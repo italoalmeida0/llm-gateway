@@ -223,8 +223,10 @@ export default function LoginPage() {
           </Show>
 
           <Show when={googleClientId()}>
-            <div class="mt-5 pt-5 border-t border-line">
-              <div ref={googleDiv} class="flex justify-center [&_iframe]:!mx-auto" />
+            <div class="mt-5 pt-5 border-t border-line flex justify-center">
+              {/* overflow-hidden + rounded-full clips the GSI iframe's white
+                  background that would otherwise peek past the pill corners. */}
+              <div ref={googleDiv} class="inline-flex overflow-hidden rounded-full" />
             </div>
           </Show>
         </Card>

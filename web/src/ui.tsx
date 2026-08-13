@@ -209,7 +209,7 @@ export function ThemeToggle(props: { class?: string }) {
       class={`relative flex h-10 w-10 items-center justify-center rounded-xl text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 transition-all duration-300 cursor-pointer ${props.class ?? ""}`}
     >
       <span
-        class="block transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
+        class="flex items-center justify-center transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
         style={{
           transform: theme() === "dark" ? "rotate(0deg)" : "rotate(180deg)",
         }}

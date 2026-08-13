@@ -20,7 +20,6 @@ ENV NODE_ENV=production \
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 COPY server ./server
-COPY shared ./shared
 COPY --from=webbuild /app/dist ./dist
 
 # /data holds gateway.db + .secret -> mount a volume to persist it

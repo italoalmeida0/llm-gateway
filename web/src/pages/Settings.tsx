@@ -276,7 +276,7 @@ export default function SettingsPage() {
               fallback={
                 <Show when={googleClientId()} fallback={<p class="text-xs text-ink-500">Google sign-in is not configured on this gateway.</p>}>
                   <p class="text-xs text-ink-400">Link any Google account to sign in with it — the email does not need to match:</p>
-                  <div ref={googleDiv} />
+                  <div ref={googleDiv} class="inline-flex overflow-hidden rounded-full" />
                 </Show>
               }
             >

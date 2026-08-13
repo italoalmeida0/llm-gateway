@@ -434,10 +434,12 @@ export default function KeysPage() {
             This is the <strong class="text-ink-100">only time</strong> the full
             token is shown. Store it like a password — we only keep its hash.
           </p>
-          <div class="flex items-center gap-2">
+          <div class="flex items-center">
             <code class="flex-1 rounded-xl bg-ink-900 border border-line px-3.5 py-2.5 text-xs text-emerald-500 break-all select-all">
               {newToken()}
             </code>
+          </div>
+          <div class="flex justify-end gap-2">
             <Btn
               variant="outline"
               size="sm"
@@ -445,8 +447,6 @@ export default function KeysPage() {
             >
               <Icon name={Icons.copy} /> Copy
             </Btn>
-          </div>
-          <div class="flex justify-end">
             <Btn onClick={() => setNewToken("")}>Done</Btn>
           </div>
         </div>

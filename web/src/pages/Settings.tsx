@@ -5,7 +5,7 @@ import { PageTitle, navigate } from "../index";
 import { usalItems } from "../motion";
 import { renderGoogleButton } from "../google";
 import {
-  Badge, Btn, Card, CardHeader, Icon, Icons, Input, Modal, Spinner, copyWithToast, fmtDate, toast,
+  Badge, Btn, Card, IconBtn, CardHeader, Icon, Icons, Input, Modal, Spinner, copyWithToast, fmtDate, toast,
 } from "../ui";
 
 export default function SettingsPage() {
@@ -255,7 +255,7 @@ export default function SettingsPage() {
               }
             >
               <p class="text-sm text-ink-300">Your account requires a 6-digit code at sign-in.</p>
-              <Btn variant="ghost" class="text-rose-500 hover:bg-rose-500/10" onClick={() => setDisableTotpOpen(true)}>
+              <Btn variant="ghost" class="text-rose-500 bg-rose-500/10 hover:bg-rose-500/25" onClick={() => setDisableTotpOpen(true)}>
                 Disable 2FA
               </Btn>
             </Show>
@@ -281,7 +281,7 @@ export default function SettingsPage() {
               }
             >
               <p class="text-sm text-ink-300">You can sign in using your Google account.</p>
-              <Btn variant="ghost" class="text-rose-500 hover:bg-rose-500/10" onClick={unlinkGoogle} disabled={busy()}>
+              <Btn variant="ghost" class="text-rose-500 bg-rose-500/10 hover:bg-rose-500/25" onClick={unlinkGoogle} disabled={busy()}>
                 Unlink Google
               </Btn>
             </Show>
@@ -331,19 +331,18 @@ export default function SettingsPage() {
                   </div>
                   <div class="flex gap-1 shrink-0">
                     <Show when={namingJti() !== s.jti}>
-                      <Btn
-                        variant="ghost"
-                        size="sm"
-                        title={s.label ? "Rename" : "Name this device"}
-                        onClick={() => { setNamingJti(s.jti); setSessionLabel(s.label ?? ""); }}
-                      >
-                        <Icon name={Icons.edit} />
-                      </Btn>
+                      <IconBtn
+                          icon={Icons.edit}
+                          title={s.label ? "Rename" : "Name this device"}
+                          onClick={() => { setNamingJti(s.jti); setSessionLabel(s.label ?? ""); }}
+                        />
                     </Show>
                     <Show when={!s.current}>
-                      <Btn variant="ghost" size="sm" class="text-rose-400 hover:bg-rose-500/10" onClick={() => revokeSession(s.jti)}>
-                        Revoke
-                      </Btn>
+                      <IconBtn
+                        icon={Icons.logout}
+                        title="Revoke"
+                        onClick={() => revokeSession(s.jti)}
+                      />
                     </Show>
                   </div>
                 </li>

@@ -42,6 +42,18 @@ interface StatsDto {
   };
 }
 
+/** Card heading split in two tight spans so long windows never wrap. */
+function CardLabel(props: { title: string; window: string }) {
+  return (
+    <span class="flex flex-col gap-0.5 leading-tight whitespace-nowrap">
+      <span class="text-ink-400">{props.title}</span>
+      <span class="text-[10px] uppercase tracking-wider text-ink-600">
+        {props.window}
+      </span>
+    </span>
+  );
+}
+
 export default function AdminStatsPage() {
   const [days, setDays] = createSignal("14");
   const [stats] = createResource(days, async (d) => {
@@ -83,6 +95,7 @@ export default function AdminStatsPage() {
               { value: "14", label: "14D" },
               { value: "30", label: "30D" },
               { value: "90", label: "90D" },
+              { value: "all", label: "ALL" },
             ]}
           />
         }
@@ -95,19 +108,17 @@ export default function AdminStatsPage() {
         >
           <StatCard
             icon={Icons.chart}
-            label={`Input · ${windowLabel(days())}`}
+            label={<CardLabel title="Input" window={windowLabel(days())} />}
             countValue={winIn()}
-            sub={<span>{fmtNum(stats()!.totals.in_tok)} all-time</span>}
           />
           <StatCard
             icon={Icons.bolt}
-            label={`Input cache · ${windowLabel(days())}`}
+            label={<CardLabel title="Input cache" window={windowLabel(days())} />}
             countValue={winCache()}
-            sub={<span>{fmtNum(stats()!.totals.cache_tok)} all-time</span>}
           />
           <StatCard
             icon={Icons.arrowUpRight}
-            label={`Output · ${windowLabel(days())}`}
+            label={<CardLabel title="Output" window={windowLabel(days())} />}
             countValue={winOut()}
             sub={<span>{fmtNum(winReqs())} requests in window</span>}
           />

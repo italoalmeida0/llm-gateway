@@ -24,19 +24,6 @@ import {
   windowLabel,
 } from "../ui";
 
-interface Buckets {
-  in_tok: number;
-  cache_tok: number;
-  out_tok: number;
-  reqs: number;
-}
-
-interface Summary {
-  today: Buckets;
-  month: Buckets;
-  total: Buckets;
-}
-
 /** % change of the second half vs the first half of `series`; null if no base. */
 function deltaPct(
   series: DailyPoint[],
@@ -74,30 +61,46 @@ function HeroHeader(props: {
   );
 }
 
-function SubStat(props: { label: string; value: string }) {
+/** One token bucket: big number on top, colored dot + label + delta beneath. */
+function BucketStat(props: {
+  label: string;
+  count: number;
+  delta: number | null;
+  color: string;
+}) {
   return (
-    <span class="text-ink-500">
-      {props.label}:{" "}
-      <span class="text-ink-100 font-semibold tabular-nums">{props.value}</span>
-    </span>
+    <div class="min-w-0">
+      <div class="text-[28px] leading-tight font-light tracking-tight truncate">
+        <CountUp value={props.count} />
+      </div>
+      <div class="mt-1.5 flex items-center gap-1.5 text-[11px] text-ink-500 min-h-[22px]">
+        <span
+          class="w-2 h-2 rounded-sm inline-block shrink-0"
+          style={{ background: props.color }}
+        />
+        <span class="truncate">{props.label}</span>
+        <Show when={props.delta !== null}>
+          <DeltaPill pct={props.delta!} />
+        </Show>
+      </div>
+    </div>
   );
 }
+
+const IN_COLOR = "var(--chart-strong)";
+const CACHE_COLOR = "var(--chart-mid)";
+const OUT_COLOR = "var(--chart-soft)";
 
 export default function DashboardPage() {
   const [days, setDays] = createSignal("14");
 
-  const [summary] = createResource(async () => {
-    const j = await api<{ summary: Summary }>("GET", "/api/usage/summary");
-    return j.summary;
-  });
   // Fetch double the window so the delta can compare against the previous
   // period — for the 1D view that means 48 hourly buckets (last 24h shown).
+  // "all" is already unbounded, nothing to double.
   const [series] = createResource(days, async (d) => {
-    const hourly = d === "1";
-    const j = await api<{ series: DailyPoint[] }>(
-      "GET",
-      hourly ? "/api/usage/daily?hours=48" : `/api/usage/daily?days=${Number(d) * 2}`,
-    );
+    const query =
+      d === "1" ? "hours=48" : d === "all" ? "days=all" : `days=${Number(d) * 2}`;
+    const j = await api<{ series: DailyPoint[] }>("GET", `/api/usage/daily?${query}`);
     return j.series;
   });
   const [keys] = createResource(async () => {
@@ -105,17 +108,20 @@ export default function DashboardPage() {
     return j.keys;
   });
 
-  const view = createMemo(() =>
-    (series() ?? []).slice(days() === "1" ? -24 : -Number(days())),
-  );
+  const view = createMemo(() => {
+    const s = series() ?? [];
+    if (days() === "1") return s.slice(-24);
+    if (days() === "all") return s;
+    return s.slice(-Number(days()));
+  });
   // Three separate buckets — never one lumped "total tokens" number.
   const winIn = createMemo(() => view().reduce((s, d) => s + (d.in_tok ?? 0), 0));
   const winCache = createMemo(() => view().reduce((s, d) => s + (d.cache_tok ?? 0), 0));
   const winOut = createMemo(() => view().reduce((s, d) => s + (d.out_tok ?? 0), 0));
   const winReqs = createMemo(() => view().reduce((s, d) => s + (d.reqs ?? 0), 0));
-  const outDelta = createMemo(() =>
-    deltaPct(series() ?? [], (d) => d.out_tok ?? 0),
-  );
+  const inDelta = createMemo(() => deltaPct(series() ?? [], (d) => d.in_tok ?? 0));
+  const cacheDelta = createMemo(() => deltaPct(series() ?? [], (d) => d.cache_tok ?? 0));
+  const outDelta = createMemo(() => deltaPct(series() ?? [], (d) => d.out_tok ?? 0));
   const reqDelta = createMemo(() =>
     deltaPct(series() ?? [], (d) => d.reqs ?? 0),
   );
@@ -151,44 +157,31 @@ export default function DashboardPage() {
               { value: "7", label: "7D" },
               { value: "14", label: "14D" },
               { value: "30", label: "30D" },
+              { value: "all", label: "ALL" },
             ]}
           />
         }
       />
 
-      {/* Gate on BOTH resources: CountUp mounts once with final values — a
+      {/* Gate on the resource: CountUp mounts once with final values — a
           late series() update would hit a text node USAL already replaced. */}
-      <Show when={summary() && series()}>
-        {() => {
-          const s = () => summary()!;
-          return (
+      <Show when={series()}>
+        {() => (
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6" {...usalItems("fade-u", 110)}>
             <Card interactive class="p-6">
-              <HeroHeader
-                icon={Icons.chart}
-                count={winOut()}
-                label={`Output tokens · ${windowLabel(days())}`}
-                delta={outDelta()}
-              />
-              <div class="mt-5 pt-4 border-t border-line flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
-                <SubStat label="Input" value={fmtNum(winIn())} />
-                <SubStat label="Input cache" value={fmtNum(winCache())} />
-                <SubStat label="Requests" value={fmtNum(winReqs())} />
+              <div class="flex items-start justify-between gap-3 mb-4">
+                <div class="text-xs font-medium text-ink-500">
+                  Tokens · {windowLabel(days())}
+                </div>
+                <IconTile icon={Icons.chart} class="w-10 h-10" />
               </div>
-              <div class="mt-1.5 flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
-                <SubStat
-                  label="Today"
-                  value={`${fmtNum(s().today.in_tok)} in · ${fmtNum(s().today.cache_tok)} cache · ${fmtNum(s().today.out_tok)} out`}
-                />
-                <SubStat
-                  label="All-time"
-                  value={`${fmtNum(s().total.in_tok)} in · ${fmtNum(s().total.cache_tok)} cache · ${fmtNum(s().total.out_tok)} out`}
-                />
+              <div class="grid grid-cols-3 gap-3">
+                <BucketStat label="Input" count={winIn()} delta={inDelta()} color={IN_COLOR} />
+                <BucketStat label="Input cache" count={winCache()} delta={cacheDelta()} color={CACHE_COLOR} />
+                <BucketStat label="Output" count={winOut()} delta={outDelta()} color={OUT_COLOR} />
               </div>
               <div class="mt-4" {...usal("fade-u delay-250 duration-700 threshold-5")}>
-                <Show when={series()} fallback={<div class="h-32" />}>
-                  <DailyChart series={view()} unit={days() === "1" ? "hour" : "day"} />
-                </Show>
+                <DailyChart series={view()} unit={days() === "1" ? "hour" : "day"} />
               </div>
             </Card>
 
@@ -199,29 +192,24 @@ export default function DashboardPage() {
                 label={`Requests · ${windowLabel(days())}`}
                 delta={reqDelta()}
               />
-              <div class="mt-5 pt-4 border-t border-line flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
-                <SubStat label="Active keys" value={String(activeKeys())} />
-                <SubStat
-                  label="Requests today"
-                  value={fmtNum(s().today.reqs)}
-                />
-                <SubStat
-                  label="All-time"
-                  value={fmtNum(s().total.reqs)}
-                />
+              <div class="mt-5 pt-4 border-t border-line flex items-center gap-2.5">
+                <span class="w-7 h-7 rounded-lg bg-elev border border-line inline-flex items-center justify-center text-ink-400 shrink-0">
+                  <Icon name={Icons.key} size={13} />
+                </span>
+                <span class="text-xs text-ink-500">Active keys</span>
+                <span class="ml-auto text-base font-semibold text-ink-100 tabular-nums">
+                  {activeKeys()}
+                </span>
               </div>
               <div class="mt-4" {...usal("fade-u delay-350 duration-700 threshold-5")}>
-                <Show when={series()} fallback={<div class="h-32" />}>
-                  <AreaChart
-                    values={view().map((d) => d.reqs ?? 0)}
-                    labels={view().map((d) => pointLabel(d))}
-                  />
-                </Show>
+                <AreaChart
+                  values={view().map((d) => d.reqs ?? 0)}
+                  labels={view().map((d) => pointLabel(d))}
+                />
               </div>
             </Card>
           </div>
-          );
-        }}
+        )}
       </Show>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5" {...usalItems("fade-u", 110)}>

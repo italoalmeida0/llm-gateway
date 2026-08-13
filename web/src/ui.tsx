@@ -421,7 +421,7 @@ export function StatCard(props: {
   icon: string;
   value?: string;
   countValue?: number;
-  label: string;
+  label: JSX.Element;
   delta?: number | null;
   sub?: JSX.Element;
 }) {
@@ -831,8 +831,10 @@ export function fmtNum(n: number | null | undefined): string {
   return String(n);
 }
 
-/** Human window name for the shared day selectors ("1" = hourly 24h view). */
+/** Human window name for the shared day selectors ("1" = hourly 24h view,
+ *  "all" = unbounded). */
 export function windowLabel(days: string): string {
+  if (days === "all") return "all time";
   return days === "1" ? "last 24 hours" : `last ${days} days`;
 }
 

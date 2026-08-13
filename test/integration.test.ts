@@ -681,6 +681,37 @@ describe("gateway end-to-end", () => {
     expect(dd.json.series[0].label).toBeUndefined();
   });
 
+  test("the unbounded all-time window (days=all) serves the full history", async () => {
+    // every byte of test traffic is from today, so "all" must cover at least
+    // as much as the bounded windows — on both user and admin surfaces
+    const list = await api("/api/keys", { token: userToken });
+    const bounded = await api("/api/usage/daily?days=7", { token: userToken });
+    const all = await api("/api/usage/daily?days=all", { token: userToken });
+    expect(all.status).toBe(200);
+    expect(all.json.granularity).toBe("day");
+    expect(all.json.series.length).toBeGreaterThanOrEqual(bounded.json.series.length);
+
+    const keyAll = await api(`/api/usage/daily?days=all&key_id=${list.json.keys[0].id}`, {
+      token: userToken,
+    });
+    expect(keyAll.status).toBe(200);
+    expect(keyAll.json.series.some((p: any) => p.reqs > 0)).toBe(true);
+
+    const allModels = await api("/api/usage/by-model?days=all", { token: userToken });
+    expect(allModels.status).toBe(200);
+    expect(allModels.json.models.length).toBeGreaterThan(0);
+
+    const as7 = await api("/api/admin/stats?days=7", { token: adminToken });
+    const as = await api("/api/admin/stats?days=all", { token: adminToken });
+    expect(as.status).toBe(200);
+    expect(as.json.granularity).toBe("day");
+    expect(as.json.series.length).toBeGreaterThanOrEqual(as7.json.series.length);
+    const reqsOf = (rows: any[]) => rows.reduce((s: number, p: any) => s + p.reqs, 0);
+    expect(reqsOf(as.json.series)).toBeGreaterThanOrEqual(reqsOf(as7.json.series));
+    expect(as.json.perUser.length).toBeGreaterThan(0);
+    expect(as.json.perModel.length).toBeGreaterThan(0);
+  });
+
   test("bad keys get protocol-shaped errors", async () => {
     const bad1 = await llm("/v1/chat/completions", "gw_" + "0".repeat(48), {
       model: "x", messages: [],

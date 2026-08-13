@@ -29,7 +29,9 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
       );
     }
 
-    const days = Math.min(Number(url.searchParams.get("days") || 14), 365);
+    // "all" = no lower date bound (the ALL window in the UI).
+    const daysParam = url.searchParams.get("days");
+    const days = daysParam === "all" ? "all" : Math.min(Number(daysParam || 14), 365);
     if (keyId) return ok({ series: keyDailySeries(keyId!, days), granularity: "day" }, req);
     return ok({ series: userDailySeries(ctx.user.id, days), granularity: "day" }, req);
   }
@@ -49,13 +51,16 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
 
   if (path === "/api/usage/by-model" && req.method === "GET") {
     const ctx = await requireAuth(req);
-    const days = Math.min(Math.max(Number(url.searchParams.get("days") || 14), 1), 365);
+    const daysParam = url.searchParams.get("days");
     const keyId = url.searchParams.get("key_id");
     if (keyId) {
       const key = db.prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?").get(keyId);
       if (!key || key.user_id !== ctx.user.id) return ok({ models: [] }, req);
     }
-    const since = Date.now() - days * 86_400_000;
+    const since =
+      daysParam === "all"
+        ? 0
+        : Date.now() - Math.min(Math.max(Number(daysParam) || 14, 1), 365) * 86_400_000;
     const rows = db
       .prepare(
         `SELECT model, proto,

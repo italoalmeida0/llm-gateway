@@ -192,7 +192,16 @@ export function hourlySeries(userId: string | null, keyId: string | null, hours:
   return out;
 }
 
-export function userDailySeries(userId: string, days: number) {
+/** Daily series over the trailing `days` days — or the full history ("all"). */
+export function userDailySeries(userId: string, days: number | "all") {
+  if (days === "all") {
+    return db
+      .prepare(
+        `SELECT date, SUM(in_tok) AS in_tok, SUM(cache_tok) AS cache_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
+         FROM usage_daily WHERE user_id = ? GROUP BY date ORDER BY date`,
+      )
+      .all(userId);
+  }
   return db
     .prepare(
       `SELECT date, SUM(in_tok) AS in_tok, SUM(cache_tok) AS cache_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
@@ -202,7 +211,15 @@ export function userDailySeries(userId: string, days: number) {
     .all(userId, `-${days} days`);
 }
 
-export function keyDailySeries(keyId: string, days: number) {
+export function keyDailySeries(keyId: string, days: number | "all") {
+  if (days === "all") {
+    return db
+      .prepare(
+        `SELECT date, in_tok, cache_tok, out_tok, reqs FROM usage_daily
+         WHERE key_id = ? ORDER BY date`,
+      )
+      .all(keyId);
+  }
   return db
     .prepare(
       `SELECT date, in_tok, cache_tok, out_tok, reqs FROM usage_daily

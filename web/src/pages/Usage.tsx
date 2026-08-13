@@ -129,6 +129,7 @@ export default function UsagePage() {
                 { value: "14", label: "14D" },
                 { value: "30", label: "30D" },
                 { value: "90", label: "90D" },
+                { value: "all", label: "ALL" },
               ]}
             />
           </div>

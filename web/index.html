@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>LLM Gateway</title>
+    <script>
+      // Theme init (before first paint): stored choice wins, otherwise follow
+      // the OS. Sets data-theme + no FOUC. Also keeps the favicon in sync with
+      // the theme (dark tile on light theme, light tile on dark) — including
+      // runtime toggles, via a MutationObserver on data-theme.
+      (function () {
+        try {
+          var t = localStorage.getItem("llmgw-theme");
+          if (t !== "light" && t !== "dark") {
+            t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          }
+          document.documentElement.dataset.theme = t;
+        } catch (e) {
+          document.documentElement.dataset.theme = "light";
+        }
+        function iconFor(t) {
+          var tile = t === "dark" ? "%23f2f2f5" : "%231c1c1e";
+          var glyph = t === "dark" ? "%231c1c1e" : "%23f5f6f8";
+          return (
+            "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E" +
+            "%3Crect width='32' height='32' rx='8' fill='" + tile + "'/%3E" +
+            "%3Cpath d='M16 7l7 4v8l-7 4-7-4v-8z' fill='none' stroke='" + glyph + "' stroke-width='2'/%3E" +
+            "%3Ccircle cx='16' cy='15' r='2.5' fill='" + glyph + "'/%3E%3C/svg%3E"
+          );
+        }
+        function syncFavicon() {
+          var t = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+          var link = document.querySelector("link[rel='icon']");
+          if (!link) {
+            link = document.createElement("link");
+            link.rel = "icon";
+            document.head.appendChild(link);
+          }
+          link.href = iconFor(t);
+        }
+        syncFavicon();
+        new MutationObserver(syncFavicon).observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ["data-theme"],
+        });
+      })();
+    </script>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231c1c1e'/%3E%3Cpath d='M16 7l7 4v8l-7 4-7-4v-8z' fill='none' stroke='%23f5f6f8' stroke-width='2'/%3E%3Ccircle cx='16' cy='15' r='2.5' fill='%23f5f6f8'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.tailwindcss.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./src/index.tsx"></script>
+  </body>
+</html>

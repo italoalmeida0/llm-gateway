@@ -1,0 +1,12 @@
+node_modules
+dist
+data
+test
+*.log
+.env
+.git
+.gitignore
+Dockerfile
+.dockerignore
+README.md
+AGENTS.md

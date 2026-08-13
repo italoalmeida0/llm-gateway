@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — LLM Gateway</title>
+  <style>
+    body { margin: 0; background: #09090c; color: #c8c8d2; font-family: ui-sans-serif, system-ui, sans-serif; line-height: 1.7; }
+    main { max-width: 720px; margin: 0 auto; padding: 48px 24px; }
+    h1 { color: #fafafa; font-size: 24px; }
+    h2 { color: #e6e6ec; font-size: 16px; margin-top: 32px; }
+    p, li { font-size: 14px; }
+    .muted { color: #6b6b7a; font-size: 12px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Privacy Policy</h1>
+  <p class="muted">Last updated: 2026</p>
+
+  <h2>1. What we store</h2>
+  <ul>
+    <li><strong>Account data:</strong> email address, display name, password hash (never the password), TOTP secret, and your Google account identifier if you link it.</li>
+    <li><strong>Usage data:</strong> for each API request — timestamp, your key, protocol, model, token counts, latency and HTTP status. IP addresses are logged for security auditing.</li>
+    <li><strong>Request content:</strong> prompts and model responses are <em>not</em> stored. They transit in memory only while being proxied; only token counts are extracted.</li>
+  </ul>
+
+  <h2>2. What third parties see</h2>
+  <ul>
+    <li><strong>Upstream LLM provider:</strong> receives the content of your requests (prompts) because this service is a proxy. The upstream provider's own privacy policy applies to that data.</li>
+    <li><strong>Google:</strong> if you use Google sign-in, Google processes that authentication under its own privacy policy. We only receive your email address and a stable account identifier.</li>
+    <li><strong>Email delivery:</strong> transactional emails (invites, password resets, security alerts) are sent through the SMTP service configured by the operator.</li>
+  </ul>
+
+  <h2>3. What we never do</h2>
+  <ul>
+    <li>We do not sell, rent or share your data with advertisers.</li>
+    <li>We do not run analytics or tracking pixels. This dashboard contains no third-party scripts except Google's sign-in button when configured.</li>
+    <li>We do not store plaintext API keys — only their cryptographic hashes.</li>
+  </ul>
+
+  <h2>4. Retention</h2>
+  <p>Usage aggregates and audit logs are kept as long as the service operates. You may ask the administrator to delete your account and personal data at any time.</p>
+
+  <h2>5. Security</h2>
+  <p>Passwords are hashed with PBKDF2; gateway API keys are stored as SHA-256 hashes; the upstream provider key is encrypted at rest. Two-factor authentication is available and recommended.</p>
+
+  <p class="muted">Contact: the administrator of this deployment.</p>
+</main>
+</body>
+</html>

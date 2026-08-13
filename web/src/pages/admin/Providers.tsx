@@ -1,0 +1,376 @@
+import { createSignal, For, Show, createResource, createMemo } from "solid-js";
+
+import { api, type AuthStyle, type ProviderDto } from "../../api";
+import { PageTitle } from "../../index";
+import { usalItems } from "../../motion";
+import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtDate } from "../../ui";
+
+const AUTH_STYLE_OPTIONS = [
+  { value: "bearer", label: "Bearer" },
+  { value: "x-api-key", label: "x-api-key" },
+] as Array<{ value: AuthStyle; label: string }>;
+
+type Cap = "openai" | "anthropic";
+
+interface SmokeResult {
+  reachable: boolean;
+  status?: number;
+  latencyMs?: number;
+  models?: string[];
+  error?: string;
+}
+
+interface ProbeResult {
+  reachable: boolean;
+  status?: number;
+  latencyMs?: number;
+  model?: string;
+  reply?: string;
+  upstreamError?: string;
+  error?: string;
+}
+
+export default function AdminProvidersPage() {
+  const [providers, { refetch }] = createResource(async () => {
+    const j = await api<{ providers: ProviderDto[] }>("GET", "/api/admin/providers");
+    return j.providers;
+  });
+
+  const [editing, setEditing] = createSignal<ProviderDto | "new" | null>(null);
+  const [confirmDelete, setConfirmDelete] = createSignal<ProviderDto | null>(null);
+  const [busy, setBusy] = createSignal(false);
+
+  // ---- editor form ----
+  const [name, setName] = createSignal("");
+  const [openaiUrl, setOpenaiUrl] = createSignal("");
+  const [openaiAuth, setOpenaiAuth] = createSignal<AuthStyle>("bearer");
+  const [anthropicUrl, setAnthropicUrl] = createSignal("");
+  const [anthropicAuth, setAnthropicAuth] = createSignal<AuthStyle>("x-api-key");
+  const [apiKey, setApiKey] = createSignal("");
+  const [priority, setPriority] = createSignal("100");
+  const [enabled, setEnabled] = createSignal(true);
+
+  // ---- test modal ----
+  const [testFor, setTestFor] = createSignal<ProviderDto | null>(null);
+  const [smoke, setSmoke] = createSignal<Partial<Record<Cap, SmokeResult>> | null>(null);
+  const [smokeBusy, setSmokeBusy] = createSignal(false);
+  const [probeCap, setProbeCap] = createSignal<Cap>("openai");
+  const [modelSel, setModelSel] = createSignal(""); // dropdown value
+  const [modelFree, setModelFree] = createSignal(""); // manual override
+  const [probe, setProbe] = createSignal<ProbeResult | null>(null);
+  const [probeBusy, setProbeBusy] = createSignal(false);
+
+  const openEditor = (p: ProviderDto | "new") => {
+    if (p === "new") {
+      setName(""); setOpenaiUrl(""); setOpenaiAuth("bearer"); setAnthropicUrl(""); setAnthropicAuth("x-api-key");
+      setApiKey(""); setPriority("100"); setEnabled(true);
+    } else {
+      setName(p.name);
+      setOpenaiUrl(p.openaiBaseUrl ?? "");
+      setOpenaiAuth(p.openaiAuthStyle ?? "bearer");
+      setAnthropicUrl(p.anthropicBaseUrl ?? "");
+      setAnthropicAuth(p.anthropicAuthStyle ?? "x-api-key");
+      setApiKey("");
+      setPriority(String(p.priority));
+      setEnabled(p.enabled);
+    }
+    setEditing(p);
+  };
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const body: Record<string, unknown> = {
+        name: name().trim(),
+        openaiBaseUrl: openaiUrl().trim() || null,
+        openaiAuthStyle: openaiAuth(),
+        anthropicBaseUrl: anthropicUrl().trim() || null,
+        anthropicAuthStyle: anthropicAuth(),
+        priority: Number(priority()) || 100,
+        enabled: enabled(),
+      };
+      if (apiKey().trim()) body.apiKey = apiKey().trim();
+
+      if (editing() === "new") {
+        await api("POST", "/api/admin/providers", body);
+        toast("Provider created");
+      } else {
+        await api("PATCH", `/api/admin/providers/${(editing() as ProviderDto).id}`, body);
+        toast("Provider updated");
+      }
+      setEditing(null);
+      refetch();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "save failed", "err");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openTest = async (p: ProviderDto) => {
+    setTestFor(p);
+    setSmoke(null);
+    setProbe(null);
+    setModelSel("");
+    setModelFree("");
+    setProbeCap(p.openaiBaseUrl ? "openai" : "anthropic");
+    setSmokeBusy(true);
+    try {
+      const j = await api<{ results: Partial<Record<Cap, SmokeResult>> }>(
+        "POST",
+        `/api/admin/providers/${p.id}/test`,
+      );
+      setSmoke(j.results);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "test failed", "err");
+    } finally {
+      setSmokeBusy(false);
+    }
+  };
+
+  const listedModels = createMemo(() => smoke()?.[probeCap()]?.models ?? []);
+  /** Manual text wins; otherwise the dropdown; otherwise the first listed model. */
+  const effectiveModel = createMemo(
+    () => modelFree().trim() || (listedModels().includes(modelSel()) ? modelSel() : (listedModels()[0] ?? "")),
+  );
+
+  const runProbe = async () => {
+    const p = testFor();
+    const model = effectiveModel();
+    if (!p || !model) return;
+    setProbeBusy(true);
+    setProbe(null);
+    try {
+      const j = await api<{ results: Partial<Record<Cap, ProbeResult>> }>(
+        "POST",
+        `/api/admin/providers/${p.id}/test`,
+        { cap: probeCap(), model },
+      );
+      setProbe(j.results[probeCap()] ?? { reachable: false, error: "no result" });
+    } catch (e) {
+      setProbe({ reachable: false, error: e instanceof Error ? e.message : "probe failed" });
+    } finally {
+      setProbeBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    const p = confirmDelete();
+    if (!p) return;
+    setBusy(true);
+    try {
+      await api("DELETE", `/api/admin/providers/${p.id}`);
+      toast("Provider deleted");
+      setConfirmDelete(null);
+      refetch();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "delete failed", "err");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <PageTitle
+        title="Providers"
+        subtitle="Upstream LLM endpoints the gateway forwards to (the real API keys live here only)"
+        right={<Btn onClick={() => openEditor("new")}><Icon name={Icons.plus} /> New provider</Btn>}
+      />
+
+      <Show when={(providers() ?? []).length > 0} fallback={
+        <Card><EmptyState icon={Icons.server} title="No providers configured"
+          hint="Add your endpoint(s) — the gateway cannot serve requests until one is enabled." /></Card>
+      }>
+        <div class="grid gap-4" {...usalItems("fade-u", 80)}>
+          <For each={providers()}>
+            {(p) => (
+              <Card interactive class="p-6">
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="font-semibold">{p.name}</span>
+                      <Badge tone={p.enabled ? "green" : "zinc"}>{p.enabled ? "Enabled" : "Disabled"}</Badge>
+                      {p.openaiBaseUrl && <Badge tone="blue">OpenAI</Badge>}
+                      {p.anthropicBaseUrl && <Badge tone="amber">Anthropic</Badge>}
+                      <span class="text-[11px] text-ink-500">priority {p.priority} · added {fmtDate(p.createdAt)}</span>
+                    </div>
+                    <div class="mt-2 space-y-1 text-xs text-ink-400">
+                      <Show when={p.openaiBaseUrl}>
+                        <div>
+                          OpenAI: <code class="text-ink-300">{p.openaiBaseUrl}</code>
+                          <span class="text-ink-600"> · key via {p.openaiAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
+                        </div>
+                      </Show>
+                      <Show when={p.anthropicBaseUrl}>
+                        <div>
+                          Anthropic: <code class="text-ink-300">{p.anthropicBaseUrl}</code>
+                          <span class="text-ink-600"> · key via {p.anthropicAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
+                        </div>
+                      </Show>
+                      <div>Upstream key: <span class="text-ink-300">Configured ✓ (never leaves this server)</span></div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-1 shrink-0">
+                    <IconBtn icon={Icons.bolt} title="Test connection" onClick={() => openTest(p)} />
+                    <IconBtn icon={Icons.edit} title="Edit" onClick={() => openEditor(p)} />
+                    <IconBtn icon={Icons.trash} title="Delete provider" danger onClick={() => setConfirmDelete(p)} />
+                  </div>
+                </div>
+              </Card>
+            )}
+          </For>
+        </div>
+      </Show>
+
+      {/* editor modal */}
+      <Modal open={!!editing()} onClose={() => setEditing(null)} title={editing() === "new" ? "New provider" : `Edit ${name()}`} width="max-w-lg">
+        <div class="space-y-4">
+          <Input label="Name" value={name()} onInput={setName} placeholder="e.g. Provider" />
+          <div>
+            <Input label="OpenAI-compatible base URL" value={openaiUrl()} onInput={setOpenaiUrl}
+              placeholder="https://provider.example.com/openai/v1" hint="Leave empty if the provider has no OpenAI surface" />
+            <div class="mt-2 flex items-center justify-between gap-3">
+              <span class="text-xs text-ink-500">Send the key as</span>
+              <Segmented value={openaiAuth()} onChange={setOpenaiAuth} options={AUTH_STYLE_OPTIONS} />
+            </div>
+          </div>
+          <div>
+            <Input label="Anthropic-compatible base URL" value={anthropicUrl()} onInput={setAnthropicUrl}
+              placeholder="https://provider.example.com/anthropic/v1" hint="Leave empty if it has no Anthropic surface" />
+            <div class="mt-2 flex items-center justify-between gap-3">
+              <span class="text-xs text-ink-500">Send the key as</span>
+              <Segmented value={anthropicAuth()} onChange={setAnthropicAuth} options={AUTH_STYLE_OPTIONS} />
+            </div>
+          </div>
+          <Input label="Upstream API key" type="password" value={apiKey()} onInput={setApiKey}
+            placeholder={editing() === "new" ? "sk-…" : "unchanged (enter a new one to rotate)"}
+            autocomplete="off" />
+          <div class="grid grid-cols-2 gap-3 items-end">
+            <Input label="Priority (lower = preferred)" type="number" min={0} max={10000} value={priority()} onInput={setPriority} />
+            <label class="flex items-center gap-2 pb-2 cursor-pointer">
+              <input type="checkbox" checked={enabled()} onChange={(e) => setEnabled(e.currentTarget.checked)}
+                class="w-4 h-4 rounded border-line bg-elev accent-brand-500" />
+              <span class="text-sm">Enabled</span>
+            </label>
+          </div>
+          <div class="flex justify-end gap-2 pt-2">
+            <Btn variant="ghost" onClick={() => setEditing(null)}>Cancel</Btn>
+            <Btn onClick={save} disabled={busy() || !name().trim() || (!openaiUrl().trim() && !anthropicUrl().trim())}>
+              {busy() ? "Saving…" : "Save provider"}
+            </Btn>
+          </div>
+        </div>
+      </Modal>
+
+      {/* test modal */}
+      <Modal open={!!testFor()} onClose={() => setTestFor(null)} title={`Test ${testFor()?.name ?? ""}`} width="max-w-lg">
+        <div class="space-y-5">
+          <div>
+            <div class="text-xs font-medium text-ink-300 mb-2">Endpoint smoke test</div>
+            <Show when={!smokeBusy()} fallback={<div class="text-xs text-ink-500">Checking…</div>}>
+              <Show when={smoke()} fallback={<div class="text-xs text-ink-500">No result</div>}>
+                {(s) => (
+                  <div class="flex flex-wrap gap-2">
+                    <For each={Object.entries(s()) as Array<[Cap, SmokeResult]>}>
+                      {([cap, r]) => (
+                        <Badge tone={r.reachable && (r.status ?? 500) < 400 ? "green" : "red"}>
+                          {cap}: {r.reachable
+                            ? `HTTP ${r.status} · ${r.latencyMs}ms · ${r.models?.length ?? 0} models`
+                            : `unreachable${r.error ? ` (${r.error})` : ""}`}
+                        </Badge>
+                      )}
+                    </For>
+                  </div>
+                )}
+              </Show>
+            </Show>
+          </div>
+
+          <div class="border-t border-line pt-5">
+            <div class="text-xs font-medium text-ink-300 mb-2">Chat probe (sends a real "Hello")</div>
+            <div class="space-y-3">
+              <Show when={testFor()?.openaiBaseUrl && testFor()?.anthropicBaseUrl}>
+                <Segmented
+                  value={probeCap()}
+                  onChange={setProbeCap}
+                  options={[
+                    { value: "openai", label: "OpenAI" },
+                    { value: "anthropic", label: "Anthropic" },
+                  ]}
+                />
+              </Show>
+              <Show when={listedModels().length > 0}>
+                <Select
+                  label="Model from /models"
+                  value={effectiveModel()}
+                  onChange={setModelSel}
+                  options={listedModels().map((m) => ({ value: m, label: m }))}
+                />
+              </Show>
+              <Input
+                label={listedModels().length > 0 ? "…or type a model id" : "Model id"}
+                value={modelFree()}
+                onInput={setModelFree}
+                placeholder="e.g. gpt-4o-mini / fake-llm-1"
+                hint={
+                  listedModels().length > 0
+                    ? "Typing here overrides the dropdown"
+                    : "Model list was empty — enter the id manually"
+                }
+              />
+              <div class="flex justify-end">
+                <Btn onClick={runProbe} disabled={probeBusy() || !effectiveModel()}>
+                  {probeBusy() ? "Sending…" : "Send Hello"}
+                </Btn>
+              </div>
+              <Show when={probe()}>
+                {(r) => (
+                  <div
+                    class={`rounded-lg border px-3 py-2.5 text-xs anim-fade-in ${
+                      r().reachable && (r().status ?? 500) < 400
+                        ? "border-emerald-500/30 bg-emerald-500/5"
+                        : "border-rose-500/30 bg-rose-500/5"
+                    }`}
+                  >
+                    <Show
+                      when={r().reachable && (r().status ?? 500) < 400}
+                      fallback={
+                        <div class="text-rose-500">
+                          {r().reachable
+                            ? `HTTP ${r().status} — ${r().upstreamError ?? "upstream rejected the request"}`
+                            : `Unreachable — ${r().error ?? "unknown error"}`}
+                        </div>
+                      }
+                    >
+                      <div class="text-emerald-500 font-medium">
+                        OK · {r().latencyMs}ms · model {r().model}
+                      </div>
+                      <Show when={r().reply}>
+                        <div class="text-ink-200 mt-1.5">“{r().reply}”</div>
+                      </Show>
+                    </Show>
+                  </div>
+                )}
+              </Show>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* delete confirm */}
+      <Modal open={!!confirmDelete()} onClose={() => setConfirmDelete(null)} title="Delete provider">
+        <div class="space-y-4">
+          <p class="text-sm text-ink-300">
+            Delete <strong class="text-ink-100">{confirmDelete()?.name}</strong>? Requests for its capabilities
+            will start failing until another enabled provider covers them.
+          </p>
+          <div class="flex justify-end gap-2">
+            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Btn>
+            <Btn variant="danger" onClick={remove} disabled={busy()}>Delete</Btn>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}

@@ -1,0 +1,286 @@
+@import "tailwindcss";
+
+@custom-variant hover (&:hover);
+
+/*
+ * Theme system: two themes (white / dark) driven by [data-theme] on <html>.
+ * Component classes keep using the semantic tokens below (ink-*, accent-*,
+ * brand-*, elev, line, card); only the variable values flip per theme.
+ *
+ *  - ink-*   : neutral scale. ink-950 = page bg … ink-100 = strongest text.
+ *  - accent  : monochrome primary action (near-black in white, near-white in dark).
+ *  - brand   : red highlight (var(--brand-500)) — nav ativa, destaques, charts.
+ *  - card    : big surface color (mock #f5f6f8), elev: surface on top of cards.
+ */
+
+:root {
+  --brand-300: var(--color-teal-600);
+  --brand-400: var(--color-teal-700);
+  --brand-500: var(--color-teal-800);
+  --brand-600: var(--color-teal-900);
+}
+
+@theme {
+  --color-brand-400: var(--brand-400);
+  --color-brand-500: var(--brand-500);
+  --color-brand-600: var(--brand-600);
+
+  --color-ink-950: var(--ink-950);
+  --color-ink-900: var(--ink-900);
+  --color-ink-850: var(--ink-850);
+  --color-ink-800: var(--ink-800);
+  --color-ink-700: var(--ink-700);
+  --color-ink-600: var(--ink-600);
+  --color-ink-500: var(--ink-500);
+  --color-ink-400: var(--ink-400);
+  --color-ink-300: var(--ink-300);
+  --color-ink-200: var(--ink-200);
+  --color-ink-100: var(--ink-100);
+
+  --color-accent-400: var(--accent);
+  --color-accent-500: var(--accent);
+  --color-accent-600: var(--accent-strong);
+  --color-accent-700: var(--accent-strong);
+  --color-accent-fg: var(--accent-fg);
+
+  --color-card: var(--card);
+  --color-elev: var(--elev);
+  --color-line: var(--line);
+
+  --font-sans:
+    "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, Inter, "Helvetica Neue", Arial, sans-serif;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+  --ink-950: #ffffff;
+  --ink-900: #f5f6f8;
+  --ink-850: #eef0f3;
+  --ink-800: #e7e9ed;
+  --ink-700: #dde0e5;
+  --ink-600: #c9ccd3;
+  --ink-500: #8b8e98;
+  --ink-400: #71747e;
+  --ink-300: #565963;
+  --ink-200: #3a3d44;
+  --ink-100: #1c1c1e;
+
+  --accent: #1c1c1e;
+  --accent-strong: #000000;
+  --accent-fg: #ffffff;
+
+  --card: #f5f6f8;
+  --elev: #ffffff;
+  --line: #ececef;
+
+  --chart-grid: #e8e9ed;
+  --chart-tick: #9a9da6;
+  --chart-strong: #1c1c1e;
+  --chart-soft: #b6bac3;
+  --chart-brand: var(--brand-500);
+
+  --glow-brand: color-mix(in oklab, var(--brand-500) 20%, transparent);
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --ink-950: #0c0c0e;
+  --ink-900: #131316;
+  --ink-850: #1a1a1f;
+  --ink-800: #202027;
+  --ink-700: #2a2a33;
+  --ink-600: #3a3a45;
+  --ink-500: #5c5c6a;
+  --ink-400: #8b8e98;
+  --ink-300: #a9aab4;
+  --ink-200: #d3d3da;
+  --ink-100: #f2f2f5;
+
+  --accent: #f2f2f5;
+  --accent-strong: #ffffff;
+  --accent-fg: #1c1c1e;
+
+  --card: #17171b;
+  --elev: #1f1f25;
+  --line: #26262e;
+
+  --chart-grid: #232329;
+  --chart-tick: #8b8e98;
+  --chart-strong: #f2f2f5;
+  --chart-soft: #50505c;
+  --chart-brand: var(--brand-300);
+
+  --glow-brand: color-mix(in oklab, var(--brand-500) 20%, transparent);
+}
+
+/* Fallback before the init script / JS runs. */
+html:not([data-theme]) {
+  color-scheme: light dark;
+  --ink-950: #ffffff;
+  --ink-900: #f5f6f8;
+  --ink-850: #eef0f3;
+  --ink-800: #e7e9ed;
+  --ink-700: #dde0e5;
+  --ink-600: #c9ccd3;
+  --ink-500: #8b8e98;
+  --ink-400: #71747e;
+  --ink-300: #565963;
+  --ink-200: #3a3d44;
+  --ink-100: #1c1c1e;
+  --accent: #1c1c1e;
+  --accent-strong: #000;
+  --accent-fg: #fff;
+  --card: #f5f6f8;
+  --elev: #fff;
+  --line: #ececef;
+  --chart-grid: #e8e9ed;
+  --chart-tick: #9a9da6;
+  --chart-strong: #1c1c1e;
+  --chart-soft: #b6bac3;
+  --chart-brand: var(--brand-500);
+  --glow-brand: color-mix(in oklab, var(--brand-500) 20%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) {
+    color-scheme: dark;
+    --ink-950: #0c0c0e;
+    --ink-900: #131316;
+    --ink-850: #1a1a1f;
+    --ink-800: #202027;
+    --ink-700: #2a2a33;
+    --ink-600: #3a3a45;
+    --ink-500: #5c5c6a;
+    --ink-400: #8b8e98;
+    --ink-300: #a9aab4;
+    --ink-200: #d3d3da;
+    --ink-100: #f2f2f5;
+    --accent: #f2f2f5;
+    --accent-strong: #fff;
+    --accent-fg: #1c1c1e;
+    --card: #17171b;
+    --elev: #1f1f25;
+    --line: #26262e;
+    --chart-grid: #232329;
+    --chart-tick: #8b8e98;
+    --chart-strong: #f2f2f5;
+    --chart-soft: #50505c;
+    --chart-brand: var(--brand-300);
+    --glow-brand: color-mix(in oklab, var(--brand-500) 20%, transparent);
+  }
+}
+
+body {
+  @apply bg-ink-950 text-ink-100 antialiased;
+  font-family: var(--font-sans);
+}
+
+/* Soft color cross-fade when flipping themes (color props only — never
+   transform/opacity, so it can't fight USAL keyframe animations). */
+html.theme-xfade body,
+html.theme-xfade body * {
+  transition:
+    background-color 0.3s ease,
+    border-color 0.3s ease,
+    color 0.3s ease,
+    box-shadow 0.3s ease !important;
+}
+
+::selection {
+  background: var(--color-brand-500);
+  color: white;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ink-700);
+  border-radius: 8px;
+  border: 2px solid var(--ink-950);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-600);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes grow-y {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+/* fill-mode "backwards" (not "both"): a retained `transform` would create a
+   containing block and break position:fixed descendants (e.g. modal). */
+.anim-fade-in {
+  animation: fade-in 0.25s ease-out backwards;
+}
+.anim-slide-in {
+  animation: slide-in 0.2s ease-out backwards;
+}
+.anim-pop-in {
+  animation: pop-in 0.18s ease-out backwards;
+}
+
+/* Chart bars rise from the baseline on mount. */
+.chart-bar {
+  transform-box: fill-box;
+  transform-origin: bottom;
+  animation: grow-y 0.7s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+/* Brand glow used on highlighted chart bars / promo surfaces. */
+.glow-brand {
+  filter: drop-shadow(0 4px 14px var(--glow-brand));
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-in,
+  .anim-slide-in,
+  .anim-pop-in,
+  .chart-bar {
+    animation-duration: 0.01ms !important;
+  }
+}

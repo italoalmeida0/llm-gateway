@@ -1,0 +1,632 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
+
+import { totpAt } from "../server/crypto";
+
+/**
+ * Black-box integration suite (farm-game "audit" style): the gateway and the
+ * fake upstream are spawned as real child processes and everything is driven
+ * over HTTP — the same way an attacker or a real client would talk to it.
+ */
+
+const GW_PORT = 4400;
+const UP_PORT = 4401;
+const GW = `http://127.0.0.1:${GW_PORT}`;
+const UP = `http://127.0.0.1:${UP_PORT}`;
+const UPSTREAM_KEY = "sk-fake-secret";
+const ADMIN_PW = "admin-password-123";
+
+let gwProc: ReturnType<typeof Bun.spawn>;
+let upProc: ReturnType<typeof Bun.spawn>;
+let dataDir: string;
+
+function spawn(cmd: string, env: Record<string, string>) {
+  return Bun.spawn({
+    cmd: ["bun", cmd],
+    cwd: path.join(import.meta.dir, ".."),
+    env: { ...process.env, ...env },
+    stdout: "ignore",
+    stderr: "inherit",
+  });
+}
+
+async function waitFor(url: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const r = await fetch(url);
+      if (r.ok) return;
+    } catch {}
+    if (Date.now() > deadline) throw new Error(`timeout waiting for ${url}`);
+    await Bun.sleep(100);
+  }
+}
+
+async function api(
+  path: string,
+  opts: { method?: string; token?: string; body?: unknown; headers?: Record<string, string> } = {},
+) {
+  const res = await fetch(`${GW}${path}`, {
+    method: opts.method ?? (opts.body !== undefined ? "POST" : "GET"),
+    headers: {
+      ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
+      ...(opts.headers ?? {}),
+    },
+    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+  });
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+  return { status: res.status, json, text };
+}
+
+async function llm(pathname: string, key: string, body: unknown, anthropicStyle = false) {
+  const res = await fetch(`${GW}${pathname}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(anthropicStyle
+        ? { "x-api-key": key, "anthropic-version": "2023-06-01" }
+        : { Authorization: `Bearer ${key}` }),
+    },
+    body: JSON.stringify(body),
+  });
+  return res;
+}
+
+beforeAll(async () => {
+  dataDir = mkdtempSync(path.join(tmpdir(), "gw-it-"));
+  const staticDir = path.join(dataDir, "dist");
+  mkdirSync(staticDir, { recursive: true });
+  writeFileSync(path.join(staticDir, "index.html"), "<!doctype html><title>SPA</title><h1>dash</h1>");
+  writeFileSync(path.join(staticDir, "terms.html"), "<!doctype html><title>terms</title>");
+  writeFileSync(path.join(staticDir, ".secret-file"), "should never be served");
+
+  upProc = spawn("test/fake-upstream.ts", { FAKE_UPSTREAM_PORT: String(UP_PORT), FAKE_UPSTREAM_KEY: UPSTREAM_KEY });
+  gwProc = spawn("server/index.ts", {
+    PORT: String(GW_PORT),
+    NODE_ENV: "development",
+    DATA_DIR: dataDir,
+    ADMIN_EMAIL: "boss@example.com",
+    ADMIN_PASSWORD: ADMIN_PW,
+    LIMIT_IP_PER_MIN: "100000",
+    LIMIT_AUTH_PER_MIN: "100000",
+    STATIC_DIR: staticDir,
+  });
+  await waitFor(`${GW}/api/health`);
+});
+
+afterAll(() => {
+  try { gwProc?.kill(); } catch {}
+  try { upProc?.kill(); } catch {}
+  try { rmSync(dataDir, { recursive: true, force: true }); } catch {}
+});
+
+// Shared state across the ordered steps.
+let adminToken = "";
+let userToken = "";
+let userEmail = "friend@example.com";
+const userPw = "user-password-xyz";
+let gatewayKey = "";
+let totpSecret = "";
+let userRefresh = "";
+
+describe("gateway end-to-end", () => {
+
+  test("health is public", async () => {
+    const r = await api("/api/health");
+    expect(r.status).toBe(200);
+    expect(r.json.ok).toBe(true);
+  });
+
+  test("admin bootstrap + login with wrong/right password", async () => {
+    const bad = await api("/api/auth/login", { body: { email: "boss@example.com", password: "wrong-password-1" } });
+    expect(bad.status).toBe(401);
+
+    const good = await api("/api/auth/login", { body: { email: "boss@example.com", password: ADMIN_PW } });
+    expect(good.status).toBe(200);
+    expect(good.json.accessToken).toBeTruthy();
+    expect(good.json.user.role).toBe("admin");
+    adminToken = good.json.accessToken;
+  });
+
+  test("dashboard API rejects missing/invalid bearer", async () => {
+    expect((await api("/api/me")).status).toBe(401);
+    expect((await api("/api/me", { token: "not.a.token" })).status).toBe(401);
+  });
+
+  test("user cannot reach admin routes", async () => {
+    // create non-admin first (invite flow) happens below; here use a forged admin check with user token once we have it
+    const r = await api("/api/admin/users", { token: adminToken });
+    expect(r.status).toBe(200); // sanity for later contrast
+  });
+
+  test("admin configures provider (openai + anthropic) and tests connection", async () => {
+    const r = await api("/api/admin/providers", {
+      token: adminToken,
+      body: {
+        name: "provider",
+        openaiBaseUrl: `${UP}/openai/v1`,
+        anthropicBaseUrl: `${UP}/anthropic/v1`,
+        apiKey: UPSTREAM_KEY,
+      },
+    });
+    expect(r.status).toBe(200);
+    expect(r.json.provider.openaiBaseUrl).toContain("/openai/v1");
+
+    const t = await api(`/api/admin/providers/${r.json.provider.id}/test`, { token: adminToken, method: "POST" });
+    expect(t.status).toBe(200);
+    expect(t.json.results.openai.reachable).toBe(true);
+    expect(t.json.results.anthropic.reachable).toBe(true);
+    // smoke now also returns the upstream model list
+    expect(t.json.results.openai.models).toContain("fake-llm-1");
+
+    // chat probe: sends a real "Hello" through the openai capability
+    const probe = await api(`/api/admin/providers/${r.json.provider.id}/test`, {
+      token: adminToken,
+      method: "POST",
+      body: { cap: "openai", model: "fake-llm-1" },
+    });
+    expect(probe.status).toBe(200);
+    expect(probe.json.results.openai.status).toBe(200);
+    expect(String(probe.json.results.openai.reply)).toContain("fake upstream");
+
+    // probe via anthropic capability works too
+    const probe2 = await api(`/api/admin/providers/${r.json.provider.id}/test`, {
+      token: adminToken,
+      method: "POST",
+      body: { cap: "anthropic", model: "fake-llm-1" },
+    });
+    expect(probe2.status).toBe(200);
+    expect(probe2.json.results.anthropic.status).toBe(200);
+  });
+
+  test("provider secret is never exposed in admin API", async () => {
+    const r = await api("/api/admin/providers", { token: adminToken });
+    const raw = JSON.stringify(r.json);
+    expect(raw).not.toContain(UPSTREAM_KEY);
+    expect(r.json.providers[0].hasApiKey).toBe(true);
+  });
+
+  test("invite flow: admin creates user, user sets password via token link", async () => {
+    const r = await api("/api/admin/users", {
+      token: adminToken,
+      body: { email: userEmail, name: "Friend", role: "user", sendInvite: true },
+    });
+    expect(r.status).toBe(200);
+    expect(r.json.invite.sent).toBe(false); // SMTP not configured in test
+    expect(String(r.json.invite.link)).toContain("token=");
+    const token = decodeURIComponent(String(r.json.invite.link).split("token=")[1]);
+
+    const bad = await api("/api/auth/password-reset/confirm", { body: { token, password: "short" } });
+    expect(bad.status).toBe(400);
+
+    const set = await api("/api/auth/password-reset/confirm", { body: { token, password: userPw } });
+    expect(set.status).toBe(200);
+
+    // token is single-use
+    const again = await api("/api/auth/password-reset/confirm", { body: { token, password: userPw } });
+    expect(again.status).toBe(400);
+
+    const login = await api("/api/auth/login", { body: { email: userEmail, password: userPw } });
+    expect(login.status).toBe(200);
+    expect(login.json.user.role).toBe("user");
+    userToken = login.json.accessToken;
+
+    // admin routes off-limits for the user
+    expect((await api("/api/admin/users", { token: userToken })).status).toBe(403);
+  });
+
+  test("sessions can be named (label survives listing)", async () => {
+    const list = await api("/api/me/sessions", { token: userToken });
+    expect(list.status).toBe(200);
+    const cur = list.json.sessions.find((s: any) => s.current);
+    expect(cur).toBeTruthy();
+    expect(cur.ip).not.toBe("unknown"); // real client IP is recorded
+
+    const p = await api(`/api/me/sessions/${cur.jti}`, {
+      token: userToken,
+      method: "PATCH",
+      body: { label: "test laptop" },
+    });
+    expect(p.status).toBe(200);
+
+    const again = await api("/api/me/sessions", { token: userToken });
+    expect(again.json.sessions.find((s: any) => s.jti === cur.jti)?.label).toBe("test laptop");
+  });
+
+  test("user creates API key and gets plaintext once", async () => {
+    const r = await api("/api/keys", {
+      token: userToken,
+      body: { name: "my-first", totalLimit: 1_000_000 },
+    });
+    expect(r.status).toBe(200);
+    expect(r.json.token).toMatch(/^gw_[a-f0-9]{48}$/);
+    gatewayKey = r.json.token;
+
+    const list = await api("/api/keys", { token: userToken });
+    expect(list.json.keys).toHaveLength(1);
+    expect(JSON.stringify(list.json)).not.toContain(gatewayKey); // never re-exposed
+  });
+
+  test("keys can be hard-deleted (gone from list, stops authenticating)", async () => {
+    const c = await api("/api/keys", { token: userToken, body: { name: "ephemeral" } });
+    expect(c.status).toBe(200);
+
+    const d = await api(`/api/keys/${c.json.key.id}?hard=true`, { token: userToken, method: "DELETE" });
+    expect(d.status).toBe(200);
+    expect(d.json.deleted).toBe(true);
+
+    const list = await api("/api/keys", { token: userToken });
+    expect(list.json.keys.find((k: any) => k.id === c.json.key.id)).toBeUndefined();
+
+    const res = await llm("/v1/chat/completions", c.json.token, { model: "fake-llm-1", messages: [] });
+    expect(res.status).toBe(401);
+  });
+
+  test("key token can be revealed/сopied later by owner and admin", async () => {
+    const c = await api("/api/keys", { token: userToken, body: { name: "revealable" } });
+    expect(c.status).toBe(200);
+
+    const r = await api(`/api/keys/${c.json.key.id}/reveal`, { token: userToken });
+    expect(r.status).toBe(200);
+    expect(r.json.token).toBe(c.json.token);
+
+    const ra = await api(`/api/admin/keys/${c.json.key.id}/reveal`, { token: adminToken });
+    expect(ra.status).toBe(200);
+    expect(ra.json.token).toBe(c.json.token);
+
+    // admin can hard-delete too
+    const d = await api(`/api/admin/keys/${c.json.key.id}?hard=true`, { token: adminToken, method: "DELETE" });
+    expect(d.status).toBe(200);
+    expect(d.json.deleted).toBe(true);
+  });
+
+  test("proxy: OpenAI non-stream works and reports usage", async () => {
+    const res = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "hello gateway" }],
+    });
+    expect(res.status).toBe(200);
+    const j = await res.json();
+    expect(j.choices[0].message.content).toContain("fake upstream");
+    expect(j.usage.prompt_tokens).toBeGreaterThan(0);
+  });
+
+  test("proxy: OpenAI streaming is relayed as SSE", async () => {
+    const res = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "stream please" }],
+      stream: true,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const body = await res.text();
+    expect(body).toContain("chat.completion.chunk");
+    expect(body).toContain('"usage"'); // injected include_usage
+    expect(body).toContain("[DONE]");
+  });
+
+  test("proxy: Anthropic non-stream + stream", async () => {
+    const res = await llm(
+      "/v1/messages",
+      gatewayKey,
+      { model: "fake-llm-1", max_tokens: 100, messages: [{ role: "user", content: "hi anthropic" }] },
+      true,
+    );
+    expect(res.status).toBe(200);
+    const j = await res.json();
+    expect(j.type).toBe("message");
+    expect(j.usage.input_tokens).toBeGreaterThan(0);
+
+    const rs = await llm(
+      "/v1/messages",
+      gatewayKey,
+      { model: "fake-llm-1", max_tokens: 100, stream: true, messages: [{ role: "user", content: "hi again" }] },
+      true,
+    );
+    expect(rs.status).toBe(200);
+    const body = await rs.text();
+    expect(body).toContain("event: message_start");
+    expect(body).toContain("event: message_delta");
+    expect(body).toContain("text_delta");
+  });
+
+  test("proxy: both header styles authenticate on both protocols", async () => {
+    // x-api-key on the OpenAI endpoint (native style is Bearer)
+    const r1 = await fetch(`${GW}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": gatewayKey },
+      body: JSON.stringify({ model: "fake-llm-1", messages: [{ role: "user", content: "x-api-key auth" }] }),
+    });
+    expect(r1.status).toBe(200);
+
+    // Authorization: Bearer on the Anthropic endpoint (native style is x-api-key)
+    const r2 = await fetch(`${GW}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${gatewayKey}`,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "fake-llm-1",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "bearer auth" }],
+      }),
+    });
+    expect(r2.status).toBe(200);
+    const j2 = await r2.json();
+    expect(j2.type).toBe("message");
+  });
+
+  test("provider auth styles are honored per capability", async () => {
+    const list = await api("/api/admin/providers", { token: adminToken });
+    const pid = list.json.providers[0].id;
+
+    // bad style value is rejected
+    const bad = await api(`/api/admin/providers/${pid}`, {
+      token: adminToken,
+      method: "PATCH",
+      body: { openaiAuthStyle: "token" },
+    });
+    expect(bad.status).toBe(400);
+
+    // flip the openai capability to x-api-key
+    const p1 = await api(`/api/admin/providers/${pid}`, {
+      token: adminToken,
+      method: "PATCH",
+      body: { openaiAuthStyle: "x-api-key" },
+    });
+    expect(p1.status).toBe(200);
+    expect(p1.json.provider.openaiAuthStyle).toBe("x-api-key");
+
+    const r1 = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "auth style probe" }],
+    });
+    expect(r1.status).toBe(200);
+    let last = await fetch(`${UP}/__last-auth`).then((r) => r.json());
+    expect(last["x-api-key"]).toBe(UPSTREAM_KEY);
+    expect(last.authorization).toBeNull();
+
+    // flip the anthropic capability to bearer
+    const p2 = await api(`/api/admin/providers/${pid}`, {
+      token: adminToken,
+      method: "PATCH",
+      body: { anthropicAuthStyle: "bearer" },
+    });
+    expect(p2.status).toBe(200);
+    expect(p2.json.provider.anthropicAuthStyle).toBe("bearer");
+
+    const r2 = await llm(
+      "/v1/messages",
+      gatewayKey,
+      { model: "fake-llm-1", max_tokens: 100, messages: [{ role: "user", content: "bearer probe" }] },
+      true,
+    );
+    expect(r2.status).toBe(200);
+    last = await fetch(`${UP}/__last-auth`).then((r) => r.json());
+    expect(last.authorization).toBe(`Bearer ${UPSTREAM_KEY}`);
+    expect(last["x-api-key"]).toBeNull();
+
+    // restore defaults for the rest of the suite
+    const back = await api(`/api/admin/providers/${pid}`, {
+      token: adminToken,
+      method: "PATCH",
+      body: { openaiAuthStyle: "bearer", anthropicAuthStyle: "x-api-key" },
+    });
+    expect(back.status).toBe(200);
+  });
+
+  test("usage accounting shows up for the user", async () => {
+    await Bun.sleep(1500); // let the usage buffer flush
+    const r = await api("/api/usage/summary", { token: userToken });
+    expect(r.status).toBe(200);
+    expect(r.json.summary.total.reqs).toBeGreaterThanOrEqual(4);
+    expect(r.json.summary.total.in_tok + r.json.summary.total.out_tok).toBeGreaterThan(0);
+
+    const daily = await api("/api/usage/daily?days=7", { token: userToken });
+    expect(daily.json.series.length).toBeGreaterThanOrEqual(1);
+
+    // by-model aggregation
+    const bm = await api("/api/usage/by-model?days=7", { token: userToken });
+    expect(bm.status).toBe(200);
+    const m = bm.json.models.find((x: any) => x.model === "fake-llm-1");
+    expect(m).toBeTruthy();
+    expect(m.reqs).toBeGreaterThan(0);
+    expect(m.in_tok + m.out_tok).toBeGreaterThan(0);
+  });
+
+  test("bad keys get protocol-shaped errors", async () => {
+    const bad1 = await llm("/v1/chat/completions", "gw_" + "0".repeat(48), {
+      model: "x", messages: [],
+    });
+    expect(bad1.status).toBe(401);
+    const j1 = await bad1.json();
+    expect(j1.error).toBeTruthy();
+    expect(typeof j1.error.message).toBe("string");
+
+    const bad2 = await llm("/v1/messages", "garbage", { model: "x", messages: [] }, true);
+    expect(bad2.status).toBe(401);
+    expect((await bad2.json()).type).toBe("error");
+  });
+
+  test("malformed bodies rejected before touching upstream", async () => {
+    const noModel = await llm("/v1/chat/completions", gatewayKey, { messages: [] });
+    expect(noModel.status).toBe(400);
+
+    const res = await fetch(`${GW}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", Authorization: `Bearer ${gatewayKey}` },
+      body: "not json",
+    });
+    expect(res.status).toBe(415);
+  });
+
+  test("total budget: tiny limit flips key to exhausted", async () => {
+    const made = await api("/api/keys", {
+      token: userToken,
+      body: { name: "tiny", totalLimit: 10 },
+    });
+    const key = made.json.token;
+
+    const first = await llm("/v1/chat/completions", key, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "spend it" }],
+    });
+    expect(first.status).toBe(200);
+    await first.text();
+
+    const second = await llm("/v1/chat/completions", key, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "again" }],
+    });
+    expect(second.status).toBe(429);
+    const e = await second.json();
+    expect(e.error.message).toContain("exhausted");
+  });
+
+  test("daily budget resets semantics (blocked when spent)", async () => {
+    const made = await api("/api/keys", {
+      token: userToken,
+      body: { name: "daily", dailyLimit: 5 },
+    });
+    const key = made.json.token;
+
+    const first = await llm("/v1/chat/completions", key, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "daily spend" }],
+    });
+    expect(first.status).toBe(200);
+    await first.text();
+
+    await Bun.sleep(3500); // flush (1s) + spend-cache TTL (2s) + margin
+
+    const second = await llm("/v1/chat/completions", key, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "blocked?" }],
+    });
+    expect(second.status).toBe(429);
+    expect((await second.json()).error.message).toContain("daily");
+  });
+
+  test("per-key RPM limit", async () => {
+    const made = await api("/api/keys", {
+      token: userToken,
+      body: { name: "slow", rpm: 1 },
+    });
+    const key = made.json.token;
+    const first = await llm("/v1/chat/completions", key, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "1" }],
+    });
+    expect(first.status).toBe(200);
+    await first.text();
+    const second = await llm("/v1/chat/completions", key, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "2" }],
+    });
+    expect(second.status).toBe(429);
+  });
+
+  test("revoked key dies immediately", async () => {
+    const made = await api("/api/keys", { token: userToken, body: { name: "bye" } });
+    const key = made.json.token;
+    const del = await api(`/api/keys/${made.json.key.id}`, { token: userToken, method: "DELETE" });
+    expect(del.status).toBe(200);
+    const res = await llm("/v1/chat/completions", key, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "hi" }],
+    });
+    expect(res.status).toBe(429);
+    expect((await res.json()).error.message).toContain("revoked");
+  });
+
+  test("TOTP end-to-end: setup, enable, login requires code", async () => {
+    const setup = await api("/api/me/2fa/setup", { token: userToken, method: "POST" });
+    expect(setup.status).toBe(200);
+    expect(setup.json.qrDataUrl).toMatch(/^data:image\/png/);
+    const secret = setup.json.secret;
+    const code = await totpAt(secret, Date.now());
+
+    const enable = await api("/api/me/2fa/enable", { token: userToken, body: { code } });
+    expect(enable.status).toBe(200);
+
+    const login = await api("/api/auth/login", { body: { email: userEmail, password: userPw } });
+    expect(login.status).toBe(200);
+    expect(login.json.needs2FA).toBe(true);
+
+    const wrong = await api("/api/auth/2fa", { body: { tempToken: login.json.tempToken, code: "000000" } });
+    expect(wrong.status).toBe(401);
+
+    const right = await api("/api/auth/2fa", {
+      body: { tempToken: login.json.tempToken, code: await totpAt(secret, Date.now()) },
+    });
+    expect(right.status).toBe(200);
+    expect(right.json.accessToken).toBeTruthy();
+    userToken = right.json.accessToken;
+    totpSecret = secret;
+    userRefresh = right.json.refreshToken; // reused by the rotation test (TOTP anti-replay blocks a same-window relogin)
+  });
+
+  test("refresh token rotates and old one dies", async () => {
+    expect(userRefresh).toBeTruthy();
+    const rotated = await api("/api/auth/refresh", { body: { refreshToken: userRefresh } });
+    expect(rotated.status).toBe(200);
+    expect(rotated.json.refreshToken).toBeTruthy();
+
+    const oldAgain = await api("/api/auth/refresh", { body: { refreshToken: userRefresh } });
+    expect(oldAgain.status).toBe(401);
+  });
+
+  test("admin sees global stats, keys of everyone, and audit trail", async () => {
+    const stats = await api("/api/admin/stats?days=7", { token: adminToken });
+    expect(stats.status).toBe(200);
+    expect(stats.json.counts.users).toBeGreaterThanOrEqual(2);
+    expect(stats.json.counts.keys).toBeGreaterThanOrEqual(4);
+    expect(stats.json.totals.reqs).toBeGreaterThanOrEqual(7);
+
+    const keys = await api("/api/admin/keys", { token: adminToken });
+    expect(keys.status).toBe(200);
+    expect(keys.json.keys.length).toBeGreaterThanOrEqual(4);
+    expect(keys.json.keys.find((k: any) => k.name === "tiny").status).toBe("exhausted");
+
+    const audit = await api("/api/admin/audit?limit=200", { token: adminToken });
+    expect(audit.status).toBe(200);
+    expect(audit.json.entries.some((e: any) => e.action === "user.created")).toBe(true);
+    expect(audit.json.entries.some((e: any) => e.action === "key.exhausted")).toBe(true);
+  });
+
+  test("static serving: SPA, legal pages, fallback and hard traversal blocks", async () => {
+    const index = await fetch(`${GW}/`);
+    expect(index.status).toBe(200);
+    expect(await index.text()).toContain("dash");
+    expect(index.headers.get("content-security-policy")).toContain("default-src 'self'");
+    expect(index.headers.get("x-content-type-options")).toBe("nosniff");
+
+    expect((await fetch(`${GW}/terms.html`)).status).toBe(200);
+
+    // SPA fallback for extension-less client routes
+    const fallback = await fetch(`${GW}/settings`);
+    expect(fallback.status).toBe(200);
+    expect(await fallback.text()).toContain("dash");
+
+    // traversal attempts never escape (undici normalizes literal `..`; the
+    // encoded variants must be hard-refused)
+    for (const p of ["/%2e%2e/server/db.ts", "/..%2fserver%2fdb.ts", "/data/gateway.db", "/.secret-file", "/.env"]) {
+      const res = await fetch(`${GW}${p}`);
+      expect([400, 404]).toContain(res.status);
+    }
+    const dots = await fetch(`${GW}/../../etc/passwd`);
+    expect(dots.status).toBe(200);
+    expect(await dots.text()).toContain("dash"); // fell back to SPA, not the shadow file
+  });
+
+  test("unauthenticated proxy endpoints look normal to scanners", async () => {
+    const res = await fetch(`${GW}/v1/models`);
+    expect([401, 404]).toContain(res.status);
+  });
+});

@@ -127,7 +127,7 @@ function RailItem(props: { item: NavItem; current: string; badge?: number }) {
   return (
     <a
       href={`#${props.item.path}`}
-      class={`group relative flex items-center justify-center rounded-xl p-3 transition-all duration-200 ${
+      class={`group relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200 ${
         active()
           ? "bg-brand-500/10 text-brand-500"
           : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/60"
@@ -226,7 +226,7 @@ function AppShell(props: { children: JSX.Element }) {
           <ThemeToggle />
           <button
             onClick={logout}
-            class="group relative flex items-center justify-center rounded-xl p-3 text-ink-400 hover:text-rose-500 hover:bg-rose-500/10 transition-all duration-200 cursor-pointer"
+            class="group relative flex h-10 w-10 items-center justify-center rounded-xl text-ink-400 hover:text-rose-500 hover:bg-rose-500/10 transition-all duration-200 cursor-pointer"
             aria-label="Sign out"
           >
             <Icon name={Icons.logout} size={22} />
@@ -249,7 +249,7 @@ function AppShell(props: { children: JSX.Element }) {
           <div class="flex items-center gap-1">
             <ThemeToggle />
             <button
-              class="flex items-center justify-center rounded-xl p-2 text-ink-300 hover:bg-ink-800/60 transition-colors cursor-pointer"
+              class="flex h-10 w-10 items-center justify-center rounded-xl text-ink-300 hover:bg-ink-800/60 transition-colors cursor-pointer"
               onClick={() => setMobileNav(!mobileNav())}
               aria-label="Menu"
             >

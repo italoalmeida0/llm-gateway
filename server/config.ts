@@ -1,4 +1,10 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "fs";
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  chmodSync,
+} from "fs";
 import path from "path";
 
 /**
@@ -10,8 +16,11 @@ import path from "path";
 export const NODE_ENV = process.env.NODE_ENV || "production";
 export const IS_PROD = NODE_ENV === "production";
 export const PORT = Number(process.env.PORT || 3000);
-export const DATA_DIR = process.env.DATA_DIR || path.join(import.meta.dir, "..", "data");
-export const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
+export const DATA_DIR =
+  process.env.DATA_DIR || path.join(import.meta.dir, "..", "data");
+export const PUBLIC_URL = (
+  process.env.PUBLIC_URL || `http://localhost:${PORT}`
+).replace(/\/$/, "");
 export const TRUST_PROXY = process.env.TRUST_PROXY === "true";
 export const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
@@ -25,7 +34,7 @@ export const SMTP = {
   port: Number(process.env.SMTP_PORT || 587),
   user: process.env.SMTP_USER || "",
   pass: process.env.SMTP_PASS || "",
-  from: process.env.SMTP_FROM || "LLM Gateway <no-reply@localhost>",
+  from: process.env.SMTP_FROM || '"LLM Gateway" <no-reply@localhost>',
   secure: process.env.SMTP_SECURE === "true",
 };
 export const SMTP_ENABLED = !!SMTP.host;
@@ -51,12 +60,16 @@ function loadSecret(): string {
   const secretFile = path.join(DATA_DIR, ".secret");
   if (existsSync(secretFile)) return readFileSync(secretFile, "utf8").trim();
 
-  const generated = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
+  const generated = Buffer.from(
+    crypto.getRandomValues(new Uint8Array(32)),
+  ).toString("hex");
   writeFileSync(secretFile, generated);
   try {
     chmodSync(secretFile, 0o600);
   } catch {}
-  console.warn(`[BOOT] dev mode: generated GATEWAY_SECRET and stored it in ${secretFile}`);
+  console.warn(
+    `[BOOT] dev mode: generated GATEWAY_SECRET and stored it in ${secretFile}`,
+  );
   return generated;
 }
 
@@ -94,7 +107,9 @@ export const LIMITS = {
 
   /** upstream behavior */
   upstreamTimeoutMs: Number(process.env.UPSTREAM_TIMEOUT_MS || 120_000),
-  upstreamNonStreamTimeoutMs: Number(process.env.UPSTREAM_TIMEOUT_NONSTREAM_MS || 60_000),
+  upstreamNonStreamTimeoutMs: Number(
+    process.env.UPSTREAM_TIMEOUT_NONSTREAM_MS || 60_000,
+  ),
   breakerFailThreshold: 5,
   breakerOpenMs: 30_000,
 

@@ -206,7 +206,7 @@ export function ThemeToggle(props: { class?: string }) {
         theme() === "dark" ? "Switch to light theme" : "Switch to dark theme"
       }
       aria-label="Toggle theme"
-      class={`relative flex items-center justify-center rounded-xl p-2 text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 transition-all duration-300 cursor-pointer ${props.class ?? ""}`}
+      class={`relative flex h-10 w-10 items-center justify-center rounded-xl text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 transition-all duration-300 cursor-pointer ${props.class ?? ""}`}
     >
       <span
         class="block transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"

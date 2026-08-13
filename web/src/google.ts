@@ -1,7 +1,8 @@
 /**
  * Google Identity Services loader + button renderer (official GSI button —
  * the safest way to obtain an ID token, and required by Google's rules).
- * Loaded lazily; renders into the provided element with a dark theme.
+ * Loaded lazily; themed to match the app (dark pill on the dark theme,
+ * outlined pill on light) and re-rendered when the theme flips.
  */
 
 declare global {
@@ -38,12 +39,23 @@ export async function renderGoogleButton(
     ux_mode: "popup",
     auto_select: false,
   });
-  el.innerHTML = "";
-  window.google.accounts.id.renderButton(el, {
-    theme: "filled_black",
-    size: "large",
-    text: "signin_with",
-    shape: "rectangular",
-    width: 260,
+  const render = () => {
+    el.innerHTML = "";
+    window.google.accounts.id.renderButton(el, {
+      theme:
+        document.documentElement.dataset.theme === "dark"
+          ? "filled_black"
+          : "outline",
+      size: "large",
+      text: "continue_with",
+      shape: "pill",
+      width: 300,
+    });
+  };
+  render();
+  // Follow theme toggles (same observer pattern as the favicon sync).
+  new MutationObserver(render).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme"],
   });
 }

@@ -92,7 +92,7 @@ export default function UsagePage() {
 
       <Card class="mb-6">
         <div class="flex flex-wrap gap-3 items-end justify-between px-6 pt-5">
-          <div class="w-64">
+          <div class="w-full sm:w-64">
             <Select
               label="Key"
               value={keyId()}
@@ -103,7 +103,7 @@ export default function UsagePage() {
               options={keyOptions()}
             />
           </div>
-          <div class="flex items-end gap-3">
+          <div class="flex flex-wrap items-end gap-3">
             <Segmented
               class="mb-0.5"
               value={chartMetric()}

@@ -127,16 +127,20 @@ export async function handleMeRoute(path: string, req: Request): Promise<Respons
 
     const identity = await verifyGoogleIdToken(idToken);
     if (!identity.emailVerified) return err(400, "Google email must be verified", req);
-    if (identity.email !== ctx.user.email.toLowerCase()) {
-      return err(400, "Google account email does not match your account email", req);
-    }
+    // The session already proves identity, so the Google email does NOT need to
+    // match the account email (e.g. work Google + personal gateway account).
+    // Auto-link at login (auth.ts) still requires an exact email match.
     const existing = stmts.userByGoogleId.get(identity.sub);
     if (existing && existing.id !== ctx.user.id) {
       return err(409, "this Google account is linked to another user", req);
     }
 
     db.prepare("UPDATE users SET google_id = ? WHERE id = ?").run(identity.sub, ctx.user.id);
-    audit("google.linked", { actorId: ctx.user.id, ip });
+    audit("google.linked", { actorId: ctx.user.id, ip, meta: { email: identity.email } });
+    void sendSecurityAlert(
+      ctx.user.email,
+      `A Google account (${identity.email}) was linked to your account.`,
+    );
     return ok({ linked: true }, req);
   }
 

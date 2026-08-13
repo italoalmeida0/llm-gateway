@@ -265,7 +265,7 @@ export function Card(props: {
 }) {
   return (
     <div
-      class={`rounded-[1.75rem] border border-line bg-card ${
+      class={`rounded-[1.75rem] border border-line bg-card overflow-hidden ${
         props.interactive
           ? "transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 hover:border-ink-600/50"
           : ""

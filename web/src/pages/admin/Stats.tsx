@@ -130,13 +130,13 @@ export default function AdminStatsPage() {
           />
           <StatCard
             icon={Icons.users}
-            label={<CardLabel title="Users" window={""} />}
+            label={<CardLabel title="Users" window={" "} />}
             countValue={stats()!.counts.users}
             sub={<span>{stats()!.counts.providers} provider(s)</span>}
           />
           <StatCard
             icon={Icons.key}
-            label={<CardLabel title="API keys" window={""} />}
+            label={<CardLabel title="API keys" window={" "} />}
             value={`${stats()!.counts.activeKeys}/${stats()!.counts.keys}`}
             sub={<span>active / total</span>}
           />
@@ -145,7 +145,7 @@ export default function AdminStatsPage() {
         <Card class="mb-6">
           <CardHeader
             title={days() === "1" ? "Hourly usage" : "Daily usage"}
-            subtitle={`tokens per ${days() === "1" ? "hour" : "day"} (UTC)`}
+            subtitle={`Tokens per ${days() === "1" ? "hour" : "day"} (UTC)`}
           />
           <div class="px-4 pb-4">
             <DailyChart

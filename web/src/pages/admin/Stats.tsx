@@ -24,14 +24,18 @@ interface Buckets {
 
 interface StatsDto {
   series: DailyPoint[];
-  perUser: Array<{
-    user_id: string;
-    email: string;
-  } & Buckets>;
-  perModel: Array<{
-    model: string;
-    proto: string;
-  } & Buckets>;
+  perUser: Array<
+    {
+      user_id: string;
+      email: string;
+    } & Buckets
+  >;
+  perModel: Array<
+    {
+      model: string;
+      proto: string;
+    } & Buckets
+  >;
   totals: Buckets;
   today: Buckets;
   counts: {
@@ -113,7 +117,9 @@ export default function AdminStatsPage() {
           />
           <StatCard
             icon={Icons.bolt}
-            label={<CardLabel title="Input cache" window={windowLabel(days())} />}
+            label={
+              <CardLabel title="Input cache" window={windowLabel(days())} />
+            }
             countValue={winCache()}
           />
           <StatCard
@@ -124,13 +130,13 @@ export default function AdminStatsPage() {
           />
           <StatCard
             icon={Icons.users}
-            label="Users"
+            label={<CardLabel title="Users" window={""} />}
             countValue={stats()!.counts.users}
             sub={<span>{stats()!.counts.providers} provider(s)</span>}
           />
           <StatCard
             icon={Icons.key}
-            label="API keys"
+            label={<CardLabel title="API keys" window={""} />}
             value={`${stats()!.counts.activeKeys}/${stats()!.counts.keys}`}
             sub={<span>active / total</span>}
           />
@@ -138,11 +144,14 @@ export default function AdminStatsPage() {
 
         <Card class="mb-6">
           <CardHeader
-            title={days() === "1" ? "Hourly usage (global)" : "Daily usage (global)"}
-            subtitle={`Input, cached input and output tokens per ${days() === "1" ? "hour" : "day"} (UTC)`}
+            title={days() === "1" ? "Hourly usage" : "Daily usage"}
+            subtitle={`tokens per ${days() === "1" ? "hour" : "day"} (UTC)`}
           />
           <div class="px-4 pb-4">
-            <DailyChart series={stats()!.series} unit={days() === "1" ? "hour" : "day"} />
+            <DailyChart
+              series={stats()!.series}
+              unit={days() === "1" ? "hour" : "day"}
+            />
           </div>
         </Card>
 
@@ -214,9 +223,7 @@ export default function AdminStatsPage() {
                       <tr class="transition-colors hover:bg-ink-800/30">
                         <td class="px-6 py-3 text-ink-200">{m.model || "—"}</td>
                         <td class="px-3 py-3">
-                          <Badge
-                            tone={m.proto === "openai" ? "blue" : "amber"}
-                          >
+                          <Badge tone={m.proto === "openai" ? "blue" : "amber"}>
                             {m.proto === "openai" ? "OpenAI" : "Anthropic"}
                           </Badge>
                         </td>

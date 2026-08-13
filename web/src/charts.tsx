@@ -46,7 +46,9 @@ export function DailyChart(props: {
     ),
   );
 
-  const slotW = createMemo(() => (W - PAD.l - PAD.r) / Math.max(1, data().length));
+  const slotW = createMemo(
+    () => (W - PAD.l - PAD.r) / Math.max(1, data().length),
+  );
   /** Three token bars (in/cache/out) fit side by side inside one day slot. */
   const barW = createMemo(() => Math.max(2, Math.min(9, slotW() * 0.22)));
   const BAR_GAP = 2;
@@ -55,13 +57,22 @@ export function DailyChart(props: {
     const center = PAD.l + slotW() * i + slotW() / 2;
     const clusterW = barW() * 3 + BAR_GAP * 2;
     const start = center - clusterW / 2;
-    return start + (which === "in" ? 0 : which === "cache" ? barW() + BAR_GAP : 2 * (barW() + BAR_GAP));
+    return (
+      start +
+      (which === "in"
+        ? 0
+        : which === "cache"
+          ? barW() + BAR_GAP
+          : 2 * (barW() + BAR_GAP))
+    );
   };
   /** Centered single bar (requests metric). */
   const soloX = (i: number) => PAD.l + slotW() * i + slotW() / 2 - barW() - 1;
   const yFor = (v: number) => PAD.t + (H - PAD.t - PAD.b) * (1 - v / maxV());
 
-  const ticks = createMemo(() => [0, 0.5, 1].map((f) => Math.round(maxV() * f)));
+  const ticks = createMemo(() =>
+    [0, 0.5, 1].map((f) => Math.round(maxV() * f)),
+  );
 
   /** Clicked/pinned day — its metadata replaces the legend row. Reset when
    *  a new series arrives (key/days/window change). */
@@ -74,20 +85,41 @@ export function DailyChart(props: {
     const i = selected();
     return i !== null ? (data()[i] ?? null) : null;
   });
-  const toggleSelect = (i: number) =>
-    setSelected(selected() === i ? null : i);
+  const toggleSelect = (i: number) => setSelected(selected() === i ? null : i);
 
   return (
     <Show
       when={data().length > 0}
-      fallback={<div class="h-32 flex items-center justify-center text-xs text-ink-500">No usage data yet</div>}
+      fallback={
+        <div class="h-32 flex items-center justify-center text-xs text-ink-500">
+          No usage data yet
+        </div>
+      }
     >
-      <svg viewBox={`0 0 ${W} ${H}`} class="w-full" role="img" aria-label="Daily token usage chart">
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        class="w-full"
+        role="img"
+        aria-label="Daily token usage chart"
+      >
         <For each={ticks()}>
           {(t) => (
             <g>
-              <line x1={PAD.l} x2={W - PAD.r} y1={yFor(t)} y2={yFor(t)} stroke={GRID} stroke-width="1" />
-              <text x={PAD.l - 6} y={yFor(t) + 3} text-anchor="end" font-size="9" fill={TICK}>
+              <line
+                x1={PAD.l}
+                x2={W - PAD.r}
+                y1={yFor(t)}
+                y2={yFor(t)}
+                stroke={GRID}
+                stroke-width="1"
+              />
+              <text
+                x={PAD.l - 6}
+                y={yFor(t) + 3}
+                text-anchor="end"
+                font-size="9"
+                fill={TICK}
+              >
                 {fmtNum(t)}
               </text>
             </g>
@@ -109,7 +141,10 @@ export function DailyChart(props: {
                       x={soloX(i())}
                       y={yFor(d.reqs ?? 0)}
                       width={barW() * 2 + 2}
-                      height={Math.max(0, ((d.reqs ?? 0) / maxV()) * (H - PAD.t - PAD.b))}
+                      height={Math.max(
+                        0,
+                        ((d.reqs ?? 0) / maxV()) * (H - PAD.t - PAD.b),
+                      )}
                       rx="2.5"
                       fill={latest() ? BRAND : OUT_BAR}
                       stroke={selected() === i() ? BRAND : "none"}
@@ -123,7 +158,10 @@ export function DailyChart(props: {
                     x={barX(i(), "in")}
                     y={yFor(d.in_tok)}
                     width={barW()}
-                    height={Math.max(0, (d.in_tok / maxV()) * (H - PAD.t - PAD.b))}
+                    height={Math.max(
+                      0,
+                      (d.in_tok / maxV()) * (H - PAD.t - PAD.b),
+                    )}
                     rx="2.5"
                     fill={latest() ? BRAND : IN_BAR}
                     stroke={selected() === i() ? BRAND : "none"}
@@ -135,7 +173,10 @@ export function DailyChart(props: {
                     x={barX(i(), "cache")}
                     y={yFor(d.cache_tok ?? 0)}
                     width={barW()}
-                    height={Math.max(0, ((d.cache_tok ?? 0) / maxV()) * (H - PAD.t - PAD.b))}
+                    height={Math.max(
+                      0,
+                      ((d.cache_tok ?? 0) / maxV()) * (H - PAD.t - PAD.b),
+                    )}
                     rx="2.5"
                     fill={CACHE_BAR}
                     stroke={selected() === i() ? BRAND : "none"}
@@ -147,7 +188,10 @@ export function DailyChart(props: {
                     x={barX(i(), "out")}
                     y={yFor(d.out_tok)}
                     width={barW()}
-                    height={Math.max(0, (d.out_tok / maxV()) * (H - PAD.t - PAD.b))}
+                    height={Math.max(
+                      0,
+                      (d.out_tok / maxV()) * (H - PAD.t - PAD.b),
+                    )}
                     rx="2.5"
                     fill={OUT_BAR}
                     stroke={selected() === i() ? BRAND : "none"}
@@ -160,11 +204,19 @@ export function DailyChart(props: {
             );
           }}
         </For>
-        <For each={data().filter((_, i) => i % Math.ceil(data().length / 6) === 0)}>
+        <For
+          each={data().filter((_, i) => i % Math.ceil(data().length / 6) === 0)}
+        >
           {(d) => {
             const i = () => data().indexOf(d);
             return (
-              <text x={PAD.l + slotW() * i() + slotW() / 2} y={H - 8} text-anchor="middle" font-size="9" fill={TICK}>
+              <text
+                x={PAD.l + slotW() * i() + slotW() / 2}
+                y={H - 8}
+                text-anchor="middle"
+                font-size="9"
+                fill={TICK}
+              >
                 {tickOf(d)}
               </text>
             );
@@ -180,40 +232,70 @@ export function DailyChart(props: {
                 when={metric() === "tokens"}
                 fallback={
                   <span class="inline-flex items-center gap-1.5">
-                    <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: OUT_BAR }} /> Requests
+                    <span
+                      class="w-2.5 h-2.5 rounded-sm inline-block"
+                      style={{ background: OUT_BAR }}
+                    />{" "}
+                    Requests
                   </span>
                 }
               >
                 <span class="inline-flex items-center gap-1.5">
-                  <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: IN_BAR }} /> Input tokens
+                  <span
+                    class="w-2.5 h-2.5 rounded-sm inline-block"
+                    style={{ background: IN_BAR }}
+                  />{" "}
+                  Input
                 </span>
                 <span class="inline-flex items-center gap-1.5">
-                  <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: CACHE_BAR }} /> Cached input
+                  <span
+                    class="w-2.5 h-2.5 rounded-sm inline-block"
+                    style={{ background: CACHE_BAR }}
+                  />{" "}
+                  Input cache
                 </span>
                 <span class="inline-flex items-center gap-1.5">
-                  <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: OUT_BAR }} /> Output tokens
+                  <span
+                    class="w-2.5 h-2.5 rounded-sm inline-block"
+                    style={{ background: OUT_BAR }}
+                  />{" "}
+                  Output
                 </span>
               </Show>
               <span class="inline-flex items-center gap-1.5">
-                <span class="w-2.5 h-2.5 rounded-sm bg-brand-500 inline-block" /> Latest {unit()}
+                <span class="w-2.5 h-2.5 rounded-sm bg-brand-500 inline-block" />{" "}
+                Latest {unit()}
               </span>
-              <span class="ml-auto text-[10px] text-ink-500">Click a bar to pin {unit() === "hour" ? "an" : "a"} {unit()}</span>
+              <span class="ml-auto text-[10px] text-ink-500">
+                Click a bar to pin
+              </span>
             </>
           }
         >
           {(d) => (
             <>
-              <span class="font-medium text-ink-200">{d().label ?? d().date}</span>
+              <span class="font-medium text-ink-200">
+                {d().label ?? d().date}
+              </span>
               <span class="inline-flex items-center gap-1.5">
-                <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: IN_BAR }} />
+                <span
+                  class="w-2.5 h-2.5 rounded-sm inline-block"
+                  style={{ background: IN_BAR }}
+                />
                 In {fmtNum(d().in_tok)}
               </span>
               <span class="inline-flex items-center gap-1.5">
-                <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: CACHE_BAR }} />
+                <span
+                  class="w-2.5 h-2.5 rounded-sm inline-block"
+                  style={{ background: CACHE_BAR }}
+                />
                 Cache {fmtNum(d().cache_tok ?? 0)}
               </span>
               <span class="inline-flex items-center gap-1.5">
-                <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: OUT_BAR }} />
+                <span
+                  class="w-2.5 h-2.5 rounded-sm inline-block"
+                  style={{ background: OUT_BAR }}
+                />
                 Out {fmtNum(d().out_tok)}
               </span>
               <span class="tabular-nums">{fmtNum(d().reqs)} req</span>
@@ -253,7 +335,11 @@ function smoothPath(pts: Array<{ x: number; y: number }>): string {
 
 let gradientSeq = 0;
 
-export function AreaChart(props: { values: number[]; labels?: string[]; height?: number }) {
+export function AreaChart(props: {
+  values: number[];
+  labels?: string[];
+  height?: number;
+}) {
   const W = 720;
   const H = props.height ?? 170;
   const PAD = { l: 10, r: 10, t: 14, b: 26 };
@@ -293,19 +379,48 @@ export function AreaChart(props: { values: number[]; labels?: string[]; height?:
   return (
     <Show
       when={pts().length > 0}
-      fallback={<div class="h-32 flex items-center justify-center text-xs text-ink-500">No data yet</div>}
+      fallback={
+        <div class="h-32 flex items-center justify-center text-xs text-ink-500">
+          No data yet
+        </div>
+      }
     >
-      <svg viewBox={`0 0 ${W} ${H}`} class="w-full" role="img" aria-label="Trend chart">
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        class="w-full"
+        role="img"
+        aria-label="Trend chart"
+      >
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stop-color={BRAND} stop-opacity="0.25" />
             <stop offset="100%" stop-color={BRAND} stop-opacity="0" />
           </linearGradient>
         </defs>
-        <line x1={PAD.l} x2={W - PAD.r} y1={yGrid(H, PAD, 0.5)} y2={yGrid(H, PAD, 0.5)} stroke={GRID} stroke-width="1" />
-        <line x1={PAD.l} x2={W - PAD.r} y1={H - PAD.b} y2={H - PAD.b} stroke={GRID} stroke-width="1" />
+        <line
+          x1={PAD.l}
+          x2={W - PAD.r}
+          y1={yGrid(H, PAD, 0.5)}
+          y2={yGrid(H, PAD, 0.5)}
+          stroke={GRID}
+          stroke-width="1"
+        />
+        <line
+          x1={PAD.l}
+          x2={W - PAD.r}
+          y1={H - PAD.b}
+          y2={H - PAD.b}
+          stroke={GRID}
+          stroke-width="1"
+        />
         <path d={area()} fill={`url(#${gid})`} />
-        <path d={line()} fill="none" stroke={BRAND} stroke-width="2" stroke-linecap="round" />
+        <path
+          d={line()}
+          fill="none"
+          stroke={BRAND}
+          stroke-width="2"
+          stroke-linecap="round"
+        />
         <circle
           cx={pts()[pts().length - 1]!.x}
           cy={pts()[pts().length - 1]!.y}
@@ -317,7 +432,13 @@ export function AreaChart(props: { values: number[]; labels?: string[]; height?:
         />
         <For each={labelIdx()}>
           {(l) => (
-            <text x={pts()[l.i]?.x ?? 0} y={H - 8} text-anchor="middle" font-size="9" fill={TICK}>
+            <text
+              x={pts()[l.i]?.x ?? 0}
+              y={H - 8}
+              text-anchor="middle"
+              font-size="9"
+              fill={TICK}
+            >
               {l.text}
             </text>
           )}

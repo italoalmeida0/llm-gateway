@@ -99,8 +99,15 @@ export default function DashboardPage() {
   // "all" is already unbounded, nothing to double.
   const [series] = createResource(days, async (d) => {
     const query =
-      d === "1" ? "hours=48" : d === "all" ? "days=all" : `days=${Number(d) * 2}`;
-    const j = await api<{ series: DailyPoint[] }>("GET", `/api/usage/daily?${query}`);
+      d === "1"
+        ? "hours=48"
+        : d === "all"
+          ? "days=all"
+          : `days=${Number(d) * 2}`;
+    const j = await api<{ series: DailyPoint[] }>(
+      "GET",
+      `/api/usage/daily?${query}`,
+    );
     return j.series;
   });
   const [keys] = createResource(async () => {
@@ -115,13 +122,27 @@ export default function DashboardPage() {
     return s.slice(-Number(days()));
   });
   // Three separate buckets — never one lumped "total tokens" number.
-  const winIn = createMemo(() => view().reduce((s, d) => s + (d.in_tok ?? 0), 0));
-  const winCache = createMemo(() => view().reduce((s, d) => s + (d.cache_tok ?? 0), 0));
-  const winOut = createMemo(() => view().reduce((s, d) => s + (d.out_tok ?? 0), 0));
-  const winReqs = createMemo(() => view().reduce((s, d) => s + (d.reqs ?? 0), 0));
-  const inDelta = createMemo(() => deltaPct(series() ?? [], (d) => d.in_tok ?? 0));
-  const cacheDelta = createMemo(() => deltaPct(series() ?? [], (d) => d.cache_tok ?? 0));
-  const outDelta = createMemo(() => deltaPct(series() ?? [], (d) => d.out_tok ?? 0));
+  const winIn = createMemo(() =>
+    view().reduce((s, d) => s + (d.in_tok ?? 0), 0),
+  );
+  const winCache = createMemo(() =>
+    view().reduce((s, d) => s + (d.cache_tok ?? 0), 0),
+  );
+  const winOut = createMemo(() =>
+    view().reduce((s, d) => s + (d.out_tok ?? 0), 0),
+  );
+  const winReqs = createMemo(() =>
+    view().reduce((s, d) => s + (d.reqs ?? 0), 0),
+  );
+  const inDelta = createMemo(() =>
+    deltaPct(series() ?? [], (d) => d.in_tok ?? 0),
+  );
+  const cacheDelta = createMemo(() =>
+    deltaPct(series() ?? [], (d) => d.cache_tok ?? 0),
+  );
+  const outDelta = createMemo(() =>
+    deltaPct(series() ?? [], (d) => d.out_tok ?? 0),
+  );
   const reqDelta = createMemo(() =>
     deltaPct(series() ?? [], (d) => d.reqs ?? 0),
   );
@@ -167,21 +188,45 @@ export default function DashboardPage() {
           late series() update would hit a text node USAL already replaced. */}
       <Show when={series()}>
         {() => (
-          <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6" {...usalItems("fade-u", 110)}>
+          <div
+            class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6"
+            {...usalItems("fade-u", 110)}
+          >
             <Card interactive class="p-6">
-              <div class="flex items-start justify-between gap-3 mb-4">
+              <div class="flex items-start justify-between gap-3">
                 <div class="text-xs font-medium text-ink-500">
                   Tokens · {windowLabel(days())}
                 </div>
                 <IconTile icon={Icons.chart} class="w-10 h-10" />
               </div>
               <div class="grid grid-cols-3 gap-3">
-                <BucketStat label="Input" count={winIn()} delta={inDelta()} color={IN_COLOR} />
-                <BucketStat label="Input cache" count={winCache()} delta={cacheDelta()} color={CACHE_COLOR} />
-                <BucketStat label="Output" count={winOut()} delta={outDelta()} color={OUT_COLOR} />
+                <BucketStat
+                  label="Input"
+                  count={winIn()}
+                  delta={inDelta()}
+                  color={IN_COLOR}
+                />
+                <BucketStat
+                  label="Input cache"
+                  count={winCache()}
+                  delta={cacheDelta()}
+                  color={CACHE_COLOR}
+                />
+                <BucketStat
+                  label="Output"
+                  count={winOut()}
+                  delta={outDelta()}
+                  color={OUT_COLOR}
+                />
               </div>
-              <div class="mt-4" {...usal("fade-u delay-250 duration-700 threshold-5")}>
-                <DailyChart series={view()} unit={days() === "1" ? "hour" : "day"} />
+              <div
+                class="mt-4"
+                {...usal("fade-u delay-250 duration-700 threshold-5")}
+              >
+                <DailyChart
+                  series={view()}
+                  unit={days() === "1" ? "hour" : "day"}
+                />
               </div>
             </Card>
 
@@ -201,7 +246,10 @@ export default function DashboardPage() {
                   {activeKeys()}
                 </span>
               </div>
-              <div class="mt-4" {...usal("fade-u delay-350 duration-700 threshold-5")}>
+              <div
+                class="mt-4"
+                {...usal("fade-u delay-350 duration-700 threshold-5")}
+              >
                 <AreaChart
                   values={view().map((d) => d.reqs ?? 0)}
                   labels={view().map((d) => pointLabel(d))}
@@ -212,11 +260,16 @@ export default function DashboardPage() {
         )}
       </Show>
 
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5" {...usalItems("fade-u", 110)}>
+      <div
+        class="grid grid-cols-1 lg:grid-cols-2 gap-5"
+        {...usalItems("fade-u", 110)}
+      >
         <Card class="p-6">
           <div class="flex items-start justify-between gap-3 mb-4">
             <div>
-              <h2 class="text-sm font-semibold text-ink-100">Output token budget</h2>
+              <h2 class="text-sm font-semibold text-ink-100">
+                Output token budget
+              </h2>
               <p class="text-xs text-ink-500 mt-0.5">Across all your keys</p>
             </div>
             <IconTile icon={Icons.key} class="w-9 h-9 rounded-xl" />
@@ -225,7 +278,9 @@ export default function DashboardPage() {
             when={budget().cap > 0}
             fallback={
               <div>
-                <div class="text-[28px] font-light tracking-tight mb-2">Unlimited</div>
+                <div class="text-[28px] font-light tracking-tight mb-2">
+                  Unlimited
+                </div>
                 <p class="text-xs text-ink-500 leading-relaxed">
                   No lifetime output caps set. Add a total output limit to any
                   key to track spend against a cap here.

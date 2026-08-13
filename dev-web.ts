@@ -2,8 +2,9 @@
  * Frontend dev server.
  *  - Serves the SPA through Bun's HTML imports (with the tailwind/solid plugins
  *    from bunfig.toml) with full reload on change.
- *  - Proxies /api and /v1 to the backend (default http://localhost:3000) so the
- *    dashboard talks to the real gateway during development.
+ *  - Proxies /api, /v1, /openai/v1 and /anthropic/v1 to the backend (default
+ *    http://localhost:3000) so the dashboard talks to the real gateway during
+ *    development.
  *
  * Usage: bun ./dev-web.ts 5700
  */
@@ -20,7 +21,12 @@ const server = serve({
   async fetch(req) {
     const url = new URL(req.url);
 
-    if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/v1/")) {
+    if (
+      url.pathname.startsWith("/api/") ||
+      url.pathname.startsWith("/v1/") ||
+      url.pathname.startsWith("/openai/v1/") ||
+      url.pathname.startsWith("/anthropic/v1/")
+    ) {
       const upstream = new URL(url.pathname + url.search, API);
       const headers = new Headers(req.headers);
       headers.delete("host");
@@ -53,4 +59,4 @@ const server = serve({
   port,
 });
 
-console.log(`[dev-web] ${server.url}  (proxying /api,/v1 -> ${API})`);
+console.log(`[dev-web] ${server.url}  (proxying /api,/v1,/openai/v1,/anthropic/v1 -> ${API})`);

@@ -49,9 +49,17 @@ export function usalItems(
   return usal(`split-item ${value} split-delay-${stagger} threshold-5`);
 }
 
-/** Count-up from 0 to `target` (raw integer, locale-formatted). */
-export function usalCount(target: number): { "data-usal": string } {
-  const formatted = Math.round(Math.max(0, target)).toLocaleString("en-US");
+/**
+ * Count-up from 0 to a PRE-FORMATTED numeric string ("950", "12.5", "1.14").
+ * Any unit suffix ("K"/"M"/"B") must stay OUTSIDE this string: USAL replaces
+ * the matched text with its animated span, so a suffixed target would eat
+ * the unit.
+ *
+ * NEVER pass locale-grouped numbers here ("1,140,500"): USAL's parser treats
+ * a single separator followed by 1-3 digits as DECIMALS, so "1,140,500" would
+ * be read as 1.140 and the counter would land on "1,140".
+ */
+export function usalCount(formatted: string): { "data-usal": string } {
   return usal(`count-[${formatted}] duration-1000`);
 }
 

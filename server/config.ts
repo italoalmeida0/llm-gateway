@@ -110,6 +110,14 @@ export const LIMITS = {
   upstreamNonStreamTimeoutMs: Number(
     process.env.UPSTREAM_TIMEOUT_NONSTREAM_MS || 60_000,
   ),
+  /**
+   * Abort an SSE stream after this many ms without a single byte from the
+   * upstream. Long thinking pauses are legitimate (models emit nothing while
+   * reasoning; Anthropic pads them with ping events), so this must be
+   * generous — an abort mid-turn makes clients retry and re-run tool actions.
+   * Must stay BELOW the HTTP server's idleTimeout (see server/index.ts).
+   */
+  proxyStreamIdleMs: Number(process.env.PROXY_STREAM_IDLE_MS || 180_000),
   breakerFailThreshold: 5,
   breakerOpenMs: 30_000,
 

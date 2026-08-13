@@ -8,11 +8,13 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 ## Architecture (read this first)
 
 - **One process** (`server/index.ts`) serves three surfaces:
-  - `/v1/*` → LLM proxy (`server/proxy/index.ts`) — pass-through to the provider's
-    `openai_base_url` or `anthropic_base_url`; auth via `gw_…` keys (SHA-256 hash
-    lookup in `api_keys`). The upstream key is sent per capability as
-    `Authorization: Bearer` or `x-api-key`, configurable per provider
-    (`openai_auth_style` / `anthropic_auth_style`; defaults Bearer/x-api-key).
+  - `/v1/*` (+ directional aliases `/openai/v1/*`, `/anthropic/v1/*` that force
+    the protocol from the path prefix) → LLM proxy (`server/proxy/index.ts`) —
+    pass-through to the provider's `openai_base_url` or `anthropic_base_url`;
+    auth via `gw_…` keys (SHA-256 hash lookup in `api_keys`). The upstream key
+    is sent per capability as `Authorization: Bearer` or `x-api-key`,
+    configurable per provider (`openai_auth_style` / `anthropic_auth_style`;
+    defaults Bearer/x-api-key).
   - `/api/*` → dashboard REST API (`server/routes/*`), JWT HS256 access tokens +
     rotating opaque refresh tokens (`sessions` table, jti revocation).
   - `/*` → static SPA from `dist/` (`server/static.ts`, path-traversal safe).
@@ -21,7 +23,10 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - **Usage accounting** (`server/usage.ts`): buffered writes (flush 1s/100 events),
   `usage_daily` aggregates, per-key spend cached 2s — enforcement is *eventually
   consistent* by design; total-exhaustion additionally flips `api_keys.status`
-  optimistically in the proxy hot path.
+  optimistically in the proxy hot path. Counted tokens EXCLUDE the cache-read
+  share: OpenAI's `prompt_tokens` is normalized by
+  `prompt_tokens_details.cached_tokens`; Anthropic's `input_tokens` is already
+  cache-free (`cache_read/cache_creation_input_tokens` are ignored on purpose).
 - **Crypto** (`server/crypto.ts`): hand-rolled on WebCrypto — PBKDF2 (100k),
   TOTP (RFC 6238, anti-replay in `ratelimit.ts`), JWT HS256, AES-256-GCM.
   Do not add crypto libs.
@@ -79,6 +84,23 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 
 ## Gotchas learned (don't re-learn)
 
+- **Bun.serve `idleTimeout` applies to in-flight responses**: a paused SSE
+  stream (model thinking, zero bytes) counts as idle and the socket dies
+  mid-turn — clients then retry and re-run tool actions (duplicate file
+  writes). Keep it above `LIMITS.proxyStreamIdleMs` (240 > 180s; Bun caps at
+  255).
+- Proxy is byte-faithful pass-through: requests are forwarded untouched EXCEPT
+  openai streams missing `stream_options.include_usage` (injected so usage
+  accounting stays exact — decided per `route.upstreamPath`, never per
+  `url.pathname`, or the prefixed aliases would silently skip it).
+- SSE relay is pull-based (`ReadableStream.pull`): reading upstream only when
+  the client socket drains keeps memory bounded and gives true pass-through
+  pacing. The concurrency slot stays held until the stream really ends —
+  the outer `finally` skips it (`slotHeldByStream`), the pump's cleanup owns it.
+- USAL `count-[...]` parses a lone separator + ≤3 digits as DECIMALS — feed it
+  compact dot-formatted numbers only (`compactParts` in `ui.tsx`), with the
+  K/M/B suffix as plain text outside. Locale-grouped strings ("1,140,500")
+  would count to 1.140 and misrender.
 - Circuit breaker: client disconnects must NEVER count (audit fix) — only real
   upstream network failures, our header timeout, and upstream 5xx/429. A user
   aborting slow requests would otherwise 503 everyone for 30s.

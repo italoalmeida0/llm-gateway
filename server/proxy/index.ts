@@ -31,33 +31,63 @@ interface RouteMatch {
   isModelsList?: boolean;
 }
 
-/** Map our public surface to capability + upstream path. Returns null = 404. */
-function matchRoute(pathname: string, method: string, req: Request): RouteMatch | null {
+interface RouteResult {
+  match: RouteMatch | null;
+  hint: Proto; // best-guess protocol for error envelopes, even on 404
+}
+
+/**
+ * Map our public surface to capability + upstream path. match=null means 404.
+ *
+ * Two shapes:
+ *  - legacy  /v1/*            → protocol inferred from the endpoint itself
+ *                               (/v1/models disambiguates via auth header)
+ *  - strict  /openai/v1/*  /anthropic/v1/* → PROTOCOL FORCED by the path
+ *    prefix; only that protocol's endpoints resolve under it, so tools can
+ *    point at an unambiguous base URL regardless of header style.
+ */
+function matchRoute(pathname: string, method: string, req: Request): RouteResult {
+  let forced: Proto | null = null;
+  let p = pathname;
+  if (p === "/openai/v1" || p.startsWith("/openai/v1/")) {
+    forced = "openai";
+    p = "/v1" + p.slice("/openai/v1".length);
+  } else if (p === "/anthropic/v1" || p.startsWith("/anthropic/v1/")) {
+    forced = "anthropic";
+    p = "/v1" + p.slice("/anthropic/v1".length);
+  }
+  const hint = forced ?? "openai";
+
   // OpenAI surface
-  if (pathname === "/v1/chat/completions" && method === "POST")
-    return { proto: "openai", upstreamPath: "/chat/completions" };
-  if (pathname === "/v1/completions" && method === "POST")
-    return { proto: "openai", upstreamPath: "/completions" };
-  if (pathname === "/v1/embeddings" && method === "POST")
-    return { proto: "openai", upstreamPath: "/embeddings" };
+  if (forced !== "anthropic") {
+    if (p === "/v1/chat/completions" && method === "POST")
+      return { match: { proto: "openai", upstreamPath: "/chat/completions" }, hint };
+    if (p === "/v1/completions" && method === "POST")
+      return { match: { proto: "openai", upstreamPath: "/completions" }, hint };
+    if (p === "/v1/embeddings" && method === "POST")
+      return { match: { proto: "openai", upstreamPath: "/embeddings" }, hint };
+  }
 
   // Anthropic surface
-  if (pathname === "/v1/messages" && method === "POST")
-    return { proto: "anthropic", upstreamPath: "/messages" };
-  if (pathname === "/v1/messages/count_tokens" && method === "POST")
-    return { proto: "anthropic", upstreamPath: "/messages/count_tokens" };
+  if (forced !== "openai") {
+    if (p === "/v1/messages" && method === "POST")
+      return { match: { proto: "anthropic", upstreamPath: "/messages" }, hint };
+    if (p === "/v1/messages/count_tokens" && method === "POST")
+      return { match: { proto: "anthropic", upstreamPath: "/messages/count_tokens" }, hint };
+  }
 
-  // Ambiguous /v1/models: disambiguate by auth header style.
-  if ((pathname === "/v1/models" || pathname.startsWith("/v1/models/")) && method === "GET") {
+  // Models listing: forced prefix decides the protocol outright; the legacy
+  // bare /v1/models keeps the old auth-header disambiguation.
+  if ((p === "/v1/models" || p.startsWith("/v1/models/")) && method === "GET") {
+    if (forced) return { match: { proto: forced, upstreamPath: p.slice(3) }, hint };
     if (req.headers.get("x-api-key")) {
-      return { proto: "anthropic", upstreamPath: pathname.slice(3) }; // "/models..." under anthropic base
+      return { match: { proto: "anthropic", upstreamPath: p.slice(3) }, hint: "anthropic" };
     }
     if (req.headers.get("authorization")) {
-      return { proto: "openai", upstreamPath: pathname.slice(3) };
+      return { match: { proto: "openai", upstreamPath: p.slice(3) }, hint };
     }
-    return null;
   }
-  return null;
+  return { match: null, hint };
 }
 
 // ===== Error envelopes per protocol =====
@@ -253,12 +283,25 @@ interface UsageResult {
   estimated: boolean;
 }
 
+/**
+ * The cache-read share of a prompt is billed at a steep discount (often 10x)
+ * by providers, so budgets here count REAL consumption only: OpenAI reports
+ * cached hits INSIDE prompt_tokens and we normalize them away. Anthropic's
+ * input_tokens is already cache-free (its cache_read/cache_creation fields
+ * are intentionally never summed).
+ */
+function uncachedPrompt(prompt: unknown, details: unknown): number {
+  const p = Number(prompt ?? 0) || 0;
+  const cached = Number((details as any)?.cached_tokens ?? 0) || 0;
+  return Math.max(0, p - cached);
+}
+
 function parseOpenAiJson(bodyText: string): UsageResult {
   try {
     const j = JSON.parse(bodyText);
     const usage = j.usage;
     return {
-      inTok: Number(usage?.prompt_tokens ?? 0),
+      inTok: uncachedPrompt(usage?.prompt_tokens, usage?.prompt_tokens_details),
       outTok: Number(usage?.completion_tokens ?? 0),
       model: typeof j.model === "string" ? j.model : "",
       estimated: !usage,
@@ -277,6 +320,8 @@ function parseAnthropicJson(bodyText: string): UsageResult {
     if (typeof j.input_tokens === "number") {
       return { inTok: j.input_tokens, outTok: 0, model: "", estimated: false };
     }
+    // usage.input_tokens excludes cache reads per the Anthropic spec; we
+    // deliberately ignore cache_read_input_tokens / cache_creation_input_tokens.
     return {
       inTok: Number(usage?.input_tokens ?? 0),
       outTok: Number(usage?.output_tokens ?? 0),
@@ -332,7 +377,9 @@ class StreamMeter {
       try {
         const j = JSON.parse(data);
         if (j.usage) {
-          this.inTok = Number(j.usage.prompt_tokens ?? this.inTok) || this.inTok;
+          if (j.usage.prompt_tokens !== undefined) {
+            this.inTok = uncachedPrompt(j.usage.prompt_tokens, j.usage.prompt_tokens_details);
+          }
           this.outTok = Number(j.usage.completion_tokens ?? this.outTok) || this.outTok;
           this.sawUsage = true;
         }
@@ -401,9 +448,9 @@ class StreamMeter {
 // ===== Main handler =====
 
 export async function handleProxy(req: Request, url: URL, server: any): Promise<Response> {
-  const route = matchRoute(url.pathname, req.method, req);
+  const { match: route, hint } = matchRoute(url.pathname, req.method, req);
   if (!route) {
-    return envelopeError("openai", 404, "unknown endpoint", "invalid_request_error");
+    return envelopeError(hint, 404, "unknown endpoint", "invalid_request_error", req);
   }
   const proto = route.proto;
   const ip = clientIp(req, server);
@@ -470,6 +517,9 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
   const requestId = randomToken(8);
   const started = performance.now();
   const requestBytes = req.headers.get("content-length");
+  // Set once we hand a streaming Response back: the stream pump owns the slot
+  // from there on, releasing it when the stream ends/aborts (not before).
+  let slotHeldByStream = false;
 
   try {
     // ---- read + validate body (GET /models has none) ----
@@ -504,12 +554,20 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       }
 
       // OpenAI streams: ask upstream to include a terminal usage chunk so
-      // accounting stays exact. Anthropic always streams usage events.
-      if (proto === "openai" && (bodyJson as any).stream === true && url.pathname === "/v1/chat/completions") {
+      // accounting stays exact (Anthropic always streams usage events). This
+      // is the ONLY field we ever mutate, and only when the client didn't set
+      // it — otherwise the original bytes are forwarded untouched.
+      if (
+        proto === "openai" &&
+        (bodyJson as any).stream === true &&
+        route.upstreamPath === "/chat/completions"
+      ) {
         const so = ((bodyJson as any).stream_options ?? {}) as Record<string, unknown>;
-        so.include_usage = true;
-        (bodyJson as any).stream_options = so;
-        bodyText = JSON.stringify(bodyJson);
+        if (so.include_usage !== true) {
+          so.include_usage = true;
+          (bodyJson as any).stream_options = so;
+          bodyText = JSON.stringify(bodyJson);
+        }
       }
     }
 
@@ -520,7 +578,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       console.error(`[PROXY] no enabled provider configured for capability "${proto}"`);
       return envelopeError(proto, 503, "gateway is not configured for this API protocol", "api_error", req);
     }
-    const base = (proto === "openai" ? target.row.openai_base_url : target.row.anthropic_base_url)!;
+    // Trailing "/" would produce "//chat/completions" — new rows are stripped
+    // at write time, this covers legacy rows still carrying one.
+    const base = (proto === "openai" ? target.row.openai_base_url : target.row.anthropic_base_url)!
+      .replace(/\/+$/, "");
     const breakerId = `${target.row.id}:${proto}`;
     if (breakerState(breakerId) === "open") {
       return envelopeError(proto, 503, "upstream temporarily unavailable", "api_error", req);
@@ -620,6 +681,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
     // ---- streaming relay ----
     if (isSse && upstream.body) {
+      // The concurrency slot stays held until the stream really ends below —
+      // the outer finally must not free it when we hand back the Response.
+      slotHeldByStream = true;
+
       const meter = new StreamMeter(proto);
       let counted = false;
       const finalize = (status: number) => {
@@ -628,7 +693,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         record(meter.result(0), status, Math.round(performance.now() - started), true);
       };
 
-      const idleLimit = 60_000;
+      const idleLimit = LIMITS.proxyStreamIdleMs;
       let idleTimer: Timer | null = null;
       const resetIdle = (cancel?: boolean) => {
         if (idleTimer) clearTimeout(idleTimer);
@@ -641,43 +706,52 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       };
       resetIdle();
 
+      const reader = upstream.body.getReader();
+      const onClientAbortStream = () => reader.cancel().catch(() => {});
+      req.signal.addEventListener("abort", onClientAbortStream, { once: true });
+
+      const cleanup = () => {
+        resetIdle(true);
+        req.signal.removeEventListener("abort", onClientAbortStream);
+        release();
+      };
+      const closeSink = (sink: ReadableStreamDefaultController<Uint8Array>) => {
+        try {
+          sink.close();
+        } catch {
+          /* already closed/errored */
+        }
+      };
+
       const stream = new ReadableStream<Uint8Array>({
-        async start(sink) {
-          const reader = upstream.body!.getReader();
-          const onAbort = () => {
-            reader.cancel().catch(() => {});
-            finalize(req.signal.aborted ? 499 : upstream.status);
-          };
-          req.signal.addEventListener("abort", onAbort, { once: true });
+        // Pull-driven relay: we read from upstream ONLY when the client socket
+        // has drained. A slow consumer therefore slows the upstream read too
+        // (true pass-through pacing) and memory stays bounded by in-flight
+        // chunks — never by the whole response.
+        async pull(sink) {
           try {
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              resetIdle();
-              if (value) {
-                meter.feed(value);
-                sink.enqueue(value);
-              }
+            const { done, value } = await reader.read();
+            if (done) {
+              finalize(req.signal.aborted ? 499 : upstream.status);
+              cleanup();
+              closeSink(sink);
+              return;
             }
-            finalize(upstream.status);
+            if (value && value.length) {
+              resetIdle();
+              meter.feed(value); // stats only — the chunk itself goes out as-is
+              sink.enqueue(value);
+            }
           } catch {
             finalize(req.signal.aborted ? 499 : 502);
-          } finally {
-            resetIdle(true);
-            req.signal.removeEventListener("abort", onAbort);
-            try {
-              sink.close();
-            } catch {
-              /* already closed */
-            }
-            release();
+            cleanup();
+            closeSink(sink);
           }
         },
         cancel() {
-          upstream.body!.cancel().catch(() => {});
+          reader.cancel().catch(() => {});
           finalize(499);
-          resetIdle(true);
-          release();
+          cleanup();
         },
       });
 
@@ -696,7 +770,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
     return new Response(respText, { status: upstream.status, headers: clientHeaders });
   } finally {
-    release();
+    if (!slotHeldByStream) release();
     if (usageFlushDue()) flushUsage();
   }
 }

@@ -365,6 +365,200 @@ describe("gateway end-to-end", () => {
     expect(j2.type).toBe("message");
   });
 
+  test("prefixed routes route directionally: /openai/v1 and /anthropic/v1", async () => {
+    // openai prefix: non-stream chat completion
+    const r1 = await llm("/openai/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "prefixed openai" }],
+    });
+    expect(r1.status).toBe(200);
+    expect((await r1.json()).choices[0].message.content).toContain("fake upstream");
+
+    // openai prefix: stream still gets the injected usage chunk
+    const r2 = await llm("/openai/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "prefixed stream" }],
+      stream: true,
+    });
+    expect(r2.status).toBe(200);
+    expect(r2.headers.get("content-type")).toContain("text/event-stream");
+    const body2 = await r2.text();
+    expect(body2).toContain('"usage"');
+    expect(body2.trimEnd().endsWith("data: [DONE]")).toBe(true);
+
+    // anthropic prefix: non-stream + stream + count_tokens
+    const r3 = await llm(
+      "/anthropic/v1/messages",
+      gatewayKey,
+      { model: "fake-llm-1", max_tokens: 100, messages: [{ role: "user", content: "prefixed anthropic" }] },
+      true,
+    );
+    expect(r3.status).toBe(200);
+    expect((await r3.json()).type).toBe("message");
+
+    const r4 = await llm(
+      "/anthropic/v1/messages",
+      gatewayKey,
+      { model: "fake-llm-1", max_tokens: 100, stream: true, messages: [{ role: "user", content: "prefixed stream" }] },
+      true,
+    );
+    expect(r4.status).toBe(200);
+    const body4 = await r4.text();
+    expect(body4).toContain("event: message_start");
+    expect(body4.trimEnd().endsWith('data: {"type":"message_stop"}')).toBe(true);
+
+    const r5 = await llm(
+      "/anthropic/v1/messages/count_tokens",
+      gatewayKey,
+      { model: "fake-llm-1", max_tokens: 100, messages: [{ role: "user", content: "count me" }] },
+      true,
+    );
+    expect(r5.status).toBe(200);
+    expect((await r5.json()).input_tokens).toBeGreaterThan(0);
+
+    // wrong-protocol paths under a prefix do NOT route (directional means strict)
+    const cross1 = await llm("/openai/v1/messages", gatewayKey, { model: "fake-llm-1", max_tokens: 1, messages: [] }, true);
+    expect(cross1.status).toBe(404);
+    expect((await cross1.json()).error.type).toBe("invalid_request_error"); // openai envelope
+
+    const cross2 = await llm("/anthropic/v1/chat/completions", gatewayKey, { model: "fake-llm-1", messages: [] });
+    expect(cross2.status).toBe(404);
+    expect((await cross2.json()).type).toBe("error"); // anthropic envelope
+
+    // models listing: prefix forces the protocol, no auth-header guessing needed
+    const m1 = await fetch(`${GW}/anthropic/v1/models`, { headers: { Authorization: `Bearer ${gatewayKey}` } });
+    expect(m1.status).toBe(200);
+    expect((await m1.json()).data[0].type).toBe("model"); // anthropic shape
+
+    const m2 = await fetch(`${GW}/openai/v1/models`, { headers: { "x-api-key": gatewayKey } });
+    expect(m2.status).toBe(200);
+    expect((await m2.json()).object).toBe("list"); // openai shape
+  });
+
+  test("request body passes through byte-identical when usable as-is", async () => {
+    // Ugly-but-valid JSON with whitespace; the client already opted into
+    // usage reporting, so the gateway must not re-serialize a single byte.
+    const raw = `{\n  "model": "fake-llm-1",\n  "stream": true,\n  "stream_options": { "include_usage": true },\n  "messages": [ { "role": "user", "content": "byte fidelity" } ]\n}`;
+    const res = await fetch(`${GW}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${gatewayKey}` },
+      body: raw,
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    const last = await fetch(`${UP}/__last-body`).then((r) => r.json());
+    expect(last.body).toBe(raw);
+  });
+
+  test("the only mutation is stream_options.include_usage on openai streams", async () => {
+    const res = await llm("/openai/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "mutation check" }],
+      stream: true,
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    const last = await fetch(`${UP}/__last-body`).then((r) => r.json());
+    const forwarded = JSON.parse(last.body);
+    expect(forwarded.stream_options).toEqual({ include_usage: true });
+    expect(forwarded.messages[0].content).toBe("mutation check");
+
+    // non-stream bodies are never touched
+    const raw = `{"model":"fake-llm-1","messages":[{ "role":"user","content":"leave me alone" }]}`;
+    const res2 = await fetch(`${GW}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${gatewayKey}` },
+      body: raw,
+    });
+    expect(res2.status).toBe(200);
+    await res2.text();
+    const last2 = await fetch(`${UP}/__last-body`).then((r) => r.json());
+    expect(last2.body).toBe(raw);
+  });
+
+  test("non-stream response body is the upstream's exact payload", async () => {
+    const payload = { model: "fake-llm-1", messages: [{ role: "user", content: "fidelity" }] };
+    const res = await llm("/openai/v1/chat/completions", gatewayKey, payload);
+    expect(res.status).toBe(200);
+    const direct = await fetch(`${UP}/openai/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${UPSTREAM_KEY}` },
+      body: JSON.stringify(payload),
+    });
+    const viaGw = (await res.json()) as any;
+    const upstream = (await direct.json()) as any;
+    delete viaGw.created;
+    delete upstream.created; // wall-clock seconds can differ between the two calls
+    expect(viaGw).toEqual(upstream);
+  });
+
+  test("cache-read tokens are excluded from consumption accounting", async () => {
+    const made = await api("/api/keys", { token: userToken, body: { name: "cache-audit" } });
+    const key = made.json.token;
+    const keyId = made.json.key.id;
+
+    // openai non-stream: provider reports the cached share inside prompt_tokens
+    const r1 = await llm("/v1/chat/completions", key, {
+      model: "fake-llm-1",
+      __cached_tokens: 9,
+      messages: [{ role: "user", content: "cached non-stream prompt, reasonably long" }],
+    });
+    expect(r1.status).toBe(200);
+    const j1 = await r1.json();
+    expect(j1.usage.prompt_tokens_details.cached_tokens).toBe(9);
+
+    // openai stream: same via the terminal usage chunk
+    const r2 = await llm("/v1/chat/completions", key, {
+      model: "fake-llm-1",
+      stream: true,
+      __cached_tokens: 11,
+      messages: [{ role: "user", content: "cached stream prompt, also reasonably long" }],
+    });
+    expect(r2.status).toBe(200);
+    const sse2 = await r2.text();
+    const usageLine = sse2.split("\n").find((l) => l.startsWith("data:") && l.includes("prompt_tokens_details"));
+    expect(usageLine).toBeTruthy();
+    const streamedUsage = JSON.parse(usageLine!.slice(5)).usage;
+    expect(streamedUsage.prompt_tokens_details.cached_tokens).toBe(11);
+
+    // anthropic stream: input_tokens is already cache-free upstream; the
+    // gateway must NOT pile cache_read/cache_creation on top of it.
+    const r3 = await llm(
+      "/v1/messages",
+      key,
+      {
+        model: "fake-llm-1",
+        max_tokens: 100,
+        stream: true,
+        __cached_tokens: 7,
+        messages: [{ role: "user", content: "cached anthropic prompt, reasonably long" }],
+      },
+      true,
+    );
+    expect(r3.status).toBe(200);
+    const sse3 = await r3.text();
+    const startLine = sse3.split("\n").find((l) => l.startsWith("data:") && l.includes("cache_read_input_tokens"));
+    expect(startLine).toBeTruthy();
+    const msgStart = JSON.parse(startLine!.slice(5)).message;
+    expect(msgStart.usage.cache_read_input_tokens).toBe(7);
+
+    await Bun.sleep(1500); // let the usage buffer flush
+    const ev = await api(`/api/usage/events?key_id=${keyId}&limit=10`, { token: userToken });
+    expect(ev.status).toBe(200);
+    expect(ev.json.events).toHaveLength(3);
+
+    const nonStream = ev.json.events.find((e: any) => e.proto === "openai" && e.stream === 0);
+    expect(nonStream.in_tok).toBe(j1.usage.prompt_tokens - 9);
+    expect(nonStream.in_tok).toBeGreaterThan(0);
+
+    const stream = ev.json.events.find((e: any) => e.proto === "openai" && e.stream === 1);
+    expect(stream.in_tok).toBe(streamedUsage.prompt_tokens - 11);
+    expect(stream.in_tok).toBeGreaterThan(0);
+
+    const anth = ev.json.events.find((e: any) => e.proto === "anthropic");
+    expect(anth.in_tok).toBe(msgStart.usage.input_tokens); // 7 cache-read + 3 creation ignored
+  });
+
   test("provider auth styles are honored per capability", async () => {
     const list = await api("/api/admin/providers", { token: adminToken });
     const pid = list.json.providers[0].id;

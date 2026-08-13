@@ -249,11 +249,11 @@ export default function DashboardPage() {
           <div class="grid gap-3">
             <EndpointRow
               label="OpenAI-compatible"
-              value={`${location.origin}/v1`}
+              value={`${location.origin}/openai/v1`}
             />
             <EndpointRow
               label="Anthropic-compatible"
-              value={`${location.origin}/v1/messages`}
+              value={`${location.origin}/anthropic/v1`}
             />
             <Show when={(keys() ?? []).length === 0}>
               <button

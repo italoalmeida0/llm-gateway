@@ -49,8 +49,22 @@ function promptGuess(body: any): { inTok: number; reply: string } {
   return { inTok, reply: "Hello from the fake upstream. This is a deterministic test answer." };
 }
 
-async function openAiChat(req: Request): Promise<Response> {
-  const body = await req.json().catch(() => null);
+/** Test hook: `__cached_tokens: N` in the body makes usage report a cache hit. */
+function cachedTokens(body: any): number {
+  return Math.max(0, Number(body?.__cached_tokens ?? 0) || 0);
+}
+
+function openAiUsage(inTok: number, outTok: number, cached: number) {
+  return {
+    prompt_tokens: inTok,
+    completion_tokens: outTok,
+    total_tokens: inTok + outTok,
+    ...(cached > 0 ? { prompt_tokens_details: { cached_tokens: cached } } : {}),
+  };
+}
+
+async function openAiChat(req: Request, raw: string): Promise<Response> {
+  const body = JSON.parse(raw || "null");
   if (!body || !body.model) {
     return Response.json(
       { error: { message: "model is required", type: "invalid_request_error", code: null } },
@@ -60,6 +74,7 @@ async function openAiChat(req: Request): Promise<Response> {
   await sleep(LATENCY_MS);
   const { inTok, reply } = promptGuess(body);
   const outTok = Math.ceil(reply.length / 4);
+  const cached = cachedTokens(body);
 
   if (body.stream) {
     const includeUsage = body.stream_options?.include_usage === true;
@@ -99,7 +114,7 @@ async function openAiChat(req: Request): Promise<Response> {
               created: Math.floor(Date.now() / 1000),
               model: body.model,
               choices: [],
-              usage: { prompt_tokens: inTok, completion_tokens: outTok, total_tokens: inTok + outTok },
+              usage: openAiUsage(inTok, outTok, cached),
             }),
           );
         }
@@ -120,12 +135,12 @@ async function openAiChat(req: Request): Promise<Response> {
     choices: [
       { index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" },
     ],
-    usage: { prompt_tokens: inTok, completion_tokens: outTok, total_tokens: inTok + outTok },
+    usage: openAiUsage(inTok, outTok, cached),
   });
 }
 
-async function anthropicMessages(req: Request): Promise<Response> {
-  const body = await req.json().catch(() => null);
+async function anthropicMessages(req: Request, raw: string): Promise<Response> {
+  const body = JSON.parse(raw || "null");
   if (!body || !body.model) {
     return Response.json(
       { type: "error", error: { type: "invalid_request_error", message: "model is required" } },
@@ -135,6 +150,16 @@ async function anthropicMessages(req: Request): Promise<Response> {
   await sleep(LATENCY_MS);
   const { inTok, reply } = promptGuess(body);
   const outTok = Math.ceil(reply.length / 4);
+  const cached = cachedTokens(body);
+  // Anthropic-style: input_tokens is the UNCACHED share; cache traffic is
+  // reported in its own fields on the side.
+  const anthropicUsage = (output: number) => ({
+    input_tokens: inTok,
+    output_tokens: output,
+    ...(cached > 0
+      ? { cache_read_input_tokens: cached, cache_creation_input_tokens: Math.min(cached, 3) }
+      : {}),
+  });
 
   if (body.stream) {
     const words = reply.split(" ");
@@ -153,7 +178,7 @@ async function anthropicMessages(req: Request): Promise<Response> {
               model: body.model,
               content: [],
               stop_reason: null,
-              usage: { input_tokens: inTok, output_tokens: 1 },
+              usage: anthropicUsage(1),
             },
           }),
         );
@@ -194,12 +219,13 @@ async function anthropicMessages(req: Request): Promise<Response> {
     model: body.model,
     content: [{ type: "text", text: reply }],
     stop_reason: "end_turn",
-    usage: { input_tokens: inTok, output_tokens: outTok },
+    usage: anthropicUsage(outTok),
   });
 }
 
-// Test introspection: which auth header did the gateway actually send upstream?
+// Test introspection: which auth header / raw body did the gateway send upstream?
 let lastAuth: Record<string, string | null> = { authorization: null, "x-api-key": null };
+let lastBody = "";
 
 const server = Bun.serve({
   port: PORT,
@@ -208,6 +234,9 @@ const server = Bun.serve({
     const p = url.pathname;
 
     if (p === "/__last-auth") return Response.json(lastAuth);
+    if (p === "/__last-body") return Response.json({ body: lastBody });
+
+    const raw = req.method === "POST" ? await req.text() : "";
     lastAuth = {
       authorization: req.headers.get("authorization"),
       "x-api-key": req.headers.get("x-api-key"),
@@ -215,12 +244,16 @@ const server = Bun.serve({
 
     if (p.startsWith("/openai/v1/")) {
       if (!authorized(req)) return openai401();
-      if (p === "/openai/v1/chat/completions" && req.method === "POST") return openAiChat(req);
+      if (p === "/openai/v1/chat/completions" && req.method === "POST") {
+        lastBody = raw;
+        return openAiChat(req, raw);
+      }
       if (p === "/openai/v1/models" && req.method === "GET") {
         return Response.json({ object: "list", data: [{ id: MODEL, object: "model", created: 0, owned_by: "fake" }] });
       }
       if (p === "/openai/v1/embeddings" && req.method === "POST") {
-        const body: any = await req.json().catch(() => ({}));
+        lastBody = raw;
+        const body: any = JSON.parse(raw || "{}");
         const n = Math.ceil(JSON.stringify(body?.input ?? "").length / 4);
         return Response.json({
           object: "list",
@@ -233,7 +266,17 @@ const server = Bun.serve({
 
     if (p.startsWith("/anthropic/v1/")) {
       if (!authorized(req)) return anthropic401();
-      if (p === "/anthropic/v1/messages" && req.method === "POST") return anthropicMessages(req);
+      if (p === "/anthropic/v1/messages" && req.method === "POST") {
+        lastBody = raw;
+        return anthropicMessages(req, raw);
+      }
+      if (p === "/anthropic/v1/messages/count_tokens" && req.method === "POST") {
+        lastBody = raw;
+        const body: any = JSON.parse(raw || "{}");
+        return Response.json({
+          input_tokens: Math.max(1, Math.ceil(JSON.stringify(body?.messages ?? "").length / 4)),
+        });
+      }
       if (p === "/anthropic/v1/models" && req.method === "GET") {
         return Response.json({
           data: [{ type: "model", id: MODEL, display_name: "Fake LLM 1" }],

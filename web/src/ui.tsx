@@ -381,15 +381,28 @@ export function Segmented<T extends string>(props: {
   );
 }
 
-/** Animated number: counts up from 0 when it enters the viewport (USAL). */
+/**
+ * Split an integer into an animatable numeric part + static unit suffix.
+ * Thresholds/decimals mirror fmtNum so animated headers agree with the
+ * static stats rendered next to them (950, 12.5K, 1.14M).
+ */
+export function compactParts(n: number): { count: string; suffix: string } {
+  if (n >= 1_000_000_000) return { count: (n / 1_000_000_000).toFixed(2), suffix: "B" };
+  if (n >= 1_000_000) return { count: (n / 1_000_000).toFixed(2), suffix: "M" };
+  if (n >= 10_000) return { count: (n / 1_000).toFixed(1), suffix: "K" };
+  return { count: String(n), suffix: "" };
+}
+
+/** Animated number: counts up from 0 (compact — 950, 12.5K, 1.14M — never wraps). */
 export function CountUp(props: { value: number; class?: string }) {
-  const formatted = () => Math.round(props.value).toLocaleString("en-US");
+  const parts = () => compactParts(Math.round(Math.max(0, props.value)));
   return (
     <span
       class={`tabular-nums inline-block ${props.class ?? ""}`}
-      {...usalCount(props.value)}
+      {...usalCount(parts().count)}
     >
-      {formatted()}
+      {parts().count}
+      {parts().suffix}
     </span>
   );
 }

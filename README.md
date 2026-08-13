@@ -8,17 +8,19 @@ dashboard — without ever seeing the real provider key or URL.
 ```
 client ──(gw_ key)──> gateway ──(real key)──> your LLM provider
                       │
-                      ├── /v1/*  OpenAI- & Anthropic-compatible proxy
+                      ├── /openai/v1/*, /anthropic/v1/*  directional protocol proxy
+                      ├── /v1/*  same proxy, protocol inferred from the endpoint
                       ├── /api/* dashboard REST API (JWT + optional TOTP)
                       └── /*     built dashboard (SolidJS SPA)
 ```
 
 ## Features
 
-**Proxy** (`/v1/…`)
-- OpenAI-compatible: `POST /v1/chat/completions` (+SSE streaming), `/v1/completions`, `/v1/embeddings`, `GET /v1/models`
-- Anthropic-compatible: `POST /v1/messages` (+SSE streaming), `/v1/messages/count_tokens`, `GET /v1/models`
-- Exact token accounting: parses `usage` in JSON and streams (injects `stream_options.include_usage`)
+**Proxy** (`/openai/v1/…`, `/anthropic/v1/…`, legacy `/v1/…`)
+- OpenAI-compatible: `POST /openai/v1/chat/completions` (+SSE streaming), `/openai/v1/completions`, `/openai/v1/embeddings`, `GET /openai/v1/models`
+- Anthropic-compatible: `POST /anthropic/v1/messages` (+SSE streaming), `/anthropic/v1/messages/count_tokens`, `GET /anthropic/v1/models`
+- The prefixed aliases force the protocol from the path (ideal for tools that need one unambiguous base URL); bare `/v1/*` still works and infers the protocol from the endpoint itself
+- Exact token accounting: parses `usage` in JSON and streams (injects `stream_options.include_usage` only when the client didn't send it — everything else passes through byte-for-byte, and SSE is relayed incrementally with backpressure, never buffered)
 - Per-key security: SHA-256-hashed `gw_…` keys, RPM limit, concurrency cap, daily/total token budgets (daily resets 00:00 UTC), expiration, instant revocation
 - Anti-abuse: global per-IP token bucket, proxy key-spray limiting, per-capability circuit breaker for a failing upstream, sanitized upstream errors (never leaks the provider URL/key)
 

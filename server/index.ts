@@ -15,6 +15,7 @@ import { flushUsage } from "./usage";
 /**
  * Entry point. One Bun process serves:
  *   /v1/*   -> LLM proxy (OpenAI + Anthropic compatible)
+ *   /openai/v1/*, /anthropic/v1/* -> same proxy, protocol forced by the prefix
  *   /api/*  -> dashboard REST API
  *   /*      -> built SPA + legal pages (path-traversal safe)
  */
@@ -96,7 +97,14 @@ async function route(req: Request, server: any): Promise<Response> {
   const retry = limits.ipPerMin(ip);
   if (retry > 0) return err(429, `rate limit exceeded, retry in ${retry}s`, req);
 
-  if (path.startsWith("/v1/") || path === "/v1") {
+  if (
+    path.startsWith("/v1/") ||
+    path === "/v1" ||
+    path.startsWith("/openai/v1/") ||
+    path === "/openai/v1" ||
+    path.startsWith("/anthropic/v1/") ||
+    path === "/anthropic/v1"
+  ) {
     return handleProxy(req, url, server);
   }
 
@@ -128,7 +136,14 @@ const server: Server<undefined> = Bun.serve({
   port: PORT,
   hostname: process.env.HOST || "0.0.0.0",
   maxRequestBodySize: LIMITS.proxyBodyBytes + 64 * 1024,
-  idleTimeout: 30, // seconds we allow a client connection to idle
+  /**
+   * Bun applies idleTimeout to IN-FLIGHT responses too — a paused SSE stream
+   * (model thinking, no bytes flowing) counts as idle. With a short timeout
+   * the socket dies mid-turn and clients retry, re-running tool actions.
+   * Kept well above LIMITS.proxyStreamIdleMs (240 > 180s), under Bun's 255s
+   * ceiling.
+   */
+  idleTimeout: 240,
 
   async fetch(req): Promise<Response> {
     try {

@@ -150,6 +150,18 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE api_keys ADD COLUMN token_enc TEXT;
     `,
   },
+  {
+    name: "005_cache_tok",
+    up: `
+      -- Providers bill cached input tokens at their own rate, so they get a
+      -- dedicated column: in_tok stays the cache-free input share, cache_tok
+      -- counts the cached share (Anthropic: read + creation). Rows that
+      -- predate this migration simply keep cache_tok = 0 (they never had the
+      -- cached share in in_tok either).
+      ALTER TABLE usage_events ADD COLUMN cache_tok INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE usage_daily  ADD COLUMN cache_tok INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -242,12 +254,6 @@ export const stmts = {
   sessionByJti: db.prepare<SessionRow, [string]>("SELECT * FROM sessions WHERE jti = ?"),
   sessionByRefreshHash: db.prepare<SessionRow, [string]>(
     "SELECT * FROM sessions WHERE refresh_hash = ?",
-  ),
-  keyToday: db.prepare<{ in_tok: number; out_tok: number; reqs: number }, [string, string]>(
-    "SELECT in_tok, out_tok, reqs FROM usage_daily WHERE key_id = ? AND date = ?",
-  ),
-  keyTotal: db.prepare<{ total: number }, [string]>(
-    "SELECT COALESCE(SUM(in_tok + out_tok), 0) AS total FROM usage_daily WHERE key_id = ?",
   ),
 };
 

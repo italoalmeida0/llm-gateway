@@ -59,11 +59,11 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
     const rows = db
       .prepare(
         `SELECT model, proto,
-                SUM(in_tok) AS in_tok, SUM(out_tok) AS out_tok, COUNT(*) AS reqs
+                SUM(in_tok) AS in_tok, SUM(cache_tok) AS cache_tok, SUM(out_tok) AS out_tok, COUNT(*) AS reqs
          FROM usage_events
          WHERE user_id = ? AND ts >= ? ${keyId ? "AND key_id = ?" : ""}
          GROUP BY model, proto
-         ORDER BY (SUM(in_tok) + SUM(out_tok)) DESC
+         ORDER BY (SUM(in_tok) + SUM(cache_tok) + SUM(out_tok)) DESC
          LIMIT 25`,
       )
       .all(...(keyId ? [ctx.user.id, since, keyId] : [ctx.user.id, since])) as any[];
@@ -73,6 +73,7 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
           model: r.model || "(unknown)",
           proto: r.proto,
           in_tok: r.in_tok,
+          cache_tok: r.cache_tok,
           out_tok: r.out_tok,
           reqs: r.reqs,
         })),

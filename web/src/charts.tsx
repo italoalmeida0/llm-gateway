@@ -5,16 +5,18 @@ import { fmtNum } from "./ui";
 
 /**
  * Tiny hand-rolled SVG charts — no chart lib. Colors come from theme CSS
- * vars (--chart-*), so white/dark flip for free. Bars: paired input (strong
- * ink) / output (muted) per day, or a single requests bar when metric is
- * "requests"; the latest day is highlighted brand red. Clicking a bar pins
- * that day's metadata into the legend row (click again / × to clear).
+ * vars (--chart-*), so white/dark flip for free. Bars: one per token bucket —
+ * input (strong ink), cached input (mid) and output (muted) — grouped per
+ * day, or a single requests bar when metric is "requests"; the latest day is
+ * highlighted brand red. Clicking a bar pins that day's metadata into the
+ * legend row (click again / × to clear).
  * Area: smooth brand-red curve with gradient fill.
  */
 
 const GRID = "var(--chart-grid)";
 const TICK = "var(--chart-tick)";
 const IN_BAR = "var(--chart-strong)";
+const CACHE_BAR = "var(--chart-mid)";
 const OUT_BAR = "var(--chart-soft)";
 const BRAND = "var(--chart-brand)";
 
@@ -39,18 +41,24 @@ export function DailyChart(props: {
       ...data().map((d) =>
         metric() === "requests"
           ? (d.reqs ?? 0)
-          : (d.in_tok ?? 0) + (d.out_tok ?? 0),
+          : Math.max(d.in_tok ?? 0, d.cache_tok ?? 0, d.out_tok ?? 0),
       ),
     ),
   );
 
   const slotW = createMemo(() => (W - PAD.l - PAD.r) / Math.max(1, data().length));
-  const barW = createMemo(() => Math.max(2, Math.min(13, slotW() * 0.32)));
+  /** Three token bars (in/cache/out) fit side by side inside one day slot. */
+  const barW = createMemo(() => Math.max(2, Math.min(9, slotW() * 0.22)));
+  const BAR_GAP = 2;
 
-  const barX = (i: number, which: "in" | "out") => {
+  const barX = (i: number, which: "in" | "cache" | "out") => {
     const center = PAD.l + slotW() * i + slotW() / 2;
-    return which === "in" ? center - barW() - 1 : center + 1;
+    const clusterW = barW() * 3 + BAR_GAP * 2;
+    const start = center - clusterW / 2;
+    return start + (which === "in" ? 0 : which === "cache" ? barW() + BAR_GAP : 2 * (barW() + BAR_GAP));
   };
+  /** Centered single bar (requests metric). */
+  const soloX = (i: number) => PAD.l + slotW() * i + slotW() / 2 - barW() - 1;
   const yFor = (v: number) => PAD.t + (H - PAD.t - PAD.b) * (1 - v / maxV());
 
   const ticks = createMemo(() => [0, 0.5, 1].map((f) => Math.round(maxV() * f)));
@@ -93,12 +101,12 @@ export function DailyChart(props: {
             // metric flips — leaving bars with the previous branch's shape.
             return (
               <g class="group cursor-pointer" onClick={() => toggleSelect(i())}>
-                <title>{`${d.date} — in ${fmtNum(d.in_tok)}, out ${fmtNum(d.out_tok)}, ${fmtNum(d.reqs ?? 0)} req`}</title>
+                <title>{`${d.date} — in ${fmtNum(d.in_tok)}, cache ${fmtNum(d.cache_tok ?? 0)}, out ${fmtNum(d.out_tok)}, ${fmtNum(d.reqs ?? 0)} req`}</title>
                 <Show
                   when={metric() === "tokens"}
                   fallback={
                     <rect
-                      x={barX(i(), "in")}
+                      x={soloX(i())}
                       y={yFor(d.reqs ?? 0)}
                       width={barW() * 2 + 2}
                       height={Math.max(0, ((d.reqs ?? 0) / maxV()) * (H - PAD.t - PAD.b))}
@@ -122,6 +130,18 @@ export function DailyChart(props: {
                     stroke-width="1.5"
                     class={`chart-bar transition-opacity duration-200 group-hover:opacity-80 ${latest() ? "glow-brand" : ""}`}
                     style={{ "animation-delay": `${i() * 35}ms` }}
+                  />
+                  <rect
+                    x={barX(i(), "cache")}
+                    y={yFor(d.cache_tok ?? 0)}
+                    width={barW()}
+                    height={Math.max(0, ((d.cache_tok ?? 0) / maxV()) * (H - PAD.t - PAD.b))}
+                    rx="2.5"
+                    fill={CACHE_BAR}
+                    stroke={selected() === i() ? BRAND : "none"}
+                    stroke-width="1.5"
+                    class="chart-bar transition-opacity duration-200 group-hover:opacity-80"
+                    style={{ "animation-delay": `${i() * 35 + 30}ms` }}
                   />
                   <rect
                     x={barX(i(), "out")}
@@ -168,6 +188,9 @@ export function DailyChart(props: {
                   <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: IN_BAR }} /> Input tokens
                 </span>
                 <span class="inline-flex items-center gap-1.5">
+                  <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: CACHE_BAR }} /> Cached input
+                </span>
+                <span class="inline-flex items-center gap-1.5">
                   <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: OUT_BAR }} /> Output tokens
                 </span>
               </Show>
@@ -184,6 +207,10 @@ export function DailyChart(props: {
               <span class="inline-flex items-center gap-1.5">
                 <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: IN_BAR }} />
                 In {fmtNum(d().in_tok)}
+              </span>
+              <span class="inline-flex items-center gap-1.5">
+                <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: CACHE_BAR }} />
+                Cache {fmtNum(d().cache_tok ?? 0)}
               </span>
               <span class="inline-flex items-center gap-1.5">
                 <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: OUT_BAR }} />

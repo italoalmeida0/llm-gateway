@@ -492,7 +492,7 @@ describe("gateway end-to-end", () => {
     expect(viaGw).toEqual(upstream);
   });
 
-  test("cache-read tokens are excluded from consumption accounting", async () => {
+  test("cached input tokens get their own bucket, separate from uncached input", async () => {
     const made = await api("/api/keys", { token: userToken, body: { name: "cache-audit" } });
     const key = made.json.token;
     const keyId = made.json.key.id;
@@ -521,8 +521,8 @@ describe("gateway end-to-end", () => {
     const streamedUsage = JSON.parse(usageLine!.slice(5)).usage;
     expect(streamedUsage.prompt_tokens_details.cached_tokens).toBe(11);
 
-    // anthropic stream: input_tokens is already cache-free upstream; the
-    // gateway must NOT pile cache_read/cache_creation on top of it.
+    // anthropic stream: input_tokens is already cache-free upstream; cache
+    // read + creation go into the cache bucket on the side.
     const r3 = await llm(
       "/v1/messages",
       key,
@@ -550,13 +550,16 @@ describe("gateway end-to-end", () => {
     const nonStream = ev.json.events.find((e: any) => e.proto === "openai" && e.stream === 0);
     expect(nonStream.in_tok).toBe(j1.usage.prompt_tokens - 9);
     expect(nonStream.in_tok).toBeGreaterThan(0);
+    expect(nonStream.cache_tok).toBe(9); // the cached share is its own bucket
 
     const stream = ev.json.events.find((e: any) => e.proto === "openai" && e.stream === 1);
     expect(stream.in_tok).toBe(streamedUsage.prompt_tokens - 11);
     expect(stream.in_tok).toBeGreaterThan(0);
+    expect(stream.cache_tok).toBe(11);
 
     const anth = ev.json.events.find((e: any) => e.proto === "anthropic");
-    expect(anth.in_tok).toBe(msgStart.usage.input_tokens); // 7 cache-read + 3 creation ignored
+    expect(anth.in_tok).toBe(msgStart.usage.input_tokens); // uncached share
+    expect(anth.cache_tok).toBe(7 + 3); // cache_read 7 + cache_creation 3
   });
 
   test("provider auth styles are honored per capability", async () => {
@@ -624,6 +627,8 @@ describe("gateway end-to-end", () => {
     expect(r.status).toBe(200);
     expect(r.json.summary.total.reqs).toBeGreaterThanOrEqual(4);
     expect(r.json.summary.total.in_tok + r.json.summary.total.out_tok).toBeGreaterThan(0);
+    // the three buckets are tracked separately (9 + 11 + 10 from the cache test)
+    expect(r.json.summary.total.cache_tok).toBeGreaterThanOrEqual(30);
 
     const daily = await api("/api/usage/daily?days=7", { token: userToken });
     expect(daily.json.series.length).toBeGreaterThanOrEqual(1);
@@ -634,7 +639,7 @@ describe("gateway end-to-end", () => {
     const m = bm.json.models.find((x: any) => x.model === "fake-llm-1");
     expect(m).toBeTruthy();
     expect(m.reqs).toBeGreaterThan(0);
-    expect(m.in_tok + m.out_tok).toBeGreaterThan(0);
+    expect(m.in_tok + m.cache_tok + m.out_tok).toBeGreaterThan(0);
   });
 
   test("hour granularity endpoints feed the 1D views", async () => {

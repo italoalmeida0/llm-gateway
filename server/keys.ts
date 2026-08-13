@@ -93,8 +93,9 @@ export function publicKey(row: ApiKeyRow, userEmail?: string) {
     rpm: row.rpm,
     status: availability.ok ? "active" : availability.reason,
     lastUsedAt: row.last_used_at,
-    usageToday: spend.today,
-    usageTotal: spend.total,
+    // Budgets cap output tokens, so these counters are output-only too.
+    outputToday: spend.today,
+    outputTotal: spend.total,
     revealable: !!row.token_enc,
   };
 }

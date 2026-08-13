@@ -453,7 +453,8 @@ describe("security audit", () => {
     const made = await api("/api/keys", { token: u1Token, body: { name: "race", totalLimit: 60 } });
     const raceKey = made.json.token as string;
 
-    // 8 parallel requests (the per-key concurrency cap), 30 tokens each = 240 > 60
+    // 8 parallel requests (the per-key concurrency cap). Budgets cap output
+    // tokens: 10 out each = 80 > 60.
     const results = await Promise.all(
       Array.from({ length: 8 }, () =>
         llm(raceKey, { model: "mini-1", messages: [{ role: "user", content: "race" }] }),
@@ -463,7 +464,8 @@ describe("security audit", () => {
     const okCount = statuses.filter((s) => s === 200).length;
 
     // All 8 in-flight requests are admitted before the ledger catches up:
-    // measured overshoot is 240 tokens against a 60-token limit (4x).
+    // measured overshoot is 80 output tokens against a 60-token limit (4x
+    // the six requests the cap would have allowed).
     expect(okCount).toBeGreaterThan(2); // strictly more than the limit allows
     await Bun.sleep(2500); // flush + spend-cache expiry
     const after = await llm(raceKey, { model: "mini-1", messages: [] });

@@ -448,7 +448,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         ? hourlySeries(null, null, hours)
         : db
             .prepare(
-              `SELECT date, SUM(in_tok) AS in_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
+              `SELECT date, SUM(in_tok) AS in_tok, SUM(cache_tok) AS cache_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
                FROM usage_daily WHERE date >= date('now', ?) GROUP BY date ORDER BY date`,
             )
             .all(`-${days} days`);
@@ -456,34 +456,34 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       hours !== null
         ? db
             .prepare(
-              `SELECT ue.user_id, u.email, SUM(ue.in_tok) AS in_tok, SUM(ue.out_tok) AS out_tok, COUNT(*) AS reqs
+              `SELECT ue.user_id, u.email, SUM(ue.in_tok) AS in_tok, SUM(ue.cache_tok) AS cache_tok, SUM(ue.out_tok) AS out_tok, COUNT(*) AS reqs
                FROM usage_events ue JOIN users u ON u.id = ue.user_id
-               WHERE ue.ts >= ? GROUP BY ue.user_id ORDER BY (in_tok + out_tok) DESC LIMIT 50`,
+               WHERE ue.ts >= ? GROUP BY ue.user_id ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 50`,
             )
             .all(Date.now() - hours * 3_600_000)
         : db
             .prepare(
-              `SELECT ud.user_id, u.email, SUM(ud.in_tok) AS in_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
+              `SELECT ud.user_id, u.email, SUM(ud.in_tok) AS in_tok, SUM(ud.cache_tok) AS cache_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
                FROM usage_daily ud JOIN users u ON u.id = ud.user_id
-               WHERE ud.date >= date('now', ?) GROUP BY ud.user_id ORDER BY (in_tok + out_tok) DESC LIMIT 50`,
+               WHERE ud.date >= date('now', ?) GROUP BY ud.user_id ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 50`,
             )
             .all(`-${days} days`);
     const perModel = db
       .prepare(
-        `SELECT model, proto, COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(out_tok),0) AS out_tok, COUNT(*) AS reqs
+        `SELECT model, proto, COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(cache_tok),0) AS cache_tok, COALESCE(SUM(out_tok),0) AS out_tok, COUNT(*) AS reqs
          FROM usage_events WHERE ts >= ?
-         GROUP BY model, proto ORDER BY (in_tok + out_tok) DESC LIMIT 20`,
+         GROUP BY model, proto ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 20`,
       )
       .all(Date.now() - (hours ?? days * 24) * 3_600_000);
     const totals = db
       .prepare(
-        `SELECT COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
+        `SELECT COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(cache_tok),0) AS cache_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
          FROM usage_daily`,
       )
       .get();
     const todayRow = db
       .prepare(
-        `SELECT COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
+        `SELECT COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(cache_tok),0) AS cache_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
          FROM usage_daily WHERE date = ?`,
       )
       .get(utcDate(Date.now()));

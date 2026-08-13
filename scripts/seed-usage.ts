@@ -103,12 +103,12 @@ if (!keep) {
 }
 
 const insertEvent = db.prepare(
-  `INSERT INTO usage_events (key_id, user_id, ts, proto, model, in_tok, out_tok, latency_ms, status, stream, estimated)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  `INSERT INTO usage_events (key_id, user_id, ts, proto, model, in_tok, cache_tok, out_tok, latency_ms, status, stream, estimated)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 );
 const insertDaily = db.prepare(
-  `INSERT INTO usage_daily (key_id, user_id, date, in_tok, out_tok, reqs)
-   VALUES (?, ?, ?, ?, ?, ?)`,
+  `INSERT INTO usage_daily (key_id, user_id, date, in_tok, cache_tok, out_tok, reqs)
+   VALUES (?, ?, ?, ?, ?, ?, ?)`,
 );
 
 const MS_DAY = 86_400_000;
@@ -121,7 +121,7 @@ const todayStart = Date.UTC(
 let eventCount = 0;
 const daily = new Map<
   string,
-  { keyId: string; userId: string; date: string; inTok: number; outTok: number; reqs: number }
+  { keyId: string; userId: string; date: string; inTok: number; cacheTok: number; outTok: number; reqs: number }
 >();
 
 db.transaction(() => {
@@ -148,6 +148,9 @@ db.transaction(() => {
         const failed = status >= 400;
         const inTok = failed ? Math.floor(rnd() * 400) : 80 + Math.floor(rnd() ** 2 * m.inMax);
         const outTok = failed ? 0 : 40 + Math.floor(rnd() ** 2 * m.outMax);
+        // ~45% of successful requests hit a prompt cache (agentic loops cache
+        // hard); the cached share is its own bucket, separate from inTok.
+        const cacheTok = !failed && rnd() < 0.45 ? Math.floor(inTok * (0.5 + rnd() * 2.5)) : 0;
         const latency = 150 + Math.floor(rnd() ** 2 * 8_000);
 
         insertEvent.run(
@@ -157,6 +160,7 @@ db.transaction(() => {
           m.proto,
           m.model,
           inTok,
+          cacheTok,
           outTok,
           latency,
           status,
@@ -172,10 +176,12 @@ db.transaction(() => {
           userId: key.user_id,
           date,
           inTok: 0,
+          cacheTok: 0,
           outTok: 0,
           reqs: 0,
         };
         agg.inTok += inTok;
+        agg.cacheTok += cacheTok;
         agg.outTok += outTok;
         agg.reqs += 1;
         daily.set(aggKey, agg);
@@ -183,7 +189,7 @@ db.transaction(() => {
     }
   }
   for (const a of daily.values()) {
-    insertDaily.run(a.keyId, a.userId, a.date, a.inTok, a.outTok, a.reqs);
+    insertDaily.run(a.keyId, a.userId, a.date, a.inTok, a.cacheTok, a.outTok, a.reqs);
   }
 })();
 
@@ -195,7 +201,7 @@ for (const k of keys) console.log(`  - ${k.name} (${k.id.slice(0, 8)}…)`);
 
 const top = db
   .query<{ model: string; proto: string; reqs: number; tok: number }, []>(
-    `SELECT model, proto, COUNT(*) AS reqs, SUM(in_tok + out_tok) AS tok
+    `SELECT model, proto, COUNT(*) AS reqs, SUM(in_tok + cache_tok + out_tok) AS tok
      FROM usage_events GROUP BY model, proto ORDER BY tok DESC`,
   )
   .all();

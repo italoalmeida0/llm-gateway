@@ -235,11 +235,11 @@ export default function KeysPage() {
                       </div>
                       <div class="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-ink-400">
                         <span>
-                          Today {fmtNum(k.usageToday)}
+                          Output today {fmtNum(k.outputToday)}
                           {k.dailyLimit ? ` / ${fmtNum(k.dailyLimit)}` : ""}
                         </span>
                         <span>
-                          Total {fmtNum(k.usageTotal)}
+                          Output total {fmtNum(k.outputTotal)}
                           {k.totalLimit ? ` / ${fmtNum(k.totalLimit)}` : ""}
                         </span>
                         <span>
@@ -258,7 +258,7 @@ export default function KeysPage() {
                         <div class="mt-2 max-w-xs">
                           <ProgressBar
                             danger
-                            value={k.dailyLimit ? k.usageToday : k.usageTotal}
+                            value={k.dailyLimit ? k.outputToday : k.outputTotal}
                             max={(k.dailyLimit ?? k.totalLimit) || 1}
                           />
                         </div>
@@ -333,22 +333,22 @@ export default function KeysPage() {
           </Show>
           <div class="grid grid-cols-2 gap-3">
             <Input
-              label="Daily token limit"
+              label="Daily output limit"
               type="number"
               min={1}
               value={form().dailyLimit}
               onInput={(v) => setForm({ ...form(), dailyLimit: v })}
               placeholder="unlimited"
-              hint="Resets 00:00 UTC"
+              hint="Output tokens · resets 00:00 UTC"
             />
             <Input
-              label="Total token limit"
+              label="Total output limit"
               type="number"
               min={1}
               value={form().totalLimit}
               onInput={(v) => setForm({ ...form(), totalLimit: v })}
               placeholder="unlimited"
-              hint="Permanent cap"
+              hint="Output tokens · permanent cap"
             />
           </div>
           <Input
@@ -385,22 +385,22 @@ export default function KeysPage() {
           />
           <div class="grid grid-cols-2 gap-3">
             <Input
-              label="Daily token limit"
+              label="Daily output limit"
               type="number"
               min={1}
               value={form().dailyLimit}
               onInput={(v) => setForm({ ...form(), dailyLimit: v })}
               placeholder="unlimited"
-              hint="Empty = unlimited"
+              hint="Output tokens · empty = unlimited"
             />
             <Input
-              label="Total token limit"
+              label="Total output limit"
               type="number"
               min={1}
               value={form().totalLimit}
               onInput={(v) => setForm({ ...form(), totalLimit: v })}
               placeholder="unlimited"
-              hint="Raising it reactivates an exhausted key"
+              hint="Output tokens · raising it reactivates an exhausted key"
             />
           </div>
           <Input

@@ -278,22 +278,31 @@ function estimateTokens(text: string): number {
 
 interface UsageResult {
   inTok: number;
+  cacheTok: number;
   outTok: number;
   model: string;
   estimated: boolean;
 }
 
 /**
- * The cache-read share of a prompt is billed at a steep discount (often 10x)
- * by providers, so budgets here count REAL consumption only: OpenAI reports
- * cached hits INSIDE prompt_tokens and we normalize them away. Anthropic's
- * input_tokens is already cache-free (its cache_read/cache_creation fields
- * are intentionally never summed).
+ * Providers bill three token categories: uncached input, cached input (at a
+ * steep discount) and output — so the gateway tracks all three separately.
+ * OpenAI reports cached hits INSIDE prompt_tokens (split them apart here);
+ * Anthropic's input_tokens is already cache-free and its cache_read/cache_
+ * creation fields make up the cached bucket.
  */
-function uncachedPrompt(prompt: unknown, details: unknown): number {
+function splitPrompt(prompt: unknown, details: unknown): { inTok: number; cacheTok: number } {
   const p = Number(prompt ?? 0) || 0;
-  const cached = Number((details as any)?.cached_tokens ?? 0) || 0;
-  return Math.max(0, p - cached);
+  const cacheTok = Math.max(0, Number((details as any)?.cached_tokens ?? 0) || 0);
+  return { inTok: Math.max(0, p - cacheTok), cacheTok };
+}
+
+/** Anthropic cached bucket: cache reads plus cache writes (creation). */
+function anthropicCacheTok(usage: any): number {
+  return (
+    (Number(usage?.cache_read_input_tokens ?? 0) || 0) +
+    (Number(usage?.cache_creation_input_tokens ?? 0) || 0)
+  );
 }
 
 function parseOpenAiJson(bodyText: string): UsageResult {
@@ -301,13 +310,13 @@ function parseOpenAiJson(bodyText: string): UsageResult {
     const j = JSON.parse(bodyText);
     const usage = j.usage;
     return {
-      inTok: uncachedPrompt(usage?.prompt_tokens, usage?.prompt_tokens_details),
+      ...splitPrompt(usage?.prompt_tokens, usage?.prompt_tokens_details),
       outTok: Number(usage?.completion_tokens ?? 0),
       model: typeof j.model === "string" ? j.model : "",
       estimated: !usage,
     };
   } catch {
-    return { inTok: 0, outTok: 0, model: "", estimated: true };
+    return { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: true };
   }
 }
 
@@ -315,21 +324,22 @@ function parseAnthropicJson(bodyText: string): UsageResult {
   try {
     const j = JSON.parse(bodyText);
     const usage = j.usage;
-    if (j.type === "error") return { inTok: 0, outTok: 0, model: "", estimated: false };
+    if (j.type === "error") return { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false };
     // /messages/count_tokens returns { input_tokens } at the top level.
     if (typeof j.input_tokens === "number") {
-      return { inTok: j.input_tokens, outTok: 0, model: "", estimated: false };
+      return { inTok: j.input_tokens, cacheTok: 0, outTok: 0, model: "", estimated: false };
     }
-    // usage.input_tokens excludes cache reads per the Anthropic spec; we
-    // deliberately ignore cache_read_input_tokens / cache_creation_input_tokens.
+    // usage.input_tokens excludes cache hits per the Anthropic spec;
+    // cache_read + cache_creation make up the cached bucket.
     return {
       inTok: Number(usage?.input_tokens ?? 0),
+      cacheTok: anthropicCacheTok(usage),
       outTok: Number(usage?.output_tokens ?? 0),
       model: typeof j.model === "string" ? j.model : "",
       estimated: !usage,
     };
   } catch {
-    return { inTok: 0, outTok: 0, model: "", estimated: true };
+    return { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: true };
   }
 }
 
@@ -344,6 +354,7 @@ class StreamMeter {
   private currentEvent = "";
   outChars = 0;
   inTok = 0;
+  cacheTok = 0;
   outTok = 0;
   model = "";
   sawUsage = false;
@@ -378,7 +389,9 @@ class StreamMeter {
         const j = JSON.parse(data);
         if (j.usage) {
           if (j.usage.prompt_tokens !== undefined) {
-            this.inTok = uncachedPrompt(j.usage.prompt_tokens, j.usage.prompt_tokens_details);
+            const s = splitPrompt(j.usage.prompt_tokens, j.usage.prompt_tokens_details);
+            this.inTok = s.inTok;
+            this.cacheTok = s.cacheTok;
           }
           this.outTok = Number(j.usage.completion_tokens ?? this.outTok) || this.outTok;
           this.sawUsage = true;
@@ -406,6 +419,7 @@ class StreamMeter {
         const usage = j?.message?.usage;
         if (usage) {
           this.inTok = Number(usage.input_tokens ?? 0);
+          this.cacheTok = anthropicCacheTok(usage);
           this.sawUsage = true;
         }
         if (typeof j?.message?.model === "string" && !this.model) this.model = j.message.model;
@@ -419,6 +433,9 @@ class StreamMeter {
           this.outTok = Number(j.usage.output_tokens) || this.outTok;
           this.sawUsage = true;
         }
+        // Some providers re-report cache counters here; keep the latest.
+        const ct = anthropicCacheTok(j?.usage);
+        if (ct > 0) this.cacheTok = ct;
       } catch {}
       return;
     }
@@ -433,11 +450,12 @@ class StreamMeter {
   }
 
   result(bodyBytesSent: number): UsageResult {
-    if (this.sawUsage && (this.inTok > 0 || this.outTok > 0)) {
-      return { inTok: this.inTok, outTok: this.outTok, model: this.model, estimated: false };
+    if (this.sawUsage && (this.inTok > 0 || this.outTok > 0 || this.cacheTok > 0)) {
+      return { inTok: this.inTok, cacheTok: this.cacheTok, outTok: this.outTok, model: this.model, estimated: false };
     }
     return {
       inTok: 0, // input estimate comes from request-body size at call site
+      cacheTok: 0,
       outTok: this.outChars > 0 ? estimateTokens(String(this.outChars)) : 0,
       model: this.model,
       estimated: true,
@@ -480,10 +498,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
   if (!availability.ok) {
     const messages: Record<typeof availability.reason, string> = {
       revoked: "this API key has been revoked",
-      exhausted: "this API key has exhausted its total token budget",
+      exhausted: "this API key has exhausted its total output token budget",
       expired: "this API key has expired",
-      daily_limit: "daily token budget exhausted (resets at 00:00 UTC)",
-      total_limit: "total token budget exhausted",
+      daily_limit: "daily output token budget exhausted (resets at 00:00 UTC)",
+      total_limit: "total output token budget exhausted",
     };
     return envelopeError(proto, 429, messages[availability.reason], "rate_limit_error", req);
   }
@@ -624,7 +642,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       console.error(`[PROXY] upstream fetch failed (${upstreamUrl}):`, (e as Error).name);
       recordUsage({
         keyId: keyRow.id, userId: keyRow.user_id, proto, model: "",
-        inTok: 0, outTok: 0, latencyMs: Math.round(performance.now() - started),
+        inTok: 0, cacheTok: 0, outTok: 0, latencyMs: Math.round(performance.now() - started),
         status: clientDisconnected ? 499 : timedOut ? 504 : 502, stream: wantsStream, estimated: false,
       });
       return envelopeError(
@@ -657,6 +675,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         proto,
         model: u.model || String((bodyJson as any)?.model ?? "").slice(0, 128),
         inTok,
+        cacheTok: u.cacheTok,
         outTok: u.outTok,
         latencyMs,
         status,
@@ -667,10 +686,11 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
       // Optimistic total-budget enforcement: the flush lands asynchronously,
       // so we add this request's delta onto the (≤2s stale) cached spend and
-      // flip the key to exhausted immediately when crossed.
+      // flip the key to exhausted immediately when crossed. Budgets cap
+      // OUTPUT tokens, so only this request's output counts here.
       if (keyRow.total_limit !== null && keyRow.status === "active") {
         const spend = getKeySpend(keyRow.id);
-        if (spend.total + inTok + u.outTok >= keyRow.total_limit) {
+        if (spend.total + u.outTok >= keyRow.total_limit) {
           db.prepare("UPDATE api_keys SET status = 'exhausted' WHERE id = ? AND status = 'active'").run(
             keyRow.id,
           );
@@ -764,7 +784,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       ? proto === "openai"
         ? parseOpenAiJson(respText)
         : parseAnthropicJson(respText)
-      : { inTok: 0, outTok: 0, model: "", estimated: false };
+      : { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false };
     const latencyMs = Math.round(performance.now() - started);
     record(usage, upstream.status, latencyMs, false);
 

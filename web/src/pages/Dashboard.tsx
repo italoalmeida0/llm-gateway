@@ -24,10 +24,17 @@ import {
   windowLabel,
 } from "../ui";
 
+interface Buckets {
+  in_tok: number;
+  cache_tok: number;
+  out_tok: number;
+  reqs: number;
+}
+
 interface Summary {
-  today: { in_tok: number; out_tok: number; reqs: number };
-  month: { in_tok: number; out_tok: number; reqs: number };
-  total: { in_tok: number; out_tok: number; reqs: number };
+  today: Buckets;
+  month: Buckets;
+  total: Buckets;
 }
 
 /** % change of the second half vs the first half of `series`; null if no base. */
@@ -101,12 +108,13 @@ export default function DashboardPage() {
   const view = createMemo(() =>
     (series() ?? []).slice(days() === "1" ? -24 : -Number(days())),
   );
-  const winTok = createMemo(() =>
-    view().reduce((s, d) => s + (d.in_tok ?? 0) + (d.out_tok ?? 0), 0),
-  );
+  // Three separate buckets — never one lumped "total tokens" number.
+  const winIn = createMemo(() => view().reduce((s, d) => s + (d.in_tok ?? 0), 0));
+  const winCache = createMemo(() => view().reduce((s, d) => s + (d.cache_tok ?? 0), 0));
+  const winOut = createMemo(() => view().reduce((s, d) => s + (d.out_tok ?? 0), 0));
   const winReqs = createMemo(() => view().reduce((s, d) => s + (d.reqs ?? 0), 0));
-  const tokDelta = createMemo(() =>
-    deltaPct(series() ?? [], (d) => (d.in_tok ?? 0) + (d.out_tok ?? 0)),
+  const outDelta = createMemo(() =>
+    deltaPct(series() ?? [], (d) => d.out_tok ?? 0),
   );
   const reqDelta = createMemo(() =>
     deltaPct(series() ?? [], (d) => d.reqs ?? 0),
@@ -116,7 +124,7 @@ export default function DashboardPage() {
     const ks = keys() ?? [];
     return {
       cap: ks.reduce((s, k) => s + (k.totalLimit ?? 0), 0),
-      used: ks.reduce((s, k) => s + (k.usageTotal ?? 0), 0),
+      used: ks.reduce((s, k) => s + (k.outputTotal ?? 0), 0),
     };
   });
   const activeKeys = createMemo(
@@ -158,23 +166,23 @@ export default function DashboardPage() {
             <Card interactive class="p-6">
               <HeroHeader
                 icon={Icons.chart}
-                count={winTok()}
-                label={`Tokens · ${windowLabel(days())}`}
-                delta={tokDelta()}
+                count={winOut()}
+                label={`Output tokens · ${windowLabel(days())}`}
+                delta={outDelta()}
               />
               <div class="mt-5 pt-4 border-t border-line flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
+                <SubStat label="Input" value={fmtNum(winIn())} />
+                <SubStat label="Input cache" value={fmtNum(winCache())} />
                 <SubStat label="Requests" value={fmtNum(winReqs())} />
+              </div>
+              <div class="mt-1.5 flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
                 <SubStat
                   label="Today"
-                  value={fmtNum(
-                    (s().today.in_tok ?? 0) + (s().today.out_tok ?? 0),
-                  )}
+                  value={`${fmtNum(s().today.in_tok)} in · ${fmtNum(s().today.cache_tok)} cache · ${fmtNum(s().today.out_tok)} out`}
                 />
                 <SubStat
                   label="All-time"
-                  value={fmtNum(
-                    (s().total.in_tok ?? 0) + (s().total.out_tok ?? 0),
-                  )}
+                  value={`${fmtNum(s().total.in_tok)} in · ${fmtNum(s().total.cache_tok)} cache · ${fmtNum(s().total.out_tok)} out`}
                 />
               </div>
               <div class="mt-4" {...usal("fade-u delay-250 duration-700 threshold-5")}>
@@ -220,7 +228,7 @@ export default function DashboardPage() {
         <Card class="p-6">
           <div class="flex items-start justify-between gap-3 mb-4">
             <div>
-              <h2 class="text-sm font-semibold text-ink-100">Token budget</h2>
+              <h2 class="text-sm font-semibold text-ink-100">Output token budget</h2>
               <p class="text-xs text-ink-500 mt-0.5">Across all your keys</p>
             </div>
             <IconTile icon={Icons.key} class="w-9 h-9 rounded-xl" />
@@ -231,8 +239,8 @@ export default function DashboardPage() {
               <div>
                 <div class="text-[28px] font-light tracking-tight mb-2">Unlimited</div>
                 <p class="text-xs text-ink-500 leading-relaxed">
-                  No lifetime budget caps set. Add a total limit to any key to
-                  track spend against a cap here.
+                  No lifetime output caps set. Add a total output limit to any
+                  key to track spend against a cap here.
                 </p>
               </div>
             }
@@ -242,7 +250,7 @@ export default function DashboardPage() {
                 <CountUp value={budget().used} />
               </span>
               <span class="text-sm text-ink-500">
-                of {fmtNum(budget().cap)} tokens
+                of {fmtNum(budget().cap)} output tokens
               </span>
             </div>
             <ProgressBar value={budget().used} max={budget().cap} danger />

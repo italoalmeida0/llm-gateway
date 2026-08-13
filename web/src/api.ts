@@ -144,14 +144,19 @@ export interface ApiKeyDto {
   rpm: number | null;
   status: "active" | "revoked" | "exhausted" | "expired" | "daily_limit" | "total_limit";
   lastUsedAt: number | null;
-  usageToday: number;
-  usageTotal: number;
+  /** Output-token burn — budgets cap output only, so these never mix in
+   *  input or cached-input tokens. */
+  outputToday: number;
+  outputTotal: number;
   revealable: boolean;
 }
 
 export interface DailyPoint {
   date: string;
+  /** Cache-free input tokens. */
   in_tok: number;
+  /** Cached input tokens (billed at cache rate upstream). */
+  cache_tok: number;
   out_tok: number;
   reqs: number;
   /** Hour buckets carry a short tick label ("13:00"); day buckets don't. */
@@ -165,6 +170,7 @@ export interface UsageEventDto {
   proto: "openai" | "anthropic";
   model: string;
   in_tok: number;
+  cache_tok: number;
   out_tok: number;
   latency_ms: number;
   status: number;

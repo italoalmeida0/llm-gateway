@@ -17,7 +17,12 @@ export interface UsageEvent {
   userId: string;
   proto: "openai" | "anthropic";
   model: string;
+  /** Cache-free input tokens (providers charge full price for these). */
   inTok: number;
+  /** Cached input tokens — cache reads (+ Anthropic cache creation), billed
+   *  at the provider's cache rate. Tracked in their own bucket, never folded
+   *  into inTok. */
+  cacheTok: number;
   outTok: number;
   latencyMs: number;
   status: number;
@@ -46,14 +51,15 @@ export function recordUsage(ev: UsageEvent): void {
 }
 
 const insertEvent = db.prepare(
-  `INSERT INTO usage_events (key_id, user_id, ts, proto, model, in_tok, out_tok, latency_ms, status, stream, estimated)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  `INSERT INTO usage_events (key_id, user_id, ts, proto, model, in_tok, cache_tok, out_tok, latency_ms, status, stream, estimated)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 );
 const upsertDaily = db.prepare(
-  `INSERT INTO usage_daily (key_id, user_id, date, in_tok, out_tok, reqs)
-   VALUES (?, ?, ?, ?, ?, 1)
+  `INSERT INTO usage_daily (key_id, user_id, date, in_tok, cache_tok, out_tok, reqs)
+   VALUES (?, ?, ?, ?, ?, ?, 1)
    ON CONFLICT(key_id, date)
    DO UPDATE SET in_tok = in_tok + excluded.in_tok,
+                 cache_tok = cache_tok + excluded.cache_tok,
                  out_tok = out_tok + excluded.out_tok,
                  reqs = reqs + 1`,
 );
@@ -73,13 +79,14 @@ export function flushUsage(): void {
         ev.proto,
         ev.model.slice(0, 128),
         ev.inTok,
+        ev.cacheTok,
         ev.outTok,
         ev.latencyMs,
         ev.status,
         ev.stream ? 1 : 0,
         ev.estimated ? 1 : 0,
       );
-      upsertDaily.run(ev.keyId, ev.userId, utcDate(ts), ev.inTok, ev.outTok);
+      upsertDaily.run(ev.keyId, ev.userId, utcDate(ts), ev.inTok, ev.cacheTok, ev.outTok);
       affectedKeys.add(ev.keyId);
     }
   })();
@@ -88,6 +95,12 @@ export function flushUsage(): void {
 
 // ===== Budget reads (cached) =====
 
+/**
+ * Key budgets (daily_limit / total_limit) cap OUTPUT tokens only — the
+ * category providers price highest and the one the key owner controls.
+ * Input and cached-input tokens are metered in their own buckets for
+ * visibility, but they never consume a key's budget.
+ */
 interface Spend {
   today: number;
   total: number;
@@ -98,12 +111,13 @@ const spendCache = new Map<string, Spend>();
 const SPEND_TTL_MS = 2_000;
 
 const qToday = db.prepare<{ t: number }, [string, string]>(
-  "SELECT COALESCE(in_tok + out_tok, 0) AS t FROM usage_daily WHERE key_id = ? AND date = ?",
+  "SELECT COALESCE(out_tok, 0) AS t FROM usage_daily WHERE key_id = ? AND date = ?",
 );
 const qTotal = db.prepare<{ t: number }, [string]>(
-  "SELECT COALESCE(SUM(in_tok + out_tok), 0) AS t FROM usage_daily WHERE key_id = ?",
+  "SELECT COALESCE(SUM(out_tok), 0) AS t FROM usage_daily WHERE key_id = ?",
 );
 
+/** OUTPUT-token burn of a key, UTC-today and all-time. */
 export function getKeySpend(keyId: string): { today: number; total: number } {
   const now = Date.now();
   const cached = spendCache.get(keyId);
@@ -122,6 +136,7 @@ export interface HourlyPoint {
   date: string; // "2026-08-13 13:00 UTC" (tooltip/legend text)
   label: string; // "13:00" (axis tick)
   in_tok: number;
+  cache_tok: number;
   out_tok: number;
   reqs: number;
 }
@@ -149,9 +164,10 @@ export function hourlySeries(userId: string | null, keyId: string | null, hours:
     params.push(keyId);
   }
   const rows = db
-    .prepare<{ hbucket: number; in_tok: number; out_tok: number; reqs: number }, any[]>(
+    .prepare<{ hbucket: number; in_tok: number; cache_tok: number; out_tok: number; reqs: number }, any[]>(
       `SELECT (ts / ?) AS hbucket,
               COALESCE(SUM(in_tok), 0) AS in_tok,
+              COALESCE(SUM(cache_tok), 0) AS cache_tok,
               COALESCE(SUM(out_tok), 0) AS out_tok,
               COUNT(*) AS reqs
        FROM usage_events WHERE ${clauses.join(" AND ")}
@@ -168,6 +184,7 @@ export function hourlySeries(userId: string | null, keyId: string | null, hours:
       date: `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:00 UTC`,
       label: `${pad2(d.getUTCHours())}:00`,
       in_tok: r?.in_tok ?? 0,
+      cache_tok: r?.cache_tok ?? 0,
       out_tok: r?.out_tok ?? 0,
       reqs: r?.reqs ?? 0,
     });
@@ -178,7 +195,7 @@ export function hourlySeries(userId: string | null, keyId: string | null, hours:
 export function userDailySeries(userId: string, days: number) {
   return db
     .prepare(
-      `SELECT date, SUM(in_tok) AS in_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
+      `SELECT date, SUM(in_tok) AS in_tok, SUM(cache_tok) AS cache_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
        FROM usage_daily WHERE user_id = ? AND date >= date('now', ?)
        GROUP BY date ORDER BY date`,
     )
@@ -188,29 +205,28 @@ export function userDailySeries(userId: string, days: number) {
 export function keyDailySeries(keyId: string, days: number) {
   return db
     .prepare(
-      `SELECT date, in_tok, out_tok, reqs FROM usage_daily
+      `SELECT date, in_tok, cache_tok, out_tok, reqs FROM usage_daily
        WHERE key_id = ? AND date >= date('now', ?) ORDER BY date`,
     )
     .all(keyId, `-${days} days`);
 }
 
+const SUMMARY_COLS = `COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(cache_tok),0) AS cache_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs`;
+
 export function userSummary(userId: string) {
   const today = db
-    .prepare<{ in_tok: number; out_tok: number; reqs: number }, [string]>(
-      `SELECT COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
-       FROM usage_daily WHERE user_id = ? AND date = date('now')`,
+    .prepare<{ in_tok: number; cache_tok: number; out_tok: number; reqs: number }, [string]>(
+      `SELECT ${SUMMARY_COLS} FROM usage_daily WHERE user_id = ? AND date = date('now')`,
     )
     .get(userId)!;
   const month = db
-    .prepare<{ in_tok: number; out_tok: number; reqs: number }, [string]>(
-      `SELECT COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
-       FROM usage_daily WHERE user_id = ? AND date >= date('now', 'start of month')`,
+    .prepare<{ in_tok: number; cache_tok: number; out_tok: number; reqs: number }, [string]>(
+      `SELECT ${SUMMARY_COLS} FROM usage_daily WHERE user_id = ? AND date >= date('now', 'start of month')`,
     )
     .get(userId)!;
   const total = db
-    .prepare<{ in_tok: number; out_tok: number; reqs: number }, [string]>(
-      `SELECT COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
-       FROM usage_daily WHERE user_id = ?`,
+    .prepare<{ in_tok: number; cache_tok: number; out_tok: number; reqs: number }, [string]>(
+      `SELECT ${SUMMARY_COLS} FROM usage_daily WHERE user_id = ?`,
     )
     .get(userId)!;
   return { today, month, total };
@@ -221,7 +237,7 @@ export function userEvents(userId: string, opts: { keyId?: string; limit: number
   const params = opts.keyId ? [userId, opts.keyId] : [userId];
   const rows = db
     .prepare(
-      `SELECT id, key_id, ts, proto, model, in_tok, out_tok, latency_ms, status, stream
+      `SELECT id, key_id, ts, proto, model, in_tok, cache_tok, out_tok, latency_ms, status, stream
        FROM usage_events WHERE ${where}
        ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`,
     )

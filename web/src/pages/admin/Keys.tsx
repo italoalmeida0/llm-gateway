@@ -108,8 +108,8 @@ export default function AdminKeysPage() {
                   <th class="font-medium px-6 py-3">Key</th>
                   <th class="font-medium px-3 py-3">Owner</th>
                   <th class="font-medium px-3 py-3">Status</th>
-                  <th class="font-medium px-3 py-3 text-right">Today</th>
-                  <th class="font-medium px-3 py-3 text-right">Total</th>
+                    <th class="font-medium px-3 py-3 text-right">Out today</th>
+                    <th class="font-medium px-3 py-3 text-right">Out total</th>
                   <th class="font-medium px-3 py-3">Expires</th>
                   <th class="font-medium px-3 py-3">Last used</th>
                   <th class="font-medium px-3 py-3 text-right"></th>
@@ -132,11 +132,11 @@ export default function AdminKeysPage() {
                           <Badge tone={st.tone}>{st.label}</Badge>
                         </td>
                         <td class="px-3 py-3 text-right tabular-nums text-ink-300">
-                          {fmtNum(k.usageToday)}
+                          {fmtNum(k.outputToday)}
                           {k.dailyLimit ? `/${fmtNum(k.dailyLimit)}` : ""}
                         </td>
                         <td class="px-3 py-3 text-right tabular-nums text-ink-300">
-                          {fmtNum(k.usageTotal)}
+                          {fmtNum(k.outputTotal)}
                           {k.totalLimit ? `/${fmtNum(k.totalLimit)}` : ""}
                         </td>
                         <td class="px-3 py-3 text-ink-400 whitespace-nowrap">

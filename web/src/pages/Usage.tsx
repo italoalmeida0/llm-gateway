@@ -48,6 +48,7 @@ export default function UsagePage() {
     model: string;
     proto: string;
     in_tok: number;
+    cache_tok: number;
     out_tok: number;
     reqs: number;
   }
@@ -60,7 +61,10 @@ export default function UsagePage() {
   });
   const byModelSorted = createMemo(() =>
     [...(byModel() ?? [])]
-      .sort((a, b) => b.in_tok + b.out_tok - (a.in_tok + a.out_tok))
+      .sort(
+        (a, b) =>
+          b.in_tok + b.cache_tok + b.out_tok - (a.in_tok + a.cache_tok + a.out_tok),
+      )
       .slice(0, 10),
   );
 
@@ -162,8 +166,8 @@ export default function UsagePage() {
                   <th class="font-medium px-3 py-3">Proto</th>
                   <th class="font-medium px-3 py-3 text-right">Requests</th>
                   <th class="font-medium px-3 py-3 text-right">In</th>
+                  <th class="font-medium px-3 py-3 text-right">Cache</th>
                   <th class="font-medium px-3 py-3 text-right">Out</th>
-                  <th class="font-medium px-3 py-3 text-right">Tokens</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-line">
@@ -183,10 +187,10 @@ export default function UsagePage() {
                         {fmtNum(m.in_tok)}
                       </td>
                       <td class="px-3 py-2.5 text-right tabular-nums">
-                        {fmtNum(m.out_tok)}
+                        {fmtNum(m.cache_tok)}
                       </td>
                       <td class="px-3 py-2.5 text-right tabular-nums">
-                        {fmtNum(m.in_tok + m.out_tok)}
+                        {fmtNum(m.out_tok)}
                       </td>
                     </tr>
                   )}
@@ -240,6 +244,7 @@ export default function UsagePage() {
                   <th class="font-medium px-3 py-3">Protocol</th>
                   <th class="font-medium px-3 py-3">Model</th>
                   <th class="font-medium px-3 py-3 text-right">In</th>
+                  <th class="font-medium px-3 py-3 text-right">Cache</th>
                   <th class="font-medium px-3 py-3 text-right">Out</th>
                   <th class="font-medium px-3 py-3 text-right">Latency</th>
                   <th class="font-medium px-3 py-3 text-right">Status</th>
@@ -274,6 +279,9 @@ export default function UsagePage() {
                         </td>
                         <td class="px-3 py-2.5 text-right tabular-nums">
                           {fmtNum(e.in_tok)}
+                        </td>
+                        <td class="px-3 py-2.5 text-right tabular-nums">
+                          {fmtNum(e.cache_tok)}
                         </td>
                         <td class="px-3 py-2.5 text-right tabular-nums">
                           {fmtNum(e.out_tok)}

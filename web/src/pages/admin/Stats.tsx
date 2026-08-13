@@ -15,24 +15,25 @@ import {
   windowLabel,
 } from "../../ui";
 
+interface Buckets {
+  in_tok: number;
+  cache_tok: number;
+  out_tok: number;
+  reqs: number;
+}
+
 interface StatsDto {
   series: DailyPoint[];
   perUser: Array<{
     user_id: string;
     email: string;
-    in_tok: number;
-    out_tok: number;
-    reqs: number;
-  }>;
+  } & Buckets>;
   perModel: Array<{
     model: string;
     proto: string;
-    in_tok: number;
-    out_tok: number;
-    reqs: number;
-  }>;
-  totals: { in_tok: number; out_tok: number; reqs: number };
-  today: { in_tok: number; out_tok: number; reqs: number };
+  } & Buckets>;
+  totals: Buckets;
+  today: Buckets;
   counts: {
     users: number;
     keys: number;
@@ -51,10 +52,17 @@ export default function AdminStatsPage() {
     return j;
   });
 
-  // Window totals are summed from the displayed series, so the headline
-  // cards always describe exactly what the chart below shows.
-  const winTok = createMemo(() =>
-    (stats()?.series ?? []).reduce((s, d) => s + (d.in_tok ?? 0) + (d.out_tok ?? 0), 0),
+  // Window totals are summed from the displayed series (per bucket — never
+  // one lumped "tokens" number), so the cards describe exactly what the
+  // chart below shows.
+  const winIn = createMemo(() =>
+    (stats()?.series ?? []).reduce((s, d) => s + (d.in_tok ?? 0), 0),
+  );
+  const winCache = createMemo(() =>
+    (stats()?.series ?? []).reduce((s, d) => s + (d.cache_tok ?? 0), 0),
+  );
+  const winOut = createMemo(() =>
+    (stats()?.series ?? []).reduce((s, d) => s + (d.out_tok ?? 0), 0),
   );
   const winReqs = createMemo(() =>
     (stats()?.series ?? []).reduce((s, d) => s + (d.reqs ?? 0), 0),
@@ -82,22 +90,26 @@ export default function AdminStatsPage() {
 
       <Show when={stats()}>
         <div
-          class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6"
+          class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 mb-6"
           {...usalItems("fade-u", 90)}
         >
           <StatCard
-            icon={Icons.bolt}
-            label={`Tokens · ${windowLabel(days())}`}
-            countValue={winTok()}
-            sub={<span>{fmtNum(winReqs())} requests in window</span>}
+            icon={Icons.chart}
+            label={`Input · ${windowLabel(days())}`}
+            countValue={winIn()}
+            sub={<span>{fmtNum(stats()!.totals.in_tok)} all-time</span>}
           />
           <StatCard
-            icon={Icons.chart}
-            label="Tokens all-time"
-            countValue={
-              (stats()!.totals.in_tok ?? 0) + (stats()!.totals.out_tok ?? 0)
-            }
-            sub={<span>{fmtNum(stats()!.totals.reqs)} requests</span>}
+            icon={Icons.bolt}
+            label={`Input cache · ${windowLabel(days())}`}
+            countValue={winCache()}
+            sub={<span>{fmtNum(stats()!.totals.cache_tok)} all-time</span>}
+          />
+          <StatCard
+            icon={Icons.arrowUpRight}
+            label={`Output · ${windowLabel(days())}`}
+            countValue={winOut()}
+            sub={<span>{fmtNum(winReqs())} requests in window</span>}
           />
           <StatCard
             icon={Icons.users}
@@ -116,7 +128,7 @@ export default function AdminStatsPage() {
         <Card class="mb-6">
           <CardHeader
             title={days() === "1" ? "Hourly usage (global)" : "Daily usage (global)"}
-            subtitle={`Input + output tokens per ${days() === "1" ? "hour" : "day"} (UTC)`}
+            subtitle={`Input, cached input and output tokens per ${days() === "1" ? "hour" : "day"} (UTC)`}
           />
           <div class="px-4 pb-4">
             <DailyChart series={stats()!.series} unit={days() === "1" ? "hour" : "day"} />
@@ -130,7 +142,7 @@ export default function AdminStatsPage() {
           <Card>
             <CardHeader
               title="Top users"
-              subtitle={`Tokens · ${windowLabel(days())}`}
+              subtitle={`Tokens by category · ${windowLabel(days())}`}
             />
             <div class="overflow-x-auto">
               <table class="w-full text-xs">
@@ -138,6 +150,7 @@ export default function AdminStatsPage() {
                   <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
                     <th class="font-medium px-6 py-3">User</th>
                     <th class="font-medium px-3 py-3 text-right">In</th>
+                    <th class="font-medium px-3 py-3 text-right">Cache</th>
                     <th class="font-medium px-3 py-3 text-right">Out</th>
                     <th class="font-medium px-3 py-3 text-right">Requests</th>
                   </tr>
@@ -149,6 +162,9 @@ export default function AdminStatsPage() {
                         <td class="px-6 py-3 text-ink-200">{u.email}</td>
                         <td class="px-3 py-3 text-right tabular-nums">
                           {fmtNum(u.in_tok)}
+                        </td>
+                        <td class="px-3 py-3 text-right tabular-nums">
+                          {fmtNum(u.cache_tok)}
                         </td>
                         <td class="px-3 py-3 text-right tabular-nums">
                           {fmtNum(u.out_tok)}
@@ -167,7 +183,7 @@ export default function AdminStatsPage() {
           <Card>
             <CardHeader
               title="Top models"
-              subtitle={`Requests + tokens · ${windowLabel(days())}`}
+              subtitle={`Tokens by category · ${windowLabel(days())}`}
             />
             <div class="overflow-x-auto">
               <table class="w-full text-xs">
@@ -175,7 +191,9 @@ export default function AdminStatsPage() {
                   <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
                     <th class="font-medium px-6 py-3">Model</th>
                     <th class="font-medium px-3 py-3">Proto</th>
-                    <th class="font-medium px-3 py-3 text-right">Tokens</th>
+                    <th class="font-medium px-3 py-3 text-right">In</th>
+                    <th class="font-medium px-3 py-3 text-right">Cache</th>
+                    <th class="font-medium px-3 py-3 text-right">Out</th>
                     <th class="font-medium px-3 py-3 text-right">Requests</th>
                   </tr>
                 </thead>
@@ -192,7 +210,13 @@ export default function AdminStatsPage() {
                           </Badge>
                         </td>
                         <td class="px-3 py-3 text-right tabular-nums">
-                          {fmtNum(m.in_tok + m.out_tok)}
+                          {fmtNum(m.in_tok)}
+                        </td>
+                        <td class="px-3 py-3 text-right tabular-nums">
+                          {fmtNum(m.cache_tok)}
+                        </td>
+                        <td class="px-3 py-3 text-right tabular-nums">
+                          {fmtNum(m.out_tok)}
                         </td>
                         <td class="px-3 py-3 text-right tabular-nums text-ink-400">
                           {fmtNum(m.reqs)}

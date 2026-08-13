@@ -23,10 +23,15 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - **Usage accounting** (`server/usage.ts`): buffered writes (flush 1s/100 events),
   `usage_daily` aggregates, per-key spend cached 2s — enforcement is *eventually
   consistent* by design; total-exhaustion additionally flips `api_keys.status`
-  optimistically in the proxy hot path. Counted tokens EXCLUDE the cache-read
-  share: OpenAI's `prompt_tokens` is normalized by
-  `prompt_tokens_details.cached_tokens`; Anthropic's `input_tokens` is already
-  cache-free (`cache_read/cache_creation_input_tokens` are ignored on purpose).
+  optimistically in the proxy hot path. Tokens are tracked in THREE buckets,
+  never one lump sum: `in_tok` (cache-free input), `cache_tok` (cached input,
+  billed at cache rate upstream), `out_tok`. OpenAI's `prompt_tokens` includes
+  the cached share — the proxy splits it via `prompt_tokens_details.cached_tokens`;
+  Anthropic's `input_tokens` is already cache-free and its
+  `cache_read/cache_creation_input_tokens` BOTH land in `cache_tok`.
+  **Key budgets (`daily_limit`/`total_limit`) cap OUTPUT tokens only** — input
+  and cache are visibility metrics, they never consume a key's budget; say
+  "output" in every budget label/message.
 - **Crypto** (`server/crypto.ts`): hand-rolled on WebCrypto — PBKDF2 (100k),
   TOTP (RFC 6238, anti-replay in `ratelimit.ts`), JWT HS256, AES-256-GCM.
   Do not add crypto libs.
@@ -59,7 +64,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - Dashboard API envelope: `{success:true, …}` / `{success:false, error}`.
 - Every admin/user mutation writes to `audit_log`.
 - Rate limits and brute-force counters are in-memory (single process) — fine;
-  budgets MUST stay SQLite-backed. The 30/min `authPerMin` bucket covers ONLY
+  budgets MUST stay SQLite-backed. Never reintroduce a summed "total tokens"
+  number in the UI/API — always show in / cache / out separately. The 30/min
+  `authPerMin` bucket covers ONLY
   credential endpoints (login/2fa/google) — refresh/logout/config must not
   consume it (dashboard traffic would lock users out).
 - Key delete is soft (revoke) by default; `DELETE /api/keys/:id?hard=true`

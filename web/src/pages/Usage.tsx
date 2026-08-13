@@ -15,6 +15,7 @@ import {
   Select,
   fmtDate,
   fmtNum,
+  windowLabel,
 } from "../ui";
 
 const PAGE_SIZE = 25;
@@ -35,9 +36,10 @@ export default function UsagePage() {
   const query = createMemo(() => ({ k: keyId(), d: days(), o: offset() }));
 
   const [series] = createResource(query, async (q) => {
+    const hourly = q.d === "1";
     const j = await api<{ series: any[] }>(
       "GET",
-      `/api/usage/daily?days=${q.d}${q.k ? `&key_id=${q.k}` : ""}`,
+      `/api/usage/daily?${hourly ? "hours=24" : `days=${q.d}`}${q.k ? `&key_id=${q.k}` : ""}`,
     );
     return j.series;
   });
@@ -118,6 +120,7 @@ export default function UsagePage() {
               value={days()}
               onChange={setDays}
               options={[
+                { value: "1", label: "1D" },
                 { value: "7", label: "7D" },
                 { value: "14", label: "14D" },
                 { value: "30", label: "30D" },
@@ -128,7 +131,11 @@ export default function UsagePage() {
         </div>
         <div class="px-4 pb-4 pt-2">
           <Show when={series()} fallback={<div class="h-32" />}>
-            <DailyChart series={series()!} metric={chartMetric()} />
+            <DailyChart
+              series={series()!}
+              metric={chartMetric()}
+              unit={days() === "1" ? "hour" : "day"}
+            />
           </Show>
         </div>
       </Card>
@@ -136,7 +143,7 @@ export default function UsagePage() {
       <Card class="mb-6">
         <CardHeader
           title="By model"
-          subtitle={`Top models in the last ${days()} days`}
+          subtitle={`Top models · ${windowLabel(days())}`}
         />
         <Show
           when={(byModelSorted().length ?? 0) > 0}

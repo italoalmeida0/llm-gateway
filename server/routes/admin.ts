@@ -7,7 +7,7 @@ import { GATEWAY_SECRET } from "../config";
 import { sendInviteEmail, sendResetEmail } from "../email";
 import { invalidateProviderCache } from "../proxy/index";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
-import { utcDate } from "../usage";
+import { hourlySeries, utcDate } from "../usage";
 
 /**
  * /api/admin/* — everything requires role=admin. Every mutation is audited.
@@ -437,27 +437,44 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
   // ================= stats =================
 
   if (path === "/api/admin/stats" && req.method === "GET") {
+    // Hour granularity ("1D"): the window tables come from usage_events so
+    // series/top-lists stay consistent with the trailing-N-hours chart.
+    const hoursParam = url.searchParams.get("hours");
+    const hours = hoursParam !== null ? Math.min(Math.max(Number(hoursParam) || 24, 1), 168) : null;
     const days = Math.min(Number(url.searchParams.get("days") || 14), 365);
-    const range = db
-      .prepare(
-        `SELECT date, SUM(in_tok) AS in_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
-         FROM usage_daily WHERE date >= date('now', ?) GROUP BY date ORDER BY date`,
-      )
-      .all(`-${days} days`);
-    const perUser = db
-      .prepare(
-        `SELECT ud.user_id, u.email, SUM(ud.in_tok) AS in_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
-         FROM usage_daily ud JOIN users u ON u.id = ud.user_id
-         WHERE ud.date >= date('now', ?) GROUP BY ud.user_id ORDER BY (in_tok + out_tok) DESC LIMIT 50`,
-      )
-      .all(`-${days} days`);
+
+    const range =
+      hours !== null
+        ? hourlySeries(null, null, hours)
+        : db
+            .prepare(
+              `SELECT date, SUM(in_tok) AS in_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
+               FROM usage_daily WHERE date >= date('now', ?) GROUP BY date ORDER BY date`,
+            )
+            .all(`-${days} days`);
+    const perUser =
+      hours !== null
+        ? db
+            .prepare(
+              `SELECT ue.user_id, u.email, SUM(ue.in_tok) AS in_tok, SUM(ue.out_tok) AS out_tok, COUNT(*) AS reqs
+               FROM usage_events ue JOIN users u ON u.id = ue.user_id
+               WHERE ue.ts >= ? GROUP BY ue.user_id ORDER BY (in_tok + out_tok) DESC LIMIT 50`,
+            )
+            .all(Date.now() - hours * 3_600_000)
+        : db
+            .prepare(
+              `SELECT ud.user_id, u.email, SUM(ud.in_tok) AS in_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
+               FROM usage_daily ud JOIN users u ON u.id = ud.user_id
+               WHERE ud.date >= date('now', ?) GROUP BY ud.user_id ORDER BY (in_tok + out_tok) DESC LIMIT 50`,
+            )
+            .all(`-${days} days`);
     const perModel = db
       .prepare(
         `SELECT model, proto, COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(out_tok),0) AS out_tok, COUNT(*) AS reqs
          FROM usage_events WHERE ts >= ?
          GROUP BY model, proto ORDER BY (in_tok + out_tok) DESC LIMIT 20`,
       )
-      .all(Date.now() - days * 24 * 3600 * 1000);
+      .all(Date.now() - (hours ?? days * 24) * 3_600_000);
     const totals = db
       .prepare(
         `SELECT COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
@@ -478,7 +495,10 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         .get()!.n,
       providers: db.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM providers").get()!.n,
     };
-    return ok({ series: range, perUser, perModel, totals, today: todayRow, counts }, req);
+    return ok(
+      { series: range, perUser, perModel, totals, today: todayRow, counts, granularity: hours !== null ? "hour" : "day" },
+      req,
+    );
   }
 
   if (path === "/api/admin/audit" && req.method === "GET") {

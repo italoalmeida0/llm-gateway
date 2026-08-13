@@ -20,6 +20,8 @@ import {
   ProgressBar,
   Segmented,
   fmtNum,
+  pointLabel,
+  windowLabel,
 } from "../ui";
 
 interface Summary {
@@ -81,11 +83,13 @@ export default function DashboardPage() {
     const j = await api<{ summary: Summary }>("GET", "/api/usage/summary");
     return j.summary;
   });
-  // Fetch double the window so the delta can compare against the previous period.
+  // Fetch double the window so the delta can compare against the previous
+  // period — for the 1D view that means 48 hourly buckets (last 24h shown).
   const [series] = createResource(days, async (d) => {
+    const hourly = d === "1";
     const j = await api<{ series: DailyPoint[] }>(
       "GET",
-      `/api/usage/daily?days=${Number(d) * 2}`,
+      hourly ? "/api/usage/daily?hours=48" : `/api/usage/daily?days=${Number(d) * 2}`,
     );
     return j.series;
   });
@@ -94,7 +98,13 @@ export default function DashboardPage() {
     return j.keys;
   });
 
-  const view = createMemo(() => (series() ?? []).slice(-Number(days())));
+  const view = createMemo(() =>
+    (series() ?? []).slice(days() === "1" ? -24 : -Number(days())),
+  );
+  const winTok = createMemo(() =>
+    view().reduce((s, d) => s + (d.in_tok ?? 0) + (d.out_tok ?? 0), 0),
+  );
+  const winReqs = createMemo(() => view().reduce((s, d) => s + (d.reqs ?? 0), 0));
   const tokDelta = createMemo(() =>
     deltaPct(series() ?? [], (d) => (d.in_tok ?? 0) + (d.out_tok ?? 0)),
   );
@@ -129,6 +139,7 @@ export default function DashboardPage() {
             value={days()}
             onChange={setDays}
             options={[
+              { value: "1", label: "1D" },
               { value: "7", label: "7D" },
               { value: "14", label: "14D" },
               { value: "30", label: "30D" },
@@ -137,26 +148,27 @@ export default function DashboardPage() {
         }
       />
 
-      <Show when={summary()}>
-        {(s) => (
+      {/* Gate on BOTH resources: CountUp mounts once with final values — a
+          late series() update would hit a text node USAL already replaced. */}
+      <Show when={summary() && series()}>
+        {() => {
+          const s = () => summary()!;
+          return (
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6" {...usalItems("fade-u", 110)}>
             <Card interactive class="p-6">
               <HeroHeader
                 icon={Icons.chart}
-                count={(s().month.in_tok ?? 0) + (s().month.out_tok ?? 0)}
-                label="Tokens this month"
+                count={winTok()}
+                label={`Tokens · ${windowLabel(days())}`}
                 delta={tokDelta()}
               />
               <div class="mt-5 pt-4 border-t border-line flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
+                <SubStat label="Requests" value={fmtNum(winReqs())} />
                 <SubStat
                   label="Today"
                   value={fmtNum(
                     (s().today.in_tok ?? 0) + (s().today.out_tok ?? 0),
                   )}
-                />
-                <SubStat
-                  label="Requests today"
-                  value={fmtNum(s().today.reqs)}
                 />
                 <SubStat
                   label="All-time"
@@ -167,7 +179,7 @@ export default function DashboardPage() {
               </div>
               <div class="mt-4" {...usal("fade-u delay-250 duration-700 threshold-5")}>
                 <Show when={series()} fallback={<div class="h-32" />}>
-                  <DailyChart series={view()} />
+                  <DailyChart series={view()} unit={days() === "1" ? "hour" : "day"} />
                 </Show>
               </div>
             </Card>
@@ -175,14 +187,18 @@ export default function DashboardPage() {
             <Card interactive class="p-6">
               <HeroHeader
                 icon={Icons.bolt}
-                count={s().month.reqs}
-                label="Requests this month"
+                count={winReqs()}
+                label={`Requests · ${windowLabel(days())}`}
                 delta={reqDelta()}
               />
               <div class="mt-5 pt-4 border-t border-line flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
                 <SubStat label="Active keys" value={String(activeKeys())} />
                 <SubStat
-                  label="Requests all-time"
+                  label="Requests today"
+                  value={fmtNum(s().today.reqs)}
+                />
+                <SubStat
+                  label="All-time"
                   value={fmtNum(s().total.reqs)}
                 />
               </div>
@@ -190,13 +206,14 @@ export default function DashboardPage() {
                 <Show when={series()} fallback={<div class="h-32" />}>
                   <AreaChart
                     values={view().map((d) => d.reqs ?? 0)}
-                    labels={view().map((d) => d.date.slice(5))}
+                    labels={view().map((d) => pointLabel(d))}
                   />
                 </Show>
               </div>
             </Card>
           </div>
-        )}
+          );
+        }}
       </Show>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5" {...usalItems("fade-u", 110)}>

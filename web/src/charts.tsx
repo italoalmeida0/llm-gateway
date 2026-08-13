@@ -22,12 +22,16 @@ export function DailyChart(props: {
   series: DailyPoint[];
   height?: number;
   metric?: "tokens" | "requests";
+  /** What one bar represents — drives legend pin text ("Latest day/hour"). */
+  unit?: "day" | "hour";
 }) {
   const W = 720;
   const H = props.height ?? 180;
   const PAD = { l: 40, r: 6, t: 14, b: 26 };
 
   const metric = () => props.metric ?? "tokens";
+  const unit = () => props.unit ?? "day";
+  const tickOf = (d: DailyPoint) => d.label ?? d.date.slice(5);
   const data = createMemo(() => props.series.slice(-30));
   const maxV = createMemo(() =>
     Math.max(
@@ -141,7 +145,7 @@ export function DailyChart(props: {
             const i = () => data().indexOf(d);
             return (
               <text x={PAD.l + slotW() * i() + slotW() / 2} y={H - 8} text-anchor="middle" font-size="9" fill={TICK}>
-                {d.date.slice(5)}
+                {tickOf(d)}
               </text>
             );
           }}
@@ -168,15 +172,15 @@ export function DailyChart(props: {
                 </span>
               </Show>
               <span class="inline-flex items-center gap-1.5">
-                <span class="w-2.5 h-2.5 rounded-sm bg-brand-500 inline-block" /> Latest day
+                <span class="w-2.5 h-2.5 rounded-sm bg-brand-500 inline-block" /> Latest {unit()}
               </span>
-              <span class="ml-auto text-[10px] text-ink-500">Click a bar to pin a day</span>
+              <span class="ml-auto text-[10px] text-ink-500">Click a bar to pin {unit() === "hour" ? "an" : "a"} {unit()}</span>
             </>
           }
         >
           {(d) => (
             <>
-              <span class="font-medium text-ink-200">{d().date}</span>
+              <span class="font-medium text-ink-200">{d().label ?? d().date}</span>
               <span class="inline-flex items-center gap-1.5">
                 <span class="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: IN_BAR }} />
                 In {fmtNum(d().in_tok)}

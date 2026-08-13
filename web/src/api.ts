@@ -154,6 +154,8 @@ export interface DailyPoint {
   in_tok: number;
   out_tok: number;
   reqs: number;
+  /** Hour buckets carry a short tick label ("13:00"); day buckets don't. */
+  label?: string;
 }
 
 export interface UsageEventDto {

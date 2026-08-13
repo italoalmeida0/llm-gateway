@@ -118,6 +118,63 @@ export function getKeySpend(keyId: string): { today: number; total: number } {
 
 // ===== Dashboard queries =====
 
+export interface HourlyPoint {
+  date: string; // "2026-08-13 13:00 UTC" (tooltip/legend text)
+  label: string; // "13:00" (axis tick)
+  in_tok: number;
+  out_tok: number;
+  reqs: number;
+}
+
+const HOUR_MS = 3_600_000;
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/**
+ * Hourly buckets for the trailing `hours` hours (UTC), zero-filled so charts
+ * render quiet hours as empty bars instead of gaps. Reads usage_events —
+ * usage_daily can't go below one day. Optional userId/keyId narrow the scope;
+ * both null = global.
+ */
+export function hourlySeries(userId: string | null, keyId: string | null, hours: number): HourlyPoint[] {
+  const h = Math.min(Math.max(Math.floor(hours) || 24, 1), 168);
+  const startHour = Math.floor(Date.now() / HOUR_MS) * HOUR_MS - (h - 1) * HOUR_MS;
+  const clauses = ["ts >= ?"];
+  const params: Array<string | number> = [startHour];
+  if (userId !== null) {
+    clauses.push("user_id = ?");
+    params.push(userId);
+  }
+  if (keyId !== null) {
+    clauses.push("key_id = ?");
+    params.push(keyId);
+  }
+  const rows = db
+    .prepare<{ hbucket: number; in_tok: number; out_tok: number; reqs: number }, any[]>(
+      `SELECT (ts / ?) AS hbucket,
+              COALESCE(SUM(in_tok), 0) AS in_tok,
+              COALESCE(SUM(out_tok), 0) AS out_tok,
+              COUNT(*) AS reqs
+       FROM usage_events WHERE ${clauses.join(" AND ")}
+       GROUP BY hbucket`,
+    )
+    .all(HOUR_MS, ...params);
+  const byBucket = new Map(rows.map((r) => [r.hbucket, r]));
+  const out: HourlyPoint[] = [];
+  for (let i = 0; i < h; i++) {
+    const ts = startHour + i * HOUR_MS;
+    const r = byBucket.get(Math.floor(ts / HOUR_MS));
+    const d = new Date(ts);
+    out.push({
+      date: `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:00 UTC`,
+      label: `${pad2(d.getUTCHours())}:00`,
+      in_tok: r?.in_tok ?? 0,
+      out_tok: r?.out_tok ?? 0,
+      reqs: r?.reqs ?? 0,
+    });
+  }
+  return out;
+}
+
 export function userDailySeries(userId: string, days: number) {
   return db
     .prepare(

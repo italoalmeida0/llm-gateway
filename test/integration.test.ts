@@ -637,6 +637,45 @@ describe("gateway end-to-end", () => {
     expect(m.in_tok + m.out_tok).toBeGreaterThan(0);
   });
 
+  test("hour granularity endpoints feed the 1D views", async () => {
+    const r = await api("/api/usage/daily?hours=24", { token: userToken });
+    expect(r.status).toBe(200);
+    expect(r.json.granularity).toBe("hour");
+    expect(r.json.series).toHaveLength(24);
+    for (const p of r.json.series) expect(p.label).toMatch(/^\d{2}:00$/);
+    // zero-filled window, but today's real traffic must be inside it
+    expect(r.json.series.some((p: any) => p.reqs > 0)).toBe(true);
+    expect(
+      r.json.series.reduce((s: number, p: any) => s + p.in_tok + p.out_tok, 0),
+    ).toBeGreaterThan(0);
+
+    // key-scoped hourly view returns a longer trailing window when asked
+    const list = await api("/api/keys", { token: userToken });
+    const r48 = await api(`/api/usage/daily?hours=48&key_id=${list.json.keys[0].id}`, {
+      token: userToken,
+    });
+    expect(r48.status).toBe(200);
+    expect(r48.json.series).toHaveLength(48);
+
+    // garbage hours clamp to the max (168h), never explode
+    const clamped = await api("/api/usage/daily?hours=99999", { token: userToken });
+    expect(clamped.json.series).toHaveLength(168);
+
+    // admin global stats: hourly series + windowed top lists
+    const as = await api("/api/admin/stats?hours=24", { token: adminToken });
+    expect(as.status).toBe(200);
+    expect(as.json.granularity).toBe("hour");
+    expect(as.json.series).toHaveLength(24);
+    expect(as.json.series.some((p: any) => p.reqs > 0)).toBe(true);
+    expect(as.json.perUser.length).toBeGreaterThan(0);
+    expect(as.json.perUser[0].email).toBeTruthy();
+
+    // day granularity stays the default and is untouched
+    const dd = await api("/api/admin/stats?days=7", { token: adminToken });
+    expect(dd.json.granularity).toBe("day");
+    expect(dd.json.series[0].label).toBeUndefined();
+  });
+
   test("bad keys get protocol-shaped errors", async () => {
     const bad1 = await llm("/v1/chat/completions", "gw_" + "0".repeat(48), {
       model: "x", messages: [],

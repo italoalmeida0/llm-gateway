@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 
 import { api, type DailyPoint } from "../../api";
 import { PageTitle } from "../../index";
@@ -12,6 +12,7 @@ import {
   Segmented,
   StatCard,
   fmtNum,
+  windowLabel,
 } from "../../ui";
 
 interface StatsDto {
@@ -43,9 +44,21 @@ interface StatsDto {
 export default function AdminStatsPage() {
   const [days, setDays] = createSignal("14");
   const [stats] = createResource(days, async (d) => {
-    const j = await api<StatsDto>("GET", `/api/admin/stats?days=${d}`);
+    const j = await api<StatsDto>(
+      "GET",
+      `/api/admin/stats?${d === "1" ? "hours=24" : `days=${d}`}`,
+    );
     return j;
   });
+
+  // Window totals are summed from the displayed series, so the headline
+  // cards always describe exactly what the chart below shows.
+  const winTok = createMemo(() =>
+    (stats()?.series ?? []).reduce((s, d) => s + (d.in_tok ?? 0) + (d.out_tok ?? 0), 0),
+  );
+  const winReqs = createMemo(() =>
+    (stats()?.series ?? []).reduce((s, d) => s + (d.reqs ?? 0), 0),
+  );
 
   return (
     <div>
@@ -57,6 +70,7 @@ export default function AdminStatsPage() {
             value={days()}
             onChange={setDays}
             options={[
+              { value: "1", label: "1D" },
               { value: "7", label: "7D" },
               { value: "14", label: "14D" },
               { value: "30", label: "30D" },
@@ -73,11 +87,9 @@ export default function AdminStatsPage() {
         >
           <StatCard
             icon={Icons.bolt}
-            label="Tokens today"
-            countValue={
-              (stats()!.today.in_tok ?? 0) + (stats()!.today.out_tok ?? 0)
-            }
-            sub={<span>{fmtNum(stats()!.today.reqs)} requests</span>}
+            label={`Tokens · ${windowLabel(days())}`}
+            countValue={winTok()}
+            sub={<span>{fmtNum(winReqs())} requests in window</span>}
           />
           <StatCard
             icon={Icons.chart}
@@ -103,11 +115,11 @@ export default function AdminStatsPage() {
 
         <Card class="mb-6">
           <CardHeader
-            title="Daily usage (global)"
-            subtitle="Input + output tokens per day (UTC)"
+            title={days() === "1" ? "Hourly usage (global)" : "Daily usage (global)"}
+            subtitle={`Input + output tokens per ${days() === "1" ? "hour" : "day"} (UTC)`}
           />
           <div class="px-4 pb-4">
-            <DailyChart series={stats()!.series} />
+            <DailyChart series={stats()!.series} unit={days() === "1" ? "hour" : "day"} />
           </div>
         </Card>
 
@@ -118,7 +130,7 @@ export default function AdminStatsPage() {
           <Card>
             <CardHeader
               title="Top users"
-              subtitle={`Tokens in the last ${days()} days`}
+              subtitle={`Tokens · ${windowLabel(days())}`}
             />
             <div class="overflow-x-auto">
               <table class="w-full text-xs">
@@ -155,7 +167,7 @@ export default function AdminStatsPage() {
           <Card>
             <CardHeader
               title="Top models"
-              subtitle={`Requests + tokens in the last ${days()} days`}
+              subtitle={`Requests + tokens · ${windowLabel(days())}`}
             />
             <div class="overflow-x-auto">
               <table class="w-full text-xs">

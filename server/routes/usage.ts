@@ -1,6 +1,6 @@
 import { requireAuth } from "../auth";
 import { ok } from "../http";
-import { userDailySeries, userEvents, userSummary, keyDailySeries } from "../usage";
+import { userDailySeries, userEvents, userSummary, keyDailySeries, hourlySeries } from "../usage";
 import { db, type ApiKeyRow } from "../db";
 
 /** /api/usage — the authenticated user's own consumption data. */
@@ -12,15 +12,26 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
 
   if (path === "/api/usage/daily" && req.method === "GET") {
     const ctx = await requireAuth(req);
-    const days = Math.min(Number(url.searchParams.get("days") || 14), 365);
     const keyId = url.searchParams.get("key_id");
-
+    let key: ApiKeyRow | undefined;
     if (keyId) {
-      const key = db.prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?").get(keyId);
+      key = db.prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?").get(keyId);
       if (!key || key.user_id !== ctx.user.id) return ok({ series: [] }, req);
-      return ok({ series: keyDailySeries(keyId, days) }, req);
     }
-    return ok({ series: userDailySeries(ctx.user.id, days) }, req);
+
+    // Hour granularity: trailing N hours from usage_events (for the "1D" view).
+    const hoursParam = url.searchParams.get("hours");
+    if (hoursParam !== null) {
+      const hours = Math.min(Math.max(Number(hoursParam) || 24, 1), 168);
+      return ok(
+        { series: hourlySeries(ctx.user.id, keyId ?? null, hours), granularity: "hour" },
+        req,
+      );
+    }
+
+    const days = Math.min(Number(url.searchParams.get("days") || 14), 365);
+    if (keyId) return ok({ series: keyDailySeries(keyId!, days), granularity: "day" }, req);
+    return ok({ series: userDailySeries(ctx.user.id, days), granularity: "day" }, req);
   }
 
   if (path === "/api/usage/events" && req.method === "GET") {

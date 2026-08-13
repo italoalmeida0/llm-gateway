@@ -393,17 +393,26 @@ export function compactParts(n: number): { count: string; suffix: string } {
   return { count: String(n), suffix: "" };
 }
 
-/** Animated number: counts up from 0 (compact — 950, 12.5K, 1.14M — never wraps). */
+/**
+ * Animated number: counts up from 0 (compact — 950, 12.5K, 1.14M — never wraps).
+ * Re-mounts when the displayed value changes: USAL replaces our text node with
+ * its own span when it animates, so an in-place Solid update after that would
+ * write into a detached node and the number would go stale (window switches).
+ */
 export function CountUp(props: { value: number; class?: string }) {
   const parts = () => compactParts(Math.round(Math.max(0, props.value)));
   return (
-    <span
-      class={`tabular-nums inline-block ${props.class ?? ""}`}
-      {...usalCount(parts().count)}
-    >
-      {parts().count}
-      {parts().suffix}
-    </span>
+    <Show when={parts().count} keyed>
+      {(count) => (
+        <span
+          class={`tabular-nums inline-block ${props.class ?? ""}`}
+          {...usalCount(count)}
+        >
+          {count}
+          {compactParts(Math.round(Math.max(0, props.value))).suffix}
+        </span>
+      )}
+    </Show>
   );
 }
 
@@ -820,6 +829,16 @@ export function fmtNum(n: number | null | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 10_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
+}
+
+/** Human window name for the shared day selectors ("1" = hourly 24h view). */
+export function windowLabel(days: string): string {
+  return days === "1" ? "last 24 hours" : `last ${days} days`;
+}
+
+/** Per-hour axis label when the point is an hour bucket, else MM-DD. */
+export function pointLabel(d: { date: string; label?: string }): string {
+  return d.label ?? d.date.slice(5);
 }
 
 export function fmtDate(ts: number | null | undefined): string {

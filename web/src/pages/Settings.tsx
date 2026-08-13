@@ -297,15 +297,12 @@ export default function SettingsPage() {
               {(s) => (
                 <li class="py-3 flex items-center justify-between gap-3">
                   <div class="min-w-0">
+                    {s.current ? <Badge tone="indigo">This session</Badge> : null}
                     <div class="text-sm flex items-center gap-2">
-                      {s.current ? <Badge tone="indigo">This session</Badge> : null}
                       <Show
                         when={namingJti() === s.jti}
                         fallback={
-                          <>
                             <span class="text-ink-200">{s.label || <span class="text-ink-500">Unnamed device</span>}</span>
-                            <span class="text-ink-500 text-xs">· {s.ip ?? "unknown ip"}</span>
-                          </>
                         }
                       >
                         <input
@@ -321,6 +318,9 @@ export default function SettingsPage() {
                         <Btn size="sm" onClick={saveSessionLabel}>Save</Btn>
                         <Btn size="sm" variant="ghost" onClick={() => setNamingJti(null)}>Cancel</Btn>
                       </Show>
+                    </div>
+                     <div class="text-ink-500 mt-0.5 text-xs">
+                      {s.ip ?? "unknown ip"}
                     </div>
                     <div class="text-[11px] text-ink-500 mt-0.5">
                       created {fmtDate(s.createdAt)} · last used {fmtDate(s.lastUsedAt)} · expires {fmtDate(s.expiresAt)}

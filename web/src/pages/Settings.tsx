@@ -298,11 +298,11 @@ export default function SettingsPage() {
                 <li class="py-3 flex items-center justify-between gap-3">
                   <div class="min-w-0">
                     {s.current ? <Badge tone="indigo">This session</Badge> : null}
-                    <div class="text-sm flex items-center gap-2">
+                    <div class={`text-sm flex items-center gap-2 ${s.current ? "mt-2": ""}`}>
                       <Show
                         when={namingJti() === s.jti}
                         fallback={
-                            <span class="text-ink-200">{s.label || <span class="text-ink-500">Unnamed device</span>}</span>
+                            <span class={`truncate ${s.current ? "text-brand-500": "text-ink-200"}`}>{s.label || <span class={`truncate ${s.current ? "text-brand-500/70": "text-ink-500"}`}>Unnamed device</span>}</span>
                         }
                       >
                         <input
@@ -319,7 +319,7 @@ export default function SettingsPage() {
                         <Btn size="sm" variant="ghost" onClick={() => setNamingJti(null)}>Cancel</Btn>
                       </Show>
                     </div>
-                     <div class="text-ink-500 mt-0.5 text-xs">
+                     <div class="text-ink-600 mt-0.5 text-xs truncate">
                       {s.ip ?? "unknown ip"}
                     </div>
                     <div class="text-[11px] text-ink-500 mt-0.5">

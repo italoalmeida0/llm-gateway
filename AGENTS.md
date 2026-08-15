@@ -21,7 +21,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - **DB**: `bun:sqlite` (`server/db.ts`), migrations via `PRAGMA user_version`,
   in `MIGRATIONS` — append-only, never edit applied ones.
 - **Usage accounting** (`server/usage.ts`): buffered writes (flush 1s/100 events),
-  `usage_daily` aggregates, per-key spend cached 2s — enforcement is *eventually
+  `usage_daily` aggregates (plus `usage_model_daily` — per key/date/model rollup
+  written by the same flush; the per-model dashboard queries read it, NOT raw
+  `usage_events`), per-key spend cached 2s — enforcement is *eventually
   consistent* by design; total-exhaustion additionally flips `api_keys.status`
   optimistically in the proxy hot path. Tokens are tracked in THREE buckets,
   never one lump sum: `in_tok` (cache-free input), `cache_tok` (cached input,
@@ -32,6 +34,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   **Key budgets (`daily_limit`/`total_limit`) cap OUTPUT tokens only** — input
   and cache are visibility metrics, they never consume a key's budget; say
   "output" in every budget label/message.
+  Scaling evidence: `docs/performance` (10y sim). `PRAGMA optimize` runs at the
+  end of `migrate()` — without planner stats, hour-window aggregates on big
+  `usage_events` degrade into full index scans.
 - **Crypto** (`server/crypto.ts`): hand-rolled on WebCrypto — PBKDF2 (100k),
   TOTP (RFC 6238, anti-replay in `ratelimit.ts`), JWT HS256, AES-256-GCM.
   Do not add crypto libs.
@@ -85,6 +90,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - `bun run build` — build SPA into `dist/`
 - `bun test` — must stay green (unit + black-box integration with fake upstream)
 - `bun run bench` — perf harness; do not let non-stream overhead regress wildly
+- `bun run perf:sim` — day-by-day growth sim (real gateway+upstream, HTTP
+  measurements per checkpoint up to 10y; `PERF_MAX_DAYS=N` to shorten)
+- `bun run perf:tuning` — `build|measure|sql <dir>` on a persistent big dataset
 - `bun run fake-upstream` — fake provider for manual testing (:3399, key `sk-fake-secret`)
 - `bun run seed` — mock usage data for the dev DB (`-- --days N`, `-- --keep`),
   seeds every existing key (replaces usage rows by default)

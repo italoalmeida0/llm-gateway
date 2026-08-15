@@ -12,6 +12,8 @@
     "bench": "bun ./test/bench.ts",
     "fake-upstream": "bun ./test/fake-upstream.ts",
     "seed": "NODE_ENV=development bun ./scripts/seed-usage.ts",
+    "perf:sim": "bun ./scripts/perf-sim.ts",
+    "perf:tuning": "bun ./scripts/perf-tuning.ts",
     "clean": "rm -rf dist data",
     "fclean": "rm -rf dist data node_modules"
   },

@@ -484,19 +484,34 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
                  WHERE ud.date >= date('now', ?) GROUP BY ud.user_id ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 50`,
               )
               .all(`-${days} days`);
-    const modelSince =
+    // Hour windows need sub-day granularity -> usage_events (selective range,
+    // <1ms with planner stats). Day/all windows read the usage_model_daily
+    // rollup instead of grouping millions of raw events (3330ms -> ~30ms at
+    // 10y scale; see docs/performance).
+    const perModel =
       hours !== null
-        ? Date.now() - hours * 3_600_000
+        ? db
+            .prepare(
+              `SELECT model, proto, COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(cache_tok),0) AS cache_tok, COALESCE(SUM(out_tok),0) AS out_tok, COUNT(*) AS reqs
+               FROM usage_events WHERE ts >= ?
+               GROUP BY model, proto ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 20`,
+            )
+            .all(Date.now() - hours * 3_600_000)
         : days === "all"
-          ? 0
-          : Date.now() - days * 86_400_000;
-    const perModel = db
-      .prepare(
-        `SELECT model, proto, COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(cache_tok),0) AS cache_tok, COALESCE(SUM(out_tok),0) AS out_tok, COUNT(*) AS reqs
-         FROM usage_events WHERE ts >= ?
-         GROUP BY model, proto ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 20`,
-      )
-      .all(modelSince);
+          ? db
+              .prepare(
+                `SELECT model, proto, COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(cache_tok),0) AS cache_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
+                 FROM usage_model_daily
+                 GROUP BY model, proto ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 20`,
+              )
+              .all()
+          : db
+              .prepare(
+                `SELECT model, proto, COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(cache_tok),0) AS cache_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs
+                 FROM usage_model_daily WHERE date >= date('now', ?)
+                 GROUP BY model, proto ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 20`,
+              )
+              .all(`-${days} days`);
     const totals = db
       .prepare(
         `SELECT COALESCE(SUM(in_tok),0) AS in_tok, COALESCE(SUM(cache_tok),0) AS cache_tok, COALESCE(SUM(out_tok),0) AS out_tok, COALESCE(SUM(reqs),0) AS reqs

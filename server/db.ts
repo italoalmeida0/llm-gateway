@@ -162,6 +162,35 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE usage_daily  ADD COLUMN cache_tok INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    name: "006_usage_model_daily",
+    up: `
+      -- Per-model daily rollup, fed by the same flush that writes usage_daily.
+      -- The per-model dashboard queries (admin stats + /api/usage/by-model)
+      -- used to GROUP BY over raw usage_events, which grows linearly (~3330ms
+      -- at 3.65M events / 10y in the growth sim — see docs/performance). The
+      -- rollup answers the same questions in ~30ms/~4ms at that scale.
+      -- The one-time backfill below costs ~4s per GB of existing history.
+      CREATE TABLE usage_model_daily (
+        key_id    TEXT NOT NULL,
+        user_id   TEXT NOT NULL,
+        date      TEXT NOT NULL,             -- YYYY-MM-DD (UTC)
+        proto     TEXT NOT NULL,
+        model     TEXT NOT NULL,
+        in_tok    INTEGER NOT NULL DEFAULT 0,
+        cache_tok INTEGER NOT NULL DEFAULT 0,
+        out_tok   INTEGER NOT NULL DEFAULT 0,
+        reqs      INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (key_id, date, proto, model)
+      ) WITHOUT ROWID;
+      CREATE INDEX idx_usage_model_daily_user ON usage_model_daily(user_id, date);
+      INSERT INTO usage_model_daily (key_id, user_id, date, proto, model, in_tok, cache_tok, out_tok, reqs)
+        SELECT key_id, user_id, date(ts/1000, 'unixepoch'), proto, model,
+               SUM(in_tok), SUM(cache_tok), SUM(out_tok), COUNT(*)
+        FROM usage_events
+        GROUP BY key_id, date(ts/1000, 'unixepoch'), proto, model;
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -178,6 +207,11 @@ export function migrate(): void {
     console.log(`[DB] migration applied: ${m.name}`);
     version = i + 1;
   }
+  // Give the query planner table statistics. Without ANALYZE data, SQLite
+  // picks bad plans once usage_events grows (measured: the admin 24h per-user
+  // aggregate went 287ms -> 0.5ms at 3.65M rows only because of this; see
+  // docs/performance). Incremental: cheap no-op once stats exist.
+  db.exec("PRAGMA optimize");
 }
 
 migrate();

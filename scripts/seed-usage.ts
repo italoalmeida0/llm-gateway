@@ -100,6 +100,7 @@ if (keys.length === 0) {
 if (!keep) {
   db.exec("DELETE FROM usage_events");
   db.exec("DELETE FROM usage_daily");
+  db.exec("DELETE FROM usage_model_daily");
 }
 
 const insertEvent = db.prepare(
@@ -109,6 +110,15 @@ const insertEvent = db.prepare(
 const insertDaily = db.prepare(
   `INSERT INTO usage_daily (key_id, user_id, date, in_tok, cache_tok, out_tok, reqs)
    VALUES (?, ?, ?, ?, ?, ?, ?)`,
+);
+const upsertModelDaily = db.prepare(
+  `INSERT INTO usage_model_daily (key_id, user_id, date, proto, model, in_tok, cache_tok, out_tok, reqs)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+   ON CONFLICT(key_id, date, proto, model)
+   DO UPDATE SET in_tok = in_tok + excluded.in_tok,
+                 cache_tok = cache_tok + excluded.cache_tok,
+                 out_tok = out_tok + excluded.out_tok,
+                 reqs = reqs + excluded.reqs`,
 );
 
 const MS_DAY = 86_400_000;
@@ -122,6 +132,10 @@ let eventCount = 0;
 const daily = new Map<
   string,
   { keyId: string; userId: string; date: string; inTok: number; cacheTok: number; outTok: number; reqs: number }
+>();
+const modelDaily = new Map<
+  string,
+  { keyId: string; userId: string; date: string; proto: string; model: string; inTok: number; cacheTok: number; outTok: number; reqs: number }
 >();
 
 db.transaction(() => {
@@ -185,11 +199,25 @@ db.transaction(() => {
         agg.outTok += outTok;
         agg.reqs += 1;
         daily.set(aggKey, agg);
+
+        const mKey = `${key.id}|${date}|${m.proto}|${m.model}`;
+        const mAgg = modelDaily.get(mKey) ?? {
+          keyId: key.id, userId: key.user_id, date, proto: m.proto, model: m.model,
+          inTok: 0, cacheTok: 0, outTok: 0, reqs: 0,
+        };
+        mAgg.inTok += inTok;
+        mAgg.cacheTok += cacheTok;
+        mAgg.outTok += outTok;
+        mAgg.reqs += 1;
+        modelDaily.set(mKey, mAgg);
       }
     }
   }
   for (const a of daily.values()) {
     insertDaily.run(a.keyId, a.userId, a.date, a.inTok, a.cacheTok, a.outTok, a.reqs);
+  }
+  for (const a of modelDaily.values()) {
+    upsertModelDaily.run(a.keyId, a.userId, a.date, a.proto, a.model, a.inTok, a.cacheTok, a.outTok, a.reqs);
   }
 })();
 

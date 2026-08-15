@@ -37,6 +37,24 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   Scaling evidence: `docs/performance` (10y sim). `PRAGMA optimize` runs at the
   end of `migrate()` — without planner stats, hour-window aggregates on big
   `usage_events` degrade into full index scans.
+- **Model registry & routing** (`server/models.ts`, migration `007_models`):
+  `models` = public id → provider + `upstream_model` (aliases allowed), with
+  rich metadata as validated JSON columns; `settings` KV holds
+  `routing_mode`. Creating a provider auto-imports its `GET /models` per
+  capability (8s timeout, tolerant 3-shape parser, `INSERT OR IGNORE` —
+  best-effort, never blocks creation, never clobbers admin edits). Proxy reads
+  a 5s `routerSnapshot()` cache (mode + all models + enabled providers with
+  decrypted keys); admin mutations call `invalidateModelCache()`.
+  - `passthrough` (default): model names forwarded untouched; `/v1/models`
+    proxies upstream. Zero behavioral change for existing setups.
+  - `router`: unknown/disabled model → 404; orphaned (provider deleted → FK
+    `ON DELETE SET NULL`) or provider-unavailable → 503; body `model` is
+    rewritten to `upstream_model` (only when different — byte-fidelity rule
+    stands); usage is recorded under the PUBLIC id; `/v1/models` is generated
+    from the registry in the rich format (never forwarded upstream).
+  - Registry ids are global and per-proto: for a dual-surface provider the
+    first capability sync wins the id (the other proto's duplicate is skipped)
+    — register a separate public id manually for the second proto if needed.
 - **Crypto** (`server/crypto.ts`): hand-rolled on WebCrypto — PBKDF2 (100k),
   TOTP (RFC 6238, anti-replay in `ratelimit.ts`), JWT HS256, AES-256-GCM.
   Do not add crypto libs.
@@ -104,6 +122,14 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   mid-turn — clients then retry and re-run tool actions (duplicate file
   writes). Keep it above `LIMITS.proxyStreamIdleMs` (240 > 180s; Bun caps at
   255).
+- `decryptSecret(enc, GATEWAY_SECRET)` takes TWO args — omitting the secret
+  throws inside `routerSnapshot()`'s per-provider try/catch and silently
+  empties the routing table (every routed request 503s, `/v1/models` lists
+  nothing).
+- Model ids can contain `/` (e.g. `hf:zai-org/GLM-5.2`): admin routes match
+  `/api/admin/models/(.+)` on the RAW (still-encoded) path and then
+  `decodeURIComponent` — the UI must `encodeURIComponent` ids, and the
+  bulk-delete route must be matched BEFORE the `/:id` one.
 - Proxy is byte-faithful pass-through: requests are forwarded untouched EXCEPT
   openai streams missing `stream_options.include_usage` (injected so usage
   accounting stays exact — decided per `route.upstreamPath`, never per

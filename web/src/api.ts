@@ -190,6 +190,45 @@ export interface ProviderDto {
   priority: number;
   createdAt: number;
   hasApiKey: boolean;
+  modelCount: number;
+}
+
+/** Per-capability result of a model-registry sync (best-effort). */
+export interface SyncOutcome {
+  added: number;
+  skipped: number;
+  error?: string;
+}
+
+export type RoutingMode = "passthrough" | "router";
+
+/** Admin view of a registered model (camelCase mirror of the models table). */
+export interface ModelDto {
+  id: string;
+  providerId: string | null;
+  providerName: string | null;
+  upstreamModel: string;
+  proto: "openai" | "anthropic";
+  name: string;
+  description: string;
+  huggingFaceId: string;
+  quantization: string;
+  openrouterSlug: string;
+  alwaysOn: boolean;
+  enabled: boolean;
+  contextLength: number | null;
+  maxOutputLength: number | null;
+  created: number | null;
+  inputModalities: string[];
+  outputModalities: string[];
+  samplingParams: string[];
+  features: string[];
+  reasoningEfforts: string[] | null;
+  pricing: Record<string, string> | null;
+  datacenters: Array<{ country_code: string }> | null;
+  source: "auto" | "manual";
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface AdminUserDto {

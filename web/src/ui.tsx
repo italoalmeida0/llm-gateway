@@ -89,6 +89,9 @@ const ICON_PATHS: Record<string, string[]> = {
   chevronDown: ["M19.5 8.25l-7.5 7.5-7.5-7.5"],
   arrowUpRight: ["M4.5 19.5l15-15m0 0H8.25m11.25 0v11.25"],
   menu: ["M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"],
+  layers: [
+    "M6.429 9.75L2.25 12l4.179 2.25m0-4.5l5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0l4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0l-5.571 3-5.571-3",
+  ],
 };
 
 // Semantic names -> inline icon keys
@@ -121,6 +124,7 @@ export const Icons = {
   chevronDown: "chevronDown",
   arrowUpRight: "arrowUpRight",
   menu: "menu",
+  layers: "layers",
 } as const;
 
 export function Icon(props: {
@@ -463,6 +467,7 @@ export function Input(props: {
   autocomplete?: string;
   required?: boolean;
   hint?: string;
+  disabled?: boolean;
 }) {
   return (
     <label class="block">
@@ -480,7 +485,8 @@ export function Input(props: {
         max={props.max}
         autocomplete={props.autocomplete}
         required={props.required}
-        class="w-full rounded-xl border border-line bg-elev px-3.5 py-2.5 text-sm text-ink-100 placeholder:text-ink-500 focus:border-ink-500 focus:outline-none focus:ring-2 focus:ring-ink-500/10 transition-all duration-200"
+        disabled={props.disabled}
+        class="w-full rounded-xl border border-line bg-elev px-3.5 py-2.5 text-sm text-ink-100 placeholder:text-ink-500 focus:border-ink-500 focus:outline-none focus:ring-2 focus:ring-ink-500/10 transition-all duration-200 disabled:opacity-50 disabled:pointer-events-none"
       />
       <Show when={props.hint}>
         <span class="block text-xs text-ink-500 mt-1.5">{props.hint}</span>

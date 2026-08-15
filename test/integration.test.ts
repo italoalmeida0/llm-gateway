@@ -899,3 +899,279 @@ describe("gateway end-to-end", () => {
     expect([401, 404]).toContain(res.status);
   });
 });
+
+describe("model registry & routing mode", () => {
+  let providerId = "";
+
+  test("provider creation auto-imported its /models lists", async () => {
+    const provs = await api("/api/admin/providers", { token: adminToken });
+    providerId = provs.json.providers[0].id;
+    // fake upstream serves "fake-llm-1" on both protocols; openai syncs first
+    // and the identical anthropic id is skipped (registry ids are global).
+    expect(provs.json.providers[0].modelCount).toBe(1);
+
+    const r = await api("/api/admin/models", { token: adminToken });
+    expect(r.status).toBe(200);
+    const m = r.json.models.find((x: any) => x.id === "fake-llm-1");
+    expect(m).toBeTruthy();
+    expect(m.source).toBe("auto");
+    expect(m.upstreamModel).toBe("fake-llm-1");
+    expect(m.proto).toBe("openai");
+    expect(m.providerName).toBe("provider");
+    expect(m.enabled).toBe(true);
+  });
+
+  test("default routing mode is passthrough", async () => {
+    const r = await api("/api/admin/settings", { token: adminToken });
+    expect(r.status).toBe(200);
+    expect(r.json.settings.routingMode).toBe("passthrough");
+  });
+
+  test("manual model CRUD validates input", async () => {
+    const c = await api("/api/admin/models", {
+      token: adminToken,
+      body: {
+        id: "alias-fast",
+        providerId,
+        upstreamModel: "fake-llm-1",
+        proto: "openai",
+        name: "Alias Fast",
+        description: "Public alias for the fake model",
+        contextLength: 128000,
+        maxOutputLength: 4096,
+        pricing: { prompt: "0.000001", completion: "0.000002" },
+        inputModalities: ["text"],
+        outputModalities: ["text"],
+        samplingParams: ["temperature", "top_p"],
+        reasoningEfforts: ["low", "high"],
+        datacenters: [{ country_code: "US" }],
+      },
+    });
+    expect(c.status).toBe(200);
+    expect(c.json.model.source).toBe("manual");
+    expect(c.json.model.pricing.prompt).toBe("0.000001");
+    expect(c.json.model.datacenters).toEqual([{ country_code: "US" }]);
+
+    // duplicate id conflicts
+    expect(
+      (await api("/api/admin/models", { token: adminToken, body: { id: "alias-fast", providerId } })).status,
+    ).toBe(409);
+    // unknown provider / bad id / bad pricing
+    expect(
+      (await api("/api/admin/models", { token: adminToken, body: { id: "x1", providerId: "0".repeat(24) } })).status,
+    ).toBe(400);
+    expect(
+      (await api("/api/admin/models", { token: adminToken, body: { id: "bad id", providerId } })).status,
+    ).toBe(400);
+    expect(
+      (await api("/api/admin/models", { token: adminToken, body: { id: "x2", providerId, pricing: { prompt: { nested: 1 } } } })).status,
+    ).toBe(400);
+  });
+
+  test("router mode: unknown model 404s, alias rewrites the upstream model", async () => {
+    const sw = await api("/api/admin/settings", {
+      token: adminToken, method: "PATCH", body: { routingMode: "router" },
+    });
+    expect(sw.status).toBe(200);
+    expect(sw.json.settings.routingMode).toBe("router");
+
+    const unknown = await llm("/v1/chat/completions", gatewayKey, { model: "nope-9000", messages: [] });
+    expect(unknown.status).toBe(404);
+    const uj = await unknown.json();
+    expect(uj.error.message).toContain("unknown model");
+
+    // The alias is accepted; the upstream receives the registered upstream id.
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "alias-fast",
+      messages: [{ role: "user", content: "alias route" }],
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    const last = await fetch(`${UP}/__last-body`).then((r2) => r2.json());
+    expect(JSON.parse(last.body).model).toBe("fake-llm-1");
+  });
+
+  test("router mode: usage is attributed to the public model id", async () => {
+    await Bun.sleep(1_300); // usage buffer flush (1s interval)
+    // admin stats' perModel rollup (the user's own session was rotated away
+    // by the refresh-rotation test above, so we read the admin view)
+    const stats = await api("/api/admin/stats?days=7", { token: adminToken });
+    expect(stats.status).toBe(200);
+    const alias = (stats.json.perModel ?? []).find((x: any) => x.model === "alias-fast");
+    expect(alias).toBeTruthy();
+    expect(alias.reqs).toBeGreaterThan(0);
+  });
+
+  test("router mode: /v1/models is served from the registry (rich format)", async () => {
+    const r = await fetch(`${GW}/v1/models`, { headers: { Authorization: `Bearer ${gatewayKey}` } });
+    expect(r.status).toBe(200);
+    const j = await r.json();
+    expect(j.object).toBeUndefined(); // no longer the upstream pass-through shape
+    const ids = j.data.map((m: any) => m.id).sort();
+    expect(ids).toEqual(["alias-fast", "fake-llm-1"]);
+    const alias = j.data.find((m: any) => m.id === "alias-fast");
+    expect(alias.provider).toBe("provider");
+    expect(alias.always_on).toBe(true);
+    expect(alias.context_length).toBe(128000);
+    expect(alias.max_output_length).toBe(4096);
+    expect(alias.pricing).toEqual({ prompt: "0.000001", completion: "0.000002" });
+    expect(alias.reasoning_parameters).toEqual({ efforts: ["low", "high"] });
+    expect(alias.datacenters).toEqual([{ country_code: "US" }]);
+    expect(alias.supported_sampling_parameters).toEqual(["temperature", "top_p"]);
+    expect(alias.input_modalities).toEqual(["text"]);
+
+    // forced anthropic listing: only anthropic-proto registry models (none) → empty
+    const a = await fetch(`${GW}/anthropic/v1/models`, { headers: { "x-api-key": gatewayKey } });
+    expect(a.status).toBe(200);
+    expect((await a.json()).data).toEqual([]);
+
+    // single-model retrieval + 404
+    const one = await fetch(`${GW}/v1/models/alias-fast`, {
+      headers: { Authorization: `Bearer ${gatewayKey}` },
+    });
+    expect(one.status).toBe(200);
+    expect((await one.json()).id).toBe("alias-fast");
+    const missing = await fetch(`${GW}/v1/models/nope`, {
+      headers: { Authorization: `Bearer ${gatewayKey}` },
+    });
+    expect(missing.status).toBe(404);
+
+    // still gated: without ANY auth header the route doesn't even resolve
+    // (scanner hygiene), with a bad one it's a 401
+    expect([401, 404]).toContain((await fetch(`${GW}/v1/models`)).status);
+    expect(
+      (await fetch(`${GW}/v1/models`, { headers: { Authorization: "Bearer gw_nope" } })).status,
+    ).toBe(401);
+  });
+
+  test("router mode: disabled model 404s; proto mismatch is unknown", async () => {
+    const d = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
+      token: adminToken, method: "PATCH", body: { enabled: false },
+    });
+    expect(d.status).toBe(200);
+    expect(d.json.model.enabled).toBe(false);
+
+    const r = await llm("/v1/chat/completions", gatewayKey, { model: "alias-fast", messages: [] });
+    expect(r.status).toBe(404);
+
+    // fake-llm-1 is registered for openai only → unknown on the anthropic surface
+    const cross = await llm(
+      "/anthropic/v1/messages", gatewayKey,
+      { model: "fake-llm-1", max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+      true,
+    );
+    expect(cross.status).toBe(404);
+
+    // re-enable for the next tests
+    const e = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
+      token: adminToken, method: "PATCH", body: { enabled: true },
+    });
+    expect(e.json.model.enabled).toBe(true);
+  });
+
+  test("deleting a provider orphans its models (503) until re-linked", async () => {
+    const del = await api(`/api/admin/providers/${providerId}`, { token: adminToken, method: "DELETE" });
+    expect(del.status).toBe(200);
+    expect(del.json.modelsOrphaned).toBe(2); // fake-llm-1 + alias-fast
+    expect(del.json.modelsDeleted).toBe(0);
+
+    const r = await llm("/v1/chat/completions", gatewayKey, { model: "alias-fast", messages: [] });
+    expect(r.status).toBe(503);
+    expect((await r.json()).error.message).toContain("no provider");
+
+    // registry rows survive, now orphaned
+    const list = await api("/api/admin/models", { token: adminToken });
+    expect(list.json.models.find((x: any) => x.id === "alias-fast").providerName).toBeNull();
+
+    // re-create the provider: auto-sync skips the orphaned duplicate (no clobber)
+    const re = await api("/api/admin/providers", {
+      token: adminToken,
+      body: {
+        name: "provider-b",
+        openaiBaseUrl: `${UP}/openai/v1`,
+        anthropicBaseUrl: `${UP}/anthropic/v1`,
+        apiKey: UPSTREAM_KEY,
+      },
+    });
+    expect(re.status).toBe(200);
+    const newId = re.json.provider.id as string;
+    expect(re.json.provider.modelCount).toBe(0);
+    expect(re.json.sync.openai).toEqual({ added: 0, skipped: 1 });
+    expect(re.json.sync.anthropic).toEqual({ added: 0, skipped: 1 });
+
+    // re-link the alias to the new provider → routes again
+    const relink = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
+      token: adminToken, method: "PATCH", body: { providerId: newId },
+    });
+    expect(relink.status).toBe(200);
+    expect(relink.json.model.providerId).toBe(newId);
+    const r2 = await llm("/v1/chat/completions", gatewayKey, {
+      model: "alias-fast", messages: [{ role: "user", content: "relinked" }],
+    });
+    expect(r2.status).toBe(200);
+    await r2.text();
+
+    providerId = newId;
+  });
+
+  test("on-demand sync endpoint reports duplicates as skipped", async () => {
+    const r = await api(`/api/admin/providers/${providerId}/sync-models`, {
+      token: adminToken, method: "POST",
+    });
+    expect(r.status).toBe(200);
+    // fake-llm-1 stays orphaned (INSERT OR IGNORE) — edits/links are never clobbered
+    expect(r.json.sync.openai).toEqual({ added: 0, skipped: 1 });
+  });
+
+  test("bulk delete removes selected models; provider delete with deleteModels cascades", async () => {
+    for (const id of ["tmp-m1", "tmp-m2"]) {
+      expect((await api("/api/admin/models", { token: adminToken, body: { id, providerId } })).status).toBe(200);
+    }
+    expect(
+      (await api("/api/admin/models/bulk-delete", { token: adminToken, body: { ids: [] } })).status,
+    ).toBe(400);
+    const bulk = await api("/api/admin/models/bulk-delete", {
+      token: adminToken, body: { ids: ["tmp-m1", "tmp-m2", "ghost-id"] },
+    });
+    expect(bulk.status).toBe(200);
+    expect(bulk.json.deleted).toBe(2);
+    const gone = await llm("/v1/chat/completions", gatewayKey, { model: "tmp-m1", messages: [] });
+    expect(gone.status).toBe(404);
+
+    // deleteModels=true removes the provider's remaining models with it
+    const del = await api(`/api/admin/providers/${providerId}?deleteModels=true`, {
+      token: adminToken, method: "DELETE",
+    });
+    expect(del.status).toBe(200);
+    expect(del.json.modelsDeleted).toBe(1); // alias-fast (fake-llm-1 is orphaned)
+    const list = await api("/api/admin/models", { token: adminToken });
+    expect(list.json.models.find((x: any) => x.id === "alias-fast")).toBeUndefined();
+    expect(list.json.models.find((x: any) => x.id === "fake-llm-1")).toBeTruthy(); // orphan survives
+
+    // restore a working provider for any later suites
+    const re = await api("/api/admin/providers", {
+      token: adminToken,
+      body: { name: "provider-c", openaiBaseUrl: `${UP}/openai/v1`, anthropicBaseUrl: `${UP}/anthropic/v1`, apiKey: UPSTREAM_KEY },
+    });
+    expect(re.status).toBe(200);
+  });
+
+  test("back to passthrough: registry is ignored, /v1/models forwards upstream", async () => {
+    const sw = await api("/api/admin/settings", {
+      token: adminToken, method: "PATCH", body: { routingMode: "passthrough" },
+    });
+    expect(sw.status).toBe(200);
+
+    // an unregistered name would 404 in router mode; passthrough forwards it
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "passthrough again" }],
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+
+    const m = await fetch(`${GW}/v1/models`, { headers: { Authorization: `Bearer ${gatewayKey}` } });
+    expect(m.status).toBe(200);
+    expect((await m.json()).object).toBe("list"); // upstream shape again
+  });
+});
+

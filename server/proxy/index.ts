@@ -12,6 +12,13 @@ import {
 import { checkKeyAvailability } from "../keys";
 import { recordUsage, flushUsage, getKeySpend } from "../usage";
 import { db } from "../db";
+import {
+  routerSnapshot,
+  resolveModelRoute,
+  listableModels,
+  publicModelEntry,
+  type RouterSnapshot,
+} from "../models";
 
 /**
  * The gateway itself: OpenAI- and Anthropic-compatible pass-through proxy.
@@ -29,6 +36,8 @@ interface RouteMatch {
   proto: Proto;
   upstreamPath: string; // appended to the provider's capability base URL
   isModelsList?: boolean;
+  /** Decoded model id for `GET .../v1/models/:id`. */
+  modelId?: string;
 }
 
 interface RouteResult {
@@ -79,12 +88,28 @@ function matchRoute(pathname: string, method: string, req: Request): RouteResult
   // Models listing: forced prefix decides the protocol outright; the legacy
   // bare /v1/models keeps the old auth-header disambiguation.
   if ((p === "/v1/models" || p.startsWith("/v1/models/")) && method === "GET") {
-    if (forced) return { match: { proto: forced, upstreamPath: p.slice(3) }, hint };
+    let modelId: string | undefined;
+    if (p.startsWith("/v1/models/")) {
+      const raw = p.slice("/v1/models/".length);
+      modelId = raw;
+      try {
+        modelId = decodeURIComponent(raw);
+      } catch {
+        /* leave raw */
+      }
+    }
+    const mk = (proto: Proto): RouteMatch => ({
+      proto,
+      upstreamPath: p.slice(3),
+      isModelsList: true,
+      modelId,
+    });
+    if (forced) return { match: mk(forced), hint };
     if (req.headers.get("x-api-key")) {
-      return { match: { proto: "anthropic", upstreamPath: p.slice(3) }, hint: "anthropic" };
+      return { match: mk("anthropic"), hint: "anthropic" };
     }
     if (req.headers.get("authorization")) {
-      return { match: { proto: "openai", upstreamPath: p.slice(3) }, hint };
+      return { match: mk("openai"), hint };
     }
   }
   return { match: null, hint };
@@ -266,6 +291,37 @@ function buildClientHeaders(upstream: Headers, requestId: string): Headers {
   h.set("Content-Type", safeResponseContentType(upstream));
   h.set("X-Request-Id", requestId);
   return h;
+}
+
+/**
+ * Router-mode `/v1/models`: answered from the local registry (rich format),
+ * never forwarded upstream. Only servable models are listed (enabled, with an
+ * enabled provider exposing this protocol's capability).
+ */
+function registryModelsResponse(
+  req: Request,
+  snap: RouterSnapshot,
+  proto: Proto,
+  modelId?: string,
+): Response {
+  const rows = listableModels(snap, proto);
+  const providerName = (m: (typeof rows)[number]) =>
+    snap.providers.get(m.provider_id!)?.row.name ?? "";
+  if (modelId !== undefined) {
+    const m = rows.find((r) => r.id === modelId);
+    if (!m) {
+      return envelopeError(proto, 404, `unknown model '${modelId}'`, "model_not_found", req);
+    }
+    const h = baseHeaders(req);
+    h.set("Content-Type", "application/json; charset=utf-8");
+    return new Response(JSON.stringify(publicModelEntry(m, providerName(m))), { headers: h });
+  }
+  const h = baseHeaders(req);
+  h.set("Content-Type", "application/json; charset=utf-8");
+  return new Response(
+    JSON.stringify({ data: rows.map((m) => publicModelEntry(m, providerName(m))) }),
+    { headers: h },
+  );
 }
 
 // ===== Token estimation fallback =====
@@ -570,28 +626,59 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       if (typeof (bodyJson as any).model !== "string" && !route.isModelsList) {
         return envelopeError(proto, 400, "`model` is required", "invalid_request_error", req);
       }
+    }
 
-      // OpenAI streams: ask upstream to include a terminal usage chunk so
-      // accounting stays exact (Anthropic always streams usage events). This
-      // is the ONLY field we ever mutate, and only when the client didn't set
-      // it — otherwise the original bytes are forwarded untouched.
-      if (
-        proto === "openai" &&
-        (bodyJson as any).stream === true &&
-        route.upstreamPath === "/chat/completions"
-      ) {
-        const so = ((bodyJson as any).stream_options ?? {}) as Record<string, unknown>;
-        if (so.include_usage !== true) {
-          so.include_usage = true;
-          (bodyJson as any).stream_options = so;
-          bodyText = JSON.stringify(bodyJson);
-        }
+    // ---- model registry (routing mode + router-backed /v1/models) ----
+    const snap = await routerSnapshot();
+    let routedPublicModel: string | null = null;
+    let routedProvider: { row: ProviderRow; key: string } | null = null;
+    let bodyDirty = false;
+
+    if (snap.mode === "router" && route.isModelsList) {
+      return registryModelsResponse(req, snap, proto, route.modelId);
+    }
+
+    // OpenAI streams: ask upstream to include a terminal usage chunk so
+    // accounting stays exact (Anthropic always streams usage events). This
+    // and the router-mode model rewrite below are the ONLY fields we ever
+    // mutate, and only when needed — otherwise the original bytes are
+    // forwarded untouched.
+    if (
+      bodyJson &&
+      proto === "openai" &&
+      (bodyJson as any).stream === true &&
+      route.upstreamPath === "/chat/completions"
+    ) {
+      const so = ((bodyJson as any).stream_options ?? {}) as Record<string, unknown>;
+      if (so.include_usage !== true) {
+        so.include_usage = true;
+        (bodyJson as any).stream_options = so;
+        bodyDirty = true;
       }
     }
 
+    if (snap.mode === "router" && req.method === "POST" && bodyJson) {
+      const requested = String((bodyJson as any).model);
+      const resolution = resolveModelRoute(snap, proto, requested);
+      if (!resolution.ok) {
+        return envelopeError(proto, resolution.status, resolution.message, resolution.code, req);
+      }
+      routedProvider = resolution.provider;
+      routedPublicModel = requested;
+      if (resolution.upstreamModel !== requested) {
+        (bodyJson as any).model = resolution.upstreamModel;
+        bodyDirty = true;
+      }
+    }
+
+    if (bodyDirty && bodyJson) bodyText = JSON.stringify(bodyJson);
+
     // ---- resolve provider ----
-    const providers = await resolveProviders();
-    const target = proto === "openai" ? providers.openai : providers.anthropic;
+    let target: { row: ProviderRow; key: string } | undefined = routedProvider ?? undefined;
+    if (!target) {
+      const providers = await resolveProviders();
+      target = proto === "openai" ? providers.openai : providers.anthropic;
+    }
     if (!target) {
       console.error(`[PROXY] no enabled provider configured for capability "${proto}"`);
       return envelopeError(proto, 503, "gateway is not configured for this API protocol", "api_error", req);
@@ -641,7 +728,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       if (!clientDisconnected) breakerFail(breakerId);
       console.error(`[PROXY] upstream fetch failed (${upstreamUrl}):`, (e as Error).name);
       recordUsage({
-        keyId: keyRow.id, userId: keyRow.user_id, proto, model: "",
+        keyId: keyRow.id, userId: keyRow.user_id, proto, model: routedPublicModel ?? "",
         inTok: 0, cacheTok: 0, outTok: 0, latencyMs: Math.round(performance.now() - started),
         status: clientDisconnected ? 499 : timedOut ? 504 : 502, stream: wantsStream, estimated: false,
       });
@@ -673,7 +760,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         keyId: keyRow.id,
         userId: keyRow.user_id,
         proto,
-        model: u.model || String((bodyJson as any)?.model ?? "").slice(0, 128),
+        // Router mode bills/attributes under the PUBLIC model id the client
+        // asked for (bodyJson.model was already rewritten to upstream_model);
+        // passthrough keeps the upstream-reported model as before.
+        model: routedPublicModel ?? (u.model || String((bodyJson as any)?.model ?? "").slice(0, 128)),
         inTok,
         cacheTok: u.cacheTok,
         outTok: u.outTok,

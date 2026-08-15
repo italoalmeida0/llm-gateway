@@ -1,9 +1,10 @@
 import { createSignal, For, Show, createResource, createMemo } from "solid-js";
 
-import { api, type AuthStyle, type ProviderDto } from "../../api";
+import { api, type AuthStyle, type ProviderDto, type SyncOutcome } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtDate } from "../../ui";
+import { syncSummary } from "./Models";
 
 const AUTH_STYLE_OPTIONS = [
   { value: "bearer", label: "Bearer" },
@@ -92,8 +93,13 @@ export default function AdminProvidersPage() {
       if (apiKey().trim()) body.apiKey = apiKey().trim();
 
       if (editing() === "new") {
-        await api("POST", "/api/admin/providers", body);
-        toast("Provider created");
+        const j = await api<{ provider: ProviderDto; sync?: Partial<Record<string, SyncOutcome>> }>(
+          "POST",
+          "/api/admin/providers",
+          body,
+        );
+        const summary = syncSummary(j.sync);
+        toast(summary ? `Provider created — models: ${summary}` : "Provider created");
       } else {
         await api("PATCH", `/api/admin/providers/${(editing() as ProviderDto).id}`, body);
         toast("Provider updated");
@@ -154,14 +160,44 @@ export default function AdminProvidersPage() {
     }
   };
 
+  const [syncBusy, setSyncBusy] = createSignal<string | null>(null);
+  const [deleteModels, setDeleteModels] = createSignal(false);
+
+  const syncModels = async (p: ProviderDto) => {
+    setSyncBusy(p.id);
+    try {
+      const j = await api<{ sync: Partial<Record<string, SyncOutcome>> }>(
+        "POST",
+        `/api/admin/providers/${p.id}/sync-models`,
+      );
+      const summary = syncSummary(j.sync);
+      toast(summary || "Model sync done");
+      refetch();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "sync failed", "err");
+    } finally {
+      setSyncBusy(null);
+    }
+  };
+
   const remove = async () => {
     const p = confirmDelete();
     if (!p) return;
     setBusy(true);
     try {
-      await api("DELETE", `/api/admin/providers/${p.id}`);
-      toast("Provider deleted");
+      const j = await api<{ modelsOrphaned: number; modelsDeleted: number }>(
+        "DELETE",
+        `/api/admin/providers/${p.id}${deleteModels() ? "?deleteModels=true" : ""}`,
+      );
+      toast(
+        j.modelsDeleted > 0
+          ? `Provider + ${j.modelsDeleted} model${j.modelsDeleted === 1 ? "" : "s"} deleted`
+          : j.modelsOrphaned > 0
+            ? `Provider deleted — ${j.modelsOrphaned} model${j.modelsOrphaned === 1 ? "" : "s"} kept (now orphaned)`
+            : "Provider deleted",
+      );
       setConfirmDelete(null);
+      setDeleteModels(false);
       refetch();
     } catch (e) {
       toast(e instanceof Error ? e.message : "delete failed", "err");
@@ -193,7 +229,7 @@ export default function AdminProvidersPage() {
                       <Badge tone={p.enabled ? "green" : "zinc"}>{p.enabled ? "Enabled" : "Disabled"}</Badge>
                       {p.openaiBaseUrl && <Badge tone="blue">OpenAI</Badge>}
                       {p.anthropicBaseUrl && <Badge tone="amber">Anthropic</Badge>}
-                      <span class="text-[11px] text-ink-500">priority {p.priority} · added {fmtDate(p.createdAt)}</span>
+                      <span class="text-[11px] text-ink-500">priority {p.priority} · {p.modelCount} model{p.modelCount === 1 ? "" : "s"} · added {fmtDate(p.createdAt)}</span>
                     </div>
                     <div class="mt-2 space-y-1 text-xs text-ink-400">
                       <Show when={p.openaiBaseUrl}>
@@ -213,8 +249,14 @@ export default function AdminProvidersPage() {
                   </div>
                   <div class="flex items-center gap-1 shrink-0">
                     <IconBtn icon={Icons.bolt} title="Test connection" onClick={() => openTest(p)} />
+                    <IconBtn
+                      icon={Icons.refresh}
+                      title="Sync models from upstream /models"
+                      disabled={syncBusy() === p.id}
+                      onClick={() => syncModels(p)}
+                    />
                     <IconBtn icon={Icons.edit} title="Edit" onClick={() => openEditor(p)} />
-                    <IconBtn icon={Icons.trash} title="Delete provider" danger onClick={() => setConfirmDelete(p)} />
+                    <IconBtn icon={Icons.trash} title="Delete provider" danger onClick={() => { setDeleteModels(false); setConfirmDelete(p); }} />
                   </div>
                 </div>
               </Card>
@@ -365,6 +407,24 @@ export default function AdminProvidersPage() {
             Delete <strong class="text-ink-100">{confirmDelete()?.name}</strong>? Requests for its capabilities
             will start failing until another enabled provider covers them.
           </p>
+          <Show when={(confirmDelete()?.modelCount ?? 0) > 0}>
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={deleteModels()}
+                onChange={(e) => setDeleteModels(e.currentTarget.checked)}
+                class="w-4 h-4 rounded border-line bg-elev accent-brand-500 mt-0.5"
+              />
+              <span class="text-xs text-ink-300">
+                Also delete its {confirmDelete()?.modelCount} registered model
+                {(confirmDelete()?.modelCount ?? 0) === 1 ? "" : "s"}.
+                <span class="text-ink-500 block mt-0.5">
+                  Unchecked: models are kept and become orphaned (badge "no provider") — you can
+                  re-link them to another provider from the Models tab.
+                </span>
+              </span>
+            </label>
+          </Show>
           <div class="flex justify-end gap-2">
             <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Btn>
             <Btn variant="danger" onClick={remove} disabled={busy()}>Delete</Btn>

@@ -37,6 +37,7 @@ import KeysPage from "./pages/Keys";
 import UsagePage from "./pages/Usage";
 import SettingsPage from "./pages/Settings";
 import AdminProvidersPage from "./pages/admin/Providers";
+import AdminModelsPage from "./pages/admin/Models";
 import AdminUsersPage from "./pages/admin/Users";
 import AdminKeysPage from "./pages/admin/Keys";
 import AdminStatsPage from "./pages/admin/Stats";
@@ -77,6 +78,7 @@ const USER_NAV: NavItem[] = [
 const ADMIN_NAV: NavItem[] = [
   { path: "/admin", label: "Global stats", icon: Icons.bolt },
   { path: "/admin/providers", label: "Providers", icon: Icons.server },
+  { path: "/admin/models", label: "Models", icon: Icons.layers },
   { path: "/admin/users", label: "Users", icon: Icons.users },
   { path: "/admin/keys", label: "All Keys", icon: Icons.key },
   { path: "/admin/audit", label: "Audit Log", icon: Icons.book },
@@ -388,6 +390,7 @@ function Root() {
                 if (p === "/admin" || p === "/admin/stats")
                   return <AdminStatsPage />;
                 if (p === "/admin/providers") return <AdminProvidersPage />;
+                if (p === "/admin/models") return <AdminModelsPage />;
                 if (p === "/admin/users") return <AdminUsersPage />;
                 if (p === "/admin/keys") return <AdminKeysPage />;
                 if (p === "/admin/audit") return <AdminAuditPage />;

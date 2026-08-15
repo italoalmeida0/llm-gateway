@@ -23,11 +23,12 @@ client ──(gw_ key)──> gateway ──(real key)──> your LLM provider
 - Exact token accounting: parses `usage` in JSON and streams (injects `stream_options.include_usage` only when the client didn't send it — everything else passes through byte-for-byte, and SSE is relayed incrementally with backpressure, never buffered)
 - Per-key security: SHA-256-hashed `gw_…` keys, RPM limit, concurrency cap, daily/total token budgets (daily resets 00:00 UTC), expiration, instant revocation
 - Anti-abuse: global per-IP token bucket, proxy key-spray limiting, per-capability circuit breaker for a failing upstream, sanitized upstream errors (never leaks the provider URL/key)
+- **Model registry & routing**: creating a provider auto-imports its `GET /models` list into a local registry (tolerant OpenAI/Anthropic/OpenRouter-style parsing, duplicates skipped, admin edits never clobbered). The admin **Models** tab supports manual aliases (public id → any upstream id), rich metadata (pricing, context, modalities, reasoning efforts…), bulk delete and re-linking orphaned models. A global `routing_mode` toggle switches the proxy between **pass-through** (default: model names forwarded untouched) and **router** (strict: unknown models 404, requests rewrite to the registered upstream id, and `/v1/models` is served from the registry in a rich format instead of forwarding upstream)
 
 **Dashboard**
 - Users: invite-only (created by admin), email+password login, optional **TOTP 2FA** with anti-replay, **Google sign-in** (link by matching verified email), password reset via email, session list/revocation
 - Self-service: mint keys with expiration (1h → permanent) + daily/total token limits + RPM, watch live usage (charts, per-request event log)
-- Admin: providers CRUD + connection tester, users CRUD/ban/kick/reset-2FA, all-keys view + revoke, global stats (users/models), audit log
+- Admin: providers CRUD + connection tester + model sync, model registry tab (CRUD, bulk delete, routing mode), users CRUD/ban/kick/reset-2FA, all-keys view + revoke, global stats (users/models), audit log
 
 **Security hardening** (designed for a publicly exposed endpoint)
 - Only admins create accounts — a leaked URL can't mint accounts

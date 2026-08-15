@@ -191,6 +191,46 @@ const MIGRATIONS: Migration[] = [
         GROUP BY key_id, date(ts/1000, 'unixepoch'), proto, model;
     `,
   },
+  {
+    name: "007_models",
+    // Model registry + routing mode. Deleting a provider orphans its models
+    // (provider_id -> NULL) instead of deleting them: usage history and the
+    // admin registry survive, and the admin can re-link them later.
+    up: `
+      CREATE TABLE settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
+      CREATE TABLE models (
+        id                TEXT PRIMARY KEY,         -- public id clients send
+        provider_id       TEXT REFERENCES providers(id) ON DELETE SET NULL,
+        upstream_model    TEXT NOT NULL,            -- id the provider receives
+        proto             TEXT NOT NULL DEFAULT 'openai' CHECK (proto IN ('openai','anthropic')),
+        name              TEXT NOT NULL DEFAULT '',
+        description       TEXT NOT NULL DEFAULT '',
+        hugging_face_id   TEXT NOT NULL DEFAULT '',
+        quantization      TEXT NOT NULL DEFAULT '',
+        openrouter_slug   TEXT NOT NULL DEFAULT '',
+        always_on         INTEGER NOT NULL DEFAULT 1,
+        enabled           INTEGER NOT NULL DEFAULT 1,
+        context_length    INTEGER,
+        max_output_length INTEGER,
+        created           INTEGER,                  -- unix seconds (upstream)
+        input_modalities  TEXT NOT NULL DEFAULT '["text"]',
+        output_modalities TEXT NOT NULL DEFAULT '["text"]',
+        sampling_params   TEXT NOT NULL DEFAULT '[]',
+        features          TEXT NOT NULL DEFAULT '[]',
+        reasoning_efforts TEXT,                     -- JSON array, NULL = unknown
+        pricing           TEXT,                     -- JSON object, NULL = unknown
+        datacenters       TEXT,                     -- JSON array, NULL = unknown
+        source            TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto','manual')),
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      );
+      CREATE INDEX idx_models_provider ON models(provider_id);
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -259,6 +299,44 @@ export interface ProviderRow {
   created_at: number;
   openai_auth_style: AuthStyle;
   anthropic_auth_style: AuthStyle;
+}
+
+/** How the proxy maps `body.model` to an upstream provider.
+ *  - passthrough (default): the model string goes to the provider untouched.
+ *  - router: the model MUST exist in the registry and is rewritten to the
+ *    registered upstream_model of its provider. */
+export type RoutingMode = "passthrough" | "router";
+
+/** A registered public model id (Model Registry). `upstream_model` is what the
+ *  provider actually receives; `id` is what gateway clients send. */
+export interface ModelRow {
+  id: string;
+  /** NULL = orphaned (its provider was deleted without cascade). */
+  provider_id: string | null;
+  upstream_model: string;
+  proto: "openai" | "anthropic";
+  name: string;
+  description: string;
+  hugging_face_id: string;
+  quantization: string;
+  openrouter_slug: string;
+  always_on: number;
+  enabled: number;
+  context_length: number | null;
+  max_output_length: number | null;
+  /** Unix seconds (upstream creation time), NULL when unknown. */
+  created: number | null;
+  /** JSON arrays/objects (validated on write). */
+  input_modalities: string;
+  output_modalities: string;
+  sampling_params: string;
+  features: string;
+  reasoning_efforts: string | null;
+  pricing: string | null;
+  datacenters: string | null;
+  source: "auto" | "manual";
+  created_at: number;
+  updated_at: number;
 }
 
 export interface ApiKeyRow {

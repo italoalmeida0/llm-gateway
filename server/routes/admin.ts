@@ -1,11 +1,18 @@
 import { LIMITS, SMTP_ENABLED } from "../config";
-import { db, stmts, audit, type ProviderRow, type ApiKeyRow, type UserRow, type AuthStyle } from "../db";
+import { db, stmts, audit, type ProviderRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow } from "../db";
 import { encryptSecret, decryptSecret, randomToken, sha256Hex } from "../crypto";
 import { requireAdmin, revokeAllUserSessions, auditAdmin } from "../auth";
 import { publicKey, revokeKey } from "../keys";
 import { GATEWAY_SECRET } from "../config";
 import { sendInviteEmail, sendResetEmail } from "../email";
 import { invalidateProviderCache } from "../proxy/index";
+import {
+  getRoutingMode,
+  setRoutingMode,
+  syncProviderModels,
+  publicModelAdmin,
+  invalidateModelCache,
+} from "../models";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { hourlySeries, utcDate } from "../usage";
 
@@ -13,7 +20,7 @@ import { hourlySeries, utcDate } from "../usage";
  * /api/admin/* — everything requires role=admin. Every mutation is audited.
  */
 
-function publicProvider(p: ProviderRow) {
+function publicProvider(p: ProviderRow, modelCount?: number) {
   return {
     id: p.id,
     name: p.name,
@@ -25,7 +32,14 @@ function publicProvider(p: ProviderRow) {
     priority: p.priority,
     createdAt: p.created_at,
     hasApiKey: !!p.api_key_enc,
+    modelCount: modelCount ?? providerModelCount(p.id),
   };
+}
+
+function providerModelCount(providerId: string): number {
+  return db
+    .prepare<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM models WHERE provider_id = ?")
+    .get(providerId)!.n;
 }
 
 function validBaseUrl(raw: string | null, field: string): string | null {
@@ -84,6 +98,120 @@ async function providerWrite(body: Record<string, unknown>, existing?: ProviderR
   return { name, openaiBaseUrl, anthropicBaseUrl, openaiAuthStyle, anthropicAuthStyle, enabled, priority, apiKeyEnc };
 }
 
+/** Validated model-registry column values for create/update. Absent PATCH
+ *  fields keep the existing value; nullable fields accept explicit null. */
+function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
+  const strOpt = (key: string, max: number): string | undefined => {
+    if (!(key in body)) return undefined;
+    const val = body[key];
+    if (typeof val !== "string") throw new ApiError(400, `${key} must be a string`);
+    if (val.length > max) throw new ApiError(400, `${key} is too long (max ${max})`);
+    return val;
+  };
+  const arrOpt = (key: string): string[] | undefined => {
+    if (!(key in body)) return undefined;
+    const val = body[key];
+    if (
+      !Array.isArray(val) ||
+      val.length > 24 ||
+      val.some((x) => typeof x !== "string" || x.length === 0 || x.length > 64)
+    ) {
+      throw new ApiError(400, `${key} must be an array of up to 24 strings (≤64 chars each)`);
+    }
+    return val as string[];
+  };
+  const intOpt = (key: string, max: number): number | null | undefined => {
+    if (!(key in body)) return undefined;
+    const val = body[key];
+    if (val === null) return null;
+    if (typeof val !== "number" || !Number.isInteger(val) || val < 0 || val > max) {
+      throw new ApiError(400, `${key} must be an integer between 0 and ${max}`);
+    }
+    return val;
+  };
+  const pricingOpt = (): string | null | undefined => {
+    if (!("pricing" in body)) return undefined;
+    const val = body.pricing;
+    if (val === null) return null;
+    if (typeof val !== "object" || Array.isArray(val)) {
+      throw new ApiError(400, "pricing must be an object of string values");
+    }
+    const out: Record<string, string> = {};
+    for (const [k, p] of Object.entries(val as Record<string, unknown>)) {
+      if (Object.keys(out).length >= 16) break;
+      if (k.length > 48) throw new ApiError(400, "pricing keys are too long");
+      if (typeof p === "string" && p.length <= 32) out[k] = p;
+      else if (typeof p === "number" && Number.isFinite(p)) out[k] = String(p);
+      else throw new ApiError(400, `pricing.${k} must be a string or number`);
+    }
+    return JSON.stringify(out);
+  };
+  const datacentersOpt = (): string | null | undefined => {
+    if (!("datacenters" in body)) return undefined;
+    const val = body.datacenters;
+    if (val === null) return null;
+    if (!Array.isArray(val) || val.length > 24) {
+      throw new ApiError(400, "datacenters must be an array of {country_code}");
+    }
+    for (const d of val) {
+      const cc = (d as Record<string, unknown> | null)?.country_code;
+      if (typeof cc !== "string" || !/^[A-Za-z0-9-]{1,8}$/.test(cc)) {
+        throw new ApiError(400, "each datacenter needs a short country_code");
+      }
+    }
+    return JSON.stringify(val.map((d) => ({ country_code: (d as any).country_code })));
+  };
+  const boolOpt = (key: string): number | undefined => {
+    if (!(key in body)) return undefined;
+    return body[key] ? 1 : 0;
+  };
+  const protoOpt = (): "openai" | "anthropic" | undefined => {
+    if (!("proto" in body)) return undefined;
+    if (body.proto !== "openai" && body.proto !== "anthropic") {
+      throw new ApiError(400, 'proto must be "openai" or "anthropic"');
+    }
+    return body.proto;
+  };
+  const jsonOr = (arr: string[] | undefined, prev: string): string =>
+    arr === undefined ? prev : JSON.stringify(arr);
+
+  // Nullable fields: undefined = keep, null = clear (must NOT use ?? chains,
+  // which would turn an explicit clear into "keep").
+  const cl = intOpt("contextLength", 1e10);
+  const mol = intOpt("maxOutputLength", 1e10);
+  const created = intOpt("created", 4_102_444_800);
+  const pricing = pricingOpt();
+  const datacenters = datacentersOpt();
+  const efforts = arrOpt("reasoningEfforts");
+
+  return {
+    proto: protoOpt() ?? existing?.proto,
+    upstream_model: strOpt("upstreamModel", 256) ?? existing?.upstream_model,
+    name: strOpt("name", 256) ?? existing?.name ?? "",
+    description: strOpt("description", 2000) ?? existing?.description ?? "",
+    hugging_face_id: strOpt("huggingFaceId", 256) ?? existing?.hugging_face_id ?? "",
+    quantization: strOpt("quantization", 64) ?? existing?.quantization ?? "",
+    openrouter_slug: strOpt("openrouterSlug", 256) ?? existing?.openrouter_slug ?? "",
+    always_on: boolOpt("alwaysOn") ?? existing?.always_on ?? 1,
+    enabled: boolOpt("enabled") ?? existing?.enabled ?? 1,
+    context_length: cl === undefined ? (existing?.context_length ?? null) : cl,
+    max_output_length: mol === undefined ? (existing?.max_output_length ?? null) : mol,
+    created: created === undefined ? (existing?.created ?? null) : created,
+    input_modalities: jsonOr(arrOpt("inputModalities"), existing?.input_modalities ?? '["text"]'),
+    output_modalities: jsonOr(arrOpt("outputModalities"), existing?.output_modalities ?? '["text"]'),
+    sampling_params: jsonOr(arrOpt("samplingParams"), existing?.sampling_params ?? "[]"),
+    features: jsonOr(arrOpt("features"), existing?.features ?? "[]"),
+    reasoning_efforts:
+      efforts === undefined
+        ? (existing?.reasoning_efforts ?? null)
+        : efforts.length
+          ? JSON.stringify(efforts)
+          : null,
+    pricing: pricing === undefined ? (existing?.pricing ?? null) : pricing,
+    datacenters: datacenters === undefined ? (existing?.datacenters ?? null) : datacenters,
+  };
+}
+
 export async function handleAdminRoute(path: string, req: Request, url: URL): Promise<Response | null> {
   const ctx = await requireAdmin(req); // every admin route is gated
   const ip = clientIp(req);
@@ -94,12 +222,21 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     const rows = db
       .prepare<ProviderRow, []>("SELECT * FROM providers ORDER BY priority ASC, created_at ASC")
       .all();
-    return ok({ providers: rows.map(publicProvider) }, req);
+    const counts = new Map(
+      db
+        .query<{ provider_id: string; n: number }, []>(
+          "SELECT provider_id, COUNT(*) AS n FROM models GROUP BY provider_id",
+        )
+        .all()
+        .map((r) => [r.provider_id, r.n]),
+    );
+    return ok({ providers: rows.map((p) => publicProvider(p, counts.get(p.id) ?? 0)) }, req);
   }
 
   if (path === "/api/admin/providers" && req.method === "POST") {
     const body = await readJsonBody(req, LIMITS.apiBodyBytes);
     const data = await providerWrite(body);
+    const plainApiKey = v.str(body, "apiKey", { max: 512, optional: true });
     const id = randomToken(12);
     db.prepare(
       `INSERT INTO providers (id, name, openai_base_url, anthropic_base_url, openai_auth_style, anthropic_auth_style, api_key_enc, enabled, priority, created_at)
@@ -117,21 +254,26 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       Date.now(),
     );
     invalidateProviderCache();
-    auditAdmin(ctx.user, "provider.created", id, { name: data.name }, ip);
     const row = db.prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?").get(id)!;
-    return ok({ provider: publicProvider(row) }, req);
+    // Model registry auto-import: best-effort — a failing /models endpoint
+    // yields per-capability errors in `sync` but never blocks creation.
+    const sync = plainApiKey ? await syncProviderModels(row, plainApiKey) : {};
+    auditAdmin(ctx.user, "provider.created", id, { name: data.name, sync }, ip);
+    return ok({ provider: publicProvider(row), sync }, req);
   }
 
-  const providerMatch = path.match(/^\/api\/admin\/providers\/([a-f0-9]{24})(\/test)?$/);
+  const providerMatch = path.match(/^\/api\/admin\/providers\/([a-f0-9]{24})(\/test|\/sync-models)?$/);
   if (providerMatch) {
     const providerId = providerMatch[1]!;
-    const isTest = !!providerMatch[2];
+    const action = providerMatch[2] ?? "";
+    const isTest = action === "/test";
+    const isSync = action === "/sync-models";
     const existing = db
       .prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?")
       .get(providerId);
     if (!existing) return err(404, "provider not found", req);
 
-    if (req.method === "PATCH" && !isTest) {
+    if (req.method === "PATCH" && !action) {
       const body = await readJsonBody(req, LIMITS.apiBodyBytes);
       const data = await providerWrite(body, existing);
       db.prepare(
@@ -154,11 +296,38 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       return ok({ provider: publicProvider(row) }, req);
     }
 
-    if (req.method === "DELETE" && !isTest) {
-      db.prepare("DELETE FROM providers WHERE id = ?").run(providerId);
+    if (req.method === "DELETE" && !action) {
+      // Default: FK ON DELETE SET NULL orphans the provider's models — usage
+      // history survives and the admin can re-link them from the Models tab.
+      // ?deleteModels=true opts into cascading deletion.
+      const deleteModels = url.searchParams.get("deleteModels") === "true";
+      const n = providerModelCount(providerId);
+      db.transaction(() => {
+        if (deleteModels) db.prepare("DELETE FROM models WHERE provider_id = ?").run(providerId);
+        db.prepare("DELETE FROM providers WHERE id = ?").run(providerId);
+      })();
       invalidateProviderCache();
-      auditAdmin(ctx.user, "provider.deleted", providerId, { name: existing.name }, ip);
-      return ok({ deleted: true }, req);
+      invalidateModelCache();
+      auditAdmin(
+        ctx.user,
+        "provider.deleted",
+        providerId,
+        { name: existing.name, models: deleteModels ? { deleted: n } : { orphaned: n } },
+        ip,
+      );
+      return ok(
+        { deleted: true, modelsDeleted: deleteModels ? n : 0, modelsOrphaned: deleteModels ? 0 : n },
+        req,
+      );
+    }
+
+    if (req.method === "POST" && isSync) {
+      // Re-run the registry import on demand (models added upstream since the
+      // provider was created). Duplicates are skipped; admin edits survive.
+      const key = await decryptSecret(existing.api_key_enc, GATEWAY_SECRET);
+      const sync = await syncProviderModels(existing, key);
+      auditAdmin(ctx.user, "provider.models_synced", providerId, { sync }, ip);
+      return ok({ sync }, req);
     }
 
     if (req.method === "POST" && isTest) {
@@ -258,6 +427,163 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       }
       auditAdmin(ctx.user, "provider.tested", providerId, model ? { model } : undefined, ip);
       return ok({ results }, req);
+    }
+  }
+
+  // ================= settings =================
+
+  if (path === "/api/admin/settings" && req.method === "GET") {
+    return ok({ settings: { routingMode: getRoutingMode() } }, req);
+  }
+
+  if (path === "/api/admin/settings" && req.method === "PATCH") {
+    const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+    const mode = v.str(body, "routingMode", { max: 16 });
+    if (mode !== "passthrough" && mode !== "router") {
+      throw new ApiError(400, 'routingMode must be "passthrough" or "router"');
+    }
+    setRoutingMode(mode);
+    invalidateModelCache();
+    auditAdmin(ctx.user, "settings.updated", "routing_mode", { routingMode: mode }, ip);
+    return ok({ settings: { routingMode: mode } }, req);
+  }
+
+  // ================= models (registry) =================
+
+  if (path === "/api/admin/models" && req.method === "GET") {
+    const rows = db
+      .prepare<ModelRow & { provider_name: string | null }, []>(
+        `SELECT m.*, p.name AS provider_name FROM models m
+         LEFT JOIN providers p ON p.id = m.provider_id
+         ORDER BY m.id`,
+      )
+      .all();
+    return ok({ models: rows.map(publicModelAdmin) }, req);
+  }
+
+  if (path === "/api/admin/models" && req.method === "POST") {
+    const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+    const id = v.str(body, "id", { min: 1, max: 256 })!;
+    if (/\s|[\x00-\x1f]/.test(id)) {
+      throw new ApiError(400, "id must not contain whitespace or control characters");
+    }
+    if (db.prepare<{ id: string }, [string]>("SELECT id FROM models WHERE id = ?").get(id)) {
+      throw new ApiError(409, "a model with this id is already registered");
+    }
+    const providerId = v.str(body, "providerId", { min: 1, max: 64 })!;
+    const provider = db
+      .prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?")
+      .get(providerId);
+    if (!provider) throw new ApiError(400, "providerId does not match any provider");
+    const f = modelFields(body);
+    const proto = f.proto ?? (provider.openai_base_url ? "openai" : "anthropic");
+    const upstreamModel = f.upstream_model ?? id;
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO models
+         (id, provider_id, upstream_model, proto, name, description, hugging_face_id,
+          quantization, openrouter_slug, always_on, enabled, context_length,
+          max_output_length, created, input_modalities, output_modalities,
+          sampling_params, features, reasoning_efforts, pricing, datacenters,
+          source, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
+    ).run(
+      id, providerId, upstreamModel, proto, f.name, f.description, f.hugging_face_id,
+      f.quantization, f.openrouter_slug, f.always_on, f.enabled, f.context_length,
+      f.max_output_length, f.created, f.input_modalities, f.output_modalities,
+      f.sampling_params, f.features, f.reasoning_efforts, f.pricing, f.datacenters,
+      now, now,
+    );
+    invalidateModelCache();
+    auditAdmin(ctx.user, "model.created", id, { providerId, upstreamModel, proto }, ip);
+    const row = db
+      .prepare<ModelRow & { provider_name: string | null }, [string]>(
+        `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id WHERE m.id = ?`,
+      )
+      .get(id)!;
+    return ok({ model: publicModelAdmin(row) }, req);
+  }
+
+  if (path === "/api/admin/models/bulk-delete" && req.method === "POST") {
+    const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+    const ids = body.ids;
+    if (
+      !Array.isArray(ids) ||
+      ids.length === 0 ||
+      ids.length > 500 ||
+      ids.some((x) => typeof x !== "string" || x.length === 0 || x.length > 256)
+    ) {
+      throw new ApiError(400, "ids must be an array of 1..500 model id strings");
+    }
+    const del = db.prepare("DELETE FROM models WHERE id = ?");
+    let deleted = 0;
+    db.transaction(() => {
+      for (const mid of ids as string[]) deleted += del.run(mid).changes;
+    })();
+    invalidateModelCache();
+    auditAdmin(ctx.user, "models.bulk_deleted", null, { requested: ids.length, deleted }, ip);
+    return ok({ deleted }, req);
+  }
+
+  const modelMatch = path.match(/^\/api\/admin\/models\/(.+)$/);
+  if (modelMatch && modelMatch[1] !== "bulk-delete") {
+    let modelId = modelMatch[1]!;
+    try {
+      modelId = decodeURIComponent(modelMatch[1]!);
+    } catch {
+      return err(400, "malformed model id", req);
+    }
+    const existing = db
+      .prepare<ModelRow, [string]>("SELECT * FROM models WHERE id = ?")
+      .get(modelId);
+    if (!existing) return err(404, "model not found", req);
+
+    if (req.method === "PATCH") {
+      const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+      let providerId = existing.provider_id;
+      if ("providerId" in body) {
+        const pid = body.providerId;
+        if (pid === null) {
+          providerId = null; // explicit unlink (orphan on purpose)
+        } else {
+          if (typeof pid !== "string") throw new ApiError(400, "providerId must be a string or null");
+          const p = db
+            .prepare<{ id: string }, [string]>("SELECT id FROM providers WHERE id = ?")
+            .get(pid);
+          if (!p) throw new ApiError(400, "providerId does not match any provider");
+          providerId = pid;
+        }
+      }
+      const f = modelFields(body, existing);
+      db.prepare(
+        `UPDATE models SET provider_id = ?, upstream_model = ?, proto = ?, name = ?,
+           description = ?, hugging_face_id = ?, quantization = ?, openrouter_slug = ?,
+           always_on = ?, enabled = ?, context_length = ?, max_output_length = ?,
+           created = ?, input_modalities = ?, output_modalities = ?, sampling_params = ?,
+           features = ?, reasoning_efforts = ?, pricing = ?, datacenters = ?, updated_at = ?
+         WHERE id = ?`,
+      ).run(
+        providerId, f.upstream_model ?? existing.upstream_model, f.proto ?? existing.proto,
+        f.name, f.description, f.hugging_face_id, f.quantization, f.openrouter_slug,
+        f.always_on, f.enabled, f.context_length, f.max_output_length, f.created,
+        f.input_modalities, f.output_modalities, f.sampling_params, f.features,
+        f.reasoning_efforts, f.pricing, f.datacenters, Date.now(), modelId,
+      );
+      invalidateModelCache();
+      auditAdmin(ctx.user, "model.updated", modelId, { providerId }, ip);
+      const row = db
+        .prepare<ModelRow & { provider_name: string | null }, [string]>(
+          `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id WHERE m.id = ?`,
+        )
+        .get(modelId)!;
+      return ok({ model: publicModelAdmin(row) }, req);
+    }
+
+    if (req.method === "DELETE") {
+      db.prepare("DELETE FROM models WHERE id = ?").run(modelId);
+      invalidateModelCache();
+      auditAdmin(ctx.user, "model.deleted", modelId, undefined, ip);
+      return ok({ deleted: true }, req);
     }
   }
 

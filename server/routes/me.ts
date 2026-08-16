@@ -19,7 +19,7 @@ import {
 import { verifyGoogleIdToken } from "../google";
 import { sendSecurityAlert } from "../email";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
-import { bruteforceFail, bruteforceLocked, consumeTotpCode } from "../ratelimit";
+import { bruteforceClear, bruteforceFail, bruteforceLocked, consumeTotpCode } from "../ratelimit";
 
 /**
  * /api/me/* — profile, password, TOTP, Google linking, session management.
@@ -84,9 +84,13 @@ export async function handleMeRoute(path: string, req: Request): Promise<Respons
     const body = await readJsonBody(req, LIMITS.authBodyBytes);
     const code = v.str(body, "code", { min: 6, max: 6 })!;
 
+    const locked = bruteforceLocked(`2faenable:${ctx.user.id}`);
+    if (locked > 0) return err(429, `too many attempts, retry in ${locked}s`, req);
     if (!(await totpVerify(ctx.user.totp_pending, code))) {
+      bruteforceFail(`2faenable:${ctx.user.id}`);
       return err(400, "invalid code — check your authenticator clock", req);
     }
+    bruteforceClear(`2faenable:${ctx.user.id}`);
     db.prepare("UPDATE users SET totp_secret = totp_pending, totp_pending = NULL WHERE id = ?").run(
       ctx.user.id,
     );

@@ -57,7 +57,8 @@ export async function handleKeysRoute(path: string, req: Request): Promise<Respo
     });
     audit("key.created", { actorId: ctx.user.id, target: row.id, ip, meta: { name } });
 
-    // Plaintext token is returned exactly once and can never be read again.
+    // Plaintext token: returned here AND recoverable later via GET /reveal
+    // from the AES copy (token_enc) — every reveal is audit-logged.
     return ok({ key: publicKey(row), token }, req);
   }
 

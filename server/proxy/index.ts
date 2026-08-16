@@ -2,6 +2,7 @@ import { LIMITS } from "../config";
 import { stmts, audit, type ApiKeyRow, type AuthStyle } from "../db";
 import { randomToken, sha256Hex } from "../crypto";
 import { clientIp, baseHeaders } from "../http";
+import { estimateTokenCount } from "tokenx";
 import {
   acquireUpstreamSlot,
   releaseUpstreamSlot,
@@ -378,9 +379,28 @@ function registryModelsResponse(
 }
 
 // ===== Token estimation fallback =====
+// tokenx: calibrated against OpenAI's o200k_base, language-aware, 2kB,
+// zero-dep. Used ONLY on the fallback path — whenever the upstream reports
+// real usage figures, those always win.
 
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
+/** Chars of observed text fed to tokenx; the measured per-char ratio is
+ *  extrapolated to the full length, so memory stays O(sample), never
+ *  O(response). Accuracy depends on the kind of text, not its length. */
+const EST_SAMPLE_CHARS = 2048;
+
+/** Concatenate every string VALUE in a JSON tree (ignores keys, numbers and
+ *  structure) — so an input estimate tracks the actual payload text, not the
+ *  ~30% JSON overhead of the raw body. */
+function collectStrings(v: unknown, out: string[]): void {
+  if (typeof v === "string") out.push(v);
+  else if (Array.isArray(v)) for (const x of v) collectStrings(x, out);
+  else if (v && typeof v === "object") for (const x of Object.values(v)) collectStrings(x, out);
+}
+
+export function estimateBodyTokens(bodyJson: unknown): number {
+  const parts: string[] = [];
+  collectStrings(bodyJson, parts);
+  return Math.max(1, estimateTokenCount(parts.join(" ")));
 }
 
 // ===== Usage parsing =====
@@ -457,11 +477,14 @@ function parseAnthropicJson(bodyText: string): UsageResult {
  * incremental line parser extracts usage figures and (fallback) output text
  * length. Memory stays O(longest event line), not O(response size).
  */
-class StreamMeter {
+export class StreamMeter {
   private pending = "";
   private decoder = new TextDecoder();
   private currentEvent = "";
   outChars = 0;
+  /** Capped text sample feeding tokenx — the per-char ratio measured on it
+   *  is extrapolated to the whole stream (memory stays O(sample)). */
+  private outSample = "";
   inTok = 0;
   cacheTok = 0;
   outTok = 0;
@@ -469,6 +492,19 @@ class StreamMeter {
   sawUsage = false;
 
   constructor(private proto: Proto) {}
+
+  private addOutText(t: string): void {
+    this.outChars += t.length;
+    if (this.outSample.length < EST_SAMPLE_CHARS) {
+      this.outSample += t.slice(0, EST_SAMPLE_CHARS - this.outSample.length);
+    }
+  }
+
+  private estimateOutTok(): number {
+    const sampleTokens = estimateTokenCount(this.outSample);
+    const scaled = Math.round((sampleTokens * this.outChars) / this.outSample.length);
+    return Math.max(1, scaled);
+  }
 
   feed(chunk: Uint8Array): void {
     this.pending += this.decoder.decode(chunk, { stream: true });
@@ -510,9 +546,9 @@ class StreamMeter {
         if (Array.isArray(choices)) {
           for (const c of choices) {
             const delta = c?.delta?.content;
-            if (typeof delta === "string") this.outChars += delta.length;
+            if (typeof delta === "string") this.addOutText(delta);
             const text = c?.text; // legacy completions
-            if (typeof text === "string") this.outChars += text.length;
+            if (typeof text === "string") this.addOutText(text);
           }
         }
       } catch {
@@ -552,7 +588,7 @@ class StreamMeter {
       try {
         const j = JSON.parse(data);
         if (j?.delta?.type === "text_delta" && typeof j.delta.text === "string") {
-          this.outChars += j.delta.text.length;
+          this.addOutText(j.delta.text);
         }
       } catch {}
     }
@@ -565,7 +601,7 @@ class StreamMeter {
     return {
       inTok: 0, // input estimate comes from request-body size at call site
       cacheTok: 0,
-      outTok: this.outChars > 0 ? estimateTokens(String(this.outChars)) : 0,
+      outTok: this.outChars > 0 ? this.estimateOutTok() : 0,
       model: this.model,
       estimated: true,
     };
@@ -737,7 +773,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     const record = (u: UsageResult, status: number, latencyMs: number, stream: boolean) => {
       let inTok = u.inTok;
       if (u.estimated && bodyJson) {
-        inTok = estimateTokens(bodyText);
+        inTok = estimateBodyTokens(bodyJson);
       }
       recordUsage({
         keyId: keyRow.id,
@@ -1019,12 +1055,16 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
   }
 }
 
-let lastTouch = 0;
+const lastTouchByKey = new Map<string, number>();
 function touchKey(keyId: string, ip: string): void {
-  // Throttle the per-request bookkeeping UPDATE to ~1/min/key.
+  // Throttle the per-request bookkeeping UPDATE to ~1/min/key. The throttle
+  // clock is PER KEY — a global clock would starve every other key's
+  // last_used_at while any single key stays busy.
   const now = Date.now();
-  if (now - lastTouch < 60_000) return;
-  lastTouch = now;
+  const last = lastTouchByKey.get(keyId) ?? 0;
+  if (now - last < 60_000) return;
+  if (lastTouchByKey.size > 10_000) lastTouchByKey.clear(); // bounded map
+  lastTouchByKey.set(keyId, now);
   db.prepare("UPDATE api_keys SET last_used_at = ?, last_used_ip = ? WHERE id = ?").run(
     now,
     ip.slice(0, 64),

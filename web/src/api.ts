@@ -26,17 +26,30 @@ export interface Session {
 
 const LS = "llm_gateway_session";
 
-let session: Session | null = null;
-try {
-  const raw = localStorage.getItem(LS);
-  if (raw) session = JSON.parse(raw);
-} catch {
-  localStorage.removeItem(LS);
+function loadStored(): Session | null {
+  try {
+    const raw = localStorage.getItem(LS);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    localStorage.removeItem(LS);
+    return null;
+  }
 }
+
+let session: Session | null = loadStored();
 
 let listeners: Array<(s: Session | null) => void> = [];
 
 export function currentSession(): Session | null {
+  return session;
+}
+
+/** Another tab may have rotated the pair (or logged out) — the freshest
+ *  stored copy wins, so this tab never replays an already-rotated token. */
+function latestSession(): Session | null {
+  const stored = loadStored();
+  if (stored && (!session || stored.refreshToken !== session.refreshToken)) session = stored;
+  if (!stored && session) session = null;
   return session;
 }
 
@@ -57,12 +70,13 @@ export function onSessionChange(fn: (s: Session | null) => void): () => void {
 let refreshPromise: Promise<boolean> | null = null;
 
 async function refresh(): Promise<boolean> {
-  if (!session) return false;
+  const s = latestSession();
+  if (!s) return false;
   try {
     const res = await fetch("/api/auth/refresh", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken: session.refreshToken }),
+      body: JSON.stringify({ refreshToken: s.refreshToken }),
     });
     const j = await res.json();
     if (!res.ok || !j.success) return false;
@@ -96,7 +110,8 @@ export class ApiFail extends Error {
 
 async function rawCall<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {};
-  if (session) headers.Authorization = `Bearer ${session.accessToken}`;
+  const s = latestSession();
+  if (s) headers.Authorization = `Bearer ${s.accessToken}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const res = await fetch(path, {
     method,
@@ -115,7 +130,7 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
   try {
     return await rawCall<T>(method, path, body);
   } catch (e) {
-    if (e instanceof ApiFail && e.status === 401 && session) {
+    if (e instanceof ApiFail && e.status === 401 && latestSession()) {
       const ok = await refreshSingleFlight();
       if (ok) return rawCall<T>(method, path, body);
       setSession(null);

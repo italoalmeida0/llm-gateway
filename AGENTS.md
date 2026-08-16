@@ -124,8 +124,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 ## Hard rules
 
 - **Never log or serialize secrets**: upstream provider keys (AES-encrypted at rest),
-  plaintext gateway keys (only hash stored; shown once at creation), TOTP secrets,
-  GATEWAY_SECRET.
+  plaintext gateway keys (SHA-256 hash is the lookup key; an AES-encrypted copy
+  `api_keys.token_enc` exists ONLY for the owner/admin `/reveal` endpoints and
+  every reveal is audit-logged), TOTP secrets, GATEWAY_SECRET.
 - Error messages on `/v1/*` use the protocol envelope (OpenAI `{"error":{…}}`,
   Anthropic `{"type":"error",…}`) — clients depend on it.
 - Dashboard API envelope: `{success:true, …}` / `{success:false, error}`.
@@ -142,8 +143,10 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - Don't buffer whole streams: keep the SSE tee incremental (memory bounded by
   longest event line, not response size).
 - Keep the dependency list minimal: runtime deps are `nodemailer` (SMTP),
-  `qrcode` (TOTP QR), `usal` (scroll/entrance animations, user-sanctioned)
-  and `sortablejs` (drag-and-drop ordering, user-sanctioned — only imported
+  `qrcode` (TOTP QR), `tokenx` (fallback token-count estimation when an
+  upstream reports no usage — used ONLY on that estimate path, user-sanctioned),
+  `usal` (scroll/entrance animations, user-sanctioned) and `sortablejs`
+  (drag-and-drop ordering, user-sanctioned — only imported
   by `web/src/sortable.ts`; rows carry `data-id` + a `[data-handle]` grip,
   the reordered ids are POSTed to the matching `/reorder` / `PUT …/targets`
   endpoint).

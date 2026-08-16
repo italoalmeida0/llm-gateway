@@ -317,6 +317,18 @@ const MIGRATIONS: Migration[] = [
         SELECT id, provider_id, upstream_model, 0, 1, created_at FROM models WHERE provider_id IS NOT NULL;
     `,
   },
+  {
+    name: "010_session_families",
+    // Refresh-token rotation chains get a family id (the jti of the chain's
+    // first session). Presenting a refresh token that was ALREADY rotated
+    // away (its session row revoked) is theft evidence: the whole family is
+    // revoked, killing the thief's rotated-forward session too (OWASP
+    // refresh-token reuse detection).
+    up: `
+      ALTER TABLE sessions ADD COLUMN family TEXT;
+      UPDATE sessions SET family = jti WHERE family IS NULL;
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -370,6 +382,7 @@ export interface SessionRow {
   ip: string | null;
   ua: string | null;
   label: string | null;
+  family: string | null;
 }
 
 export type AuthStyle = "bearer" | "x-api-key";

@@ -35,6 +35,8 @@ import {
   liveKeyClear,
   nextCooldown,
 } from "../server/failover";
+import { StreamMeter, estimateBodyTokens } from "../server/proxy/index";
+import { estimateTokenCount } from "tokenx";
 import type { ModelRow, ModelTargetRow, ProviderRow } from "../server/db";
 
 const SECRET = "test-secret-that-is-long-enough-32+";
@@ -550,3 +552,71 @@ describe("failover: candidate chains", () => {
   });
 });
 
+
+describe("StreamMeter fallback (upstream never reports usage)", () => {
+  const enc = new TextEncoder();
+
+  test("openai stream: tokenx estimate of the output text — not the digit count", () => {
+    const m = new StreamMeter("openai");
+    // 20 chunks x 100 chars of content, no usage chunk anywhere.
+    for (let i = 0; i < 20; i++) {
+      m.feed(enc.encode(`data: {"model":"m1","choices":[{"delta":{"content":"${"y".repeat(100)}"}}]}\n\n`));
+    }
+    const r = m.result(0);
+    expect(r.estimated).toBe(true);
+    expect(r.inTok).toBe(0); // input estimate happens at the call site
+    // Whole text (2000 chars) fits the estimation sample, so the meter must
+    // land exactly on tokenx's count. The pre-fix code returned 1-2 here.
+    expect(r.outTok).toBe(estimateTokenCount("y".repeat(2000)));
+    expect(r.outTok).toBeGreaterThan(100); // a real order of magnitude
+    expect(r.model).toBe("m1");
+  });
+
+  test("anthropic stream: text_delta is tokenx-estimated when usage events are missing", () => {
+    const m = new StreamMeter("anthropic");
+    m.feed(enc.encode(`event: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"${"z".repeat(400)}"}}\n\n`));
+    const r = m.result(0);
+    expect(r.estimated).toBe(true);
+    expect(r.outTok).toBe(estimateTokenCount("z".repeat(400)));
+    expect(r.outTok).toBeGreaterThan(10);
+  });
+
+  test("long streams: the capped sample extrapolates to the full length", () => {
+    const m = new StreamMeter("openai");
+    // 8000 chars of English prose — well beyond the 2048-char sample cap.
+    let stream = "";
+    while (stream.length < 8000) stream += "The quick brown fox jumps over the lazy dog. ";
+    stream = stream.slice(0, 8000);
+    for (const chunk of stream.match(/.{1,100}/g)!) {
+      m.feed(enc.encode(`data: {"model":"m1","choices":[{"delta":{"content":${JSON.stringify(chunk)}}}]}\n\n`));
+    }
+    const r = m.result(0);
+    expect(r.estimated).toBe(true);
+    // The per-char ratio of the first sample extrapolates to (at least) the
+    // same order as counting the whole text — never the pre-fix ~1 token.
+    const full = estimateTokenCount(stream);
+    expect(r.outTok).toBeGreaterThanOrEqual(Math.floor(full * 0.9));
+    expect(r.outTok).toBeLessThanOrEqual(Math.ceil(full * 1.1));
+  });
+
+  test("real usage events still win over the estimate", () => {
+    const m = new StreamMeter("openai");
+    m.feed(enc.encode(`data: {"model":"m1","choices":[{"delta":{"content":"${"y".repeat(100)}"}}]}\n\n`));
+    m.feed(enc.encode(`data: {"usage":{"prompt_tokens":7,"completion_tokens":42}}\n\n`));
+    const r = m.result(0);
+    expect(r.estimated).toBe(false);
+    expect(r.outTok).toBe(42);
+    expect(r.inTok).toBe(7);
+  });
+});
+
+describe("estimateBodyTokens (estimated input from the request body)", () => {
+  test("runs tokenx over string values only — JSON keys/structure add no tokens", () => {
+    const body = { model: "llm-1", messages: [{ role: "user", content: "a".repeat(400) }] };
+    expect(estimateBodyTokens(body)).toBe(estimateTokenCount(`llm-1 user ${"a".repeat(400)}`));
+  });
+
+  test("never returns zero for a non-empty body", () => {
+    expect(estimateBodyTokens({ model: "x" })).toBeGreaterThanOrEqual(1);
+  });
+});

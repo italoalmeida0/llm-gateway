@@ -172,6 +172,8 @@ beforeAll(async () => {
   const staticDir = path.join(dataDir, "dist");
   mkdirSync(staticDir, { recursive: true });
   writeFileSync(path.join(staticDir, "index.html"), "<!doctype html><title>SPA</title>");
+  writeFileSync(path.join(staticDir, "app-abc.js"), "console.log(1);");
+  writeFileSync(path.join(staticDir, "app-abc.js.map"), '{"version":3,"sources":[]}');
 
   upServer = startMiniUpstream();
 
@@ -321,6 +323,55 @@ describe("security audit", () => {
       ip,
     });
     expect(disable.status).toBe(200);
+  });
+
+  // ------------------------------------------------ 1b. sessions & static hardening
+
+  test("refresh reuse: replaying a rotated token revokes the whole family", async () => {
+    const ip = freshIp();
+    const login = await api("/api/auth/login", { body: { email: u2Email, password: U_PW }, ip });
+    expect(login.status).toBe(200);
+    const r1 = login.json.refreshToken as string;
+
+    // Legitimate rotation: r1 -> r2.
+    const rot = await api("/api/auth/refresh", { body: { refreshToken: r1 }, ip });
+    expect(rot.status).toBe(200);
+    const r2 = rot.json.refreshToken as string;
+    expect((await api("/api/me", { token: rot.json.accessToken })).status).toBe(200);
+
+    // Attacker replays the already-consumed r1 -> 401, and the WHOLE family is
+    // revoked…
+    expect((await api("/api/auth/refresh", { body: { refreshToken: r1 }, ip })).status).toBe(401);
+    // …including the legitimate rotated-forward session r2.
+    expect((await api("/api/auth/refresh", { body: { refreshToken: r2 }, ip })).status).toBe(401);
+
+    // A fresh login works again (new family).
+    const relogin = await api("/api/auth/login", { body: { email: u2Email, password: U_PW }, ip });
+    expect(relogin.status).toBe(200);
+    expect((await api("/api/me", { token: relogin.json.accessToken })).status).toBe(200);
+  });
+
+  test("static: source maps are refused even when present in dist/", async () => {
+    expect((await fetch(`${GW}/app-abc.js`)).status).toBe(200);
+    expect((await fetch(`${GW}/app-abc.js.map`)).status).toBe(404);
+  });
+
+  test("2FA enable: invalid codes are brute-force locked like disable/login", async () => {
+    const fresh = await makeUser("u4@audit.test");
+    const ip = freshIp();
+    const setup = await api("/api/me/2fa/setup", { token: fresh, method: "POST", ip });
+    expect(setup.status).toBe(200);
+    const secret = setup.json.secret as string;
+
+    // Codes from 100+ minutes in the future are guaranteed outside the ±1 step
+    // window — deterministically invalid.
+    for (let i = 1; i <= 10; i++) {
+      const wrong = await totpAt(secret, Date.now() + (100 + i) * 60_000);
+      const r = await api("/api/me/2fa/enable", { token: fresh, body: { code: wrong }, ip });
+      expect(r.status).toBe(400);
+    }
+    const locked = await api("/api/me/2fa/enable", { token: fresh, body: { code: "123456" }, ip });
+    expect(locked.status).toBe(429);
   });
 
   // ------------------------------------------------------------ 2. IDOR

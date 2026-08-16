@@ -53,6 +53,10 @@ export function resolveStaticFile(urlPath: string): { filePath: string; isHtml: 
 
   const segments = normalized.split(path.sep);
   if (segments.some((s) => s.startsWith("."))) return null; // no dotfiles
+  // Source maps are build artifacts, never dashboard assets — they would
+  // publish the entire frontend source. Refuse to serve them even if they
+  // end up in the static root.
+  if (normalized.endsWith(".map")) return null;
 
   let finalPath = fullPath;
   if (!existsSync(finalPath) || statSync(finalPath).isDirectory()) {

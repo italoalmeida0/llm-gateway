@@ -22,6 +22,13 @@ RUN bun install --frozen-lockfile --production
 COPY server ./server
 COPY --from=webbuild /app/dist ./dist
 
+# Run as a dedicated non-root user (least privilege). /data holds the DB and
+# the dev secret, so it is owned by that user and mounted as a volume.
+RUN mkdir -p /data \
+    && addgroup -S gateway && adduser -S -G gateway gateway \
+    && chown -R gateway:gateway /app /data
+USER gateway
+
 # /data holds gateway.db + .secret -> mount a volume to persist it
 VOLUME /data
 EXPOSE 3000

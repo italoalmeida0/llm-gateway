@@ -18,7 +18,9 @@ async function build() {
     outdir: distDir,
     target: "browser",
     minify: true,
-    sourcemap: "linked",
+    // No source maps in the published bundle: dist/ is served to the public
+    // internet; a linked .map would expose the whole frontend source.
+    sourcemap: "none",
     plugins: [tailwindPlugin, solidPlugin],
   });
 

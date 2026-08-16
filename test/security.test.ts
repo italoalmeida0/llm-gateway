@@ -305,16 +305,19 @@ describe("security audit", () => {
     expect(confusion.status).toBe(401);
 
     // finish u3's login properly so the account is usable again (+ disable 2FA
-    // with a future-window code to dodge the anti-replay store)
+    // with a next-window code to dodge the anti-replay store). The timestamp is
+    // pinned to the START of the next 30s window: a fixed "+35s" lands two
+    // windows ahead near a boundary and flakes with a 401.
     const finish = await api("/api/auth/2fa", {
       body: { tempToken, code: await totpAt(secret, Date.now()) },
       ip,
     });
     expect(finish.status).toBe(200);
     u3Token = finish.json.accessToken;
+    const nextWindow = (Math.floor(Date.now() / 30_000) + 1) * 30_000 + 1_000;
     const disable = await api("/api/me/2fa/disable", {
       token: u3Token,
-      body: { code: await totpAt(secret, Date.now() + 35_000) },
+      body: { code: await totpAt(secret, nextWindow) },
       ip,
     });
     expect(disable.status).toBe(200);

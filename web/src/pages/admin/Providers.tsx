@@ -1,6 +1,6 @@
 import { createSignal, For, Show, createResource, createMemo } from "solid-js";
 
-import { api, type AuthStyle, type ProviderDto, type SyncOutcome } from "../../api";
+import { api, type AuthStyle, type ProviderDto, type SyncMode, type SyncOutcome, type SyncPreview } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtDate } from "../../ui";
@@ -40,6 +40,11 @@ export default function AdminProvidersPage() {
   const [editing, setEditing] = createSignal<ProviderDto | "new" | null>(null);
   const [confirmDelete, setConfirmDelete] = createSignal<ProviderDto | null>(null);
   const [busy, setBusy] = createSignal(false);
+
+  // ---- import-mode dialog (shown after creating a dual-capability provider) ----
+  const [importFor, setImportFor] = createSignal<{ id: string; name: string; preview: SyncPreview } | null>(null);
+  const [importMode, setImportMode] = createSignal<SyncMode>("both");
+  const [importBusy, setImportBusy] = createSignal(false);
 
   // ---- editor form ----
   const [name, setName] = createSignal("");
@@ -93,13 +98,20 @@ export default function AdminProvidersPage() {
       if (apiKey().trim()) body.apiKey = apiKey().trim();
 
       if (editing() === "new") {
-        const j = await api<{ provider: ProviderDto; sync?: Partial<Record<string, SyncOutcome>> }>(
-          "POST",
-          "/api/admin/providers",
-          body,
-        );
-        const summary = syncSummary(j.sync);
-        toast(summary ? `Provider created — models: ${summary}` : "Provider created");
+        const j = await api<{
+          provider: ProviderDto;
+          sync?: Partial<Record<string, SyncOutcome>>;
+          preview?: SyncPreview;
+        }>("POST", "/api/admin/providers", body);
+        if (j.preview) {
+          // Dual-capability: nothing imported yet — ask how below.
+          setImportMode("both");
+          setImportFor({ id: j.provider.id, name: j.provider.name, preview: j.preview });
+          toast("Provider created — choose how to import its models");
+        } else {
+          const summary = syncSummary(j.sync);
+          toast(summary ? `Provider created — models: ${summary}` : "Provider created");
+        }
       } else {
         await api("PATCH", `/api/admin/providers/${(editing() as ProviderDto).id}`, body);
         toast("Provider updated");
@@ -162,6 +174,27 @@ export default function AdminProvidersPage() {
 
   const [syncBusy, setSyncBusy] = createSignal<string | null>(null);
   const [deleteModels, setDeleteModels] = createSignal(false);
+
+  const runImport = async () => {
+    const t = importFor();
+    if (!t) return;
+    setImportBusy(true);
+    try {
+      const j = await api<{ sync: Partial<Record<string, SyncOutcome>> }>(
+        "POST",
+        `/api/admin/providers/${t.id}/sync-models`,
+        { mode: importMode() },
+      );
+      const summary = syncSummary(j.sync);
+      toast(summary || "Model sync done");
+      setImportFor(null);
+      refetch();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "import failed", "err");
+    } finally {
+      setImportBusy(false);
+    }
+  };
 
   const syncModels = async (p: ProviderDto) => {
     setSyncBusy(p.id);
@@ -396,6 +429,57 @@ export default function AdminProvidersPage() {
                 )}
               </Show>
             </div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* import-mode dialog (dual-capability provider just created) */}
+      <Modal
+        open={!!importFor()}
+        onClose={() => setImportFor(null)}
+        title={`Import models — ${importFor()?.name ?? ""}`}
+        width="max-w-lg"
+      >
+        <div class="space-y-4">
+          <p class="text-sm text-ink-300">
+            This provider has both protocol surfaces. The upstream model lists:
+          </p>
+          <div class="flex flex-wrap gap-2">
+            <For each={(["openai", "anthropic"] as Cap[]).filter((c) => !!importFor()?.preview[c])}>
+              {(c) => {
+                const r = () => importFor()!.preview[c]!;
+                return (
+                  <Badge tone={r().error ? "red" : "zinc"}>
+                    {c}: {r().error ? `failed (${r().error})` : `${r().count} models`}
+                  </Badge>
+                );
+              }}
+            </For>
+            <Show when={importFor()?.preview.common != null}>
+              <Badge tone="indigo">{importFor()!.preview.common} listed by both</Badge>
+            </Show>
+          </div>
+          <div>
+            <span class="block text-xs font-medium text-ink-300 mb-1.5">Import as</span>
+            <Segmented
+              value={importMode()}
+              onChange={(m) => setImportMode(m as SyncMode)}
+              options={[
+                { value: "both", label: "Both" },
+                { value: "separate", label: "Separate" },
+              ]}
+            />
+            <p class="text-[11px] text-ink-500 mt-1.5">
+              {importMode() === "both"
+                ? "One entry per model, served on the OpenAI and Anthropic endpoints."
+                : "Each model keeps the protocol of the list it came from (duplicates go to OpenAI)."}
+            </p>
+          </div>
+          <div class="flex justify-end gap-2 pt-2">
+            <Btn variant="ghost" onClick={() => setImportFor(null)}>Skip for now</Btn>
+            <Btn onClick={runImport} disabled={importBusy()}>
+              {importBusy() ? "Importing…" : "Import models"}
+            </Btn>
           </div>
         </div>
       </Modal>

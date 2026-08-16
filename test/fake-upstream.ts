@@ -227,6 +227,11 @@ async function anthropicMessages(req: Request, raw: string): Promise<Response> {
 let lastAuth: Record<string, string | null> = { authorization: null, "x-api-key": null };
 let lastBody = "";
 
+// Test hook: the model ids each surface's GET /models serves (POST /__models
+// with {openai?: string[], anthropic?: string[]} to override).
+let openaiModels: string[] = [MODEL];
+let anthropicModels: string[] = [MODEL];
+
 const server = Bun.serve({
   port: PORT,
   async fetch(req) {
@@ -235,6 +240,12 @@ const server = Bun.serve({
 
     if (p === "/__last-auth") return Response.json(lastAuth);
     if (p === "/__last-body") return Response.json({ body: lastBody });
+    if (p === "/__models" && req.method === "POST") {
+      const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      if (Array.isArray(b.openai)) openaiModels = b.openai.map(String).slice(0, 50);
+      if (Array.isArray(b.anthropic)) anthropicModels = b.anthropic.map(String).slice(0, 50);
+      return Response.json({ ok: true });
+    }
 
     const raw = req.method === "POST" ? await req.text() : "";
     lastAuth = {
@@ -249,7 +260,10 @@ const server = Bun.serve({
         return openAiChat(req, raw);
       }
       if (p === "/openai/v1/models" && req.method === "GET") {
-        return Response.json({ object: "list", data: [{ id: MODEL, object: "model", created: 0, owned_by: "fake" }] });
+        return Response.json({
+          object: "list",
+          data: openaiModels.map((id) => ({ id, object: "model", created: 0, owned_by: "fake" })),
+        });
       }
       if (p === "/openai/v1/embeddings" && req.method === "POST") {
         lastBody = raw;
@@ -279,7 +293,7 @@ const server = Bun.serve({
       }
       if (p === "/anthropic/v1/models" && req.method === "GET") {
         return Response.json({
-          data: [{ type: "model", id: MODEL, display_name: "Fake LLM 1" }],
+          data: anthropicModels.map((id) => ({ type: "model", id, display_name: `Fake ${id}` })),
           has_more: false,
         });
       }

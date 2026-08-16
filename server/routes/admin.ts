@@ -10,6 +10,7 @@ import {
   getRoutingMode,
   setRoutingMode,
   syncProviderModels,
+  previewProviderModels,
   publicModelAdmin,
   invalidateModelCache,
 } from "../models";
@@ -255,6 +256,15 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     );
     invalidateProviderCache();
     const row = db.prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?").get(id)!;
+    // Dual-capability provider: don't import yet — preview both /models lists
+    // and let the dashboard ask how to import (sync-models with mode
+    // "both"|"separate"). Single-capability: auto-import right away.
+    const dual = !!row.openai_base_url && !!row.anthropic_base_url;
+    if (plainApiKey && dual) {
+      const preview = await previewProviderModels(row, plainApiKey);
+      auditAdmin(ctx.user, "provider.created", id, { name: data.name, import: "pending-choice" }, ip);
+      return ok({ provider: publicProvider(row), preview }, req);
+    }
     // Model registry auto-import: best-effort — a failing /models endpoint
     // yields per-capability errors in `sync` but never blocks creation.
     const sync = plainApiKey ? await syncProviderModels(row, plainApiKey) : {};
@@ -324,9 +334,19 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     if (req.method === "POST" && isSync) {
       // Re-run the registry import on demand (models added upstream since the
       // provider was created). Duplicates are skipped; admin edits survive.
+      // Optional body { mode: "both" | "separate" } (default "both") — see
+      // syncProviderModels.
+      let body: Record<string, unknown> = {};
+      if ((req.headers.get("content-type") ?? "").includes("application/json")) {
+        body = await readJsonBody(req, LIMITS.apiBodyBytes);
+      }
+      const mode = v.str(body, "mode", { max: 16, optional: true });
+      if (mode && mode !== "both" && mode !== "separate") {
+        return err(400, 'mode must be "both" or "separate"', req);
+      }
       const key = await decryptSecret(existing.api_key_enc, GATEWAY_SECRET);
-      const sync = await syncProviderModels(existing, key);
-      auditAdmin(ctx.user, "provider.models_synced", providerId, { sync }, ip);
+      const sync = await syncProviderModels(existing, key, mode ?? "both");
+      auditAdmin(ctx.user, "provider.models_synced", providerId, { mode: mode ?? "both", sync }, ip);
       return ok({ sync }, req);
     }
 

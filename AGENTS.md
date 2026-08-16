@@ -40,11 +40,16 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - **Model registry & routing** (`server/models.ts`, migration `007_models`):
   `models` = public id → provider + `upstream_model` (aliases allowed), with
   rich metadata as validated JSON columns; `settings` KV holds
-  `routing_mode`. Creating a provider auto-imports its `GET /models` per
-  capability (8s timeout, tolerant 3-shape parser, `INSERT OR IGNORE` —
-  best-effort, never blocks creation, never clobbers admin edits). Proxy reads
-  a 5s `routerSnapshot()` cache (mode + all models + enabled providers with
-  decrypted keys); admin mutations call `invalidateModelCache()`.
+  `routing_mode`. Creating a SINGLE-capability provider auto-imports its
+  `GET /models` (8s timeout, tolerant 3-shape parser, `INSERT OR IGNORE` —
+  best-effort, never blocks creation, never clobbers admin edits). A
+  DUAL-capability provider instead returns a `preview` of both lists and the
+  dashboard asks how to import: `POST /api/admin/providers/:id/sync-models`
+  with `{mode}` — `"both"` (default) marks every listed model `proto='both'`,
+  `"separate"` ties each model to the protocol whose endpoint listed it
+  (duplicates: first capability wins). Proxy reads a 5s `routerSnapshot()`
+  cache (mode + all models + enabled providers with decrypted keys); admin
+  mutations call `invalidateModelCache()`.
   - `passthrough` (default): model names forwarded untouched; `/v1/models`
     proxies upstream. Zero behavioral change for existing setups.
   - `router`: unknown/disabled model → 404; orphaned (provider deleted → FK
@@ -53,12 +58,10 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
     stands); usage is recorded under the PUBLIC id; `/v1/models` is generated
     from the registry in the rich format (never forwarded upstream).
   - Registry ids are global; `proto` is `openai` | `anthropic` | `both`
-    (migration `008_model_proto_both`). A dual-capability provider's
-    auto-import creates the id on the first capability sync and upgrades the
-    row to `'both'` when the second capability lists the same upstream id —
-    ONLY for pristine auto rows (`updated_at = created_at`): once an admin
-    edits the row, sync never touches its proto again. Orphaned rows
-    (provider_id NULL) never merge either.
+    (migration `008_model_proto_both`). A `"both"`-mode sync upgrades
+    pristine auto rows (`updated_at = created_at`) of the same provider to
+    `'both'`: once an admin edits the row, sync never touches its proto
+    again. Orphaned rows (provider_id NULL) never merge either.
 - **Crypto** (`server/crypto.ts`): hand-rolled on WebCrypto — PBKDF2 (100k),
   TOTP (RFC 6238, anti-replay in `ratelimit.ts`), JWT HS256, AES-256-GCM.
   Do not add crypto libs.

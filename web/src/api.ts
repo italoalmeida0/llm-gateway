@@ -197,9 +197,26 @@ export interface ProviderDto {
 export interface SyncOutcome {
   added: number;
   skipped: number;
-  /** Rows upgraded to proto "both" (listed by the provider's other capability). */
+  /** Rows upgraded to proto "both" by a "both"-mode sync. */
   merged: number;
   error?: string;
+}
+
+/** How a sync maps listed models to registry protos. */
+export type SyncMode = "both" | "separate";
+
+/** Per-capability peek at a provider's GET /models (before importing). */
+export interface CapPreview {
+  count?: number;
+  sample?: string[];
+  error?: string;
+}
+
+export interface SyncPreview {
+  openai?: CapPreview;
+  anthropic?: CapPreview;
+  /** Ids present on both lists (only when both fetches succeeded). */
+  common?: number;
 }
 
 export type RoutingMode = "passthrough" | "router";

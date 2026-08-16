@@ -5,14 +5,16 @@ import { GATEWAY_SECRET } from "./config";
 /**
  * Model registry & routing.
  *
- * - `syncProviderModels` imports a provider's model list (GET {base}/models)
- *    into the registry. It is best-effort: it never blocks provider creation
- *    and tolerates OpenAI, Anthropic and rich (OpenRouter-style) payload
- *    shapes. Duplicates are skipped (INSERT OR IGNORE) so re-syncing never
- *    clobbers admin edits — with one exception: when the OTHER capability of
- *    the same provider lists the same upstream id, a pristine auto-imported
- *    row (never edited by an admin) is upgraded to proto='both', so
- *    dual-surface providers serve the model on both protocols.
+ * - `previewProviderModels` fetches a provider's GET /models lists without
+ *    importing (the dashboard shows counts and asks how to import);
+ *    `syncProviderModels` does the import in mode "both" (dual-capability
+ *    providers: every listed model serves both protocol surfaces) or
+ *    "separate" (each model keeps the protocol of the endpoint that listed
+ *    it). Best-effort: never blocks provider creation, tolerates OpenAI /
+ *    Anthropic / rich (OpenRouter-style) payload shapes, and duplicates are
+ *    skipped (INSERT OR IGNORE) so re-syncing never clobbers admin edits —
+ *    the one exception is upgrading a pristine auto row to 'both' on a
+ *    "both"-mode sync.
  * - `routerSnapshot` is the proxy hot-path view (5s cache, same pattern as the
  *    provider cache): routing mode + every model row + every ENABLED provider
  *    with its decrypted key. Admin mutations call invalidateModelCache().
@@ -198,27 +200,101 @@ const insertModel = db.prepare(
 );
 
 /**
- * Promote a row to proto='both' when this provider's other capability lists
- * the same upstream id. Guarded to pristine auto-imported rows
+ * Promote a row to proto='both' when a "both"-mode sync re-lists an id the
+ * provider already has. Guarded to pristine auto-imported rows
  * (updated_at = created_at): once an admin touches the row, its proto is
  * never changed by a sync again.
  */
 const mergeProtoBoth = db.prepare(
   `UPDATE models SET proto = 'both', updated_at = ?
    WHERE id = ? AND provider_id = ? AND upstream_model = ? AND source = 'auto'
-     AND proto != ? AND proto != 'both' AND updated_at = created_at`,
+     AND proto != 'both' AND updated_at = created_at`,
 );
+
+/** Fetch one capability's GET /models list. Never throws. */
+async function fetchCapabilityModels(
+  provider: ProviderRow,
+  proto: "openai" | "anthropic",
+  plaintextKey: string,
+): Promise<{ models: ParsedModel[] } | { error: string }> {
+  const base = proto === "openai" ? provider.openai_base_url : provider.anthropic_base_url;
+  if (!base) return { error: "not configured" };
+  try {
+    const res = await fetch(`${base}/models`, {
+      headers: { Accept: "application/json", ...authHeaders(provider, proto, plaintextKey) },
+      signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
+    });
+    if (!res.ok) return { error: `HTTP ${res.status}` };
+    return { models: parseUpstreamModels((await res.json()) as unknown) };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "sync failed" };
+  }
+}
+
+/** Per-capability preview of a provider's model lists (before importing). */
+export interface CapPreview {
+  count?: number;
+  sample?: string[];
+  error?: string;
+}
+
+export interface SyncPreview {
+  openai?: CapPreview;
+  anthropic?: CapPreview;
+  /** Ids present on both lists (only when both fetches succeeded). */
+  common?: number;
+}
+
+/**
+ * Fetch every configured capability's model list WITHOUT importing — the
+ * dashboard shows this and asks how to import (mode "both" | "separate").
+ */
+export async function previewProviderModels(
+  provider: ProviderRow,
+  plaintextKey: string,
+): Promise<SyncPreview> {
+  const out: SyncPreview = {};
+  const ids: Partial<Record<"openai" | "anthropic", Set<string>>> = {};
+  for (const proto of ["openai", "anthropic"] as const) {
+    const base = proto === "openai" ? provider.openai_base_url : provider.anthropic_base_url;
+    if (!base) continue;
+    const r = await fetchCapabilityModels(provider, proto, plaintextKey);
+    if ("error" in r) {
+      out[proto] = { error: r.error };
+    } else {
+      ids[proto] = new Set(r.models.map((m) => m.id));
+      out[proto] = { count: r.models.length, sample: r.models.slice(0, 5).map((m) => m.id) };
+    }
+  }
+  if (ids.openai && ids.anthropic) {
+    let common = 0;
+    for (const id of ids.openai) if (ids.anthropic!.has(id)) common++;
+    out.common = common;
+  }
+  return out;
+}
+
+/** How a sync maps listed models to registry protos. */
+export type SyncMode = "both" | "separate";
 
 /**
  * Import models for every capability the provider exposes. Returns per-capability
- * counts; a failing capability yields {added:0, skipped:0, error} and never
- * throws — sync must not block provider creation.
+ * counts; a failing capability yields {added:0, skipped:0, merged:0, error}
+ * and never throws — sync must not block provider creation.
+ *
+ * mode "both" (dual-capability providers): every listed model serves both
+ * protocol surfaces (proto='both'); pristine existing rows are upgraded.
+ * mode "separate": each model keeps the protocol of the endpoint that listed
+ * it (duplicates: first capability wins). Single-capability providers always
+ * import under their one protocol regardless of mode.
  */
 export async function syncProviderModels(
   provider: ProviderRow,
   plaintextKey: string,
+  mode: SyncMode = "both",
 ): Promise<Partial<Record<"openai" | "anthropic", SyncOutcome>>> {
   const out: Partial<Record<"openai" | "anthropic", SyncOutcome>> = {};
+  const dual = !!provider.openai_base_url && !!provider.anthropic_base_url;
   const caps: Array<["openai" | "anthropic", string | null]> = [
     ["openai", provider.openai_base_url],
     ["anthropic", provider.anthropic_base_url],
@@ -226,52 +302,48 @@ export async function syncProviderModels(
   const now = Date.now();
   for (const [proto, base] of caps) {
     if (!base) continue;
-    try {
-      const res = await fetch(`${base}/models`, {
-        headers: { Accept: "application/json", ...authHeaders(provider, proto, plaintextKey) },
-        signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
-      });
-      if (!res.ok) {
-        out[proto] = { added: 0, skipped: 0, merged: 0, error: `HTTP ${res.status}` };
-        continue;
-      }
-      const parsed = parseUpstreamModels((await res.json()) as unknown);
-      let added = 0;
-      let merged = 0;
-      db.transaction(() => {
-        for (const m of parsed) {
-          const r = insertModel.run(
-            m.id,
-            provider.id,
-            m.id, // auto-import: upstream id == public id
-            proto,
-            m.name,
-            m.description,
-            m.hugging_face_id,
-            m.quantization,
-            m.openrouter_slug,
-            m.always_on ? 1 : 0,
-            m.context_length,
-            m.max_output_length,
-            m.created,
-            JSON.stringify(m.input_modalities),
-            JSON.stringify(m.output_modalities),
-            JSON.stringify(m.sampling_params),
-            JSON.stringify(m.features),
-            m.reasoning_efforts ? JSON.stringify(m.reasoning_efforts) : null,
-            m.pricing ? JSON.stringify(m.pricing) : null,
-            m.datacenters ? JSON.stringify(m.datacenters) : null,
-            now,
-            now,
-          );
-          added += r.changes;
-          if (r.changes === 0) merged += mergeProtoBoth.run(now, m.id, provider.id, m.id, proto).changes;
-        }
-      })();
-      out[proto] = { added, skipped: parsed.length - added - merged, merged };
-    } catch (e) {
-      out[proto] = { added: 0, skipped: 0, merged: 0, error: e instanceof Error ? e.message : "sync failed" };
+    const importProto = mode === "both" && dual ? "both" : proto;
+    const r = await fetchCapabilityModels(provider, proto, plaintextKey);
+    if ("error" in r) {
+      out[proto] = { added: 0, skipped: 0, merged: 0, error: r.error };
+      continue;
     }
+    const parsed = r.models;
+    let added = 0;
+    let merged = 0;
+    db.transaction(() => {
+      for (const m of parsed) {
+        const r2 = insertModel.run(
+          m.id,
+          provider.id,
+          m.id, // auto-import: upstream id == public id
+          importProto,
+          m.name,
+          m.description,
+          m.hugging_face_id,
+          m.quantization,
+          m.openrouter_slug,
+          m.always_on ? 1 : 0,
+          m.context_length,
+          m.max_output_length,
+          m.created,
+          JSON.stringify(m.input_modalities),
+          JSON.stringify(m.output_modalities),
+          JSON.stringify(m.sampling_params),
+          JSON.stringify(m.features),
+          m.reasoning_efforts ? JSON.stringify(m.reasoning_efforts) : null,
+          m.pricing ? JSON.stringify(m.pricing) : null,
+          m.datacenters ? JSON.stringify(m.datacenters) : null,
+          now,
+          now,
+        );
+        added += r2.changes;
+        if (r2.changes === 0 && importProto === "both") {
+          merged += mergeProtoBoth.run(now, m.id, provider.id, m.id).changes;
+        }
+      }
+    })();
+    out[proto] = { added, skipped: parsed.length - added - merged, merged };
   }
   if (Object.keys(out).length) invalidateModelCache();
   return out;

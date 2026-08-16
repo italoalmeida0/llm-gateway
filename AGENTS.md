@@ -145,11 +145,14 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - Keep the dependency list minimal: runtime deps are `nodemailer` (SMTP),
   `qrcode` (TOTP QR), `tokenx` (fallback token-count estimation when an
   upstream reports no usage — used ONLY on that estimate path, user-sanctioned),
-  `usal` (scroll/entrance animations, user-sanctioned) and `sortablejs`
+  `usal` (scroll/entrance animations, user-sanctioned), `sortablejs`
   (drag-and-drop ordering, user-sanctioned — only imported
   by `web/src/sortable.ts`; rows carry `data-id` + a `[data-handle]` grip,
   the reordered ids are POSTed to the matching `/reorder` / `PUT …/targets`
-  endpoint).
+  endpoint) and `echarts` (charts, user-sanctioned — imported tree-shaken as
+  `echarts/core` with only bar/line + grid/tooltip + canvas in
+  `web/src/echarts.tsx`; colors are resolved from the `--chart-*` CSS vars at
+  render time so white/dark flip for free).
   `@fontsource-variable/inter` is a bundled dev asset (no runtime CDN).
   Bun-native or hand-rolled beats a new dep.
 

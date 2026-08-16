@@ -1,24 +1,22 @@
-import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
+import { Show, createEffect, createMemo, createSignal } from "solid-js";
 
 import type { DailyPoint } from "./api";
-import { fmtNum } from "./ui";
+import { EChart, chartColors, echarts, withAlpha } from "./echarts";
+import { fmtNum, theme } from "./ui";
 
 /**
- * Tiny hand-rolled SVG charts — no chart lib. Colors come from theme CSS
- * vars (--chart-*), so white/dark flip for free. Bars: one per token bucket —
- * input (strong ink), cached input (mid) and output (muted) — grouped per
- * day, or a single requests bar when metric is "requests"; the latest day is
- * highlighted brand red. Clicking a bar pins that day's metadata into the
- * legend row (click again / × to clear).
- * Area: smooth brand-red curve with gradient fill.
+ * ECharts-based usage charts. Colors are resolved from the theme CSS vars
+ * (--chart-*) at render time and re-read when the theme flips, so white/dark
+ * flip for free. Bars: one per token bucket — input (strong ink), cached
+ * input (mid) and output (muted) — grouped per day, or a single requests bar
+ * when metric is "requests"; the latest day is highlighted brand red.
+ * Clicking a bar pins that day's metadata into the legend row (click again /
+ * × to clear); hovering shows a rich tooltip.
  */
 
-const GRID = "var(--chart-grid)";
-const TICK = "var(--chart-tick)";
 const IN_BAR = "var(--chart-strong)";
 const CACHE_BAR = "var(--chart-mid)";
 const OUT_BAR = "var(--chart-soft)";
-const BRAND = "var(--chart-brand)";
 
 export function DailyChart(props: {
   series: DailyPoint[];
@@ -27,52 +25,10 @@ export function DailyChart(props: {
   /** What one bar represents — drives legend pin text ("Latest day/hour"). */
   unit?: "day" | "hour";
 }) {
-  const W = 720;
-  const H = props.height ?? 180;
-  const PAD = { l: 40, r: 6, t: 14, b: 26 };
-
   const metric = () => props.metric ?? "tokens";
   const unit = () => props.unit ?? "day";
   const tickOf = (d: DailyPoint) => d.label ?? d.date.slice(5);
   const data = createMemo(() => props.series.slice(-30));
-  const maxV = createMemo(() =>
-    Math.max(
-      1,
-      ...data().map((d) =>
-        metric() === "requests"
-          ? (d.reqs ?? 0)
-          : Math.max(d.in_tok ?? 0, d.cache_tok ?? 0, d.out_tok ?? 0),
-      ),
-    ),
-  );
-
-  const slotW = createMemo(
-    () => (W - PAD.l - PAD.r) / Math.max(1, data().length),
-  );
-  /** Three token bars (in/cache/out) fit side by side inside one day slot. */
-  const barW = createMemo(() => Math.max(2, Math.min(9, slotW() * 0.22)));
-  const BAR_GAP = 2;
-
-  const barX = (i: number, which: "in" | "cache" | "out") => {
-    const center = PAD.l + slotW() * i + slotW() / 2;
-    const clusterW = barW() * 3 + BAR_GAP * 2;
-    const start = center - clusterW / 2;
-    return (
-      start +
-      (which === "in"
-        ? 0
-        : which === "cache"
-          ? barW() + BAR_GAP
-          : 2 * (barW() + BAR_GAP))
-    );
-  };
-  /** Centered single bar (requests metric). */
-  const soloX = (i: number) => PAD.l + slotW() * i + slotW() / 2 - barW() - 1;
-  const yFor = (v: number) => PAD.t + (H - PAD.t - PAD.b) * (1 - v / maxV());
-
-  const ticks = createMemo(() =>
-    [0, 0.5, 1].map((f) => Math.round(maxV() * f)),
-  );
 
   /** Clicked/pinned day — its metadata replaces the legend row. Reset when
    *  a new series arrives (key/days/window change). */
@@ -87,6 +43,115 @@ export function DailyChart(props: {
   });
   const toggleSelect = (i: number) => setSelected(selected() === i ? null : i);
 
+  const option = createMemo(() => {
+    void theme();
+    const c = chartColors();
+    const ds = data();
+    const isTokens = metric() === "tokens";
+    const latest = ds.length - 1;
+    const tooltip = {
+      trigger: "axis" as const,
+      confine: true,
+      backgroundColor: c.elev,
+      borderColor: c.line,
+      borderWidth: 1,
+      textStyle: { color: c.ink100, fontSize: 11 },
+      formatter: (params: unknown) => {
+        const arr = (Array.isArray(params) ? params : [params]) as Array<{
+          dataIndex: number;
+        }>;
+        const d = ds[arr[0]?.dataIndex ?? 0];
+        if (!d) return "";
+        const rows = isTokens
+          ? [
+              `Input: <b>${fmtNum(d.in_tok)}</b>`,
+              `Input cache: <b>${fmtNum(d.cache_tok ?? 0)}</b>`,
+              `Output: <b>${fmtNum(d.out_tok)}</b>`,
+              `Requests: <b>${fmtNum(d.reqs ?? 0)}</b>`,
+            ]
+          : [`Requests: <b>${fmtNum(d.reqs ?? 0)}</b>`];
+        return `<div style="font-weight:600;margin-bottom:4px">${d.label ?? d.date}</div>${rows.join("<br/>")}`;
+      },
+    };
+    const base = {
+      animationDuration: 600,
+      grid: { left: 8, right: 8, top: 12, bottom: 4, containLabel: true },
+      xAxis: {
+        type: "category" as const,
+        data: ds.map(tickOf),
+        axisLine: { lineStyle: { color: c.grid } },
+        axisTick: { show: false },
+        axisLabel: {
+          color: c.tick,
+          fontSize: 10,
+          interval: Math.max(0, Math.ceil(ds.length / 6) - 1),
+        },
+      },
+      yAxis: {
+        type: "value" as const,
+        splitLine: { lineStyle: { color: c.grid } },
+        axisLabel: {
+          color: c.tick,
+          fontSize: 10,
+          formatter: (v: number) => fmtNum(v),
+        },
+      },
+      tooltip,
+    };
+    if (!isTokens) {
+      return {
+        ...base,
+        series: [
+          {
+            name: "Requests",
+            type: "bar" as const,
+            barWidth: "38%",
+            itemStyle: { color: c.soft, borderRadius: [4, 4, 0, 0] },
+            emphasis: {
+              itemStyle: { color: c.brand, borderRadius: [4, 4, 0, 0] },
+            },
+            data: ds.map((d, i) => ({
+              value: d.reqs ?? 0,
+              itemStyle:
+                i === latest
+                  ? { color: c.brand, borderRadius: [4, 4, 0, 0] }
+                  : undefined,
+            })),
+          },
+        ],
+      };
+    }
+    return {
+      ...base,
+      series: [
+        {
+          name: "Input",
+          type: "bar" as const,
+          itemStyle: { color: c.strong, borderRadius: [3, 3, 0, 0] },
+          data: ds.map((d, i) => ({
+            value: d.in_tok,
+            itemStyle:
+              i === latest
+                ? { color: c.brand, borderRadius: [3, 3, 0, 0] }
+                : undefined,
+          })),
+        },
+        {
+          name: "Input cache",
+          type: "bar" as const,
+          itemStyle: { color: c.mid, borderRadius: [3, 3, 0, 0] },
+          data: ds.map((d) => ({ value: d.cache_tok ?? 0 })),
+        },
+        {
+          name: "Output",
+          type: "bar" as const,
+          itemStyle: { color: c.soft, borderRadius: [3, 3, 0, 0] },
+          data: ds.map((d) => ({ value: d.out_tok })),
+        },
+      ],
+    };
+  });
+
   return (
     <Show
       when={data().length > 0}
@@ -96,133 +161,11 @@ export function DailyChart(props: {
         </div>
       }
     >
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        class="w-full"
-        role="img"
-        aria-label="Daily token usage chart"
-      >
-        <For each={ticks()}>
-          {(t) => (
-            <g>
-              <line
-                x1={PAD.l}
-                x2={W - PAD.r}
-                y1={yFor(t)}
-                y2={yFor(t)}
-                stroke={GRID}
-                stroke-width="1"
-              />
-              <text
-                x={PAD.l - 6}
-                y={yFor(t) + 3}
-                text-anchor="end"
-                font-size="9"
-                fill={TICK}
-              >
-                {fmtNum(t)}
-              </text>
-            </g>
-          )}
-        </For>
-        <For each={data()}>
-          {(d, i) => {
-            const latest = () => i() === data().length - 1;
-            // Branch with <Show> (never if/return): a For child body runs once
-            // per item, so a plain if/else branch would go stale when the
-            // metric flips — leaving bars with the previous branch's shape.
-            return (
-              <g class="group cursor-pointer" onClick={() => toggleSelect(i())}>
-                <title>{`${d.date} — in ${fmtNum(d.in_tok)}, cache ${fmtNum(d.cache_tok ?? 0)}, out ${fmtNum(d.out_tok)}, ${fmtNum(d.reqs ?? 0)} req`}</title>
-                <Show
-                  when={metric() === "tokens"}
-                  fallback={
-                    <rect
-                      x={soloX(i())}
-                      y={yFor(d.reqs ?? 0)}
-                      width={barW() * 2 + 2}
-                      height={Math.max(
-                        0,
-                        ((d.reqs ?? 0) / maxV()) * (H - PAD.t - PAD.b),
-                      )}
-                      rx="2.5"
-                      fill={latest() ? BRAND : OUT_BAR}
-                      stroke={selected() === i() ? BRAND : "none"}
-                      stroke-width="1.5"
-                      class={`chart-bar transition-opacity duration-200 group-hover:opacity-80 ${latest() ? "glow-brand" : ""}`}
-                      style={{ "animation-delay": `${i() * 35}ms` }}
-                    />
-                  }
-                >
-                  <rect
-                    x={barX(i(), "in")}
-                    y={yFor(d.in_tok)}
-                    width={barW()}
-                    height={Math.max(
-                      0,
-                      (d.in_tok / maxV()) * (H - PAD.t - PAD.b),
-                    )}
-                    rx="2.5"
-                    fill={latest() ? BRAND : IN_BAR}
-                    stroke={selected() === i() ? BRAND : "none"}
-                    stroke-width="1.5"
-                    class={`chart-bar transition-opacity duration-200 group-hover:opacity-80 ${latest() ? "glow-brand" : ""}`}
-                    style={{ "animation-delay": `${i() * 35}ms` }}
-                  />
-                  <rect
-                    x={barX(i(), "cache")}
-                    y={yFor(d.cache_tok ?? 0)}
-                    width={barW()}
-                    height={Math.max(
-                      0,
-                      ((d.cache_tok ?? 0) / maxV()) * (H - PAD.t - PAD.b),
-                    )}
-                    rx="2.5"
-                    fill={CACHE_BAR}
-                    stroke={selected() === i() ? BRAND : "none"}
-                    stroke-width="1.5"
-                    class="chart-bar transition-opacity duration-200 group-hover:opacity-80"
-                    style={{ "animation-delay": `${i() * 35 + 30}ms` }}
-                  />
-                  <rect
-                    x={barX(i(), "out")}
-                    y={yFor(d.out_tok)}
-                    width={barW()}
-                    height={Math.max(
-                      0,
-                      (d.out_tok / maxV()) * (H - PAD.t - PAD.b),
-                    )}
-                    rx="2.5"
-                    fill={OUT_BAR}
-                    stroke={selected() === i() ? BRAND : "none"}
-                    stroke-width="1.5"
-                    class="chart-bar transition-opacity duration-200 group-hover:opacity-80"
-                    style={{ "animation-delay": `${i() * 35 + 60}ms` }}
-                  />
-                </Show>
-              </g>
-            );
-          }}
-        </For>
-        <For
-          each={data().filter((_, i) => i % Math.ceil(data().length / 6) === 0)}
-        >
-          {(d) => {
-            const i = () => data().indexOf(d);
-            return (
-              <text
-                x={PAD.l + slotW() * i() + slotW() / 2}
-                y={H - 8}
-                text-anchor="middle"
-                font-size="9"
-                fill={TICK}
-              >
-                {tickOf(d)}
-              </text>
-            );
-          }}
-        </For>
-      </svg>
+      <EChart
+        option={option}
+        height={props.height ?? 180}
+        onClick={(i) => toggleSelect(i)}
+      />
       <div class="flex flex-wrap items-center gap-x-4 gap-y-1 px-2 pt-1 min-h-[18px] text-[11px] text-ink-400">
         <Show
           when={selectedDay()}
@@ -314,66 +257,78 @@ export function DailyChart(props: {
   );
 }
 
-/** Smooth path through points (Catmull-Rom → cubic Bézier). */
-function smoothPath(pts: Array<{ x: number; y: number }>): string {
-  if (pts.length === 0) return "";
-  if (pts.length === 1) return `M ${pts[0]!.x} ${pts[0]!.y}`;
-  let d = `M ${pts[0]!.x} ${pts[0]!.y}`;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)]!;
-    const p1 = pts[i]!;
-    const p2 = pts[i + 1]!;
-    const p3 = pts[Math.min(pts.length - 1, i + 2)]!;
-    const c1x = p1.x + (p2.x - p0.x) / 6;
-    const c1y = p1.y + (p2.y - p0.y) / 6;
-    const c2x = p2.x - (p3.x - p1.x) / 6;
-    const c2y = p2.y - (p3.y - p1.y) / 6;
-    d += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
-  }
-  return d;
-}
-
-let gradientSeq = 0;
-
 export function AreaChart(props: {
   values: number[];
   labels?: string[];
   height?: number;
 }) {
-  const W = 720;
-  const H = props.height ?? 170;
-  const PAD = { l: 10, r: 10, t: 14, b: 26 };
-  const gid = `area-fill-${++gradientSeq}`;
-
-  const vals = createMemo(() => props.values.filter((v) => Number.isFinite(v)));
-  const maxV = createMemo(() => Math.max(1, ...vals()));
-
   const pts = createMemo(() => {
-    const n = vals().length;
-    if (n === 0) return [];
-    return vals().map((v, i) => ({
-      x: n === 1 ? W / 2 : PAD.l + ((W - PAD.l - PAD.r) / (n - 1)) * i,
-      y: PAD.t + (H - PAD.t - PAD.b) * (1 - v / maxV()),
-    }));
+    const labels = props.labels ?? [];
+    return props.values
+      .map((v, i) => ({ v, label: labels[i] ?? "" }))
+      .filter((p) => Number.isFinite(p.v));
   });
 
-  const line = createMemo(() => smoothPath(pts()));
-  const area = createMemo(() =>
-    pts().length > 0
-      ? `${line()} L ${pts()[pts().length - 1]!.x} ${H - PAD.b} L ${pts()[0]!.x} ${H - PAD.b} Z`
-      : "",
-  );
-
-  const labelIdx = createMemo(() => {
-    const labels = props.labels ?? [];
-    if (labels.length === 0) return [] as Array<{ i: number; text: string }>;
-    const n = labels.length;
-    const step = Math.max(1, Math.floor((n - 1) / 3));
-    const idx = new Set<number>([0, step, 2 * step, n - 1]);
-    return [...idx]
-      .filter((i) => i >= 0 && i < n)
-      .sort((a, b) => a - b)
-      .map((i) => ({ i, text: labels[i]! }));
+  const option = createMemo(() => {
+    void theme();
+    const c = chartColors();
+    const p = pts();
+    const n = p.length;
+    return {
+      animationDuration: 600,
+      grid: { left: 8, right: 8, top: 12, bottom: 4, containLabel: true },
+      xAxis: {
+        type: "category" as const,
+        boundaryGap: false,
+        data: p.map((x) => x.label),
+        axisLine: { lineStyle: { color: c.grid } },
+        axisTick: { show: false },
+        axisLabel: {
+          color: c.tick,
+          fontSize: 10,
+          interval: Math.max(0, Math.ceil(n / 4) - 1),
+        },
+      },
+      yAxis: {
+        type: "value" as const,
+        splitLine: { lineStyle: { color: c.grid } },
+        axisLabel: {
+          color: c.tick,
+          fontSize: 10,
+          formatter: (v: number) => fmtNum(v),
+        },
+      },
+      tooltip: {
+        trigger: "axis" as const,
+        confine: true,
+        backgroundColor: c.elev,
+        borderColor: c.line,
+        borderWidth: 1,
+        textStyle: { color: c.ink100, fontSize: 11 },
+        valueFormatter: (v: unknown) => fmtNum(Number(v)),
+      },
+      series: [
+        {
+          name: "Requests",
+          type: "line" as const,
+          smooth: true,
+          symbol: "none",
+          lineStyle: { color: c.brand, width: 2 },
+          itemStyle: { color: c.brand },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: withAlpha(c.brand, 0.22) },
+              { offset: 1, color: withAlpha(c.brand, 0) },
+            ]),
+          },
+          data: p.map((x, i) => ({
+            value: x.v,
+            symbol: i === n - 1 ? "circle" : "none",
+            symbolSize: i === n - 1 ? 7 : 0,
+          })),
+        },
+      ],
+    };
   });
 
   return (
@@ -385,69 +340,7 @@ export function AreaChart(props: {
         </div>
       }
     >
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        class="w-full"
-        role="img"
-        aria-label="Trend chart"
-      >
-        <defs>
-          <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color={BRAND} stop-opacity="0.25" />
-            <stop offset="100%" stop-color={BRAND} stop-opacity="0" />
-          </linearGradient>
-        </defs>
-        <line
-          x1={PAD.l}
-          x2={W - PAD.r}
-          y1={yGrid(H, PAD, 0.5)}
-          y2={yGrid(H, PAD, 0.5)}
-          stroke={GRID}
-          stroke-width="1"
-        />
-        <line
-          x1={PAD.l}
-          x2={W - PAD.r}
-          y1={H - PAD.b}
-          y2={H - PAD.b}
-          stroke={GRID}
-          stroke-width="1"
-        />
-        <path d={area()} fill={`url(#${gid})`} />
-        <path
-          d={line()}
-          fill="none"
-          stroke={BRAND}
-          stroke-width="2"
-          stroke-linecap="round"
-        />
-        <circle
-          cx={pts()[pts().length - 1]!.x}
-          cy={pts()[pts().length - 1]!.y}
-          r="4"
-          fill={BRAND}
-          stroke="var(--ink-900)"
-          stroke-width="2"
-          class="glow-brand"
-        />
-        <For each={labelIdx()}>
-          {(l) => (
-            <text
-              x={pts()[l.i]?.x ?? 0}
-              y={H - 8}
-              text-anchor="middle"
-              font-size="9"
-              fill={TICK}
-            >
-              {l.text}
-            </text>
-          )}
-        </For>
-      </svg>
+      <EChart option={option} height={props.height ?? 170} />
     </Show>
   );
-}
-
-function yGrid(H: number, PAD: { b: number; t: number }, f: number): number {
-  return PAD.t + (H - PAD.t - PAD.b) * (1 - f);
 }

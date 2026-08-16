@@ -8,8 +8,11 @@ import { onCleanup } from "solid-js";
  * admin UI (providers, provider keys, model targets).
  *
  * The callback receives the reordered `data-id` values; persistence (API
- * call) is the caller's job. Sortable mutates the DOM optimistically; on API
- * failure the caller should refetch (which re-renders the list).
+ * call) is the caller's job — its state update/re-render applies the new
+ * order: on drop we UNDO Sortable's optimistic DOM move, because Solid's
+ * array reconciliation assumes the child order it rendered and crashes
+ * (`insertBefore` on a reference node that got deleted) or snaps rows back
+ * if the DOM was mutated behind its back.
  */
 export function attachSortable(
   el: HTMLElement,
@@ -26,10 +29,19 @@ export function attachSortable(
     chosenClass: "sortable-chosen",
     dragClass: "sortable-drag",
     onEnd: (evt) => {
-      if (evt.oldIndex === evt.newIndex) return;
+      const { oldIndex, newIndex, item, from } = evt;
+      if (oldIndex === newIndex || oldIndex == null || newIndex == null) return;
       const ids = Array.from(el.children)
         .map((c) => (c as HTMLElement).dataset.id)
         .filter((x): x is string => !!x);
+      // Undo Sortable's optimistic DOM move. Solid's array reconciliation
+      // trusts the child order it rendered (it computes insert references from
+      // its own node list); reconciling against a DOM that was reordered behind
+      // its back throws insertBefore NotFoundError and/or drops rows. Reverting
+      // here makes the caller's state update / refetch re-render the list into
+      // the new order from a consistent DOM.
+      const ref = newIndex > oldIndex ? from.children[oldIndex] : from.children[oldIndex + 1];
+      from.insertBefore(item, ref ?? null);
       opts.onReorder(ids);
     },
   });

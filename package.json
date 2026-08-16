@@ -14,6 +14,7 @@
     "seed": "NODE_ENV=development bun ./scripts/seed-usage.ts",
     "perf:sim": "bun ./scripts/perf-sim.ts",
     "perf:tuning": "bun ./scripts/perf-tuning.ts",
+    "perf:router-bench": "bun ./scripts/perf-router-bench.ts",
     "clean": "rm -rf dist data",
     "fclean": "rm -rf dist data node_modules"
   },

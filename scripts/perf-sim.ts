@@ -1,15 +1,26 @@
 /**
  * scripts/perf-sim.ts — day-by-day growth simulation with REAL measurements.
  *
- *   1. boots a real gateway + fake upstream on a fresh temp DATA_DIR
- *   2. provisions 1 provider + 5 users + 5 keys through the real API
- *   3. grows history checkpoint by checkpoint (real gateway-shaped rows)
+ * Scenario v2 — the current architecture (router mode + upstream failover):
+ *
+ *   1. boots a real gateway + TWO fake upstreams (primary + fallback provider)
+ *      on a fresh temp DATA_DIR
+ *   2. provisions through the real API:
+ *        - routing_mode = "router" with a model registry
+ *        - 2 providers: primary (3 upstream keys) + fallback (2 upstream keys)
+ *        - 3 public models, each with an A→B target chain (fallback target
+ *          renames the model → exercises the router rewrite path)
+ *        - 5 users + 5 gateway keys
+ *   3. grows history checkpoint by checkpoint (usage events, audit rows, and
+ *      registry churn: +2 models per simulated quarter)
  *   4. at every checkpoint measures, over real HTTP:
  *        - proxy latency (stream + non-stream, 5 keys × 3 models rotating)
  *        - direct-to-upstream baseline
- *        - every dashboard endpoint the SPA calls (user + admin)
+ *        - every dashboard endpoint the SPA calls (user + admin + registry)
  *        - SPA delivery (static index)
- *   5. writes docs/performance/results/crescimento.json + prints a table
+ *      and at chosen checkpoints also runs the failover probes
+ *      (skip-exhausted / active-failover / burst / provider-fallback).
+ *   5. writes docs/performance/results/crescimento-v2-router.json + prints a table
  *
  * Run: bun run perf:sim            (goes up to PERF_MAX_DAYS, default 10 years)
  */
@@ -20,13 +31,16 @@ import path from "path";
 
 import {
   GW, NUM_USERS, REQS_PER_USER_DAY, AUDIT_PER_USER_DAY,
-  startStack, stopStack, provision, backfill, openRawDb, tableCounts,
-  measureGet, measureProxy, measureDirect, endpointSet,
-  type Stack, type EndpointSample,
+  startStack, stopStack, provisionRouter, backfill, backfillRegistry,
+  openRawDb, tableCounts,
+  measureGet, measureProxy, measureDirect, endpointSet, runFailoverProbes,
+  type Stack, type EndpointSample, type FailoverProbes,
 } from "./perf-common";
 
 const MAX_DAYS = Number(process.env.PERF_MAX_DAYS || 3650); // 10 years
 const STOP_P95_MS = Number(process.env.PERF_STOP_P95 || 5000);
+const PROBE_DAYS = (process.env.PERF_PROBE_DAYS ?? "365,3650")
+  .split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n >= 0);
 
 /** day counts where a full measurement round happens */
 function checkpoints(maxDays: number): number[] {
@@ -46,6 +60,8 @@ interface CheckpointResult {
     overheadP50: number;
     overheadP95: number;
   };
+  failoverProbes?: FailoverProbes;
+  coldSnapshot?: { coldMs: number; warmP50: number };
 }
 
 // simple linear regression y = a + b*x over checkpoints
@@ -84,16 +100,17 @@ console.log(`[sim] data dir: ${dataDir}`);
 // open the raw writer BEFORE the stack boots: the file exists from the start
 // (empty), the gateway's own boot runs the migrations on it.
 const rawDb = openRawDb(dataDir);
-const stack: Stack = await startStack(dataDir);
+const stack: Stack = await startStack(dataDir, { fallbackUpstream: true });
 
 const results: CheckpointResult[] = [];
 
 try {
-  console.log(`[sim] provisioning ${NUM_USERS} users + provider via real API...`);
-  const { adminToken, users } = await provision(NUM_USERS);
+  console.log(`[sim] provisioning router mode + failover topology via real API...`);
+  const { adminToken, users, topo } = await provisionRouter(NUM_USERS);
   const adminId = (rawDb.query("SELECT id FROM users WHERE role='admin'").get() as any).id as string;
 
   let simDays = 0;
+  let catalogCount = 3; // the provisioned public models
   const stop = checkpoints(MAX_DAYS);
 
   // discover the built SPA bundle URL so we can time a "frontend load"
@@ -114,18 +131,36 @@ try {
   for (const target of stop) {
     if (target > simDays) {
       backfill(rawDb, users, adminId, simDays, target - simDays);
+      catalogCount += backfillRegistry(rawDb, topo.providerA, simDays, target - simDays, catalogCount);
       simDays = target;
     }
 
     const rows = tableCounts(rawDb);
     rawDb.exec("PRAGMA wal_checkpoint(PASSIVE)");
 
-    console.log(`\n[sim] ===== day ${simDays} — rows: events=${rows.usage_events.toLocaleString("en-US")} daily=${rows.usage_daily} audit=${rows.audit_log.toLocaleString("en-US")} =====`);
+    console.log(
+      `\n[sim] ===== day ${simDays} — rows: events=${rows.usage_events.toLocaleString("en-US")} ` +
+        `daily=${rows.usage_daily} audit=${rows.audit_log.toLocaleString("en-US")} ` +
+        `models=${rows.models} targets=${rows.model_targets} pkeys=${rows.provider_keys} =====`,
+    );
 
-    // --- proxy (real requests through the gateway) ---
+    // --- proxy (real requests through the gateway, router mode) ---
     const direct = await measureDirect(60, 8);
     const nonstream = await measureProxy(users, 100, 8, false);
     const stream = await measureProxy(users, 30, 5, true);
+
+    // --- failover probes at the chosen checkpoints ---
+    let failoverProbes: FailoverProbes | undefined;
+    if (PROBE_DAYS.includes(simDays)) {
+      console.log(`  [probes] failover regimes...`);
+      failoverProbes = await runFailoverProbes(users, adminToken, topo);
+      console.log(
+        `  [probes] skip-exhausted p50 ${failoverProbes.skipExhausted.p50.toFixed(1)}ms (dead-key hits: ${failoverProbes.skipExhausted.deadKeyHitsDuringMeasure}) | ` +
+          `active failover ${failoverProbes.activeFailover.mean.toFixed(1)}ms avg | ` +
+          `burst p95 ${failoverProbes.failoverBurst.p95.toFixed(1)}ms | ` +
+          `provider-fallback p50 ${failoverProbes.providerFallback.p50.toFixed(1)}ms (${failoverProbes.providerFallback.fallbackUpstreamHits} hits on B)`,
+      );
+    }
 
     // --- dashboard endpoints ---
     const endpoints: Record<string, { p50: number; p95: number; n: number; errors: number }> = {};
@@ -134,13 +169,30 @@ try {
     const set: EndpointSample[] = endpointSet(
       Math.min(Math.max(rows.usage_events - 100, 0), 10_000),
       Math.min(Math.max(rows.audit_log - 50, 0), 5_000),
+      { router: true },
     );
     if (bundlePath) set.push({ name: "static.bundle", url: bundlePath, who: "anon" });
     for (const ep of set) {
-      const token = ep.who === "admin" ? adminToken : ep.who === "user" ? users[0]!.accessToken : undefined;
+      const token =
+        ep.who === "admin" ? adminToken
+        : ep.who === "user" ? users[0]!.accessToken
+        : ep.who === "gw" ? users[0]!.gwKey
+        : undefined;
       const s = await measureGet(ep.url, token);
       endpoints[ep.name] = { p50: s.p50, p95: s.p95, n: s.n, errors: s.errors };
       if (s.p95 > slowest) { slowest = s.p95; slowestName = ep.name; }
+    }
+
+    // --- cold router-snapshot rebuild (5s TTL expired) ---
+    let coldSnapshot: { coldMs: number; warmP50: number } | undefined;
+    if (target === stop[stop.length - 1]) {
+      await Bun.sleep(5600); // SNAP_TTL_MS is 5s
+      const t0 = performance.now();
+      await measureProxy(users, 1, 1, false);
+      coldSnapshot = { coldMs: performance.now() - t0, warmP50: nonstream.p50 };
+      console.log(
+        `  [snapshot] cold rebuild + first request: ${coldSnapshot.coldMs.toFixed(1)}ms vs warm p50 ${nonstream.p50.toFixed(1)}ms`,
+      );
     }
 
     results.push({
@@ -148,8 +200,12 @@ try {
       rows: {
         usage_events: rows.usage_events,
         usage_daily: rows.usage_daily,
+        usage_model_daily: rows.usage_model_daily,
         audit_log: rows.audit_log,
         sessions: rows.sessions,
+        models: rows.models,
+        model_targets: rows.model_targets,
+        provider_keys: rows.provider_keys,
       },
       dbSizeMB: dbSizeMB(dataDir),
       endpoints,
@@ -160,6 +216,8 @@ try {
         overheadP50: nonstream.p50 - direct.p50,
         overheadP95: nonstream.p95 - direct.p95,
       },
+      failoverProbes,
+      coldSnapshot,
     });
 
     console.log(
@@ -174,8 +232,21 @@ try {
     if (aborted) break;
   }
 
-  // keep-data option for follow-up tuning runs
+  // keep-data option for follow-up tuning runs (`perf-tuning measure <dir>`
+  // re-boots the CURRENT code on the aged dataset — fresh planner stats)
   if (process.env.PERF_KEEP_DIR === "1") {
+    writeFileSync(
+      path.join(dataDir, "meta.json"),
+      JSON.stringify(
+        {
+          router: true,
+          adminToken,
+          users: users.map((u) => ({ id: u.id, email: u.email, gwKey: u.gwKey, keyId: u.keyId })),
+        },
+        null,
+        2,
+      ),
+    );
     console.log(`[sim] PERF_KEEP_DIR=1 — keeping ${dataDir}`);
   }
 } finally {
@@ -196,16 +267,27 @@ function dbSizeMB(dir: string): number {
 
 const outDir = path.join(import.meta.dir, "..", "docs", "performance", "results");
 mkdirSync(outDir, { recursive: true });
-const outFile = path.join(outDir, "crescimento.json");
+// keep the 5-user file name stable (docs reference it); larger runs get a
+// suffixed file so both scenarios coexist
+const outName = NUM_USERS === 5 ? "crescimento-v2-router.json" : `crescimento-v2-router-${NUM_USERS}users.json`;
+const outFile = path.join(outDir, outName);
 writeFileSync(outFile, JSON.stringify({ generatedAt: new Date().toISOString(), scenario: scenarioText(), results }, null, 2));
 
 function scenarioText() {
   return {
+    architecture: "router mode + model registry + multi-key failover (migrations 006–009)",
+    routingMode: "router",
     users: NUM_USERS,
     reqsPerUserDay: REQS_PER_USER_DAY,
     tokensPerUserDay: { in: 1_000_000, cache: 4_000_000, out: 200_000 },
     auditRowsPerUserDay: AUDIT_PER_USER_DAY,
     models: ["claude-sonnet-4-5 (50%)", "gpt-5-mini (30%)", "gpt-4o (20%)"],
+    topology: {
+      providerPrimary: "3 upstream keys (failover chain)",
+      providerFallback: "2 upstream keys",
+      modelTargets: "A(same id) → B(fb-<id>) per public model",
+      registryChurn: "+2 models per quarter",
+    },
   };
 }
 
@@ -214,13 +296,14 @@ console.log(`\n[sim] wrote ${outFile}`);
 // table print: days × rows × key endpoints
 const ALL_ENDPOINTS = Object.keys(results[results.length - 1]?.endpoints ?? {});
 console.log("\n===== GROWTH TABLE (p95 ms) =====");
-const cols = ["days", "events", "audit", "dbMB", "proxyOv50", "proxyOv95", ...ALL_ENDPOINTS];
+const cols = ["days", "events", "audit", "models", "dbMB", "proxyOv50", "proxyOv95", ...ALL_ENDPOINTS];
 console.log(cols.map((c) => c.padStart(16)).join(""));
 for (const r of results) {
   const cells = [
     String(r.days),
     String(r.rows.usage_events),
     String(r.rows.audit_log),
+    String(r.rows.models),
     String(r.dbSizeMB),
     r.proxy.overheadP50.toFixed(2),
     r.proxy.overheadP95.toFixed(2),

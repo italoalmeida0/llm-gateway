@@ -87,7 +87,8 @@ if (cmd === "measure") {
       endpoints: {} as Record<string, { p50: number; p95: number }>,
     };
 
-    const set = endpointSet(10_000, 5_000);
+    const router = meta.router === true;
+    const set = endpointSet(10_000, 5_000, { router });
     // also the SPA bundle
     try {
       const html = await (await fetch(`${GW}/`)).text();
@@ -95,7 +96,11 @@ if (cmd === "measure") {
       if (m) set.push({ name: "static.bundle", url: m[1]!.startsWith("/") ? m[1]! : `/${m[1]!.replace(/^\.\//, "")}`, who: "anon" });
     } catch {}
     for (const ep of set) {
-      const token = ep.who === "admin" ? adminToken : ep.who === "user" ? users[0]!.accessToken : undefined;
+      const token =
+        ep.who === "admin" ? adminToken
+        : ep.who === "user" ? users[0]!.accessToken
+        : ep.who === "gw" ? meta.users[0].gwKey
+        : undefined;
       const s = await measureGet(ep.url, token);
       out.endpoints[ep.name] = { p50: s.p50, p95: s.p95 };
     }

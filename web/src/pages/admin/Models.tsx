@@ -3,7 +3,15 @@ import { createSignal, For, Show, createResource, createMemo } from "solid-js";
 import { api, type ModelDto, type ModelProto, type ProviderDto, type RoutingMode, type SyncOutcome } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
+import { attachSortable } from "../../sortable";
 import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtNum } from "../../ui";
+
+/** Editor-state of one failover routing target. */
+interface TargetDraft {
+  providerId: string;
+  upstreamModel: string; // "" = public id
+  enabled: boolean;
+}
 
 const ROUTING_OPTIONS = [
   { value: "passthrough", label: "Pass-through" },
@@ -73,8 +81,7 @@ export default function AdminModelsPage() {
 
   // ---- editor form ----
   const [fId, setFId] = createSignal("");
-  const [fProvider, setFProvider] = createSignal("");
-  const [fUpstream, setFUpstream] = createSignal("");
+  const [fTargets, setFTargets] = createSignal<TargetDraft[]>([]);
   const [fProto, setFProto] = createSignal<ModelProto>("both");
   const [fEnabled, setFEnabled] = createSignal(true);
   const [fAlwaysOn, setFAlwaysOn] = createSignal(true);
@@ -114,16 +121,35 @@ export default function AdminModelsPage() {
     }
   };
 
+  const updateTarget = (i: number, patch: Partial<TargetDraft>) =>
+    setFTargets((prev) => prev.map((t, j) => (j === i ? { ...t, ...patch } : t)));
+
+  const targetsValid = createMemo(
+    () => fTargets().length >= 1 && fTargets().every((t) => !!t.providerId),
+  );
+
   const openEditor = (m: ModelDto | "new") => {
     if (m === "new") {
-      setFId(""); setFProvider(providers()?.[0]?.id ?? ""); setFUpstream(""); setFProto("both");
+      setFId("");
+      setFTargets([{ providerId: providers()?.[0]?.id ?? "", upstreamModel: "", enabled: true }]);
+      setFProto("both");
       setFEnabled(true); setFAlwaysOn(true);
       setFName(""); setFDesc(""); setFHf(""); setFQuant(""); setFSlug("");
       setFContext(""); setFMaxOut(""); setFCreated("");
       setFInMod("text"); setFOutMod("text"); setFSampling(""); setFFeatures(""); setFEfforts("");
       setFDatacenters(""); setFPricing({});
     } else {
-      setFId(m.id); setFProvider(m.providerId ?? ""); setFUpstream(m.upstreamModel); setFProto(m.proto);
+      setFId(m.id);
+      setFTargets(
+        m.targets.length > 0
+          ? m.targets.map((t) => ({
+              providerId: t.providerId,
+              upstreamModel: t.upstreamModel === m.id ? "" : t.upstreamModel,
+              enabled: t.enabled,
+            }))
+          : [{ providerId: "", upstreamModel: "", enabled: true }],
+      );
+      setFProto(m.proto);
       setFEnabled(m.enabled); setFAlwaysOn(m.alwaysOn);
       setFName(m.name); setFDesc(m.description); setFHf(m.huggingFaceId); setFQuant(m.quantization);
       setFSlug(m.openrouterSlug);
@@ -167,9 +193,13 @@ export default function AdminModelsPage() {
         reasoningEfforts: csv(fEfforts()),
         datacenters: csv(fDatacenters()).map((cc) => ({ country_code: cc })),
         pricing: Object.keys(pricing).length ? pricing : null,
+        // Ordered failover chain; "" upstream = defaults to the public id.
+        targets: fTargets().map((t) => ({
+          providerId: t.providerId,
+          upstreamModel: t.upstreamModel.trim() || undefined,
+          enabled: t.enabled,
+        })),
       };
-      if (fProvider()) body.providerId = fProvider();
-      if (fUpstream().trim()) body.upstreamModel = fUpstream().trim();
       if (editing() === "new") {
         body.id = fId().trim();
         await api("POST", "/api/admin/models", body);
@@ -244,7 +274,7 @@ export default function AdminModelsPage() {
     <div>
       <PageTitle
         title="Models"
-        subtitle="The public model ids this gateway serves, mapped to each provider's upstream ids"
+        subtitle="The public model ids this gateway serves — each with an ordered failover chain of provider targets"
         right={
           <div class="flex items-center gap-3 flex-wrap">
             <div class="flex items-center gap-2">
@@ -345,7 +375,12 @@ export default function AdminModelsPage() {
                       </td>
                       <td class="px-3 py-3 text-ink-300 whitespace-nowrap">
                         <Show when={m.providerName} fallback={<Badge tone="amber">no provider</Badge>}>
-                          {m.providerName}
+                          <span class="inline-flex items-center gap-1.5 whitespace-nowrap">
+                            {m.providerName}
+                            <Show when={m.targets.length > 1}>
+                              <Badge tone="indigo">+{m.targets.length - 1} fallback{m.targets.length === 2 ? "" : "s"}</Badge>
+                            </Show>
+                          </span>
                         </Show>
                       </td>
                       <td class="px-3 py-3 max-w-[220px]">
@@ -404,35 +439,109 @@ export default function AdminModelsPage() {
         width="max-w-2xl"
       >
         <div class="space-y-4">
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Input
-              label="Public model id"
-              value={fId()}
-              onInput={setFId}
-              placeholder="hf:zai-org/GLM-5.2"
-              hint={
-                editing() === "new"
-                  ? "What clients send as `model`"
-                  : "Changing the id renames the entry — clients must send the new id (usage history keeps the old one)"
-              }
-            />
-            <Select label="Provider" value={fProvider()} onChange={setFProvider} options={providerOptions()} />
-          </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Input
-              label="Upstream model id"
-              value={fUpstream()}
-              onInput={setFUpstream}
-              placeholder={fId() || "defaults to the public id"}
-              hint="What the provider actually receives"
-            />
-            <div>
-              <span class="block text-xs font-medium text-ink-300 mb-1.5">Protocol</span>
-              <Segmented value={fProto()} onChange={(p) => setFProto(p as ModelProto)} options={PROTO_OPTIONS} />
-              <p class="text-[11px] text-ink-500 mt-1.5">
-                Which API surface(s) serve this model — the provider needs the matching base URL.
-              </p>
+          <Input
+            label="Public model id"
+            value={fId()}
+            onInput={setFId}
+            placeholder="hf:zai-org/GLM-5.2"
+            hint={
+              editing() === "new"
+                ? "What clients send as `model`"
+                : "Changing the id renames the entry — clients must send the new id (usage history keeps the old one)"
+            }
+          />
+
+          {/* routing targets / failover chain */}
+          <div>
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-xs font-medium text-ink-300">Routing targets · fallback order</span>
+              <button
+                type="button"
+                class="flex items-center gap-1 text-[11px] font-medium text-ink-400 hover:text-ink-100 transition-colors cursor-pointer disabled:opacity-40"
+                disabled={fTargets().length >= 8}
+                onClick={() =>
+                  setFTargets((prev) => [
+                    ...prev,
+                    {
+                      providerId:
+                        (providers() ?? []).find((p) => !prev.some((t) => t.providerId === p.id))?.id ??
+                        providers()?.[0]?.id ??
+                        "",
+                      upstreamModel: "",
+                      enabled: true,
+                    },
+                  ])
+                }
+              >
+                <Icon name={Icons.plus} size={12} /> Add fallback
+              </button>
             </div>
+            <div
+              class="space-y-1.5"
+              ref={(el) =>
+                attachSortable(el, {
+                  onReorder: (ids) =>
+                    // ids are the row indices captured at render time
+                    setFTargets((prev) => ids.map((s) => prev[Number(s)]!).filter(Boolean)),
+                })
+              }
+            >
+              <For each={fTargets()}>
+                {(t, i) => (
+                  <div data-id={String(i())} class="flex items-center gap-2 rounded-xl border border-line bg-elev/40 px-2 py-1.5">
+                    <span data-handle title="Drag to reorder" class="text-ink-600 hover:text-ink-300 transition-colors shrink-0">
+                      <Icon name={Icons.grip} size={14} />
+                    </span>
+                    <span class="text-[10px] tabular-nums text-ink-600 w-3 shrink-0">{i() + 1}</span>
+                    <div class="w-[38%] shrink-0">
+                      <Select
+                        value={t.providerId}
+                        onChange={(v) => updateTarget(i(), { providerId: v })}
+                        options={providerOptions()}
+                      />
+                    </div>
+                    <div class="flex-1 min-w-0">
+                      <Input
+                        value={t.upstreamModel}
+                        onInput={(v) => updateTarget(i(), { upstreamModel: v })}
+                        placeholder={fId() || "defaults to the public id"}
+                      />
+                    </div>
+                    <label
+                      class="flex items-center gap-1 shrink-0 cursor-pointer"
+                      title="Enabled target (disabled targets are skipped during failover)"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={t.enabled}
+                        onChange={(e) => updateTarget(i(), { enabled: e.currentTarget.checked })}
+                        class="w-3.5 h-3.5 rounded border-line bg-elev accent-brand-500"
+                      />
+                      <span class="text-[10px] text-ink-500">on</span>
+                    </label>
+                    <IconBtn
+                      icon={Icons.trash}
+                      title={fTargets().length <= 1 ? "A model needs at least one routing target" : "Remove target"}
+                      danger
+                      disabled={fTargets().length <= 1}
+                      onClick={() => setFTargets((prev) => prev.filter((_, j) => j !== i()))}
+                    />
+                  </div>
+                )}
+              </For>
+            </div>
+            <p class="text-[11px] text-ink-500 mt-1.5">
+              The gateway tries targets top-down — when a provider's keys are out of credits or
+              failing, the request falls to the next target, each with its own upstream model id.
+            </p>
+          </div>
+
+          <div>
+            <span class="block text-xs font-medium text-ink-300 mb-1.5">Protocol</span>
+            <Segmented value={fProto()} onChange={(p) => setFProto(p as ModelProto)} options={PROTO_OPTIONS} />
+            <p class="text-[11px] text-ink-500 mt-1.5">
+              Which API surface(s) serve this model — the provider needs the matching base URL.
+            </p>
           </div>
           <div class="flex items-center gap-6">
             <label class="flex items-center gap-2 cursor-pointer">
@@ -509,7 +618,7 @@ export default function AdminModelsPage() {
 
           <div class="flex justify-end gap-2 pt-2">
             <Btn variant="ghost" onClick={() => setEditing(null)}>Cancel</Btn>
-            <Btn onClick={save} disabled={busy() || !fProvider() || !fId().trim()}>
+            <Btn onClick={save} disabled={busy() || !targetsValid() || !fId().trim()}>
               {busy() ? "Saving…" : "Save model"}
             </Btn>
           </div>

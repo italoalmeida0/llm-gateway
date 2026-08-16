@@ -1,11 +1,11 @@
 import { LIMITS, SMTP_ENABLED } from "../config";
-import { db, stmts, audit, type ProviderRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow, type ModelProto } from "../db";
+import { db, stmts, audit, type ProviderRow, type ProviderKeyRow, type ModelTargetRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow, type ModelProto } from "../db";
 import { encryptSecret, decryptSecret, randomToken, sha256Hex } from "../crypto";
 import { requireAdmin, revokeAllUserSessions, auditAdmin } from "../auth";
 import { publicKey, revokeKey } from "../keys";
 import { GATEWAY_SECRET } from "../config";
 import { sendInviteEmail, sendResetEmail } from "../email";
-import { invalidateProviderCache } from "../proxy/index";
+import { liveKeyClear } from "../failover";
 import {
   getRoutingMode,
   setRoutingMode,
@@ -13,6 +13,11 @@ import {
   previewProviderModels,
   publicModelAdmin,
   invalidateModelCache,
+  modelTargetsFor,
+  refreshModelMirror,
+  refreshProviderKeyMirror,
+  primaryAdminKey,
+  type ModelTargetDto,
 } from "../models";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { hourlySeries, utcDate } from "../usage";
@@ -21,7 +26,7 @@ import { hourlySeries, utcDate } from "../usage";
  * /api/admin/* — everything requires role=admin. Every mutation is audited.
  */
 
-function publicProvider(p: ProviderRow, modelCount?: number) {
+function publicProvider(p: ProviderRow, modelCount?: number, keys?: ProviderKeyRow[]) {
   return {
     id: p.id,
     name: p.name,
@@ -34,7 +39,67 @@ function publicProvider(p: ProviderRow, modelCount?: number) {
     createdAt: p.created_at,
     hasApiKey: !!p.api_key_enc,
     modelCount: modelCount ?? providerModelCount(p.id),
+    // Upstream keys in failover order — NEVER including the key material.
+    keys: (keys ?? providerKeysFor(p.id)).map(publicProviderKey),
   };
+}
+
+function providerKeysFor(providerId: string): ProviderKeyRow[] {
+  return db
+    .prepare<ProviderKeyRow, [string]>(
+      "SELECT * FROM provider_keys WHERE provider_id = ? ORDER BY priority ASC, created_at ASC",
+    )
+    .all(providerId);
+}
+
+function publicProviderKey(k: ProviderKeyRow) {
+  return {
+    id: k.id,
+    label: k.label,
+    priority: k.priority,
+    status: k.status,
+    failCount: k.fail_count,
+    cooldownUntil: k.cooldown_until,
+    exhaustedReason: k.exhausted_reason,
+    createdAt: k.created_at,
+  };
+}
+
+/** Insert a new upstream key at the end of a provider's failover chain. */
+async function addProviderKey(providerId: string, apiKey: string, label: string, status: "active" | "disabled" = "active") {
+  const id = randomToken(12);
+  const enc = await encryptSecret(apiKey, GATEWAY_SECRET);
+  const maxP = db
+    .prepare<{ p: number | null }, [string]>("SELECT MAX(priority) AS p FROM provider_keys WHERE provider_id = ?")
+    .get(providerId)!.p;
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO provider_keys (id, provider_id, label, api_key_enc, priority, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, providerId, label, enc, (maxP ?? -10) + 10, status, now, now);
+  refreshProviderKeyMirror(providerId);
+  return db.prepare<ProviderKeyRow, [string]>("SELECT * FROM provider_keys WHERE id = ?").get(id)!;
+}
+
+/** Legacy single-key write: route an incoming `apiKey` to the provider's
+ *  TOP-1 key row (create when missing), keeping the mirror invariant. */
+async function rotatePrimaryKey(providerId: string, apiKeyEnc: string): Promise<void> {
+  const top = providerKeysFor(providerId)[0];
+  if (top) {
+    // A new secret is a fresh credential: clear any failure state with it.
+    db.prepare(
+      `UPDATE provider_keys SET api_key_enc = ?, status = 'active', fail_count = 0,
+         cooldown_until = NULL, exhausted_reason = NULL, updated_at = ? WHERE id = ?`,
+    ).run(apiKeyEnc, Date.now(), top.id);
+    liveKeyClear(top.id);
+  } else {
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO provider_keys (id, provider_id, label, api_key_enc, priority, status, created_at, updated_at)
+       VALUES (?, ?, 'primary', ?, 0, 'active', ?, ?)`,
+    ).run(randomToken(12), providerId, apiKeyEnc, now, now);
+  }
+  refreshProviderKeyMirror(providerId);
 }
 
 function providerModelCount(providerId: string): number {
@@ -213,6 +278,94 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
   };
 }
 
+// ---------- model failover targets ----------
+
+interface TargetInput {
+  providerId: string;
+  upstreamModel: string;
+  enabled: boolean;
+}
+
+const MAX_MODEL_TARGETS = 8;
+
+/** Validate a `targets` array (ordered failover chain) for a model. */
+export function validateTargets(raw: unknown, modelId: string): TargetInput[] {
+  if (!Array.isArray(raw)) throw new ApiError(400, "targets must be an array");
+  if (raw.length < 1 || raw.length > MAX_MODEL_TARGETS) {
+    throw new ApiError(400, `targets must have between 1 and ${MAX_MODEL_TARGETS} entries`);
+  }
+  const seen = new Set<string>();
+  const exists = db.prepare<{ id: string }, [string]>("SELECT id FROM providers WHERE id = ?");
+  return raw.map((t, i) => {
+    if (!t || typeof t !== "object" || Array.isArray(t)) {
+      throw new ApiError(400, `targets[${i}] must be an object`);
+    }
+    const o = t as Record<string, unknown>;
+    const providerId = o.providerId;
+    if (typeof providerId !== "string" || providerId.length > 64) {
+      throw new ApiError(400, `targets[${i}].providerId must be a provider id string`);
+    }
+    if (!exists.get(providerId)) {
+      throw new ApiError(400, `targets[${i}].providerId does not match any provider`);
+    }
+    if (seen.has(providerId)) {
+      throw new ApiError(400, "the same provider cannot appear twice in a model's chain");
+    }
+    seen.add(providerId);
+    let upstreamModel = modelId;
+    if (o.upstreamModel !== undefined && o.upstreamModel !== null && o.upstreamModel !== "") {
+      if (typeof o.upstreamModel !== "string" || o.upstreamModel.length > 256 || /\s/.test(o.upstreamModel)) {
+        throw new ApiError(400, `targets[${i}].upstreamModel is invalid (max 256 chars, no spaces)`);
+      }
+      upstreamModel = o.upstreamModel;
+    }
+    return { providerId, upstreamModel, enabled: o.enabled !== false };
+  });
+}
+
+/** Replace a model's whole failover chain (order = priority) + mirror. */
+function replaceModelTargets(modelId: string, targets: TargetInput[]): void {
+  db.transaction(() => {
+    db.prepare("DELETE FROM model_targets WHERE model_id = ?").run(modelId);
+    const ins = db.prepare(
+      "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    const now = Date.now();
+    targets.forEach((t, i) => ins.run(modelId, t.providerId, t.upstreamModel, i * 10, t.enabled ? 1 : 0, now));
+    refreshModelMirror(modelId);
+  })();
+  invalidateModelCache();
+}
+
+/** Legacy single-link edit (PATCH providerId/upstreamModel): sync the TOP-1
+ *  target; `providerId === null` drops the top of the chain. */
+function upsertPrimaryTarget(modelId: string, providerId: string | null, upstreamModel: string): void {
+  const qFirst = db.prepare<ModelTargetRow, [string]>(
+    "SELECT * FROM model_targets WHERE model_id = ? ORDER BY priority ASC LIMIT 1",
+  );
+  const first = qFirst.get(modelId);
+  // One provider may only appear once per model (chain PRIMARY KEY).
+  db.prepare("DELETE FROM model_targets WHERE model_id = ? AND provider_id = ?").run(
+    modelId,
+    providerId ?? "__none__",
+  );
+  if (providerId === null) {
+    if (first) {
+      db.prepare("DELETE FROM model_targets WHERE model_id = ? AND provider_id = ?").run(modelId, first.provider_id);
+    }
+  } else if (first) {
+    db.prepare("DELETE FROM model_targets WHERE model_id = ? AND provider_id = ?").run(modelId, first.provider_id);
+    db.prepare(
+      "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+    ).run(modelId, providerId, upstreamModel, first.priority, first.created_at);
+  } else {
+    db.prepare(
+      "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES (?, ?, ?, 0, 1, ?)",
+    ).run(modelId, providerId, upstreamModel, Date.now());
+  }
+  refreshModelMirror(modelId);
+}
+
 export async function handleAdminRoute(path: string, req: Request, url: URL): Promise<Response | null> {
   const ctx = await requireAdmin(req); // every admin route is gated
   const ip = clientIp(req);
@@ -231,7 +384,18 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         .all()
         .map((r) => [r.provider_id, r.n]),
     );
-    return ok({ providers: rows.map((p) => publicProvider(p, counts.get(p.id) ?? 0)) }, req);
+    const keysByProvider = new Map<string, ProviderKeyRow[]>();
+    for (const k of db
+      .query<ProviderKeyRow, []>("SELECT * FROM provider_keys ORDER BY priority ASC, created_at ASC")
+      .all()) {
+      const list = keysByProvider.get(k.provider_id);
+      if (list) list.push(k);
+      else keysByProvider.set(k.provider_id, [k]);
+    }
+    return ok(
+      { providers: rows.map((p) => publicProvider(p, counts.get(p.id) ?? 0, keysByProvider.get(p.id) ?? [])) },
+      req,
+    );
   }
 
   if (path === "/api/admin/providers" && req.method === "POST") {
@@ -254,7 +418,12 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       data.priority,
       Date.now(),
     );
-    invalidateProviderCache();
+    // The submitted key becomes the provider's primary upstream key.
+    db.prepare(
+      `INSERT INTO provider_keys (id, provider_id, label, api_key_enc, priority, status, created_at, updated_at)
+       VALUES (?, ?, 'primary', ?, 0, 'active', ?, ?)`,
+    ).run(randomToken(12), id, data.apiKeyEnc!, Date.now(), Date.now());
+    invalidateModelCache();
     const row = db.prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?").get(id)!;
     // Dual-capability provider: don't import yet — preview both /models lists
     // and let the dashboard ask how to import (sync-models with mode
@@ -272,10 +441,40 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     return ok({ provider: publicProvider(row), sync }, req);
   }
 
-  const providerMatch = path.match(/^\/api\/admin\/providers\/([a-f0-9]{24})(\/test|\/sync-models)?$/);
+  // Failover order of providers themselves (used by passthrough mode and as
+  // display order): the submitted id list IS the new order.
+  if (path === "/api/admin/providers/reorder" && req.method === "POST") {
+    const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+    const ids = body.ids;
+    if (
+      !Array.isArray(ids) ||
+      ids.length === 0 ||
+      ids.length > 500 ||
+      ids.some((x) => typeof x !== "string" || !/^[a-f0-9]{24}$/.test(x))
+    ) {
+      throw new ApiError(400, "ids must be an array of provider ids");
+    }
+    const existing = db.prepare<{ id: string }, []>("SELECT id FROM providers").all();
+    if (ids.length !== existing.length || existing.some((p) => !ids.includes(p.id))) {
+      throw new ApiError(400, "ids must list every provider exactly once");
+    }
+    db.transaction(() => {
+      const upd = db.prepare("UPDATE providers SET priority = ? WHERE id = ?");
+      (ids as string[]).forEach((pid, i) => upd.run(i * 10, pid));
+    })();
+    invalidateModelCache();
+    auditAdmin(ctx.user, "providers.reordered", undefined, { count: ids.length }, ip);
+    const rows = db
+      .prepare<ProviderRow, []>("SELECT * FROM providers ORDER BY priority ASC, created_at ASC")
+      .all();
+    return ok({ providers: rows.map((p) => publicProvider(p)) }, req);
+  }
+
+  const providerMatch = path.match(/^\/api\/admin\/providers\/([a-f0-9]{24})(\/test|\/sync-models|\/keys|\/keys\/reorder|\/keys\/([a-f0-9]{24}))?$/);
   if (providerMatch) {
     const providerId = providerMatch[1]!;
     const action = providerMatch[2] ?? "";
+    const keyId = providerMatch[3];
     const isTest = action === "/test";
     const isSync = action === "/sync-models";
     const existing = db
@@ -283,9 +482,116 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       .get(providerId);
     if (!existing) return err(404, "provider not found", req);
 
+    // ---------- upstream keys (failover chain) ----------
+
+    if (req.method === "POST" && action === "/keys") {
+      const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+      const apiKey = v.str(body, "apiKey", { min: 1, max: 512 })!;
+      const label = v.str(body, "label", { max: 64, optional: true }) ?? "";
+      const row = await addProviderKey(providerId, apiKey, label.trim());
+      invalidateModelCache();
+      auditAdmin(ctx.user, "provider_key.created", row.id, { provider: providerId, label: row.label }, ip);
+      return ok({ key: publicProviderKey(row) }, req);
+    }
+
+    if (req.method === "POST" && action === "/keys/reorder") {
+      const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+      const ids = body.ids;
+      const current = providerKeysFor(providerId);
+      if (
+        !Array.isArray(ids) ||
+        ids.length !== current.length ||
+        current.some((k) => !ids.includes(k.id)) ||
+        ids.some((x) => typeof x !== "string")
+      ) {
+        throw new ApiError(400, "ids must list every key of this provider exactly once");
+      }
+      db.transaction(() => {
+        const upd = db.prepare("UPDATE provider_keys SET priority = ?, updated_at = ? WHERE id = ?");
+        (ids as string[]).forEach((kid, i) => upd.run(i * 10, Date.now(), kid));
+      })();
+      // A new key became top-1: the mirror follows.
+      refreshProviderKeyMirror(providerId);
+      invalidateModelCache();
+      auditAdmin(ctx.user, "provider_keys.reordered", providerId, { count: ids.length }, ip);
+      return ok({ keys: providerKeysFor(providerId).map(publicProviderKey) }, req);
+    }
+
+    if (keyId) {
+      const keyRow = db
+        .prepare<ProviderKeyRow, [string, string]>(
+          "SELECT * FROM provider_keys WHERE id = ? AND provider_id = ?",
+        )
+        .get(keyId, providerId);
+      if (!keyRow) return err(404, "key not found", req);
+
+      if (req.method === "PATCH") {
+        const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+        let { label, status, api_key_enc } = keyRow;
+        let failCount = keyRow.fail_count;
+        let cooldownUntil = keyRow.cooldown_until;
+        let exhaustedReason = keyRow.exhausted_reason;
+        if ("label" in body) {
+          label = v.str(body, "label", { max: 64, optional: true }) ?? "";
+        }
+        if ("apiKey" in body) {
+          // New secret = fresh credential: wipe billing/auth/transient state.
+          const apiKey = v.str(body, "apiKey", { min: 1, max: 512 })!;
+          api_key_enc = await encryptSecret(apiKey, GATEWAY_SECRET);
+          status = "active";
+          failCount = 0;
+          cooldownUntil = null;
+          exhaustedReason = null;
+        }
+        if ("status" in body) {
+          if (body.status !== "active" && body.status !== "disabled") {
+            throw new ApiError(400, 'status must be "active" or "disabled"');
+          }
+          status = body.status;
+          if (status === "active") {
+            failCount = 0;
+            cooldownUntil = null;
+            exhaustedReason = null;
+          }
+        }
+        db.prepare(
+          `UPDATE provider_keys SET label = ?, api_key_enc = ?, status = ?, fail_count = ?,
+             cooldown_until = ?, exhausted_reason = ?, updated_at = ? WHERE id = ?`,
+        ).run(label, api_key_enc, status, failCount, cooldownUntil, exhaustedReason, Date.now(), keyId);
+        refreshProviderKeyMirror(providerId);
+        liveKeyClear(keyId);
+        invalidateModelCache();
+        auditAdmin(
+          ctx.user,
+          status !== keyRow.status && status === "active" ? "provider_key.reenabled" : "provider_key.updated",
+          keyId,
+          { provider: providerId, status },
+          ip,
+        );
+        const row = db.prepare<ProviderKeyRow, [string]>("SELECT * FROM provider_keys WHERE id = ?").get(keyId)!;
+        return ok({ key: publicProviderKey(row) }, req);
+      }
+
+      if (req.method === "DELETE") {
+        // providers.api_key_enc is NOT NULL — the failover chain must never
+        // become empty. Deleting the last key would orphan the provider.
+        const n = db
+          .prepare<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM provider_keys WHERE provider_id = ?")
+          .get(providerId)!.n;
+        if (n <= 1) throw new ApiError(400, "a provider needs at least one upstream key");
+        db.prepare("DELETE FROM provider_keys WHERE id = ?").run(keyId);
+        refreshProviderKeyMirror(providerId);
+        liveKeyClear(keyId);
+        invalidateModelCache();
+        auditAdmin(ctx.user, "provider_key.deleted", keyId, { provider: providerId, label: keyRow.label }, ip);
+        return ok({ deleted: true }, req);
+      }
+    }
+
     if (req.method === "PATCH" && !action) {
       const body = await readJsonBody(req, LIMITS.apiBodyBytes);
       const data = await providerWrite(body, existing);
+      const priKeyRotated = !!v.str(body, "apiKey", { max: 512, optional: true });
       db.prepare(
         `UPDATE providers SET name = ?, openai_base_url = ?, anthropic_base_url = ?, openai_auth_style = ?, anthropic_auth_style = ?, api_key_enc = ?, enabled = ?, priority = ?
          WHERE id = ?`,
@@ -300,23 +606,33 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         data.priority,
         providerId,
       );
-      invalidateProviderCache();
+      // A submitted apiKey rotates the TOP-1 upstream key (legacy single-key
+      // semantics) and refreshes its failure state.
+      if (priKeyRotated) await rotatePrimaryKey(providerId, data.apiKeyEnc!);
+      invalidateModelCache();
       auditAdmin(ctx.user, "provider.updated", providerId, { name: data.name }, ip);
       const row = db.prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?").get(providerId)!;
       return ok({ provider: publicProvider(row) }, req);
     }
 
     if (req.method === "DELETE" && !action) {
-      // Default: FK ON DELETE SET NULL orphans the provider's models — usage
-      // history survives and the admin can re-link them from the Models tab.
+      // Default: models keep their rows; targets pointing at this provider
+      // cascade away, so models with no remaining targets become orphaned
+      // (badge "no provider") and can be re-linked from the Models tab.
       // ?deleteModels=true opts into cascading deletion.
       const deleteModels = url.searchParams.get("deleteModels") === "true";
       const n = providerModelCount(providerId);
+      const affected = db
+        .prepare<{ model_id: string }, [string]>(
+          "SELECT DISTINCT model_id FROM model_targets WHERE provider_id = ?",
+        )
+        .all(providerId)
+        .map((r) => r.model_id);
       db.transaction(() => {
         if (deleteModels) db.prepare("DELETE FROM models WHERE provider_id = ?").run(providerId);
         db.prepare("DELETE FROM providers WHERE id = ?").run(providerId);
+        for (const mid of affected) refreshModelMirror(mid);
       })();
-      invalidateProviderCache();
       invalidateModelCache();
       auditAdmin(
         ctx.user,
@@ -344,16 +660,17 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       if (mode && mode !== "both" && mode !== "separate") {
         return err(400, 'mode must be "both" or "separate"', req);
       }
-      const key = await decryptSecret(existing.api_key_enc, GATEWAY_SECRET);
-      const sync = await syncProviderModels(existing, key, mode ?? "both");
+      const key = await primaryAdminKey(providerId);
+      if (!key) return err(400, "provider has no upstream key", req);
+      const sync = await syncProviderModels(existing, key, (mode ?? "both") as "both" | "separate");
       auditAdmin(ctx.user, "provider.models_synced", providerId, { mode: mode ?? "both", sync }, ip);
       return ok({ sync }, req);
     }
 
     if (req.method === "POST" && isTest) {
-      // Smoke-test the upstream with the real key (never echoing it back).
-      // Optional JSON body { cap?, model? } switches to a chat probe: a real
-      // "Hello" request against the chosen model id.
+      // Smoke-test the upstream with a real key (never echoing it back).
+      // Optional JSON body { cap?, model?, keyId? } — keyId tests one
+      // specific key of the failover chain instead of the top usable one.
       let body: Record<string, unknown> = {};
       if ((req.headers.get("content-type") ?? "").includes("application/json")) {
         body = await readJsonBody(req, LIMITS.apiBodyBytes);
@@ -364,7 +681,24 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         return err(400, 'cap must be "openai" or "anthropic"', req);
       }
 
-      const key = await decryptSecret(existing.api_key_enc, GATEWAY_SECRET);
+      let key: string | null;
+      const keyIdReq = v.str(body, "keyId", { max: 64, optional: true });
+      if (keyIdReq) {
+        const kr = db
+          .prepare<ProviderKeyRow, [string, string]>(
+            "SELECT * FROM provider_keys WHERE id = ? AND provider_id = ?",
+          )
+          .get(keyIdReq, providerId);
+        if (!kr) return err(404, "key not found", req);
+        try {
+          key = await decryptSecret(kr.api_key_enc, GATEWAY_SECRET);
+        } catch {
+          return err(500, "key material is unreadable", req);
+        }
+      } else {
+        key = await primaryAdminKey(providerId);
+      }
+      if (!key) return err(400, "provider has no usable upstream key", req);
       const headersFor = (cap: "openai" | "anthropic"): Record<string, string> => {
         const style = cap === "openai" ? existing.openai_auth_style : existing.anthropic_auth_style;
         const h: Record<string, string> =
@@ -478,7 +812,27 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
          ORDER BY m.id`,
       )
       .all();
-    return ok({ models: rows.map(publicModelAdmin) }, req);
+    const byModel = new Map<string, ModelTargetDto[]>();
+    for (const t of db
+      .prepare<ModelTargetDto & { model_id: string }, []>(
+        `SELECT t.model_id, t.provider_id AS "providerId", p.name AS "providerName",
+                t.upstream_model AS "upstreamModel", t.priority, t.enabled
+         FROM model_targets t JOIN providers p ON p.id = t.provider_id
+         ORDER BY t.priority ASC`,
+      )
+      .all()) {
+      const dto: ModelTargetDto = {
+        providerId: t.providerId,
+        providerName: t.providerName,
+        upstreamModel: t.upstreamModel,
+        priority: t.priority,
+        enabled: !!t.enabled,
+      };
+      const list = byModel.get(t.model_id);
+      if (list) list.push(dto);
+      else byModel.set(t.model_id, [dto]);
+    }
+    return ok({ models: rows.map((m) => publicModelAdmin(m, byModel.get(m.id) ?? [])) }, req);
   }
 
   if (path === "/api/admin/models" && req.method === "POST") {
@@ -490,7 +844,9 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     if (db.prepare<{ id: string }, [string]>("SELECT id FROM models WHERE id = ?").get(id)) {
       throw new ApiError(409, "a model with this id is already registered");
     }
-    const providerId = v.str(body, "providerId", { min: 1, max: 64 })!;
+    // Either a single providerId (legacy) or an ordered targets chain.
+    const targets = "targets" in body ? validateTargets(body.targets, id) : null;
+    let providerId = targets?.[0]?.providerId ?? v.str(body, "providerId", { min: 1, max: 64 })!;
     const provider = db
       .prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?")
       .get(providerId);
@@ -504,31 +860,40 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
           ? "both"
           : "openai"
         : "anthropic");
-    const upstreamModel = f.upstream_model ?? id;
+    const upstreamModel =
+      targets?.[0]?.upstreamModel ?? f.upstream_model ?? id;
     const now = Date.now();
-    db.prepare(
-      `INSERT INTO models
-         (id, provider_id, upstream_model, proto, name, description, hugging_face_id,
-          quantization, openrouter_slug, always_on, enabled, context_length,
-          max_output_length, created, input_modalities, output_modalities,
-          sampling_params, features, reasoning_efforts, pricing, datacenters,
-          source, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
-    ).run(
-      id, providerId, upstreamModel, proto, f.name, f.description, f.hugging_face_id,
-      f.quantization, f.openrouter_slug, f.always_on, f.enabled, f.context_length,
-      f.max_output_length, f.created, f.input_modalities, f.output_modalities,
-      f.sampling_params, f.features, f.reasoning_efforts, f.pricing, f.datacenters,
-      now, now,
-    );
+    const chain = targets ?? [{ providerId, upstreamModel, enabled: f.enabled === 1 }];
+    db.transaction(() => {
+      db.prepare(
+        `INSERT INTO models
+           (id, provider_id, upstream_model, proto, name, description, hugging_face_id,
+            quantization, openrouter_slug, always_on, enabled, context_length,
+            max_output_length, created, input_modalities, output_modalities,
+            sampling_params, features, reasoning_efforts, pricing, datacenters,
+            source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
+      ).run(
+        id, providerId, upstreamModel, proto, f.name, f.description, f.hugging_face_id,
+        f.quantization, f.openrouter_slug, f.always_on, f.enabled, f.context_length,
+        f.max_output_length, f.created, f.input_modalities, f.output_modalities,
+        f.sampling_params, f.features, f.reasoning_efforts, f.pricing, f.datacenters,
+        now, now,
+      );
+      const ins = db.prepare(
+        "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      );
+      chain.forEach((t, i) => ins.run(id, t.providerId, t.upstreamModel, i * 10, t.enabled ? 1 : 0, now));
+      refreshModelMirror(id);
+    })();
     invalidateModelCache();
-    auditAdmin(ctx.user, "model.created", id, { providerId, upstreamModel, proto }, ip);
+    auditAdmin(ctx.user, "model.created", id, { providerId, upstreamModel, proto, targets: chain.length }, ip);
     const row = db
       .prepare<ModelRow & { provider_name: string | null }, [string]>(
         `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id WHERE m.id = ?`,
       )
       .get(id)!;
-    return ok({ model: publicModelAdmin(row) }, req);
+    return ok({ model: publicModelAdmin(row, modelTargetsFor(id)) }, req);
   }
 
   if (path === "/api/admin/models/bulk-delete" && req.method === "POST") {
@@ -543,13 +908,51 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       throw new ApiError(400, "ids must be an array of 1..500 model id strings");
     }
     const del = db.prepare("DELETE FROM models WHERE id = ?");
+    const exists = db.prepare("SELECT 1 AS x FROM models WHERE id = ?");
     let deleted = 0;
     db.transaction(() => {
-      for (const mid of ids as string[]) deleted += del.run(mid).changes;
+      // NB: bun:sqlite's .changes includes FK-cascaded model_targets rows —
+      // count models by existence instead.
+      for (const mid of ids as string[]) {
+        if (exists.get(mid)) {
+          del.run(mid);
+          deleted++;
+        }
+      }
     })();
     invalidateModelCache();
     auditAdmin(ctx.user, "models.bulk_deleted", null, { requested: ids.length, deleted }, ip);
     return ok({ deleted }, req);
+  }
+
+  const modelTargetsMatch = path.match(/^\/api\/admin\/models\/(.+)\/targets$/);
+  if (modelTargetsMatch && (req.method === "PUT" || req.method === "POST")) {
+    let modelId = modelTargetsMatch[1]!;
+    try {
+      modelId = decodeURIComponent(modelTargetsMatch[1]!);
+    } catch {
+      return err(400, "malformed model id", req);
+    }
+    const existing = db.prepare<ModelRow, [string]>("SELECT * FROM models WHERE id = ?").get(modelId);
+    if (!existing) return err(404, "model not found", req);
+    const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+    const targets = validateTargets(body.targets, modelId);
+    replaceModelTargets(modelId, targets);
+    // The mirror makes the top-1 visible on the models row itself.
+    db.prepare("UPDATE models SET updated_at = ? WHERE id = ?").run(Date.now(), modelId);
+    auditAdmin(
+      ctx.user,
+      "model.targets_updated",
+      modelId,
+      { chain: targets.map((t) => `${t.providerId} → ${t.upstreamModel}`) },
+      ip,
+    );
+    const row = db
+      .prepare<ModelRow & { provider_name: string | null }, [string]>(
+        `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id WHERE m.id = ?`,
+      )
+      .get(modelId)!;
+    return ok({ model: publicModelAdmin(row, modelTargetsFor(modelId)) }, req);
   }
 
   const modelMatch = path.match(/^\/api\/admin\/models\/(.+)$/);
@@ -567,11 +970,17 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
 
     if (req.method === "PATCH") {
       const body = await readJsonBody(req, LIMITS.apiBodyBytes);
+      const hasTargets = "targets" in body;
+      if (hasTargets && ("providerId" in body || "upstreamModel" in body)) {
+        throw new ApiError(400, "pass either `targets` or providerId/upstreamModel, not both");
+      }
+      const targets = hasTargets ? validateTargets(body.targets, modelId) : null;
+
       let providerId = existing.provider_id;
-      if ("providerId" in body) {
+      if (!hasTargets && "providerId" in body) {
         const pid = body.providerId;
         if (pid === null) {
-          providerId = null; // explicit unlink (orphan on purpose)
+          providerId = null; // explicit unlink of the top-1 target
         } else {
           if (typeof pid !== "string") throw new ApiError(400, "providerId must be a string or null");
           const p = db
@@ -581,9 +990,9 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
           providerId = pid;
         }
       }
-      // Optional rename: `id` is the PRIMARY KEY, updated in place — no
-      // foreign keys point at it (usage events record the model as plain
-      // text, so history keeps the old id; clients must send the new one).
+      // Optional rename: `id` is the PRIMARY KEY, updated in place — model
+      // targets follow via ON UPDATE CASCADE and usage events record the
+      // model as plain text, so history keeps the old id.
       let newId: string | undefined;
       if ("id" in body) {
         const candidate = v.str(body, "id", { min: 1, max: 256 })!;
@@ -598,6 +1007,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         }
       }
       const f = modelFields(body, existing);
+      const finalId = newId ?? modelId;
       db.transaction(() => {
         db.prepare(
           `UPDATE models SET provider_id = ?, upstream_model = ?, proto = ?, name = ?,
@@ -607,28 +1017,40 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
              features = ?, reasoning_efforts = ?, pricing = ?, datacenters = ?, updated_at = ?
            WHERE id = ?`,
         ).run(
-          providerId, f.upstream_model ?? existing.upstream_model, f.proto ?? existing.proto,
+          targets ? existing.provider_id : providerId,
+          targets ? existing.upstream_model : (f.upstream_model ?? existing.upstream_model),
+          f.proto ?? existing.proto,
           f.name, f.description, f.hugging_face_id, f.quantization, f.openrouter_slug,
           f.always_on, f.enabled, f.context_length, f.max_output_length, f.created,
           f.input_modalities, f.output_modalities, f.sampling_params, f.features,
           f.reasoning_efforts, f.pricing, f.datacenters, Date.now(), modelId,
         );
+        if (targets) {
+          replaceModelTargets(modelId, targets);
+        } else if ("providerId" in body || "upstreamModel" in body) {
+          upsertPrimaryTarget(modelId, providerId, f.upstream_model ?? existing.upstream_model);
+        }
         if (newId) db.prepare("UPDATE models SET id = ? WHERE id = ?").run(newId, modelId);
+        refreshModelMirror(finalId);
       })();
       invalidateModelCache();
       auditAdmin(
         ctx.user,
         newId ? "model.renamed" : "model.updated",
-        newId ?? modelId,
-        { providerId, ...(newId ? { renamedFrom: modelId } : {}) },
+        finalId,
+        {
+          providerId,
+          ...(targets ? { targets: targets.length } : {}),
+          ...(newId ? { renamedFrom: modelId } : {}),
+        },
         ip,
       );
       const row = db
         .prepare<ModelRow & { provider_name: string | null }, [string]>(
           `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id WHERE m.id = ?`,
         )
-        .get(newId ?? modelId)!;
-      return ok({ model: publicModelAdmin(row) }, req);
+        .get(finalId)!;
+      return ok({ model: publicModelAdmin(row, modelTargetsFor(finalId)) }, req);
     }
 
     if (req.method === "DELETE") {

@@ -1345,3 +1345,349 @@ describe("model registry & routing mode", () => {
   });
 });
 
+/**
+ * Upstream failover: multiple provider keys (ordered) + ordered per-model
+ * routing targets. The fake upstream is told per-secret how to misbehave
+ * (__behavior) and counts requests per secret (/__hits).
+ */
+describe("upstream failover", () => {
+  let provA = "";
+  let provB = "";
+  let keyA1 = ""; // provider A, priority 0
+  let keyA2 = ""; // provider A, priority 10
+  let keyB1 = ""; // provider B, priority 0
+  let plainUserToken = ""; // fresh non-admin for the 403 assertions
+  const SEC_A1 = "sk-fb-a1";
+  const SEC_A2 = "sk-fb-a2";
+  const SEC_B1 = "sk-fb-b1";
+
+  const behavior = (secret: string, failWith: { status: number; message?: string } | null) =>
+    fetch(`${UP}/__behavior`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret, failWith }),
+    });
+  const hits = async (): Promise<Record<string, number>> =>
+    (await fetch(`${UP}/__hits`).then((r) => r.json())) as Record<string, number>;
+  const lastAuth = async (): Promise<Record<string, string | null>> =>
+    (await fetch(`${UP}/__last-auth`).then((r) => r.json())) as Record<string, string | null>;
+
+  test("setup: fresh provider pair, exclusively owned by this suite", async () => {
+    // remove anything earlier describes left behind so candidate chains are exact
+    const list = await api("/api/admin/providers", { token: adminToken });
+    for (const p of list.json.providers as Array<{ id: string }>) {
+      expect((await api(`/api/admin/providers/${p.id}`, { token: adminToken, method: "DELETE" })).status).toBe(200);
+    }
+    for (const s of [SEC_A1, SEC_A2, SEC_B1]) await behavior(s, null); // accept the secrets
+
+    const a = await api("/api/admin/providers", {
+      token: adminToken,
+      body: { name: "fb-a", openaiBaseUrl: `${UP}/openai/v1`, apiKey: SEC_A1 },
+    });
+    expect(a.status).toBe(200);
+    provA = a.json.provider.id;
+    expect(a.json.provider.keys.length).toBe(1);
+    expect(a.json.provider.keys[0].label).toBe("primary");
+    expect(a.json.provider.keys[0].status).toBe("active");
+    keyA1 = a.json.provider.keys[0].id;
+
+    // no key material anywhere in the payload
+    expect(JSON.stringify(a.json)).not.toContain(SEC_A1);
+
+    const k2 = await api(`/api/admin/providers/${provA}/keys`, {
+      token: adminToken,
+      body: { label: "backup", apiKey: SEC_A2 },
+    });
+    expect(k2.status).toBe(200);
+    keyA2 = k2.json.key.id;
+    expect(k2.json.key.priority).toBeGreaterThan(0);
+
+    const b = await api("/api/admin/providers", {
+      token: adminToken,
+      body: { name: "fb-b", openaiBaseUrl: `${UP}/openai/v1`, apiKey: SEC_B1, priority: 200 },
+    });
+    expect(b.status).toBe(200);
+    provB = b.json.provider.id;
+    keyB1 = b.json.provider.keys[0].id;
+
+    // a fresh non-admin user whose token is guaranteed valid right now
+    const u = await api("/api/admin/users", {
+      token: adminToken,
+      body: { email: "fca-user@example.com", name: "FCA", role: "user", sendInvite: true },
+    });
+    expect(u.status).toBe(200);
+    const pwToken = decodeURIComponent(String(u.json.invite.link).split("token=")[1]);
+    expect((await api("/api/auth/password-reset/confirm", { body: { token: pwToken, password: "fca-password-123" } })).status).toBe(200);
+    const login = await api("/api/auth/login", { body: { email: "fca-user@example.com", password: "fca-password-123" } });
+    expect(login.status).toBe(200);
+    plainUserToken = login.json.accessToken;
+  });
+
+  test("key routes require admin", async () => {
+    expect((await api(`/api/admin/providers/${provA}/keys`, { body: { apiKey: "x" } })).status).toBe(401);
+    expect((await api(`/api/admin/providers/${provA}/keys`, { token: plainUserToken, body: { apiKey: "x" } })).status).toBe(403);
+    expect(
+      (await api(`/api/admin/providers/${provA}/keys/reorder`, { token: plainUserToken, body: { ids: [keyA1, keyA2] } })).status,
+    ).toBe(403);
+    expect(
+      (await api(`/api/admin/providers/${provA}/keys/${keyA1}`, { token: plainUserToken, method: "PATCH", body: { status: "active" } })).status,
+    ).toBe(403);
+    expect(
+      (await api("/api/admin/providers/reorder", { token: plainUserToken, body: { ids: [provB, provA] } })).status,
+    ).toBe(403);
+    expect(
+      (await api(`/api/admin/models/x/targets`, { token: plainUserToken, method: "PUT", body: { targets: [{ providerId: provA }] } })).status,
+    ).toBe(403);
+  });
+
+  test("out-of-credits key falls through to the next key in the SAME request", async () => {
+    // primary key reports "insufficient credits" (billing)
+    await behavior(SEC_A1, { status: 402, message: "Insufficient credits. Please top up your account." });
+
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "failover please" }],
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    expect((await lastAuth()).authorization).toBe(`Bearer ${SEC_A2}`);
+
+    let h = await hits();
+    expect(h[SEC_A1]).toBe(1);
+    expect(h[SEC_A2]).toBe(1);
+
+    // the failed key is marked exhausted(billing) with an auto-retry timestamp
+    const provs = await api("/api/admin/providers", { token: adminToken });
+    const a1 = provs.json.providers.find((p: any) => p.id === provA).keys.find((k: any) => k.id === keyA1);
+    expect(a1.status).toBe("exhausted");
+    expect(a1.exhaustedReason).toBe("billing");
+    expect(a1.cooldownUntil).toBeGreaterThan(Date.now());
+
+    // second request: the exhausted key is not retried
+    const r2 = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "again" }],
+    });
+    expect(r2.status).toBe(200);
+    await r2.text();
+    h = await hits();
+    expect(h[SEC_A1]).toBe(1);
+    expect(h[SEC_A2]).toBe(2);
+
+    // an exhausted key transition is audited
+    const log = await api(`/api/admin/audit?limit=20`, { token: adminToken });
+    expect(log.json.entries.some((e: any) => e.action === "provider_key.exhausted" && e.target === keyA1)).toBe(true);
+  });
+
+  test("client-caused 4xx does NOT fail over to other keys/providers", async () => {
+    // a2 (now the active one) rejects with a plain 400 — a client error
+    await behavior(SEC_A2, { status: 400, message: "messages: field required" });
+    const before = await hits();
+
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "this 400s" }],
+    });
+    expect(r.status).toBe(400);
+    await r.text();
+
+    const after = await hits();
+    expect(after[SEC_A2]).toBe((before[SEC_A2] ?? 0) + 1);
+    expect(after[SEC_B1] ?? 0).toBe(before[SEC_B1] ?? 0); // provider B untouched
+    // a 400 is client-caused: the key is NOT penalized
+    const provs = await api("/api/admin/providers", { token: adminToken });
+    const a2 = provs.json.providers.find((p: any) => p.id === provA).keys.find((k: any) => k.id === keyA2);
+    expect(a2.status).toBe("active");
+    await behavior(SEC_A2, null);
+  });
+
+  test("manual re-enable returns an exhausted key to rotation", async () => {
+    const re = await api(`/api/admin/providers/${provA}/keys/${keyA1}`, {
+      token: adminToken, method: "PATCH", body: { status: "active" },
+    });
+    expect(re.status).toBe(200);
+    expect(re.json.key.status).toBe("active");
+    expect(re.json.key.cooldownUntil).toBeNull();
+    expect(re.json.key.exhaustedReason).toBeNull();
+    await behavior(SEC_A1, null);
+
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "primary again" }],
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    expect((await lastAuth()).authorization).toBe(`Bearer ${SEC_A1}`);
+  });
+
+  test("reordering keys changes which one is preferred", async () => {
+    const ro = await api(`/api/admin/providers/${provA}/keys/reorder`, {
+      token: adminToken, body: { ids: [keyA2, keyA1] },
+    });
+    expect(ro.status).toBe(200);
+    expect(ro.json.keys.map((k: any) => k.id)).toEqual([keyA2, keyA1]);
+    // a partial/wrong set is rejected
+    expect(
+      (await api(`/api/admin/providers/${provA}/keys/reorder`, { token: adminToken, body: { ids: [keyA2] } })).status,
+    ).toBe(400);
+
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "who is first" }],
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    expect((await lastAuth()).authorization).toBe(`Bearer ${SEC_A2}`);
+
+    // restore natural order for subsequent tests
+    await api(`/api/admin/providers/${provA}/keys/reorder`, { token: adminToken, body: { ids: [keyA1, keyA2] } });
+  });
+
+  test("legacy PATCH apiKey rotates the top-1 key", async () => {
+    const SEC_A1_NEW = "sk-fb-a1-rotated";
+    await behavior(SEC_A1_NEW, null);
+    const p = await api(`/api/admin/providers/${provA}`, {
+      token: adminToken, method: "PATCH", body: { apiKey: SEC_A1_NEW },
+    });
+    expect(p.status).toBe(200);
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "rotated" }],
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    expect((await lastAuth()).authorization).toBe(`Bearer ${SEC_A1_NEW}`);
+    // keep the canonical secret name for later behavior hooks
+    await behavior(SEC_A1, null); // no-op safety
+    const provs = await api("/api/admin/providers", { token: adminToken });
+    const a1 = provs.json.providers.find((p: any) => p.id === provA).keys.find((k: any) => k.id === keyA1);
+    expect(a1.status).toBe("active");
+  });
+
+  test("router mode falls across TARGETS: provider A out of credits → provider B serves with its own upstream id", async () => {
+    // both of A's keys are out of credits
+    await behavior("sk-fb-a1-rotated", { status: 429, message: "You exceeded your current quota, please check your plan and billing details" });
+    await behavior(SEC_A2, { status: 429, message: "insufficient_quota: quota exceeded" });
+
+    const sw = await api("/api/admin/settings", {
+      token: adminToken, method: "PATCH", body: { routingMode: "router" },
+    });
+    expect(sw.status).toBe(200);
+
+    const created = await api("/api/admin/models", {
+      token: adminToken,
+      body: {
+        id: "fb-model",
+        proto: "openai",
+        targets: [
+          { providerId: provA, upstreamModel: "fb-model-on-a" },
+          { providerId: provB, upstreamModel: "fb-model-on-b" },
+        ],
+      },
+    });
+    expect(created.status).toBe(200);
+    expect(created.json.model.targets.length).toBe(2);
+    expect(created.json.model.providerId).toBe(provA); // mirror = top-1 target
+    expect(created.json.model.upstreamModel).toBe("fb-model-on-a");
+
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fb-model", messages: [{ role: "user", content: "target failover" }],
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    // B received the request under ITS OWN upstream model id
+    const body = await fetch(`${UP}/__last-body`).then((x) => x.json());
+    expect(JSON.parse(body.body).model).toBe("fb-model-on-b");
+
+    // /v1/models (router registry) still lists the public id
+    const m = await fetch(`${GW}/v1/models`, { headers: { Authorization: `Bearer ${gatewayKey}` } });
+    expect((await m.json()).data.some((x: any) => x.id === "fb-model")).toBe(true);
+
+    // cleanup: the created model + both A keys exhausted; back to passthrough
+    expect((await api(`/api/admin/models/${encodeURIComponent("fb-model")}`, { token: adminToken, method: "DELETE" })).status).toBe(200);
+    const sw2 = await api("/api/admin/settings", {
+      token: adminToken, method: "PATCH", body: { routingMode: "passthrough" },
+    });
+    expect(sw2.status).toBe(200);
+  });
+
+  test("PUT targets replaces the chain and re-prioritizes it", async () => {
+    const created = await api("/api/admin/models", {
+      token: adminToken,
+      body: { id: "fb-model2", proto: "openai", targets: [{ providerId: provA }] },
+    });
+    expect(created.status).toBe(200);
+    expect(created.json.model.providerId).toBe(provA);
+
+    // invalid: unknown provider / empty chain / duplicated provider
+    expect((await api(`/api/admin/models/fb-model2/targets`, { token: adminToken, method: "PUT", body: { targets: [{ providerId: "0".repeat(24) }] } })).status).toBe(400);
+    expect((await api(`/api/admin/models/fb-model2/targets`, { token: adminToken, method: "PUT", body: { targets: [] } })).status).toBe(400);
+    expect(
+      (await api(`/api/admin/models/fb-model2/targets`, {
+        token: adminToken, method: "PUT",
+        body: { targets: [{ providerId: provA }, { providerId: provB }, { providerId: provA }] },
+      })).status,
+    ).toBe(400);
+
+    const put = await api(`/api/admin/models/fb-model2/targets`, {
+      token: adminToken, method: "PUT",
+      body: { targets: [{ providerId: provB, upstreamModel: "m2-b" }, { providerId: provA, upstreamModel: "m2-a" }] },
+    });
+    expect(put.status).toBe(200);
+    expect(put.json.model.targets.map((t: any) => t.providerId)).toEqual([provB, provA]);
+    expect(put.json.model.providerId).toBe(provB); // mirror follows the new top-1
+    expect(put.json.model.upstreamModel).toBe("m2-b");
+
+    // A's keys are still exhausted from the previous test → B serves anyway
+    await behavior(SEC_A2, null); // A2 healthy again, but B is top-1 now
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fb-model2", messages: [{ role: "user", content: "chain order" }],
+    });
+    // router mode was switched back to passthrough above — re-enable for this check
+    const sw = await api("/api/admin/settings", { token: adminToken, method: "PATCH", body: { routingMode: "router" } });
+    expect(sw.status).toBe(200);
+    const r2 = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fb-model2", messages: [{ role: "user", content: "chain order" }],
+    });
+    expect(r2.status).toBe(200);
+    await r2.text();
+    const body = await fetch(`${UP}/__last-body`).then((x) => x.json());
+    expect(JSON.parse(body.body).model).toBe("m2-b");
+    expect(r.status).toBe(200); // passthrough served it untouched before the switch
+    await r.text();
+
+    expect((await api(`/api/admin/models/${encodeURIComponent("fb-model2")}`, { token: adminToken, method: "DELETE" })).status).toBe(200);
+    await api("/api/admin/settings", { token: adminToken, method: "PATCH", body: { routingMode: "passthrough" } });
+  });
+
+  test("providers reorder endpoint rewrites priorities", async () => {
+    const ro = await api("/api/admin/providers/reorder", { token: adminToken, body: { ids: [provB, provA] } });
+    expect(ro.status).toBe(200);
+    expect(ro.json.providers.map((p: any) => p.id)).toEqual([provB, provA]);
+    expect(ro.json.providers[0].priority).toBeLessThan(ro.json.providers[1].priority);
+    // wrong set rejected
+    expect((await api("/api/admin/providers/reorder", { token: adminToken, body: { ids: [provA] } })).status).toBe(400);
+    // restore A-first
+    await api("/api/admin/providers/reorder", { token: adminToken, body: { ids: [provA, provB] } });
+  });
+
+  test("every candidate failing billing → the last upstream error reaches the client", async () => {
+    await behavior(SEC_A2, { status: 402, message: "Insufficient credits" });
+    await behavior(SEC_B1, { status: 402, message: "Payment required: account is out of credits" });
+
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "everyone broke" }],
+    });
+    expect(r.status).toBe(402); // the real upstream error, not a generic 503
+    const j = await r.json();
+    expect(JSON.stringify(j)).toContain("credits");
+
+    // cleanup: accept the keys again for the last-key-delete test
+    await behavior(SEC_A2, null);
+    await behavior(SEC_B1, null);
+  });
+
+  test("a provider cannot lose its last remaining key", async () => {
+    const d2 = await api(`/api/admin/providers/${provA}/keys/${keyA2}`, { token: adminToken, method: "DELETE" });
+    expect(d2.status).toBe(200);
+    const d1 = await api(`/api/admin/providers/${provA}/keys/${keyA1}`, { token: adminToken, method: "DELETE" });
+    expect(d1.status).toBe(400);
+    const provs = await api("/api/admin/providers", { token: adminToken });
+    expect(provs.json.providers.find((p: any) => p.id === provA).keys.length).toBe(1);
+  });
+});
+

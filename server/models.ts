@@ -1,6 +1,14 @@
-import { db, type ModelRow, type ProviderRow, type RoutingMode } from "./db";
+import {
+  db,
+  type ModelRow,
+  type ModelTargetRow,
+  type ProviderKeyRow,
+  type ProviderRow,
+  type RoutingMode,
+} from "./db";
 import { decryptSecret } from "./crypto";
 import { GATEWAY_SECRET } from "./config";
+import { keyUsable } from "./failover";
 
 /**
  * Model registry & routing.
@@ -15,9 +23,15 @@ import { GATEWAY_SECRET } from "./config";
  *    skipped (INSERT OR IGNORE) so re-syncing never clobbers admin edits —
  *    the one exception is upgrading a pristine auto row to 'both' on a
  *    "both"-mode sync.
+ * - Every model has an ORDERED list of routing targets (`model_targets`):
+ *    (provider, upstream_model) pairs tried in priority order by the proxy's
+ *    failover loop. `models.provider_id`/`models.upstream_model` are a
+ *    denormalized mirror of the top-1 target for pre-failover readers —
+ *    `refreshModelMirror()` recomputes them after every mutation.
  * - `routerSnapshot` is the proxy hot-path view (5s cache, same pattern as the
- *    provider cache): routing mode + every model row + every ENABLED provider
- *    with its decrypted key. Admin mutations call invalidateModelCache().
+ *    old provider cache): routing mode + every model row + every target +
+ *    every ENABLED provider with ALL its keys decrypted (ordered). Admin
+ *    mutations call invalidateModelCache().
  * - `publicModelEntry` renders the rich /v1/models entry (the format shown in
  *    the gateway's own listing when routing mode is "router").
  */
@@ -199,6 +213,12 @@ const insertModel = db.prepare(
    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)`,
 );
 
+/** A freshly imported model gets its provider as the priority-0 target. */
+const insertTarget = db.prepare(
+  `INSERT OR IGNORE INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at)
+   VALUES (?, ?, ?, 0, 1, ?)`,
+);
+
 /**
  * Promote a row to proto='both' when a "both"-mode sync re-lists an id the
  * provider already has. Guarded to pristine auto-imported rows
@@ -341,6 +361,9 @@ export async function syncProviderModels(
         if (r2.changes === 0 && importProto === "both") {
           merged += mergeProtoBoth.run(now, m.id, provider.id, m.id).changes;
         }
+        // New rows only: existing models keep whatever targets the admin
+        // configured (an orphaned id is also never auto-healed by a sync).
+        if (r2.changes === 1) insertTarget.run(m.id, provider.id, m.id, now);
       }
     })();
     out[proto] = { added, skipped: parsed.length - added - merged, merged };
@@ -400,7 +423,10 @@ export function publicModelEntry(m: ModelRow, providerName: string): Record<stri
 }
 
 /** Admin dashboard DTO (camelCase, JSON fields parsed). */
-export function publicModelAdmin(m: ModelRow & { provider_name?: string | null }) {
+export function publicModelAdmin(
+  m: ModelRow & { provider_name?: string | null },
+  targets?: ModelTargetDto[],
+) {
   return {
     id: m.id,
     providerId: m.provider_id,
@@ -427,15 +453,108 @@ export function publicModelAdmin(m: ModelRow & { provider_name?: string | null }
     source: m.source,
     createdAt: m.created_at,
     updatedAt: m.updated_at,
+    // Ordered failover chain (first entry mirrors providerId/upstreamModel).
+    targets: targets ?? [],
   };
 }
 
+/** Dashboard view of one routing target. */
+export interface ModelTargetDto {
+  providerId: string;
+  providerName: string | null;
+  upstreamModel: string;
+  priority: number;
+  enabled: boolean;
+}
+
+export function modelTargetsFor(modelId: string): ModelTargetDto[] {
+  const rows = db
+    .prepare<ModelTargetRow & { provider_name: string | null }, [string]>(
+      `SELECT t.*, p.name AS provider_name FROM model_targets t
+       JOIN providers p ON p.id = t.provider_id
+       WHERE t.model_id = ? ORDER BY t.priority ASC`,
+    )
+    .all(modelId);
+  return rows.map((t) => ({
+    providerId: t.provider_id,
+    providerName: t.provider_name,
+    upstreamModel: t.upstream_model,
+    priority: t.priority,
+    enabled: !!t.enabled,
+  }));
+}
+
+/** Recompute the denormalized top-1 mirror on `models` after any target
+ *  mutation (provider_id/upstream_model = lowest-priority target; NULL when
+ *  none remains — the model is then "orphaned", same as a pre-failover
+ *  provider deletion). */
+export function refreshModelMirror(modelId: string): void {
+  const top = db
+    .prepare<ModelTargetRow, [string]>(
+      "SELECT * FROM model_targets WHERE model_id = ? ORDER BY priority ASC LIMIT 1",
+    )
+    .get(modelId);
+  if (top) {
+    db.prepare("UPDATE models SET provider_id = ?, upstream_model = ? WHERE id = ?").run(
+      top.provider_id,
+      top.upstream_model,
+      modelId,
+    );
+  } else {
+    db.prepare("UPDATE models SET provider_id = NULL WHERE id = ?").run(modelId);
+  }
+}
+
+/** Keep `providers.api_key_enc` mirroring the top-priority key row (NOT NULL
+ *  invariant: the last key of a provider is never deleted). */
+export function refreshProviderKeyMirror(providerId: string): void {
+  const top = db
+    .prepare<ProviderKeyRow, [string]>(
+      "SELECT api_key_enc FROM provider_keys WHERE provider_id = ? ORDER BY priority ASC LIMIT 1",
+    )
+    .get(providerId);
+  if (top) {
+    db.prepare("UPDATE providers SET api_key_enc = ? WHERE id = ?").run(top.api_key_enc, providerId);
+  }
+}
+
+/** Top-priority usable key for admin-side operations (sync/test). Falls back
+ *  to the top key regardless of state — a best-effort call never fails just
+ *  because every key is cooling down. */
+export async function primaryAdminKey(providerId: string): Promise<string | null> {
+  const rows = db
+    .prepare<ProviderKeyRow, [string]>(
+      "SELECT * FROM provider_keys WHERE provider_id = ? ORDER BY priority ASC",
+    )
+    .all(providerId);
+  if (rows.length === 0) return null;
+  const usable = rows.find((k) => keyUsable(k));
+  const chosen = usable ?? rows[0]!;
+  try {
+    return await decryptSecret(chosen.api_key_enc, GATEWAY_SECRET);
+  } catch {
+    return null;
+  }
+}
 
 // ---------- router snapshot (proxy hot path) ----------
 
+/** One decrypted upstream key, ordered within its provider. */
+export interface RoutedKey {
+  id: string;
+  key: string;
+  label: string;
+  priority: number;
+  status: ProviderKeyRow["status"];
+  cooldownUntil: number | null;
+  exhaustedReason: string | null;
+}
+
 export interface RoutedProvider {
   row: ProviderRow;
-  key: string;
+  /** Decrypted keys, priority ASC (may include blocked ones — the proxy's
+   *  candidate builder filters). */
+  keys: RoutedKey[];
 }
 
 export interface RouterSnapshot {
@@ -443,6 +562,8 @@ export interface RouterSnapshot {
   /** ALL model rows (any enabled state) — the proxy distinguishes
    *  404-unknown vs 404-disabled vs 503-orphaned from this map. */
   models: Map<string, ModelRow>;
+  /** Ordered fallback chain per model id (any enabled state). */
+  targets: Map<string, ModelTargetRow[]>;
   /** Enabled providers only, keyed by id, with decrypted keys. */
   providers: Map<string, RoutedProvider>;
 }
@@ -458,18 +579,42 @@ export function routerSnapshot(): Promise<RouterSnapshot> {
     const mode = getRoutingMode();
     const models = new Map<string, ModelRow>();
     for (const m of db.query<ModelRow, []>("SELECT * FROM models").all()) models.set(m.id, m);
+    const targets = new Map<string, ModelTargetRow[]>();
+    for (const t of db
+      .query<ModelTargetRow, []>("SELECT * FROM model_targets ORDER BY priority ASC")
+      .all()) {
+      const list = targets.get(t.model_id);
+      if (list) list.push(t);
+      else targets.set(t.model_id, [t]);
+    }
     const providers = new Map<string, RoutedProvider>();
     for (const row of db
       .query<ProviderRow, []>("SELECT * FROM providers WHERE enabled = 1 ORDER BY priority, created_at")
       .all()) {
       try {
-        providers.set(row.id, { row, key: await decryptSecret(row.api_key_enc, GATEWAY_SECRET) });
-      } catch {
-        // Corrupt key material: leave the provider out — its models 503
-        // instead of taking the whole proxy down.
-      }
+        const keys: RoutedKey[] = [];
+        for (const k of db
+          .query<ProviderKeyRow, [string]>(
+            "SELECT * FROM provider_keys WHERE provider_id = ? ORDER BY priority ASC",
+          )
+          .all(row.id)) {
+          keys.push({
+            id: k.id,
+            key: await decryptSecret(k.api_key_enc, GATEWAY_SECRET),
+            label: k.label,
+            priority: k.priority,
+            status: k.status,
+            cooldownUntil: k.cooldown_until,
+            exhaustedReason: k.exhausted_reason,
+          });
+        }
+        if (keys.length > 0) providers.set(row.id, { row, keys });
+        // A provider whose key material is all corrupt/models entry that
+        // can't decrypt: left out — its models 503 instead of taking the
+        // whole proxy down.
+      } catch {}
     }
-    const snap: RouterSnapshot = { mode, models, providers };
+    const snap: RouterSnapshot = { mode, models, targets, providers };
     snapCache = { snap, at: Date.now() };
     return snap;
   })().finally(() => {
@@ -486,14 +631,36 @@ export function providerHasCapability(row: ProviderRow, proto: "openai" | "anthr
   return proto === "openai" ? !!row.openai_base_url : !!row.anthropic_base_url;
 }
 
+/** One attempt of the failover chain: a concrete provider key plus the
+ *  upstream model id to send (null in passthrough mode — body untouched). */
+export interface RouteCandidate {
+  provider: RoutedProvider;
+  key: RoutedKey;
+  upstreamModel: string;
+}
+
 /** Resolve a requested public model id against the registry (router mode). */
 export type ModelResolution =
-  | { ok: true; provider: RoutedProvider; upstreamModel: string }
+  | { ok: true; requested: string; candidates: RouteCandidate[] }
   | { ok: false; status: 404 | 503; code: string; message: string };
 
 /** Does a registry entry serve this protocol surface? */
 function servesProto(m: ModelRow, proto: "openai" | "anthropic"): boolean {
   return m.proto === proto || m.proto === "both";
+}
+
+/** Keys of a provider currently worth trying, priority order. */
+export function usableKeys(provider: RoutedProvider, now = Date.now()): RoutedKey[] {
+  return provider.keys.filter((k) =>
+    keyUsable(
+      {
+        status: k.status,
+        cooldown_until: k.cooldownUntil,
+        exhausted_reason: k.exhaustedReason,
+      },
+      now,
+    ),
+  );
 }
 
 export function resolveModelRoute(
@@ -513,7 +680,9 @@ export function resolveModelRoute(
   if (!m.enabled) {
     return { ok: false, status: 404, code: "model_not_found", message: `model '${model}' is disabled` };
   }
-  if (!m.provider_id) {
+  const modelTargetRows = snap.targets.get(model) ?? [];
+  const enabledTargets = modelTargetRows.filter((t) => t.enabled);
+  if (enabledTargets.length === 0) {
     return {
       ok: false,
       status: 503,
@@ -521,26 +690,54 @@ export function resolveModelRoute(
       message: `model '${model}' has no provider configured`,
     };
   }
-  const provider = snap.providers.get(m.provider_id);
-  if (!provider || !providerHasCapability(provider.row, proto)) {
+  const candidates: RouteCandidate[] = [];
+  for (const t of enabledTargets) {
+    const provider = snap.providers.get(t.provider_id);
+    if (!provider || !providerHasCapability(provider.row, proto)) continue;
+    for (const key of usableKeys(provider)) {
+      candidates.push({ provider, key, upstreamModel: t.upstream_model });
+    }
+  }
+  if (candidates.length === 0) {
     return {
       ok: false,
       status: 503,
       code: "model_unavailable",
-      message: `model '${model}': its provider is unavailable for this protocol`,
+      message: `model '${model}': every upstream candidate is unavailable right now`,
     };
   }
-  return { ok: true, provider, upstreamModel: m.upstream_model };
+  return { ok: true, requested: model, candidates };
 }
 
-/** Models visible in /v1/models for a protocol: enabled + provider serves it. */
+/** Passthrough-mode candidates: every enabled provider exposing this
+ *  capability (priority order), each contributing its usable keys. */
+export function passthroughCandidates(
+  snap: RouterSnapshot,
+  proto: "openai" | "anthropic",
+): RouteCandidate[] {
+  const out: RouteCandidate[] = [];
+  for (const provider of snap.providers.values()) {
+    if (!providerHasCapability(provider.row, proto)) continue;
+    for (const key of usableKeys(provider)) {
+      out.push({ provider, key, upstreamModel: "" });
+    }
+  }
+  return out;
+}
+
+/** Models visible in /v1/models for a protocol: enabled, serves the proto,
+ *  and at least one enabled target whose provider is enabled and capable. */
 export function listableModels(snap: RouterSnapshot, proto: "openai" | "anthropic"): ModelRow[] {
   const out: ModelRow[] = [];
   for (const m of snap.models.values()) {
-    if (!m.enabled || !servesProto(m, proto) || !m.provider_id) continue;
-    const p = snap.providers.get(m.provider_id);
-    if (!p || !providerHasCapability(p.row, proto)) continue;
-    out.push(m);
+    if (!m.enabled || !servesProto(m, proto)) continue;
+    const ts = snap.targets.get(m.id) ?? [];
+    const servable = ts.some((t) => {
+      if (!t.enabled) return false;
+      const p = snap.providers.get(t.provider_id);
+      return !!p && providerHasCapability(p.row, proto);
+    });
+    if (servable) out.push(m);
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }

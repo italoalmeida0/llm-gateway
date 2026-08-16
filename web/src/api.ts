@@ -179,6 +179,19 @@ export interface UsageEventDto {
 
 export type AuthStyle = "bearer" | "x-api-key";
 
+/** One upstream key of a provider (failover order). The key material itself
+ *  never leaves the server. */
+export interface ProviderKeyDto {
+  id: string;
+  label: string;
+  priority: number;
+  status: "active" | "disabled" | "exhausted";
+  failCount: number;
+  cooldownUntil: number | null;
+  exhaustedReason: string | null;
+  createdAt: number;
+}
+
 export interface ProviderDto {
   id: string;
   name: string;
@@ -191,6 +204,17 @@ export interface ProviderDto {
   createdAt: number;
   hasApiKey: boolean;
   modelCount: number;
+  /** Upstream keys in failover order (secret material never included). */
+  keys: ProviderKeyDto[];
+}
+
+/** One routing target of a registered model (failover order). */
+export interface ModelTargetDto {
+  providerId: string;
+  providerName: string | null;
+  upstreamModel: string;
+  priority: number;
+  enabled: boolean;
 }
 
 /** Per-capability result of a model-registry sync (best-effort). */
@@ -251,6 +275,8 @@ export interface ModelDto {
   source: "auto" | "manual";
   createdAt: number;
   updatedAt: number;
+  /** Ordered failover chain; the first entry mirrors providerId/upstreamModel. */
+  targets: ModelTargetDto[];
 }
 
 export interface AdminUserDto {

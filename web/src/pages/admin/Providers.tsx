@@ -1,10 +1,25 @@
 import { createSignal, For, Show, createResource, createMemo } from "solid-js";
 
-import { api, type AuthStyle, type ProviderDto, type SyncMode, type SyncOutcome, type SyncPreview } from "../../api";
+import { api, type AuthStyle, type ProviderDto, type ProviderKeyDto, type SyncMode, type SyncOutcome, type SyncPreview } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
-import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtDate } from "../../ui";
+import { attachSortable } from "../../sortable";
+import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtDate, timeUntil } from "../../ui";
 import { syncSummary } from "./Models";
+
+/** Badge view of a provider key's failover state. */
+function keyStatus(k: ProviderKeyDto): { tone: "green" | "zinc" | "amber" | "red"; label: string } {
+  if (k.status === "disabled") return { tone: "zinc", label: "Disabled" };
+  if (k.status === "exhausted") {
+    return k.exhaustedReason === "billing"
+      ? { tone: "amber", label: `Out of credits · retry in ${timeUntil(k.cooldownUntil)}` }
+      : { tone: "red", label: "Rejected upstream (auth)" };
+  }
+  if (k.cooldownUntil && k.cooldownUntil > Date.now()) {
+    return { tone: "amber", label: `Cooldown · retry in ${timeUntil(k.cooldownUntil)}` };
+  }
+  return { tone: "green", label: "Active" };
+}
 
 const AUTH_STYLE_OPTIONS = [
   { value: "bearer", label: "Bearer" },
@@ -175,6 +190,82 @@ export default function AdminProvidersPage() {
   const [syncBusy, setSyncBusy] = createSignal<string | null>(null);
   const [deleteModels, setDeleteModels] = createSignal(false);
 
+  // ---- upstream key management ----
+  const [keyFor, setKeyFor] = createSignal<{ id: string; name: string } | null>(null);
+  const [newKeyLabel, setNewKeyLabel] = createSignal("");
+  const [newKeySecret, setNewKeySecret] = createSignal("");
+  const [keyBusy, setKeyBusy] = createSignal(false);
+  const [confirmDeleteKey, setConfirmDeleteKey] = createSignal<{ provider: ProviderDto; key: ProviderKeyDto } | null>(null);
+
+  const addKey = async () => {
+    const t = keyFor();
+    if (!t || !newKeySecret().trim()) return;
+    setKeyBusy(true);
+    try {
+      await api("POST", `/api/admin/providers/${t.id}/keys`, {
+        label: newKeyLabel().trim(),
+        apiKey: newKeySecret().trim(),
+      });
+      toast("Key added to the fallback chain");
+      setKeyFor(null);
+      setNewKeyLabel("");
+      setNewKeySecret("");
+      refetch();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "could not add key", "err");
+    } finally {
+      setKeyBusy(false);
+    }
+  };
+
+  const patchKey = async (provider: ProviderDto, k: ProviderKeyDto, body: Record<string, unknown>, okMsg: string) => {
+    try {
+      await api("PATCH", `/api/admin/providers/${provider.id}/keys/${k.id}`, body);
+      toast(okMsg);
+      refetch();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "update failed", "err");
+      refetch();
+    }
+  };
+
+  const deleteKey = async () => {
+    const t = confirmDeleteKey();
+    if (!t) return;
+    setKeyBusy(true);
+    try {
+      await api("DELETE", `/api/admin/providers/${t.provider.id}/keys/${t.key.id}`);
+      toast("Key removed from the chain");
+      setConfirmDeleteKey(null);
+      refetch();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "delete failed", "err");
+    } finally {
+      setKeyBusy(false);
+    }
+  };
+
+  /** Drag-and-drop callbacks (SortableJS): the reordered ids ARE the new priority. */
+  const reorderProviders = async (ids: string[]) => {
+    try {
+      await api("POST", "/api/admin/providers/reorder", { ids });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "reorder failed", "err");
+    } finally {
+      refetch();
+    }
+  };
+
+  const reorderKeys = (providerId: string) => async (ids: string[]) => {
+    try {
+      await api("POST", `/api/admin/providers/${providerId}/keys/reorder`, { ids });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "reorder failed", "err");
+    } finally {
+      refetch();
+    }
+  };
+
   const runImport = async () => {
     const t = importFor();
     if (!t) return;
@@ -243,7 +334,7 @@ export default function AdminProvidersPage() {
     <div>
       <PageTitle
         title="Providers"
-        subtitle="Upstream LLM endpoints the gateway forwards to (the real API keys live here only)"
+        subtitle="Upstream LLM endpoints the gateway forwards to — drag to set fallback order (the real API keys live here only)"
         right={<Btn onClick={() => openEditor("new")}><Icon name={Icons.plus} /> New provider</Btn>}
       />
 
@@ -251,48 +342,126 @@ export default function AdminProvidersPage() {
         <Card><EmptyState icon={Icons.server} title="No providers configured"
           hint="Add your endpoint(s) — the gateway cannot serve requests until one is enabled." /></Card>
       }>
-        <div class="grid gap-4" {...usalItems("fade-u", 80)}>
+        <div
+          class="grid gap-4"
+          {...usalItems("fade-u", 80)}
+          ref={(el) => attachSortable(el, { onReorder: reorderProviders })}
+        >
           <For each={providers()}>
             {(p) => (
-              <Card interactive class="p-6">
-                <div class="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <div class="flex items-center gap-2 flex-wrap">
-                      <span class="font-semibold">{p.name}</span>
-                      <Badge tone={p.enabled ? "green" : "zinc"}>{p.enabled ? "Enabled" : "Disabled"}</Badge>
-                      {p.openaiBaseUrl && <Badge tone="blue">OpenAI</Badge>}
-                      {p.anthropicBaseUrl && <Badge tone="amber">Anthropic</Badge>}
-                      <span class="text-[11px] text-ink-500">priority {p.priority} · {p.modelCount} model{p.modelCount === 1 ? "" : "s"} · added {fmtDate(p.createdAt)}</span>
+              <div data-id={p.id}>
+                <Card interactive class="p-6">
+                  <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div class="flex items-start gap-2 min-w-0">
+                      <span data-handle title="Drag to reorder (fallback priority)" class="mt-0.5 text-ink-600 hover:text-ink-300 transition-colors">
+                        <Icon name={Icons.grip} size={16} />
+                      </span>
+                      <div class="min-w-0">
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <span class="font-semibold">{p.name}</span>
+                          <Badge tone={p.enabled ? "green" : "zinc"}>{p.enabled ? "Enabled" : "Disabled"}</Badge>
+                          {p.openaiBaseUrl && <Badge tone="blue">OpenAI</Badge>}
+                          {p.anthropicBaseUrl && <Badge tone="amber">Anthropic</Badge>}
+                          <span class="text-[11px] text-ink-500">priority {p.priority} · {p.modelCount} model{p.modelCount === 1 ? "" : "s"} · added {fmtDate(p.createdAt)}</span>
+                        </div>
+                        <div class="mt-2 space-y-1 text-xs text-ink-400">
+                          <Show when={p.openaiBaseUrl}>
+                            <div>
+                              OpenAI: <code class="text-ink-300">{p.openaiBaseUrl}</code>
+                              <span class="text-ink-600"> · key via {p.openaiAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
+                            </div>
+                          </Show>
+                          <Show when={p.anthropicBaseUrl}>
+                            <div>
+                              Anthropic: <code class="text-ink-300">{p.anthropicBaseUrl}</code>
+                              <span class="text-ink-600"> · key via {p.anthropicAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
+                            </div>
+                          </Show>
+                        </div>
+                      </div>
                     </div>
-                    <div class="mt-2 space-y-1 text-xs text-ink-400">
-                      <Show when={p.openaiBaseUrl}>
-                        <div>
-                          OpenAI: <code class="text-ink-300">{p.openaiBaseUrl}</code>
-                          <span class="text-ink-600"> · key via {p.openaiAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
-                        </div>
-                      </Show>
-                      <Show when={p.anthropicBaseUrl}>
-                        <div>
-                          Anthropic: <code class="text-ink-300">{p.anthropicBaseUrl}</code>
-                          <span class="text-ink-600"> · key via {p.anthropicAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
-                        </div>
-                      </Show>
-                      <div>Upstream key: <span class="text-ink-300">Configured ✓ (never leaves this server)</span></div>
+                    <div class="flex items-center gap-1 shrink-0">
+                      <IconBtn icon={Icons.bolt} title="Test connection" onClick={() => openTest(p)} />
+                      <IconBtn
+                        icon={Icons.refresh}
+                        title="Sync models from upstream /models"
+                        disabled={syncBusy() === p.id}
+                        onClick={() => syncModels(p)}
+                      />
+                      <IconBtn icon={Icons.edit} title="Edit" onClick={() => openEditor(p)} />
+                      <IconBtn icon={Icons.trash} title="Delete provider" danger onClick={() => { setDeleteModels(false); setConfirmDelete(p); }} />
                     </div>
                   </div>
-                  <div class="flex items-center gap-1 shrink-0">
-                    <IconBtn icon={Icons.bolt} title="Test connection" onClick={() => openTest(p)} />
-                    <IconBtn
-                      icon={Icons.refresh}
-                      title="Sync models from upstream /models"
-                      disabled={syncBusy() === p.id}
-                      onClick={() => syncModels(p)}
-                    />
-                    <IconBtn icon={Icons.edit} title="Edit" onClick={() => openEditor(p)} />
-                    <IconBtn icon={Icons.trash} title="Delete provider" danger onClick={() => { setDeleteModels(false); setConfirmDelete(p); }} />
+
+                  {/* upstream keys (fallback order) */}
+                  <div class="mt-4 border-t border-line pt-3">
+                    <div class="flex items-center justify-between mb-2">
+                      <span class="text-[11px] font-medium uppercase tracking-wider text-ink-500">
+                        Upstream keys · fallback order
+                      </span>
+                      <button
+                        type="button"
+                        class="flex items-center gap-1 text-[11px] font-medium text-ink-400 hover:text-ink-100 transition-colors cursor-pointer"
+                        onClick={() => { setNewKeyLabel(""); setNewKeySecret(""); setKeyFor({ id: p.id, name: p.name }); }}
+                      >
+                        <Icon name={Icons.plus} size={12} /> Add key
+                      </button>
+                    </div>
+                    <div
+                      class="space-y-1.5"
+                      ref={(el) => attachSortable(el, { onReorder: reorderKeys(p.id) })}
+                    >
+                      <For each={p.keys}>
+                        {(k) => {
+                          const st = () => keyStatus(k);
+                          return (
+                            <div data-id={k.id} class="flex items-center gap-2 rounded-xl border border-line bg-elev/40 px-2 py-1.5">
+                              <span data-handle title="Drag to reorder" class="text-ink-600 hover:text-ink-300 transition-colors shrink-0">
+                                <Icon name={Icons.grip} size={14} />
+                              </span>
+                              <Badge tone={st().tone}>{st().label}</Badge>
+                              <span class="text-xs text-ink-200 font-medium truncate">{k.label || "key"}</span>
+                              <span class="text-[10px] text-ink-600 truncate">
+                                {st().tone === "green" ? "configured ✓" : `fails ${k.failCount}`}
+                              </span>
+                              <div class="ml-auto flex items-center gap-0.5 shrink-0">
+                                <Show when={k.status !== "active" || (k.cooldownUntil !== null && k.cooldownUntil > Date.now())}>
+                                  <IconBtn
+                                    icon={Icons.refresh}
+                                    title="Re-enable: clear exhaustion/cooldown and return to rotation"
+                                    onClick={() => patchKey(p, k, { status: "active" }, "Key re-enabled")}
+                                  />
+                                </Show>
+                                <Show when={k.status === "active"}>
+                                  <IconBtn
+                                    icon={Icons.ban}
+                                    title="Disable this key (kept for later re-enable)"
+                                    onClick={() => patchKey(p, k, { status: "disabled" }, "Key disabled")}
+                                  />
+                                </Show>
+                                <Show when={k.status === "disabled"}>
+                                  <IconBtn
+                                    icon={Icons.check}
+                                    title="Enable this key"
+                                    onClick={() => patchKey(p, k, { status: "active" }, "Key enabled")}
+                                  />
+                                </Show>
+                                <IconBtn
+                                  icon={Icons.trash}
+                                  title={p.keys.length <= 1 ? "A provider needs at least one upstream key" : "Remove key"}
+                                  danger
+                                  disabled={p.keys.length <= 1}
+                                  onClick={() => setConfirmDeleteKey({ provider: p, key: k })}
+                                />
+                              </div>
+                            </div>
+                          );
+                        }}
+                      </For>
+                    </div>
                   </div>
-                </div>
-              </Card>
+                </Card>
+              </div>
             )}
           </For>
         </div>
@@ -318,9 +487,11 @@ export default function AdminProvidersPage() {
               <Segmented value={anthropicAuth()} onChange={setAnthropicAuth} options={AUTH_STYLE_OPTIONS} />
             </div>
           </div>
-          <Input label="Upstream API key" type="password" value={apiKey()} onInput={setApiKey}
-            placeholder={editing() === "new" ? "sk-…" : "unchanged (enter a new one to rotate)"}
-            autocomplete="off" />
+          <Show when={editing() === "new"}>
+            <Input label="Upstream API key" type="password" value={apiKey()} onInput={setApiKey}
+              placeholder="sk-…" autocomplete="off"
+              hint="Becomes the primary key — add fallback keys on the provider card after creating" />
+          </Show>
           <div class="grid grid-cols-2 gap-3 items-end">
             <Input label="Priority (lower = preferred)" type="number" min={0} max={10000} value={priority()} onInput={setPriority} />
             <label class="flex items-center gap-2 pb-2 cursor-pointer">
@@ -480,6 +651,37 @@ export default function AdminProvidersPage() {
             <Btn onClick={runImport} disabled={importBusy()}>
               {importBusy() ? "Importing…" : "Import models"}
             </Btn>
+          </div>
+        </div>
+      </Modal>
+
+      {/* add-key modal */}
+      <Modal open={!!keyFor()} onClose={() => setKeyFor(null)} title={`Add upstream key — ${keyFor()?.name ?? ""}`} width="max-w-md">
+        <div class="space-y-4">
+          <Input label="Label (optional)" value={newKeyLabel()} onInput={setNewKeyLabel} placeholder="e.g. backup account" />
+          <Input label="API key" type="password" value={newKeySecret()} onInput={setNewKeySecret}
+            placeholder="sk-…" autocomplete="off"
+            hint="Appended to the end of the fallback chain — drag it up to prefer it. Never leaves this server." />
+          <div class="flex justify-end gap-2 pt-2">
+            <Btn variant="ghost" onClick={() => setKeyFor(null)}>Cancel</Btn>
+            <Btn onClick={addKey} disabled={keyBusy() || !newKeySecret().trim()}>
+              {keyBusy() ? "Adding…" : "Add key"}
+            </Btn>
+          </div>
+        </div>
+      </Modal>
+
+      {/* delete-key confirm */}
+      <Modal open={!!confirmDeleteKey()} onClose={() => setConfirmDeleteKey(null)} title="Remove upstream key">
+        <div class="space-y-4">
+          <p class="text-sm text-ink-300">
+            Remove <strong class="text-ink-100">{confirmDeleteKey()?.key.label || "this key"}</strong> from{" "}
+            <strong class="text-ink-100">{confirmDeleteKey()?.provider.name}</strong>'s fallback chain?
+            Requests will skip it immediately.
+          </p>
+          <div class="flex justify-end gap-2">
+            <Btn variant="ghost" onClick={() => setConfirmDeleteKey(null)}>Cancel</Btn>
+            <Btn variant="danger" onClick={deleteKey} disabled={keyBusy()}>Remove</Btn>
           </div>
         </div>
       </Modal>

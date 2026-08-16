@@ -273,6 +273,24 @@ html.theme-xfade body * {
   filter: drop-shadow(0 4px 14px var(--glow-brand));
 }
 
+/* SortableJS drag states (theme tokens: the same row just dims/lifts). */
+.sortable-ghost {
+  opacity: 0.35;
+}
+.sortable-chosen {
+  cursor: grabbing;
+}
+.sortable-drag {
+  opacity: 0.9;
+}
+[data-handle] {
+  cursor: grab;
+  touch-action: none; /* let the drag gesture own the pointer on mobile */
+}
+[data-handle]:active {
+  cursor: grabbing;
+}
+
 input[type="number"]::-webkit-outer-spin-button,
 input[type="number"]::-webkit-inner-spin-button {
   -webkit-appearance: none;

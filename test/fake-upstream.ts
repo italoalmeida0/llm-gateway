@@ -20,10 +20,36 @@ const LATENCY_MS = Number(process.env.FAKE_UPSTREAM_LATENCY || 0);
 const CHUNKS = Number(process.env.FAKE_UPSTREAM_CHUNKS || 5);
 const CHUNK_INTERVAL_MS = Number(process.env.FAKE_UPSTREAM_CHUNK_INTERVAL || 25);
 
-function authorized(req: Request): boolean {
+/**
+ * Failover test hooks:
+ *  - multiple accepted secrets (the gateway may carry several upstream keys);
+ *  - per-secret behavior override: a secret can be made to fail with a given
+ *    HTTP status (simulates "out of credits", revoked keys, ...);
+ *  - per-secret hit counters (assert a dead key stops being called).
+ * All via POST /__behavior {secret, failWith:{status,message?}|null},
+ * GET /__hits, POST /__reset. Defaults keep the original single-key behavior.
+ */
+const acceptedSecrets = new Set([SECRET]);
+const behavior = new Map<string, { status: number; message?: string }>();
+const hits = new Map<string, number>();
+
+/** Returns the authenticated secret, or null. */
+function authorized(req: Request): string | null {
   const bearer = req.headers.get("authorization");
   const xk = req.headers.get("x-api-key");
-  return bearer === `Bearer ${SECRET}` || xk === SECRET;
+  if (bearer?.startsWith("Bearer ") && acceptedSecrets.has(bearer.slice(7))) return bearer.slice(7);
+  if (xk && acceptedSecrets.has(xk)) return xk;
+  return null;
+}
+
+function forcedResponse(secret: string, proto: "openai" | "anthropic"): Response | null {
+  const b = behavior.get(secret);
+  if (!b) return null;
+  const message = b.message ?? `forced failure ${b.status} (test hook)`;
+  const code = b.status === 402 || /quota|credit|billing/i.test(message) ? "insufficient_quota" : null;
+  return proto === "openai"
+    ? Response.json({ error: { message, type: "invalid_request_error", code } }, { status: b.status })
+    : Response.json({ type: "error", error: { type: "api_error", message } }, { status: b.status });
 }
 
 function openai401(): Response {
@@ -240,6 +266,32 @@ const server = Bun.serve({
 
     if (p === "/__last-auth") return Response.json(lastAuth);
     if (p === "/__last-body") return Response.json({ body: lastBody });
+    if (p === "/__hits") return Response.json(Object.fromEntries(hits));
+    if (p === "/__reset" && req.method === "POST") {
+      hits.clear();
+      behavior.clear();
+      acceptedSecrets.clear();
+      acceptedSecrets.add(SECRET);
+      lastAuth = { authorization: null, "x-api-key": null };
+      lastBody = "";
+      return Response.json({ ok: true });
+    }
+    if (p === "/__behavior" && req.method === "POST") {
+      const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      const secret = String(b.secret ?? "");
+      if (!secret) return Response.json({ error: "secret required" }, { status: 400 });
+      acceptedSecrets.add(secret);
+      if (b.failWith && typeof b.failWith === "object") {
+        const fw = b.failWith as Record<string, unknown>;
+        behavior.set(secret, {
+          status: Math.min(Math.max(Number(fw.status) || 500, 400), 599),
+          message: typeof fw.message === "string" ? fw.message.slice(0, 200) : undefined,
+        });
+      } else {
+        behavior.delete(secret);
+      }
+      return Response.json({ ok: true });
+    }
     if (p === "/__models" && req.method === "POST") {
       const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       if (Array.isArray(b.openai)) openaiModels = b.openai.map(String).slice(0, 50);
@@ -254,12 +306,18 @@ const server = Bun.serve({
     };
 
     if (p.startsWith("/openai/v1/")) {
-      if (!authorized(req)) return openai401();
+      const secret = authorized(req);
+      if (!secret) return openai401();
       if (p === "/openai/v1/chat/completions" && req.method === "POST") {
+        hits.set(secret, (hits.get(secret) ?? 0) + 1);
+        const forced = forcedResponse(secret, "openai");
+        if (forced) return forced;
         lastBody = raw;
         return openAiChat(req, raw);
       }
       if (p === "/openai/v1/models" && req.method === "GET") {
+        const forced = forcedResponse(secret, "openai");
+        if (forced) return forced;
         return Response.json({
           object: "list",
           data: openaiModels.map((id) => ({ id, object: "model", created: 0, owned_by: "fake" })),
@@ -279,8 +337,12 @@ const server = Bun.serve({
     }
 
     if (p.startsWith("/anthropic/v1/")) {
-      if (!authorized(req)) return anthropic401();
+      const secret = authorized(req);
+      if (!secret) return anthropic401();
       if (p === "/anthropic/v1/messages" && req.method === "POST") {
+        hits.set(secret, (hits.get(secret) ?? 0) + 1);
+        const forced = forcedResponse(secret, "anthropic");
+        if (forced) return forced;
         lastBody = raw;
         return anthropicMessages(req, raw);
       }

@@ -20,6 +20,38 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   - `/*` → static SPA from `dist/` (`server/static.ts`, path-traversal safe).
 - **DB**: `bun:sqlite` (`server/db.ts`), migrations via `PRAGMA user_version`,
   in `MIGRATIONS` — append-only, never edit applied ones.
+- **Upstream failover** (migration `009_failover`): every request gets an
+  ordered candidate chain of `(provider, provider_key, upstream_model)` and
+  the proxy (`server/proxy/index.ts`) walks it — fallback happens only BEFORE
+  the first byte reaches the client (error bodies are consumed capped to 16KB
+  to be classified; 2xx streams relay untouched, no mid-stream failover).
+  - `provider_keys`: N upstream keys per provider, ordered by `priority`.
+    Classification (`server/failover.ts` → `classifyHttpError`): HTTP 402 or
+    quota/billing phrases in any 4xx = **billing** → key `exhausted`,
+    auto-retries at next UTC midnight (daily free tiers); 401/403 without
+    those hints = **auth** → `exhausted` until manual re-enable; plain 429 /
+    5xx / network = **transient|rate_limit** → consecutive-failure counter,
+    exponential cooldown (30s→15min cap) from `LIMITS.providerFailThreshold`
+    (3); other 4xx = client error → delivered as-is, no failover. Key state
+    lives in the DB + an in-memory overlay (`liveKeyBlock`) so a dying key is
+    skipped instantly despite the 5s router snapshot TTL; admin mutations
+    `liveKeyClear`. **The last key of a provider is never deleted**
+    (`providers.api_key_enc` is NOT NULL).
+  - `model_targets`: N ordered `(provider_id, upstream_model)` rows per model
+    — the per-model cross-provider fallback chain; `body.model` is rewritten
+    per attempted target. Managed via `PUT /api/admin/models/:id/targets`
+    (+ `targets` on model create/PATCH; legacy `providerId`/`upstreamModel`
+    writes sync the top-1 target).
+  - **Mirror rule**: `models.provider_id`/`models.upstream_model` and
+    `providers.api_key_enc` are denormalized mirrors of the top-1
+    target/key, recomputed by `refreshModelMirror` /
+    `refreshProviderKeyMirror` after every mutation — pre-failover readers
+    (sync, admin listing) keep working. A model with zero targets is
+    "orphaned" (same semantics as a deleted provider).
+  - bun:sqlite `.changes` INCLUDES FK-cascaded rows — count deletions by
+    existence, never by `.changes`, when cascade tables are involved.
+  - Exhausted/failing everything → the client gets the LAST upstream error
+    (sanitized), or 503 "no upstream candidate" when all were skipped.
 - **Usage accounting** (`server/usage.ts`): buffered writes (flush 1s/100 events),
   `usage_daily` aggregates (plus `usage_model_daily` — per key/date/model rollup
   written by the same flush; the per-model dashboard queries read it, NOT raw
@@ -38,7 +70,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   end of `migrate()` — without planner stats, hour-window aggregates on big
   `usage_events` degrade into full index scans.
 - **Model registry & routing** (`server/models.ts`, migration `007_models`):
-  `models` = public id → provider + `upstream_model` (aliases allowed), with
+  `models` = public id → ordered `model_targets` (see failover above), with
   rich metadata as validated JSON columns; `settings` KV holds
   `routing_mode`. Creating a SINGLE-capability provider auto-imports its
   `GET /models` (8s timeout, tolerant 3-shape parser, `INSERT OR IGNORE` —
@@ -52,11 +84,12 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   mutations call `invalidateModelCache()`.
   - `passthrough` (default): model names forwarded untouched; `/v1/models`
     proxies upstream. Zero behavioral change for existing setups.
-  - `router`: unknown/disabled model → 404; orphaned (provider deleted → FK
-    `ON DELETE SET NULL`) or provider-unavailable → 503; body `model` is
-    rewritten to `upstream_model` (only when different — byte-fidelity rule
-    stands); usage is recorded under the PUBLIC id; `/v1/models` is generated
-    from the registry in the rich format (never forwarded upstream).
+  - `router`: unknown/disabled model → 404; orphaned (no targets left — e.g.
+    its provider was deleted and targets cascade away) or provider/key
+    unavailable → 503; body `model` is rewritten per attempted target (only
+    when different — byte-fidelity rule stands); usage is recorded under the
+    PUBLIC id; `/v1/models` is generated from the registry in the rich format
+    (never forwarded upstream).
   - Registry ids are global; `proto` is `openai` | `anthropic` | `both`
     (migration `008_model_proto_both`). A `"both"`-mode sync upgrades
     pristine auto rows (`updated_at = created_at`) of the same provider to
@@ -109,7 +142,11 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - Don't buffer whole streams: keep the SSE tee incremental (memory bounded by
   longest event line, not response size).
 - Keep the dependency list minimal: runtime deps are `nodemailer` (SMTP),
-  `qrcode` (TOTP QR) and `usal` (scroll/entrance animations, user-sanctioned).
+  `qrcode` (TOTP QR), `usal` (scroll/entrance animations, user-sanctioned)
+  and `sortablejs` (drag-and-drop ordering, user-sanctioned — only imported
+  by `web/src/sortable.ts`; rows carry `data-id` + a `[data-handle]` grip,
+  the reordered ids are POSTed to the matching `/reorder` / `PUT …/targets`
+  endpoint).
   `@fontsource-variable/inter` is a bundled dev asset (no runtime CDN).
   Bun-native or hand-rolled beats a new dep.
 

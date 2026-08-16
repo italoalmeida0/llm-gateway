@@ -121,6 +121,17 @@ export const LIMITS = {
   breakerFailThreshold: 5,
   breakerOpenMs: 30_000,
 
+  /** upstream failover (multi-key / multi-target) */
+  /** Consecutive transient/rate-limit failures before a key enters cooldown. */
+  providerFailThreshold: Number(process.env.LIMIT_PROVIDER_FAIL_THRESHOLD || 3),
+  /** Cooldown backoff: base * 2^(fails-threshold), capped. */
+  providerCooldownBaseMs: Number(process.env.LIMIT_PROVIDER_COOLDOWN_BASE_MS || 30_000),
+  providerCooldownMaxMs: Number(process.env.LIMIT_PROVIDER_COOLDOWN_MAX_MS || 15 * 60_000),
+  /** Bytes of an upstream error body read to classify it (billing/quota hints). */
+  upstreamErrorPeekBytes: Number(process.env.UPSTREAM_ERROR_PEEK_BYTES || 16 * 1024),
+  /** Hard cap on failover attempts (keys × targets) per client request. */
+  maxFailoverAttempts: Number(process.env.LIMIT_MAX_FAILOVER_ATTEMPTS || 8),
+
   /** JWT / sessions */
   accessTokenTtlSec: 12 * 3600,
   refreshTokenTtlMs: 30 * 24 * 3600 * 1000, // sliding

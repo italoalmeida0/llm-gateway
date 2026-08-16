@@ -19,11 +19,23 @@ import { checkKeyAvailability } from "../server/keys";
 import {
   listableModels,
   parseUpstreamModels,
+  passthroughCandidates,
   publicModelEntry,
   resolveModelRoute,
+  type RoutedKey,
+  type RoutedProvider,
   type RouterSnapshot,
 } from "../server/models";
-import type { ModelRow, ProviderRow } from "../server/db";
+import {
+  billingCooldownUntil,
+  classifyHttpError,
+  keyBlockedNow,
+  keyUsable,
+  liveKeyBlock,
+  liveKeyClear,
+  nextCooldown,
+} from "../server/failover";
+import type { ModelRow, ModelTargetRow, ProviderRow } from "../server/db";
 
 const SECRET = "test-secret-that-is-long-enough-32+";
 
@@ -335,6 +347,20 @@ describe("model routing with proto 'both'", () => {
     created_at: 1,
     updated_at: 1,
   });
+  const target = (modelId: string, providerId = "p1"): ModelTargetRow => ({
+    model_id: modelId,
+    provider_id: providerId,
+    upstream_model: modelId,
+    priority: 0,
+    enabled: 1,
+    created_at: 1,
+  });
+  const routedProvider: RoutedProvider = {
+    row: provider,
+    keys: [
+      { id: "k1", key: "secret", label: "primary", priority: 0, status: "active", cooldownUntil: null, exhaustedReason: null },
+    ],
+  };
   const snap: RouterSnapshot = {
     mode: "router",
     models: new Map([
@@ -342,7 +368,12 @@ describe("model routing with proto 'both'", () => {
       ["m-openai", mk("m-openai", "openai")],
       ["m-anthropic", mk("m-anthropic", "anthropic")],
     ]),
-    providers: new Map([["p1", { row: provider, key: "k" }]]),
+    targets: new Map([
+      ["m-both", [target("m-both")]],
+      ["m-openai", [target("m-openai")]],
+      ["m-anthropic", [target("m-anthropic")]],
+    ]),
+    providers: new Map([["p1", routedProvider]]),
   };
 
   test("'both' resolves on either surface; single-proto stays gated", () => {
@@ -355,6 +386,167 @@ describe("model routing with proto 'both'", () => {
   test("listings include 'both' on their own surface only", () => {
     expect(listableModels(snap, "openai").map((m) => m.id)).toEqual(["m-both", "m-openai"]);
     expect(listableModels(snap, "anthropic").map((m) => m.id)).toEqual(["m-anthropic", "m-both"]);
+  });
+});
+
+describe("failover: upstream error classification", () => {
+  const quota429 = JSON.stringify({ error: { message: "You exceeded your current quota, please check your plan and billing details", type: "insufficient_quota", code: "insufficient_quota" } });
+  const rate429 = JSON.stringify({ error: { message: "Rate limit reached for requests", type: "tokens" } });
+  const credit402 = JSON.stringify({ error: { message: "Insufficient credits. Add more at https://openrouter.ai/credits", code: 402 } });
+
+  test("billing detection (402 or quota hints in any 4xx)", () => {
+    expect(classifyHttpError(402, credit402)).toBe("billing");
+    expect(classifyHttpError(402, "")).toBe("billing"); // status alone suffices
+    expect(classifyHttpError(429, quota429)).toBe("billing");
+    expect(classifyHttpError(400, JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API" } }))).toBe("billing");
+    expect(classifyHttpError(403, JSON.stringify({ error: { message: "account is not active, insufficient credits" } }))).toBe("billing");
+  });
+
+  test("auth rejection (401/403 without billing hints)", () => {
+    expect(classifyHttpError(401, JSON.stringify({ error: { message: "Incorrect API key provided" } }))).toBe("auth");
+    expect(classifyHttpError(403, JSON.stringify({ error: { message: "Forbidden" } }))).toBe("auth");
+  });
+
+  test("transients: plain 429, 5xx, 408, upstream 404 'model not found'", () => {
+    expect(classifyHttpError(429, rate429)).toBe("rate_limit");
+    expect(classifyHttpError(500, "internal error")).toBe("transient");
+    expect(classifyHttpError(502, "bad gateway")).toBe("transient");
+    expect(classifyHttpError(408, "")).toBe("transient");
+    expect(classifyHttpError(404, JSON.stringify({ error: { message: "The model `gpt-x` does not exist" } }))).toBe("transient");
+  });
+
+  test("client errors are NOT fail-able", () => {
+    expect(classifyHttpError(400, JSON.stringify({ error: { message: "messages: field required" } }))).toBeNull();
+    expect(classifyHttpError(404, "not found")).toBeNull();
+    expect(classifyHttpError(413, "too large")).toBeNull();
+    expect(classifyHttpError(422, "{}")).toBeNull();
+    expect(classifyHttpError(301, "")).toBeNull();
+  });
+});
+
+describe("failover: cooldowns and key usability", () => {
+  test("no cooldown below the threshold, exponential after", () => {
+    const t0 = Date.now();
+    expect(nextCooldown(1)).toBeNull();
+    expect(nextCooldown(2)).toBeNull();
+    const c3 = nextCooldown(3)!;
+    expect(c3).toBeGreaterThanOrEqual(t0 + 30_000);
+    expect(c3).toBeLessThan(t0 + 31_000);
+    const c5 = nextCooldown(5)!;
+    expect(c5).toBeGreaterThanOrEqual(t0 + 120_000); // 30s * 2^2
+    // capped at max
+    expect(nextCooldown(20)!).toBeLessThanOrEqual(Date.now() + 15 * 60_000);
+  });
+
+  test("billing cooldown lands on the next UTC midnight", () => {
+    // 2026-01-15 10:30 UTC -> midnight of the 16th
+    const at = Date.UTC(2026, 0, 15, 10, 30);
+    expect(billingCooldownUntil(at)).toBe(Date.UTC(2026, 0, 16));
+  });
+
+  test("keyUsable: billing auto-retries after midnight, auth stays out", () => {
+    const now = Date.now();
+    expect(keyUsable({ status: "active", cooldown_until: null, exhausted_reason: null }, now)).toBe(true);
+    expect(keyUsable({ status: "active", cooldown_until: now - 1, exhausted_reason: null }, now)).toBe(true);
+    expect(keyUsable({ status: "active", cooldown_until: now + 10_000, exhausted_reason: null }, now)).toBe(false);
+    expect(keyUsable({ status: "disabled", cooldown_until: null, exhausted_reason: null }, now)).toBe(false);
+    expect(keyUsable({ status: "exhausted", cooldown_until: null, exhausted_reason: "auth" }, now)).toBe(false);
+    expect(keyUsable({ status: "exhausted", cooldown_until: now + 10_000, exhausted_reason: "billing" }, now)).toBe(false);
+    expect(keyUsable({ status: "exhausted", cooldown_until: now - 1, exhausted_reason: "billing" }, now)).toBe(true);
+  });
+
+  test("live overlay blocks immediately and clears", () => {
+    const id = `test-${Math.random()}`;
+    expect(keyBlockedNow(id)).toBe(false);
+    liveKeyBlock(id, null);
+    expect(keyBlockedNow(id)).toBe(true);
+    liveKeyClear(id);
+    expect(keyBlockedNow(id)).toBe(false);
+    liveKeyBlock(id, Date.now() + 60_000);
+    expect(keyBlockedNow(id)).toBe(true);
+    liveKeyBlock(id, Date.now() - 1);
+    expect(keyBlockedNow(id)).toBe(false);
+  });
+});
+
+describe("failover: candidate chains", () => {
+  const provider = {
+    id: "p1", name: "p1",
+    openai_base_url: "http://x/openai/v1", anthropic_base_url: null,
+    api_key_enc: "enc", enabled: 1, priority: 100, created_at: 1,
+    openai_auth_style: "bearer", anthropic_auth_style: "x-api-key",
+  } as ProviderRow;
+  const key = (id: string, priority: number, over: Partial<RoutedKey> = {}): RoutedKey => ({
+    id, key: `secret-${id}`, label: id, priority, status: "active", cooldownUntil: null, exhaustedReason: null, ...over,
+  });
+  const model = (id: string): ModelRow => ({
+    id, provider_id: "p1", upstream_model: id, proto: "openai",
+    name: "", description: "", hugging_face_id: "", quantization: "", openrouter_slug: "",
+    always_on: 1, enabled: 1, context_length: null, max_output_length: null, created: null,
+    input_modalities: '["text"]', output_modalities: '["text"]', sampling_params: "[]",
+    features: "[]", reasoning_efforts: null, pricing: null, datacenters: null,
+    source: "manual", created_at: 1, updated_at: 1,
+  });
+  const target = (modelId: string, providerId: string, upstream: string, priority: number, enabled = 1): ModelTargetRow =>
+    ({ model_id: modelId, provider_id: providerId, upstream_model: upstream, priority, enabled, created_at: 1 });
+
+  test("resolveModelRoute flattens targets × usable keys in priority order", () => {
+    const p2 = { ...provider, id: "p2", name: "p2" } as ProviderRow;
+    const snap: RouterSnapshot = {
+      mode: "router",
+      models: new Map([["m", model("m")]]),
+      targets: new Map([
+        ["m", [target("m", "p1", "m-on-p1", 0), target("m", "p2", "m-on-p2", 10)]],
+      ]),
+      providers: new Map([
+        ["p1", { row: provider, keys: [key("k1", 0), key("k2", 10)] }],
+        ["p2", { row: p2, keys: [key("k3", 0)] }],
+      ]),
+    };
+    const r = resolveModelRoute(snap, "openai", "m");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.candidates.map((c) => c.key.id)).toEqual(["k1", "k2", "k3"]);
+    expect(r.candidates[2]!.upstreamModel).toBe("m-on-p2");
+  });
+
+  test("exhausted/cooling keys and disabled targets are skipped; empty chain → 503", () => {
+    const snap: RouterSnapshot = {
+      mode: "router",
+      models: new Map([["m", model("m")]]),
+      targets: new Map([["m", [target("m", "p1", "m", 0)]]]),
+      providers: new Map([
+        ["p1", { row: provider, keys: [key("k1", 0, { status: "exhausted", exhaustedReason: "auth" }), key("k2", 10, { cooldownUntil: Date.now() + 60_000 })] }],
+      ]),
+    };
+    expect(resolveModelRoute(snap, "openai", "m")).toMatchObject({ ok: false, status: 503 });
+
+    // billing-exhausted key whose midnight passed is usable again
+    const snap2: RouterSnapshot = {
+      ...snap,
+      providers: new Map([
+        ["p1", { row: provider, keys: [key("k1", 0, { status: "exhausted", exhaustedReason: "billing", cooldownUntil: Date.now() - 1 })] }],
+      ]),
+    };
+    const r = resolveModelRoute(snap2, "openai", "m");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.candidates.map((c) => c.key.id)).toEqual(["k1"]);
+  });
+
+  test("passthroughCandidates walks providers by priority, skipping blocked keys", () => {
+    const p2 = { ...provider, id: "p2", name: "p2", priority: 200 } as ProviderRow;
+    const snap: RouterSnapshot = {
+      mode: "passthrough",
+      models: new Map(),
+      targets: new Map(),
+      providers: new Map([
+        ["p1", { row: provider, keys: [key("k1", 0, { status: "disabled" }), key("k2", 10)] }],
+        ["p2", { row: p2, keys: [key("k3", 0)] }],
+      ]),
+    };
+    expect(passthroughCandidates(snap, "openai").map((c) => c.key.id)).toEqual(["k2", "k3"]);
+    // anthropic capability missing on both
+    expect(passthroughCandidates(snap, "anthropic")).toEqual([]);
   });
 });
 

@@ -89,6 +89,9 @@ const ICON_PATHS: Record<string, string[]> = {
   chevronDown: ["M19.5 8.25l-7.5 7.5-7.5-7.5"],
   arrowUpRight: ["M4.5 19.5l15-15m0 0H8.25m11.25 0v11.25"],
   menu: ["M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"],
+  grip: [
+    "M9 5.25h.01M9 12h.01M9 18.75h.01M15 5.25h.01M15 12h.01M15 18.75h.01",
+  ],
   layers: [
     "M6.429 9.75L2.25 12l4.179 2.25m0-4.5l5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0l4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0l-5.571 3-5.571-3",
   ],
@@ -124,6 +127,7 @@ export const Icons = {
   chevronDown: "chevronDown",
   arrowUpRight: "arrowUpRight",
   menu: "menu",
+  grip: "grip",
   layers: "layers",
 } as const;
 

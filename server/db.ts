@@ -268,6 +268,55 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_models_provider ON models(provider_id);
     `,
   },
+  {
+    name: "009_failover",
+    // Upstream failover: N keys per provider (ordered by priority) and N
+    // routing targets per model ((provider, upstream_model) pairs, ordered).
+    // The proxy falls through to the next key/target when the preferred one
+    // is exhausted (billing/auth) or cooling down (>=3 consecutive transient
+    // failures) — see server/failover.ts.
+    //
+    // Mirror rule: providers.api_key_enc and models.provider_id /
+    // models.upstream_model stay as a denormalized mirror of the top-1
+    // (lowest-priority) entry, recomputed after every mutation, so pre-009
+    // readers (sync, admin listing) keep working. The last key of a provider
+    // can never be deleted (api_key_enc is NOT NULL).
+    up: `
+      CREATE TABLE provider_keys (
+        id               TEXT PRIMARY KEY,
+        provider_id      TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+        label            TEXT NOT NULL DEFAULT '',
+        api_key_enc      TEXT NOT NULL,
+        priority         INTEGER NOT NULL DEFAULT 100,
+        status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled','exhausted')),
+        fail_count       INTEGER NOT NULL DEFAULT 0,
+        cooldown_until   INTEGER,
+        exhausted_reason TEXT,
+        created_at       INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL
+      );
+      CREATE INDEX idx_provider_keys_provider ON provider_keys(provider_id, priority);
+
+      CREATE TABLE model_targets (
+        model_id       TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        provider_id    TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+        upstream_model TEXT NOT NULL,
+        priority       INTEGER NOT NULL DEFAULT 100,
+        enabled        INTEGER NOT NULL DEFAULT 1,
+        created_at     INTEGER NOT NULL,
+        PRIMARY KEY (model_id, provider_id)
+      ) WITHOUT ROWID;
+      CREATE INDEX idx_model_targets_provider ON model_targets(provider_id);
+
+      -- Backfill: legacy single key / single provider link become the
+      -- priority-0 entries of the new tables.
+      INSERT INTO provider_keys (id, provider_id, label, api_key_enc, priority, status, created_at, updated_at)
+        SELECT 'pk_' || lower(hex(randomblob(8))), id, 'primary', api_key_enc, 0, 'active', created_at, created_at
+        FROM providers;
+      INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at)
+        SELECT id, provider_id, upstream_model, 0, 1, created_at FROM models WHERE provider_id IS NOT NULL;
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -394,6 +443,36 @@ export interface ApiKeyRow {
   last_used_at: number | null;
   last_used_ip: string | null;
   token_enc: string | null;
+}
+
+/** One upstream API key of a provider (failover chain, ordered by priority).
+ *  `exhausted` = detected out-of-credits ('billing', auto-retried after
+ *  midnight UTC) or rejected credential ('auth', stays down until re-enabled).
+ *  `cooldown_until` covers transient/rate-limit backoff. */
+export interface ProviderKeyRow {
+  id: string;
+  provider_id: string;
+  label: string;
+  api_key_enc: string;
+  priority: number;
+  status: "active" | "disabled" | "exhausted";
+  fail_count: number;
+  cooldown_until: number | null;
+  exhausted_reason: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One routing destination of a registered model: which provider serves it
+ *  and under which upstream id. The ordered list (priority ASC) is the
+ *  per-model fallback chain. */
+export interface ModelTargetRow {
+  model_id: string;
+  provider_id: string;
+  upstream_model: string;
+  priority: number;
+  enabled: number;
+  created_at: number;
 }
 
 // ===== Prepared statements (hot paths) =====

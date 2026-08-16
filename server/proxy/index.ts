@@ -1,7 +1,6 @@
 import { LIMITS } from "../config";
-import { stmts, audit, type ApiKeyRow, type ProviderRow, type AuthStyle } from "../db";
-import { decryptSecret, randomToken, sha256Hex } from "../crypto";
-import { GATEWAY_SECRET } from "../config";
+import { stmts, audit, type ApiKeyRow, type AuthStyle } from "../db";
+import { randomToken, sha256Hex } from "../crypto";
 import { clientIp, baseHeaders } from "../http";
 import {
   acquireUpstreamSlot,
@@ -15,10 +14,22 @@ import { db } from "../db";
 import {
   routerSnapshot,
   resolveModelRoute,
+  passthroughCandidates,
   listableModels,
   publicModelEntry,
   type RouterSnapshot,
+  type RouteCandidate,
+  type RoutedKey,
 } from "../models";
+import {
+  classifyHttpError,
+  billingCooldownUntil,
+  nextCooldown,
+  keyBlockedNow,
+  liveKeyBlock,
+  liveKeyClear,
+  type FailClass,
+} from "../failover";
 
 /**
  * The gateway itself: OpenAI- and Anthropic-compatible pass-through proxy.
@@ -137,48 +148,90 @@ function envelopeError(proto: Proto, status: number, message: string, type?: str
   );
 }
 
-// ===== Provider resolution (cached 5s) =====
+// ===== Failover bookkeeping (per-provider-key state) =====
 
-interface ResolvedProviders {
-  openai?: { row: ProviderRow; key: string };
-  anthropic?: { row: ProviderRow; key: string };
-  fetchedAt: number;
-}
+const qKeyFailCount = db.prepare<{ fail_count: number }, [string]>(
+  "SELECT fail_count FROM provider_keys WHERE id = ?",
+);
+const qKeyExhaust = db.prepare(
+  "UPDATE provider_keys SET status = 'exhausted', exhausted_reason = ?, cooldown_until = ?, fail_count = 0, updated_at = ? WHERE id = ?",
+);
+const qKeyTrack = db.prepare(
+  "UPDATE provider_keys SET fail_count = ?, cooldown_until = ?, updated_at = ? WHERE id = ?",
+);
+const qKeyReset = db.prepare(
+  "UPDATE provider_keys SET fail_count = 0, cooldown_until = NULL, updated_at = ? WHERE id = ? AND (fail_count != 0 OR cooldown_until IS NOT NULL)",
+);
 
-let providerCache: ResolvedProviders | null = null;
-let providerCachePromise: Promise<ResolvedProviders> | null = null;
-
-async function resolveProviders(): Promise<ResolvedProviders> {
+/** A key proved unusable: billing/auth → exhausted (billing auto-retries at
+ *  the next UTC midnight, when daily free tiers refill; auth waits for a
+ *  manual re-enable). Transient and rate-limit failures only bump a
+ *  consecutive-failure counter that escalates to an exponential cooldown
+ *  from LIMITS.providerFailThreshold — intermittent blips never escalate
+ *  because any success resets the counter. */
+function markProviderKeyFailure(key: RoutedKey, cls: FailClass): void {
   const now = Date.now();
-  if (providerCache && now - providerCache.fetchedAt < 5_000) return providerCache;
-  if (providerCachePromise) return providerCachePromise;
-
-  providerCachePromise = (async () => {
-    const rows = db
-      .prepare<ProviderRow, []>(
-        "SELECT * FROM providers WHERE enabled = 1 ORDER BY priority ASC, created_at ASC",
-      )
-      .all();
-    const resolved: ResolvedProviders = { fetchedAt: Date.now() };
-    for (const row of rows) {
-      if (row.openai_base_url && !resolved.openai) {
-        resolved.openai = { row, key: await decryptSecret(row.api_key_enc, GATEWAY_SECRET) };
-      }
-      if (row.anthropic_base_url && !resolved.anthropic) {
-        resolved.anthropic = { row, key: await decryptSecret(row.api_key_enc, GATEWAY_SECRET) };
-      }
-      if (resolved.openai && resolved.anthropic) break;
-    }
-    providerCache = resolved;
-    providerCachePromise = null;
-    return resolved;
-  })();
-  return providerCachePromise;
+  if (cls === "billing" || cls === "auth") {
+    const until = cls === "billing" ? billingCooldownUntil(now) : null;
+    qKeyExhaust.run(cls, until, now, key.id);
+    liveKeyBlock(key.id, until);
+    audit("provider_key.exhausted", {
+      target: key.id,
+      meta: { reason: cls, label: key.label, retryAt: until },
+    });
+    console.warn(`[PROXY] upstream key exhausted (${cls}): ${key.label || key.id}`);
+    return;
+  }
+  const fails = (qKeyFailCount.get(key.id)?.fail_count ?? 0) + 1;
+  const until = nextCooldown(fails);
+  qKeyTrack.run(fails, until, now, key.id);
+  if (until !== null) {
+    liveKeyBlock(key.id, until);
+    console.warn(
+      `[PROXY] upstream key ${key.label || key.id} cooling down until ${new Date(until).toISOString()} (${fails} consecutive failures)`,
+    );
+  }
 }
 
-/** Test hooks: force cache reload (used after admin writes in tests). */
-export function invalidateProviderCache(): void {
-  providerCache = null;
+/** Healthy response: reset the transient-failure counters (the conditional
+ *  UPDATE keeps the common path write-free). */
+function markProviderKeyOk(key: RoutedKey): void {
+  liveKeyClear(key.id);
+  qKeyReset.run(Date.now(), key.id);
+}
+
+/** Consume an upstream error body (capped) so it can be classified for
+ *  failover. Error bodies from LLM providers are small JSON payloads — the
+ *  cap guards against pathological upstreams. */
+async function readBodyCapped(resp: Response, cap: number): Promise<string> {
+  if (!resp.body) return "";
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length) {
+        chunks.push(value);
+        total += value.length;
+        if (total >= cap) break;
+      }
+    }
+  } catch {
+    /* aborted/failed upstream: classify whatever bytes we have */
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  const buf = new Uint8Array(Math.min(total, cap));
+  let off = 0;
+  for (const c of chunks) {
+    const n = Math.min(c.length, buf.length - off);
+    if (n <= 0) break;
+    buf.set(c.subarray(0, n), off);
+    off += n;
+  }
+  return new TextDecoder().decode(buf);
 }
 
 // ===== Circuit breaker (per provider+capability) =====
@@ -631,7 +684,6 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     // ---- model registry (routing mode + router-backed /v1/models) ----
     const snap = await routerSnapshot();
     let routedPublicModel: string | null = null;
-    let routedProvider: { row: ProviderRow; key: string } | null = null;
     let bodyDirty = false;
 
     if (snap.mode === "router" && route.isModelsList) {
@@ -640,8 +692,8 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
     // OpenAI streams: ask upstream to include a terminal usage chunk so
     // accounting stays exact (Anthropic always streams usage events). This
-    // and the router-mode model rewrite below are the ONLY fields we ever
-    // mutate, and only when needed — otherwise the original bytes are
+    // and the router-mode per-attempt model rewrite are the ONLY fields we
+    // ever mutate, and only when needed — otherwise the original bytes are
     // forwarded untouched.
     if (
       bodyJson &&
@@ -657,99 +709,30 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       }
     }
 
+    // ---- build the failover chain ----
+    // Router mode: the model's enabled targets in priority order, each with
+    // its provider's usable keys. Passthrough: enabled providers in priority
+    // order, each contributing its usable keys. Every attempt is a concrete
+    // (provider, key, upstreamModel) triple.
+    let candidates: RouteCandidate[];
     if (snap.mode === "router" && req.method === "POST" && bodyJson) {
       const requested = String((bodyJson as any).model);
       const resolution = resolveModelRoute(snap, proto, requested);
       if (!resolution.ok) {
         return envelopeError(proto, resolution.status, resolution.message, resolution.code, req);
       }
-      routedProvider = resolution.provider;
+      candidates = resolution.candidates;
       routedPublicModel = requested;
-      if (resolution.upstreamModel !== requested) {
-        (bodyJson as any).model = resolution.upstreamModel;
-        bodyDirty = true;
-      }
+    } else {
+      candidates = passthroughCandidates(snap, proto);
     }
-
-    if (bodyDirty && bodyJson) bodyText = JSON.stringify(bodyJson);
-
-    // ---- resolve provider ----
-    let target: { row: ProviderRow; key: string } | undefined = routedProvider ?? undefined;
-    if (!target) {
-      const providers = await resolveProviders();
-      target = proto === "openai" ? providers.openai : providers.anthropic;
-    }
-    if (!target) {
-      console.error(`[PROXY] no enabled provider configured for capability "${proto}"`);
+    if (candidates.length === 0) {
+      console.error(`[PROXY] no usable upstream candidate for capability "${proto}"`);
       return envelopeError(proto, 503, "gateway is not configured for this API protocol", "api_error", req);
     }
-    // Trailing "/" would produce "//chat/completions" — new rows are stripped
-    // at write time, this covers legacy rows still carrying one.
-    const base = (proto === "openai" ? target.row.openai_base_url : target.row.anthropic_base_url)!
-      .replace(/\/+$/, "");
-    const breakerId = `${target.row.id}:${proto}`;
-    if (breakerState(breakerId) === "open") {
-      return envelopeError(proto, 503, "upstream temporarily unavailable", "api_error", req);
-    }
+    if (bodyDirty && bodyJson) bodyText = JSON.stringify(bodyJson);
 
-    // ---- forward ----
     const wantsStream = (bodyJson as any)?.stream === true;
-    const upstreamUrl = `${base}${route.upstreamPath}`;
-    const controller = new AbortController();
-    const headerTimeout = setTimeout(
-      () => controller.abort(new Error("upstream header timeout")),
-      wantsStream ? LIMITS.upstreamTimeoutMs : LIMITS.upstreamNonStreamTimeoutMs,
-    );
-    const onClientAbort = () => controller.abort(new Error("client disconnected"));
-    req.signal.addEventListener("abort", onClientAbort, { once: true });
-
-    let upstream: Response;
-    try {
-      upstream = await fetch(upstreamUrl, {
-        method: req.method,
-        headers: buildUpstreamHeaders(
-          req,
-          proto,
-          target.key,
-          proto === "openai" ? target.row.openai_auth_style : target.row.anthropic_auth_style,
-        ),
-        body: req.method === "POST" ? bodyText : undefined,
-        signal: controller.signal,
-      });
-      clearTimeout(headerTimeout);
-    } catch (e) {
-      clearTimeout(headerTimeout);
-      const clientDisconnected = req.signal.aborted;
-      const timedOut = controller.signal.aborted && !clientDisconnected;
-      // A client giving up on us (short timeout, rage-quit) must NOT trip the
-      // breaker — otherwise a few disconnects would 503 the whole gateway for
-      // every user. Only genuine upstream network failures and OUR header
-      // timeout count as provider trouble.
-      if (!clientDisconnected) breakerFail(breakerId);
-      console.error(`[PROXY] upstream fetch failed (${upstreamUrl}):`, (e as Error).name);
-      recordUsage({
-        keyId: keyRow.id, userId: keyRow.user_id, proto, model: routedPublicModel ?? "",
-        inTok: 0, cacheTok: 0, outTok: 0, latencyMs: Math.round(performance.now() - started),
-        status: clientDisconnected ? 499 : timedOut ? 504 : 502, stream: wantsStream, estimated: false,
-      });
-      return envelopeError(
-        proto,
-        timedOut ? 504 : 502,
-        timedOut ? "upstream took too long to respond" : "upstream is unreachable",
-        "api_error",
-      );
-    } finally {
-      req.signal.removeEventListener("abort", onClientAbort);
-    }
-
-    // Only infrastructure-level failures count toward the circuit breaker;
-    // a 4xx from upstream is just the client's request being rejected there.
-    if (upstream.status >= 500 || upstream.status === 429) breakerFail(breakerId);
-    else breakerOk(breakerId);
-
-    const contentType = upstream.headers.get("content-type") || "";
-    const isSse = contentType.includes("text/event-stream");
-    const clientHeaders = buildClientHeaders(upstream.headers, requestId);
 
     const record = (u: UsageResult, status: number, latencyMs: number, stream: boolean) => {
       let inTok = u.inTok;
@@ -761,7 +744,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         userId: keyRow.user_id,
         proto,
         // Router mode bills/attributes under the PUBLIC model id the client
-        // asked for (bodyJson.model was already rewritten to upstream_model);
+        // asked for (the upstream model id varies per failover target);
         // passthrough keeps the upstream-reported model as before.
         model: routedPublicModel ?? (u.model || String((bodyJson as any)?.model ?? "").slice(0, 128)),
         inTok,
@@ -789,96 +772,247 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       }
     };
 
-    // ---- streaming relay ----
-    if (isSse && upstream.body) {
-      // The concurrency slot stays held until the stream really ends below —
-      // the outer finally must not free it when we hand back the Response.
-      slotHeldByStream = true;
+    const parseBufferedUsage = (contentType: string, text: string): UsageResult =>
+      contentType.includes("application/json")
+        ? proto === "openai"
+          ? parseOpenAiJson(text)
+          : parseAnthropicJson(text)
+        : { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false };
 
-      const meter = new StreamMeter(proto);
-      let counted = false;
-      const finalize = (status: number) => {
-        if (counted) return;
-        counted = true;
-        record(meter.result(0), status, Math.round(performance.now() - started), true);
-      };
+    let lastFailure:
+      | { kind: "upstream"; status: number; body: string; headers: Headers }
+      | { kind: "network"; status: number; timedOut: boolean }
+      | null = null;
 
-      const idleLimit = LIMITS.proxyStreamIdleMs;
-      let idleTimer: Timer | null = null;
-      const resetIdle = (cancel?: boolean) => {
-        if (idleTimer) clearTimeout(idleTimer);
-        if (!cancel) {
-          idleTimer = setTimeout(() => {
-            controller.abort(new Error("upstream idle timeout"));
-          }, idleLimit);
-          idleTimer.unref?.();
+    // ---- forward, with failover across the candidate chain ----
+    for (const cand of candidates.slice(0, LIMITS.maxFailoverAttempts)) {
+      if (keyBlockedNow(cand.key.id)) continue;
+      // Trailing "/" would produce "//chat/completions" — new rows are
+      // stripped at write time, this covers legacy rows still carrying one.
+      const base = (proto === "openai" ? cand.provider.row.openai_base_url : cand.provider.row.anthropic_base_url)!
+        .replace(/\/+$/, "");
+      const breakerId = `${cand.provider.row.id}:${proto}`;
+      if (breakerState(breakerId) === "open") continue;
+
+      // Byte-fidelity rule: the original request bytes go upstream untouched;
+      // the only per-attempt mutation is the router-mode model rewrite
+      // (each failover target may name the model differently).
+      let attemptBody = bodyText;
+      if (bodyJson && cand.upstreamModel && (bodyJson as any).model !== cand.upstreamModel) {
+        attemptBody = JSON.stringify({ ...bodyJson, model: cand.upstreamModel });
+      }
+
+      const upstreamUrl = `${base}${route.upstreamPath}`;
+      const controller = new AbortController();
+      const headerTimeout = setTimeout(
+        () => controller.abort(new Error("upstream header timeout")),
+        wantsStream ? LIMITS.upstreamTimeoutMs : LIMITS.upstreamNonStreamTimeoutMs,
+      );
+      const onClientAbort = () => controller.abort(new Error("client disconnected"));
+      req.signal.addEventListener("abort", onClientAbort, { once: true });
+
+      let upstream: Response;
+      try {
+        upstream = await fetch(upstreamUrl, {
+          method: req.method,
+          headers: buildUpstreamHeaders(
+            req,
+            proto,
+            cand.key.key,
+            proto === "openai" ? cand.provider.row.openai_auth_style : cand.provider.row.anthropic_auth_style,
+          ),
+          body: req.method === "POST" ? attemptBody : undefined,
+          signal: controller.signal,
+        });
+        clearTimeout(headerTimeout);
+      } catch (e) {
+        clearTimeout(headerTimeout);
+        req.signal.removeEventListener("abort", onClientAbort);
+        const clientDisconnected = req.signal.aborted;
+        const timedOut = controller.signal.aborted && !clientDisconnected;
+        // A client giving up on us (short timeout, rage-quit) must NOT trip
+        // the breaker nor the key's fail counter — otherwise a few
+        // disconnects would 503 the whole gateway for every user. Only
+        // genuine upstream network failures and OUR header timeout count as
+        // provider trouble.
+        if (!clientDisconnected) {
+          breakerFail(breakerId);
+          markProviderKeyFailure(cand.key, "transient");
+          console.error(`[PROXY] upstream fetch failed (${upstreamUrl}):`, (e as Error).name);
+          lastFailure = { kind: "network", status: timedOut ? 504 : 502, timedOut };
+          continue;
         }
-      };
-      resetIdle();
+        // The client is gone; running cheaper candidates serves nobody.
+        lastFailure = { kind: "network", status: timedOut ? 504 : 502, timedOut };
+        break;
+      }
+      req.signal.removeEventListener("abort", onClientAbort);
 
-      const reader = upstream.body.getReader();
-      const onClientAbortStream = () => reader.cancel().catch(() => {});
-      req.signal.addEventListener("abort", onClientAbortStream, { once: true });
+      // Only infrastructure-level failures count toward the circuit breaker;
+      // a 4xx from upstream is just the client's request being rejected there.
+      if (upstream.status >= 500 || upstream.status === 429) breakerFail(breakerId);
+      else breakerOk(breakerId);
 
-      const cleanup = () => {
-        resetIdle(true);
-        req.signal.removeEventListener("abort", onClientAbortStream);
-        release();
-      };
-      const closeSink = (sink: ReadableStreamDefaultController<Uint8Array>) => {
+      if (upstream.status >= 400) {
+        // Failover happens BEFORE a single byte reaches the client: consume
+        // the (capped) error body, classify it, then either mark this key
+        // and move to the next candidate, or deliver the error untouched.
+        const peekTimeout = setTimeout(
+          () => controller.abort(new Error("error peek timeout")),
+          LIMITS.upstreamNonStreamTimeoutMs,
+        );
+        let errBody = "";
         try {
-          sink.close();
+          errBody = await readBodyCapped(upstream, LIMITS.upstreamErrorPeekBytes);
         } catch {
-          /* already closed/errored */
+          /* classified with an empty peek */
         }
-      };
+        clearTimeout(peekTimeout);
 
-      const stream = new ReadableStream<Uint8Array>({
-        // Pull-driven relay: we read from upstream ONLY when the client socket
-        // has drained. A slow consumer therefore slows the upstream read too
-        // (true pass-through pacing) and memory stays bounded by in-flight
-        // chunks — never by the whole response.
-        async pull(sink) {
+        if (req.signal.aborted) {
+          lastFailure = { kind: "upstream", status: upstream.status, body: errBody, headers: upstream.headers };
+          break;
+        }
+        const cls = classifyHttpError(upstream.status, errBody);
+        if (cls) {
+          markProviderKeyFailure(cand.key, cls);
+          lastFailure = { kind: "upstream", status: upstream.status, body: errBody, headers: upstream.headers };
+          continue;
+        }
+        // Client-caused rejection (bad request, too large, ...): every other
+        // candidate would answer the same — deliver as-is, no failover. The
+        // key itself clearly works, so its transient counters reset.
+        markProviderKeyOk(cand.key);
+        const ct = upstream.headers.get("content-type") || "";
+        record(parseBufferedUsage(ct, errBody), upstream.status, Math.round(performance.now() - started), false);
+        return new Response(errBody, {
+          status: upstream.status,
+          headers: buildClientHeaders(upstream.headers, requestId),
+        });
+      }
+
+      // ---- success: deliver this candidate's response ----
+      markProviderKeyOk(cand.key);
+      const contentType = upstream.headers.get("content-type") || "";
+      const isSse = contentType.includes("text/event-stream");
+      const clientHeaders = buildClientHeaders(upstream.headers, requestId);
+
+      // ---- streaming relay ----
+      if (isSse && upstream.body) {
+        // The concurrency slot stays held until the stream really ends below —
+        // the outer finally must not free it when we hand back the Response.
+        slotHeldByStream = true;
+
+        const meter = new StreamMeter(proto);
+        let counted = false;
+        const finalize = (status: number) => {
+          if (counted) return;
+          counted = true;
+          record(meter.result(0), status, Math.round(performance.now() - started), true);
+        };
+
+        const idleLimit = LIMITS.proxyStreamIdleMs;
+        let idleTimer: Timer | null = null;
+        const resetIdle = (cancel?: boolean) => {
+          if (idleTimer) clearTimeout(idleTimer);
+          if (!cancel) {
+            idleTimer = setTimeout(() => {
+              controller.abort(new Error("upstream idle timeout"));
+            }, idleLimit);
+            idleTimer.unref?.();
+          }
+        };
+        resetIdle();
+
+        const reader = upstream.body.getReader();
+        const onClientAbortStream = () => reader.cancel().catch(() => {});
+        req.signal.addEventListener("abort", onClientAbortStream, { once: true });
+
+        const cleanup = () => {
+          resetIdle(true);
+          req.signal.removeEventListener("abort", onClientAbortStream);
+          release();
+        };
+        const closeSink = (sink: ReadableStreamDefaultController<Uint8Array>) => {
           try {
-            const { done, value } = await reader.read();
-            if (done) {
-              finalize(req.signal.aborted ? 499 : upstream.status);
+            sink.close();
+          } catch {
+            /* already closed/errored */
+          }
+        };
+
+        const stream = new ReadableStream<Uint8Array>({
+          // Pull-driven relay: we read from upstream ONLY when the client socket
+          // has drained. A slow consumer therefore slows the upstream read too
+          // (true pass-through pacing) and memory stays bounded by in-flight
+          // chunks — never by the whole response.
+          async pull(sink) {
+            try {
+              const { done, value } = await reader.read();
+              if (done) {
+                finalize(req.signal.aborted ? 499 : upstream.status);
+                cleanup();
+                closeSink(sink);
+                return;
+              }
+              if (value && value.length) {
+                resetIdle();
+                meter.feed(value); // stats only — the chunk itself goes out as-is
+                sink.enqueue(value);
+              }
+            } catch {
+              finalize(req.signal.aborted ? 499 : 502);
               cleanup();
               closeSink(sink);
-              return;
             }
-            if (value && value.length) {
-              resetIdle();
-              meter.feed(value); // stats only — the chunk itself goes out as-is
-              sink.enqueue(value);
-            }
-          } catch {
-            finalize(req.signal.aborted ? 499 : 502);
+          },
+          cancel() {
+            reader.cancel().catch(() => {});
+            finalize(499);
             cleanup();
-            closeSink(sink);
-          }
-        },
-        cancel() {
-          reader.cancel().catch(() => {});
-          finalize(499);
-          cleanup();
-        },
-      });
+          },
+        });
 
-      return new Response(stream, { status: upstream.status, headers: clientHeaders });
+        return new Response(stream, { status: upstream.status, headers: clientHeaders });
+      }
+
+      // ---- buffered relay ----
+      const respText = await upstream.text();
+      record(parseBufferedUsage(contentType, respText), upstream.status, Math.round(performance.now() - started), false);
+
+      return new Response(respText, { status: upstream.status, headers: clientHeaders });
     }
 
-    // ---- buffered relay ----
-    const respText = await upstream.text();
-    const usage = contentType.includes("application/json")
-      ? proto === "openai"
-        ? parseOpenAiJson(respText)
-        : parseAnthropicJson(respText)
-      : { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false };
-    const latencyMs = Math.round(performance.now() - started);
-    record(usage, upstream.status, latencyMs, false);
-
-    return new Response(respText, { status: upstream.status, headers: clientHeaders });
+    // ---- every candidate failed (or was skipped) ----
+    const finalLatency = Math.round(performance.now() - started);
+    if (lastFailure?.kind === "upstream") {
+      // Deliver the most recent UPSTREAM error (sanitized headers as always):
+      // clients want the real cause (e.g. insufficient_quota), not a 503.
+      const f = lastFailure;
+      record(parseBufferedUsage(f.headers.get("content-type") || "", f.body), f.status, finalLatency, false);
+      return new Response(f.body, { status: f.status, headers: buildClientHeaders(f.headers, requestId) });
+    }
+    if (lastFailure?.kind === "network") {
+      recordUsage({
+        keyId: keyRow.id, userId: keyRow.user_id, proto, model: routedPublicModel ?? "",
+        inTok: 0, cacheTok: 0, outTok: 0, latencyMs: finalLatency,
+        status: req.signal.aborted ? 499 : lastFailure.status, stream: wantsStream, estimated: false,
+      });
+      return envelopeError(
+        proto,
+        lastFailure.status,
+        lastFailure.timedOut ? "upstream took too long to respond" : "upstream is unreachable",
+        "api_error",
+      );
+    }
+    // Every candidate was skipped (cooling-down keys / open breakers).
+    return envelopeError(
+      proto,
+      503,
+      "no upstream candidate is currently available (keys cooling down or providers circuit-broken)",
+      "api_error",
+      req,
+    );
   } finally {
     if (!slotHeldByStream) release();
     if (usageFlushDue()) flushUsage();

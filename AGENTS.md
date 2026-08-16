@@ -61,7 +61,11 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
     (migration `008_model_proto_both`). A `"both"`-mode sync upgrades
     pristine auto rows (`updated_at = created_at`) of the same provider to
     `'both'`: once an admin edits the row, sync never touches its proto
-    again. Orphaned rows (provider_id NULL) never merge either.
+    again. Orphaned rows (provider_id NULL) never merge either. A model id
+    CAN be renamed (PATCH `{id}` — the PK is updated in place, nothing
+    references it); usage history keeps the old id, and renaming an
+    auto-imported id does not stop the next sync from re-adding it (the
+    upstream still lists it).
 - **Crypto** (`server/crypto.ts`): hand-rolled on WebCrypto — PBKDF2 (100k),
   TOTP (RFC 6238, anti-replay in `ratelimit.ts`), JWT HS256, AES-256-GCM.
   Do not add crypto libs.

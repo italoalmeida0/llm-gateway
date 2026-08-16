@@ -581,28 +581,53 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
           providerId = pid;
         }
       }
+      // Optional rename: `id` is the PRIMARY KEY, updated in place — no
+      // foreign keys point at it (usage events record the model as plain
+      // text, so history keeps the old id; clients must send the new one).
+      let newId: string | undefined;
+      if ("id" in body) {
+        const candidate = v.str(body, "id", { min: 1, max: 256 })!;
+        if (/\s|[\x00-\x1f]/.test(candidate)) {
+          throw new ApiError(400, "id must not contain whitespace or control characters");
+        }
+        if (candidate !== modelId) {
+          if (db.prepare<{ id: string }, [string]>("SELECT id FROM models WHERE id = ?").get(candidate)) {
+            throw new ApiError(409, "a model with this id is already registered");
+          }
+          newId = candidate;
+        }
+      }
       const f = modelFields(body, existing);
-      db.prepare(
-        `UPDATE models SET provider_id = ?, upstream_model = ?, proto = ?, name = ?,
-           description = ?, hugging_face_id = ?, quantization = ?, openrouter_slug = ?,
-           always_on = ?, enabled = ?, context_length = ?, max_output_length = ?,
-           created = ?, input_modalities = ?, output_modalities = ?, sampling_params = ?,
-           features = ?, reasoning_efforts = ?, pricing = ?, datacenters = ?, updated_at = ?
-         WHERE id = ?`,
-      ).run(
-        providerId, f.upstream_model ?? existing.upstream_model, f.proto ?? existing.proto,
-        f.name, f.description, f.hugging_face_id, f.quantization, f.openrouter_slug,
-        f.always_on, f.enabled, f.context_length, f.max_output_length, f.created,
-        f.input_modalities, f.output_modalities, f.sampling_params, f.features,
-        f.reasoning_efforts, f.pricing, f.datacenters, Date.now(), modelId,
-      );
+      db.transaction(() => {
+        db.prepare(
+          `UPDATE models SET provider_id = ?, upstream_model = ?, proto = ?, name = ?,
+             description = ?, hugging_face_id = ?, quantization = ?, openrouter_slug = ?,
+             always_on = ?, enabled = ?, context_length = ?, max_output_length = ?,
+             created = ?, input_modalities = ?, output_modalities = ?, sampling_params = ?,
+             features = ?, reasoning_efforts = ?, pricing = ?, datacenters = ?, updated_at = ?
+           WHERE id = ?`,
+        ).run(
+          providerId, f.upstream_model ?? existing.upstream_model, f.proto ?? existing.proto,
+          f.name, f.description, f.hugging_face_id, f.quantization, f.openrouter_slug,
+          f.always_on, f.enabled, f.context_length, f.max_output_length, f.created,
+          f.input_modalities, f.output_modalities, f.sampling_params, f.features,
+          f.reasoning_efforts, f.pricing, f.datacenters, Date.now(), modelId,
+        );
+        if (newId) db.prepare("UPDATE models SET id = ? WHERE id = ?").run(newId, modelId);
+      })();
       invalidateModelCache();
-      auditAdmin(ctx.user, "model.updated", modelId, { providerId }, ip);
+      auditAdmin(
+        ctx.user,
+        newId ? "model.renamed" : "model.updated",
+        newId ?? modelId,
+        { providerId, ...(newId ? { renamedFrom: modelId } : {}) },
+        ip,
+      );
       const row = db
         .prepare<ModelRow & { provider_name: string | null }, [string]>(
           `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id WHERE m.id = ?`,
         )
-        .get(modelId)!;
+        .get(newId ?? modelId)!;
       return ok({ model: publicModelAdmin(row) }, req);
     }
 

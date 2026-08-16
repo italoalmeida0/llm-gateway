@@ -176,8 +176,10 @@ export default function AdminModelsPage() {
         toast("Model registered");
       } else {
         const m = editing() as ModelDto;
+        const newId = fId().trim();
+        if (newId && newId !== m.id) body.id = newId; // rename (id is the PK)
         await api("PATCH", `/api/admin/models/${encodeURIComponent(m.id)}`, body);
-        toast("Model updated");
+        toast(newId && newId !== m.id ? "Model renamed" : "Model updated");
       }
       setEditing(null);
       refetch();
@@ -398,7 +400,7 @@ export default function AdminModelsPage() {
       <Modal
         open={!!editing()}
         onClose={() => setEditing(null)}
-        title={editing() === "new" ? "Register model" : `Edit ${fId()}`}
+        title={editing() === "new" ? "Register model" : `Edit ${(editing() as ModelDto)?.id ?? ""}`}
         width="max-w-2xl"
       >
         <div class="space-y-4">
@@ -408,8 +410,11 @@ export default function AdminModelsPage() {
               value={fId()}
               onInput={setFId}
               placeholder="hf:zai-org/GLM-5.2"
-              disabled={editing() !== "new"}
-              hint={editing() === "new" ? "What clients send as `model`" : "Ids are immutable"}
+              hint={
+                editing() === "new"
+                  ? "What clients send as `model`"
+                  : "Changing the id renames the entry — clients must send the new id (usage history keeps the old one)"
+              }
             />
             <Select label="Provider" value={fProvider()} onChange={setFProvider} options={providerOptions()} />
           </div>
@@ -504,7 +509,7 @@ export default function AdminModelsPage() {
 
           <div class="flex justify-end gap-2 pt-2">
             <Btn variant="ghost" onClick={() => setEditing(null)}>Cancel</Btn>
-            <Btn onClick={save} disabled={busy() || !fProvider() || (editing() === "new" && !fId().trim())}>
+            <Btn onClick={save} disabled={busy() || !fProvider() || !fId().trim()}>
               {busy() ? "Saving…" : "Save model"}
             </Btn>
           </div>

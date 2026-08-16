@@ -1016,6 +1016,58 @@ describe("model registry & routing mode", () => {
     expect(JSON.parse(last.body).model).toBe("fake-llm-1");
   });
 
+  test("models can be renamed (the id is the PK, updated in place)", async () => {
+    // target id already taken → 409
+    expect(
+      (
+        await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
+          token: adminToken, method: "PATCH", body: { id: "fake-llm-1" },
+        })
+      ).status,
+    ).toBe(409);
+    // invalid id → 400
+    expect(
+      (
+        await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
+          token: adminToken, method: "PATCH", body: { id: "has space" },
+        })
+      ).status,
+    ).toBe(400);
+
+    // the rename itself: same row carried over to the new id
+    const r = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
+      token: adminToken, method: "PATCH", body: { id: "renamed-alias" },
+    });
+    expect(r.status).toBe(200);
+    expect(r.json.model.id).toBe("renamed-alias");
+    expect(r.json.model.name).toBe("Alias Fast"); // fields survived
+    expect(r.json.model.upstreamModel).toBe("fake-llm-1");
+
+    // routing follows the new id; the old one 404s (router mode is on)
+    const routed = await llm("/v1/chat/completions", gatewayKey, {
+      model: "renamed-alias", messages: [{ role: "user", content: "renamed" }],
+    });
+    expect(routed.status).toBe(200);
+    await routed.text();
+    expect(
+      (await llm("/v1/chat/completions", gatewayKey, { model: "alias-fast", messages: [] })).status,
+    ).toBe(404);
+
+    // the old id no longer addresses the row; rename back for the next tests
+    expect(
+      (
+        await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
+          token: adminToken, method: "PATCH", body: { enabled: true },
+        })
+      ).status,
+    ).toBe(404);
+    const back = await api(`/api/admin/models/${encodeURIComponent("renamed-alias")}`, {
+      token: adminToken, method: "PATCH", body: { id: "alias-fast" },
+    });
+    expect(back.status).toBe(200);
+    expect(back.json.model.id).toBe("alias-fast");
+  });
+
   test("router mode: usage is attributed to the public model id", async () => {
     await Bun.sleep(1_300); // usage buffer flush (1s interval)
     // admin stats' perModel rollup (the user's own session was rotated away

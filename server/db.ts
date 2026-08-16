@@ -231,6 +231,43 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_models_provider ON models(provider_id);
     `,
   },
+  {
+    name: "008_model_proto_both",
+    // A registry entry may serve BOTH protocol surfaces (proto = 'both').
+    // SQLite can't alter a CHECK constraint, so the table is rebuilt.
+    up: `
+      CREATE TABLE models_new (
+        id                TEXT PRIMARY KEY,
+        provider_id       TEXT REFERENCES providers(id) ON DELETE SET NULL,
+        upstream_model    TEXT NOT NULL,
+        proto             TEXT NOT NULL DEFAULT 'openai' CHECK (proto IN ('openai','anthropic','both')),
+        name              TEXT NOT NULL DEFAULT '',
+        description       TEXT NOT NULL DEFAULT '',
+        hugging_face_id   TEXT NOT NULL DEFAULT '',
+        quantization      TEXT NOT NULL DEFAULT '',
+        openrouter_slug   TEXT NOT NULL DEFAULT '',
+        always_on         INTEGER NOT NULL DEFAULT 1,
+        enabled           INTEGER NOT NULL DEFAULT 1,
+        context_length    INTEGER,
+        max_output_length INTEGER,
+        created           INTEGER,
+        input_modalities  TEXT NOT NULL DEFAULT '["text"]',
+        output_modalities TEXT NOT NULL DEFAULT '["text"]',
+        sampling_params   TEXT NOT NULL DEFAULT '[]',
+        features          TEXT NOT NULL DEFAULT '[]',
+        reasoning_efforts TEXT,
+        pricing           TEXT,
+        datacenters       TEXT,
+        source            TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto','manual')),
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      );
+      INSERT INTO models_new SELECT * FROM models;
+      DROP TABLE models;
+      ALTER TABLE models_new RENAME TO models;
+      CREATE INDEX idx_models_provider ON models(provider_id);
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -307,6 +344,9 @@ export interface ProviderRow {
  *    registered upstream_model of its provider. */
 export type RoutingMode = "passthrough" | "router";
 
+/** Protocol surface(s) a registry entry serves: one of them, or 'both'. */
+export type ModelProto = "openai" | "anthropic" | "both";
+
 /** A registered public model id (Model Registry). `upstream_model` is what the
  *  provider actually receives; `id` is what gateway clients send. */
 export interface ModelRow {
@@ -314,7 +354,7 @@ export interface ModelRow {
   /** NULL = orphaned (its provider was deleted without cascade). */
   provider_id: string | null;
   upstream_model: string;
-  proto: "openai" | "anthropic";
+  proto: ModelProto;
   name: string;
   description: string;
   hugging_face_id: string;

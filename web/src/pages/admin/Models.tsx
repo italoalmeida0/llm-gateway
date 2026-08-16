@@ -1,6 +1,6 @@
 import { createSignal, For, Show, createResource, createMemo } from "solid-js";
 
-import { api, type ModelDto, type ProviderDto, type RoutingMode, type SyncOutcome } from "../../api";
+import { api, type ModelDto, type ModelProto, type ProviderDto, type RoutingMode, type SyncOutcome } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtNum } from "../../ui";
@@ -11,9 +11,16 @@ const ROUTING_OPTIONS = [
 ] as Array<{ value: RoutingMode; label: string }>;
 
 const PROTO_OPTIONS = [
+  { value: "both", label: "Both" },
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic" },
-] as Array<{ value: "openai" | "anthropic"; label: string }>;
+] as Array<{ value: ModelProto; label: string }>;
+
+const PROTO_TONE: Record<ModelProto, "zinc" | "blue" | "indigo"> = {
+  openai: "zinc",
+  anthropic: "blue",
+  both: "indigo",
+};
 
 const PRICING_KEYS = ["prompt", "completion", "image", "request", "input_cache_reads", "input_cache_writes"];
 
@@ -30,7 +37,12 @@ export function syncSummary(sync?: Partial<Record<string, SyncOutcome>>): string
   const parts: string[] = [];
   for (const [cap, r] of Object.entries(sync)) {
     if (!r) continue;
-    parts.push(r.error ? `${cap}: sync failed (${r.error})` : `${cap}: ${r.added} added, ${r.skipped} skipped`);
+    parts.push(
+      r.error
+        ? `${cap}: sync failed (${r.error})`
+        : `${cap}: ${r.added} added, ${r.skipped} skipped` +
+            (r.merged ? `, ${r.merged} upgraded to both` : ""),
+    );
   }
   return parts.join(" · ");
 }
@@ -63,7 +75,7 @@ export default function AdminModelsPage() {
   const [fId, setFId] = createSignal("");
   const [fProvider, setFProvider] = createSignal("");
   const [fUpstream, setFUpstream] = createSignal("");
-  const [fProto, setFProto] = createSignal<"openai" | "anthropic">("openai");
+  const [fProto, setFProto] = createSignal<ModelProto>("both");
   const [fEnabled, setFEnabled] = createSignal(true);
   const [fAlwaysOn, setFAlwaysOn] = createSignal(true);
   const [fName, setFName] = createSignal("");
@@ -104,7 +116,7 @@ export default function AdminModelsPage() {
 
   const openEditor = (m: ModelDto | "new") => {
     if (m === "new") {
-      setFId(""); setFProvider(providers()?.[0]?.id ?? ""); setFUpstream(""); setFProto("openai");
+      setFId(""); setFProvider(providers()?.[0]?.id ?? ""); setFUpstream(""); setFProto("both");
       setFEnabled(true); setFAlwaysOn(true);
       setFName(""); setFDesc(""); setFHf(""); setFQuant(""); setFSlug("");
       setFContext(""); setFMaxOut(""); setFCreated("");
@@ -340,7 +352,7 @@ export default function AdminModelsPage() {
                         </code>
                       </td>
                       <td class="px-3 py-3">
-                        <Badge tone={m.proto === "openai" ? "zinc" : "blue"}>{m.proto}</Badge>
+                        <Badge tone={PROTO_TONE[m.proto]}>{m.proto}</Badge>
                       </td>
                       <td class="px-3 py-3 text-right text-ink-300 whitespace-nowrap">
                         {m.contextLength != null ? fmtNum(m.contextLength) : "—"}
@@ -411,7 +423,10 @@ export default function AdminModelsPage() {
             />
             <div>
               <span class="block text-xs font-medium text-ink-300 mb-1.5">Protocol</span>
-              <Segmented value={fProto()} onChange={(p) => setFProto(p as "openai" | "anthropic")} options={PROTO_OPTIONS} />
+              <Segmented value={fProto()} onChange={(p) => setFProto(p as ModelProto)} options={PROTO_OPTIONS} />
+              <p class="text-[11px] text-ink-500 mt-1.5">
+                Which API surface(s) serve this model — the provider needs the matching base URL.
+              </p>
             </div>
           </div>
           <div class="flex items-center gap-6">

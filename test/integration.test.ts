@@ -159,6 +159,10 @@ describe("gateway end-to-end", () => {
     expect(r.status).toBe(200);
     expect(r.json.provider.openaiBaseUrl).toContain("/openai/v1");
 
+    // dual-surface provider: openai imports the id, anthropic upgrades it to "both"
+    expect(r.json.sync.openai).toEqual({ added: 1, skipped: 0, merged: 0 });
+    expect(r.json.sync.anthropic).toEqual({ added: 0, skipped: 0, merged: 1 });
+
     const t = await api(`/api/admin/providers/${r.json.provider.id}/test`, { token: adminToken, method: "POST" });
     expect(t.status).toBe(200);
     expect(t.json.results.openai.reachable).toBe(true);
@@ -907,7 +911,7 @@ describe("model registry & routing mode", () => {
     const provs = await api("/api/admin/providers", { token: adminToken });
     providerId = provs.json.providers[0].id;
     // fake upstream serves "fake-llm-1" on both protocols; openai syncs first
-    // and the identical anthropic id is skipped (registry ids are global).
+    // and the identical anthropic id merges the row into proto "both".
     expect(provs.json.providers[0].modelCount).toBe(1);
 
     const r = await api("/api/admin/models", { token: adminToken });
@@ -916,7 +920,7 @@ describe("model registry & routing mode", () => {
     expect(m).toBeTruthy();
     expect(m.source).toBe("auto");
     expect(m.upstreamModel).toBe("fake-llm-1");
-    expect(m.proto).toBe("openai");
+    expect(m.proto).toBe("both");
     expect(m.providerName).toBe("provider");
     expect(m.enabled).toBe(true);
   });
@@ -1020,10 +1024,11 @@ describe("model registry & routing mode", () => {
     expect(alias.supported_sampling_parameters).toEqual(["temperature", "top_p"]);
     expect(alias.input_modalities).toEqual(["text"]);
 
-    // forced anthropic listing: only anthropic-proto registry models (none) → empty
+    // forced anthropic listing: only anthropic-serving models — fake-llm-1 is
+    // proto "both" so it shows up; alias-fast (openai-only) does not
     const a = await fetch(`${GW}/anthropic/v1/models`, { headers: { "x-api-key": gatewayKey } });
     expect(a.status).toBe(200);
-    expect((await a.json()).data).toEqual([]);
+    expect((await a.json()).data.map((m: any) => m.id)).toEqual(["fake-llm-1"]);
 
     // single-model retrieval + 404
     const one = await fetch(`${GW}/v1/models/alias-fast`, {
@@ -1044,7 +1049,24 @@ describe("model registry & routing mode", () => {
     ).toBe(401);
   });
 
-  test("router mode: disabled model 404s; proto mismatch is unknown", async () => {
+  test("router mode: disabled model 404s; proto gates each surface", async () => {
+    // fake-llm-1 is proto "both" → it answers on the anthropic surface too
+    const both = await llm(
+      "/anthropic/v1/messages", gatewayKey,
+      { model: "fake-llm-1", max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+      true,
+    );
+    expect(both.status).toBe(200);
+    await both.text();
+
+    // alias-fast is openai-only → unknown on the anthropic surface
+    const cross = await llm(
+      "/anthropic/v1/messages", gatewayKey,
+      { model: "alias-fast", max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+      true,
+    );
+    expect(cross.status).toBe(404);
+
     const d = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
       token: adminToken, method: "PATCH", body: { enabled: false },
     });
@@ -1053,14 +1075,6 @@ describe("model registry & routing mode", () => {
 
     const r = await llm("/v1/chat/completions", gatewayKey, { model: "alias-fast", messages: [] });
     expect(r.status).toBe(404);
-
-    // fake-llm-1 is registered for openai only → unknown on the anthropic surface
-    const cross = await llm(
-      "/anthropic/v1/messages", gatewayKey,
-      { model: "fake-llm-1", max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
-      true,
-    );
-    expect(cross.status).toBe(404);
 
     // re-enable for the next tests
     const e = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
@@ -1083,7 +1097,8 @@ describe("model registry & routing mode", () => {
     const list = await api("/api/admin/models", { token: adminToken });
     expect(list.json.models.find((x: any) => x.id === "alias-fast").providerName).toBeNull();
 
-    // re-create the provider: auto-sync skips the orphaned duplicate (no clobber)
+    // re-create the provider: auto-sync skips the orphaned duplicate (no clobber,
+    // and no 'both' merge — the orphan belongs to no provider anymore)
     const re = await api("/api/admin/providers", {
       token: adminToken,
       body: {
@@ -1096,8 +1111,8 @@ describe("model registry & routing mode", () => {
     expect(re.status).toBe(200);
     const newId = re.json.provider.id as string;
     expect(re.json.provider.modelCount).toBe(0);
-    expect(re.json.sync.openai).toEqual({ added: 0, skipped: 1 });
-    expect(re.json.sync.anthropic).toEqual({ added: 0, skipped: 1 });
+    expect(re.json.sync.openai).toEqual({ added: 0, skipped: 1, merged: 0 });
+    expect(re.json.sync.anthropic).toEqual({ added: 0, skipped: 1, merged: 0 });
 
     // re-link the alias to the new provider → routes again
     const relink = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
@@ -1120,7 +1135,28 @@ describe("model registry & routing mode", () => {
     });
     expect(r.status).toBe(200);
     // fake-llm-1 stays orphaned (INSERT OR IGNORE) — edits/links are never clobbered
-    expect(r.json.sync.openai).toEqual({ added: 0, skipped: 1 });
+    expect(r.json.sync.openai).toEqual({ added: 0, skipped: 1, merged: 0 });
+  });
+
+  test("sync never re-merges a proto the admin restricted manually", async () => {
+    // re-link the orphan to provider-b and restrict it to openai on purpose
+    await api(`/api/admin/models/${encodeURIComponent("fake-llm-1")}`, {
+      token: adminToken, method: "PATCH", body: { providerId, proto: "openai" },
+    });
+    const r = await api(`/api/admin/providers/${providerId}/sync-models`, {
+      token: adminToken, method: "POST",
+    });
+    expect(r.status).toBe(200);
+    // the row was edited by hand → no 'both' upgrade, proto stays openai
+    expect(r.json.sync.openai).toEqual({ added: 0, skipped: 1, merged: 0 });
+    expect(r.json.sync.anthropic).toEqual({ added: 0, skipped: 1, merged: 0 });
+    const list = await api("/api/admin/models", { token: adminToken });
+    expect(list.json.models.find((x: any) => x.id === "fake-llm-1").proto).toBe("openai");
+
+    // restore the orphaned state the following tests expect
+    await api(`/api/admin/models/${encodeURIComponent("fake-llm-1")}`, {
+      token: adminToken, method: "PATCH", body: { providerId: null, proto: "both" },
+    });
   });
 
   test("bulk delete removes selected models; provider delete with deleteModels cascades", async () => {

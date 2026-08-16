@@ -1,5 +1,5 @@
 import { LIMITS, SMTP_ENABLED } from "../config";
-import { db, stmts, audit, type ProviderRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow } from "../db";
+import { db, stmts, audit, type ProviderRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow, type ModelProto } from "../db";
 import { encryptSecret, decryptSecret, randomToken, sha256Hex } from "../crypto";
 import { requireAdmin, revokeAllUserSessions, auditAdmin } from "../auth";
 import { publicKey, revokeKey } from "../keys";
@@ -165,10 +165,10 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
     if (!(key in body)) return undefined;
     return body[key] ? 1 : 0;
   };
-  const protoOpt = (): "openai" | "anthropic" | undefined => {
+  const protoOpt = (): ModelProto | undefined => {
     if (!("proto" in body)) return undefined;
-    if (body.proto !== "openai" && body.proto !== "anthropic") {
-      throw new ApiError(400, 'proto must be "openai" or "anthropic"');
+    if (body.proto !== "openai" && body.proto !== "anthropic" && body.proto !== "both") {
+      throw new ApiError(400, 'proto must be "openai", "anthropic" or "both"');
     }
     return body.proto;
   };
@@ -476,7 +476,14 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       .get(providerId);
     if (!provider) throw new ApiError(400, "providerId does not match any provider");
     const f = modelFields(body);
-    const proto = f.proto ?? (provider.openai_base_url ? "openai" : "anthropic");
+    // Default to every capability the provider exposes (both when dual-surface).
+    const proto: ModelProto =
+      f.proto ??
+      (provider.openai_base_url
+        ? provider.anthropic_base_url
+          ? "both"
+          : "openai"
+        : "anthropic");
     const upstreamModel = f.upstream_model ?? id;
     const now = Date.now();
     db.prepare(

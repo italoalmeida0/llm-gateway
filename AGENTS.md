@@ -52,9 +52,13 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
     rewritten to `upstream_model` (only when different — byte-fidelity rule
     stands); usage is recorded under the PUBLIC id; `/v1/models` is generated
     from the registry in the rich format (never forwarded upstream).
-  - Registry ids are global and per-proto: for a dual-surface provider the
-    first capability sync wins the id (the other proto's duplicate is skipped)
-    — register a separate public id manually for the second proto if needed.
+  - Registry ids are global; `proto` is `openai` | `anthropic` | `both`
+    (migration `008_model_proto_both`). A dual-capability provider's
+    auto-import creates the id on the first capability sync and upgrades the
+    row to `'both'` when the second capability lists the same upstream id —
+    ONLY for pristine auto rows (`updated_at = created_at`): once an admin
+    edits the row, sync never touches its proto again. Orphaned rows
+    (provider_id NULL) never merge either.
 - **Crypto** (`server/crypto.ts`): hand-rolled on WebCrypto — PBKDF2 (100k),
   TOTP (RFC 6238, anti-replay in `ratelimit.ts`), JWT HS256, AES-256-GCM.
   Do not add crypto libs.

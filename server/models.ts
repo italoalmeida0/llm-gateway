@@ -9,7 +9,10 @@ import { GATEWAY_SECRET } from "./config";
  *    into the registry. It is best-effort: it never blocks provider creation
  *    and tolerates OpenAI, Anthropic and rich (OpenRouter-style) payload
  *    shapes. Duplicates are skipped (INSERT OR IGNORE) so re-syncing never
- *    clobbers admin edits.
+ *    clobbers admin edits — with one exception: when the OTHER capability of
+ *    the same provider lists the same upstream id, a pristine auto-imported
+ *    row (never edited by an admin) is upgraded to proto='both', so
+ *    dual-surface providers serve the model on both protocols.
  * - `routerSnapshot` is the proxy hot-path view (5s cache, same pattern as the
  *    provider cache): routing mode + every model row + every ENABLED provider
  *    with its decrypted key. Admin mutations call invalidateModelCache().
@@ -169,6 +172,9 @@ function parseCreated(m: Record<string, unknown>): number | null {
 export interface SyncOutcome {
   added: number;
   skipped: number;
+  /** Rows upgraded to proto='both' because the other capability of the same
+   *  provider listed the same upstream id (pristine auto rows only). */
+  merged: number;
   error?: string;
 }
 
@@ -189,6 +195,18 @@ const insertModel = db.prepare(
       sampling_params, features, reasoning_efforts, pricing, datacenters,
       source, created_at, updated_at)
    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)`,
+);
+
+/**
+ * Promote a row to proto='both' when this provider's other capability lists
+ * the same upstream id. Guarded to pristine auto-imported rows
+ * (updated_at = created_at): once an admin touches the row, its proto is
+ * never changed by a sync again.
+ */
+const mergeProtoBoth = db.prepare(
+  `UPDATE models SET proto = 'both', updated_at = ?
+   WHERE id = ? AND provider_id = ? AND upstream_model = ? AND source = 'auto'
+     AND proto != ? AND proto != 'both' AND updated_at = created_at`,
 );
 
 /**
@@ -214,11 +232,12 @@ export async function syncProviderModels(
         signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
       });
       if (!res.ok) {
-        out[proto] = { added: 0, skipped: 0, error: `HTTP ${res.status}` };
+        out[proto] = { added: 0, skipped: 0, merged: 0, error: `HTTP ${res.status}` };
         continue;
       }
       const parsed = parseUpstreamModels((await res.json()) as unknown);
       let added = 0;
+      let merged = 0;
       db.transaction(() => {
         for (const m of parsed) {
           const r = insertModel.run(
@@ -246,11 +265,12 @@ export async function syncProviderModels(
             now,
           );
           added += r.changes;
+          if (r.changes === 0) merged += mergeProtoBoth.run(now, m.id, provider.id, m.id, proto).changes;
         }
       })();
-      out[proto] = { added, skipped: parsed.length - added };
+      out[proto] = { added, skipped: parsed.length - added - merged, merged };
     } catch (e) {
-      out[proto] = { added: 0, skipped: 0, error: e instanceof Error ? e.message : "sync failed" };
+      out[proto] = { added: 0, skipped: 0, merged: 0, error: e instanceof Error ? e.message : "sync failed" };
     }
   }
   if (Object.keys(out).length) invalidateModelCache();
@@ -399,13 +419,18 @@ export type ModelResolution =
   | { ok: true; provider: RoutedProvider; upstreamModel: string }
   | { ok: false; status: 404 | 503; code: string; message: string };
 
+/** Does a registry entry serve this protocol surface? */
+function servesProto(m: ModelRow, proto: "openai" | "anthropic"): boolean {
+  return m.proto === proto || m.proto === "both";
+}
+
 export function resolveModelRoute(
   snap: RouterSnapshot,
   proto: "openai" | "anthropic",
   model: string,
 ): ModelResolution {
   const m = snap.models.get(model);
-  if (!m || m.proto !== proto) {
+  if (!m || !servesProto(m, proto)) {
     return {
       ok: false,
       status: 404,
@@ -440,7 +465,7 @@ export function resolveModelRoute(
 export function listableModels(snap: RouterSnapshot, proto: "openai" | "anthropic"): ModelRow[] {
   const out: ModelRow[] = [];
   for (const m of snap.models.values()) {
-    if (!m.enabled || m.proto !== proto || !m.provider_id) continue;
+    if (!m.enabled || !servesProto(m, proto) || !m.provider_id) continue;
     const p = snap.providers.get(m.provider_id);
     if (!p || !providerHasCapability(p.row, proto)) continue;
     out.push(m);

@@ -16,8 +16,14 @@ import {
   verifyPassword,
 } from "../server/crypto";
 import { checkKeyAvailability } from "../server/keys";
-import { parseUpstreamModels, publicModelEntry } from "../server/models";
-import type { ModelRow } from "../server/db";
+import {
+  listableModels,
+  parseUpstreamModels,
+  publicModelEntry,
+  resolveModelRoute,
+  type RouterSnapshot,
+} from "../server/models";
+import type { ModelRow, ProviderRow } from "../server/db";
 
 const SECRET = "test-secret-that-is-long-enough-32+";
 
@@ -287,6 +293,68 @@ describe("public /v1/models registry entry", () => {
     expect("datacenters" in e).toBe(false);
     expect("context_length" in e).toBe(false);
     expect("openrouter" in e).toBe(false);
+  });
+});
+
+describe("model routing with proto 'both'", () => {
+  const provider = {
+    id: "p1",
+    name: "dual",
+    openai_base_url: "http://x/openai/v1",
+    anthropic_base_url: "http://x/anthropic/v1",
+    api_key_enc: "enc",
+    enabled: 1,
+    priority: 100,
+    created_at: 1,
+    openai_auth_style: "bearer",
+    anthropic_auth_style: "x-api-key",
+  } as ProviderRow;
+  const mk = (id: string, proto: ModelRow["proto"]): ModelRow => ({
+    id,
+    provider_id: "p1",
+    upstream_model: id,
+    proto,
+    name: "",
+    description: "",
+    hugging_face_id: "",
+    quantization: "",
+    openrouter_slug: "",
+    always_on: 1,
+    enabled: 1,
+    context_length: null,
+    max_output_length: null,
+    created: null,
+    input_modalities: '["text"]',
+    output_modalities: '["text"]',
+    sampling_params: "[]",
+    features: "[]",
+    reasoning_efforts: null,
+    pricing: null,
+    datacenters: null,
+    source: "auto",
+    created_at: 1,
+    updated_at: 1,
+  });
+  const snap: RouterSnapshot = {
+    mode: "router",
+    models: new Map([
+      ["m-both", mk("m-both", "both")],
+      ["m-openai", mk("m-openai", "openai")],
+      ["m-anthropic", mk("m-anthropic", "anthropic")],
+    ]),
+    providers: new Map([["p1", { row: provider, key: "k" }]]),
+  };
+
+  test("'both' resolves on either surface; single-proto stays gated", () => {
+    expect(resolveModelRoute(snap, "openai", "m-both")).toMatchObject({ ok: true });
+    expect(resolveModelRoute(snap, "anthropic", "m-both")).toMatchObject({ ok: true });
+    expect(resolveModelRoute(snap, "anthropic", "m-openai")).toMatchObject({ ok: false, status: 404 });
+    expect(resolveModelRoute(snap, "openai", "m-anthropic")).toMatchObject({ ok: false, status: 404 });
+  });
+
+  test("listings include 'both' on their own surface only", () => {
+    expect(listableModels(snap, "openai").map((m) => m.id)).toEqual(["m-both", "m-openai"]);
+    expect(listableModels(snap, "anthropic").map((m) => m.id)).toEqual(["m-anthropic", "m-both"]);
   });
 });
 

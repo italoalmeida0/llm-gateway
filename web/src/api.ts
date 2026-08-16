@@ -197,10 +197,15 @@ export interface ProviderDto {
 export interface SyncOutcome {
   added: number;
   skipped: number;
+  /** Rows upgraded to proto "both" (listed by the provider's other capability). */
+  merged: number;
   error?: string;
 }
 
 export type RoutingMode = "passthrough" | "router";
+
+/** Protocol surface(s) a registry entry serves. */
+export type ModelProto = "openai" | "anthropic" | "both";
 
 /** Admin view of a registered model (camelCase mirror of the models table). */
 export interface ModelDto {
@@ -208,7 +213,7 @@ export interface ModelDto {
   providerId: string | null;
   providerName: string | null;
   upstreamModel: string;
-  proto: "openai" | "anthropic";
+  proto: ModelProto;
   name: string;
   description: string;
   huggingFaceId: string;

@@ -1,7 +1,7 @@
 import { Show, createEffect, createMemo, createSignal } from "solid-js";
 
 import type { DailyPoint } from "./api";
-import { EChart, chartColors, echarts, withAlpha } from "./echarts";
+import { EChart, chartColors, withAlpha } from "./echarts";
 import { fmtNum, theme } from "./ui";
 
 /**
@@ -51,6 +51,9 @@ export function DailyChart(props: {
     const latest = ds.length - 1;
     const tooltip = {
       trigger: "axis" as const,
+      // Pinned to the top so the box never hides the hovered bars (a
+      // cursor-following tip clamps onto the latest day and covers it).
+      position: "top" as const,
       confine: true,
       backgroundColor: c.elev,
       borderColor: c.line,
@@ -107,9 +110,6 @@ export function DailyChart(props: {
             type: "bar" as const,
             barWidth: "38%",
             itemStyle: { color: c.soft, borderRadius: [4, 4, 0, 0] },
-            emphasis: {
-              itemStyle: { color: c.brand, borderRadius: [4, 4, 0, 0] },
-            },
             data: ds.map((d, i) => ({
               value: d.reqs ?? 0,
               itemStyle:
@@ -300,6 +300,7 @@ export function AreaChart(props: {
       },
       tooltip: {
         trigger: "axis" as const,
+        position: "top" as const,
         confine: true,
         backgroundColor: c.elev,
         borderColor: c.line,
@@ -312,20 +313,18 @@ export function AreaChart(props: {
           name: "Requests",
           type: "line" as const,
           smooth: true,
+          // No per-item symbols: animating a mixed "none"/"circle" symbol
+          // list across data changes crashes zrender's morph frames and can
+          // leave the chart stuck mid-transition.
           symbol: "none",
           lineStyle: { color: c.brand, width: 2 },
           itemStyle: { color: c.brand },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: withAlpha(c.brand, 0.22) },
-              { offset: 1, color: withAlpha(c.brand, 0) },
-            ]),
-          },
-          data: p.map((x, i) => ({
-            value: x.v,
-            symbol: i === n - 1 ? "circle" : "none",
-            symbolSize: i === n - 1 ? 7 : 0,
-          })),
+          emphasis: { disabled: true },
+          // Flat translucent fill — a LinearGradient object here crashes
+          // zrender's morph frames when it lerps colorStops against a state
+          // that has none (pageerror -> chart can freeze mid-transition).
+          areaStyle: { color: withAlpha(c.brand, 0.15) },
+          data: p.map((x) => x.v),
         },
       ],
     };

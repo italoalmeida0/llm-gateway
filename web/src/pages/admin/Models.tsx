@@ -288,19 +288,6 @@ export default function AdminModelsPage() {
         }
       />
 
-      <Show when={routingMode() === "router"}>
-        <Card class="p-4 mb-4 border-amber-500/30">
-          <div class="flex items-start gap-2 text-xs text-ink-300">
-            <Icon name={Icons.warning} size={16} class="text-amber-500 mt-0.5" />
-            <span>
-              Router mode is strict: requests for models missing from this registry fail with 404,
-              and the upstream receives the registered <em>upstream model</em> id. Switch back to
-              pass-through to forward model names untouched.
-            </span>
-          </div>
-        </Card>
-      </Show>
-
       <Show when={selected().size > 0}>
         <Card class="p-3 mb-4 flex items-center justify-between">
           <span class="text-xs text-ink-300">{selected().size} selected</span>

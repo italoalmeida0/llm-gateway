@@ -22,7 +22,6 @@ export function DailyChart(props: {
   series: DailyPoint[];
   height?: number;
   metric?: "tokens" | "requests";
-  /** What one bar represents — drives legend pin text ("Latest day/hour"). */
   unit?: "day" | "hour";
 }) {
   const metric = () => props.metric ?? "tokens";
@@ -51,8 +50,6 @@ export function DailyChart(props: {
     const latest = ds.length - 1;
     const tooltip = {
       trigger: "axis" as const,
-      // Pinned to the top so the box never hides the hovered bars (a
-      // cursor-following tip clamps onto the latest day and covers it).
       position: "top" as const,
       confine: true,
       backgroundColor: c.elev,
@@ -115,7 +112,7 @@ export function DailyChart(props: {
               itemStyle:
                 i === latest
                   ? { color: c.brand, borderRadius: [4, 4, 0, 0] }
-                  : undefined,
+                  : { color: c.soft, borderRadius: [4, 4, 0, 0] },
             })),
           },
         ],
@@ -133,7 +130,7 @@ export function DailyChart(props: {
             itemStyle:
               i === latest
                 ? { color: c.brand, borderRadius: [3, 3, 0, 0] }
-                : undefined,
+                : { color: c.strong, borderRadius: [3, 3, 0, 0] },
           })),
         },
         {
@@ -313,16 +310,10 @@ export function AreaChart(props: {
           name: "Requests",
           type: "line" as const,
           smooth: true,
-          // No per-item symbols: animating a mixed "none"/"circle" symbol
-          // list across data changes crashes zrender's morph frames and can
-          // leave the chart stuck mid-transition.
           symbol: "none",
           lineStyle: { color: c.brand, width: 2 },
           itemStyle: { color: c.brand },
           emphasis: { disabled: true },
-          // Flat translucent fill — a LinearGradient object here crashes
-          // zrender's morph frames when it lerps colorStops against a state
-          // that has none (pageerror -> chart can freeze mid-transition).
           areaStyle: { color: withAlpha(c.brand, 0.15) },
           data: p.map((x) => x.v),
         },

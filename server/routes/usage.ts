@@ -42,7 +42,7 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
     const keyId = url.searchParams.get("key_id") || undefined;
     if (keyId) {
       const key = db.prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?").get(keyId);
-      if (!key || key.user_id !== ctx.user.id) return ok({ events: [], total: 0 }, req);
+      if (!key || key.user_id !== ctx.user.id) return ok({ events: [], total: 0, totals: { in_tok: 0, cache_tok: 0, out_tok: 0, reqs: 0 } }, req);
     }
     const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 500);
     const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);
@@ -69,8 +69,8 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
     } catch {
       /* malformed sort/filters fall back to unfiltered default */
     }
-    const { rows, total } = userEvents(ctx.user.id, { keyId, limit, offset, sort, filters, cursor: cursor ?? undefined });
-    return ok({ events: rows, total, limit, offset }, req);
+    const { rows, total, totals } = userEvents(ctx.user.id, { keyId, limit, offset, sort, filters, cursor: cursor ?? undefined });
+    return ok({ events: rows, total, limit, offset, totals }, req);
   }
 
   if (path === "/api/usage/breakdown" && req.method === "GET") {
@@ -91,7 +91,7 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
         days: days as number | "all",
         ...grid,
       });
-      return ok({ rows: page.rows, total: page.total, limit: grid.limit, offset: grid.offset }, req);
+      return ok({ rows: page.rows, total: page.total, limit: grid.limit, offset: grid.offset, totals: page.totals }, req);
     }
     const rows = userUsageBreakdown(ctx.user.id, {
       keyId: keyId ?? undefined,

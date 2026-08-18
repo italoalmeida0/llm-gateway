@@ -751,6 +751,15 @@ describe("gateway end-to-end", () => {
       JSON.stringify([{ colId, sort }]);
     const contains = (filter: string) =>
       JSON.stringify({ name: { filterType: "text", type: "contains", filter } });
+    // footer totals: four numeric fields, separate buckets, never lumped
+    const expectTotals = (j: any) => {
+      expect(j.totals).toBeTruthy();
+      for (const k of ["in_tok", "cache_tok", "out_tok", "reqs"]) {
+        expect(typeof j.totals[k]).toBe("number");
+        expect(j.totals[k]).toBeGreaterThanOrEqual(0);
+      }
+      expect(j.totals.reqs).toBeGreaterThan(0);
+    };
 
     const userKeys0 = await api(query("/api/keys", { limit: "1", offset: "0" }), { token: userToken });
     const userKeys1 = await api(query("/api/keys", { limit: "1", offset: "1" }), { token: userToken });
@@ -811,6 +820,7 @@ describe("gateway end-to-end", () => {
     expect(userBreakdown.json.total).toBeGreaterThanOrEqual(1);
     expect(userBreakdown.json.rows).toHaveLength(1);
     expect(userBreakdown.json.rows[0].model).toContain("fake");
+    expectTotals(userBreakdown.json);
 
     const adminBreakdownUsers = await api(query("/api/admin/usage-breakdown/users", {
       days: "7",
@@ -821,6 +831,7 @@ describe("gateway end-to-end", () => {
     expect(adminBreakdownUsers.status).toBe(200);
     expect(adminBreakdownUsers.json.total).toBeGreaterThanOrEqual(1);
     expect(adminBreakdownUsers.json.users).toHaveLength(1);
+    expectTotals(adminBreakdownUsers.json);
 
     const adminBreakdownModels = await api(query("/api/admin/usage-breakdown/models", {
       days: "7",
@@ -831,6 +842,7 @@ describe("gateway end-to-end", () => {
     expect(adminBreakdownModels.status).toBe(200);
     expect(adminBreakdownModels.json.total).toBeGreaterThanOrEqual(1);
     expect(adminBreakdownModels.json.models).toHaveLength(1);
+    expectTotals(adminBreakdownModels.json);
 
     const audit = await api(query("/api/admin/audit", {
       limit: "2",
@@ -968,14 +980,29 @@ describe("gateway end-to-end", () => {
     expect(f200.json.events.length).toBeGreaterThan(0);
     for (const e of f200.json.events) expect(e.status).toBe(200);
     expect(f200.json.total).toBe(f200.json.events.length);
+    // totals: reqs mirrors the count, token buckets are separate sums over
+    // the filtered set (limit 500 covers the user's whole history here)
+    expect(f200.json.totals.reqs).toBe(f200.json.total);
+    const reduced = f200.json.events.reduce(
+      (acc: any, e: any) => ({
+        in_tok: acc.in_tok + e.in_tok,
+        cache_tok: acc.cache_tok + e.cache_tok,
+        out_tok: acc.out_tok + e.out_tok,
+      }),
+      { in_tok: 0, cache_tok: 0, out_tok: 0 },
+    );
+    expect(f200.json.totals.in_tok).toBe(reduced.in_tok);
+    expect(f200.json.totals.cache_tok).toBe(reduced.cache_tok);
+    expect(f200.json.totals.out_tok).toBe(reduced.out_tok);
 
-    // no match → empty view (rows AND count)
+    // no match → empty view (rows AND count AND totals)
     const fNone = await api(
       `/api/usage/events?limit=10&filters=${enc(JSON.stringify({ status: { filterType: "number", type: "equals", filter: 418 } }))}`,
       { token: userToken },
     );
     expect(fNone.json.events).toHaveLength(0);
     expect(fNone.json.total).toBe(0);
+    expect(fNone.json.totals).toEqual({ in_tok: 0, cache_tok: 0, out_tok: 0, reqs: 0 });
 
     // text contains filter — hits raw model ids only
     const fm = await api(

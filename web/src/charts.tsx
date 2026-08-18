@@ -30,13 +30,23 @@ type TokenChartPoint = DailyChartPoint & {
   out_visual: number;
 };
 
-/** Compresses large token ranges without changing the values shown in the tooltip. */
-function tokenVisualValue(value: number | null | undefined): number {
-  return Math.log1p(Math.max(0, value ?? 0));
+/** Per-bucket visual divisors: a typical window's buckets are wildly
+ *  disproportionate (e.g. 15M input, 150M cache, 1.5M output), so raw bars
+ *  collapse into one dominant block and log1p flattened the differences.
+ *  Dividing each bucket by its typical magnitude keeps the three bars
+ *  comparable; tooltips keep the exact values. */
+const IN_DIVISOR = 8;
+const CACHE_DIVISOR = 75;
+const OUT_DIVISOR = 1;
+
+function tokenVisualValue(value: number | null | undefined, divisor: number): number {
+  return Math.max(0, value ?? 0) / divisor;
 }
 
-function tokenAxisValue(value: number): string {
-  return fmtNum(Math.expm1(Math.max(0, value)));
+/** Y-axis tick label: compact and never fractional (raw ticks can render
+ *  as "147.4131591025766"). */
+function axisNum(value: number): string {
+  return fmtNum(Math.round(Number(value)));
 }
 
 function ChartFrame(props: { height: number; children: JSX.Element }) {
@@ -117,9 +127,9 @@ export function DailyChart(props: {
   const tokenData = createMemo<TokenChartPoint[]>(() =>
     data().map((point) => ({
       ...point,
-      in_visual: tokenVisualValue(point.in_tok),
-      cache_visual: tokenVisualValue(point.cache_tok),
-      out_visual: tokenVisualValue(point.out_tok),
+      in_visual: tokenVisualValue(point.in_tok, IN_DIVISOR),
+      cache_visual: tokenVisualValue(point.cache_tok, CACHE_DIVISOR),
+      out_visual: tokenVisualValue(point.out_tok, OUT_DIVISOR),
     })),
   );
   const dataKey = createMemo(() =>
@@ -166,11 +176,7 @@ export function DailyChart(props: {
                     <AxisLabel
                       fill="var(--chart-tick)"
                       font-size="10"
-                      format={(value) =>
-                        metric() === "tokens"
-                          ? tokenAxisValue(Number(value))
-                          : fmtNum(Number(value))
-                      }
+                      format={(value) => axisNum(Number(value))}
                     />
                     <AxisGrid stroke="var(--chart-grid)" />
                   </Axis>
@@ -273,7 +279,7 @@ export function DailyChart(props: {
         <Show when={metric() === "tokens"}>
           <span
             class="text-[10px] text-ink-500"
-            title="Token bars use a logarithmic visual scale; tooltip values are exact."
+            title="Token bars are scaled per bucket (input ÷8, cache ÷75, output ×1) so disproportionate buckets stay comparable; tooltip values are exact."
           >
             Balanced scale
           </span>
@@ -338,7 +344,7 @@ export function AreaChart(props: {
                     <AxisLabel
                       fill="var(--chart-tick)"
                       font-size="10"
-                      format={(value) => fmtNum(Number(value))}
+                      format={(value) => axisNum(Number(value))}
                     />
                     <AxisGrid stroke="var(--chart-grid)" />
                   </Axis>

@@ -21,6 +21,7 @@ import {
   serverDatasource,
   countFormatter,
   tokenFormatter,
+  type GridTotals,
 } from "../../aggrid";
 import type { ColDef } from "ag-grid-community";
 
@@ -127,6 +128,8 @@ export default function AdminStatsPage() {
     ]);
     return { users: users.total, models: models.total };
   });
+  const [usersTotals, setUsersTotals] = createSignal<GridTotals | null>(null);
+  const [modelsTotals, setModelsTotals] = createSignal<GridTotals | null>(null);
   const usersDatasource = serverDatasource<UserRow>(async (params) => {
     const qs = new URLSearchParams({
       days: days(),
@@ -136,7 +139,8 @@ export default function AdminStatsPage() {
     if (providerId()) qs.set("provider_id", providerId());
     if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
     if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
-    const j = await api<{ users: UserRow[]; total: number }>("GET", `/api/admin/usage-breakdown/users?${qs}`);
+    const j = await api<{ users: UserRow[]; total: number; totals?: GridTotals }>("GET", `/api/admin/usage-breakdown/users?${qs}`);
+    if (j.totals) setUsersTotals(j.totals);
     return { rows: j.users, total: j.total };
   });
   const modelsDatasource = serverDatasource<ModelRow>(async (params) => {
@@ -148,7 +152,8 @@ export default function AdminStatsPage() {
     if (providerId()) qs.set("provider_id", providerId());
     if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
     if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
-    const j = await api<{ models: ModelRow[]; total: number }>("GET", `/api/admin/usage-breakdown/models?${qs}`);
+    const j = await api<{ models: ModelRow[]; total: number; totals?: GridTotals }>("GET", `/api/admin/usage-breakdown/models?${qs}`);
+    if (j.totals) setModelsTotals(j.totals);
     return { rows: j.models, total: j.total };
   });
 
@@ -275,6 +280,7 @@ export default function AdminStatsPage() {
                     cacheBlockSize={100}
                     refreshDeps={`${days()}:${providerId()}`}
                     storageKey="llmgw-grid:admin.stats.users"
+                    totals={usersTotals()}
                   />
                 </div>
               </Show>
@@ -305,6 +311,7 @@ export default function AdminStatsPage() {
                     cacheBlockSize={100}
                     refreshDeps={`${days()}:${providerId()}`}
                     storageKey="llmgw-grid:admin.stats.models"
+                    totals={modelsTotals()}
                   />
                 </div>
               </Show>

@@ -128,6 +128,15 @@ export function serverDatasource<T>(
   };
 }
 
+/** Filtered-set aggregates for the grid footer: server-computed over the
+ *  same WHERE as the grid page — buckets stay separate, never a lump sum. */
+export interface GridTotals {
+  in_tok: number;
+  cache_tok: number;
+  out_tok: number;
+  reqs: number;
+}
+
 export function UsageGrid(props: {
   columnDefs: Array<ColDef | ColGroupDef>;
   /** undefined = data still loading (grid mounts only when ready). Optional in
@@ -157,6 +166,8 @@ export function UsageGrid(props: {
   /** Increment to force the grid to re-pull its row cache (e.g. top-level
    *  filter changed). */
   refreshDeps?: unknown;
+  /** Filtered-set aggregates rendered in the footer (null/absent = footer as today). */
+  totals?: GridTotals | null;
 }) {
   const [changedColumns, setChangedColumns] = createSignal<string[]>([]);
   createEffect(() => {
@@ -324,17 +335,32 @@ export function UsageGrid(props: {
             )}
           </For>
         </div>
-        <Btn
-          variant="ghost"
-          size="sm"
-          class="max-h-5 min-h-5 max-w-fit min-w-fit !px-2 text-[11px] text-ink-500 hover:text-ink-200"
-          title="Reset column order, sizes, sorting and filters to the default layout"
-          disabled={!props.rowData && !props.datasource}
-          onClick={resetLayout}
-        >
-          <Icon name={Icons.refresh} size={12} />
-          Reset layout
-        </Btn>
+        <div class="flex items-center gap-3 shrink-0">
+          <Show when={props.totals}>
+            {(totals) => (
+              <div
+                class="flex items-center gap-2.5 whitespace-nowrap text-[11px] text-ink-400"
+                title="Totals for the current table filters"
+              >
+                <span>In <strong class="font-semibold text-ink-200">{fmtNum(totals().in_tok)}</strong></span>
+                <span>Cache <strong class="font-semibold text-ink-200">{fmtNum(totals().cache_tok)}</strong></span>
+                <span>Out <strong class="font-semibold text-ink-200">{fmtNum(totals().out_tok)}</strong></span>
+                <span>Requests <strong class="font-semibold text-ink-200">{fmtNum(totals().reqs)}</strong></span>
+              </div>
+            )}
+          </Show>
+          <Btn
+            variant="ghost"
+            size="sm"
+            class="max-h-5 min-h-5 max-w-fit min-w-fit !px-2 text-[11px] text-ink-500 hover:text-ink-200"
+            title="Reset column order, sizes, sorting and filters to the default layout"
+            disabled={!props.rowData && !props.datasource}
+            onClick={resetLayout}
+          >
+            <Icon name={Icons.refresh} size={12} />
+            Reset layout
+          </Btn>
+        </div>
       </div>
     </div>
   );

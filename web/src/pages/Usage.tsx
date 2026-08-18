@@ -23,6 +23,7 @@ import {
   latencyFormatter,
   timeFormatter,
   tokenFormatter,
+  type GridTotals,
 } from "../aggrid";
 import type { ColDef } from "ag-grid-community";
 
@@ -129,6 +130,7 @@ export default function UsagePage() {
     );
     return j.total;
   });
+  const [breakdownTotals, setBreakdownTotals] = createSignal<GridTotals | null>(null);
   const breakdownDatasource = serverDatasource<BreakdownRow>(async (params) => {
     const qs = new URLSearchParams({
       days: days(),
@@ -138,7 +140,8 @@ export default function UsagePage() {
     if (keyId()) qs.set("key_id", keyId());
     if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
     if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
-    const j = await api<{ rows: BreakdownRow[]; total: number }>("GET", `/api/usage/breakdown?${qs}`);
+    const j = await api<{ rows: BreakdownRow[]; total: number; totals?: GridTotals }>("GET", `/api/usage/breakdown?${qs}`);
+    if (j.totals) setBreakdownTotals(j.totals);
     return { rows: j.rows, total: j.total };
   });
 
@@ -156,6 +159,7 @@ export default function UsagePage() {
    *  Forward scrolling uses the keyset cursor of the previous block's last
    *  row (server O(page) instead of O(offset)); jumps/context changes (key,
    *  sort, filters) fall back to OFFSET, which stays correct either way. */
+  const [eventsTotals, setEventsTotals] = createSignal<GridTotals | null>(null);
   const eventsDatasource = serverDatasource<any>((() => {
     const cursors = new Map<string, Map<number, { ts: number; id: number }>>();
     return async (params) => {
@@ -179,10 +183,11 @@ export default function UsagePage() {
       // DEFAULT (ts DESC) ordering — with a column sort or a malformed cursor
       // it falls back to OFFSET, which must still be the right one.
       if (cursor) qs.set("cursor", `${cursor.ts}:${cursor.id}`);
-      const j = await api<{ events: any[]; total: number }>(
+      const j = await api<{ events: any[]; total: number; totals?: GridTotals }>(
         "GET",
         `/api/usage/events?${qs.toString()}`,
       );
+      if (j.totals) setEventsTotals(j.totals);
       const last = j.events[j.events.length - 1];
       if (last && typeof last.ts === "number" && typeof last.id === "number") {
         ctxCursors.set(params.startRow + j.events.length - 1, { ts: last.ts, id: last.id });
@@ -274,6 +279,7 @@ export default function UsagePage() {
                 refreshDeps={`${days()}:${keyId()}`}
                 heightClass="h-[420px]"
                 storageKey="llmgw-grid:usage.by-model"
+                totals={breakdownTotals()}
               />
             </div>
           </Show>
@@ -301,6 +307,7 @@ export default function UsagePage() {
                 refreshDeps={keyId()}
                 heightClass="h-[560px]"
                 storageKey="llmgw-grid:usage.recent"
+                totals={eventsTotals()}
               />
             </div>
           </Show>

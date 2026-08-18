@@ -201,20 +201,39 @@ export interface GridPageArgs {
   tieBreak?: string;
   /** Optional FROM-clause override for the COUNT query. Default counts the
    *  joined baseSql as a subquery — fine for small tables, but a LEFT JOIN
-   * resolves per ROW and an unbounded table (audit_log) pays one PK lookup
-   * per history row (~200ms at 1.8M rows, measured). Pass the join-free
-   * `FROM …` when no filter needs the joined columns: the count only has to
-   * agree with the filtered row set, and LEFT JOINs never filter. */
+   *  resolves per ROW and an unbounded table (audit_log) pays one PK lookup
+   *  per history row (~200ms at 1.8M rows, measured). Pass the join-free
+   *  `FROM …` when no filter needs the joined columns: the count only has to
+   *  agree with the filtered row set, and LEFT JOINs never filter. */
   countFrom?: string;
+  /** Output column names of baseSql to SUM over the filtered set (footer
+   *  totals for the grid). Server-side constants — same trust level as the
+   *  cols map, never request input; still validated as bare identifiers
+   *  before splicing into SQL. */
+  sumCols?: string[];
 }
 
-export function gridPage(a: GridPageArgs): { rows: any[]; total: number } {
+export function gridPage(a: GridPageArgs): { rows: any[]; total: number; totals?: Record<string, number> } {
   const { clauses, params } = buildGridWhere(a.grid.filters, a.cols);
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
   const order = buildGridOrder(a.grid.sort, a.cols, a.defaultOrder, a.tieBreak);
   const rows = db
     .prepare(`SELECT * FROM (${a.baseSql})${where} ORDER BY ${order} LIMIT ? OFFSET ?`)
     .all(...a.baseParams, ...params, a.grid.limit, a.grid.offset);
+  const sumCols = (a.sumCols ?? []).filter((c) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(c));
+  if (sumCols.length > 0) {
+    // One combined COUNT+SUM pass over the same WHERE as the page (not the
+    // countFrom shortcut — the sums need baseSql's output columns), so
+    // footer totals always agree with the filtered row set.
+    const agg = db
+      .prepare<{ n: number } & Record<string, number>, Array<string | number>>(
+        `SELECT COUNT(*) AS n, ${sumCols.map((c) => `COALESCE(SUM(${c}), 0) AS ${c}`).join(", ")} FROM (${a.baseSql})${where}`,
+      )
+      .get(...a.baseParams, ...params)!;
+    const totals: Record<string, number> = {};
+    for (const c of sumCols) totals[c] = agg[c] ?? 0;
+    return { rows, total: agg.n, totals };
+  }
   const total = db
     .prepare<{ n: number }, Array<string | number>>(
       a.countFrom

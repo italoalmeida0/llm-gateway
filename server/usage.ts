@@ -397,7 +397,7 @@ export function queryUserUsageBreakdown(
     sort?: GridSort[];
     filters?: Record<string, GridFilterEntry>;
   },
-): { rows: UsageBreakdownRow[]; total: number } {
+): { rows: UsageBreakdownRow[]; total: number; totals: { in_tok: number; cache_tok: number; out_tok: number; reqs: number } } {
   const { where, params } = usageBreakdownScope(userId, opts);
   const baseSql = `
     SELECT m.key_id,
@@ -419,7 +419,8 @@ export function queryUserUsageBreakdown(
     grid: opts,
     defaultOrder: "(in_tok + cache_tok + out_tok) DESC",
     tieBreak: "key_id DESC, model DESC, provider_id DESC, provider_key_id DESC, upstream_model DESC",
-  }) as { rows: UsageBreakdownRow[]; total: number };
+    sumCols: ["in_tok", "cache_tok", "out_tok", "reqs"],
+  }) as { rows: UsageBreakdownRow[]; total: number; totals: { in_tok: number; cache_tok: number; out_tok: number; reqs: number } };
 }
 
 // ===== Server-driven events query (AG Grid infinite row model) =====
@@ -467,7 +468,7 @@ export function userEvents(
      *  default (ts DESC, id DESC) ordering; custom sorts keep OFFSET. */
     cursor?: { ts: number; id: number };
   },
-) {
+): { rows: any[]; total: number; totals: { in_tok: number; cache_tok: number; out_tok: number; reqs: number } } {
   // Scope (user + filters) shared by the page query and the total-count;
   // the keyset cursor predicate applies to the page query ONLY — the count
   // must answer "how many rows exist for this filter view", not "how many
@@ -516,7 +517,9 @@ export function userEvents(
   // the page with names, they filter nothing, so the count runs on
   // usage_events alone; joined-name filters (key_name, provider_name) are
   // the only case that needs the joins back. A short TTL cache absorbs
-  // repeat counts for the same view while the grid scrolls.
+  // repeat counts for the same view while the grid scrolls. The footer
+  // token sums ride the SAME query and the SAME scope (never the cursor
+  // predicate) — one pass, and totals always agree with `total`.
   const joinedFilter =
     opts.filters &&
     Object.keys(opts.filters).some((c) => c === "key_name" || c === "provider_name");
@@ -524,30 +527,40 @@ export function userEvents(
   const now = Date.now();
   const cached = joinedFilter ? null : eventCountCache.get(cacheKey);
   let total: number;
+  let sums: { in_tok: number; cache_tok: number; out_tok: number };
   if (cached && now - cached.at < EVENT_COUNT_TTL_MS) {
     total = cached.n;
+    sums = { in_tok: cached.in_tok, cache_tok: cached.cache_tok, out_tok: cached.out_tok };
   } else {
-    total = joinedFilter
-      ? db
-          .prepare<{ n: number }, any[]>(
-            `SELECT COUNT(*) AS n FROM usage_events e
-             LEFT JOIN api_keys k ON k.id = e.key_id
-             LEFT JOIN providers p ON p.id = e.provider_id
-             WHERE ${scopeClauses.join(" AND ")}`,
-          )
-          .get(...scopeParams)!.n
-      : db
-          .prepare<{ n: number }, any[]>(
-            `SELECT COUNT(*) as n FROM usage_events e WHERE ${scopeClauses.join(" AND ")}`,
-          )
-          .get(...scopeParams)!.n;
-    if (!joinedFilter) eventCountCache.set(cacheKey, { n: total, at: now });
+    const agg = (
+      joinedFilter
+        ? db
+            .prepare<{ n: number; in_tok: number; cache_tok: number; out_tok: number }, any[]>(
+              `SELECT COUNT(*) AS n, COALESCE(SUM(e.in_tok),0) AS in_tok, COALESCE(SUM(e.cache_tok),0) AS cache_tok, COALESCE(SUM(e.out_tok),0) AS out_tok
+               FROM usage_events e
+               LEFT JOIN api_keys k ON k.id = e.key_id
+               LEFT JOIN providers p ON p.id = e.provider_id
+               WHERE ${scopeClauses.join(" AND ")}`,
+            )
+        : db
+            .prepare<{ n: number; in_tok: number; cache_tok: number; out_tok: number }, any[]>(
+              `SELECT COUNT(*) AS n, COALESCE(SUM(e.in_tok),0) AS in_tok, COALESCE(SUM(e.cache_tok),0) AS cache_tok, COALESCE(SUM(e.out_tok),0) AS out_tok
+               FROM usage_events e WHERE ${scopeClauses.join(" AND ")}`,
+            )
+    ).get(...scopeParams)!;
+    total = agg.n;
+    sums = { in_tok: agg.in_tok, cache_tok: agg.cache_tok, out_tok: agg.out_tok };
+    if (!joinedFilter) eventCountCache.set(cacheKey, { n: total, at: now, ...sums });
     if (eventCountCache.size > 512) eventCountCache.clear();
   }
-  return { rows, total };
+  return { rows, total, totals: { ...sums, reqs: total } };
 }
 
-/** Recent-request grid counts, TTL-cached: `total` only changes when the
- *  usage flush lands, so repeat blocks within seconds reuse the number. */
+/** Recent-request grid counts + footer token sums, TTL-cached: `total` only
+ *  changes when the usage flush lands, so repeat blocks within seconds reuse
+ *  the numbers. */
 const EVENT_COUNT_TTL_MS = 10_000;
-const eventCountCache = new Map<string, { n: number; at: number }>();
+const eventCountCache = new Map<
+  string,
+  { n: number; at: number; in_tok: number; cache_tok: number; out_tok: number }
+>();

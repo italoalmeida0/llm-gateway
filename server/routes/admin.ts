@@ -1553,8 +1553,9 @@ if (path === "/api/admin/stats" && req.method === "GET") {
         grid,
         defaultOrder: "(in_tok + cache_tok + out_tok) DESC",
         tieBreak: "user_id DESC",
+        sumCols: ["in_tok", "cache_tok", "out_tok", "reqs"],
       });
-      return ok({ users: page.rows, total: page.total, limit: grid.limit, offset: grid.offset }, req);
+      return ok({ users: page.rows, total: page.total, limit: grid.limit, offset: grid.offset, totals: page.totals }, req);
     }
     const modelClauses = clauses.map((c) => c.replaceAll("ud.", "m."));
     const modelParams = params;
@@ -1587,8 +1588,9 @@ if (path === "/api/admin/stats" && req.method === "GET") {
       grid,
       defaultOrder: "(in_tok + cache_tok + out_tok) DESC",
       tieBreak: "model DESC, provider_id DESC, provider_key_id DESC, upstream_model DESC",
+      sumCols: ["in_tok", "cache_tok", "out_tok", "reqs"],
     });
-    return ok({ models: page.rows, total: page.total, limit: grid.limit, offset: grid.offset }, req);
+    return ok({ models: page.rows, total: page.total, limit: grid.limit, offset: grid.offset, totals: page.totals }, req);
   }
 
   if (path === "/api/admin/usage-breakdown" && req.method === "GET") {

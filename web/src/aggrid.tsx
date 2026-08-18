@@ -314,7 +314,7 @@ export function UsageGrid(props: {
               <Btn
                 variant="ghost"
                 size="sm"
-                class="!px-2 border border-brand-500/30 bg-brand-500/10 text-[11px] text-brand-400 hover:border-brand-500/50 hover:bg-brand-500/20 hover:text-brand-300"
+                class="max-h-5 min-h-5 max-w-fit min-w-fit !px-2 border border-brand-500/30 bg-brand-500/10 text-[11px] text-brand-400 hover:border-brand-500/50 hover:bg-brand-500/20 hover:text-brand-300"
                 title={`Reset ${columnLabels.get(colId) ?? colId}`}
                 onClick={() => resetColumn(colId)}
               >
@@ -327,7 +327,7 @@ export function UsageGrid(props: {
         <Btn
           variant="ghost"
           size="sm"
-          class="!px-2 text-[11px] text-ink-500 hover:text-ink-200"
+          class="max-h-5 min-h-5 max-w-fit min-w-fit !px-2 text-[11px] text-ink-500 hover:text-ink-200"
           title="Reset column order, sizes, sorting and filters to the default layout"
           disabled={!props.rowData && !props.datasource}
           onClick={resetLayout}

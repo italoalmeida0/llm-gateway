@@ -667,7 +667,7 @@ export function Badge(props: {
   };
   return (
     <span
-      class={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tones[props.tone]} fit-content`}
+      class={`fit-content rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tones[props.tone]}`}
     >
       {props.children}
     </span>

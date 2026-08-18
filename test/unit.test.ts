@@ -39,6 +39,7 @@ import { StreamMeter, estimateBodyTokens } from "../server/proxy/index";
 import { estimateTokenCount } from "tokenx";
 import type { ModelRow, ModelTargetRow, ProviderRow } from "../server/db";
 import { buildGridWhere } from "../server/gridql";
+import { normalizePricing, pricingColumns } from "../server/pricing";
 
 const SECRET = "test-secret-that-is-long-enough-32+";
 
@@ -78,6 +79,29 @@ describe("AG Grid server-side filter translation", () => {
     );
     expect(result.clauses).toEqual(["(reqs > ? OR reqs = ?)"]);
     expect(result.params).toEqual([100, 0]);
+  });
+});
+
+describe("model pricing normalization", () => {
+  test("cleans provider labels and derives the real pricing columns", () => {
+    const pricing = normalizePricing({
+      prompt: "$0.000001 per token",
+      input_cache_reads: "USD 0.0000001",
+      input_cache_writes: 2e-7,
+      completion: "0.000002",
+    });
+    expect(pricing).toEqual({
+      prompt: 0.000001,
+      input_cache_reads: 0.0000001,
+      input_cache_writes: 0.0000002,
+      completion: 0.000002,
+    });
+    expect(pricingColumns(pricing)).toEqual({
+      input: 0.000001,
+      inputCache: 0.0000001,
+      inputCacheWrite: 0.0000002,
+      output: 0.000002,
+    });
   });
 });
 
@@ -304,6 +328,10 @@ describe("public /v1/models registry entry", () => {
     features: '["tools"]',
     reasoning_efforts: '["low","high"]',
     pricing: '{"prompt":"0.1","completion":"0.2"}',
+    pricing_input: 0.1,
+    pricing_input_cache: null,
+    pricing_input_cache_write: null,
+    pricing_output: 0.2,
     datacenters: '[{"country_code":"US"}]',
     source: "manual",
     created_at: 1,
@@ -320,7 +348,7 @@ describe("public /v1/models registry entry", () => {
     expect(e.input_modalities).toEqual(["text", "image"]);
     expect(e.context_length).toBe(100_000);
     expect(e.max_output_length).toBe(4096);
-    expect(e.pricing).toEqual({ prompt: "0.1", completion: "0.2" });
+    expect(e.pricing).toEqual({ prompt: 0.1, completion: 0.2 });
     expect(e.created).toBe(1700000000);
     expect(e.supported_sampling_parameters).toEqual(["temperature"]);
     expect(e.supported_features).toEqual(["tools"]);
@@ -339,6 +367,10 @@ describe("public /v1/models registry entry", () => {
       max_output_length: null,
       created: null,
       openrouter_slug: "",
+      pricing_input: null,
+      pricing_input_cache: null,
+      pricing_input_cache_write: null,
+      pricing_output: null,
     };
     const e = publicModelEntry(sparse, "p") as any;
     expect(e.name).toBe("alias-fast"); // falls back to id
@@ -384,6 +416,10 @@ describe("model routing with proto 'both'", () => {
     features: "[]",
     reasoning_efforts: null,
     pricing: null,
+    pricing_input: null,
+    pricing_input_cache: null,
+    pricing_input_cache_write: null,
+    pricing_output: null,
     datacenters: null,
     source: "auto",
     created_at: 1,
@@ -526,7 +562,9 @@ describe("failover: candidate chains", () => {
     name: "", description: "", hugging_face_id: "", quantization: "", openrouter_slug: "",
     always_on: 1, enabled: 1, context_length: null, max_output_length: null, created: null,
     input_modalities: '["text"]', output_modalities: '["text"]', sampling_params: "[]",
-    features: "[]", reasoning_efforts: null, pricing: null, datacenters: null,
+    features: "[]", reasoning_efforts: null, pricing: null,
+    pricing_input: null, pricing_input_cache: null, pricing_input_cache_write: null, pricing_output: null,
+    datacenters: null,
     source: "manual", created_at: 1, updated_at: 1,
   });
   const target = (modelId: string, providerId: string, upstream: string, priority: number, enabled = 1): ModelTargetRow =>

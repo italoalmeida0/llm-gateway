@@ -44,12 +44,17 @@ const USER_SELECTION_SOURCES = new Set([
 const PRICING_KEYS = ["prompt", "completion", "image", "request", "input_cache_reads", "input_cache_writes"];
 
 /** Registry pricing is stored as USD per token; the table displays USD per 1M. */
-function pricePerMillion(value: string | number | undefined): string {
-  if (value == null || value === "") return "—";
+function pricePerMillionNumber(value: string | number | null | undefined): number | null {
+  if (value == null || value === "") return null;
   const cleaned = String(value).replace(/[^0-9.]/g, "");
   const amount = Number(cleaned);
-  if (!Number.isFinite(amount)) return String(value);
-  return `$${(amount * 1_000_000).toLocaleString(undefined, {
+  return Number.isFinite(amount) ? amount * 1_000_000 : null;
+}
+
+function pricePerMillion(value: string | number | null | undefined): string {
+  const amount = pricePerMillionNumber(value);
+  if (amount === null) return "—";
+  return `$${amount.toLocaleString(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 4,
   })}`;
@@ -517,11 +522,12 @@ export default function AdminModelsPage() {
       width: 125,
       cellRenderer: (p: { data?: ModelDto }) => (
         <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
-          {pricePerMillion(p.data?.pricing?.prompt)}
+          {pricePerMillion(p.data?.pricingInput)}
         </code>
       ),
-      filter: false,
-      floatingFilter: false,
+      type: "rightAligned",
+      filter: "agNumberColumnFilter",
+      valueGetter: (p) => pricePerMillionNumber(p.data?.pricingInput),
     },
     {
       colId: "pricing_cache",
@@ -529,16 +535,17 @@ export default function AdminModelsPage() {
       width: 150,
       cellRenderer: (p: { data?: ModelDto }) => (
         <div class="flex flex-col gap-0.5 py-1 text-[10px] leading-tight" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
-          <code class="text-ink-400">{pricePerMillion(p.data?.pricing?.input_cache_reads)}</code>
-          <Show when={p.data?.pricing?.input_cache_writes != null}>
+          <code class="text-ink-400">{pricePerMillion(p.data?.pricingInputCache)}</code>
+          <Show when={p.data?.pricingInputCacheWrite != null}>
             <span class="text-[9px] text-ink-500">
-              write {pricePerMillion(p.data?.pricing?.input_cache_writes)}
+              write {pricePerMillion(p.data?.pricingInputCacheWrite)}
             </span>
           </Show>
         </div>
       ),
-      filter: false,
-      floatingFilter: false,
+      type: "rightAligned",
+      filter: "agNumberColumnFilter",
+      valueGetter: (p) => pricePerMillionNumber(p.data?.pricingInputCache),
     },
     {
       colId: "pricing_output",
@@ -546,11 +553,12 @@ export default function AdminModelsPage() {
       width: 125,
       cellRenderer: (p: { data?: ModelDto }) => (
         <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
-          {pricePerMillion(p.data?.pricing?.completion)}
+          {pricePerMillion(p.data?.pricingOutput)}
         </code>
       ),
-      filter: false,
-      floatingFilter: false,
+      type: "rightAligned",
+      filter: "agNumberColumnFilter",
+      valueGetter: (p) => pricePerMillionNumber(p.data?.pricingOutput),
     },
     { field: "source", headerName: "Source", width: 110, cellRenderer: SourceCell },
     { field: "enabled", headerName: "Enabled", width: 90, cellRenderer: EnabledCell, filter: false, floatingFilter: false },
@@ -646,7 +654,7 @@ export default function AdminModelsPage() {
               columnDefs={cols}
               datasource={modelsDatasource}
               cacheBlockSize={100}
-              refreshDeps={`${gridVersion()}:${selectedOnly()}`}
+              refreshDeps={`${gridVersion()}:${selectedOnly()}:${selectedOnly() ? [...selected()].sort().join(",") : ""}`}
               storageKey="llmgw-grid:admin.models"
               heightClass="h-[560px]"
               rowSelection="multiple"

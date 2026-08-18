@@ -23,6 +23,7 @@ import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { hourlySeries, utcDate } from "../usage";
 import { gridPage, parseGridQuery, type ColSpec } from "../gridql";
 import { queryKeys } from "../keys";
+import { normalizePricing, pricingColumns } from "../pricing";
 
 /**
  * /api/admin/* — everything requires role=admin. Every mutation is audited.
@@ -197,22 +198,35 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
     }
     return val;
   };
-  const pricingOpt = (): string | null | undefined => {
+  const pricingOpt = (): {
+    json: string | null;
+    input: number | null;
+    inputCache: number | null;
+    inputCacheWrite: number | null;
+    output: number | null;
+  } | null | undefined => {
     if (!("pricing" in body)) return undefined;
     const val = body.pricing;
     if (val === null) return null;
     if (typeof val !== "object" || Array.isArray(val)) {
-      throw new ApiError(400, "pricing must be an object of string values");
+      throw new ApiError(400, "pricing must be an object of string or number values");
     }
-    const out: Record<string, string> = {};
-    for (const [k, p] of Object.entries(val as Record<string, unknown>)) {
-      if (Object.keys(out).length >= 16) break;
+    for (const [k, p] of Object.entries(val as Record<string, unknown>).slice(0, 16)) {
       if (k.length > 48) throw new ApiError(400, "pricing keys are too long");
-      if (typeof p === "string" && p.length <= 32) out[k] = p;
-      else if (typeof p === "number" && Number.isFinite(p)) out[k] = String(p);
-      else throw new ApiError(400, `pricing.${k} must be a string or number`);
+      if (typeof p === "string" && p.length > 32) throw new ApiError(400, `pricing.${k} is too long`);
+      if (normalizePricing({ [k]: p }) === null && p !== "") {
+        throw new ApiError(400, `pricing.${k} must contain a numeric value`);
+      }
     }
-    return JSON.stringify(out);
+    const normalized = normalizePricing(val);
+    const columns = pricingColumns(normalized);
+    return {
+      json: normalized ? JSON.stringify(normalized) : null,
+      input: columns.input,
+      inputCache: columns.inputCache,
+      inputCacheWrite: columns.inputCacheWrite,
+      output: columns.output,
+    };
   };
   const datacentersOpt = (): string | null | undefined => {
     if (!("datacenters" in body)) return undefined;
@@ -275,7 +289,11 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
         : efforts.length
           ? JSON.stringify(efforts)
           : null,
-    pricing: pricing === undefined ? (existing?.pricing ?? null) : pricing,
+    pricing: pricing === undefined ? (existing?.pricing ?? null) : pricing?.json ?? null,
+    pricing_input: pricing === undefined ? (existing?.pricing_input ?? null) : pricing?.input ?? null,
+    pricing_input_cache: pricing === undefined ? (existing?.pricing_input_cache ?? null) : pricing?.inputCache ?? null,
+    pricing_input_cache_write: pricing === undefined ? (existing?.pricing_input_cache_write ?? null) : pricing?.inputCacheWrite ?? null,
+    pricing_output: pricing === undefined ? (existing?.pricing_output ?? null) : pricing?.output ?? null,
     datacenters: datacenters === undefined ? (existing?.datacenters ?? null) : datacenters,
   };
 }
@@ -827,7 +845,8 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       : " WHERE m.id IN (SELECT value FROM json_each(?))";
     const page = grid
       ? gridPage({
-          baseSql: `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id${selectedWhere}`,
+          baseSql: `SELECT m.*, p.name AS provider_name
+                    FROM models m LEFT JOIN providers p ON p.id = m.provider_id${selectedWhere}`,
           baseParams: selectedIds === null ? [] : [JSON.stringify(selectedIds)],
           cols: {
             id: { col: "id" },
@@ -839,6 +858,9 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
             source: { col: "source" },
             enabled: { col: "enabled", kind: "number" },
             contextLength: { col: "context_length", kind: "number" },
+            pricing_input: { col: "pricing_input * 1000000", kind: "number" },
+            pricing_cache: { col: "pricing_input_cache * 1000000", kind: "number" },
+            pricing_output: { col: "pricing_output * 1000000", kind: "number" },
             createdAt: { col: "created_at", kind: "number" },
             updatedAt: { col: "updated_at", kind: "number" },
           },
@@ -927,15 +949,19 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         `INSERT INTO models
            (id, provider_id, upstream_model, proto, name, description, hugging_face_id,
             quantization, openrouter_slug, always_on, enabled, context_length,
-            max_output_length, created, input_modalities, output_modalities,
-            sampling_params, features, reasoning_efforts, pricing, datacenters,
-            source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
+             max_output_length, created, input_modalities, output_modalities,
+             sampling_params, features, reasoning_efforts, pricing,
+             pricing_input, pricing_input_cache, pricing_input_cache_write, pricing_output,
+             datacenters,
+             source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
       ).run(
         id, providerId, upstreamModel, proto, f.name, f.description, f.hugging_face_id,
         f.quantization, f.openrouter_slug, f.always_on, f.enabled, f.context_length,
         f.max_output_length, f.created, f.input_modalities, f.output_modalities,
-        f.sampling_params, f.features, f.reasoning_efforts, f.pricing, f.datacenters,
+        f.sampling_params, f.features, f.reasoning_efforts, f.pricing,
+        f.pricing_input, f.pricing_input_cache, f.pricing_input_cache_write, f.pricing_output,
+        f.datacenters,
         now, now,
       );
       const ins = db.prepare(
@@ -1071,8 +1097,10 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
           `UPDATE models SET provider_id = ?, upstream_model = ?, proto = ?, name = ?,
              description = ?, hugging_face_id = ?, quantization = ?, openrouter_slug = ?,
              always_on = ?, enabled = ?, context_length = ?, max_output_length = ?,
-             created = ?, input_modalities = ?, output_modalities = ?, sampling_params = ?,
-             features = ?, reasoning_efforts = ?, pricing = ?, datacenters = ?, updated_at = ?
+              created = ?, input_modalities = ?, output_modalities = ?, sampling_params = ?,
+              features = ?, reasoning_efforts = ?, pricing = ?, pricing_input = ?,
+              pricing_input_cache = ?, pricing_input_cache_write = ?, pricing_output = ?,
+              datacenters = ?, updated_at = ?
            WHERE id = ?`,
         ).run(
           targets ? existing.provider_id : providerId,
@@ -1081,7 +1109,8 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
           f.name, f.description, f.hugging_face_id, f.quantization, f.openrouter_slug,
           f.always_on, f.enabled, f.context_length, f.max_output_length, f.created,
           f.input_modalities, f.output_modalities, f.sampling_params, f.features,
-          f.reasoning_efforts, f.pricing, f.datacenters, Date.now(), modelId,
+          f.reasoning_efforts, f.pricing, f.pricing_input, f.pricing_input_cache,
+          f.pricing_input_cache_write, f.pricing_output, f.datacenters, Date.now(), modelId,
         );
         if (targets) {
           replaceModelTargets(modelId, targets);

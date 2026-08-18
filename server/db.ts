@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import path from "path";
 
 import { DATA_DIR } from "./config";
+import { normalizePricing, pricingColumns } from "./pricing";
 
 /**
  * SQLite via bun:sqlite (built into the runtime, WAL mode). Migrations are
@@ -15,7 +16,7 @@ db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
 db.exec("PRAGMA busy_timeout = 5000");
 
-type Migration = { name: string; up: string };
+type Migration = { name: string; up: string | (() => void) };
 
 const MIGRATIONS: Migration[] = [
   {
@@ -188,7 +189,7 @@ const MIGRATIONS: Migration[] = [
         SELECT key_id, user_id, date(ts/1000, 'unixepoch'), proto, model,
                SUM(in_tok), SUM(cache_tok), SUM(out_tok), COUNT(*)
         FROM usage_events
-        GROUP BY key_id, date(ts/1000, 'unixepoch'), proto, model;
+       GROUP BY key_id, date(ts/1000, 'unixepoch'), proto, model;
     `,
   },
   {
@@ -364,7 +365,45 @@ const MIGRATIONS: Migration[] = [
                SUM(in_tok), SUM(cache_tok), SUM(out_tok), COUNT(*)
         FROM usage_events
         GROUP BY key_id, date(ts/1000, 'unixepoch'), proto, model;
-    `,
+      `,
+  },
+  {
+    name: "012_model_pricing_columns",
+    // Keep the JSON object for rich provider metadata, but make the common
+    // token prices real columns so filtering and sorting do not parse JSON.
+    up: () => {
+      db.exec(`
+        ALTER TABLE models ADD COLUMN pricing_input REAL;
+        ALTER TABLE models ADD COLUMN pricing_input_cache REAL;
+        ALTER TABLE models ADD COLUMN pricing_input_cache_write REAL;
+        ALTER TABLE models ADD COLUMN pricing_output REAL;
+      `);
+      const rows = db
+        .prepare<{ id: string; pricing: string | null }, []>("SELECT id, pricing FROM models")
+        .all();
+      const update = db.prepare(
+        `UPDATE models SET pricing = ?, pricing_input = ?, pricing_input_cache = ?,
+         pricing_input_cache_write = ?, pricing_output = ? WHERE id = ?`,
+      );
+      for (const row of rows) {
+        let parsed: unknown = null;
+        if (row.pricing) {
+          try {
+            parsed = JSON.parse(row.pricing);
+          } catch {}
+        }
+        const pricing = normalizePricing(parsed);
+        const columns = pricingColumns(pricing);
+        update.run(
+          pricing ? JSON.stringify(pricing) : null,
+          columns.input,
+          columns.inputCache,
+          columns.inputCacheWrite,
+          columns.output,
+          row.id,
+        );
+      }
+    },
   },
 ];
 
@@ -376,7 +415,8 @@ export function migrate(): void {
   for (let i = version; i < MIGRATIONS.length; i++) {
     const m = MIGRATIONS[i]!;
     db.transaction(() => {
-      db.exec(m.up);
+      if (typeof m.up === "string") db.exec(m.up);
+      else m.up();
       db.exec(`PRAGMA user_version = ${i + 1}`);
     })();
     console.log(`[DB] migration applied: ${m.name}`);
@@ -472,6 +512,10 @@ export interface ModelRow {
   features: string;
   reasoning_efforts: string | null;
   pricing: string | null;
+  pricing_input: number | null;
+  pricing_input_cache: number | null;
+  pricing_input_cache_write: number | null;
+  pricing_output: number | null;
   datacenters: string | null;
   source: "auto" | "manual";
   created_at: number;

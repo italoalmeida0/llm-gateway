@@ -1,6 +1,7 @@
 import {
   createSignal,
   createMemo,
+  createEffect,
   For,
   onCleanup,
   onMount,
@@ -579,7 +580,7 @@ export function Select(props: {
   };
 
   let listRef: HTMLDivElement | undefined;
-  createMemo(() => {
+  createEffect(() => {
     if (!open()) return;
     highlight();
     queueMicrotask(() => {

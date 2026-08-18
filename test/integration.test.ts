@@ -1288,8 +1288,16 @@ describe("model registry & routing mode", () => {
     });
     expect(c.status).toBe(200);
     expect(c.json.model.source).toBe("manual");
-    expect(c.json.model.pricing.prompt).toBe("0.000001");
+    expect(c.json.model.pricing.prompt).toBe(0.000001);
+    expect(c.json.model.pricingInput).toBe(0.000001);
+    expect(c.json.model.pricingOutput).toBe(0.000002);
     expect(c.json.model.datacenters).toEqual([{ country_code: "US" }]);
+
+    const priced = await api(`/api/admin/models?limit=50&filters=${encodeURIComponent(JSON.stringify({
+      pricing_input: { filterType: "number", type: "greaterThan", filter: 0 },
+    }))}`, { token: adminToken });
+    expect(priced.status).toBe(200);
+    expect(priced.json.models.map((m: any) => m.id)).toContain("alias-fast");
 
     // duplicate id conflicts
     expect(
@@ -1405,7 +1413,7 @@ describe("model registry & routing mode", () => {
     expect(alias.always_on).toBe(true);
     expect(alias.context_length).toBe(128000);
     expect(alias.max_output_length).toBe(4096);
-    expect(alias.pricing).toEqual({ prompt: "0.000001", completion: "0.000002" });
+    expect(alias.pricing).toEqual({ prompt: 0.000001, completion: 0.000002 });
     expect(alias.reasoning_parameters).toEqual({ efforts: ["low", "high"] });
     expect(alias.datacenters).toEqual([{ country_code: "US" }]);
     expect(alias.supported_sampling_parameters).toEqual(["temperature", "top_p"]);

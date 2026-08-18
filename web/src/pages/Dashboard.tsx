@@ -186,8 +186,9 @@ export default function DashboardPage() {
 
       {/* Gate on the resource: CountUp mounts once with final values — a
           late series() update would hit a text node USAL already replaced. */}
-      <Show when={series()} keyed>
-        {(_series) => (
+      <Show when={!series.loading}>
+        <Show when={series()} keyed>
+          {(_series) => (
           <div
             class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6"
             {...usalItems("fade-u", 110)}
@@ -259,7 +260,8 @@ export default function DashboardPage() {
               </div>
             </Card>
           </div>
-        )}
+          )}
+        </Show>
       </Show>
 
       <div

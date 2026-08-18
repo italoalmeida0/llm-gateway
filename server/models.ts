@@ -9,6 +9,7 @@ import {
 import { decryptSecret } from "./crypto";
 import { GATEWAY_SECRET } from "./config";
 import { keyUsable } from "./failover";
+import { normalizePricing, pricingColumns } from "./pricing";
 
 /**
  * Model registry & routing.
@@ -88,26 +89,6 @@ const strArr = (v: unknown): string[] | null => {
 const posInt = (v: unknown): number | null =>
   typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 1e10 ? Math.floor(v) : null;
 
-function parsePricingValue(v: unknown): number | null {
-  if (typeof v !== "string" && typeof v !== "number") return null;
-  const cleaned = String(v).replace(/[^0-9.]/g, "");
-  if (!cleaned) return null;
-  const n = Number(cleaned);
-  return Number.isFinite(n) && n >= 0 ? n : null;
-}
-
-function parsePricing(v: unknown): Record<string, number> | null {
-  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
-  const out: Record<string, number> = {};
-  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-    if (Object.keys(out).length >= 16) break;
-    if (k.length > 48) continue;
-    const n = parsePricingValue(val);
-    if (n !== null) out[k] = n;
-  }
-  return Object.keys(out).length ? out : null;
-}
-
 function parseDatacenters(v: unknown): Array<{ country_code: string }> | null {
   if (!Array.isArray(v)) return null;
   const out: Array<{ country_code: string }> = [];
@@ -174,7 +155,7 @@ export function parseUpstreamModels(payload: unknown): ParsedModel[] {
         strArr(m.supported_sampling_parameters) ?? strArr(m.supported_parameters) ?? [],
       features: strArr(m.supported_features) ?? [],
       reasoning_efforts: strArr(reasoningParams?.efforts) ?? strArr(m.reasoning_efforts),
-      pricing: parsePricing(m.pricing),
+      pricing: normalizePricing(m.pricing),
       datacenters: parseDatacenters(m.datacenters),
     });
   }
@@ -216,9 +197,11 @@ const insertModel = db.prepare(
      (id, provider_id, upstream_model, proto, name, description, hugging_face_id,
       quantization, openrouter_slug, always_on, enabled, context_length,
       max_output_length, created, input_modalities, output_modalities,
-      sampling_params, features, reasoning_efforts, pricing, datacenters,
-      source, created_at, updated_at)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)`,
+       sampling_params, features, reasoning_efforts, pricing,
+       pricing_input, pricing_input_cache, pricing_input_cache_write, pricing_output,
+       datacenters,
+       source, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)`,
 );
 
 /** A freshly imported model gets its provider as the priority-0 target. */
@@ -341,6 +324,7 @@ export async function syncProviderModels(
     let merged = 0;
     db.transaction(() => {
       for (const m of parsed) {
+        const prices = pricingColumns(m.pricing);
         const r2 = insertModel.run(
           m.id,
           provider.id,
@@ -361,6 +345,10 @@ export async function syncProviderModels(
           JSON.stringify(m.features),
           m.reasoning_efforts ? JSON.stringify(m.reasoning_efforts) : null,
           m.pricing ? JSON.stringify(m.pricing) : null,
+          prices.input,
+          prices.inputCache,
+          prices.inputCacheWrite,
+          prices.output,
           m.datacenters ? JSON.stringify(m.datacenters) : null,
           now,
           now,
@@ -402,10 +390,19 @@ const jsonObj = (s: string | null): Record<string, unknown> | null => {
   }
 };
 
+function modelPricing(m: ModelRow): Record<string, number> | null {
+  const pricing = normalizePricing(jsonObj(m.pricing)) ?? {};
+  if (m.pricing_input != null) pricing.prompt = m.pricing_input;
+  if (m.pricing_input_cache != null) pricing.input_cache_reads = m.pricing_input_cache;
+  if (m.pricing_input_cache_write != null) pricing.input_cache_writes = m.pricing_input_cache_write;
+  if (m.pricing_output != null) pricing.completion = m.pricing_output;
+  return Object.keys(pricing).length ? pricing : null;
+}
+
 /** The rich registry entry shape served by /v1/models in router mode. */
 export function publicModelEntry(m: ModelRow, providerName: string): Record<string, unknown> {
   const efforts = jsonArr(m.reasoning_efforts);
-  const pricing = jsonObj(m.pricing);
+  const pricing = modelPricing(m);
   const datacenters = jsonArr(m.datacenters);
   const entry: Record<string, unknown> = {
     provider: providerName,
@@ -456,7 +453,11 @@ export function publicModelAdmin(
     samplingParams: jsonArr(m.sampling_params),
     features: jsonArr(m.features),
     reasoningEfforts: m.reasoning_efforts ? jsonArr(m.reasoning_efforts) : null,
-    pricing: jsonObj(m.pricing),
+    pricing: modelPricing(m),
+    pricingInput: m.pricing_input ?? null,
+    pricingInputCache: m.pricing_input_cache ?? null,
+    pricingInputCacheWrite: m.pricing_input_cache_write ?? null,
+    pricingOutput: m.pricing_output ?? null,
     datacenters: m.datacenters ? jsonArr(m.datacenters) : null,
     source: m.source,
     createdAt: m.created_at,

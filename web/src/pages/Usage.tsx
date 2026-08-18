@@ -221,7 +221,7 @@ export default function UsagePage() {
           </div>
         </div>
         <div class="px-4 pb-4 pt-2">
-          <Show when={series()} fallback={<div class="h-32" />}>
+          <Show when={series() && !series.loading} fallback={<div class="h-32" />}>
             <DailyChart
               series={series()!}
               metric={chartMetric()}
@@ -238,43 +238,51 @@ export default function UsagePage() {
           subtitle={`Model × provider breakdown · ${windowLabel(days())}`}
         />
         <Show
-          when={(breakdownCount() ?? 0) > 0}
-          fallback={<EmptyState icon={Icons.chart} title="No model data in this window" />}
+          when={!breakdownCount.loading}
+          fallback={<div class="p-6 text-xs text-ink-500">Loading…</div>}
         >
-          <div class="px-1 py-1">
-            <UsageGrid
-              columnDefs={byModelCols}
-              datasource={breakdownDatasource}
-              cacheBlockSize={100}
-              refreshDeps={`${days()}:${keyId()}`}
-              heightClass="h-[420px]"
-              storageKey="llmgw-grid:usage.by-model"
-            />
-          </div>
+          <Show
+            when={(breakdownCount() ?? 0) > 0}
+            fallback={<EmptyState icon={Icons.chart} title="No model data in this window" />}
+          >
+            <div class="px-1 py-1">
+              <UsageGrid
+                columnDefs={byModelCols}
+                datasource={breakdownDatasource}
+                cacheBlockSize={100}
+                refreshDeps={`${days()}:${keyId()}`}
+                heightClass="h-[420px]"
+                storageKey="llmgw-grid:usage.by-model"
+              />
+            </div>
+          </Show>
         </Show>
       </Card>
 
       <Card>
-        <CardHeader
-          title="Recent requests"
-          subtitle={`${fmtNum(eventCount() ?? 0)} events`}
-        />
+          <CardHeader
+            title="Recent requests"
+            subtitle={eventCount.loading ? "Loading…" : `${fmtNum(eventCount() ?? 0)} events`}
+          />
         <Show
-          when={(eventCount() ?? 0) > 0}
-          fallback={
-            <EmptyState icon={Icons.chart} title="No requests in this window" />
-          }
+          when={!eventCount.loading}
+          fallback={<div class="p-6 text-xs text-ink-500">Loading…</div>}
         >
-          <div class="px-2 py-2">
-            <UsageGrid
-              columnDefs={eventCols}
-              datasource={eventsDatasource}
-              cacheBlockSize={EVENTS_BLOCK}
-              refreshDeps={keyId()}
-              heightClass="h-[560px]"
-              storageKey="llmgw-grid:usage.recent"
-            />
-          </div>
+          <Show
+            when={(eventCount() ?? 0) > 0}
+            fallback={<EmptyState icon={Icons.chart} title="No requests in this window" />}
+          >
+            <div class="px-2 py-2">
+              <UsageGrid
+                columnDefs={eventCols}
+                datasource={eventsDatasource}
+                cacheBlockSize={EVENTS_BLOCK}
+                refreshDeps={keyId()}
+                heightClass="h-[560px]"
+                storageKey="llmgw-grid:usage.recent"
+              />
+            </div>
+          </Show>
         </Show>
       </Card>
     </div>

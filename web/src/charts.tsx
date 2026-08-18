@@ -122,6 +122,20 @@ export function DailyChart(props: {
       out_visual: tokenVisualValue(point.out_tok),
     })),
   );
+  const dataKey = createMemo(() =>
+    data()
+      .map((point) =>
+        [
+          point.date,
+          point.label ?? "",
+          point.in_tok,
+          point.cache_tok ?? 0,
+          point.out_tok,
+          point.reqs ?? 0,
+        ].join(":"),
+      )
+      .join("|"),
+  );
 
   return (
     <Show
@@ -132,7 +146,10 @@ export function DailyChart(props: {
         </div>
       }
     >
-      <Show when={`${props.resetKey ?? "default"}:${metric()}`} keyed>
+      <Show
+        when={`${props.resetKey ?? "default"}:${metric()}:${dataKey()}`}
+        keyed
+      >
         {(_resetKey) => (
           <ChartFrame height={props.height ?? 180}>
             {/* solid-charts 0.0.2 keeps the hovered tick in internal state.
@@ -282,6 +299,11 @@ export function AreaChart(props: {
       }))
       .filter((point) => Number.isFinite(point.value));
   });
+  const dataKey = createMemo(() =>
+    points()
+      .map((point) => `${point.tick}:${point.value}`)
+      .join("|"),
+  );
   const gradientId = `chart-area-gradient-${createUniqueId()}`;
 
   return (
@@ -293,7 +315,7 @@ export function AreaChart(props: {
         </div>
       }
     >
-      <Show when={props.resetKey ?? "default"} keyed>
+      <Show when={`${props.resetKey ?? "default"}:${dataKey()}`} keyed>
         {(_resetKey) => (
           <ChartFrame height={props.height ?? 170}>
             <Show when={points()} keyed>

@@ -1,3 +1,5 @@
+import { createSignal } from "solid-js";
+
 /**
  * Typed fetch client for the gateway REST API.
  * - Attaches the bearer token automatically.
@@ -36,28 +38,31 @@ function loadStored(): Session | null {
   }
 }
 
-let session: Session | null = loadStored();
+const [session, setSessionSignal] = createSignal<Session | null>(loadStored());
 
 let listeners: Array<(s: Session | null) => void> = [];
 
 export function currentSession(): Session | null {
-  return session;
+  return session();
 }
 
 /** Another tab may have rotated the pair (or logged out) — the freshest
  *  stored copy wins, so this tab never replays an already-rotated token. */
 function latestSession(): Session | null {
   const stored = loadStored();
-  if (stored && (!session || stored.refreshToken !== session.refreshToken)) session = stored;
-  if (!stored && session) session = null;
-  return session;
+  const current = session();
+  if (stored && (!current || stored.refreshToken !== current.refreshToken)) {
+    setSessionSignal(stored);
+  }
+  if (!stored && current) setSessionSignal(null);
+  return stored ?? null;
 }
 
 export function setSession(s: Session | null): void {
-  session = s;
+  setSessionSignal(s);
   if (s) localStorage.setItem(LS, JSON.stringify(s));
   else localStorage.removeItem(LS);
-  for (const fn of listeners) fn(session);
+  for (const fn of listeners) fn(session());
 }
 
 export function onSessionChange(fn: (s: Session | null) => void): () => void {
@@ -285,7 +290,11 @@ export interface ModelDto {
   samplingParams: string[];
   features: string[];
   reasoningEfforts: string[] | null;
-  pricing: Record<string, string | number> | null;
+  pricing: Record<string, number> | null;
+  pricingInput: number | null;
+  pricingInputCache: number | null;
+  pricingInputCacheWrite: number | null;
+  pricingOutput: number | null;
   datacenters: Array<{ country_code: string }> | null;
   source: "auto" | "manual";
   createdAt: number;

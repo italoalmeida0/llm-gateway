@@ -80,6 +80,8 @@ export default function AdminProvidersPage() {
   const [modelFree, setModelFree] = createSignal(""); // manual override
   const [probe, setProbe] = createSignal<ProbeResult | null>(null);
   const [probeBusy, setProbeBusy] = createSignal(false);
+  let testRequest = 0;
+  let probeRequest = 0;
 
   const openEditor = (p: ProviderDto | "new") => {
     if (p === "new") {
@@ -141,24 +143,42 @@ export default function AdminProvidersPage() {
   };
 
   const openTest = async (p: ProviderDto) => {
+    const requestId = ++testRequest;
+    probeRequest++;
     setTestFor(p);
     setSmoke(null);
     setProbe(null);
     setModelSel("");
     setModelFree("");
     setProbeCap(p.openaiBaseUrl ? "openai" : "anthropic");
+    setProbe(null);
+    setProbeBusy(false);
     setSmokeBusy(true);
     try {
       const j = await api<{ results: Partial<Record<Cap, SmokeResult>> }>(
         "POST",
         `/api/admin/providers/${p.id}/test`,
       );
-      setSmoke(j.results);
+      if (requestId === testRequest && testFor()?.id === p.id) {
+        setSmoke(j.results);
+      }
     } catch (e) {
-      toast(e instanceof Error ? e.message : "test failed", "err");
+      if (requestId === testRequest && testFor()?.id === p.id) {
+        toast(e instanceof Error ? e.message : "test failed", "err");
+      }
     } finally {
-      setSmokeBusy(false);
+      if (requestId === testRequest) setSmokeBusy(false);
     }
+  };
+
+  const closeTest = () => {
+    testRequest++;
+    probeRequest++;
+    setTestFor(null);
+    setSmoke(null);
+    setProbe(null);
+    setSmokeBusy(false);
+    setProbeBusy(false);
   };
 
   const listedModels = createMemo(() => smoke()?.[probeCap()]?.models ?? []);
@@ -167,23 +187,37 @@ export default function AdminProvidersPage() {
     () => modelFree().trim() || (listedModels().includes(modelSel()) ? modelSel() : (listedModels()[0] ?? "")),
   );
 
+  const changeProbeCap = (value: string) => {
+    probeRequest++;
+    setProbeCap(value as Cap);
+    setModelSel("");
+    setModelFree("");
+    setProbe(null);
+  };
+
   const runProbe = async () => {
     const p = testFor();
+    const cap = probeCap();
     const model = effectiveModel();
     if (!p || !model) return;
+    const requestId = ++probeRequest;
     setProbeBusy(true);
     setProbe(null);
     try {
       const j = await api<{ results: Partial<Record<Cap, ProbeResult>> }>(
         "POST",
         `/api/admin/providers/${p.id}/test`,
-        { cap: probeCap(), model },
+        { cap, model },
       );
-      setProbe(j.results[probeCap()] ?? { reachable: false, error: "no result" });
+      if (requestId === probeRequest && testFor()?.id === p.id && probeCap() === cap) {
+        setProbe(j.results[cap] ?? { reachable: false, error: "no result" });
+      }
     } catch (e) {
-      setProbe({ reachable: false, error: e instanceof Error ? e.message : "probe failed" });
+      if (requestId === probeRequest && testFor()?.id === p.id) {
+        setProbe({ reachable: false, error: e instanceof Error ? e.message : "probe failed" });
+      }
     } finally {
-      setProbeBusy(false);
+      if (requestId === probeRequest) setProbeBusy(false);
     }
   };
 
@@ -510,7 +544,7 @@ export default function AdminProvidersPage() {
       </Modal>
 
       {/* test modal */}
-      <Modal open={!!testFor()} onClose={() => setTestFor(null)} title={`Test ${testFor()?.name ?? ""}`} width="max-w-lg">
+      <Modal open={!!testFor()} onClose={closeTest} title={`Test ${testFor()?.name ?? ""}`} width="max-w-lg">
         <div class="space-y-5">
           <div>
             <div class="text-xs font-medium text-ink-300 mb-2">Endpoint smoke test</div>
@@ -539,7 +573,7 @@ export default function AdminProvidersPage() {
               <Show when={testFor()?.openaiBaseUrl && testFor()?.anthropicBaseUrl}>
                 <Segmented
                   value={probeCap()}
-                  onChange={setProbeCap}
+                  onChange={changeProbeCap}
                   options={[
                     { value: "openai", label: "OpenAI" },
                     { value: "anthropic", label: "Anthropic" },

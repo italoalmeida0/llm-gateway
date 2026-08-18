@@ -199,7 +199,7 @@ export default function AdminStatsPage() {
         }
       />
 
-      <Show when={stats()}>
+      <Show when={stats() && !stats.loading}>
         <div
           class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 mb-6"
           {...usalItems("fade-u", 90)}
@@ -257,22 +257,27 @@ export default function AdminStatsPage() {
               subtitle={`By category · ${windowLabel(days())}`}
             />
             <Show
-              when={(breakdownCounts()?.users ?? 0) > 0}
-              fallback={
-                <div class="p-6">
-                  <EmptyState icon={Icons.users} title="No user data in this window" />
-                </div>
-              }
+              when={!breakdownCounts.loading}
+              fallback={<div class="p-6 text-xs text-ink-500">Loading…</div>}
             >
-              <div class="p-2">
-                <UsageGrid
-                  columnDefs={userCols}
-                  datasource={usersDatasource}
-                  cacheBlockSize={100}
-                  refreshDeps={`${days()}:${providerId()}`}
-                  storageKey="llmgw-grid:admin.stats.users"
-                />
-              </div>
+              <Show
+                when={(breakdownCounts()?.users ?? 0) > 0}
+                fallback={
+                  <div class="p-6">
+                    <EmptyState icon={Icons.users} title="No user data in this window" />
+                  </div>
+                }
+              >
+                <div class="p-2">
+                  <UsageGrid
+                    columnDefs={userCols}
+                    datasource={usersDatasource}
+                    cacheBlockSize={100}
+                    refreshDeps={`${days()}:${providerId()}`}
+                    storageKey="llmgw-grid:admin.stats.users"
+                  />
+                </div>
+              </Show>
             </Show>
           </Card>
 
@@ -282,22 +287,27 @@ export default function AdminStatsPage() {
               subtitle={`Model × provider breakdown · ${windowLabel(days())}`}
             />
             <Show
-              when={(breakdownCounts()?.models ?? 0) > 0}
-              fallback={
-                <div class="p-6">
-                  <EmptyState icon={Icons.chart} title="No model data in this window" />
-                </div>
-              }
+              when={!breakdownCounts.loading}
+              fallback={<div class="p-6 text-xs text-ink-500">Loading…</div>}
             >
-              <div class="p-2">
-                <UsageGrid
-                  columnDefs={modelCols}
-                  datasource={modelsDatasource}
-                  cacheBlockSize={100}
-                  refreshDeps={`${days()}:${providerId()}`}
-                  storageKey="llmgw-grid:admin.stats.models"
-                />
-              </div>
+              <Show
+                when={(breakdownCounts()?.models ?? 0) > 0}
+                fallback={
+                  <div class="p-6">
+                    <EmptyState icon={Icons.chart} title="No model data in this window" />
+                  </div>
+                }
+              >
+                <div class="p-2">
+                  <UsageGrid
+                    columnDefs={modelCols}
+                    datasource={modelsDatasource}
+                    cacheBlockSize={100}
+                    refreshDeps={`${days()}:${providerId()}`}
+                    storageKey="llmgw-grid:admin.stats.models"
+                  />
+                </div>
+              </Show>
             </Show>
           </Card>
         </div>

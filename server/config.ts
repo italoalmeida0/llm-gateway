@@ -103,7 +103,7 @@ export const LIMITS = {
 
   /** defaults applied when a key leaves them empty */
   defaultKeyRpm: Number(process.env.DEFAULT_KEY_RPM || 120),
-  defaultKeyConcurrency: Number(process.env.DEFAULT_KEY_CONCURRENCY || 8),
+  defaultKeyConcurrency: Number(process.env.DEFAULT_KEY_CONCURRENCY || 16),
 
   /** upstream behavior */
   upstreamTimeoutMs: Number(process.env.UPSTREAM_TIMEOUT_MS || 120_000),

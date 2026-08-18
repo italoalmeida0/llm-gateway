@@ -43,6 +43,17 @@ const USER_SELECTION_SOURCES = new Set([
 
 const PRICING_KEYS = ["prompt", "completion", "image", "request", "input_cache_reads", "input_cache_writes"];
 
+/** Registry pricing is stored as USD per token; the table displays USD per 1M. */
+function pricePerMillion(value: string | undefined): string {
+  if (value == null || value === "") return "—";
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return value;
+  return `$${(amount * 1_000_000).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })}`;
+}
+
 const csv = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
 const numOrNull = (s: string): number | null => {
   if (s.trim() === "") return null;
@@ -497,13 +508,31 @@ export default function AdminModelsPage() {
     },
     {
       colId: "pricing",
-      headerName: "Pricing",
-      width: 170,
+      headerName: "Pricing / 1M tokens",
+      width: 220,
       cellRenderer: (p: { data?: ModelDto }) =>
         p.data?.pricing ? (
-          <code class="text-ink-400" title={JSON.stringify(p.data.pricing)}>
-            in {p.data.pricing.prompt ?? "—"} · out {p.data.pricing.completion ?? "—"}
-          </code>
+          <div
+            class="flex flex-col gap-0.5 py-1 text-[10px] leading-tight text-ink-400"
+            title={JSON.stringify(p.data.pricing)}
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-ink-500">Input</span>
+              <code>{pricePerMillion(p.data.pricing.prompt)}</code>
+            </div>
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-ink-500">Input cache read</span>
+              <code>{pricePerMillion(p.data.pricing.input_cache_reads)}</code>
+            </div>
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-ink-500">Input cache write</span>
+              <code>{pricePerMillion(p.data.pricing.input_cache_writes)}</code>
+            </div>
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-ink-500">Output</span>
+              <code>{pricePerMillion(p.data.pricing.completion)}</code>
+            </div>
+          </div>
         ) : (
           <span class="text-ink-500">—</span>
         ),

@@ -24,6 +24,21 @@ type DailyChartPoint = DailyPoint & {
   tick: string;
 };
 
+type TokenChartPoint = DailyChartPoint & {
+  in_visual: number;
+  cache_visual: number;
+  out_visual: number;
+};
+
+/** Compresses large token ranges without changing the values shown in the tooltip. */
+function tokenVisualValue(value: number | null | undefined): number {
+  return Math.log1p(Math.max(0, value ?? 0));
+}
+
+function tokenAxisValue(value: number): string {
+  return fmtNum(Math.expm1(Math.max(0, value)));
+}
+
 function ChartFrame(props: { height: number; children: JSX.Element }) {
   return (
     <div class="relative w-full" style={{ height: `${props.height}px` }}>
@@ -99,6 +114,14 @@ export function DailyChart(props: {
       tick: point.label ?? point.date.slice(5),
     })),
   );
+  const tokenData = createMemo<TokenChartPoint[]>(() =>
+    data().map((point) => ({
+      ...point,
+      in_visual: tokenVisualValue(point.in_tok),
+      cache_visual: tokenVisualValue(point.cache_tok),
+      out_visual: tokenVisualValue(point.out_tok),
+    })),
+  );
 
   return (
     <Show
@@ -115,7 +138,7 @@ export function DailyChart(props: {
             {/* solid-charts 0.0.2 keeps the hovered tick in internal state.
                 This keyed wrapper resets it when a provider/window/metric
                 changes while the pointer is still over the SVG. */}
-            <Show when={data()} keyed>
+            <Show when={metric() === "tokens" ? tokenData() : data()} keyed>
               {(chartData) => (
                 <Chart
                   data={chartData}
@@ -126,7 +149,11 @@ export function DailyChart(props: {
                     <AxisLabel
                       fill="var(--chart-tick)"
                       font-size="10"
-                      format={(value) => fmtNum(Number(value))}
+                      format={(value) =>
+                        metric() === "tokens"
+                          ? tokenAxisValue(Number(value))
+                          : fmtNum(Number(value))
+                      }
                     />
                     <AxisGrid stroke="var(--chart-grid)" />
                   </Axis>
@@ -161,19 +188,19 @@ export function DailyChart(props: {
                     }
                   >
                     <Bar
-                      dataKey="in_tok"
+                      dataKey="in_visual"
                       fill={IN_BAR}
                       rx={3}
                       class="chart-bar chart-bar-input"
                     />
                     <Bar
-                      dataKey="cache_tok"
+                      dataKey="cache_visual"
                       fill={CACHE_BAR}
                       rx={3}
                       class="chart-bar"
                     />
                     <Bar
-                      dataKey="out_tok"
+                      dataKey="out_visual"
                       fill={OUT_BAR}
                       rx={3}
                       class="chart-bar"
@@ -226,6 +253,14 @@ export function DailyChart(props: {
           <span class="inline-block h-2.5 w-2.5 rounded-sm bg-brand-500" />
           Latest {unit()}
         </span>
+        <Show when={metric() === "tokens"}>
+          <span
+            class="text-[10px] text-ink-500"
+            title="Token bars use a logarithmic visual scale; tooltip values are exact."
+          >
+            Balanced scale
+          </span>
+        </Show>
       </div>
     </Show>
   );

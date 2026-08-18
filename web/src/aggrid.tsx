@@ -1,6 +1,6 @@
-import { Show, createEffect, onCleanup } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import AgGridSolid, { type AgGridSolidRef } from "solid-ag-grid";
-import type { ColDef, ColGroupDef } from "ag-grid-community";
+import type { ColDef, ColGroupDef, ColumnState, GridApi } from "ag-grid-community";
 
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-quartz.css";
@@ -70,7 +70,7 @@ const DEFAULT_COL_DEF: ColDef = {
   sortable: true,
   resizable: true,
   filter: "agTextColumnFilter",
-  floatingFilter: false,
+  floatingFilter: true,
   minWidth: 72,
 };
 const PAGE_SIZE_SELECTOR: number[] = [15, 20, 25, 50, 100, 250];
@@ -158,6 +158,7 @@ export function UsageGrid(props: {
    *  filter changed). */
   refreshDeps?: unknown;
 }) {
+  const [changedColumns, setChangedColumns] = createSignal<string[]>([]);
   createEffect(() => {
     props.refreshDeps; // track
     gridRef?.api?.purgeInfiniteCache?.();
@@ -171,6 +172,43 @@ export function UsageGrid(props: {
 
   // ---- per-grid user prefs (filters, column size/order/visibility, sort) ----
   let gridRef: AgGridSolidRef | undefined;
+  let defaultColumnState: ColumnState[] = [];
+  const columnLabels = new Map(
+    props.columnDefs.flatMap((column) =>
+      "children" in column
+        ? []
+        : [[column.colId ?? column.field ?? "", column.headerName ?? column.colId ?? column.field ?? "Column"]],
+    ),
+  );
+  const stateKey = (state: ColumnState) =>
+    JSON.stringify({
+      hide: state.hide ?? false,
+      width: state.width,
+      flex: state.flex ?? null,
+      sort: state.sort ?? null,
+      sortIndex: state.sortIndex ?? null,
+      pinned: state.pinned ?? null,
+      rowGroup: state.rowGroup ?? false,
+      rowGroupIndex: state.rowGroupIndex ?? null,
+      pivot: state.pivot ?? false,
+      pivotIndex: state.pivotIndex ?? null,
+      aggFunc: state.aggFunc ?? null,
+    });
+  const updateChangedColumns = (api: GridApi) => {
+    const defaults = new Map(defaultColumnState.map((state) => [state.colId, state]));
+    const defaultPositions = new Map(
+      defaultColumnState.map((state, index) => [state.colId, index]),
+    );
+    const changed = api
+      .getColumnState()
+      .filter((state, index) =>
+        index !== defaultPositions.get(state.colId) ||
+        stateKey(state) !== stateKey(defaults.get(state.colId) ?? state) ||
+        api.getColumnFilterModel(state.colId) != null,
+      )
+      .map((state) => state.colId);
+    setChangedColumns(changed);
+  };
   const saveState = () => {
     const api = gridRef?.api;
     if (!api) return;
@@ -188,6 +226,10 @@ export function UsageGrid(props: {
   const saveSoon = () => {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(saveState, 250);
+  };
+  const onGridChanged = () => {
+    if (gridRef?.api) updateChangedColumns(gridRef.api);
+    saveSoon();
   };
   onCleanup(() => {
     if (saveTimer) clearTimeout(saveTimer);
@@ -208,6 +250,24 @@ export function UsageGrid(props: {
     } catch {}
   };
 
+  const resetColumn = async (colId: string) => {
+    const api = gridRef?.api;
+    if (!api) return;
+    const defaultState = defaultColumnState.find((state) => state.colId === colId);
+    if (defaultState) {
+      const current = api.getColumnState();
+      const currentWithoutColumn = current.filter((state) => state.colId !== colId);
+      const defaultIndex = defaultColumnState.findIndex((state) => state.colId === colId);
+      const insertAt = Math.min(Math.max(defaultIndex, 0), currentWithoutColumn.length);
+      currentWithoutColumn.splice(insertAt, 0, { ...defaultState });
+      api.applyColumnState({ state: currentWithoutColumn, applyOrder: true });
+    }
+    await api.setColumnFilterModel(colId, null);
+    api.onFilterChanged("api");
+    updateChangedColumns(api);
+    saveState();
+  };
+
   /** Wipe persisted prefs and put the grid back on the column defs. */
   const resetLayout = () => {
     try {
@@ -217,6 +277,7 @@ export function UsageGrid(props: {
     if (!api) return;
     api.resetColumnState();
     api.setFilterModel(null);
+    updateChangedColumns(api);
   };
 
   return (
@@ -249,15 +310,17 @@ export function UsageGrid(props: {
             rowHeight={38}
             suppressCellFocus
             onGridReady={(e) => {
+              defaultColumnState = e.api.getColumnState().map((state: ColumnState) => ({ ...state }));
               restoreState();
+              updateChangedColumns(e.api);
               props.onGridReady?.(e);
             }}
             onModelUpdated={props.onModelUpdated}
-            onFilterChanged={saveSoon}
-            onSortChanged={saveSoon}
-            onColumnMoved={saveSoon}
-            onColumnResized={saveSoon}
-            onColumnVisible={saveSoon}
+            onFilterChanged={onGridChanged}
+            onSortChanged={onGridChanged}
+            onColumnMoved={onGridChanged}
+            onColumnResized={onGridChanged}
+            onColumnVisible={onGridChanged}
             rowSelection={props.rowSelection}
             suppressRowClickSelection={props.suppressRowClickSelection}
             getRowId={props.getRowId}
@@ -265,7 +328,22 @@ export function UsageGrid(props: {
           />
         </Show>
       </div>
-      <div class="flex items-center justify-end px-1.5 py-1 shrink-0">
+      <div class="flex items-center justify-between gap-2 overflow-x-auto px-1.5 py-1 shrink-0">
+        <div class="flex items-center gap-1 shrink-0">
+          <For each={changedColumns()}>
+            {(colId) => (
+              <Btn
+                variant="ghost"
+                size="sm"
+                class="!px-2 text-[11px] text-ink-500 hover:text-ink-200"
+                title={`Reset ${columnLabels.get(colId) ?? colId}`}
+                onClick={() => resetColumn(colId)}
+              >
+                Reset {columnLabels.get(colId) ?? colId}
+              </Btn>
+            )}
+          </For>
+        </div>
         <Btn
           variant="ghost"
           size="sm"

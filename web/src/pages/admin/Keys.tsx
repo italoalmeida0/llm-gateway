@@ -30,6 +30,7 @@ const TONE: Record<
   expired: { tone: "zinc", label: "Expired" },
   daily_limit: { tone: "amber", label: "Daily spent" },
   total_limit: { tone: "red", label: "Total spent" },
+  zinc: { tone: "zinc", label: "Unknown" },
 };
 
 export default function AdminKeysPage() {
@@ -222,7 +223,7 @@ export default function AdminKeysPage() {
             <EmptyState icon={Icons.key} title="No keys in the system" />
           }
         >
-          <div class="p-2" {...usalItems("fade-u", 60)}>
+          <div class="p-2">
             <UsageGrid
               columnDefs={cols}
               datasource={keysDatasource}

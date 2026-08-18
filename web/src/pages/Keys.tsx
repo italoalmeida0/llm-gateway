@@ -34,6 +34,7 @@ const STATUS_TONE: Record<
   expired: { tone: "zinc", label: "Expired" },
   daily_limit: { tone: "amber", label: "Daily budget spent" },
   total_limit: { tone: "red", label: "Total budget spent" },
+  zinc: { tone: "zinc", label: "Unknown" },
 };
 
 const EXPIRY_PRESETS = [
@@ -363,7 +364,7 @@ export default function KeysPage() {
             />
           }
         >
-          <div class="p-2" {...usalItems("fade-u", 60)}>
+          <div class="p-2">
             <UsageGrid
               columnDefs={cols}
               datasource={keysDatasource}

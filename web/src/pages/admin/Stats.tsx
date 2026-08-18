@@ -263,7 +263,7 @@ export default function AdminStatsPage() {
                 </div>
               }
             >
-              <div class="p-2" {...usalItems("fade-u", 60)}>
+              <div class="p-2">
                 <UsageGrid
                   columnDefs={userCols}
                   datasource={usersDatasource}
@@ -288,7 +288,7 @@ export default function AdminStatsPage() {
                 </div>
               }
             >
-              <div class="p-2" {...usalItems("fade-u", 60)}>
+              <div class="p-2">
                 <UsageGrid
                   columnDefs={modelCols}
                   datasource={modelsDatasource}

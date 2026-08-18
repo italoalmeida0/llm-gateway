@@ -451,7 +451,7 @@ export default function AdminModelsPage() {
         }
       >
         <Card class="overflow-hidden" {...usalItems("fade-u", 60)}>
-          <div class="p-2" {...usalItems("fade-u", 60)}>
+          <div class="p-2">
             <UsageGrid
               columnDefs={cols}
               datasource={modelsDatasource}

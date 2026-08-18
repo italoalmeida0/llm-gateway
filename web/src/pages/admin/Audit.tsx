@@ -101,7 +101,7 @@ export default function AdminAuditPage() {
           when={(auditCount() ?? 0) > 0}
           fallback={<EmptyState icon={Icons.book} title="No audit entries" />}
         >
-          <div class="p-2" {...usalItems("fade-u", 60)}>
+          <div class="p-2">
             <UsageGrid
               columnDefs={cols}
               datasource={auditDatasource}

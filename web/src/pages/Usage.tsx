@@ -239,7 +239,7 @@ export default function UsagePage() {
           when={(breakdownCount() ?? 0) > 0}
           fallback={<EmptyState icon={Icons.chart} title="No model data in this window" />}
         >
-          <div class="px-1 py-1" {...usalItems("fade-u", 60)}>
+          <div class="px-1 py-1">
             <UsageGrid
               columnDefs={byModelCols}
               datasource={breakdownDatasource}
@@ -263,7 +263,7 @@ export default function UsagePage() {
             <EmptyState icon={Icons.chart} title="No requests in this window" />
           }
         >
-          <div class="px-2 py-2" {...usalItems("fade-u", 60)}>
+          <div class="px-2 py-2">
             <UsageGrid
               columnDefs={eventCols}
               datasource={eventsDatasource}

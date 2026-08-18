@@ -809,6 +809,78 @@ describe("gateway end-to-end", () => {
     expect(ab.json.users.length).toBeGreaterThan(0);
   });
 
+  test("events endpoint honors server-side sort and filters", async () => {
+    const enc = encodeURIComponent;
+
+    // number filter — exact match only, and the count agrees with the rows
+    const f200 = await api(
+      `/api/usage/events?limit=500&filters=${enc(JSON.stringify({ status: { filterType: "number", type: "equals", filter: 200 } }))}`,
+      { token: userToken },
+    );
+    expect(f200.status).toBe(200);
+    expect(f200.json.events.length).toBeGreaterThan(0);
+    for (const e of f200.json.events) expect(e.status).toBe(200);
+    expect(f200.json.total).toBe(f200.json.events.length);
+
+    // no match → empty view (rows AND count)
+    const fNone = await api(
+      `/api/usage/events?limit=10&filters=${enc(JSON.stringify({ status: { filterType: "number", type: "equals", filter: 418 } }))}`,
+      { token: userToken },
+    );
+    expect(fNone.json.events).toHaveLength(0);
+    expect(fNone.json.total).toBe(0);
+
+    // text contains filter — hits raw model ids only
+    const fm = await api(
+      `/api/usage/events?limit=200&filters=${enc(JSON.stringify({ model: { filterType: "text", type: "contains", filter: "fake-llm" } }))}`,
+      { token: userToken },
+    );
+    expect(fm.json.events.length).toBeGreaterThan(0);
+    for (const e of fm.json.events) expect(e.model).toContain("fake-llm");
+
+    // inRange on latency — every returned row is inside the window
+    const fr = await api(
+      `/api/usage/events?limit=200&filters=${enc(JSON.stringify({ latency_ms: { filterType: "number", type: "inrange", filter: 0, filterTo: 120_000 } }))}`,
+      { token: userToken },
+    );
+    for (const e of fr.json.events) {
+      expect(e.latency_ms).toBeGreaterThanOrEqual(0);
+      expect(e.latency_ms).toBeLessThanOrEqual(120_000);
+    }
+    expect(fr.json.total).toBe(fr.json.events.length);
+
+    // sort: latency descending, returned sequence must be non-increasing
+    const sorted = await api(
+      `/api/usage/events?limit=50&sort=${enc(JSON.stringify([{ colId: "latency_ms", sort: "desc" }]))}`,
+      { token: userToken },
+    );
+    expect(sorted.status).toBe(200);
+    const lat = sorted.json.events.map((e: any) => e.latency_ms);
+    for (let i = 1; i < lat.length; i++) {
+      expect(lat[i - 1]).toBeGreaterThanOrEqual(lat[i]);
+    }
+
+    // infinite-model invariant: consecutive blocks never overlap
+    const p1 = await api("/api/usage/events?limit=3&offset=0", { token: userToken });
+    const p2 = await api("/api/usage/events?limit=3&offset=3", { token: userToken });
+    const ids1 = new Set(p1.json.events.map((e: any) => e.id));
+    for (const e of p2.json.events) expect(ids1.has(e.id)).toBe(false);
+
+    // an injected filter column name is whitelisted out — data intact
+    const evil = await api(
+      `/api/usage/events?limit=10&filters=${enc(JSON.stringify({ "x'; DROP TABLE users; --": { filterType: "text", type: "equals", filter: "x" } }))}`,
+      { token: userToken },
+    );
+    expect(evil.status).toBe(200);
+    const stillHere = await api("/api/admin/users", { token: adminToken });
+    expect(stillHere.json.users.length).toBeGreaterThanOrEqual(1);
+
+    // malformed JSON params degrade gracefully to the default (newest-first)
+    const garb = await api("/api/usage/events?limit=5&sort=%7Bnot-json&filters=no", { token: userToken });
+    expect(garb.status).toBe(200);
+    expect(garb.json.events.length).toBeGreaterThanOrEqual(0);
+  });
+
   test("hour granularity endpoints feed the 1D views", async () => {
     const r = await api("/api/usage/daily?hours=24", { token: userToken });
     expect(r.status).toBe(200);

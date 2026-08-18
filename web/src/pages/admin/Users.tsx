@@ -32,6 +32,8 @@ export default function AdminUsersPage() {
   const [confirmDelete, setConfirmDelete] = createSignal<AdminUserDto | null>(
     null,
   );
+  const [confirmReset2fa, setConfirmReset2fa] =
+    createSignal<AdminUserDto | null>(null);
   const [inviteLink, setInviteLink] = createSignal("");
   const [busy, setBusy] = createSignal(false);
 
@@ -95,18 +97,29 @@ export default function AdminUsersPage() {
     }
   };
 
-  const quick = async (
-    u: AdminUserDto,
-    action: string,
-    confirmMsg?: string,
-  ) => {
-    if (confirmMsg && !window.confirm(confirmMsg)) return;
+  const quick = async (u: AdminUserDto, action: string) => {
     try {
       await api("POST", `/api/admin/users/${u.id}/${action}`);
       toast("Done");
       refetch();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed", "err");
+    }
+  };
+
+  const reset2fa = async () => {
+    const u = confirmReset2fa();
+    if (!u) return;
+    setBusy(true);
+    try {
+      await api("POST", `/api/admin/users/${u.id}/reset-2fa`);
+      toast("2FA reset");
+      setConfirmReset2fa(null);
+      refetch();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "failed", "err");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -203,7 +216,7 @@ export default function AdminUsersPage() {
           <IconBtn
             icon={Icons.shield}
             title="Reset 2FA"
-            onClick={() => quick(u, "reset-2fa", "Reset this user's 2FA?")}
+            onClick={() => setConfirmReset2fa(u)}
           />
         </Show>
         <Show when={u.id !== meId()}>
@@ -401,6 +414,29 @@ export default function AdminUsersPage() {
           </div>
           <div class="flex justify-end">
             <Btn onClick={() => setInviteLink("")}>Done</Btn>
+          </div>
+        </div>
+      </Modal>
+
+      {/* reset-2FA confirm */}
+      <Modal
+        open={!!confirmReset2fa()}
+        onClose={() => setConfirmReset2fa(null)}
+        title="Reset 2FA"
+      >
+        <div class="space-y-4">
+          <p class="text-sm text-ink-300">
+            Reset two-factor authentication for{" "}
+            <strong class="text-ink-100">{confirmReset2fa()?.email}</strong>?
+            They'll need to set a new TOTP secret on next login.
+          </p>
+          <div class="flex justify-end gap-2">
+            <Btn variant="ghost" onClick={() => setConfirmReset2fa(null)}>
+              Cancel
+            </Btn>
+            <Btn variant="danger" onClick={reset2fa} disabled={busy()}>
+              Reset 2FA
+            </Btn>
           </div>
         </div>
       </Modal>

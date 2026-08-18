@@ -357,9 +357,143 @@ export function userUsageBreakdown(
   }>;
 }
 
-export function userEvents(userId: string, opts: { keyId?: string; limit: number; offset: number }) {
-  const where = opts.keyId ? "e.user_id = ? AND e.key_id = ?" : "e.user_id = ?";
+// ===== Server-driven events query (AG Grid infinite row model) =====
+
+/** Grid sort/filter column map — STRICT whitelist; unknown columns are simply
+ *  ignored (never spliced into SQL). */
+const EVENT_SORT_COLS: Record<string, string> = {
+  ts: "e.ts",
+  key_name: "COALESCE(k.name, substr(e.key_id, 1, 8))",
+  proto: "e.proto",
+  provider_name: "COALESCE(p.name, '')",
+  model: "e.model",
+  upstream_model: "e.upstream_model",
+  latency_ms: "e.latency_ms",
+  in_tok: "e.in_tok",
+  cache_tok: "e.cache_tok",
+  out_tok: "e.out_tok",
+  status: "e.status",
+};
+const EVENT_TEXT_COLS: Record<string, string> = {
+  key_name: "COALESCE(k.name, substr(e.key_id, 1, 8))",
+  proto: "e.proto",
+  provider_name: "COALESCE(p.name, '')",
+  model: "e.model",
+  upstream_model: "e.upstream_model",
+};
+const EVENT_NUM_COLS: Record<string, string> = {
+  ts: "e.ts",
+  latency_ms: "e.latency_ms",
+  in_tok: "e.in_tok",
+  cache_tok: "e.cache_tok",
+  out_tok: "e.out_tok",
+  status: "e.status",
+};
+
+export interface EventFilterEntry {
+  filterType?: string;
+  type?: string;
+  filter?: unknown;
+  filterTo?: unknown;
+}
+
+function likeEscape(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Translate an AG Grid filterModel to SQL WHERE fragments, strictly through
+ * the whitelisted column map. Returns clauses + params; unknown/malformed
+ * entries are dropped (never interpolated).
+ */
+export function buildEventFilter(
+  filters: Record<string, EventFilterEntry>,
+): { clauses: string[]; params: Array<string | number> } {
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+  for (const [colId, f] of Object.entries(filters)) {
+    if (!f || typeof f !== "object") continue;
+    const type = String(f.type ?? "").toLowerCase();
+    const val = String(f.filter ?? "").slice(0, 200);
+    if (f.filterType === "number" && colId in EVENT_NUM_COLS) {
+      const col = EVENT_NUM_COLS[colId]!;
+      const n = Number(f.filter);
+      const nTo = Number(f.filterTo);
+      if (type === "inrange" && Number.isFinite(n) && Number.isFinite(nTo)) {
+        clauses.push(`${col} BETWEEN ? AND ?`);
+        params.push(n, nTo);
+      } else if (Number.isFinite(n)) {
+        const op =
+          type === "equals" ? "="
+          : type === "notequal" ? "<>"
+          : type === "lessthan" ? "<"
+          : type === "lessthanorequal" ? "<="
+          : type === "greaterthan" ? ">"
+          : type === "greaterthanorequal" ? ">="
+          : null;
+        if (op) {
+          clauses.push(`${col} ${op} ?`);
+          params.push(n);
+        }
+      }
+      continue;
+    }
+    if (colId in EVENT_TEXT_COLS && val.length > 0) {
+      const col = EVENT_TEXT_COLS[colId]!;
+      const neg = type === "notcontains" || type === "notequal";
+      const like = type === "equals" || type === "notequal"
+        ? val
+        : type === "startswith" ? `${likeEscape(val)}%`
+        : type === "endswith" ? `%${likeEscape(val)}`
+        : `%${likeEscape(val)}%`; // contains/notContains
+      if (type === "equals" || type === "notequal") {
+        clauses.push(`${col} ${neg ? "<>" : "="} ?`);
+        params.push(val);
+      } else {
+        clauses.push(`${col} ${neg ? "NOT " : ""}LIKE ? ESCAPE '\\'`);
+        params.push(like);
+      }
+    }
+  }
+  return { clauses, params };
+}
+
+/** Whitelisted ORDER BY from AG Grid sortModel; id tie-break keeps OFFSET
+ *  pagination deterministic across blocks. */
+export function buildEventOrder(
+  sort: Array<{ colId: string; sort: string }> | undefined,
+): string {
+  const parts: string[] = [];
+  for (const s of sort ?? []) {
+    const col = EVENT_SORT_COLS[s.colId];
+    if (!col) continue;
+    const dir = s.sort === "asc" ? "ASC" : "DESC";
+    parts.push(`${col} ${dir}`);
+  }
+  if (parts.length === 0) return "e.ts DESC, e.id DESC";
+  parts.push("e.id DESC");
+  return parts.join(", ");
+}
+
+export function userEvents(
+  userId: string,
+  opts: {
+    keyId?: string;
+    limit: number;
+    offset: number;
+    sort?: Array<{ colId: string; sort: string }>;
+    filters?: Record<string, EventFilterEntry>;
+  },
+) {
+  const clauses = [opts.keyId ? "e.user_id = ? AND e.key_id = ?" : "e.user_id = ?"];
   const params = opts.keyId ? [userId, opts.keyId] : [userId];
+  if (opts.filters) {
+    const { clauses: fc, params: fp } = buildEventFilter(opts.filters);
+    clauses.push(...fc);
+    (params as Array<string | number>).push(...fp);
+  }
+  const where = clauses.join(" AND ");
+  const order = buildEventOrder(opts.sort);
   const rows = db
     .prepare(
       // LEFT JOINs: hard-deleted keys/providers must not hide their history.
@@ -372,12 +506,12 @@ export function userEvents(userId: string, opts: { keyId?: string; limit: number
        LEFT JOIN providers p ON p.id = e.provider_id
        LEFT JOIN provider_keys pk ON pk.id = e.provider_key_id
        WHERE ${where}
-       ORDER BY e.ts DESC, e.id DESC LIMIT ? OFFSET ?`,
+       ORDER BY ${order} LIMIT ? OFFSET ?`,
     )
     .all(...(params as [string, string]), opts.limit, opts.offset);
   const count = db
     .prepare<{ n: number }, [string, string] | [string]>(
-      `SELECT COUNT(*) AS n FROM usage_events e WHERE ${where}`,
+      `SELECT COUNT(*) AS n FROM usage_events e LEFT JOIN api_keys k ON k.id = e.key_id LEFT JOIN providers p ON p.id = e.provider_id WHERE ${where}`,
     )
     // @ts-expect-error tuple spread fine at runtime
     .get(...params)!.n;

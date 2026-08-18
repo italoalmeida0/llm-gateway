@@ -45,7 +45,27 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
     }
     const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 500);
     const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);
-    const { rows, total } = userEvents(ctx.user.id, { keyId, limit, offset });
+    // Server-side sort/filter (AG Grid infinite row model): JSON-encoded
+    // sortModel / filterModel, translated through strict whitelists.
+    let sort: Array<{ colId: string; sort: string }> | undefined;
+    let filters: Record<string, { filterType?: string; type?: string; filter?: unknown; filterTo?: unknown }> | undefined;
+    try {
+      const s = url.searchParams.get("sort");
+      if (s) {
+        const parsed = JSON.parse(s);
+        if (Array.isArray(parsed)) sort = parsed.slice(0, 8);
+      }
+      const f = url.searchParams.get("filters");
+      if (f) {
+        const parsed = JSON.parse(f);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          filters = parsed;
+        }
+      }
+    } catch {
+      /* malformed sort/filters fall back to unfiltered default */
+    }
+    const { rows, total } = userEvents(ctx.user.id, { keyId, limit, offset, sort, filters });
     return ok({ events: rows, total, limit, offset }, req);
   }
 

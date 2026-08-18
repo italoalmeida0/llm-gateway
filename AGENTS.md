@@ -166,7 +166,14 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   layout button at the bottom). Option props are module constants and the grid
   only mounts once rowData is set: solid-ag-grid@0.0.230's prop-diff effect can
   fire before the grid api exists (crash `__internalUpdateGridOptions`) and
-  inline object literals would retrigger it. solid-ag-grid pins
+  inline object literals would retrigger it. The Recent-requests grid instead
+  uses the **infinite row model** (`datasource` prop): blocks are fetched from
+  `/api/usage/events` on scroll (limit/offset), and the grid's sortModel /
+  filterModel is translated to SQL server-side through a strict column
+  whitelist (`buildEventFilter`/`buildEventOrder` in `server/usage.ts` —
+  never interpolate user input; unknown cols/malformed JSON degrade silently).
+  `e.id DESC` is always appended to ORDER BY so OFFSET blocks stay
+  deterministic. solid-ag-grid pins
   `ag-grid-community@31.1.1` EXACTLY — keep the top-level dep on the same
   version or bun nests a second copy and types diverge. Theme flips via the
   `ag-theme-quartz(-dark)` class; the `--ag-*` CSS variables are remapped to

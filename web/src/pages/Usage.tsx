@@ -24,9 +24,7 @@ import {
 } from "../aggrid";
 import type { ColDef } from "ag-grid-community";
 
-const RECENT_PAGE = 50;
-/** Recent-requests fetch window: the grid paginates client-side over it. */
-const EVENTS_FETCH = 500;
+const EVENTS_BLOCK = 100;
 
 interface BreakdownRow {
   key_id: string;
@@ -85,7 +83,8 @@ const byModelCols: ColDef<BreakdownRow>[] = [
 ];
 
 const eventCols: ColDef[] = [
-  { field: "ts", headerName: "Time", width: 150, valueFormatter: timeFormatter },
+  // Formatted display ≠ raw epoch — no text filter on Time (sort stays).
+  { field: "ts", headerName: "Time", width: 150, valueFormatter: timeFormatter, filter: false },
   { field: "key_name", headerName: "Key", width: 140, flex: 0.8 },
   { field: "proto", headerName: "Protocol", width: 120, cellRenderer: ProtoCell },
   { field: "provider_name", headerName: "Provider", width: 150, flex: 1, valueFormatter: (p) => fmtOrDash(p.value) },
@@ -129,13 +128,46 @@ export default function UsagePage() {
     return j.rows;
   });
 
-  const [events] = createResource(query, async (q) => {
-    const j = await api<{ events: any[]; total: number }>(
+  // Header count only — LIMIT 1 (the grid below pulls its own blocks).
+  const [eventCount] = createResource(query, async (q) => {
+    const j = await api<{ total: number }>(
       "GET",
-      `/api/usage/events?limit=${EVENTS_FETCH}${q.k ? `&key_id=${q.k}` : ""}`,
+      `/api/usage/events?limit=1${q.k ? `&key_id=${q.k}` : ""}`,
     );
-    return j;
+    return j.total;
   });
+
+  /** AG Grid infinite row model: blocks are fetched from the API on scroll,
+   *  with the grid's sortModel/filterModel translated to SQL server-side. */
+  const eventsDatasource = {
+    getRows: async (params: {
+      startRow: number;
+      endRow: number;
+      sortModel: Array<{ colId: string; sort: string }>;
+      filterModel: Record<string, unknown>;
+      successCallback: (rowsThisBlock: any[], lastRow: number) => void;
+      failCallback: () => void;
+    }) => {
+      const qs = new URLSearchParams({
+        limit: String(Math.min(params.endRow - params.startRow, 500)),
+        offset: String(params.startRow),
+      });
+      if (keyId()) qs.set("key_id", keyId());
+      if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+      if (Object.keys(params.filterModel).length > 0) {
+        qs.set("filters", JSON.stringify(params.filterModel));
+      }
+      try {
+        const j = await api<{ events: any[]; total: number }>(
+          "GET",
+          `/api/usage/events?${qs.toString()}`,
+        );
+        params.successCallback(j.events, j.total);
+      } catch {
+        params.failCallback();
+      }
+    },
+  };
 
   const keyOptions = createMemo(() => [
     { value: "", label: "All keys" },
@@ -212,7 +244,7 @@ export default function UsagePage() {
             />
           }
         >
-          <div class="px-1 py-1" {...usalItems("fade-u", 90)}>
+          <div class="px-1 py-1" {...usalItems("fade-u", 60)}>
             <UsageGrid columnDefs={byModelCols} rowData={breakdown()} pageSize={15} storageKey="llmgw-grid:usage.by-model" />
           </div>
         </Show>
@@ -221,16 +253,23 @@ export default function UsagePage() {
       <Card>
         <CardHeader
           title="Recent requests"
-          subtitle={`${fmtNum(events()?.total ?? 0)} events`}
+          subtitle={`${fmtNum(eventCount() ?? 0)} events`}
         />
         <Show
-          when={(events()?.events.length ?? 0) > 0}
+          when={(eventCount() ?? 0) > 0}
           fallback={
             <EmptyState icon={Icons.chart} title="No requests in this window" />
           }
         >
-          <div class="px-2 py-2">
-            <UsageGrid columnDefs={eventCols} rowData={events()?.events} pageSize={RECENT_PAGE} heightClass="h-[560px]" storageKey="llmgw-grid:usage.recent" />
+          <div class="px-2 py-2" {...usalItems("fade-u", 60)}>
+            <UsageGrid
+              columnDefs={eventCols}
+              datasource={eventsDatasource}
+              cacheBlockSize={EVENTS_BLOCK}
+              refreshDeps={keyId()}
+              heightClass="h-[560px]"
+              storageKey="llmgw-grid:usage.recent"
+            />
           </div>
         </Show>
       </Card>

@@ -1,4 +1,4 @@
-import { Show, onCleanup } from "solid-js";
+import { Show, createEffect, onCleanup } from "solid-js";
 import AgGridSolid, { type AgGridSolidRef } from "solid-ag-grid";
 import type { ColDef, ColGroupDef } from "ag-grid-community";
 
@@ -77,8 +77,9 @@ const PAGE_SIZE_SELECTOR: number[] = [15, 20, 25, 50, 100, 250];
 
 export function UsageGrid(props: {
   columnDefs: Array<ColDef | ColGroupDef>;
-  /** undefined = data still loading (grid mounts only when ready). */
-  rowData: unknown[] | undefined;
+  /** undefined = data still loading (grid mounts only when ready). Optional in
+   *  datasource (infinite row model) mode. */
+  rowData?: unknown[] | undefined;
   pageSize?: number;
   /** Tailwind height class for the grid wrapper (default h-[420px]). */
   heightClass?: string;
@@ -90,7 +91,29 @@ export function UsageGrid(props: {
   suppressRowClickSelection?: boolean;
   getRowId?: (p: { data: any }) => string;
   onSelectionChanged?: (e: any) => void;
+  /** Infinite row model (server-driven blocks; mutually exclusive with
+   *  pagination props). The datasource maps startRow/endRow to
+   *  limit/offset API calls with sort/filter forwarded to SQL. */
+  datasource?: {
+    getRows: (params: {
+      startRow: number;
+      endRow: number;
+      sortModel: Array<{ colId: string; sort: string }>;
+      filterModel: Record<string, unknown>;
+      successCallback: (rowsThisBlock: unknown[], lastRow: number) => void;
+      failCallback: () => void;
+    }) => void;
+  };
+  /** Block size the grid requests per fetch (default 100). */
+  cacheBlockSize?: number;
+  /** Increment to force the grid to re-pull its row cache (e.g. top-level
+   *  filter changed). */
+  refreshDeps?: unknown;
 }) {
+  createEffect(() => {
+    props.refreshDeps; // track
+    gridRef?.api?.purgeInfiniteCache?.();
+  });
   const darkClass = () => {
     // Track the signal (updates live on toggle) but trust the DOM attribute —
     // it is the single source of truth that the whole app already styles by.
@@ -153,15 +176,27 @@ export function UsageGrid(props: {
       class={`w-full max-h-[72vh] ${darkClass()} ${props.heightClass ?? "h-[420px]"} flex flex-col`}
     >
       <div class="min-h-0 flex-1">
-        <Show when={props.rowData}>
+        <Show when={props.rowData ?? props.datasource}>
           <AgGridSolid
             ref={gridRef}
             rowData={props.rowData!}
             columnDefs={props.columnDefs}
             defaultColDef={DEFAULT_COL_DEF}
-            pagination
-            paginationPageSize={props.pageSize ?? 25}
-            paginationPageSizeSelector={PAGE_SIZE_SELECTOR}
+            {...(props.datasource
+              ? {
+                  rowModelType: "infinite" as const,
+                  datasource: props.datasource,
+                  cacheBlockSize: props.cacheBlockSize ?? 100,
+                  maxBlocksInCache: 8,
+                  maxConcurrentDatasourceRequests: 2,
+                  infiniteInitialRowCount: 1,
+                  blockLoadDebounceMillis: 50,
+                }
+              : {
+                  pagination: true,
+                  paginationPageSize: props.pageSize ?? 25,
+                  paginationPageSizeSelector: PAGE_SIZE_SELECTOR,
+                })}
             animateRows
             rowHeight={38}
             suppressCellFocus

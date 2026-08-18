@@ -232,7 +232,7 @@ export default function AdminStatsPage() {
               title="Top users"
               subtitle={`By category · ${windowLabel(days())}`}
             />
-            <div class="p-2">
+            <div class="p-2" {...usalItems("fade-u", 60)}>
               <UsageGrid
                 columnDefs={userCols}
                 rowData={breakdown()?.users}
@@ -247,7 +247,7 @@ export default function AdminStatsPage() {
               title="Models by provider"
               subtitle={`Model × provider breakdown · ${windowLabel(days())}`}
             />
-            <div class="p-2">
+            <div class="p-2" {...usalItems("fade-u", 60)}>
               <UsageGrid
                 columnDefs={modelCols}
                 rowData={breakdown()?.models}

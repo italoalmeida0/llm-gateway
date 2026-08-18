@@ -667,6 +667,64 @@ describe("gateway end-to-end", () => {
     expect(m.in_tok + m.cache_tok + m.out_tok).toBeGreaterThan(0);
   });
 
+  test("usage carries the upstream provider dimension", async () => {
+    // /api/usage/breakdown — fine-grained per model × provider × upstream key
+    const bd = await api("/api/usage/breakdown?days=7", { token: userToken });
+    expect(bd.status).toBe(200);
+    const rows = bd.json.rows;
+    expect(rows.length).toBeGreaterThan(0);
+    const modelRow = rows.find((x: any) => x.model === "fake-llm-1");
+    expect(modelRow).toBeTruthy();
+    expect(modelRow.key_name).toBeTruthy();
+    // the passthrough test provider routed the request → a real provider id
+    expect(modelRow.provider_id).toBeTruthy();
+    expect(modelRow.provider_name).toBeTruthy();
+    expect(modelRow.in_tok + modelRow.cache_tok + modelRow.out_tok).toBeGreaterThan(0);
+
+    // events resolve provider ids/names server-side
+    const ev = await api("/api/usage/events?limit=20", { token: userToken });
+    expect(ev.status).toBe(200);
+    expect(ev.json.events.length).toBeGreaterThan(0);
+    expect(ev.json.events[0].provider_id).toBeTruthy();
+    expect(ev.json.events[0].provider_name).toBeTruthy();
+
+    // admin global breakdown: per-user aggregate + detailed model rows
+    const ab = await api("/api/admin/usage-breakdown?days=7", { token: adminToken });
+    expect(ab.status).toBe(200);
+    expect(ab.json.users.length).toBeGreaterThan(0);
+    expect(ab.json.users[0].email).toBeTruthy();
+    expect(ab.json.users[0].reqs).toBeGreaterThan(0);
+    const am = ab.json.models.find((x: any) => x.model === "fake-llm-1");
+    expect(am).toBeTruthy();
+    expect(am.provider_id).toBeTruthy();
+    expect(am.provider_name).toBeTruthy();
+    expect(am.reqs).toBeGreaterThan(0);
+
+    // provider filter narrows both admin views to that provider
+    const pid = am.provider_id as string;
+    const filtered = await api(`/api/admin/usage-breakdown?days=7&provider_id=${pid}`, {
+      token: adminToken,
+    });
+    expect(filtered.status).toBe(200);
+    expect(filtered.json.models.length).toBeGreaterThan(0);
+    for (const m of filtered.json.models) expect(m.provider_id).toBe(pid);
+    for (const u of filtered.json.users) expect(u.reqs).toBeGreaterThan(0);
+
+    // bogus key ids / user ids stay scoped (return empty, never leak)
+    const badKey = await api("/api/usage/breakdown?days=7&key_id=not-a-key", { token: userToken });
+    expect(badKey.json.rows).toEqual([]);
+    const badUser = await api("/api/admin/usage-breakdown?days=7&user_id=ghost", {
+      token: adminToken,
+    });
+    expect(badUser.json.users.length).toBe(0);
+    expect(badUser.json.models.length).toBe(0);
+
+    // days=all supports the full window
+    const all = await api("/api/usage/breakdown?days=all", { token: userToken });
+    expect(all.status).toBe(200);
+    expect(all.json.rows.length).toBeGreaterThanOrEqual(bd.json.rows.length);
+  });
+
   test("hour granularity endpoints feed the 1D views", async () => {
     const r = await api("/api/usage/daily?hours=24", { token: userToken });
     expect(r.status).toBe(200);

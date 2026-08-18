@@ -305,3 +305,37 @@ input[type="number"]::-webkit-inner-spin-button {
     animation-duration: 0.01ms !important;
   }
 }
+
+/*
+ * AG Grid theme → app tokens. AG Grid's --ag-* variables cascade from the
+ * theme class; these rules (higher specificity than the .ag-theme-* base)
+ * remap them to the semantic scale so white/dark flip stays in sync with
+ * the rest of the dashboard. Never hardcode hex here.
+ */
+html[data-theme="light"] .ag-theme-quartz,
+html[data-theme="light"] .ag-theme-quartz-dark,
+html[data-theme="dark"] .ag-theme-quartz,
+html[data-theme="dark"] .ag-theme-quartz-dark {
+  --ag-background-color: var(--elev);
+  --ag-foreground-color: var(--ink-200);
+  --ag-secondary-foreground-color: var(--ink-300);
+  --ag-border-color: var(--line);
+  --ag-secondary-border-color: var(--line);
+  --ag-header-background-color: var(--card);
+  --ag-header-foreground-color: var(--ink-400);
+  --ag-header-column-separator-color: var(--line);
+  --ag-row-hover-color: color-mix(in srgb, var(--ink-500) 18%, transparent);
+  --ag-selected-row-background-color: color-mix(in srgb, var(--accent-strong) 10%, transparent);
+  --ag-active-color: var(--accent-strong);
+  --ag-accent-color: var(--accent);
+  --ag-checkbox-checked-color: var(--accent-strong);
+  --ag-icon-font-color: var(--ink-300);
+  --ag-input-focus-border-color: var(--accent-strong);
+  --ag-input-border-color: var(--line);
+  --ag-input-focus-box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-strong) 18%, transparent);
+  --ag-menu-background-color: var(--elev);
+  --ag-menu-border-color: var(--line);
+  --ag-tooltip-background-color: var(--elev);
+  --ag-tooltip-border-color: var(--line);
+  --ag-font-family: var(--font-sans);
+}

@@ -1,6 +1,6 @@
 import { requireAuth } from "../auth";
 import { ok } from "../http";
-import { userDailySeries, userEvents, userSummary, keyDailySeries, hourlySeries } from "../usage";
+import { userDailySeries, userEvents, userSummary, keyDailySeries, hourlySeries, userUsageBreakdown } from "../usage";
 import { db, type ApiKeyRow } from "../db";
 
 /** /api/usage — the authenticated user's own consumption data. */
@@ -43,10 +43,28 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
       const key = db.prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?").get(keyId);
       if (!key || key.user_id !== ctx.user.id) return ok({ events: [], total: 0 }, req);
     }
-    const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 25), 1), 100);
+    const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 500);
     const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);
     const { rows, total } = userEvents(ctx.user.id, { keyId, limit, offset });
     return ok({ events: rows, total, limit, offset }, req);
+  }
+
+  if (path === "/api/usage/breakdown" && req.method === "GET") {
+    const ctx = await requireAuth(req);
+    const daysParam = url.searchParams.get("days");
+    const keyId = url.searchParams.get("key_id");
+    if (keyId) {
+      const key = db.prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?").get(keyId);
+      if (!key || key.user_id !== ctx.user.id) return ok({ rows: [] }, req);
+    }
+    const providerId = url.searchParams.get("provider_id") || undefined;
+    const days = daysParam === "all" ? "all" : daysParam;
+    const rows = userUsageBreakdown(ctx.user.id, {
+      keyId: keyId ?? undefined,
+      providerId,
+      days: days as number | "all",
+    });
+    return ok({ rows }, req);
   }
 
   if (path === "/api/usage/by-model" && req.method === "GET") {

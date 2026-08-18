@@ -313,7 +313,7 @@ function AppShell(props: { children: JSX.Element }) {
           </div>
         </header>
 
-        <div class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-8">
+        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
           {props.children}
         </div>
       </main>

@@ -101,6 +101,7 @@ if (!keep) {
   db.exec("DELETE FROM usage_events");
   db.exec("DELETE FROM usage_daily");
   db.exec("DELETE FROM usage_model_daily");
+  db.exec("DELETE FROM usage_model_provider_daily");
 }
 
 const insertEvent = db.prepare(
@@ -115,6 +116,17 @@ const upsertModelDaily = db.prepare(
   `INSERT INTO usage_model_daily (key_id, user_id, date, proto, model, in_tok, cache_tok, out_tok, reqs)
    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
    ON CONFLICT(key_id, date, proto, model)
+   DO UPDATE SET in_tok = in_tok + excluded.in_tok,
+                 cache_tok = cache_tok + excluded.cache_tok,
+                 out_tok = out_tok + excluded.out_tok,
+                 reqs = reqs + excluded.reqs`,
+);
+// Deepest rollup (migration 011): seeded passthrough-style mock data carries
+// no provider dimension, so these rows aggregate per (key, date, model).
+const upsertModelProviderDaily = db.prepare(
+  `INSERT INTO usage_model_provider_daily (key_id, user_id, date, proto, provider_id, provider_key_id, model, upstream_model, in_tok, cache_tok, out_tok, reqs)
+   VALUES (?, ?, ?, ?, '', '', ?, '', ?, ?, ?, ?)
+   ON CONFLICT(key_id, date, proto, provider_id, provider_key_id, model, upstream_model)
    DO UPDATE SET in_tok = in_tok + excluded.in_tok,
                  cache_tok = cache_tok + excluded.cache_tok,
                  out_tok = out_tok + excluded.out_tok,
@@ -218,6 +230,7 @@ db.transaction(() => {
   }
   for (const a of modelDaily.values()) {
     upsertModelDaily.run(a.keyId, a.userId, a.date, a.proto, a.model, a.inTok, a.cacheTok, a.outTok, a.reqs);
+    upsertModelProviderDaily.run(a.keyId, a.userId, a.date, a.proto, a.model, a.inTok, a.cacheTok, a.outTok, a.reqs);
   }
 })();
 

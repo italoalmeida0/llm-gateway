@@ -1,19 +1,26 @@
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, Show } from "solid-js";
 
-import { api, type DailyPoint } from "../../api";
+import { api, type DailyPoint, type ProviderDto } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { DailyChart } from "../../charts";
 import {
-  Badge,
   Card,
   CardHeader,
   Icons,
   Segmented,
+  Select,
   StatCard,
   fmtNum,
   windowLabel,
 } from "../../ui";
+import {
+  UsageGrid,
+  ProtoCell,
+  countFormatter,
+  tokenFormatter,
+} from "../../aggrid";
+import type { ColDef } from "ag-grid-community";
 
 interface Buckets {
   in_tok: number;
@@ -24,20 +31,6 @@ interface Buckets {
 
 interface StatsDto {
   series: DailyPoint[];
-  perUser: Array<
-    {
-      user_id: string;
-      email: string;
-    } & Buckets
-  >;
-  perModel: Array<
-    {
-      model: string;
-      proto: string;
-    } & Buckets
-  >;
-  totals: Buckets;
-  today: Buckets;
   counts: {
     users: number;
     keys: number;
@@ -45,6 +38,49 @@ interface StatsDto {
     providers: number;
   };
 }
+
+interface UserRow extends Buckets {
+  user_id: string;
+  email: string;
+}
+
+interface ModelRow extends Buckets {
+  model: string;
+  proto: string;
+  provider_id: string;
+  provider_name: string | null;
+  provider_key_id: string;
+  provider_key_label: string | null;
+  upstream_model: string;
+}
+
+const fmtOrDash = (v: unknown) => (v == null || v === "" ? "—" : String(v));
+
+const userCols: ColDef<UserRow>[] = [
+  { field: "email", headerName: "User", flex: 1.4 },
+  { field: "in_tok", headerName: "In", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "cache_tok", headerName: "Cache", width: 120, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "out_tok", headerName: "Out", width: 120, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "reqs", headerName: "Requests", width: 110, type: "rightAligned", valueFormatter: countFormatter },
+];
+
+const modelCols: ColDef<ModelRow>[] = [
+  { field: "model", headerName: "Model", flex: 1.2, valueFormatter: (p) => fmtOrDash(p.value) },
+  { field: "proto", headerName: "Proto", width: 110, cellRenderer: ProtoCell },
+  { field: "provider_name", headerName: "Provider", flex: 1, valueFormatter: (p) => fmtOrDash(p.value) },
+  { field: "upstream_model", headerName: "Upstream", flex: 1, valueFormatter: (p) => fmtOrDash(p.value) },
+  {
+    field: "provider_key_id",
+    headerName: "Upstream key",
+    flex: 0.8,
+    valueGetter: (p) => p.data?.provider_key_label || p.data?.provider_key_id?.slice(0, 8) || "—",
+    valueFormatter: (p) => p.value,
+  },
+  { field: "reqs", headerName: "Requests", width: 100, type: "rightAligned", valueFormatter: countFormatter },
+  { field: "in_tok", headerName: "In", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "cache_tok", headerName: "Cache", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "out_tok", headerName: "Out", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
+];
 
 /** Card heading split in two tight spans so long windows never wrap. */
 function CardLabel(props: { title: string; window: string }) {
@@ -60,12 +96,36 @@ function CardLabel(props: { title: string; window: string }) {
 
 export default function AdminStatsPage() {
   const [days, setDays] = createSignal("14");
+  const [providerId, setProviderId] = createSignal("");
+
   const [stats] = createResource(days, async (d) => {
     const j = await api<StatsDto>(
       "GET",
       `/api/admin/stats?${d === "1" ? "hours=24" : `days=${d}`}`,
     );
     return j;
+  });
+
+  const [providers] = createResource(async () => {
+    const j = await api<{ providers: ProviderDto[] }>("GET", "/api/admin/providers");
+    return j.providers;
+  });
+  const providerOptions = createMemo(() => [
+    { value: "", label: "All providers" },
+    ...(providers() ?? []).map((p) => ({ value: p.id, label: p.name })),
+  ]);
+
+  const breakdownQuery = createMemo(() => ({
+    d: days(),
+    p: providerId(),
+  }));
+  const [breakdown] = createResource(breakdownQuery, async (q) => {
+    const params = new URLSearchParams({ days: q.d });
+    if (q.p) params.set("provider_id", q.p);
+    return api<{ users: UserRow[]; models: ModelRow[] }>(
+      "GET",
+      `/api/admin/usage-breakdown?${params.toString()}`,
+    );
   });
 
   // Window totals are summed from the displayed series (per bucket — never
@@ -90,18 +150,28 @@ export default function AdminStatsPage() {
         title="Global overview"
         subtitle="All users, all keys"
         right={
-          <Segmented
-            value={days()}
-            onChange={setDays}
-            options={[
-              { value: "1", label: "1D" },
-              { value: "7", label: "7D" },
-              { value: "14", label: "14D" },
-              { value: "30", label: "30D" },
-              { value: "90", label: "90D" },
-              { value: "all", label: "ALL" },
-            ]}
-          />
+          <div class="flex flex-wrap items-end gap-3">
+            <div class="w-56">
+              <Select
+                label="Provider"
+                value={providerId()}
+                onChange={setProviderId}
+                options={providerOptions()}
+              />
+            </div>
+            <Segmented
+              value={days()}
+              onChange={setDays}
+              options={[
+                { value: "1", label: "1D" },
+                { value: "7", label: "7D" },
+                { value: "14", label: "14D" },
+                { value: "30", label: "30D" },
+                { value: "90", label: "90D" },
+                { value: "all", label: "ALL" },
+              ]}
+            />
+          </div>
         }
       />
 
@@ -162,88 +232,28 @@ export default function AdminStatsPage() {
           <Card>
             <CardHeader
               title="Top users"
-              subtitle={`Tokens by category · ${windowLabel(days())}`}
+              subtitle={`By category · ${windowLabel(days())}`}
             />
-            <div class="overflow-x-auto">
-              <table class="w-full text-xs">
-                <thead>
-                  <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
-                    <th class="font-medium px-6 py-3">User</th>
-                    <th class="font-medium px-3 py-3 text-right">In</th>
-                    <th class="font-medium px-3 py-3 text-right">Cache</th>
-                    <th class="font-medium px-3 py-3 text-right">Out</th>
-                    <th class="font-medium px-3 py-3 text-right">Requests</th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-line">
-                  <For each={stats()!.perUser}>
-                    {(u) => (
-                      <tr class="transition-colors hover:bg-ink-800/30">
-                        <td class="px-6 py-3 text-ink-200">{u.email}</td>
-                        <td class="px-3 py-3 text-right tabular-nums">
-                          {fmtNum(u.in_tok)}
-                        </td>
-                        <td class="px-3 py-3 text-right tabular-nums">
-                          {fmtNum(u.cache_tok)}
-                        </td>
-                        <td class="px-3 py-3 text-right tabular-nums">
-                          {fmtNum(u.out_tok)}
-                        </td>
-                        <td class="px-3 py-3 text-right tabular-nums text-ink-400">
-                          {fmtNum(u.reqs)}
-                        </td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
+            <div class="p-2">
+              <UsageGrid
+                columnDefs={userCols}
+                rowData={breakdown()?.users ?? []}
+                pageSize={15}
+              />
             </div>
           </Card>
 
           <Card>
             <CardHeader
-              title="Top models"
-              subtitle={`Tokens by category · ${windowLabel(days())}`}
+              title="Models by provider"
+              subtitle={`Model × provider breakdown · ${windowLabel(days())}`}
             />
-            <div class="overflow-x-auto">
-              <table class="w-full text-xs">
-                <thead>
-                  <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
-                    <th class="font-medium px-6 py-3">Model</th>
-                    <th class="font-medium px-3 py-3">Proto</th>
-                    <th class="font-medium px-3 py-3 text-right">In</th>
-                    <th class="font-medium px-3 py-3 text-right">Cache</th>
-                    <th class="font-medium px-3 py-3 text-right">Out</th>
-                    <th class="font-medium px-3 py-3 text-right">Requests</th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-line">
-                  <For each={stats()!.perModel}>
-                    {(m) => (
-                      <tr class="transition-colors hover:bg-ink-800/30">
-                        <td class="px-6 py-3 text-ink-200">{m.model || "—"}</td>
-                        <td class="px-3 py-3">
-                          <Badge tone={m.proto === "openai" ? "blue" : "amber"}>
-                            {m.proto === "openai" ? "OpenAI" : "Anthropic"}
-                          </Badge>
-                        </td>
-                        <td class="px-3 py-3 text-right tabular-nums">
-                          {fmtNum(m.in_tok)}
-                        </td>
-                        <td class="px-3 py-3 text-right tabular-nums">
-                          {fmtNum(m.cache_tok)}
-                        </td>
-                        <td class="px-3 py-3 text-right tabular-nums">
-                          {fmtNum(m.out_tok)}
-                        </td>
-                        <td class="px-3 py-3 text-right tabular-nums text-ink-400">
-                          {fmtNum(m.reqs)}
-                        </td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
+            <div class="p-2">
+              <UsageGrid
+                columnDefs={modelCols}
+                rowData={breakdown()?.models ?? []}
+                pageSize={15}
+              />
             </div>
           </Card>
         </div>

@@ -1338,6 +1338,80 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     );
   }
 
+  // ================= usage breakdown (per user + per model × provider) =================
+
+  if (path === "/api/admin/usage-breakdown" && req.method === "GET") {
+    // Day-granularity breakdown over the migration-011 rollup (usage_model_
+    // provider_daily): feeds the AG Grid panels (per-user aggregate + the
+    // detailed model×provider×upstream×provider-key table) with optional
+    // provider/user filters. The 1D view is "today" via the rollup.
+    const daysAll = url.searchParams.get("days") === "all";
+    const days = daysAll ? "all" : Math.min(Number(url.searchParams.get("days") || 14), 365);
+    const providerId = url.searchParams.get("provider_id");
+    const userId = url.searchParams.get("user_id");
+
+    // users: aggregate per user, narrowed by provider and/or the window.
+    const uClauses: string[] = [];
+    const uParams: Array<string | number> = [];
+    if (!daysAll) {
+      uClauses.push("ud.date >= date('now', ?)");
+      uParams.push(`-${days as number} days`);
+    }
+    if (providerId) {
+      uClauses.push("ud.provider_id = ?");
+      uParams.push(providerId);
+    }
+    if (userId) {
+      uClauses.push("ud.user_id = ?");
+      uParams.push(userId);
+    }
+    const uWhere = uClauses.length ? `WHERE ${uClauses.join(" AND ")}` : "";
+    const users = db
+      .prepare(
+        `SELECT ud.user_id, u.email,
+                SUM(ud.in_tok) AS in_tok, SUM(ud.cache_tok) AS cache_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
+         FROM usage_model_provider_daily ud JOIN users u ON u.id = ud.user_id
+         ${uWhere}
+         GROUP BY ud.user_id
+         ORDER BY (SUM(ud.in_tok) + SUM(ud.cache_tok) + SUM(ud.out_tok)) DESC
+         LIMIT 2000`,
+      )
+      .all(...uParams);
+
+    // models: per model × provider × upstream model × provider key.
+    const mClauses: string[] = [];
+    const mParams: Array<string | number> = [];
+    if (!daysAll) {
+      mClauses.push("m.date >= date('now', ?)");
+      mParams.push(`-${days as number} days`);
+    }
+    if (providerId) {
+      mClauses.push("m.provider_id = ?");
+      mParams.push(providerId);
+    }
+    if (userId) {
+      mClauses.push("m.user_id = ?");
+      mParams.push(userId);
+    }
+    const mWhere = mClauses.length ? `WHERE ${mClauses.join(" AND ")}` : "";
+    const models = db
+      .prepare(
+        `SELECT m.model, m.proto, m.provider_id, p.name AS provider_name,
+                m.provider_key_id, pk.label AS provider_key_label, m.upstream_model,
+                SUM(m.in_tok) AS in_tok, SUM(m.cache_tok) AS cache_tok, SUM(m.out_tok) AS out_tok, SUM(m.reqs) AS reqs
+         FROM usage_model_provider_daily m
+         LEFT JOIN providers p ON p.id = m.provider_id
+         LEFT JOIN provider_keys pk ON pk.id = m.provider_key_id
+         ${mWhere}
+         GROUP BY m.model, m.proto, m.provider_id, m.provider_key_id, m.upstream_model
+         ORDER BY (SUM(m.in_tok) + SUM(m.cache_tok) + SUM(m.out_tok)) DESC
+         LIMIT 2000`,
+      )
+      .all(...mParams);
+
+    return ok({ users, models }, req);
+  }
+
   if (path === "/api/admin/audit" && req.method === "GET") {
     const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 200);
     const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);

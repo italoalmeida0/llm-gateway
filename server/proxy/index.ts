@@ -770,7 +770,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
     const wantsStream = (bodyJson as any)?.stream === true;
 
-    const record = (u: UsageResult, status: number, latencyMs: number, stream: boolean) => {
+    const record = (u: UsageResult, status: number, latencyMs: number, stream: boolean, cand: RouteCandidate) => {
       let inTok = u.inTok;
       if (u.estimated && bodyJson) {
         inTok = estimateBodyTokens(bodyJson);
@@ -790,6 +790,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         status,
         stream,
         estimated: u.estimated,
+        // Upstream dimension: which failover candidate actually answered.
+        providerId: cand.provider.row.id,
+        providerKeyId: cand.key.id,
+        upstreamModel: cand.upstreamModel,
       });
       touchKey(keyRow.id, ip);
 
@@ -819,10 +823,14 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       | { kind: "upstream"; status: number; body: string; headers: Headers }
       | { kind: "network"; status: number; timedOut: boolean }
       | null = null;
+    // The candidate that last made a fetch attempt — its provider/key/upstream
+    // model are attributed to the "all candidates failed" network record.
+    let lastAttempted: RouteCandidate | null = null;
 
     // ---- forward, with failover across the candidate chain ----
     for (const cand of candidates.slice(0, LIMITS.maxFailoverAttempts)) {
       if (keyBlockedNow(cand.key.id)) continue;
+      lastAttempted = cand;
       // Trailing "/" would produce "//chat/completions" — new rows are
       // stripped at write time, this covers legacy rows still carrying one.
       const base = (proto === "openai" ? cand.provider.row.openai_base_url : cand.provider.row.anthropic_base_url)!
@@ -920,7 +928,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // key itself clearly works, so its transient counters reset.
         markProviderKeyOk(cand.key);
         const ct = upstream.headers.get("content-type") || "";
-        record(parseBufferedUsage(ct, errBody), upstream.status, Math.round(performance.now() - started), false);
+        record(parseBufferedUsage(ct, errBody), upstream.status, Math.round(performance.now() - started), false, cand);
         return new Response(errBody, {
           status: upstream.status,
           headers: buildClientHeaders(upstream.headers, requestId),
@@ -944,7 +952,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         const finalize = (status: number) => {
           if (counted) return;
           counted = true;
-          record(meter.result(0), status, Math.round(performance.now() - started), true);
+          record(meter.result(0), status, Math.round(performance.now() - started), true, cand);
         };
 
         const idleLimit = LIMITS.proxyStreamIdleMs;
@@ -1014,7 +1022,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
       // ---- buffered relay ----
       const respText = await upstream.text();
-      record(parseBufferedUsage(contentType, respText), upstream.status, Math.round(performance.now() - started), false);
+      record(parseBufferedUsage(contentType, respText), upstream.status, Math.round(performance.now() - started), false, cand);
 
       return new Response(respText, { status: upstream.status, headers: clientHeaders });
     }
@@ -1025,7 +1033,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // Deliver the most recent UPSTREAM error (sanitized headers as always):
       // clients want the real cause (e.g. insufficient_quota), not a 503.
       const f = lastFailure;
-      record(parseBufferedUsage(f.headers.get("content-type") || "", f.body), f.status, finalLatency, false);
+      record(parseBufferedUsage(f.headers.get("content-type") || "", f.body), f.status, finalLatency, false, lastAttempted!);
       return new Response(f.body, { status: f.status, headers: buildClientHeaders(f.headers, requestId) });
     }
     if (lastFailure?.kind === "network") {
@@ -1033,6 +1041,9 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         keyId: keyRow.id, userId: keyRow.user_id, proto, model: routedPublicModel ?? "",
         inTok: 0, cacheTok: 0, outTok: 0, latencyMs: finalLatency,
         status: req.signal.aborted ? 499 : lastFailure.status, stream: wantsStream, estimated: false,
+        providerId: lastAttempted?.provider.row.id ?? "",
+        providerKeyId: lastAttempted?.key.id ?? "",
+        upstreamModel: lastAttempted?.upstreamModel ?? "",
       });
       return envelopeError(
         proto,

@@ -54,8 +54,12 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
     (sanitized), or 503 "no upstream candidate" when all were skipped.
 - **Usage accounting** (`server/usage.ts`): buffered writes (flush 1s/100 events),
   `usage_daily` aggregates (plus `usage_model_daily` — per key/date/model rollup
-  written by the same flush; the per-model dashboard queries read it, NOT raw
-  `usage_events`), per-key spend cached 2s — enforcement is *eventually
+  and `usage_model_provider_daily` (migration 011) — the SAME rollup one
+  dimension deeper: `(provider_id, provider_key_id, upstream_model)`; the proxy
+  stamps every event with the failover candidate that answered, and the AG Grid
+  breakdown queries (`/api/usage/breakdown`, `/api/admin/usage-breakdown`) read
+  it, NOT raw `usage_events`; pre-011 rows have empty provider fields and show
+  as "—"). Per-key spend cached 2s — enforcement is *eventually
   consistent* by design; total-exhaustion additionally flips `api_keys.status`
   optimistically in the proxy hot path. Tokens are tracked in THREE buckets,
   never one lump sum: `in_tok` (cache-free input), `cache_tok` (cached input,
@@ -153,7 +157,14 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   `echarts/core` with only bar/line + grid/tooltip + canvas in
   `web/src/echarts.tsx`; colors are resolved from the `--chart-*` CSS vars at
   render time so white/dark flip for free).
-  `@fontsource-variable/inter` is a bundled dev asset (no runtime CDN).
+  Usage tables are AG Grid (`ag-grid-community` + `solid-ag-grid`,
+  user-sanctioned — wrapper in `web/src/aggrid.tsx`): solid-ag-grid pins
+  `ag-grid-community@31.1.1` EXACTLY — keep the top-level dep on the same
+  version or bun nests a second copy and types diverge. Theme flips via the
+  `ag-theme-quartz(-dark)` class picked from the `theme` signal; the `--ag-*`
+  CSS variables are remapped to the semantic tokens in
+  `style.tailwindcss.css` (never hardcode hex). `@fontsource-variable/inter`
+  is a bundled dev asset (no runtime CDN).
   Bun-native or hand-rolled beats a new dep.
 
 ## Commands

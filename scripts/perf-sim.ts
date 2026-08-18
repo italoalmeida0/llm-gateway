@@ -201,6 +201,7 @@ try {
         usage_events: rows.usage_events,
         usage_daily: rows.usage_daily,
         usage_model_daily: rows.usage_model_daily,
+        usage_model_provider_daily: rows.usage_model_provider_daily,
         audit_log: rows.audit_log,
         sessions: rows.sessions,
         models: rows.models,

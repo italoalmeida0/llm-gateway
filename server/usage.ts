@@ -28,6 +28,11 @@ export interface UsageEvent {
   status: number;
   stream: boolean;
   estimated: boolean;
+  /** Upstream dimension (which candidate of the failover chain answered).
+   *  Empty strings on pre-011 events. */
+  providerId?: string;
+  providerKeyId?: string;
+  upstreamModel?: string;
   ts?: number;
 }
 
@@ -51,8 +56,8 @@ export function recordUsage(ev: UsageEvent): void {
 }
 
 const insertEvent = db.prepare(
-  `INSERT INTO usage_events (key_id, user_id, ts, proto, model, in_tok, cache_tok, out_tok, latency_ms, status, stream, estimated)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  `INSERT INTO usage_events (key_id, user_id, ts, proto, model, in_tok, cache_tok, out_tok, latency_ms, status, stream, estimated, provider_id, provider_key_id, upstream_model)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 );
 const upsertDaily = db.prepare(
   `INSERT INTO usage_daily (key_id, user_id, date, in_tok, cache_tok, out_tok, reqs)
@@ -69,6 +74,19 @@ const upsertModelDaily = db.prepare(
   `INSERT INTO usage_model_daily (key_id, user_id, date, proto, model, in_tok, cache_tok, out_tok, reqs)
    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
    ON CONFLICT(key_id, date, proto, model)
+   DO UPDATE SET in_tok = in_tok + excluded.in_tok,
+                 cache_tok = cache_tok + excluded.cache_tok,
+                 out_tok = out_tok + excluded.out_tok,
+                 reqs = reqs + 1`,
+);
+// Deepest rollup (migration 011): adds the upstream dimensions — provider,
+// provider key and upstream model id — powering the AG Grid usage breakdown
+// (filter by provider / upstream model / provider key) without scanning
+// usage_events. Written alongside the two shallower rollups.
+const upsertModelProviderDaily = db.prepare(
+  `INSERT INTO usage_model_provider_daily (key_id, user_id, date, proto, provider_id, provider_key_id, model, upstream_model, in_tok, cache_tok, out_tok, reqs)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+   ON CONFLICT(key_id, date, proto, provider_id, provider_key_id, model, upstream_model)
    DO UPDATE SET in_tok = in_tok + excluded.in_tok,
                  cache_tok = cache_tok + excluded.cache_tok,
                  out_tok = out_tok + excluded.out_tok,
@@ -97,10 +115,26 @@ export function flushUsage(): void {
         ev.status,
         ev.stream ? 1 : 0,
         ev.estimated ? 1 : 0,
+        ev.providerId ?? "",
+        ev.providerKeyId ?? "",
+        ev.upstreamModel ?? "",
       );
       const date = utcDate(ts);
       upsertDaily.run(ev.keyId, ev.userId, date, ev.inTok, ev.cacheTok, ev.outTok);
       upsertModelDaily.run(ev.keyId, ev.userId, date, ev.proto, model, ev.inTok, ev.cacheTok, ev.outTok);
+      upsertModelProviderDaily.run(
+        ev.keyId,
+        ev.userId,
+        date,
+        ev.proto,
+        ev.providerId ?? "",
+        ev.providerKeyId ?? "",
+        model,
+        ev.upstreamModel ?? "",
+        ev.inTok,
+        ev.cacheTok,
+        ev.outTok,
+      );
       affectedKeys.add(ev.keyId);
     }
   })();
@@ -263,19 +297,82 @@ export function userSummary(userId: string) {
   return { today, month, total };
 }
 
+/**
+ * Detailed per-key × model × (provider × upstream-model × provider key) rollup read
+ * (migration 011's usage_model_provider_daily) for the dashboard grids.
+ * Joins resolve display names; the grid itself filters/sorts client-side.
+ */
+export function userUsageBreakdown(
+  userId: string,
+  opts: { keyId?: string; providerId?: string; days: number | "all"; limit?: number },
+) {
+  const limit = opts.limit ?? 2000;
+  const clauses: string[] = ["m.user_id = ?"];
+  const params: Array<string | number> = [userId];
+  if (opts.keyId) {
+    clauses.push("m.key_id = ?");
+    params.push(opts.keyId);
+  }
+  if (opts.providerId) {
+    clauses.push("m.provider_id = ?");
+    params.push(opts.providerId);
+  }
+  if (opts.days !== "all") {
+    clauses.push("m.date >= date('now', ?)");
+    params.push(`-${Math.min(Math.max(Number(opts.days) || 14, 1), 365)} days`);
+  }
+  return db
+    .prepare(
+      `SELECT m.key_id, k.name AS key_name, m.model, m.proto,
+              m.provider_id, p.name AS provider_name, m.provider_key_id, pk.label AS provider_key_label,
+              m.upstream_model,
+              SUM(m.in_tok) AS in_tok, SUM(m.cache_tok) AS cache_tok, SUM(m.out_tok) AS out_tok, SUM(m.reqs) AS reqs
+       FROM usage_model_provider_daily m
+       JOIN api_keys k ON k.id = m.key_id
+       LEFT JOIN providers p ON p.id = m.provider_id
+       LEFT JOIN provider_keys pk ON pk.id = m.provider_key_id
+       WHERE ${clauses.join(" AND ")}
+       GROUP BY m.key_id, m.model, m.proto, m.provider_id, m.provider_key_id, m.upstream_model
+       ORDER BY (SUM(m.in_tok) + SUM(m.cache_tok) + SUM(m.out_tok)) DESC
+       LIMIT ?`,
+    )
+    .all(...params, limit) as Array<{
+    key_id: string;
+    key_name: string;
+    model: string;
+    proto: "openai" | "anthropic";
+    provider_id: string;
+    provider_name: string | null;
+    provider_key_id: string;
+    provider_key_label: string | null;
+    upstream_model: string;
+    in_tok: number;
+    cache_tok: number;
+    out_tok: number;
+    reqs: number;
+  }>;
+}
+
 export function userEvents(userId: string, opts: { keyId?: string; limit: number; offset: number }) {
-  const where = opts.keyId ? "user_id = ? AND key_id = ?" : "user_id = ?";
+  const where = opts.keyId ? "e.user_id = ? AND e.key_id = ?" : "e.user_id = ?";
   const params = opts.keyId ? [userId, opts.keyId] : [userId];
   const rows = db
     .prepare(
-      `SELECT id, key_id, ts, proto, model, in_tok, cache_tok, out_tok, latency_ms, status, stream
-       FROM usage_events WHERE ${where}
-       ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`,
+      `SELECT e.id, e.key_id, k.name AS key_name, e.ts, e.proto, e.model,
+              e.in_tok, e.cache_tok, e.out_tok, e.latency_ms, e.status, e.stream,
+              e.provider_id, p.name AS provider_name, e.provider_key_id, pk.label AS provider_key_label,
+              e.upstream_model
+       FROM usage_events e
+       JOIN api_keys k ON k.id = e.key_id
+       LEFT JOIN providers p ON p.id = e.provider_id
+       LEFT JOIN provider_keys pk ON pk.id = e.provider_key_id
+       WHERE ${where}
+       ORDER BY e.ts DESC, e.id DESC LIMIT ? OFFSET ?`,
     )
     .all(...(params as [string, string]), opts.limit, opts.offset);
   const count = db
     .prepare<{ n: number }, [string, string] | [string]>(
-      `SELECT COUNT(*) AS n FROM usage_events WHERE ${where}`,
+      `SELECT COUNT(*) AS n FROM usage_events e WHERE ${where}`,
     )
     // @ts-expect-error tuple spread fine at runtime
     .get(...params)!.n;

@@ -569,6 +569,17 @@ export function backfill(
                    out_tok = out_tok + excluded.out_tok,
                    reqs = reqs + 1`,
   );
+  // Deepest rollup (migration 011): passthrough-style sim data carries no
+  // provider dimension (empty strings) — mirrors the proxy flush upsert.
+  const upsertModelProviderDaily = rawDb.prepare(
+    `INSERT INTO usage_model_provider_daily (key_id, user_id, date, proto, provider_id, provider_key_id, model, upstream_model, in_tok, cache_tok, out_tok, reqs)
+     VALUES (?, ?, ?, ?, '', '', ?, '', ?, ?, ?, 1)
+     ON CONFLICT(key_id, date, proto, provider_id, provider_key_id, model, upstream_model)
+     DO UPDATE SET in_tok = in_tok + excluded.in_tok,
+                   cache_tok = cache_tok + excluded.cache_tok,
+                   out_tok = out_tok + excluded.out_tok,
+                   reqs = reqs + 1`,
+  );
   const insertAudit = rawDb.prepare(
     "INSERT INTO audit_log (ts, actor_id, action, target, meta, ip) VALUES (?, ?, ?, ?, ?, ?)",
   );
@@ -594,6 +605,7 @@ export function backfill(
         // one upsert per request — exactly what the proxy's flush does
         upsertDaily.run(user.keyId, user.id, date, ev.inTok, ev.cacheTok, ev.outTok);
         upsertModelDaily.run(user.keyId, user.id, date, ev.proto, ev.model, ev.inTok, ev.cacheTok, ev.outTok);
+        upsertModelProviderDaily.run(user.keyId, user.id, date, ev.proto, ev.model, ev.inTok, ev.cacheTok, ev.outTok);
       }
       // audit trail for the day (~AUDIT_PER_USER_DAY rows/user, admin chips in too)
       const rnd = mulberry32(42_000 + u * 7_777 + (daysAlready + d) * 31);
@@ -627,6 +639,7 @@ export function tableCounts(rawDb: Database) {
     usage_events: c("usage_events"),
     usage_daily: c("usage_daily"),
     usage_model_daily: c("usage_model_daily"),
+    usage_model_provider_daily: c("usage_model_provider_daily"),
     audit_log: c("audit_log"),
     sessions: c("sessions"),
     models: c("models"),

@@ -1,28 +1,103 @@
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, Show } from "solid-js";
 
-import { api, type ApiKeyDto, type UsageEventDto } from "../api";
+import { api, type ApiKeyDto } from "../api";
 import { PageTitle } from "../index";
 import { usalItems } from "../motion";
 import { DailyChart } from "../charts";
 import {
-  Badge,
-  Btn,
   Card,
   CardHeader,
   EmptyState,
   Icons,
   Segmented,
   Select,
-  fmtDate,
   fmtNum,
   windowLabel,
 } from "../ui";
+import {
+  UsageGrid,
+  ProtoCell,
+  StatusCell,
+  latencyFormatter,
+  timeFormatter,
+  tokenFormatter,
+} from "../aggrid";
+import type { ColDef } from "ag-grid-community";
 
-const PAGE_SIZE = 25;
+const RECENT_PAGE = 50;
+
+interface BreakdownRow {
+  key_id: string;
+  key_name: string;
+  model: string;
+  proto: "openai" | "anthropic";
+  provider_id: string;
+  provider_name: string | null;
+  provider_key_id: string;
+  provider_key_label: string | null;
+  upstream_model: string;
+  in_tok: number;
+  cache_tok: number;
+  out_tok: number;
+  reqs: number;
+}
+
+const fmtOrDash = (v: unknown) => (v == null || v === "" ? "—" : String(v));
+
+const byModelCols: ColDef<BreakdownRow>[] = [
+  {
+    field: "model",
+    headerName: "Model",
+    flex: 1.2,
+    valueFormatter: (p) => fmtOrDash(p.value),
+  },
+  {
+    field: "proto",
+    headerName: "Proto",
+    width: 110,
+    cellRenderer: ProtoCell,
+  },
+  {
+    field: "provider_name",
+    headerName: "Provider",
+    flex: 1,
+    valueFormatter: (p) => fmtOrDash(p.value),
+  },
+  {
+    field: "upstream_model",
+    headerName: "Upstream",
+    flex: 1,
+    valueFormatter: (p) => fmtOrDash(p.value),
+  },
+  {
+    field: "provider_key_id",
+    headerName: "Upstream key",
+    flex: 0.8,
+    valueGetter: (p) => p.data?.provider_key_label || p.data?.provider_key_id?.slice(0, 8) || "—",
+    valueFormatter: (p) => p.value,
+  },
+  { field: "reqs", headerName: "Requests", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "in_tok", headerName: "In", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "cache_tok", headerName: "Cache", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "out_tok", headerName: "Out", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
+];
+
+const eventCols: ColDef[] = [
+  { field: "ts", headerName: "Time", width: 150, valueFormatter: timeFormatter },
+  { field: "key_name", headerName: "Key", width: 140, flex: 0.8 },
+  { field: "proto", headerName: "Protocol", width: 120, cellRenderer: ProtoCell },
+  { field: "provider_name", headerName: "Provider", width: 150, flex: 1, valueFormatter: (p) => fmtOrDash(p.value) },
+  { field: "model", headerName: "Model", flex: 1.2, valueFormatter: (p) => fmtOrDash(p.value) },
+  { field: "upstream_model", headerName: "Upstream", width: 150, valueFormatter: (p) => fmtOrDash(p.value) },
+  { field: "in_tok", headerName: "In", width: 90, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "cache_tok", headerName: "Cache", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "out_tok", headerName: "Out", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "latency_ms", headerName: "Latency", width: 100, type: "rightAligned", valueFormatter: latencyFormatter },
+  { field: "status", headerName: "Status", width: 90, type: "rightAligned", cellRenderer: StatusCell },
+];
 
 export default function UsagePage() {
   const [keyId, setKeyId] = createSignal("");
-  const [offset, setOffset] = createSignal(0);
   const [days, setDays] = createSignal("14");
   const [chartMetric, setChartMetric] = createSignal<"tokens" | "requests">(
     "tokens",
@@ -33,7 +108,7 @@ export default function UsagePage() {
     return j.keys;
   });
 
-  const query = createMemo(() => ({ k: keyId(), d: days(), o: offset() }));
+  const query = createMemo(() => ({ k: keyId(), d: days() }));
 
   const [series] = createResource(query, async (q) => {
     const hourly = q.d === "1";
@@ -44,34 +119,18 @@ export default function UsagePage() {
     return j.series;
   });
 
-  interface ModelRow {
-    model: string;
-    proto: string;
-    in_tok: number;
-    cache_tok: number;
-    out_tok: number;
-    reqs: number;
-  }
-  const [byModel] = createResource(query, async (q) => {
-    const j = await api<{ models: ModelRow[] }>(
+  const [breakdown] = createResource(query, async (q) => {
+    const j = await api<{ rows: BreakdownRow[] }>(
       "GET",
-      `/api/usage/by-model?days=${q.d}${q.k ? `&key_id=${q.k}` : ""}`,
+      `/api/usage/breakdown?days=${q.d}${q.k ? `&key_id=${q.k}` : ""}`,
     );
-    return j.models;
+    return j.rows;
   });
-  const byModelSorted = createMemo(() =>
-    [...(byModel() ?? [])]
-      .sort(
-        (a, b) =>
-          b.in_tok + b.cache_tok + b.out_tok - (a.in_tok + a.cache_tok + a.out_tok),
-      )
-      .slice(0, 10),
-  );
 
   const [events] = createResource(query, async (q) => {
-    const j = await api<{ events: UsageEventDto[]; total: number }>(
+    const j = await api<{ events: any[]; total: number }>(
       "GET",
-      `/api/usage/events?limit=${PAGE_SIZE}&offset=${q.o}${q.k ? `&key_id=${q.k}` : ""}`,
+      `/api/usage/events?limit=${RECENT_PAGE}${q.k ? `&key_id=${q.k}` : ""}`,
     );
     return j;
   });
@@ -84,16 +143,11 @@ export default function UsagePage() {
     })),
   ]);
 
-  const totalPages = createMemo(() =>
-    Math.max(1, Math.ceil((events()?.total ?? 0) / PAGE_SIZE)),
-  );
-  const page = createMemo(() => Math.floor(offset() / PAGE_SIZE) + 1);
-
   return (
     <div>
       <PageTitle
         title="Usage"
-        subtitle="Inspect consumption per key, model and request"
+        subtitle="Inspect consumption per key, provider, model and request"
       />
 
       <Card class="mb-6">
@@ -102,10 +156,7 @@ export default function UsagePage() {
             <Select
               label="Key"
               value={keyId()}
-              onChange={(v) => {
-                setKeyId(v);
-                setOffset(0);
-              }}
+              onChange={setKeyId}
               options={keyOptions()}
             />
           </div>
@@ -148,10 +199,10 @@ export default function UsagePage() {
       <Card class="mb-6">
         <CardHeader
           title="By model"
-          subtitle={`Top models · ${windowLabel(days())}`}
+          subtitle={`Model × provider breakdown · ${windowLabel(days())}`}
         />
         <Show
-          when={(byModelSorted().length ?? 0) > 0}
+          when={(breakdown()?.length ?? 0) > 0}
           fallback={
             <EmptyState
               icon={Icons.chart}
@@ -159,45 +210,8 @@ export default function UsagePage() {
             />
           }
         >
-          <div class="overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead>
-                <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
-                  <th class="font-medium px-6 py-3">Model</th>
-                  <th class="font-medium px-3 py-3">Proto</th>
-                  <th class="font-medium px-3 py-3 text-right">Requests</th>
-                  <th class="font-medium px-3 py-3 text-right">In</th>
-                  <th class="font-medium px-3 py-3 text-right">Cache</th>
-                  <th class="font-medium px-3 py-3 text-right">Out</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-line">
-                <For each={byModelSorted()}>
-                  {(m) => (
-                    <tr class="transition-colors hover:bg-ink-800/30">
-                      <td class="px-6 py-3 text-ink-200">{m.model}</td>
-                      <td class="px-3 py-2.5">
-                        <Badge tone={m.proto === "openai" ? "blue" : "amber"}>
-                          {m.proto === "openai" ? "OpenAI" : "Anthropic"}
-                        </Badge>
-                      </td>
-                      <td class="px-3 py-2.5 text-right tabular-nums text-ink-400">
-                        {fmtNum(m.reqs)}
-                      </td>
-                      <td class="px-3 py-2.5 text-right tabular-nums">
-                        {fmtNum(m.in_tok)}
-                      </td>
-                      <td class="px-3 py-2.5 text-right tabular-nums">
-                        {fmtNum(m.cache_tok)}
-                      </td>
-                      <td class="px-3 py-2.5 text-right tabular-nums">
-                        {fmtNum(m.out_tok)}
-                      </td>
-                    </tr>
-                  )}
-                </For>
-              </tbody>
-            </table>
+          <div class="px-1 py-1" {...usalItems("fade-u", 90)}>
+            <UsageGrid columnDefs={byModelCols} rowData={breakdown() ?? []} pageSize={15} />
           </div>
         </Show>
       </Card>
@@ -206,29 +220,6 @@ export default function UsagePage() {
         <CardHeader
           title="Recent requests"
           subtitle={`${fmtNum(events()?.total ?? 0)} events`}
-          right={
-            <div class="flex items-center gap-2">
-              <Btn
-                variant="outline"
-                size="sm"
-                disabled={page() <= 1}
-                onClick={() => setOffset(Math.max(0, offset() - PAGE_SIZE))}
-              >
-                Prev
-              </Btn>
-              <span class="text-xs text-ink-400">
-                {page()} / {totalPages()}
-              </span>
-              <Btn
-                variant="outline"
-                size="sm"
-                disabled={page() >= totalPages()}
-                onClick={() => setOffset(offset() + PAGE_SIZE)}
-              >
-                Next
-              </Btn>
-            </div>
-          }
         />
         <Show
           when={(events()?.events.length ?? 0) > 0}
@@ -236,79 +227,8 @@ export default function UsagePage() {
             <EmptyState icon={Icons.chart} title="No requests in this window" />
           }
         >
-          <div class="overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead>
-                <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
-                  <th class="font-medium px-6 py-3">Time</th>
-                  <th class="font-medium px-3 py-3">Key</th>
-                  <th class="font-medium px-3 py-3">Protocol</th>
-                  <th class="font-medium px-3 py-3">Model</th>
-                  <th class="font-medium px-3 py-3 text-right">In</th>
-                  <th class="font-medium px-3 py-3 text-right">Cache</th>
-                  <th class="font-medium px-3 py-3 text-right">Out</th>
-                  <th class="font-medium px-3 py-3 text-right">Latency</th>
-                  <th class="font-medium px-3 py-3 text-right">Status</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-line">
-                <For each={events()?.events}>
-                  {(e) => {
-                    const keyName = createMemo(
-                      () =>
-                        (keys() ?? []).find((k) => k.id === e.key_id)?.name ??
-                        e.key_id.slice(0, 8),
-                    );
-                    return (
-                      <tr class="transition-colors hover:bg-ink-800/30">
-                        <td class="px-6 py-3 text-ink-300 whitespace-nowrap">
-                          {fmtDate(e.ts)}
-                        </td>
-                        <td class="px-3 py-2.5 text-ink-300">{keyName()}</td>
-                        <td class="px-3 py-2.5">
-                          <Badge
-                            tone={e.proto === "openai" ? "blue" : "amber"}
-                          >
-                            {e.proto === "openai" ? "OpenAI" : "Anthropic"}
-                          </Badge>
-                          <Show when={e.stream === 1}>
-                            <span class="ml-1 text-ink-500">SSE</span>
-                          </Show>
-                        </td>
-                        <td class="px-3 py-2.5 text-ink-300">
-                          {e.model || "—"}
-                        </td>
-                        <td class="px-3 py-2.5 text-right tabular-nums">
-                          {fmtNum(e.in_tok)}
-                        </td>
-                        <td class="px-3 py-2.5 text-right tabular-nums">
-                          {fmtNum(e.cache_tok)}
-                        </td>
-                        <td class="px-3 py-2.5 text-right tabular-nums">
-                          {fmtNum(e.out_tok)}
-                        </td>
-                        <td class="px-3 py-2.5 text-right tabular-nums text-ink-400">
-                          {e.latency_ms}ms
-                        </td>
-                        <td class="px-3 py-2.5 text-right">
-                          <Badge
-                            tone={
-                              e.status < 400
-                                ? "green"
-                                : e.status < 500
-                                  ? "amber"
-                                  : "red"
-                            }
-                          >
-                            {e.status}
-                          </Badge>
-                        </td>
-                      </tr>
-                    );
-                  }}
-                </For>
-              </tbody>
-            </table>
+          <div class="px-2 py-2">
+            <UsageGrid columnDefs={eventCols} rowData={events()?.events ?? []} pageSize={RECENT_PAGE} heightClass="h-[560px]" />
           </div>
         </Show>
       </Card>

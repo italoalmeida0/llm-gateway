@@ -329,6 +329,43 @@ const MIGRATIONS: Migration[] = [
       UPDATE sessions SET family = jti WHERE family IS NULL;
     `,
   },
+  {
+    name: "011_usage_provider_dims",
+    // Usage gains the UPSTREAM dimension: which provider actually served a
+    // request, which provider key, and which upstream model id. Pre-011 rows
+    // don't know this — the rollup backfill keeps them visible with empty
+    // provider fields (the UI shows "—") and only NEW events carry real
+    // provider/key/upstream info (written by the proxy from the failover
+    // candidate that answered).
+    up: `
+      ALTER TABLE usage_events ADD COLUMN provider_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE usage_events ADD COLUMN provider_key_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE usage_events ADD COLUMN upstream_model TEXT NOT NULL DEFAULT '';
+
+      CREATE TABLE usage_model_provider_daily (
+        key_id          TEXT NOT NULL,
+        user_id         TEXT NOT NULL,
+        date            TEXT NOT NULL,   -- YYYY-MM-DD (UTC)
+        proto           TEXT NOT NULL CHECK (proto IN ('openai','anthropic')),
+        provider_id     TEXT NOT NULL DEFAULT '',
+        provider_key_id TEXT NOT NULL DEFAULT '',
+        model           TEXT NOT NULL,
+        upstream_model  TEXT NOT NULL DEFAULT '',
+        in_tok          INTEGER NOT NULL DEFAULT 0,
+        cache_tok       INTEGER NOT NULL DEFAULT 0,
+        out_tok         INTEGER NOT NULL DEFAULT 0,
+        reqs            INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (key_id, date, proto, provider_id, provider_key_id, model, upstream_model)
+      ) WITHOUT ROWID;
+      CREATE INDEX idx_usage_mpd_user ON usage_model_provider_daily(user_id, date);
+
+      INSERT INTO usage_model_provider_daily (key_id, user_id, date, proto, provider_id, provider_key_id, model, upstream_model, in_tok, cache_tok, out_tok, reqs)
+        SELECT key_id, user_id, date(ts/1000, 'unixepoch'), proto, '', '', model, '',
+               SUM(in_tok), SUM(cache_tok), SUM(out_tok), COUNT(*)
+        FROM usage_events
+        GROUP BY key_id, date(ts/1000, 'unixepoch'), proto, model;
+    `,
+  },
 ];
 
 export function migrate(): void {

@@ -153,10 +153,11 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   (drag-and-drop ordering, user-sanctioned — only imported
   by `web/src/sortable.ts`; rows carry `data-id` + a `[data-handle]` grip,
   the reordered ids are POSTed to the matching `/reorder` / `PUT …/targets`
-  endpoint) and `echarts` (charts, user-sanctioned — imported tree-shaken as
-  `echarts/core` with only bar/line + grid/tooltip + canvas in
-  `web/src/echarts.tsx`; colors are resolved from the `--chart-*` CSS vars at
-  render time so white/dark flip for free).
+  endpoint) and `solid-charts` (charts, user-sanctioned — composable SVG
+  `Chart`/`Axis`/`Bar`/`Area`/`Line` components in `web/src/charts.tsx`; colors
+  are passed from the `--chart-*` CSS vars so white/dark flip for free; chart
+  entrance animations live in the stylesheet because the library does not
+  animate series natively yet).
   Usage AND entity tables are AG Grid (`ag-grid-community` + `solid-ag-grid`,
   user-sanctioned — wrapper in `web/src/aggrid.tsx`): usage breakdowns, recent
   requests, admin top users/models, user + admin keys, admin users, admin

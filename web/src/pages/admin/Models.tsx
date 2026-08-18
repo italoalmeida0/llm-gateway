@@ -597,11 +597,14 @@ export default function AdminModelsPage() {
       >
         <Card class="overflow-hidden" {...usalItems("fade-u", 60)}>
           <div class="p-2">
+            {/* Selecting a row is local state and must not purge the infinite
+                cache. Only changing Selected only mode or a real model
+                mutation needs to reload rows. */}
             <UsageGrid
               columnDefs={cols}
               datasource={modelsDatasource}
               cacheBlockSize={100}
-              refreshDeps={`${gridVersion()}:${selectedOnly()}:${[...selected()].join(",")}`}
+              refreshDeps={`${gridVersion()}:${selectedOnly()}`}
               storageKey="llmgw-grid:admin.models"
               heightClass="h-[560px]"
               rowSelection="multiple"

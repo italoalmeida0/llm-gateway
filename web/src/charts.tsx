@@ -11,7 +11,7 @@ import {
   Line,
 } from "solid-charts";
 import { curveMonotoneX } from "solid-charts/curves";
-import { Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
+import { Show, createMemo, createUniqueId, type JSX } from "solid-js";
 
 import type { DailyPoint } from "./api";
 import { fmtNum } from "./ui";
@@ -83,19 +83,6 @@ function DailyTooltip(props: {
   );
 }
 
-function chartBarIndex(event: MouseEvent): number | null {
-  const target = event.target;
-  if (!(target instanceof Element)) return null;
-  const bar = target.closest("[data-sc-bar]");
-  const group = bar?.parentElement;
-  if (!bar || !group) return null;
-  const bars = Array.from(group.children).filter((child) =>
-    child.matches("[data-sc-bar]"),
-  );
-  const index = bars.indexOf(bar);
-  return index >= 0 ? index : null;
-}
-
 export function DailyChart(props: {
   series: DailyPoint[];
   height?: number;
@@ -111,20 +98,6 @@ export function DailyChart(props: {
     })),
   );
 
-  const [selected, setSelected] = createSignal<number | null>(null);
-  createEffect(() => {
-    props.series;
-    setSelected(null);
-  });
-  const selectedDay = createMemo(() => {
-    const index = selected();
-    return index !== null ? (data()[index] ?? null) : null;
-  });
-  const toggleSelect = (index: number | null) => {
-    if (index === null) return;
-    setSelected(selected() === index ? null : index);
-  };
-
   return (
     <Show
       when={data().length > 0}
@@ -139,7 +112,6 @@ export function DailyChart(props: {
           data={data()}
           barConfig={{ bandGap: "18%", barGap: "10%" }}
           class="chart-root"
-          onClick={(event) => toggleSelect(chartBarIndex(event))}
         >
           <Axis axis="y" position="left" tickCount={5}>
             <AxisLabel
@@ -202,90 +174,45 @@ export function DailyChart(props: {
       </ChartFrame>
       <div class="flex min-h-[18px] flex-wrap items-center gap-x-4 gap-y-1 px-2 pt-1 text-[11px] text-ink-400">
         <Show
-          when={selectedDay()}
+          when={metric() === "tokens"}
           fallback={
-            <>
-              <Show
-                when={metric() === "tokens"}
-                fallback={
-                  <span class="inline-flex items-center gap-1.5">
-                    <span
-                      class="inline-block h-2.5 w-2.5 rounded-sm"
-                      style={{ background: OUT_BAR }}
-                    />
-                    Requests
-                  </span>
-                }
-              >
-                <span class="inline-flex items-center gap-1.5">
-                  <span
-                    class="inline-block h-2.5 w-2.5 rounded-sm"
-                    style={{ background: IN_BAR }}
-                  />
-                  Input
-                </span>
-                <span class="inline-flex items-center gap-1.5">
-                  <span
-                    class="inline-block h-2.5 w-2.5 rounded-sm"
-                    style={{ background: CACHE_BAR }}
-                  />
-                  Input cache
-                </span>
-                <span class="inline-flex items-center gap-1.5">
-                  <span
-                    class="inline-block h-2.5 w-2.5 rounded-sm"
-                    style={{ background: OUT_BAR }}
-                  />
-                  Output
-                </span>
-              </Show>
-              <span class="inline-flex items-center gap-1.5">
-                <span class="inline-block h-2.5 w-2.5 rounded-sm bg-brand-500" />
-                Latest {unit()}
-              </span>
-              <span class="ml-auto text-[10px] text-ink-500">
-                Click a bar to pin
-              </span>
-            </>
+            <span class="inline-flex items-center gap-1.5">
+              <span
+                class="inline-block h-2.5 w-2.5 rounded-sm"
+                style={{ background: OUT_BAR }}
+              />
+              Requests
+            </span>
           }
         >
-          {(day) => (
-            <>
-              <span class="font-medium text-ink-200">
-                {day().label ?? day().date}
-              </span>
-              <span class="inline-flex items-center gap-1.5">
-                <span
-                  class="inline-block h-2.5 w-2.5 rounded-sm"
-                  style={{ background: IN_BAR }}
-                />
-                In {fmtNum(day().in_tok)}
-              </span>
-              <span class="inline-flex items-center gap-1.5">
-                <span
-                  class="inline-block h-2.5 w-2.5 rounded-sm"
-                  style={{ background: CACHE_BAR }}
-                />
-                Cache {fmtNum(day().cache_tok ?? 0)}
-              </span>
-              <span class="inline-flex items-center gap-1.5">
-                <span
-                  class="inline-block h-2.5 w-2.5 rounded-sm"
-                  style={{ background: OUT_BAR }}
-                />
-                Out {fmtNum(day().out_tok)}
-              </span>
-              <span class="tabular-nums">{fmtNum(day().reqs)} req</span>
-              <button
-                class="ml-auto cursor-pointer px-1 text-ink-500 transition-colors hover:text-ink-200"
-                onClick={() => setSelected(null)}
-                aria-label="Clear selected day"
-              >
-                ×
-              </button>
-            </>
-          )}
+          <>
+            <span class="inline-flex items-center gap-1.5">
+              <span
+                class="inline-block h-2.5 w-2.5 rounded-sm"
+                style={{ background: IN_BAR }}
+              />
+              Input
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span
+                class="inline-block h-2.5 w-2.5 rounded-sm"
+                style={{ background: CACHE_BAR }}
+              />
+              Input cache
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span
+                class="inline-block h-2.5 w-2.5 rounded-sm"
+                style={{ background: OUT_BAR }}
+              />
+              Output
+            </span>
+          </>
         </Show>
+        <span class="inline-flex items-center gap-1.5">
+          <span class="inline-block h-2.5 w-2.5 rounded-sm bg-brand-500" />
+          Latest {unit()}
+        </span>
       </div>
     </Show>
   );
@@ -305,6 +232,7 @@ export function AreaChart(props: {
       }))
       .filter((point) => Number.isFinite(point.value));
   });
+  const gradientId = `chart-area-gradient-${createUniqueId()}`;
 
   return (
     <Show
@@ -317,6 +245,19 @@ export function AreaChart(props: {
     >
       <ChartFrame height={props.height ?? 170}>
         <Chart data={points()} class="chart-root">
+          <defs>
+            <linearGradient
+              id={gradientId}
+              x1="0"
+              y1="0"
+              x2="0"
+              y2="1"
+              gradientUnits="objectBoundingBox"
+            >
+              <stop offset="0%" stop-color="var(--chart-brand)" stop-opacity="0.3" />
+              <stop offset="100%" stop-color="var(--chart-brand)" stop-opacity="0" />
+            </linearGradient>
+          </defs>
           <Axis axis="y" position="left" tickCount={5}>
             <AxisLabel
               fill="var(--chart-tick)"
@@ -355,7 +296,7 @@ export function AreaChart(props: {
           </Axis>
           <Area
             dataKey="value"
-            fill="var(--chart-brand)"
+            fill={`url(#${gradientId})`}
             fill-opacity={1}
             class="chart-area"
             curve={curveMonotoneX}

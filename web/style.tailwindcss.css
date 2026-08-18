@@ -303,7 +303,7 @@ html.theme-xfade body * {
     opacity: 0;
   }
   to {
-    opacity: 0.15;
+    opacity: 1;
   }
 }
 

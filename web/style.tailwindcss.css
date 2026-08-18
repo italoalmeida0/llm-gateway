@@ -373,7 +373,7 @@ html[data-theme="dark"] .ag-theme-quartz-dark {
   --ag-header-foreground-color: var(--ink-400);
   --ag-header-column-separator-color: var(--line);
   --ag-row-hover-color: color-mix(in srgb, var(--ink-500) 18%, transparent);
-  --ag-selected-row-background-color: color-mix(in srgb, var(--accent-strong) 10%, transparent);
+  --ag-selected-row-background-color: color-mix(in srgb, var(--accent-strong) 10%, transparent) !important;
   --ag-active-color: var(--accent-strong);
   --ag-accent-color: var(--accent);
   --ag-checkbox-checked-color: var(--accent-strong);

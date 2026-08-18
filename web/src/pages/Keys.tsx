@@ -435,7 +435,7 @@ export default function KeysPage() {
             label="Requests per minute"
             type="number"
             min={1}
-            max={3600}
+            max={1000000}
             value={form().rpm}
             onInput={(v) => setForm({ ...form(), rpm: v })}
             placeholder="default (120)"
@@ -487,7 +487,7 @@ export default function KeysPage() {
             label="Requests per minute"
             type="number"
             min={1}
-            max={3600}
+            max={1000000}
             value={form().rpm}
             onInput={(v) => setForm({ ...form(), rpm: v })}
             placeholder="default (120)"

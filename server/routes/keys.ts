@@ -47,7 +47,7 @@ export async function handleKeysRoute(path: string, req: Request): Promise<Respo
     const name = v.str(body, "name", { min: 1, max: 64 })!;
     const dailyLimit = v.int(body, "dailyLimit", { min: 1, max: 10 ** 12, optional: true });
     const totalLimit = v.int(body, "totalLimit", { min: 1, max: 10 ** 15, optional: true });
-    const rpm = v.int(body, "rpm", { min: 1, max: 3600, optional: true });
+    const rpm = v.int(body, "rpm", { min: 1, max: 1_000_000, optional: true });
     const expiresAt = v.int(body, "expiresAt", {
       min: Date.now() + 60_000,
       max: Date.now() + MAX_TTL_MS,
@@ -84,7 +84,7 @@ export async function handleKeysRoute(path: string, req: Request): Promise<Respo
       "dailyLimit" in body ? v.int(body, "dailyLimit", { min: 1, max: 10 ** 12, optional: true }) : key.daily_limit;
     const totalLimit =
       "totalLimit" in body ? v.int(body, "totalLimit", { min: 1, max: 10 ** 15, optional: true }) : key.total_limit;
-    const rpm = "rpm" in body ? v.int(body, "rpm", { min: 1, max: 3600, optional: true }) : key.rpm;
+    const rpm = "rpm" in body ? v.int(body, "rpm", { min: 1, max: 1_000_000, optional: true }) : key.rpm;
 
     // Raising limits re-activates an exhausted key.
     const newStatus = key.status === "exhausted" ? "active" : key.status;

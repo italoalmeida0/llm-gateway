@@ -710,6 +710,24 @@ describe("gateway end-to-end", () => {
     for (const m of filtered.json.models) expect(m.provider_id).toBe(pid);
     for (const u of filtered.json.users) expect(u.reqs).toBeGreaterThan(0);
 
+    // global stats' series (and so the window cards) narrows to the provider
+    const reqsum = (rows: any[]) =>
+      rows.reduce((s: number, p: any) => s + (p.reqs ?? 0), 0);
+    const stAll = await api("/api/admin/stats?days=7", { token: adminToken });
+    const stProv = await api(`/api/admin/stats?days=7&provider_id=${pid}`, {
+      token: adminToken,
+    });
+    expect(stProv.status).toBe(200);
+    expect(reqsum(stProv.json.series)).toBeGreaterThan(0);
+    expect(reqsum(stProv.json.series)).toBeLessThanOrEqual(
+      reqsum(stAll.json.series),
+    );
+    const stNone = await api(
+      "/api/admin/stats?days=7&provider_id=does-not-exist",
+      { token: adminToken },
+    );
+    expect(reqsum(stNone.json.series)).toBe(0);
+
     // bogus key ids / user ids stay scoped (return empty, never leak)
     const badKey = await api("/api/usage/breakdown?days=7&key_id=not-a-key", { token: userToken });
     expect(badKey.json.rows).toEqual([]);

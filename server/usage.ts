@@ -195,10 +195,10 @@ const pad2 = (n: number) => String(n).padStart(2, "0");
 /**
  * Hourly buckets for the trailing `hours` hours (UTC), zero-filled so charts
  * render quiet hours as empty bars instead of gaps. Reads usage_events —
- * usage_daily can't go below one day. Optional userId/keyId narrow the scope;
- * both null = global.
+ * usage_daily can't go below one day. Optional userId/keyId/providerId narrow
+ * the scope; both null = global.
  */
-export function hourlySeries(userId: string | null, keyId: string | null, hours: number): HourlyPoint[] {
+export function hourlySeries(userId: string | null, keyId: string | null, hours: number, providerId?: string): HourlyPoint[] {
   const h = Math.min(Math.max(Math.floor(hours) || 24, 1), 168);
   const startHour = Math.floor(Date.now() / HOUR_MS) * HOUR_MS - (h - 1) * HOUR_MS;
   const clauses = ["ts >= ?"];
@@ -210,6 +210,10 @@ export function hourlySeries(userId: string | null, keyId: string | null, hours:
   if (keyId !== null) {
     clauses.push("key_id = ?");
     params.push(keyId);
+  }
+  if (providerId) {
+    clauses.push("provider_id = ?");
+    params.push(providerId);
   }
   const rows = db
     .prepare<{ hbucket: number; in_tok: number; cache_tok: number; out_tok: number; reqs: number }, any[]>(

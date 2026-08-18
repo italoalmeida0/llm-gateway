@@ -73,7 +73,7 @@ const DEFAULT_COL_DEF: ColDef = {
   floatingFilter: true,
   minWidth: 72,
 };
-const PAGE_SIZE_SELECTOR: number[] = [25, 50, 100, 250];
+const PAGE_SIZE_SELECTOR: number[] = [15, 20, 25, 50, 100, 250];
 
 export function UsageGrid(props: {
   columnDefs: Array<ColDef | ColGroupDef>;
@@ -85,6 +85,11 @@ export function UsageGrid(props: {
   /** localStorage key for user prefs (column order/size/visibility, sort,
    *  filters). Column defs must be stable for the state to map back. */
   storageKey: string;
+  /** Optional passthroughs for selection-enabled grids (e.g. Models). */
+  rowSelection?: "single" | "multiple";
+  suppressRowClickSelection?: boolean;
+  getRowId?: (p: { data: any }) => string;
+  onSelectionChanged?: (e: any) => void;
 }) {
   const darkClass = () => {
     // Track the signal (updates live on toggle) but trust the DOM attribute —
@@ -147,19 +152,6 @@ export function UsageGrid(props: {
     <div
       class={`w-full max-h-[72vh] ${darkClass()} ${props.heightClass ?? "h-[420px]"} flex flex-col`}
     >
-      <div class="flex items-center justify-end px-1.5 py-1 shrink-0">
-        <Btn
-          variant="ghost"
-          size="sm"
-          class="!px-2 text-[11px] text-ink-500 hover:text-ink-200"
-          title="Reset column order, sizes, sorting and filters to the default layout"
-          disabled={!props.rowData}
-          onClick={resetLayout}
-        >
-          <Icon name={Icons.refresh} size={12} />
-          Reset layout
-        </Btn>
-      </div>
       <div class="min-h-0 flex-1">
         <Show when={props.rowData}>
           <AgGridSolid
@@ -179,8 +171,25 @@ export function UsageGrid(props: {
             onColumnMoved={saveSoon}
             onColumnResized={saveSoon}
             onColumnVisible={saveSoon}
+            rowSelection={props.rowSelection}
+            suppressRowClickSelection={props.suppressRowClickSelection}
+            getRowId={props.getRowId}
+            onSelectionChanged={props.onSelectionChanged}
           />
         </Show>
+      </div>
+      <div class="flex items-center justify-end px-1.5 py-1 shrink-0">
+        <Btn
+          variant="ghost"
+          size="sm"
+          class="!px-2 text-[11px] text-ink-500 hover:text-ink-200"
+          title="Reset column order, sizes, sorting and filters to the default layout"
+          disabled={!props.rowData}
+          onClick={resetLayout}
+        >
+          <Icon name={Icons.refresh} size={12} />
+          Reset layout
+        </Btn>
       </div>
     </div>
   );

@@ -157,14 +157,21 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   `echarts/core` with only bar/line + grid/tooltip + canvas in
   `web/src/echarts.tsx`; colors are resolved from the `--chart-*` CSS vars at
   render time so white/dark flip for free).
-  Usage tables are AG Grid (`ag-grid-community` + `solid-ag-grid`,
-  user-sanctioned — wrapper in `web/src/aggrid.tsx`): solid-ag-grid pins
+  Usage AND entity tables are AG Grid (`ag-grid-community` + `solid-ag-grid`,
+  user-sanctioned — wrapper in `web/src/aggrid.tsx`): usage breakdowns, recent
+  requests, admin top users/models, user + admin keys, admin users, admin
+  models (row selection + checkbox bulk-delete) and the audit log.
+  `UsageGrid` needs a `storageKey` per grid — it persists column
+  order/sizes/sort/filters to localStorage and restores on next visit (Reset
+  layout button at the bottom). Option props are module constants and the grid
+  only mounts once rowData is set: solid-ag-grid@0.0.230's prop-diff effect can
+  fire before the grid api exists (crash `__internalUpdateGridOptions`) and
+  inline object literals would retrigger it. solid-ag-grid pins
   `ag-grid-community@31.1.1` EXACTLY — keep the top-level dep on the same
   version or bun nests a second copy and types diverge. Theme flips via the
-  `ag-theme-quartz(-dark)` class picked from the `theme` signal; the `--ag-*`
-  CSS variables are remapped to the semantic tokens in
-  `style.tailwindcss.css` (never hardcode hex). `@fontsource-variable/inter`
-  is a bundled dev asset (no runtime CDN).
+  `ag-theme-quartz(-dark)` class; the `--ag-*` CSS variables are remapped to
+  the semantic tokens in `style.tailwindcss.css` (never hardcode hex).
+  `@fontsource-variable/inter` is a bundled dev asset (no runtime CDN).
   Bun-native or hand-rolled beats a new dep.
 
 ## Commands

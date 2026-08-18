@@ -98,12 +98,13 @@ export default function AdminStatsPage() {
   const [days, setDays] = createSignal("14");
   const [providerId, setProviderId] = createSignal("");
 
-  const [stats] = createResource(days, async (d) => {
-    const j = await api<StatsDto>(
-      "GET",
-      `/api/admin/stats?${d === "1" ? "hours=24" : `days=${d}`}`,
+  const statsQuery = createMemo(() => ({ d: days(), p: providerId() }));
+  const [stats] = createResource(statsQuery, async (q) => {
+    const params = new URLSearchParams(
+      q.d === "1" ? { hours: "24" } : { days: q.d },
     );
-    return j;
+    if (q.p) params.set("provider_id", q.p);
+    return api<StatsDto>("GET", `/api/admin/stats?${params.toString()}`);
   });
 
   const [providers] = createResource(async () => {

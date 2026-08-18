@@ -1,32 +1,88 @@
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createResource, Show } from "solid-js";
 
 import { api } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
-import {
-  Badge,
-  Btn,
-  Card,
-  CardHeader,
-  EmptyState,
-  Icons,
-  fmtDate,
-} from "../../ui";
+import { Badge, Card, CardHeader, EmptyState, Icons, fmtNum } from "../../ui";
+import { UsageGrid, timeFormatter } from "../../aggrid";
+import type { ColDef } from "ag-grid-community";
 
-const PAGE = 50;
+const FETCH = 500;
+const PAGE_SIZE = 50;
+
+interface AuditEntry {
+  ts: number;
+  action: string;
+  target?: string;
+  meta?: string;
+  ip?: string;
+  actor_email?: string;
+}
+
+/** Tone heuristic — red for bad-outcome actions, green for creations. */
+function ActionCell(props: { value?: string }) {
+  const a = props.value ?? "";
+  const tone =
+    a.includes("failed") ||
+    a.includes("exhausted") ||
+    a.includes("banned") ||
+    a.includes("deleted") ||
+    a.includes("revoked")
+      ? "red"
+      : a.includes("created") ||
+          a.includes("success") ||
+          a.includes("linked") ||
+          a.includes("enabled")
+        ? "green"
+        : "zinc";
+  return <Badge tone={tone}>{a}</Badge>;
+}
 
 export default function AdminAuditPage() {
-  const [offset, setOffset] = createSignal(0);
-  const [data] = createResource(offset, async (o) => {
-    const j = await api<{ entries: any[]; total: number }>(
+  const [data] = createResource(async () => {
+    const j = await api<{ entries: AuditEntry[]; total: number }>(
       "GET",
-      `/api/admin/audit?limit=${PAGE}&offset=${o}`,
+      `/api/admin/audit?limit=${FETCH}`,
     );
     return j;
   });
 
-  const page = () => Math.floor(offset() / PAGE) + 1;
-  const pages = () => Math.max(1, Math.ceil((data()?.total ?? 0) / PAGE));
+  const cols: ColDef[] = [
+    { field: "ts", headerName: "Time", width: 160, valueFormatter: timeFormatter },
+    { field: "action", headerName: "Action", width: 220, cellRenderer: ActionCell },
+    {
+      field: "actor_email",
+      headerName: "Actor",
+      flex: 1,
+      minWidth: 160,
+      valueGetter: (p) => p.data?.actor_email ?? p.data?.target ?? "—",
+    },
+    {
+      field: "target",
+      headerName: "Target",
+      width: 200,
+      cellRenderer: (p: { value?: string }) => (
+        <span class="font-mono text-[11px] text-ink-400">{p.value?.slice(0, 24) ?? "—"}</span>
+      ),
+    },
+    {
+      field: "ip",
+      headerName: "IP",
+      width: 120,
+      valueFormatter: (p) => p.value ?? "—",
+    },
+    {
+      field: "meta",
+      headerName: "Detail",
+      flex: 1,
+      minWidth: 200,
+      cellRenderer: (p: { value?: string }) => (
+        <span class="text-ink-500 truncate block" title={p.value ?? ""}>
+          {p.value ?? "—"}
+        </span>
+      ),
+    },
+  ];
 
   return (
     <div>
@@ -37,92 +93,20 @@ export default function AdminAuditPage() {
 
       <Card>
         <CardHeader
-          title={`${data()?.total ?? 0} events`}
-          right={
-            <div class="flex items-center gap-2">
-              <Btn
-                variant="outline"
-                size="sm"
-                disabled={page() <= 1}
-                onClick={() => setOffset(Math.max(0, offset() - PAGE))}
-              >
-                Prev
-              </Btn>
-              <span class="text-xs text-ink-400">
-                {page()} / {pages()}
-              </span>
-              <Btn
-                variant="outline"
-                size="sm"
-                disabled={page() >= pages()}
-                onClick={() => setOffset(offset() + PAGE)}
-              >
-                Next
-              </Btn>
-            </div>
-          }
+          title={`${fmtNum(data()?.total ?? 0)} events · latest ${FETCH}`}
         />
         <Show
           when={(data()?.entries.length ?? 0) > 0}
           fallback={<EmptyState icon={Icons.book} title="No audit entries" />}
         >
-          <div class="overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead>
-                <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
-                  <th class="font-medium px-6 py-3">Time</th>
-                  <th class="font-medium px-3 py-3">Action</th>
-                  <th class="font-medium px-3 py-3">Actor</th>
-                  <th class="font-medium px-3 py-3">Target</th>
-                  <th class="font-medium px-3 py-3">IP</th>
-                  <th class="font-medium px-3 py-3">Detail</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-line">
-                <For each={data()?.entries}>
-                  {(e) => (
-                    <tr class="transition-colors hover:bg-ink-800/30">
-                      <td class="px-6 py-3 text-ink-300 whitespace-nowrap">
-                        {fmtDate(e.ts)}
-                      </td>
-                      <td class="px-3 py-3">
-                        <Badge
-                          tone={
-                            e.action.includes("failed") ||
-                            e.action.includes("exhausted") ||
-                            e.action.includes("banned") ||
-                            e.action.includes("deleted") ||
-                            e.action.includes("revoked")
-                              ? "red"
-                              : e.action.includes("created") ||
-                                  e.action.includes("success") ||
-                                  e.action.includes("linked") ||
-                                  e.action.includes("enabled")
-                                ? "green"
-                                : "zinc"
-                          }
-                        >
-                          {e.action}
-                        </Badge>
-                      </td>
-                      <td class="px-3 py-3 text-ink-300">
-                        {e.actor_email ?? e.target ?? "—"}
-                      </td>
-                      <td class="px-3 py-3 text-ink-400 font-mono text-[11px]">
-                        {e.target?.slice(0, 24) ?? "—"}
-                      </td>
-                      <td class="px-3 py-3 text-ink-400">{e.ip ?? "—"}</td>
-                      <td
-                        class="px-3 py-3 text-ink-500 max-w-48 truncate"
-                        title={e.meta ?? ""}
-                      >
-                        {e.meta ?? "—"}
-                      </td>
-                    </tr>
-                  )}
-                </For>
-              </tbody>
-            </table>
+          <div class="p-2" {...usalItems("fade-u", 60)}>
+            <UsageGrid
+              columnDefs={cols}
+              rowData={data()?.entries}
+              pageSize={PAGE_SIZE}
+              heightClass="h-[560px]"
+              storageKey="llmgw-grid:admin.audit"
+            />
           </div>
         </Show>
       </Card>

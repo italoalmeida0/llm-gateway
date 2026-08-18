@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createResource, createSignal, Show } from "solid-js";
 
 import { api, type ApiKeyDto } from "../../api";
 import { PageTitle } from "../../index";
@@ -17,6 +17,8 @@ import {
   fmtNum,
   timeUntil,
 } from "../../ui";
+import { UsageGrid } from "../../aggrid";
+import type { ColDef } from "ag-grid-community";
 
 const TONE: Record<
   string,
@@ -87,6 +89,110 @@ export default function AdminKeysPage() {
     }
   };
 
+  // ---- grid cells ----
+
+  function KeyCell(props: { data?: ApiKeyDto }) {
+    return (
+      <div class="flex flex-col gap-0.5 py-1">
+        <span class="text-sm text-ink-100 truncate">{props.data?.name}</span>
+        <code class="text-ink-500">{props.data?.prefix}…</code>
+      </div>
+    );
+  }
+
+  function StatusCell(props: { value?: string }) {
+    const st = TONE[props.value ?? ""] ?? TONE.zinc!;
+    return <Badge tone={st.tone}>{st.label}</Badge>;
+  }
+
+  function ActionsCell(props: { data?: ApiKeyDto }) {
+    const k = props.data;
+    if (!k) return null;
+    return (
+      <div class="flex items-center justify-end gap-1">
+        <IconBtn
+          icon={Icons.copy}
+          title={k.revealable ? "Copy full token" : "Predates reveal support"}
+          disabled={!k.revealable}
+          onClick={() => copyKey(k)}
+        />
+        <IconBtn
+          icon={Icons.ban}
+          title="Revoke key"
+          danger
+          disabled={k.status === "revoked"}
+          onClick={() => setConfirmRevoke(k)}
+        />
+        <IconBtn
+          icon={Icons.trash}
+          title="Delete permanently"
+          danger
+          onClick={() => setConfirmDelete(k)}
+        />
+      </div>
+    );
+  }
+
+  const cols: ColDef[] = [
+    { field: "name", headerName: "Key", flex: 1.2, minWidth: 190, cellRenderer: KeyCell },
+    {
+      field: "userEmail",
+      headerName: "Owner",
+      flex: 1,
+      minWidth: 160,
+      valueGetter: (p) => p.data?.userEmail ?? p.data?.userId,
+    },
+    { field: "status", headerName: "Status", width: 130, cellRenderer: StatusCell },
+    {
+      field: "outputToday",
+      headerName: "Out today",
+      width: 130,
+      type: "rightAligned",
+      cellRenderer: (p: { data?: ApiKeyDto }) => (
+        <span class="tabular-nums">
+          {fmtNum(p.data?.outputToday)}
+          {p.data?.dailyLimit ? `/${fmtNum(p.data.dailyLimit)}` : ""}
+        </span>
+      ),
+    },
+    {
+      field: "outputTotal",
+      headerName: "Out total",
+      width: 130,
+      type: "rightAligned",
+      cellRenderer: (p: { data?: ApiKeyDto }) => (
+        <span class="tabular-nums">
+          {fmtNum(p.data?.outputTotal)}
+          {p.data?.totalLimit ? `/${fmtNum(p.data.totalLimit)}` : ""}
+        </span>
+      ),
+    },
+    {
+      field: "expiresAt",
+      headerName: "Expires",
+      width: 210,
+      valueFormatter: (p) =>
+        p.value ? `${fmtDate(p.value)} (${timeUntil(p.value)})` : "Never",
+    },
+    {
+      field: "lastUsedAt",
+      headerName: "Last used",
+      width: 160,
+      valueFormatter: (p) => (p.value ? fmtDate(p.value) : "Never"),
+    },
+    {
+      colId: "actions",
+      headerName: "",
+      width: 130,
+      cellRenderer: ActionsCell,
+      sortable: false,
+      filter: false,
+      floatingFilter: false,
+      resizable: false,
+      pinned: "right",
+    },
+  ];
+
   return (
     <div>
       <PageTitle
@@ -101,85 +207,8 @@ export default function AdminKeysPage() {
             <EmptyState icon={Icons.key} title="No keys in the system" />
           }
         >
-          <div class="overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead>
-                <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
-                  <th class="font-medium px-6 py-3">Key</th>
-                  <th class="font-medium px-3 py-3">Owner</th>
-                  <th class="font-medium px-3 py-3">Status</th>
-                    <th class="font-medium px-3 py-3 text-right">Out today</th>
-                    <th class="font-medium px-3 py-3 text-right">Out total</th>
-                  <th class="font-medium px-3 py-3">Expires</th>
-                  <th class="font-medium px-3 py-3">Last used</th>
-                  <th class="font-medium px-3 py-3 text-right"></th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-line">
-                <For each={keys()}>
-                  {(k) => {
-                    const st = TONE[k.status] ?? TONE.zinc!;
-                    return (
-                      <tr class="transition-colors hover:bg-ink-800/30">
-                        <td class="px-6 py-3">
-                          <div class="text-sm text-ink-100">{k.name}</div>
-                          <code class="text-ink-500">{k.prefix}…</code>
-                        </td>
-                        <td class="px-3 py-3 text-ink-300">
-                          {k.userEmail ?? k.userId}
-                        </td>
-                        <td class="px-3 py-3">
-                          <Badge tone={st.tone}>{st.label}</Badge>
-                        </td>
-                        <td class="px-3 py-3 text-right tabular-nums text-ink-300">
-                          {fmtNum(k.outputToday)}
-                          {k.dailyLimit ? `/${fmtNum(k.dailyLimit)}` : ""}
-                        </td>
-                        <td class="px-3 py-3 text-right tabular-nums text-ink-300">
-                          {fmtNum(k.outputTotal)}
-                          {k.totalLimit ? `/${fmtNum(k.totalLimit)}` : ""}
-                        </td>
-                        <td class="px-3 py-3 text-ink-400 whitespace-nowrap">
-                          {k.expiresAt
-                            ? `${fmtDate(k.expiresAt)} (${timeUntil(k.expiresAt)})`
-                            : "Never"}
-                        </td>
-                        <td class="px-3 py-3 text-ink-400 whitespace-nowrap">
-                          {k.lastUsedAt ? fmtDate(k.lastUsedAt) : "Never"}
-                        </td>
-                        <td class="px-3 py-3 text-right whitespace-nowrap">
-                          <div class="flex items-center justify-end gap-1">
-                            <IconBtn
-                              icon={Icons.copy}
-                              title={
-                                k.revealable
-                                  ? "Copy full token"
-                                  : "Predates reveal support"
-                              }
-                              disabled={!k.revealable}
-                              onClick={() => copyKey(k)}
-                            />
-                            <IconBtn
-                              icon={Icons.ban}
-                              title="Revoke key"
-                              danger
-                              disabled={k.status === "revoked"}
-                              onClick={() => setConfirmRevoke(k)}
-                            />
-                            <IconBtn
-                              icon={Icons.trash}
-                              title="Delete permanently"
-                              danger
-                              onClick={() => setConfirmDelete(k)}
-                            />
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  }}
-                </For>
-              </tbody>
-            </table>
+          <div class="p-2" {...usalItems("fade-u", 60)}>
+            <UsageGrid columnDefs={cols} rowData={keys()} storageKey="llmgw-grid:admin.keys" />
           </div>
         </Show>
       </Card>

@@ -1236,18 +1236,36 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
 
   // ================= stats =================
 
-  if (path === "/api/admin/stats" && req.method === "GET") {
+if (path === "/api/admin/stats" && req.method === "GET") {
     // Hour granularity ("1D"): the window tables come from usage_events so
     // series/top-lists stay consistent with the trailing-N-hours chart.
+    // provider_id narrows the SERIES (and so the window cards) — usage_daily
+    // has no provider dimension, so the filtered day/all series reads the
+    // migration-011 provider rollup instead.
     const hoursParam = url.searchParams.get("hours");
     const hours = hoursParam !== null ? Math.min(Math.max(Number(hoursParam) || 24, 1), 168) : null;
     const daysAll = url.searchParams.get("days") === "all";
     const days = daysAll ? "all" : Math.min(Number(url.searchParams.get("days") || 14), 365);
+    const providerId = url.searchParams.get("provider_id");
 
     const range =
       hours !== null
-        ? hourlySeries(null, null, hours)
-        : days === "all"
+        ? hourlySeries(null, null, hours, providerId ?? undefined)
+        : providerId
+          ? days === "all"
+            ? db
+                .prepare(
+                  `SELECT date, SUM(in_tok) AS in_tok, SUM(cache_tok) AS cache_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
+                   FROM usage_model_provider_daily WHERE provider_id = ? GROUP BY date ORDER BY date`,
+                )
+                .all(providerId)
+            : db
+                .prepare(
+                  `SELECT date, SUM(in_tok) AS in_tok, SUM(cache_tok) AS cache_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
+                   FROM usage_model_provider_daily WHERE provider_id = ? AND date >= date('now', ?) GROUP BY date ORDER BY date`,
+                )
+                .all(providerId, `-${days} days`)
+          : days === "all"
           ? db
               .prepare(
                 `SELECT date, SUM(in_tok) AS in_tok, SUM(cache_tok) AS cache_tok, SUM(out_tok) AS out_tok, SUM(reqs) AS reqs
@@ -1413,7 +1431,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
   }
 
   if (path === "/api/admin/audit" && req.method === "GET") {
-    const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 200);
+    const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 500);
     const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);
     const rows = db
       .prepare(

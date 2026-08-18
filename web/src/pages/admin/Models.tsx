@@ -5,6 +5,8 @@ import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
 import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtNum } from "../../ui";
+import { UsageGrid } from "../../aggrid";
+import type { ColDef } from "ag-grid-community";
 
 /** Editor-state of one failover routing target. */
 interface TargetDraft {
@@ -262,13 +264,134 @@ export default function AdminModelsPage() {
     }
   };
 
-  const allSelected = createMemo(() => {
-    const list = models() ?? [];
-    return list.length > 0 && list.every((m) => selected().has(m.id));
-  });
-  const toggleAll = (on: boolean) =>
-    setSelected(on ? new Set((models() ?? []).map((m) => m.id)) : new Set<string>());
+  // ---- grid cells ----
 
+  function ModelCell(props: { data?: ModelDto }) {
+    const m = props.data;
+    if (!m) return null;
+    return (
+      <div class="flex flex-col gap-0.5 py-1 min-w-0">
+        <span class="text-sm text-ink-100 font-medium truncate">{m.id}</span>
+        <Show when={m.name && m.name !== m.id}>
+          <span class="text-ink-500 truncate">{m.name}</span>
+        </Show>
+      </div>
+    );
+  }
+
+  function ProviderCell(props: { data?: ModelDto }) {
+    const m = props.data;
+    if (!m) return null;
+    return m.providerName ? (
+      <span class="inline-flex items-center gap-1.5 whitespace-nowrap text-ink-300">
+        {m.providerName}
+        <Show when={m.targets.length > 1}>
+          <Badge tone="indigo">+{m.targets.length - 1} fallback{m.targets.length === 2 ? "" : "s"}</Badge>
+        </Show>
+      </span>
+    ) : (
+      <Badge tone="amber">no provider</Badge>
+    );
+  }
+
+  function ProtoBadgeCell(props: { value?: string }) {
+    const p = (props.value ?? "openai") as ModelProto;
+    return <Badge tone={PROTO_TONE[p]}>{p}</Badge>;
+  }
+
+  function SourceCell(props: { value?: string }) {
+    return (
+      <Badge tone={props.value === "manual" ? "indigo" : "zinc"}>{props.value}</Badge>
+    );
+  }
+
+  function EnabledCell(props: { data?: ModelDto }) {
+    const m = props.data;
+    if (!m) return null;
+    return (
+      <input
+        type="checkbox"
+        checked={m.enabled}
+        onChange={() => toggleEnabled(m)}
+        title={m.enabled ? "Disable model" : "Enable model"}
+        class="w-4 h-4 rounded border-line bg-elev accent-brand-500 cursor-pointer"
+      />
+    );
+  }
+
+  function ActionsCell(props: { data?: ModelDto }) {
+    const m = props.data;
+    if (!m) return null;
+    return (
+      <div class="flex justify-end gap-1">
+        <IconBtn icon={Icons.edit} title="Edit model" onClick={() => openEditor(m)} />
+        <IconBtn icon={Icons.trash} title="Delete model" danger onClick={() => setConfirmDelete(m)} />
+      </div>
+    );
+  }
+
+  const cols: ColDef[] = [
+    {
+      colId: "sel",
+      headerName: "",
+      width: 42,
+      checkboxSelection: true,
+      headerCheckboxSelection: true,
+      sortable: false,
+      filter: false,
+      floatingFilter: false,
+      resizable: false,
+      pinned: "left",
+    },
+    { field: "id", headerName: "Model", flex: 1.4, minWidth: 220, cellRenderer: ModelCell },
+    { field: "providerName", headerName: "Provider", flex: 1, minWidth: 140, cellRenderer: ProviderCell },
+    {
+      field: "upstreamModel",
+      headerName: "Upstream model",
+      flex: 1,
+      minWidth: 140,
+      valueGetter: (p) => (p.data?.upstreamModel === p.data?.id ? "—" : p.data?.upstreamModel),
+      cellRenderer: (p: { value?: string }) => (
+        <code class="text-ink-400 truncate block">{p.value}</code>
+      ),
+    },
+    { field: "proto", headerName: "Protocol", width: 130, cellRenderer: ProtoBadgeCell },
+    {
+      field: "contextLength",
+      headerName: "Context",
+      width: 110,
+      type: "rightAligned",
+      valueFormatter: (p) => (p.value != null ? fmtNum(p.value) : "—"),
+    },
+    {
+      colId: "pricing",
+      headerName: "Pricing",
+      width: 170,
+      cellRenderer: (p: { data?: ModelDto }) =>
+        p.data?.pricing ? (
+          <code class="text-ink-400" title={JSON.stringify(p.data.pricing)}>
+            in {p.data.pricing.prompt ?? "—"} · out {p.data.pricing.completion ?? "—"}
+          </code>
+        ) : (
+          <span class="text-ink-500">—</span>
+        ),
+      filter: false,
+      floatingFilter: false,
+    },
+    { field: "source", headerName: "Source", width: 110, cellRenderer: SourceCell },
+    { field: "enabled", headerName: "Enabled", width: 90, cellRenderer: EnabledCell, filter: false, floatingFilter: false },
+    {
+      colId: "actions",
+      headerName: "",
+      width: 100,
+      cellRenderer: ActionsCell,
+      sortable: false,
+      filter: false,
+      floatingFilter: false,
+      resizable: false,
+      pinned: "right",
+    },
+  ];
 
   return (
     <div>
@@ -313,106 +436,20 @@ export default function AdminModelsPage() {
         }
       >
         <Card class="overflow-hidden" {...usalItems("fade-u", 60)}>
-          <div class="overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead>
-                <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
-                  <th class="font-medium px-4 py-3 w-8">
-                    <input
-                      type="checkbox"
-                      checked={allSelected()}
-                      onChange={(e) => toggleAll(e.currentTarget.checked)}
-                      class="w-4 h-4 rounded border-line bg-elev accent-brand-500 cursor-pointer"
-                    />
-                  </th>
-                  <th class="font-medium px-3 py-3">Model</th>
-                  <th class="font-medium px-3 py-3">Provider</th>
-                  <th class="font-medium px-3 py-3">Upstream model</th>
-                  <th class="font-medium px-3 py-3">Protocol</th>
-                  <th class="font-medium px-3 py-3 text-right">Context</th>
-                  <th class="font-medium px-3 py-3">Pricing</th>
-                  <th class="font-medium px-3 py-3">Source</th>
-                  <th class="font-medium px-3 py-3">Enabled</th>
-                  <th class="font-medium px-3 py-3 text-right"></th>
-                </tr>
-              </thead>
-
-              <tbody class="divide-y divide-line">
-                <For each={models()}>
-                  {(m) => (
-                    <tr class="transition-colors hover:bg-ink-800/30">
-                      <td class="px-4 py-3">
-                        <input
-                          type="checkbox"
-                          checked={selected().has(m.id)}
-                          onChange={(e) => {
-                            const s = new Set(selected());
-                            if (e.currentTarget.checked) s.add(m.id);
-                            else s.delete(m.id);
-                            setSelected(s);
-                          }}
-                          class="w-4 h-4 rounded border-line bg-elev accent-brand-500 cursor-pointer"
-                        />
-                      </td>
-                      <td class="px-3 py-3 max-w-[280px]">
-                        <div class="text-sm text-ink-100 font-medium truncate">{m.id}</div>
-                        <Show when={m.name && m.name !== m.id}>
-                          <div class="text-ink-500 truncate">{m.name}</div>
-                        </Show>
-                      </td>
-                      <td class="px-3 py-3 text-ink-300 whitespace-nowrap">
-                        <Show when={m.providerName} fallback={<Badge tone="amber">no provider</Badge>}>
-                          <span class="inline-flex items-center gap-1.5 whitespace-nowrap">
-                            {m.providerName}
-                            <Show when={m.targets.length > 1}>
-                              <Badge tone="indigo">+{m.targets.length - 1} fallback{m.targets.length === 2 ? "" : "s"}</Badge>
-                            </Show>
-                          </span>
-                        </Show>
-                      </td>
-                      <td class="px-3 py-3 max-w-[220px]">
-                        <code class="text-ink-400 truncate block">
-                          {m.upstreamModel === m.id ? "—" : m.upstreamModel}
-                        </code>
-                      </td>
-                      <td class="px-3 py-3">
-                        <Badge tone={PROTO_TONE[m.proto]}>{m.proto}</Badge>
-                      </td>
-                      <td class="px-3 py-3 text-right text-ink-300 whitespace-nowrap">
-                        {m.contextLength != null ? fmtNum(m.contextLength) : "—"}
-                      </td>
-                      <td class="px-3 py-3 text-ink-400 whitespace-nowrap">
-                        <Show when={m.pricing} fallback="—">
-                          {(p) => (
-                            <code title={JSON.stringify(p())}>
-                              in {p().prompt ?? "—"} · out {p().completion ?? "—"}
-                            </code>
-                          )}
-                        </Show>
-                      </td>
-                      <td class="px-3 py-3">
-                        <Badge tone={m.source === "manual" ? "indigo" : "zinc"}>{m.source}</Badge>
-                      </td>
-                      <td class="px-3 py-3">
-                        <input
-                          type="checkbox"
-                          checked={m.enabled}
-                          onChange={() => toggleEnabled(m)}
-                          title={m.enabled ? "Disable model" : "Enable model"}
-                          class="w-4 h-4 rounded border-line bg-elev accent-brand-500 cursor-pointer"
-                        />
-                      </td>
-                      <td class="px-3 py-3">
-                        <div class="flex justify-end gap-1">
-                          <IconBtn icon={Icons.edit} title="Edit model" onClick={() => openEditor(m)} />
-                          <IconBtn icon={Icons.trash} title="Delete model" danger onClick={() => setConfirmDelete(m)} />
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </For>
-              </tbody>
-            </table>
+          <div class="p-2">
+            <UsageGrid
+              columnDefs={cols}
+              rowData={models()}
+              storageKey="llmgw-grid:admin.models"
+              pageSize={20}
+              heightClass="h-[560px]"
+              rowSelection="multiple"
+              suppressRowClickSelection
+              getRowId={(p) => p.data.id}
+              onSelectionChanged={(e) =>
+                setSelected(new Set(e.api.getSelectedRows().map((r: ModelDto) => r.id)))
+              }
+            />
           </div>
         </Card>
       </Show>

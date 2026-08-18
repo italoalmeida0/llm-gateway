@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createResource, createSignal, Show } from "solid-js";
 
 import { api, type ApiKeyDto } from "../api";
 import { PageTitle } from "../index";
@@ -21,6 +21,8 @@ import {
   timeUntil,
   toast,
 } from "../ui";
+import { UsageGrid } from "../aggrid";
+import type { ColDef } from "ag-grid-community";
 
 const STATUS_TONE: Record<
   string,
@@ -196,6 +198,133 @@ export default function KeysPage() {
     }
   };
 
+  // ---- grid cells ----
+
+  function KeyCell(props: { data?: ApiKeyDto }) {
+    return (
+      <div class="min-w-0 flex flex-col gap-0.5 py-1">
+        <span class="text-sm font-medium text-ink-100 truncate">
+          {props.data?.name}
+        </span>
+        <code class="text-[11px] text-ink-500">{props.data?.prefix}…</code>
+      </div>
+    );
+  }
+
+  function StatusBadgeCell(props: { value?: string }) {
+    const st = STATUS_TONE[props.value ?? ""] ?? STATUS_TONE.zinc!;
+    return <Badge tone={st.tone}>{st.label}</Badge>;
+  }
+
+  /** Output burn, with a mini progress bar when a budget is set. */
+  function BudgetCell(props: { data?: ApiKeyDto; kind?: "today" | "total" }) {
+    const k = props.data;
+    if (!k) return null;
+    const today = props.kind === "today";
+    const used = today ? k.outputToday : k.outputTotal;
+    const limit = today ? k.dailyLimit : k.totalLimit;
+    return (
+      <div class="flex flex-col items-end gap-1 py-1">
+        <span class="tabular-nums">
+          {fmtNum(used)}
+          {limit ? <span class="text-ink-500"> / {fmtNum(limit)}</span> : ""}
+        </span>
+        {limit ? (
+          <div class="w-20">
+            <ProgressBar danger value={used} max={limit} />
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function ActionsCell(props: { data?: ApiKeyDto }) {
+    const k = props.data;
+    if (!k) return null;
+    return (
+      <div class="flex items-center justify-end gap-1">
+        <IconBtn
+          icon={Icons.copy}
+          title={
+            k.revealable
+              ? "Copy full token"
+              : "Created before reveal support — rotate it to get a copyable token"
+          }
+          disabled={!k.revealable}
+          onClick={() => copyKey(k)}
+        />
+        <IconBtn
+          icon={Icons.edit}
+          title="Edit"
+          disabled={k.status === "revoked"}
+          onClick={() => openEdit(k)}
+        />
+        <IconBtn
+          icon={Icons.ban}
+          title="Revoke key"
+          danger
+          disabled={k.status === "revoked"}
+          onClick={() => setConfirmRevoke(k)}
+        />
+        <IconBtn
+          icon={Icons.trash}
+          title="Delete permanently"
+          danger
+          onClick={() => setConfirmDelete(k)}
+        />
+      </div>
+    );
+  }
+
+  const cols: ColDef[] = [
+    { field: "name", headerName: "Key", flex: 1.3, minWidth: 200, cellRenderer: KeyCell },
+    { field: "status", headerName: "Status", width: 160, cellRenderer: StatusBadgeCell },
+    {
+      field: "outputToday",
+      headerName: "Out today",
+      width: 140,
+      cellRenderer: BudgetCell,
+      cellRendererParams: { kind: "today" },
+    },
+    {
+      field: "outputTotal",
+      headerName: "Out total",
+      width: 140,
+      cellRenderer: BudgetCell,
+      cellRendererParams: { kind: "total" },
+    },
+    {
+      field: "expiresAt",
+      headerName: "Expires",
+      width: 200,
+      valueFormatter: (p) =>
+        p.value ? `${fmtDate(p.value)} (${timeUntil(p.value)})` : "Never",
+    },
+    {
+      field: "lastUsedAt",
+      headerName: "Last used",
+      width: 160,
+      valueFormatter: (p) => (p.value ? fmtDate(p.value) : "Never"),
+    },
+    {
+      field: "rpm",
+      headerName: "RPM",
+      width: 100,
+      valueFormatter: (p) => (p.value ?? "default"),
+    },
+    {
+      colId: "actions",
+      headerName: "",
+      width: 160,
+      cellRenderer: ActionsCell,
+      sortable: false,
+      filter: false,
+      floatingFilter: false,
+      resizable: false,
+      pinned: "right",
+    },
+  ];
+
   return (
     <div>
       <PageTitle
@@ -219,87 +348,9 @@ export default function KeysPage() {
             />
           }
         >
-          <ul class="divide-y divide-line">
-            <For each={keys()}>
-              {(k) => {
-                const st = STATUS_TONE[k.status] ?? STATUS_TONE.zinc!;
-                return (
-                  <li class="px-6 py-4.5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between transition-colors hover:bg-ink-800/25 first:rounded-t-[1.75rem] last:rounded-b-[1.75rem]">
-                    <div class="min-w-0">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <span class="text-sm font-medium">{k.name}</span>
-                        <Badge tone={st.tone}>{st.label}</Badge>
-                        <code class="text-[11px] text-ink-500">
-                          {k.prefix}…
-                        </code>
-                      </div>
-                      <div class="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-ink-400">
-                        <span>
-                          Output today {fmtNum(k.outputToday)}
-                          {k.dailyLimit ? ` / ${fmtNum(k.dailyLimit)}` : ""}
-                        </span>
-                        <span>
-                          Output total {fmtNum(k.outputTotal)}
-                          {k.totalLimit ? ` / ${fmtNum(k.totalLimit)}` : ""}
-                        </span>
-                        <span>
-                          Expires:{" "}
-                          {k.expiresAt
-                            ? `${fmtDate(k.expiresAt)} (${timeUntil(k.expiresAt)})`
-                            : "Never"}
-                        </span>
-                        <span>{k.rpm ? `${k.rpm} rpm` : "Default rpm"}</span>
-                        <span>
-                          Last used:{" "}
-                          {k.lastUsedAt ? fmtDate(k.lastUsedAt) : "Never"}
-                        </span>
-                      </div>
-                      <Show when={k.dailyLimit || k.totalLimit}>
-                        <div class="mt-2 max-w-xs">
-                          <ProgressBar
-                            danger
-                            value={k.dailyLimit ? k.outputToday : k.outputTotal}
-                            max={(k.dailyLimit ?? k.totalLimit) || 1}
-                          />
-                        </div>
-                      </Show>
-                    </div>
-                    <div class="flex items-center gap-1 shrink-0">
-                      <IconBtn
-                        icon={Icons.copy}
-                        title={
-                          k.revealable
-                            ? "Copy full token"
-                            : "Created before reveal support — rotate it to get a copyable token"
-                        }
-                        disabled={!k.revealable}
-                        onClick={() => copyKey(k)}
-                      />
-                      <IconBtn
-                        icon={Icons.edit}
-                        title="Edit"
-                        disabled={k.status === "revoked"}
-                        onClick={() => openEdit(k)}
-                      />
-                      <IconBtn
-                        icon={Icons.ban}
-                        title="Revoke key"
-                        danger
-                        disabled={k.status === "revoked"}
-                        onClick={() => setConfirmRevoke(k)}
-                      />
-                      <IconBtn
-                        icon={Icons.trash}
-                        title="Delete permanently"
-                        danger
-                        onClick={() => setConfirmDelete(k)}
-                      />
-                    </div>
-                  </li>
-                );
-              }}
-            </For>
-          </ul>
+          <div class="p-2" {...usalItems("fade-u", 60)}>
+            <UsageGrid columnDefs={cols} rowData={keys()} storageKey="llmgw-grid:keys.user" />
+          </div>
         </Show>
       </Card>
 

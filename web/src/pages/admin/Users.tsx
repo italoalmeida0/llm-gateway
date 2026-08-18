@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createResource, createSignal, Show } from "solid-js";
 
 import { api, currentSession, type AdminUserDto } from "../../api";
 import { PageTitle } from "../../index";
@@ -18,6 +18,8 @@ import {
   fmtDate,
   toast,
 } from "../../ui";
+import { UsageGrid } from "../../aggrid";
+import type { ColDef } from "ag-grid-community";
 
 export default function AdminUsersPage() {
   const [users, { refetch }] = createResource(async () => {
@@ -137,6 +139,116 @@ export default function AdminUsersPage() {
     }
   };
 
+  // ---- grid cells ----
+
+  function UserCell(props: { data?: AdminUserDto }) {
+    return (
+      <div class="flex flex-col gap-0.5 py-1">
+        <span class="text-sm text-ink-100 truncate">
+          {props.data?.name || props.data?.email}
+        </span>
+        <span class="text-ink-500 truncate">{props.data?.email}</span>
+      </div>
+    );
+  }
+
+  function RoleCell(props: { data?: AdminUserDto }) {
+    const u = props.data;
+    if (!u) return null;
+    return (
+      <div class="flex items-center gap-1.5 flex-wrap">
+        <Badge tone={u.role === "admin" ? "indigo" : "zinc"}>
+          {u.role === "admin" ? "Admin" : "User"}
+        </Badge>
+        <Show when={u.status === "banned"}>
+          <Badge tone="red">Banned</Badge>
+        </Show>
+      </div>
+    );
+  }
+
+  function SecurityCell(props: { data?: AdminUserDto }) {
+    const u = props.data;
+    if (!u) return null;
+    return (
+      <span class="text-ink-400 whitespace-nowrap">
+        <span title="password" class={u.hasPassword ? "" : "opacity-40"}>*</span>{" "}
+        <span title="2FA" class={u.totpEnabled ? "" : "opacity-40"}>2</span>{" "}
+        <span title="google" class={u.googleLinked ? "" : "opacity-40"}>G</span>
+      </span>
+    );
+  }
+
+  function ActionsCell(props: { data?: AdminUserDto }) {
+    const u = props.data;
+    if (!u) return null;
+    return (
+      <div class="flex items-center justify-end gap-1">
+        <IconBtn
+          icon={Icons.edit}
+          title="Edit"
+          onClick={() => setEditing({ ...u })}
+        />
+        <IconBtn
+          icon={Icons.key}
+          title="Send password reset link"
+          onClick={() => sendReset(u)}
+        />
+        <IconBtn
+          icon={Icons.logout}
+          title="Revoke all sessions"
+          onClick={() => quick(u, "revoke-sessions")}
+        />
+        <Show when={u.totpEnabled}>
+          <IconBtn
+            icon={Icons.shield}
+            title="Reset 2FA"
+            onClick={() => quick(u, "reset-2fa", "Reset this user's 2FA?")}
+          />
+        </Show>
+        <Show when={u.id !== meId()}>
+          <IconBtn
+            icon={Icons.trash}
+            title="Delete user"
+            danger
+            onClick={() => setConfirmDelete(u)}
+          />
+        </Show>
+      </div>
+    );
+  }
+
+  const cols: ColDef[] = [
+    { field: "email", headerName: "User", flex: 1.4, minWidth: 220, cellRenderer: UserCell },
+    { field: "role", headerName: "Role", width: 150, cellRenderer: RoleCell },
+    {
+      colId: "security",
+      headerName: "Security",
+      width: 110,
+      cellRenderer: SecurityCell,
+      filter: false,
+      floatingFilter: false,
+    },
+    { field: "keyCount", headerName: "Keys", width: 90, type: "rightAligned" },
+    {
+      field: "lastLoginAt",
+      headerName: "Last login",
+      width: 170,
+      valueFormatter: (p) => (p.value ? fmtDate(p.value) : "Never"),
+    },
+    {
+      colId: "actions",
+      headerName: "",
+      width: 180,
+      cellRenderer: ActionsCell,
+      sortable: false,
+      filter: false,
+      floatingFilter: false,
+      resizable: false,
+      pinned: "right",
+    },
+  ];
+
   return (
     <div>
       <PageTitle
@@ -154,90 +266,8 @@ export default function AdminUsersPage() {
           when={(users() ?? []).length > 0}
           fallback={<EmptyState icon={Icons.users} title="No users" />}
         >
-          <div class="overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead>
-                <tr class="text-left text-[10px] uppercase tracking-wider text-ink-500 border-b border-line">
-                  <th class="font-medium px-6 py-3">User</th>
-                  <th class="font-medium px-3 py-3">Role</th>
-                  <th class="font-medium px-3 py-3">Security</th>
-                  <th class="font-medium px-3 py-3">Keys</th>
-                  <th class="font-medium px-3 py-3">Last login</th>
-                  <th class="font-medium px-3 py-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-line">
-                <For each={users()}>
-                  {(u) => (
-                    <tr class="transition-colors hover:bg-ink-800/30">
-                      <td class="px-6 py-3">
-                        <div class="text-sm text-ink-100">
-                          {u.name || u.email}
-                        </div>
-                        <div class="text-ink-500">{u.email}</div>
-                      </td>
-                      <td class="px-3 py-3">
-                        <Badge tone={u.role === "admin" ? "indigo" : "zinc"}>
-                          {u.role === "admin" ? "Admin" : "User"}
-                        </Badge>{" "}
-                        <Show when={u.status === "banned"}>
-                          <Badge tone="red">Banned</Badge>
-                        </Show>
-                      </td>
-                      <td class="px-3 py-3 text-ink-400 whitespace-nowrap">
-                        <span title="password">
-                          {u.hasPassword ? "*" : "·"}
-                        </span>{" "}
-                        <span title="2FA">{u.totpEnabled ? "2" : "·"}</span>{" "}
-                        <span title="google">{u.googleLinked ? "G" : "·"}</span>
-                      </td>
-                      <td class="px-3 py-3 tabular-nums text-ink-300">
-                        {u.keyCount}
-                      </td>
-                      <td class="px-3 py-3 text-ink-400 whitespace-nowrap">
-                        {u.lastLoginAt ? fmtDate(u.lastLoginAt) : "Never"}
-                      </td>
-                      <td class="px-3 py-3">
-                        <div class="flex items-center justify-end gap-1">
-                          <IconBtn
-                            icon={Icons.edit}
-                            title="Edit"
-                            onClick={() => setEditing({ ...u })}
-                          />
-                          <IconBtn
-                            icon={Icons.key}
-                            title="Send password reset link"
-                            onClick={() => sendReset(u)}
-                          />
-                          <IconBtn
-                            icon={Icons.logout}
-                            title="Revoke all sessions"
-                            onClick={() => quick(u, "revoke-sessions")}
-                          />
-                          <Show when={u.totpEnabled}>
-                            <IconBtn
-                              icon={Icons.shield}
-                              title="Reset 2FA"
-                              onClick={() =>
-                                quick(u, "reset-2fa", "Reset this user's 2FA?")
-                              }
-                            />
-                          </Show>
-                          <Show when={u.id !== meId()}>
-                            <IconBtn
-                              icon={Icons.trash}
-                              title="Delete user"
-                              danger
-                              onClick={() => setConfirmDelete(u)}
-                            />
-                          </Show>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </For>
-              </tbody>
-            </table>
+          <div class="p-2" {...usalItems("fade-u", 60)}>
+            <UsageGrid columnDefs={cols} rowData={users()} storageKey="llmgw-grid:admin.users.list" />
           </div>
         </Show>
       </Card>

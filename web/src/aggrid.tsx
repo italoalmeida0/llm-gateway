@@ -125,6 +125,8 @@ export function UsageGrid(props: {
   suppressRowClickSelection?: boolean;
   getRowId?: (p: { data: any }) => string;
   onSelectionChanged?: (e: any) => void;
+  onGridReady?: (e: any) => void;
+  onModelUpdated?: (e: any) => void;
   /** Infinite row model (server-driven blocks; mutually exclusive with
    *  pagination props). The datasource maps startRow/endRow to
    *  limit/offset API calls with sort/filter forwarded to SQL. */
@@ -227,7 +229,11 @@ export function UsageGrid(props: {
             animateRows
             rowHeight={38}
             suppressCellFocus
-            onGridReady={restoreState}
+            onGridReady={(e) => {
+              restoreState();
+              props.onGridReady?.(e);
+            }}
+            onModelUpdated={props.onModelUpdated}
             onFilterChanged={saveSoon}
             onSortChanged={saveSoon}
             onColumnMoved={saveSoon}

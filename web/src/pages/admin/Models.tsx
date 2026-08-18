@@ -1,4 +1,4 @@
-import { createSignal, For, Show, createResource, createMemo } from "solid-js";
+import { createSignal, For, Show, createResource, createMemo, createEffect } from "solid-js";
 
 import { api, type ModelDto, type ModelProto, type ProviderDto, type RoutingMode, type SyncOutcome } from "../../api";
 import { PageTitle } from "../../index";
@@ -6,7 +6,7 @@ import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
 import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtNum } from "../../ui";
 import { UsageGrid, serverDatasource } from "../../aggrid";
-import type { ColDef } from "ag-grid-community";
+import type { ColDef, GridApi } from "ag-grid-community";
 
 /** Editor-state of one failover routing target. */
 interface TargetDraft {
@@ -31,6 +31,15 @@ const PROTO_TONE: Record<ModelProto, "zinc" | "blue" | "indigo"> = {
   anthropic: "blue",
   both: "indigo",
 };
+
+const USER_SELECTION_SOURCES = new Set([
+  "checkboxSelected",
+  "rowClicked",
+  "spaceKey",
+  "uiSelectAll",
+  "uiSelectAllFiltered",
+  "uiSelectAllCurrentPage",
+]);
 
 const PRICING_KEYS = ["prompt", "completion", "image", "request", "input_cache_reads", "input_cache_writes"];
 
@@ -58,12 +67,112 @@ export function syncSummary(sync?: Partial<Record<string, SyncOutcome>>): string
 }
 
 export default function AdminModelsPage() {
+  const [selected, setSelected] = createSignal<Set<string>>(new Set());
+  const [selectingAll, setSelectingAll] = createSignal(false);
+  let modelsGridApi: GridApi<ModelDto> | undefined;
+
+  const applyLoadedSelection = (gridApi = modelsGridApi) => {
+    if (!gridApi) return;
+    const ids = selected();
+    gridApi.forEachNode((node) => {
+      const id = node.data?.id;
+      if (!id) return;
+      const shouldSelect = ids.has(id);
+      if (node.isSelected() !== shouldSelect) {
+        node.setSelected(shouldSelect, false, "api");
+      }
+    });
+  };
+
+  // Infinite row model only exposes loaded blocks. Merge those changes into
+  // the app-level set so scrolling never drops selections from other blocks.
+  const syncLoadedSelection = (event: {
+    api: GridApi<ModelDto>;
+    source?: string;
+  }) => {
+    // Ignore selection changes caused by loading blocks or our own API calls.
+    // Only user actions should mutate the page-level selection set.
+    if (event.source && !USER_SELECTION_SOURCES.has(event.source)) return;
+    const next = new Set(selected());
+    let changed = false;
+    event.api.forEachNode((node) => {
+      const id = node.data?.id;
+      if (!id) return;
+      if (node.isSelected()) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      } else if (next.delete(id)) {
+        changed = true;
+      }
+    });
+    if (changed) setSelected(next);
+  };
+
+  createEffect(() => {
+    selected();
+    applyLoadedSelection();
+  });
+
+  const clearSelection = () => {
+    modelsGridApi?.deselectAll();
+    setSelected(new Set<string>());
+  };
+
+  const selectAllFiltered = async () => {
+    const gridApi = modelsGridApi;
+    if (!gridApi) return;
+    setSelectingAll(true);
+    try {
+      const filters = gridApi.getFilterModel();
+      const sort = gridApi
+        .getColumnState()
+        .filter((column) => column.sort)
+        .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
+        .map((column) => ({ colId: column.colId, sort: column.sort! }));
+      const ids: string[] = [];
+      let offset = 0;
+      let total = 0;
+
+      do {
+        const qs = new URLSearchParams({
+          limit: "500",
+          offset: String(offset),
+        });
+        if (Object.keys(filters).length > 0) {
+          qs.set("filters", JSON.stringify(filters));
+        }
+        if (sort.length > 0) qs.set("sort", JSON.stringify(sort));
+        const page = await api<{ models: ModelDto[]; total: number }>(
+          "GET",
+          `/api/admin/models?${qs}`,
+        );
+        total = page.total;
+        ids.push(...page.models.map((model) => model.id));
+        offset += page.models.length;
+        if (page.models.length === 0) break;
+      } while (offset < total);
+
+      const next = new Set(selected());
+      for (const id of ids) next.add(id);
+      setSelected(next);
+      applyLoadedSelection(gridApi);
+      toast(`${ids.length} model${ids.length === 1 ? "" : "s"} selected`);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "could not select filtered models", "err");
+    } finally {
+      setSelectingAll(false);
+    }
+  };
+
   const [modelCount, { refetch: refetchModelCount }] = createResource(async () => {
     const j = await api<{ total: number }>("GET", "/api/admin/models?limit=1");
     return j.total;
   });
   const [gridVersion, setGridVersion] = createSignal(0);
   const refreshGrid = () => {
+    clearSelection();
     setGridVersion((v) => v + 1);
     refetchModelCount();
   };
@@ -93,7 +202,6 @@ export default function AdminModelsPage() {
   const [editing, setEditing] = createSignal<ModelDto | "new" | null>(null);
   const [confirmDelete, setConfirmDelete] = createSignal<ModelDto | null>(null);
   const [confirmBulk, setConfirmBulk] = createSignal(false);
-  const [selected, setSelected] = createSignal<Set<string>>(new Set());
   const [showAdvanced, setShowAdvanced] = createSignal(false);
 
   // ---- editor form ----
@@ -265,12 +373,16 @@ export default function AdminModelsPage() {
   const bulkRemove = async () => {
     setBusy(true);
     try {
-      const j = await api<{ deleted: number }>("POST", "/api/admin/models/bulk-delete", {
-        ids: [...selected()],
-      });
-      toast(`Deleted ${j.deleted} model${j.deleted === 1 ? "" : "s"}`);
+      let deleted = 0;
+      const ids = [...selected()];
+      for (let i = 0; i < ids.length; i += 500) {
+        const j = await api<{ deleted: number }>("POST", "/api/admin/models/bulk-delete", {
+          ids: ids.slice(i, i + 500),
+        });
+        deleted += j.deleted;
+      }
+      toast(`Deleted ${deleted} model${deleted === 1 ? "" : "s"}`);
       setConfirmBulk(false);
-      setSelected(new Set<string>());
       refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "bulk delete failed", "err");
@@ -351,7 +463,6 @@ export default function AdminModelsPage() {
       headerName: "",
       width: 42,
       checkboxSelection: true,
-      headerCheckboxSelection: true,
       sortable: false,
       filter: false,
       floatingFilter: false,
@@ -426,14 +537,21 @@ export default function AdminModelsPage() {
         }
       />
 
-      <Show when={selected().size > 0}>
+      <Show when={(modelCount() ?? 0) > 0}>
         <Card class="p-3 mb-4 flex items-center justify-between">
           <span class="text-xs text-ink-300">{selected().size} selected</span>
           <div class="flex gap-2">
-            <Btn variant="ghost" size="sm" onClick={() => setSelected(new Set<string>())}>Clear</Btn>
-            <Btn variant="danger" size="sm" onClick={() => setConfirmBulk(true)}>
-              <Icon name={Icons.trash} /> Delete selected
+            <Btn variant="ghost" size="sm" onClick={selectAllFiltered} disabled={selectingAll() || busy()}>
+              {selectingAll() ? "Selecting…" : "Select all filtered"}
             </Btn>
+            <Btn variant="ghost" size="sm" onClick={clearSelection} disabled={selected().size === 0 || selectingAll() || busy()}>
+              Clear
+            </Btn>
+            <Show when={selected().size > 0}>
+              <Btn variant="danger" size="sm" onClick={() => setConfirmBulk(true)} disabled={selectingAll()}>
+                <Icon name={Icons.trash} /> Delete selected
+              </Btn>
+            </Show>
           </div>
         </Card>
       </Show>
@@ -462,9 +580,12 @@ export default function AdminModelsPage() {
               rowSelection="multiple"
               suppressRowClickSelection
               getRowId={(p) => p.data.id}
-              onSelectionChanged={(e) =>
-                setSelected(new Set(e.api.getSelectedRows().map((r: ModelDto) => r.id)))
-              }
+              onGridReady={(e) => {
+                modelsGridApi = e.api as GridApi<ModelDto>;
+                applyLoadedSelection(modelsGridApi);
+              }}
+              onModelUpdated={(e) => applyLoadedSelection(e.api as GridApi<ModelDto>)}
+              onSelectionChanged={syncLoadedSelection}
             />
           </div>
         </Card>
@@ -696,4 +817,3 @@ export default function AdminModelsPage() {
     </div>
   );
 }
-

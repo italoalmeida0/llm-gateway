@@ -791,6 +791,15 @@ describe("gateway end-to-end", () => {
     expect(models.json.models[0].id).toBe("fake-llm-1");
     expect(models.json.models[0].targets.length).toBeGreaterThanOrEqual(1);
 
+    const selectedModels = await api(query("/api/admin/models", {
+      limit: "50",
+      offset: "0",
+      selected_ids: JSON.stringify(["fake-llm-1"]),
+    }), { token: adminToken });
+    expect(selectedModels.status).toBe(200);
+    expect(selectedModels.json.total).toBe(1);
+    expect(selectedModels.json.models.map((m: any) => m.id)).toEqual(["fake-llm-1"]);
+
     const userBreakdown = await api(query("/api/usage/breakdown", {
       days: "7",
       limit: "1",
@@ -1995,4 +2004,3 @@ describe("upstream failover", () => {
     expect(provs.json.providers.find((p: any) => p.id === provA).keys.length).toBe(1);
   });
 });
-

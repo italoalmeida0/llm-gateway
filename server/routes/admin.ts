@@ -808,10 +808,27 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
 
   if (path === "/api/admin/models" && req.method === "GET") {
     const grid = url.searchParams.has("limit") ? parseGridQuery(url) : null;
+    let selectedIds: string[] | null = null;
+    const selectedRaw = url.searchParams.get("selected_ids");
+    if (selectedRaw !== null) {
+      try {
+        const parsed = JSON.parse(selectedRaw);
+        if (!Array.isArray(parsed) || parsed.length > 10_000) return err(400, "selected_ids is invalid", req);
+        if (parsed.some((id) => typeof id !== "string" || id.length === 0 || id.length > 256)) {
+          return err(400, "selected_ids is invalid", req);
+        }
+        selectedIds = parsed;
+      } catch {
+        return err(400, "selected_ids is invalid", req);
+      }
+    }
+    const selectedWhere = selectedIds === null
+      ? ""
+      : " WHERE m.id IN (SELECT value FROM json_each(?))";
     const page = grid
       ? gridPage({
-          baseSql: `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id`,
-          baseParams: [],
+          baseSql: `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id${selectedWhere}`,
+          baseParams: selectedIds === null ? [] : [JSON.stringify(selectedIds)],
           cols: {
             id: { col: "id" },
             providerId: { col: "provider_id" },
@@ -830,13 +847,22 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
           tieBreak: "id ASC",
         })
       : null;
-    const rows = (page?.rows ?? db
-      .prepare<ModelRow & { provider_name: string | null }, []>(
-        `SELECT m.*, p.name AS provider_name FROM models m
-         LEFT JOIN providers p ON p.id = m.provider_id
-         ORDER BY m.id`,
-      )
-      .all()) as Array<ModelRow & { provider_name: string | null }>;
+    const rows = (page?.rows ?? (selectedIds === null
+      ? db
+          .prepare<ModelRow & { provider_name: string | null }, []>(
+            `SELECT m.*, p.name AS provider_name FROM models m
+             LEFT JOIN providers p ON p.id = m.provider_id
+             ORDER BY m.id`,
+          )
+          .all()
+      : db
+          .prepare<ModelRow & { provider_name: string | null }, [string]>(
+            `SELECT m.*, p.name AS provider_name FROM models m
+             LEFT JOIN providers p ON p.id = m.provider_id
+             WHERE m.id IN (SELECT value FROM json_each(?))
+             ORDER BY m.id`,
+          )
+          .all(JSON.stringify(selectedIds)))) as Array<ModelRow & { provider_name: string | null }>;
     const byModel = new Map<string, ModelTargetDto[]>();
     const modelIds = rows.map((m) => m.id);
     if (modelIds.length > 0) {

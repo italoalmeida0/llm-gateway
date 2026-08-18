@@ -69,6 +69,7 @@ export function syncSummary(sync?: Partial<Record<string, SyncOutcome>>): string
 export default function AdminModelsPage() {
   const [selected, setSelected] = createSignal<Set<string>>(new Set());
   const [selectingAll, setSelectingAll] = createSignal(false);
+  const [selectedOnly, setSelectedOnly] = createSignal(false);
   let modelsGridApi: GridApi<ModelDto> | undefined;
 
   const applyLoadedSelection = (gridApi = modelsGridApi) => {
@@ -118,6 +119,7 @@ export default function AdminModelsPage() {
   const clearSelection = () => {
     modelsGridApi?.deselectAll();
     setSelected(new Set<string>());
+    setSelectedOnly(false);
   };
 
   const selectAllFiltered = async () => {
@@ -183,6 +185,9 @@ export default function AdminModelsPage() {
     });
     if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
     if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+    if (selectedOnly()) {
+      qs.set("selected_ids", JSON.stringify([...selected()]));
+    }
     const j = await api<{ models: ModelDto[]; total: number }>("GET", `/api/admin/models?${qs}`);
     return { rows: j.models, total: j.total };
   });
@@ -545,7 +550,28 @@ export default function AdminModelsPage() {
             <Btn variant="ghost" size="sm" onClick={selectAllFiltered} disabled={selectingAll() || busy()}>
               {selectingAll() ? "Selecting…" : "Select all filtered"}
             </Btn>
-            <Btn variant="ghost" size="sm" onClick={clearSelection} disabled={selected().size === 0 || selectingAll() || busy()}>
+            <Btn
+              variant={selectedOnly() ? "outline" : "ghost"}
+              size="sm"
+              onClick={() => setSelectedOnly((value) => !value)}
+              disabled={
+                (!selectedOnly() && selected().size === 0) ||
+                selectingAll() ||
+                busy()
+              }
+            >
+              Selected only
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
+              onClick={clearSelection}
+              disabled={
+                (!selectedOnly() && selected().size === 0) ||
+                selectingAll() ||
+                busy()
+              }
+            >
               Clear
             </Btn>
             <Show when={selected().size > 0}>
@@ -575,7 +601,7 @@ export default function AdminModelsPage() {
               columnDefs={cols}
               datasource={modelsDatasource}
               cacheBlockSize={100}
-              refreshDeps={gridVersion()}
+              refreshDeps={`${gridVersion()}:${selectedOnly()}:${[...selected()].join(",")}`}
               storageKey="llmgw-grid:admin.models"
               heightClass="h-[560px]"
               rowSelection="multiple"

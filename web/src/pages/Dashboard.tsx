@@ -74,11 +74,14 @@ function BucketStat(props: {
         <CountUp value={props.count} />
       </div>
       <div class="mt-1.5 flex items-center gap-1.5 text-[11px] text-ink-500 min-h-[22px]">
-        <span
-          class="w-2 h-2 rounded-sm inline-block shrink-0"
-          style={{ background: props.color }}
-        />
-        <span class="truncate">{props.label}</span>
+        <span class="flex items-center">
+          <span
+            class="w-2 h-2 rounded-sm inline-block shrink-0"
+            style={{ background: props.color }}
+          />
+
+          <span class="truncate">{props.label}</span>
+        </span>
         <Show when={props.delta !== null}>
           <DeltaPill pct={props.delta!} />
         </Show>

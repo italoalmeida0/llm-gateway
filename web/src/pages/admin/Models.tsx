@@ -487,6 +487,7 @@ export default function AdminModelsPage() {
       headerName: "Context",
       width: 110,
       type: "rightAligned",
+      filter: "agNumberColumnFilter",
       valueFormatter: (p) => (p.value != null ? fmtNum(p.value) : "—"),
     },
     {

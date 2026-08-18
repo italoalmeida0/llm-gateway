@@ -141,8 +141,8 @@ export function queryKeys(
     prefix: { col: "prefix" },
     outputToday: { col: "_out_today", kind: "number" },
     outputTotal: { col: "_out_total", kind: "number" },
-    expiresAt: { col: "expires_at", kind: "number" },
-    lastUsedAt: { col: "last_used_at", kind: "number" },
+    expiresAt: { col: "expires_at", kind: "date" },
+    lastUsedAt: { col: "last_used_at", kind: "date" },
     rpm: { col: "rpm", kind: "number" },
     createdAt: { col: "created_at", kind: "number" },
   };

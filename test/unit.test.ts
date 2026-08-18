@@ -38,8 +38,48 @@ import {
 import { StreamMeter, estimateBodyTokens } from "../server/proxy/index";
 import { estimateTokenCount } from "tokenx";
 import type { ModelRow, ModelTargetRow, ProviderRow } from "../server/db";
+import { buildGridWhere } from "../server/gridql";
 
 const SECRET = "test-secret-that-is-long-enough-32+";
+
+describe("AG Grid server-side filter translation", () => {
+  test("translates native date filter models into UTC day ranges", () => {
+    const result = buildGridWhere(
+      {
+        ts: {
+          filterType: "date",
+          type: "inRange",
+          dateFrom: "2026-08-18 00:00:00",
+          dateTo: "2026-08-19 00:00:00",
+        },
+      },
+      { ts: { col: "e.ts", kind: "date" } },
+    );
+    expect(result.clauses).toEqual(["e.ts >= ? AND e.ts < ?"]);
+    expect(result.params).toEqual([
+      Date.UTC(2026, 7, 18),
+      Date.UTC(2026, 7, 20),
+    ]);
+  });
+
+  test("supports multiple native conditions with their operator", () => {
+    const result = buildGridWhere(
+      {
+        requests: {
+          filterType: "number",
+          operator: "OR",
+          conditions: [
+            { filterType: "number", type: "greaterThan", filter: 100 },
+            { filterType: "number", type: "equals", filter: 0 },
+          ],
+        },
+      },
+      { requests: { col: "reqs", kind: "number" } },
+    );
+    expect(result.clauses).toEqual(["(reqs > ? OR reqs = ?)"]);
+    expect(result.params).toEqual([100, 0]);
+  });
+});
 
 describe("TOTP (RFC 6238 vectors, SHA-1, 6-digit truncation)", () => {
   // RFC 6238 Appendix B: ASCII secret "12345678901234567890" -> base32

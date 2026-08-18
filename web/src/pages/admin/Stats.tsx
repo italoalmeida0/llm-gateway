@@ -60,10 +60,10 @@ const fmtOrDash = (v: unknown) => (v == null || v === "" ? "—" : String(v));
 
 const userCols: ColDef<UserRow>[] = [
   { field: "email", headerName: "User", flex: 1.4 },
-  { field: "in_tok", headerName: "In", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "cache_tok", headerName: "Cache", width: 120, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "out_tok", headerName: "Out", width: 120, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "reqs", headerName: "Requests", width: 110, type: "rightAligned", valueFormatter: countFormatter },
+  { field: "in_tok", headerName: "In", width: 110, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "cache_tok", headerName: "Cache", width: 120, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "out_tok", headerName: "Out", width: 120, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "reqs", headerName: "Requests", width: 110, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: countFormatter },
 ];
 
 const modelCols: ColDef<ModelRow>[] = [
@@ -78,10 +78,10 @@ const modelCols: ColDef<ModelRow>[] = [
     valueGetter: (p) => p.data?.provider_key_label || p.data?.provider_key_id?.slice(0, 8) || "—",
     valueFormatter: (p) => p.value,
   },
-  { field: "reqs", headerName: "Requests", width: 100, type: "rightAligned", valueFormatter: countFormatter },
-  { field: "in_tok", headerName: "In", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "cache_tok", headerName: "Cache", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "out_tok", headerName: "Out", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "reqs", headerName: "Requests", width: 100, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: countFormatter },
+  { field: "in_tok", headerName: "In", width: 100, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "cache_tok", headerName: "Cache", width: 110, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "out_tok", headerName: "Out", width: 110, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
 ];
 
 /** Card heading split in two tight spans so long windows never wrap. */

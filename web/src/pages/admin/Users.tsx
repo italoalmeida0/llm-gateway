@@ -18,7 +18,7 @@ import {
   fmtDate,
   toast,
 } from "../../ui";
-import { UsageGrid, serverDatasource } from "../../aggrid";
+import { EPOCH_DATE_FILTER_PARAMS, UsageGrid, serverDatasource } from "../../aggrid";
 import type { ColDef } from "ag-grid-community";
 
 export default function AdminUsersPage() {
@@ -257,11 +257,13 @@ export default function AdminUsersPage() {
       filter: false,
       floatingFilter: false,
     },
-    { field: "keyCount", headerName: "Keys", width: 90, type: "rightAligned" },
+    { field: "keyCount", headerName: "Keys", width: 90, type: "rightAligned", filter: "agNumberColumnFilter" },
     {
       field: "lastLoginAt",
       headerName: "Last login",
       width: 170,
+      filter: "agDateColumnFilter",
+      filterParams: EPOCH_DATE_FILTER_PARAMS,
       valueFormatter: (p) => (p.value ? fmtDate(p.value) : "Never"),
     },
     {

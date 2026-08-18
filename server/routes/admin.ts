@@ -1104,7 +1104,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         role: { col: "role" },
         status: { col: "status" },
         keyCount: { col: "key_count", kind: "number" },
-        lastLoginAt: { col: "last_login_at", kind: "number" },
+         lastLoginAt: { col: "last_login_at", kind: "date" },
         createdAt: { col: "created_at", kind: "number" },
       };
       const { rows, total } = gridPage({
@@ -1596,7 +1596,7 @@ if (path === "/api/admin/stats" && req.method === "GET") {
           FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id`,
         baseParams: [],
         cols: {
-          ts: { col: "ts", kind: "number" },
+           ts: { col: "ts", kind: "date" },
           action: { col: "action" },
           target: { col: "target" },
           meta: { col: "meta" },

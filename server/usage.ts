@@ -424,7 +424,7 @@ export function queryUserUsageBreakdown(
 /** Grid sort/filter column map — STRICT whitelist; unknown columns are simply
  *  ignored (never spliced into SQL). Translation lives in server/gridql. */
 const EVENT_COLS: Record<string, ColSpec> = {
-  ts: { col: "e.ts", kind: "number" },
+  ts: { col: "e.ts", kind: "date" },
   key_name: { col: "COALESCE(k.name, substr(e.key_id, 1, 8))" },
   proto: { col: "e.proto" },
   provider_name: { col: "COALESCE(p.name, '')" },

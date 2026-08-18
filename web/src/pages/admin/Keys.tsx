@@ -17,7 +17,7 @@ import {
   fmtNum,
   timeUntil,
 } from "../../ui";
-import { UsageGrid, serverDatasource } from "../../aggrid";
+import { EPOCH_DATE_FILTER_PARAMS, UsageGrid, serverDatasource } from "../../aggrid";
 import type { ColDef } from "ag-grid-community";
 
 const TONE: Record<
@@ -164,6 +164,7 @@ export default function AdminKeysPage() {
       headerName: "Out today",
       width: 130,
       type: "rightAligned",
+      filter: "agNumberColumnFilter",
       cellRenderer: (p: { data?: ApiKeyDto }) => (
         <span class="tabular-nums">
           {fmtNum(p.data?.outputToday)}
@@ -176,6 +177,7 @@ export default function AdminKeysPage() {
       headerName: "Out total",
       width: 130,
       type: "rightAligned",
+      filter: "agNumberColumnFilter",
       cellRenderer: (p: { data?: ApiKeyDto }) => (
         <span class="tabular-nums">
           {fmtNum(p.data?.outputTotal)}
@@ -187,6 +189,8 @@ export default function AdminKeysPage() {
       field: "expiresAt",
       headerName: "Expires",
       width: 210,
+      filter: "agDateColumnFilter",
+      filterParams: EPOCH_DATE_FILTER_PARAMS,
       valueFormatter: (p) =>
         p.value ? `${fmtDate(p.value)} (${timeUntil(p.value)})` : "Never",
     },
@@ -194,6 +198,8 @@ export default function AdminKeysPage() {
       field: "lastUsedAt",
       headerName: "Last used",
       width: 160,
+      filter: "agDateColumnFilter",
+      filterParams: EPOCH_DATE_FILTER_PARAMS,
       valueFormatter: (p) => (p.value ? fmtDate(p.value) : "Never"),
     },
     {

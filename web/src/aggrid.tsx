@@ -69,11 +69,30 @@ export function latencyFormatter(p: { value?: unknown }) {
 const DEFAULT_COL_DEF: ColDef = {
   sortable: true,
   resizable: true,
-  filter: true,
-  floatingFilter: true,
+  filter: "agTextColumnFilter",
+  floatingFilter: false,
   minWidth: 72,
 };
 const PAGE_SIZE_SELECTOR: number[] = [15, 20, 25, 50, 100, 250];
+
+/** AG Grid date filters receive native Date values by default. Our API DTOs
+ * carry epoch milliseconds, so compare their local calendar day explicitly. */
+export const EPOCH_DATE_FILTER_PARAMS = {
+  browserDatePicker: true,
+  comparator: (filterLocalDateAtMidnight: Date, cellValue: unknown) => {
+    const timestamp = Number(cellValue);
+    if (!Number.isFinite(timestamp)) return -1;
+    const cellDate = new Date(timestamp);
+    const cellDay = new Date(
+      cellDate.getFullYear(),
+      cellDate.getMonth(),
+      cellDate.getDate(),
+    );
+    if (cellDay < filterLocalDateAtMidnight) return -1;
+    if (cellDay > filterLocalDateAtMidnight) return 1;
+    return 0;
+  },
+};
 
 export interface GridRowsParams {
   startRow: number;

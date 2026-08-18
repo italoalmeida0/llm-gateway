@@ -21,7 +21,7 @@ import {
   timeUntil,
   toast,
 } from "../ui";
-import { UsageGrid, serverDatasource } from "../aggrid";
+import { EPOCH_DATE_FILTER_PARAMS, UsageGrid, serverDatasource } from "../aggrid";
 import type { ColDef } from "ag-grid-community";
 
 const STATUS_TONE: Record<
@@ -299,6 +299,7 @@ export default function KeysPage() {
       field: "outputToday",
       headerName: "Out today",
       width: 140,
+      filter: "agNumberColumnFilter",
       cellRenderer: BudgetCell,
       cellRendererParams: { kind: "today" },
     },
@@ -306,6 +307,7 @@ export default function KeysPage() {
       field: "outputTotal",
       headerName: "Out total",
       width: 140,
+      filter: "agNumberColumnFilter",
       cellRenderer: BudgetCell,
       cellRendererParams: { kind: "total" },
     },
@@ -313,6 +315,8 @@ export default function KeysPage() {
       field: "expiresAt",
       headerName: "Expires",
       width: 200,
+      filter: "agDateColumnFilter",
+      filterParams: EPOCH_DATE_FILTER_PARAMS,
       valueFormatter: (p) =>
         p.value ? `${fmtDate(p.value)} (${timeUntil(p.value)})` : "Never",
     },
@@ -320,12 +324,15 @@ export default function KeysPage() {
       field: "lastUsedAt",
       headerName: "Last used",
       width: 160,
+      filter: "agDateColumnFilter",
+      filterParams: EPOCH_DATE_FILTER_PARAMS,
       valueFormatter: (p) => (p.value ? fmtDate(p.value) : "Never"),
     },
     {
       field: "rpm",
       headerName: "RPM",
       width: 100,
+      filter: "agNumberColumnFilter",
       valueFormatter: (p) => (p.value ?? "default"),
     },
     {

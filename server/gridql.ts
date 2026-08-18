@@ -5,6 +5,10 @@ export interface GridFilterEntry {
   type?: string;
   filter?: unknown;
   filterTo?: unknown;
+  dateFrom?: unknown;
+  dateTo?: unknown;
+  operator?: string;
+  conditions?: GridFilterEntry[];
 }
 
 export interface GridSort {
@@ -14,7 +18,7 @@ export interface GridSort {
 
 export interface ColSpec {
   col: string;
-  kind?: "text" | "number";
+  kind?: "text" | "number" | "date";
 }
 
 export function likeEscape(s: string): string {
@@ -27,47 +31,104 @@ export function buildGridWhere(
 ): { clauses: string[]; params: Array<string | number> } {
   const clauses: string[] = [];
   const params: Array<string | number> = [];
-  for (const [colId, f] of Object.entries(filters ?? {})) {
-    const spec = cols[colId];
-    if (!spec || !f || typeof f !== "object") continue;
+
+  const utcDay = (raw: unknown): number | null => {
+    if (typeof raw !== "string") return null;
+    const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return null;
+    const year = Number(m[1]);
+    const month = Number(m[2]);
+    const day = Number(m[3]);
+    const ts = Date.UTC(year, month - 1, day);
+    const d = new Date(ts);
+    return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day
+      ? ts
+      : null;
+  };
+
+  const conditionWhere = (
+    spec: ColSpec,
+    f: GridFilterEntry,
+  ): { sql: string; params: Array<string | number> } | null => {
     const type = String(f.type ?? "").toLowerCase();
-    if (spec.kind === "number" || f.filterType === "number") {
-      if (spec.kind !== "number") continue;
+    const filterType = String(f.filterType ?? "").toLowerCase();
+
+    if (filterType === "date" || (spec.kind === "date" && filterType !== "number")) {
+      const from = utcDay(f.dateFrom ?? f.filter);
+      const to = utcDay(f.dateTo ?? f.filterTo);
+      if (type === "blank") return { sql: `${spec.col} IS NULL`, params: [] };
+      if (type === "notblank") return { sql: `${spec.col} IS NOT NULL`, params: [] };
+      if (from === null) return null;
+      const nextFrom = from + 86_400_000;
+      if (type === "inrange" && to !== null) {
+        return {
+          sql: `${spec.col} >= ? AND ${spec.col} < ?`,
+          params: [from, to + 86_400_000],
+        };
+      }
+      if (type === "equals") return { sql: `${spec.col} >= ? AND ${spec.col} < ?`, params: [from, nextFrom] };
+      if (type === "notequal") return { sql: `(${spec.col} < ? OR ${spec.col} >= ?)`, params: [from, nextFrom] };
+      if (type === "lessthan") return { sql: `${spec.col} < ?`, params: [from] };
+      if (type === "lessthanorequal") return { sql: `${spec.col} < ?`, params: [nextFrom] };
+      if (type === "greaterthan") return { sql: `${spec.col} >= ?`, params: [nextFrom] };
+      if (type === "greaterthanorequal") return { sql: `${spec.col} >= ?`, params: [from] };
+      return null;
+    }
+
+    if (spec.kind === "number" || filterType === "number") {
+      if (spec.kind !== "number") return null;
+      if (type === "blank") return { sql: `${spec.col} IS NULL`, params: [] };
+      if (type === "notblank") return { sql: `${spec.col} IS NOT NULL`, params: [] };
       const n = Number(f.filter);
       const nTo = Number(f.filterTo);
       if (type === "inrange" && Number.isFinite(n) && Number.isFinite(nTo)) {
-        clauses.push(`${spec.col} BETWEEN ? AND ?`);
-        params.push(n, nTo);
-      } else if (Number.isFinite(n)) {
-        const op =
-          type === "equals" ? "="
-          : type === "notequal" ? "<>"
-          : type === "lessthan" ? "<"
-          : type === "lessthanorequal" ? "<="
-          : type === "greaterthan" ? ">"
-          : type === "greaterthanorequal" ? ">="
-          : null;
-        if (op) {
-          clauses.push(`${spec.col} ${op} ?`);
-          params.push(n);
-        }
+        return { sql: `${spec.col} BETWEEN ? AND ?`, params: [n, nTo] };
       }
-      continue;
+      if (!Number.isFinite(n)) return null;
+      const op =
+        type === "equals" ? "="
+        : type === "notequal" ? "<>"
+        : type === "lessthan" ? "<"
+        : type === "lessthanorequal" ? "<="
+        : type === "greaterthan" ? ">"
+        : type === "greaterthanorequal" ? ">="
+        : null;
+      return op ? { sql: `${spec.col} ${op} ?`, params: [n] } : null;
     }
+
     const val = String(f.filter ?? "").slice(0, 200);
-    if (val.length === 0) continue;
+    if (type === "blank") return { sql: `(${spec.col} IS NULL OR ${spec.col} = '')`, params: [] };
+    if (type === "notblank") return { sql: `(${spec.col} IS NOT NULL AND ${spec.col} <> '')`, params: [] };
+    if (val.length === 0) return null;
     if (type === "equals" || type === "notequal") {
-      clauses.push(`${spec.col} ${type === "notequal" ? "<>" : "="} ?`);
-      params.push(val);
-    } else {
-      const neg = type === "notcontains";
-      const like =
-        type === "startswith" ? `${likeEscape(val)}%`
-        : type === "endswith" ? `%${likeEscape(val)}`
-        : `%${likeEscape(val)}%`;
-      clauses.push(`${spec.col} ${neg ? "NOT " : ""}LIKE ? ESCAPE '\\'`);
-      params.push(like);
+      return {
+        sql: `${spec.col} ${type === "notequal" ? "<>" : "="} ?`,
+        params: [val],
+      };
     }
+    const neg = type === "notcontains";
+    const like =
+      type === "startswith" ? `${likeEscape(val)}%`
+      : type === "endswith" ? `%${likeEscape(val)}`
+      : `%${likeEscape(val)}%`;
+    return {
+      sql: `${spec.col} ${neg ? "NOT " : ""}LIKE ? ESCAPE '\\'`,
+      params: [like],
+    };
+  };
+
+  for (const [colId, f] of Object.entries(filters ?? {})) {
+    const spec = cols[colId];
+    if (!spec || !f || typeof f !== "object") continue;
+    const conditions = Array.isArray(f.conditions) ? f.conditions.slice(0, 8) : [f];
+    const built = conditions.map((condition) => conditionWhere(spec, condition)).filter(Boolean) as Array<{
+      sql: string;
+      params: Array<string | number>;
+    }>;
+    if (built.length === 0) continue;
+    const join = String(f.operator ?? "AND").toUpperCase() === "OR" ? " OR " : " AND ";
+    clauses.push(built.length === 1 ? built[0]!.sql : `(${built.map((x) => x.sql).join(join)})`);
+    for (const condition of built) params.push(...condition.params);
   }
   return { clauses, params };
 }

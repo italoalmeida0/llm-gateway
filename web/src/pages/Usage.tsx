@@ -16,6 +16,7 @@ import {
 } from "../ui";
 import {
   UsageGrid,
+  EPOCH_DATE_FILTER_PARAMS,
   ProtoCell,
   serverDatasource,
   StatusCell,
@@ -77,25 +78,25 @@ const byModelCols: ColDef<BreakdownRow>[] = [
     valueGetter: (p) => p.data?.provider_key_label || p.data?.provider_key_id?.slice(0, 8) || "—",
     valueFormatter: (p) => p.value,
   },
-  { field: "reqs", headerName: "Requests", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "in_tok", headerName: "In", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "cache_tok", headerName: "Cache", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "out_tok", headerName: "Out", width: 110, type: "rightAligned", valueFormatter: tokenFormatter },
+  { field: "reqs", headerName: "Requests", width: 100, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "in_tok", headerName: "In", width: 100, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "cache_tok", headerName: "Cache", width: 110, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "out_tok", headerName: "Out", width: 110, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
 ];
 
 const eventCols: ColDef[] = [
   // Formatted display ≠ raw epoch — no text filter on Time (sort stays).
-  { field: "ts", headerName: "Time", width: 150, valueFormatter: timeFormatter, filter: false },
+  { field: "ts", headerName: "Time", width: 150, filter: "agDateColumnFilter", filterParams: EPOCH_DATE_FILTER_PARAMS, valueFormatter: timeFormatter },
   { field: "key_name", headerName: "Key", width: 140, flex: 0.8 },
   { field: "proto", headerName: "Protocol", width: 120, cellRenderer: ProtoCell },
   { field: "provider_name", headerName: "Provider", width: 150, flex: 1, valueFormatter: (p) => fmtOrDash(p.value) },
   { field: "model", headerName: "Model", flex: 1.2, valueFormatter: (p) => fmtOrDash(p.value) },
   { field: "upstream_model", headerName: "Upstream", width: 150, valueFormatter: (p) => fmtOrDash(p.value) },
-  { field: "in_tok", headerName: "In", width: 90, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "cache_tok", headerName: "Cache", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "out_tok", headerName: "Out", width: 100, type: "rightAligned", valueFormatter: tokenFormatter },
-  { field: "latency_ms", headerName: "Latency", width: 100, type: "rightAligned", valueFormatter: latencyFormatter },
-  { field: "status", headerName: "Status", width: 90, type: "rightAligned", cellRenderer: StatusCell },
+  { field: "in_tok", headerName: "In", width: 90, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "cache_tok", headerName: "Cache", width: 100, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "out_tok", headerName: "Out", width: 100, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
+  { field: "latency_ms", headerName: "Latency", width: 100, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: latencyFormatter },
+  { field: "status", headerName: "Status", width: 90, type: "rightAligned", filter: "agNumberColumnFilter", cellRenderer: StatusCell },
 ];
 
 export default function UsagePage() {

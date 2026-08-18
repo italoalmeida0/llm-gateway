@@ -4,7 +4,7 @@ import { api } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { Badge, Card, CardHeader, EmptyState, Icons, fmtNum } from "../../ui";
-import { UsageGrid, serverDatasource, timeFormatter } from "../../aggrid";
+import { EPOCH_DATE_FILTER_PARAMS, UsageGrid, serverDatasource, timeFormatter } from "../../aggrid";
 import type { ColDef } from "ag-grid-community";
 
 interface AuditEntry {
@@ -52,7 +52,14 @@ export default function AdminAuditPage() {
   });
 
   const cols: ColDef[] = [
-    { field: "ts", headerName: "Time", width: 160, valueFormatter: timeFormatter },
+    {
+      field: "ts",
+      headerName: "Time",
+      width: 160,
+      filter: "agDateColumnFilter",
+      filterParams: EPOCH_DATE_FILTER_PARAMS,
+      valueFormatter: timeFormatter,
+    },
     { field: "action", headerName: "Action", width: 220, cellRenderer: ActionCell },
     {
       field: "actor_email",

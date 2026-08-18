@@ -24,7 +24,7 @@ import { LIMITS } from "./config";
  * be unit-tested without HTTP.
  */
 
-export type FailClass = "billing" | "auth" | "rate_limit" | "transient";
+export type FailClass = "billing" | "auth" | "rate_limit" | "transient" | "model_not_found";
 
 /** Quota/billing phrases seen across OpenAI, Anthropic and OpenRouter-style
  *  providers (matched against a ≤16KB error-body peek, case-insensitive). */
@@ -49,7 +49,7 @@ export function classifyHttpError(status: number, bodyPeek: string): FailClass |
   if (status === 400) return BILLING_RE.test(hint) ? "billing" : null;
   if (status === 404) {
     if (BILLING_RE.test(hint)) return "billing";
-    if (MODEL_NOT_FOUND_RE.test(hint)) return "transient"; // next target may have the model
+    if (MODEL_NOT_FOUND_RE.test(hint)) return "model_not_found";
     return null;
   }
   if (status === 408 || status >= 500) return "transient";

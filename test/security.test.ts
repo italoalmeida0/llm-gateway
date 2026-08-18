@@ -64,6 +64,9 @@ function startMiniUpstream() {
             "Content-Type": "text/html",
             "X-Frame-Options": "ALLOWALL",
             "Content-Security-Policy": "default-src *",
+            "Cache-Control": "public, max-age=600",
+            "Access-Control-Allow-Origin": "*",
+            "ETag": "\"upstream-secret\"",
           },
         });
       }
@@ -258,6 +261,46 @@ describe("security audit", () => {
     const sessions = await api("/api/me/sessions", { token: u1Token });
     u1SessionJti = sessions.json.sessions.find((s: any) => s.current).jti;
     expect(u1SessionJti).toBeTruthy();
+  });
+
+  test("reset token is single-use under concurrent confirmation", async () => {
+    const created = await api("/api/admin/users", {
+      token: adminToken,
+      body: { email: "race-reset@audit.test", name: "Reset Race", role: "user", sendInvite: true },
+    });
+    const token = decodeURIComponent(String(created.json.invite.link).split("token=")[1]!);
+    const results = await Promise.all([
+      api("/api/auth/password-reset/confirm", { body: { token, password: "race-pass-a-1" } }),
+      api("/api/auth/password-reset/confirm", { body: { token, password: "race-pass-b-1" } }),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 400]);
+  });
+
+  test("concurrent admin demotions preserve one active admin", async () => {
+    const createAdmin = async (email: string) => {
+      const created = await api("/api/admin/users", {
+        token: adminToken,
+        body: { email, name: "Admin Race", role: "admin", sendInvite: true },
+      });
+      const token = decodeURIComponent(String(created.json.invite.link).split("token=")[1]!);
+      await api("/api/auth/password-reset/confirm", { body: { token, password: "admin-race-pass-1" } });
+      return api("/api/auth/login", { body: { email, password: "admin-race-pass-1" } });
+    };
+    const [second, third] = await Promise.all([
+      createAdmin("admin-race-2@audit.test"),
+      createAdmin("admin-race-3@audit.test"),
+    ]);
+    const users = await api("/api/admin/users", { token: adminToken });
+    const secondUser = users.json.users.find((u: any) => u.email === "admin-race-2@audit.test");
+    const thirdUser = users.json.users.find((u: any) => u.email === "admin-race-3@audit.test");
+    const [a, b] = await Promise.all([
+      api(`/api/admin/users/${thirdUser.id}`, { token: second.json.accessToken, method: "PATCH", body: { role: "user", status: "active" } }),
+      api(`/api/admin/users/${secondUser.id}`, { token: third.json.accessToken, method: "PATCH", body: { role: "user", status: "active" } }),
+    ]);
+    expect([a.status, b.status].filter((s) => s === 200).length).toBe(1);
+    const remaining = await api("/api/admin/users", { token: adminToken });
+    expect(remaining.status).toBe(200);
+    expect(remaining.json.users.some((u: any) => u.role === "admin" && u.status === "active")).toBe(true);
   });
 
   // ------------------------------------------------------------ 1. JWT
@@ -581,6 +624,9 @@ describe("security audit", () => {
     expect(res.headers.get("content-security-policy")).toContain("default-src 'none'");
     // hostile content-type is neutralized to an inert API payload
     expect(res.headers.get("content-type")).toContain("application/json");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    expect(res.headers.get("etag")).toBeNull();
     await res.text();
   });
 

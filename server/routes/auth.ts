@@ -212,24 +212,27 @@ export async function handleAuthRoute(path: string, req: Request, server: any): 
     const password = v.str(body, "password", { min: 1, max: 256 })!;
     passwordPolicy(password);
 
+    const tokenHash = sha256Hex(token);
     const row = db
       .prepare<{ user_id: string; kind: string; expires_at: number; used_at: number | null }, [string]>(
         "SELECT user_id, kind, expires_at, used_at FROM password_tokens WHERE token_hash = ?",
       )
-      .get(sha256Hex(token));
+      .get(tokenHash);
 
     if (!row || row.used_at || row.expires_at < Date.now()) {
       return err(400, "link is invalid or has expired", req);
     }
 
     const newHash = await hashPassword(password);
-    db.transaction(() => {
+    const claimed = db.transaction(() => {
+      const result = db.prepare(
+        "UPDATE password_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at >= ?",
+      ).run(Date.now(), tokenHash, Date.now());
+      if (result.changes !== 1) return false;
       db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(newHash, row.user_id);
-      db.prepare("UPDATE password_tokens SET used_at = ? WHERE token_hash = ?").run(
-        Date.now(),
-        sha256Hex(token),
-      );
+      return true;
     })();
+    if (!claimed) return err(400, "link is invalid or has expired", req);
     revokeAllUserSessions(row.user_id);
     audit(`password.${row.kind}.completed`, { target: row.user_id, ip });
     const owner = stmts.userById.get(row.user_id);

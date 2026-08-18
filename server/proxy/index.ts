@@ -327,6 +327,7 @@ const STRIP_RES_HEADERS = new Set([
 
 /** Only API-ish payloads may be rendered by clients; anything else becomes JSON. */
 const SAFE_RES_CT = new Set(["application/json", "text/event-stream", "text/plain"]);
+const MAX_BUFFERED_UPSTREAM_BYTES = 16 * 1024 * 1024;
 
 function safeResponseContentType(upstream: Headers): string {
   const raw = upstream.get("content-type") || "";
@@ -334,14 +335,22 @@ function safeResponseContentType(upstream: Headers): string {
   return SAFE_RES_CT.has(mime) ? raw : "application/json; charset=utf-8";
 }
 
-function buildClientHeaders(upstream: Headers, requestId: string): Headers {
-  const h = baseHeaders();
+function buildClientHeaders(upstream: Headers, requestId: string, req: Request): Headers {
+  const h = baseHeaders(req);
   // Even if unsafe content slips through, it can never execute as a document.
   h.set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
   upstream.forEach((value, name) => {
-    if (STRIP_RES_HEADERS.has(name.toLowerCase())) return;
+    const lower = name.toLowerCase();
+    if (STRIP_RES_HEADERS.has(lower) || [
+      "cache-control", "pragma", "expires", "age", "etag", "last-modified", "vary",
+      "access-control-allow-origin", "access-control-allow-credentials",
+      "access-control-allow-methods", "access-control-allow-headers",
+      "access-control-expose-headers", "access-control-max-age",
+    ].includes(lower)) return;
     h.set(name, value);
   });
+  h.set("Cache-Control", "no-store");
+  h.set("Pragma", "no-cache");
   h.set("Content-Type", safeResponseContentType(upstream));
   h.set("X-Request-Id", requestId);
   return h;
@@ -918,6 +927,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
           break;
         }
         const cls = classifyHttpError(upstream.status, errBody);
+        if (cls === "model_not_found") {
+          lastFailure = { kind: "upstream", status: upstream.status, body: errBody, headers: upstream.headers };
+          continue;
+        }
         if (cls) {
           markProviderKeyFailure(cand.key, cls);
           lastFailure = { kind: "upstream", status: upstream.status, body: errBody, headers: upstream.headers };
@@ -931,7 +944,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         record(parseBufferedUsage(ct, errBody), upstream.status, Math.round(performance.now() - started), false, cand);
         return new Response(errBody, {
           status: upstream.status,
-          headers: buildClientHeaders(upstream.headers, requestId),
+          headers: buildClientHeaders(upstream.headers, requestId, req),
         });
       }
 
@@ -939,7 +952,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       markProviderKeyOk(cand.key);
       const contentType = upstream.headers.get("content-type") || "";
       const isSse = contentType.includes("text/event-stream");
-      const clientHeaders = buildClientHeaders(upstream.headers, requestId);
+      const clientHeaders = buildClientHeaders(upstream.headers, requestId, req);
 
       // ---- streaming relay ----
       if (isSse && upstream.body) {
@@ -1021,7 +1034,39 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       }
 
       // ---- buffered relay ----
-      const respText = await upstream.text();
+      if (!upstream.body) return new Response(null, { status: upstream.status, headers: clientHeaders });
+      const reader = upstream.body.getReader();
+      const decoder = new TextDecoder();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      const bodyTimeout = setTimeout(() => controller.abort(new Error("upstream body timeout")), LIMITS.upstreamNonStreamTimeoutMs);
+      const onBodyAbort = () => controller.abort(new Error("client disconnected"));
+      req.signal.addEventListener("abort", onBodyAbort, { once: true });
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            total += value.byteLength;
+            if (total > MAX_BUFFERED_UPSTREAM_BYTES) {
+              await reader.cancel().catch(() => {});
+              return envelopeError(proto, 502, "upstream response too large", "api_error", req);
+            }
+            chunks.push(value);
+          }
+        }
+      } catch {
+        if (req.signal.aborted) return envelopeError(proto, 499, "client disconnected", "api_error", req);
+        return envelopeError(proto, 502, "upstream response failed", "api_error", req);
+      } finally {
+        clearTimeout(bodyTimeout);
+        req.signal.removeEventListener("abort", onBodyAbort);
+        await reader.cancel().catch(() => {});
+      }
+      const body = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+      const respText = decoder.decode(body);
       record(parseBufferedUsage(contentType, respText), upstream.status, Math.round(performance.now() - started), false, cand);
 
       return new Response(respText, { status: upstream.status, headers: clientHeaders });
@@ -1034,7 +1079,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // clients want the real cause (e.g. insufficient_quota), not a 503.
       const f = lastFailure;
       record(parseBufferedUsage(f.headers.get("content-type") || "", f.body), f.status, finalLatency, false, lastAttempted!);
-      return new Response(f.body, { status: f.status, headers: buildClientHeaders(f.headers, requestId) });
+      return new Response(f.body, { status: f.status, headers: buildClientHeaders(f.headers, requestId, req) });
     }
     if (lastFailure?.kind === "network") {
       recordUsage({

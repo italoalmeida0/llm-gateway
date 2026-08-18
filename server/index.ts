@@ -29,19 +29,11 @@ configureLimits({
 // ===== First-admin bootstrap =====
 
 async function bootstrapAdmin(): Promise<void> {
-  const count = db.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM users").get()!.n;
-  if (count > 0) return;
+  const admins = db.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND status = 'active'").get()!.n;
+  if (admins > 0) return;
 
-  let password = ADMIN_PASSWORD;
-  if (!password) {
-    password = `gw-${randomToken(10)}`;
-    console.log("\n==============================================================");
-    console.log("[BOOT] First admin created");
-    console.log(`[BOOT]   email:    ${ADMIN_EMAIL}`);
-    console.log(`[BOOT]   password: ${password}`);
-    console.log("[BOOT] Change it immediately after first login.");
-    console.log("==============================================================\n");
-  } else if (password.length < 10) {
+  const password = ADMIN_PASSWORD;
+  if (!password || password.length < 10) {
     console.error("[BOOT] FATAL: ADMIN_PASSWORD must be at least 10 characters");
     process.exit(1);
   }
@@ -87,16 +79,15 @@ async function route(req: Request, server: any): Promise<Response> {
     return new Response(null, { status: 204, headers: baseHeaders(req) });
   }
 
-  // Health is public but still subject to the global bucket below.
+  const ip = clientIp(req, server);
+  const retry = limits.ipPerMin(ip);
+  if (retry > 0) return err(429, `rate limit exceeded, retry in ${retry}s`, req);
+
   if (path === "/api/health") {
     return json({ ok: true, ts: Date.now() }, { req });
   }
 
   // Global per-IP bucket — first line of DoS defense.
-  const ip = clientIp(req, server);
-  const retry = limits.ipPerMin(ip);
-  if (retry > 0) return err(429, `rate limit exceeded, retry in ${retry}s`, req);
-
   if (
     path.startsWith("/v1/") ||
     path === "/v1" ||

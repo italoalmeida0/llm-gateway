@@ -490,7 +490,7 @@ describe("failover: upstream error classification", () => {
     expect(classifyHttpError(500, "internal error")).toBe("transient");
     expect(classifyHttpError(502, "bad gateway")).toBe("transient");
     expect(classifyHttpError(408, "")).toBe("transient");
-    expect(classifyHttpError(404, JSON.stringify({ error: { message: "The model `gpt-x` does not exist" } }))).toBe("transient");
+    expect(classifyHttpError(404, JSON.stringify({ error: { message: "The model `gpt-x` does not exist" } }))).toBe("model_not_found");
   });
 
   test("client errors are NOT fail-able", () => {

@@ -40,9 +40,7 @@ function button(url: string, label: string): string {
 
 async function send(to: string, subject: string, html: string): Promise<boolean> {
   if (!transporter) {
-    console.log(`[MAIL:no-smtp] to=${to} subject=${subject}`);
-    const link = html.match(/href="([^"]+)"/)?.[1];
-    if (link) console.log(`[MAIL:no-smtp] action link: ${link}`);
+    console.error(`[MAIL:no-smtp] delivery unavailable for ${to}; action link withheld`);
     return false;
   }
   try {

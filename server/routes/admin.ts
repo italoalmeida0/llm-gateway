@@ -1273,12 +1273,24 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       if (targetId === ctx.user.id && (role !== "admin" || status !== "active")) {
         return err(400, "you cannot demote or ban yourself", req);
       }
-      db.prepare("UPDATE users SET name = ?, role = ?, status = ? WHERE id = ?").run(
-        name,
-        role,
-        status,
-        targetId,
-      );
+      const demotesActiveAdmin =
+        target.role === "admin" &&
+        target.status === "active" &&
+        (role !== "admin" || status !== "active");
+      const changed = demotesActiveAdmin
+        ? db.prepare(
+            `UPDATE users SET name = ?, role = ?, status = ?
+             WHERE id = ? AND (
+               SELECT COUNT(*) FROM users
+               WHERE role = 'admin' AND status = 'active'
+             ) > 1`,
+          ).run(name, role, status, targetId)
+        : db.prepare("UPDATE users SET name = ?, role = ?, status = ? WHERE id = ?").run(
+            name, role, status, targetId,
+          );
+      if (changed.changes !== 1) {
+        return err(400, "cannot remove the last active admin", req);
+      }
       if (status === "banned") revokeAllUserSessions(targetId);
       auditAdmin(ctx.user, "user.updated", targetId, { name, role, status }, ip);
       return ok({ done: true }, req);
@@ -1286,7 +1298,17 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
 
     if (req.method === "DELETE" && !action) {
       if (targetId === ctx.user.id) return err(400, "you cannot delete yourself", req);
-      db.prepare("DELETE FROM users WHERE id = ?").run(targetId);
+      const changed = target.role === "admin" && target.status === "active"
+        ? db.prepare(
+            `DELETE FROM users WHERE id = ? AND (
+              SELECT COUNT(*) FROM users
+              WHERE role = 'admin' AND status = 'active'
+            ) > 1`,
+          ).run(targetId)
+        : db.prepare("DELETE FROM users WHERE id = ?").run(targetId);
+      if (changed.changes !== 1) {
+        return err(400, "cannot remove the last active admin", req);
+      }
       auditAdmin(ctx.user, "user.deleted", targetId, { email: target.email }, ip);
       return ok({ deleted: true }, req);
     }

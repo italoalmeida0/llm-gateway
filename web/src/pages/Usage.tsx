@@ -211,7 +211,7 @@ export default function UsagePage() {
           }
         >
           <div class="px-1 py-1" {...usalItems("fade-u", 90)}>
-            <UsageGrid columnDefs={byModelCols} rowData={breakdown()} pageSize={15} />
+            <UsageGrid columnDefs={byModelCols} rowData={breakdown()} pageSize={15} storageKey="llmgw-grid:usage.by-model" />
           </div>
         </Show>
       </Card>
@@ -228,7 +228,7 @@ export default function UsagePage() {
           }
         >
           <div class="px-2 py-2">
-            <UsageGrid columnDefs={eventCols} rowData={events()?.events} pageSize={RECENT_PAGE} heightClass="h-[560px]" />
+            <UsageGrid columnDefs={eventCols} rowData={events()?.events} pageSize={RECENT_PAGE} heightClass="h-[560px]" storageKey="llmgw-grid:usage.recent" />
           </div>
         </Show>
       </Card>

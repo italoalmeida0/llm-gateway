@@ -339,3 +339,63 @@ html[data-theme="dark"] .ag-theme-quartz-dark {
   --ag-tooltip-border-color: var(--line);
   --ag-font-family: var(--font-sans);
 }
+
+/*
+ * AG Grid — pagination panel polish + responsiveness. The panel derives its
+ * padding from --ag-grid-size; tightening it keeps the bar compact. On small
+ * viewports the non-essential description chunks drop out (page-size label,
+ * then the "1–25 of N" text) and the whole grid gets denser.
+ */
+.ag-theme-quartz .ag-paging-panel,
+.ag-theme-quartz-dark .ag-paging-panel {
+  padding-top: 4px;
+  padding-bottom: 4px;
+  font-size: 12px;
+  color: var(--ag-secondary-foreground-color);
+}
+.ag-theme-quartz .ag-paging-description,
+.ag-theme-quartz-dark .ag-paging-description {
+  gap: 2px;
+}
+.ag-theme-quartz .ag-paging-button,
+.ag-theme-quartz-dark .ag-paging-button {
+  border-radius: 6px;
+}
+.ag-theme-quartz .ag-paging-page-summary-panel,
+.ag-theme-quartz-dark .ag-paging-page-summary-panel {
+  gap: 10px;
+  margin: 0;
+}
+/* The page-size select: match app Select density. */
+.ag-theme-quartz .ag-paging-page-size .ag-select,
+.ag-theme-quartz-dark .ag-paging-page-size .ag-select {
+  min-height: 26px;
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  html[data-theme="light"] .ag-theme-quartz,
+  html[data-theme="light"] .ag-theme-quartz-dark,
+  html[data-theme="dark"] .ag-theme-quartz,
+  html[data-theme="dark"] .ag-theme-quartz-dark {
+    --ag-grid-size: 4.5px;
+  }
+  .ag-theme-quartz .ag-paging-panel,
+  .ag-theme-quartz-dark .ag-paging-panel {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  /* Hide the "Page Size" label text (the dropdown itself stays). */
+  .ag-theme-quartz .ag-paging-page-size .ag-label,
+  .ag-theme-quartz-dark .ag-paging-page-size .ag-label {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Very small screens: keep only the page-size dropdown + nav buttons. */
+  .ag-theme-quartz .ag-paging-row-summary-panel,
+  .ag-theme-quartz-dark .ag-paging-row-summary-panel {
+    display: none;
+  }
+}

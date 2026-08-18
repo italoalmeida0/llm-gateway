@@ -225,10 +225,7 @@ export default function AdminStatsPage() {
           </div>
         </Card>
 
-        <div
-          class="grid grid-cols-1 lg:grid-cols-2 gap-6"
-          {...usalItems("fade-u", 90)}
-        >
+        <div class="flex flex-col gap-6" {...usalItems("fade-u", 90)}>
           <Card>
             <CardHeader
               title="Top users"
@@ -239,6 +236,7 @@ export default function AdminStatsPage() {
                 columnDefs={userCols}
                 rowData={breakdown()?.users}
                 pageSize={15}
+                storageKey="llmgw-grid:admin.users"
               />
             </div>
           </Card>
@@ -253,6 +251,7 @@ export default function AdminStatsPage() {
                 columnDefs={modelCols}
                 rowData={breakdown()?.models}
                 pageSize={15}
+                storageKey="llmgw-grid:admin.models"
               />
             </div>
           </Card>

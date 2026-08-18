@@ -1,11 +1,11 @@
-import { Show } from "solid-js";
-import AgGridSolid from "solid-ag-grid";
+import { Show, onCleanup } from "solid-js";
+import AgGridSolid, { type AgGridSolidRef } from "solid-ag-grid";
 import type { ColDef, ColGroupDef } from "ag-grid-community";
 
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-quartz.css";
 
-import { Badge, fmtDate, fmtNum, getTheme, theme } from "./ui";
+import { Badge, Btn, Icon, Icons, fmtDate, fmtNum, getTheme, theme } from "./ui";
 
 /**
  * AG Grid usage tables (ag-grid-community + solid-ag-grid, user-sanctioned).
@@ -82,6 +82,9 @@ export function UsageGrid(props: {
   pageSize?: number;
   /** Tailwind height class for the grid wrapper (default h-[420px]). */
   heightClass?: string;
+  /** localStorage key for user prefs (column order/size/visibility, sort,
+   *  filters). Column defs must be stable for the state to map back. */
+  storageKey: string;
 }) {
   const darkClass = () => {
     // Track the signal (updates live on toggle) but trust the DOM attribute —
@@ -89,23 +92,96 @@ export function UsageGrid(props: {
     theme();
     return getTheme() === "dark" ? "ag-theme-quartz-dark" : "ag-theme-quartz";
   };
+
+  // ---- per-grid user prefs (filters, column size/order/visibility, sort) ----
+  let gridRef: AgGridSolidRef | undefined;
+  const saveState = () => {
+    const api = gridRef?.api;
+    if (!api) return;
+    try {
+      localStorage.setItem(
+        props.storageKey,
+        JSON.stringify({
+          columnState: api.getColumnState(),
+          filterModel: api.getFilterModel(),
+        }),
+      );
+    } catch {}
+  };
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  const saveSoon = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveState, 250);
+  };
+  onCleanup(() => {
+    if (saveTimer) clearTimeout(saveTimer);
+  });
+  const restoreState = () => {
+    const api = gridRef?.api;
+    if (!api) return;
+    try {
+      const raw = localStorage.getItem(props.storageKey);
+      if (!raw) return;
+      const j = JSON.parse(raw);
+      if (Array.isArray(j.columnState)) {
+        api.applyColumnState({ state: j.columnState, applyOrder: true });
+      }
+      if (j.filterModel && typeof j.filterModel === "object") {
+        api.setFilterModel(j.filterModel);
+      }
+    } catch {}
+  };
+
+  /** Wipe persisted prefs and put the grid back on the column defs. */
+  const resetLayout = () => {
+    try {
+      localStorage.removeItem(props.storageKey);
+    } catch {}
+    const api = gridRef?.api;
+    if (!api) return;
+    api.resetColumnState();
+    api.setFilterModel(null);
+  };
+
   return (
     <div
-      class={`w-full ${darkClass()} ${props.heightClass ?? "h-[420px]"}`}
+      class={`w-full max-h-[72vh] ${darkClass()} ${props.heightClass ?? "h-[420px]"} flex flex-col`}
     >
-      <Show when={props.rowData}>
-        <AgGridSolid
-          rowData={props.rowData!}
-          columnDefs={props.columnDefs}
-          defaultColDef={DEFAULT_COL_DEF}
-          pagination
-          paginationPageSize={props.pageSize ?? 25}
-          paginationPageSizeSelector={PAGE_SIZE_SELECTOR}
-          animateRows
-          rowHeight={38}
-          suppressCellFocus
-        />
-      </Show>
+      <div class="flex items-center justify-end px-1.5 py-1 shrink-0">
+        <Btn
+          variant="ghost"
+          size="sm"
+          class="!px-2 text-[11px] text-ink-500 hover:text-ink-200"
+          title="Reset column order, sizes, sorting and filters to the default layout"
+          disabled={!props.rowData}
+          onClick={resetLayout}
+        >
+          <Icon name={Icons.refresh} size={12} />
+          Reset layout
+        </Btn>
+      </div>
+      <div class="min-h-0 flex-1">
+        <Show when={props.rowData}>
+          <AgGridSolid
+            ref={gridRef}
+            rowData={props.rowData!}
+            columnDefs={props.columnDefs}
+            defaultColDef={DEFAULT_COL_DEF}
+            pagination
+            paginationPageSize={props.pageSize ?? 25}
+            paginationPageSizeSelector={PAGE_SIZE_SELECTOR}
+            animateRows
+            rowHeight={38}
+            suppressCellFocus
+            onGridReady={restoreState}
+            onFilterChanged={saveSoon}
+            onSortChanged={saveSoon}
+            onColumnMoved={saveSoon}
+            onColumnResized={saveSoon}
+            onColumnVisible={saveSoon}
+          />
+        </Show>
+      </div>
     </div>
   );
 }

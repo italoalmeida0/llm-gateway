@@ -140,6 +140,9 @@ export function flushUsage(): void {
     }
   })();
   for (const k of affectedKeys) spendCache.delete(k);
+  // New rows just landed: every view's total changed. Clearing beats keying
+  // precisely — flushes are ≤1/s and the TTL cache rebuilds on next read.
+  if (batch.length > 0) eventCountCache.clear();
 }
 
 // ===== Budget reads (cached) =====
@@ -459,16 +462,37 @@ export function userEvents(
     offset: number;
     sort?: Array<{ colId: string; sort: string }>;
     filters?: Record<string, GridFilterEntry>;
+    /** Keyset cursor (`ts`, `id` of the previous page's last row) — makes
+     *  deep forward pages O(page) instead of O(offset). Only honored for the
+     *  default (ts DESC, id DESC) ordering; custom sorts keep OFFSET. */
+    cursor?: { ts: number; id: number };
   },
 ) {
-  const clauses = [opts.keyId ? "e.user_id = ? AND e.key_id = ?" : "e.user_id = ?"];
-  const params = opts.keyId ? [userId, opts.keyId] : [userId];
+  // Scope (user + filters) shared by the page query and the total-count;
+  // the keyset cursor predicate applies to the page query ONLY — the count
+  // must answer "how many rows exist for this filter view", not "how many
+  // remain after this cursor".
+  const scopeClauses = [opts.keyId ? "e.user_id = ? AND e.key_id = ?" : "e.user_id = ?"];
+  const scopeParams: Array<string | number> = opts.keyId ? [userId, opts.keyId] : [userId];
   if (opts.filters) {
     const { clauses: fc, params: fp } = buildGridWhere(opts.filters, EVENT_COLS);
-    clauses.push(...fc);
-    (params as Array<string | number>).push(...fp);
+    scopeClauses.push(...fc);
+    scopeParams.push(...fp);
   }
-  const where = clauses.join(" AND ");
+  const useCursor = !!opts.cursor && (!opts.sort || opts.sort.length === 0);
+  const pageClauses = [...scopeClauses];
+  const pageParams = [...scopeParams];
+  if (useCursor) {
+    // Keyset continuation: rows strictly older than (cursor.ts, cursor.id).
+    // Written as one backward index range (`ts <= X`) plus an exclusion
+    // predicate for the boundary row — a `ts < ? OR (ts = ? AND id < ?)`
+    // collapses on a near-now cursor (SQLite's MULTI-INDEX OR temp-sorts
+    // the user's WHOLE slice: ~200-300ms at 3.65M events, measured). The
+    // exclusion is a post-filter over an already-indexed range: O(page +
+    // ties-at-boundary), exact even when events share a millisecond.
+    pageClauses.push("(e.ts <= ?) AND NOT (e.ts = ? AND e.id >= ?)");
+    pageParams.push(opts.cursor!.ts, opts.cursor!.ts, opts.cursor!.id);
+  }
   const order = buildGridOrder(opts.sort, EVENT_COLS, "e.ts DESC", "e.id DESC");
   const rows = db
     .prepare(
@@ -481,15 +505,49 @@ export function userEvents(
        LEFT JOIN api_keys k ON k.id = e.key_id
        LEFT JOIN providers p ON p.id = e.provider_id
        LEFT JOIN provider_keys pk ON pk.id = e.provider_key_id
-       WHERE ${where}
-       ORDER BY ${order} LIMIT ? OFFSET ?`,
+       WHERE ${pageClauses.join(" AND ")}
+       ORDER BY ${order} LIMIT ?${useCursor ? "" : " OFFSET ?"}`,
     )
-    .all(...(params as [string, string]), opts.limit, opts.offset);
-  const count = db
-    .prepare<{ n: number }, [string, string] | [string]>(
-      `SELECT COUNT(*) AS n FROM usage_events e LEFT JOIN api_keys k ON k.id = e.key_id LEFT JOIN providers p ON p.id = e.provider_id WHERE ${where}`,
-    )
-    // @ts-expect-error tuple spread fine at runtime
-    .get(...params)!.n;
-  return { rows, total: count };
+    .all(...pageParams, opts.limit, ...(useCursor ? [] : [opts.offset]));
+
+  // The COUNT must never do per-row joins: a LEFT JOIN resolves
+  // api_keys/providers for EVERY row of the user's whole history (~85ms at
+  // 3.65M events, measured — 10x the page query). The joins only DECORATE
+  // the page with names, they filter nothing, so the count runs on
+  // usage_events alone; joined-name filters (key_name, provider_name) are
+  // the only case that needs the joins back. A short TTL cache absorbs
+  // repeat counts for the same view while the grid scrolls.
+  const joinedFilter =
+    opts.filters &&
+    Object.keys(opts.filters).some((c) => c === "key_name" || c === "provider_name");
+  const cacheKey = `u:${userId}|k:${opts.keyId ?? ""}|f:${(opts.filters ? JSON.stringify(opts.filters) : "")}`;
+  const now = Date.now();
+  const cached = joinedFilter ? null : eventCountCache.get(cacheKey);
+  let total: number;
+  if (cached && now - cached.at < EVENT_COUNT_TTL_MS) {
+    total = cached.n;
+  } else {
+    total = joinedFilter
+      ? db
+          .prepare<{ n: number }, any[]>(
+            `SELECT COUNT(*) AS n FROM usage_events e
+             LEFT JOIN api_keys k ON k.id = e.key_id
+             LEFT JOIN providers p ON p.id = e.provider_id
+             WHERE ${scopeClauses.join(" AND ")}`,
+          )
+          .get(...scopeParams)!.n
+      : db
+          .prepare<{ n: number }, any[]>(
+            `SELECT COUNT(*) as n FROM usage_events e WHERE ${scopeClauses.join(" AND ")}`,
+          )
+          .get(...scopeParams)!.n;
+    if (!joinedFilter) eventCountCache.set(cacheKey, { n: total, at: now });
+    if (eventCountCache.size > 512) eventCountCache.clear();
+  }
+  return { rows, total };
 }
+
+/** Recent-request grid counts, TTL-cached: `total` only changes when the
+ *  usage flush lands, so repeat blocks within seconds reuse the number. */
+const EVENT_COUNT_TTL_MS = 10_000;
+const eventCountCache = new Map<string, { n: number; at: number }>();

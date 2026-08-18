@@ -191,6 +191,11 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - `bun run perf:sim` — day-by-day growth sim (real gateway+upstream, HTTP
   measurements per checkpoint up to 10y; `PERF_MAX_DAYS=N` to shorten)
 - `bun run perf:tuning` — `build|measure|sql <dir>` on a persistent big dataset
+- `bun scripts/load_test.ts [dir] [days=365] [--live] [--reuse]` — exact-scenario
+  scale audit (20 users × 500 reqs/day, 10M/100M/500K tokens, 50 audit rows per
+  user-day): seeds `days` of history, times every dashboard query + the flush
+  write path before/after migration-013 indexes, optional live HTTP pass;
+  writes a markdown report (see docs/performance/results)
 - `bun run fake-upstream` — fake provider for manual testing (:3399, key `sk-fake-secret`)
 - `bun run seed` — mock usage data for the dev DB (`-- --days N`, `-- --keep`),
   seeds every existing key (replaces usage rows by default)

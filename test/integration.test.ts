@@ -844,6 +844,53 @@ describe("gateway end-to-end", () => {
     expect(audit.json.entries.every((e: any) => e.action.includes("created"))).toBe(true);
   });
 
+  test("audit keyset cursor continues without overlap", async () => {
+    const p1 = await api("/api/admin/audit?limit=3", { token: adminToken });
+    expect(p1.status).toBe(200);
+    expect(p1.json.entries.length).toBeGreaterThan(0);
+    const last = p1.json.entries[p1.json.entries.length - 1] as any;
+    expect(typeof last.id).toBe("number");
+
+    const p2 = await api(`/api/admin/audit?limit=3&cursor=${last.ts}:${last.id}`, { token: adminToken });
+    expect(p2.status).toBe(200);
+    const ids1 = new Set(p1.json.entries.map((e: any) => e.id));
+    for (const e of p2.json.entries) {
+      expect(ids1.has(e.id)).toBe(false);
+      expect(e.ts < last.ts || (e.ts === last.ts && e.id < last.id)).toBe(true);
+    }
+  });
+
+  test("audit actor_email filter: joined count agrees, cursor pages keep filtering", async () => {
+    const enc = encodeURIComponent;
+    const filters = enc(
+      JSON.stringify({ actor_email: { filterType: "text", type: "contains", filter: "example" } }),
+    );
+    // actor_email resolves through the users LEFT JOIN — this exercises the
+    // joined-count path in both the OFFSET (gridPage) and cursor branches.
+    const p1 = await api(`/api/admin/audit?limit=500&filters=${filters}`, { token: adminToken });
+    expect(p1.status).toBe(200);
+    expect(p1.json.entries.length).toBeGreaterThan(0);
+    for (const e of p1.json.entries) {
+      expect((e.actor_email ?? "")).toContain("example");
+    }
+    expect(p1.json.total).toBe(p1.json.entries.length);
+
+    // cursor continuation with the same filter: no overlap, strictly older
+    const last = p1.json.entries[p1.json.entries.length - 1] as any;
+    const p2 = await api(
+      `/api/admin/audit?limit=3&cursor=${last.ts}:${last.id}&filters=${filters}`,
+      { token: adminToken },
+    );
+    expect(p2.status).toBe(200);
+    const ids1 = new Set(p1.json.entries.map((e: any) => e.id));
+    for (const e of p2.json.entries) {
+      expect(ids1.has(e.id)).toBe(false);
+      expect(e.ts < last.ts || (e.ts === last.ts && e.id < last.id)).toBe(true);
+      expect((e.actor_email ?? "")).toContain("example");
+    }
+    expect(p2.json.total).toBe(p1.json.total);
+  });
+
   test("every event shows up — provider-less legacy rows and hard-deleted key history", async () => {
     // Pre-011 history looks like this row: no provider dimension at all. The
     // test DB starts empty at migration time, so nothing injects one — plant
@@ -979,6 +1026,117 @@ describe("gateway end-to-end", () => {
     const garb = await api("/api/usage/events?limit=5&sort=%7Bnot-json&filters=no", { token: userToken });
     expect(garb.status).toBe(200);
     expect(garb.json.events.length).toBeGreaterThanOrEqual(0);
+  });
+
+  test("events keyset cursor walks the same pages as OFFSET, without overlap", async () => {
+    const p1 = await api("/api/usage/events?limit=5", { token: userToken });
+    expect(p1.status).toBe(200);
+    expect(p1.json.events).toHaveLength(5);
+    const last = p1.json.events[p1.json.events.length - 1] as any;
+
+    // page 2 via cursor: strictly older (ts, id) than the cursor row — no
+    // overlap with page 1 and identical to the OFFSET view's slice
+    const p2 = await api(`/api/usage/events?limit=5&cursor=${last.ts}:${last.id}`, { token: userToken });
+    expect(p2.status).toBe(200);
+    expect(p2.json.events).toHaveLength(5);
+    const ids1 = new Set(p1.json.events.map((e: any) => e.id));
+    for (const e of p2.json.events) {
+      expect(ids1.has(e.id)).toBe(false);
+      expect(e.ts < last.ts || (e.ts === last.ts && e.id < last.id)).toBe(true);
+    }
+
+    // the web grid sends cursor AND offset together (offset stays as the
+    // fallback for sorted views) — with the default ordering the cursor
+    // wins and the offset is ignored
+    const p2b = await api(
+      `/api/usage/events?limit=5&offset=0&cursor=${last.ts}:${last.id}`,
+      { token: userToken },
+    );
+    expect(p2b.status).toBe(200);
+    expect(p2b.json.events.map((e: any) => e.id)).toEqual(p2.json.events.map((e: any) => e.id));
+
+    // walking to the end with a small block size reproduces the full history
+    // in EXACTLY the order the offset queries return it
+    const all = await api("/api/usage/events?limit=500", { token: userToken });
+    const walked: any[] = [];
+    let cur: { ts: number; id: number } | null = null;
+    for (;;) {
+      const page = await api(
+        cur
+          ? `/api/usage/events?limit=7&cursor=${cur.ts}:${cur.id}`
+          : "/api/usage/events?limit=7",
+        { token: userToken },
+      );
+      const rows = page.json.events as any[];
+      if (rows.length === 0) break;
+      walked.push(...rows);
+      const l = rows[rows.length - 1]!;
+      cur = { ts: l.ts, id: l.id };
+      if (walked.length >= all.json.total) break;
+    }
+    expect(walked).toHaveLength(all.json.total);
+    expect(walked.map((e: any) => e.id)).toEqual(all.json.events.map((e: any) => e.id));
+
+    // malformed cursors degrade to the default newest-first page
+    const garb = await api("/api/usage/events?limit=5&cursor=meet", { token: userToken });
+    expect(garb.status).toBe(200);
+    expect(garb.json.events).toHaveLength(5);
+  });
+
+  test("events key_name filter counts through the join (and agrees with the rows)", async () => {
+    const enc = encodeURIComponent;
+    // key_name resolves through the api_keys LEFT JOIN — the count must take
+    // the joined path and still agree exactly with the returned rows.
+    const f = await api(
+      `/api/usage/events?limit=500&filters=${enc(JSON.stringify({ key_name: { filterType: "text", type: "contains", filter: "first" } }))}`,
+      { token: userToken },
+    );
+    expect(f.status).toBe(200);
+    expect(f.json.events.length).toBeGreaterThan(0);
+    for (const e of f.json.events) expect(e.key_name).toContain("first");
+    expect(f.json.total).toBe(f.json.events.length);
+  });
+
+  test("events cursor is IGNORED when a column sort is active (offset stays king)", async () => {
+    const enc = encodeURIComponent;
+    const sort = enc(JSON.stringify([{ colId: "in_tok", sort: "desc" }]));
+    const p1 = await api(`/api/usage/events?limit=5&sort=${sort}`, { token: userToken });
+    expect(p1.status).toBe(200);
+    const last = p1.json.events[p1.json.events.length - 1];
+
+    // page 2 with BOTH a cursor and the sort: the server must fall back to
+    // OFFSET (keyset is only defined for the default ts ordering) — identical
+    // to the plain offset request. (The web grid relies on exactly this.)
+    const p2 = await api(
+      `/api/usage/events?limit=5&offset=5&cursor=${last.ts}:${last.id}&sort=${sort}`,
+      { token: userToken },
+    );
+    const plain = await api(`/api/usage/events?limit=5&offset=5&sort=${sort}`, { token: userToken });
+    expect(p2.status).toBe(200);
+    expect(p2.json.events.map((e: any) => e.id)).toEqual(plain.json.events.map((e: any) => e.id));
+  });
+
+  test("events cursor + filter: no overlap, strictly older, total is cursor-independent", async () => {
+    const enc = encodeURIComponent;
+    const filters = enc(JSON.stringify({ status: { filterType: "number", type: "equals", filter: 200 } }));
+    const p1 = await api(`/api/usage/events?limit=5&filters=${filters}`, { token: userToken });
+    expect(p1.status).toBe(200);
+    expect(p1.json.events).toHaveLength(5);
+    const last = p1.json.events[p1.json.events.length - 1] as any;
+
+    const p2 = await api(
+      `/api/usage/events?limit=5&cursor=${last.ts}:${last.id}&filters=${filters}`,
+      { token: userToken },
+    );
+    expect(p2.status).toBe(200);
+    const ids1 = new Set(p1.json.events.map((e: any) => e.id));
+    for (const e of p2.json.events) {
+      expect(ids1.has(e.id)).toBe(false);
+      expect(e.ts < last.ts || (e.ts === last.ts && e.id < last.id)).toBe(true);
+      expect(e.status).toBe(200); // filter keeps applying on cursor pages
+    }
+    // the total describes the filtered VIEW, not the remaining pages
+    expect(p2.json.total).toBe(p1.json.total);
   });
 
   test("hour granularity endpoints feed the 1D views", async () => {

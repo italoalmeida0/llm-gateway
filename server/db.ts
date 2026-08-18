@@ -405,6 +405,30 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    name: "013_events_audit_keyset",
+    // Keyset-pagination + sorted-grid support for the two unbounded tables
+    // (usage_events grows ~10k rows/day under the audited scenario).
+    //
+    // The dashboard grids paginate with `ORDER BY ts DESC, id DESC` and a
+    // LIMIT/OFFSET, so a deep page walks O(offset) index entries. The
+    // (user_id, ts, id) index lets the keyset predicate (`ts <= X AND NOT
+    // (ts = X AND id >= Y)`) start at the cursor: deep forward pages become
+    // O(page). The in_tok tail gives the same jump treatment to grid sorts
+    // on that column — AND stays a win for unselective filters on it
+    // (measured: 316ms -> 0.01ms at 5y of the audited load). A latency_ms
+    // tail was measured and REJECTED: a >= threshold on it matches most rows
+    // of the seed distribution (~56%), so the planner routes ~half the user
+    // slice through the index + temp-sorts it (2.3s at 18.25M events vs
+    // 0.2ms on the ts-scan). Same pair for audit_log, whose grid sorts by
+    // (ts DESC, id DESC) and frequently filters by action.
+    up: `
+      CREATE INDEX idx_usage_user_ts_id ON usage_events(user_id, ts, id);
+      CREATE INDEX idx_usage_user_in_tok_id ON usage_events(user_id, in_tok, id);
+      CREATE INDEX idx_audit_ts_id ON audit_log(ts, id);
+      CREATE INDEX idx_audit_action_ts ON audit_log(action, ts, id);
+    `,
+  },
 ];
 
 export function migrate(): void {

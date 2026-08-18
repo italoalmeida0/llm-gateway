@@ -152,23 +152,44 @@ export default function UsagePage() {
   });
 
   /** AG Grid infinite row model: blocks are fetched from the API on scroll,
-   *  with the grid's sortModel/filterModel translated to SQL server-side. */
-  const eventsDatasource = serverDatasource<any>(async (params) => {
-    const qs = new URLSearchParams({
-      limit: String(Math.min(params.endRow - params.startRow, 500)),
-      offset: String(params.startRow),
-    });
-    if (keyId()) qs.set("key_id", keyId());
-    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
-    if (Object.keys(params.filterModel).length > 0) {
-      qs.set("filters", JSON.stringify(params.filterModel));
-    }
-    const j = await api<{ events: any[]; total: number }>(
-      "GET",
-      `/api/usage/events?${qs.toString()}`,
-    );
-    return { rows: j.events, total: j.total };
-  });
+   *  with the grid's sortModel/filterModel translated to SQL server-side.
+   *  Forward scrolling uses the keyset cursor of the previous block's last
+   *  row (server O(page) instead of O(offset)); jumps/context changes (key,
+   *  sort, filters) fall back to OFFSET, which stays correct either way. */
+  const eventsDatasource = serverDatasource<any>((() => {
+    const cursors = new Map<string, Map<number, { ts: number; id: number }>>();
+    return async (params) => {
+      const ctx = JSON.stringify([keyId(), params.sortModel, params.filterModel]);
+      let ctxCursors = cursors.get(ctx);
+      if (!ctxCursors) {
+        ctxCursors = new Map();
+        cursors.set(ctx, ctxCursors);
+      }
+      const qs = new URLSearchParams({
+        limit: String(Math.min(params.endRow - params.startRow, 500)),
+        offset: String(params.startRow),
+      });
+      if (keyId()) qs.set("key_id", keyId());
+      if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+      if (Object.keys(params.filterModel).length > 0) {
+        qs.set("filters", JSON.stringify(params.filterModel));
+      }
+      const cursor = params.startRow > 0 ? ctxCursors.get(params.startRow - 1) : undefined;
+      // Keep `offset` in the query: the server only honors the cursor for the
+      // DEFAULT (ts DESC) ordering — with a column sort or a malformed cursor
+      // it falls back to OFFSET, which must still be the right one.
+      if (cursor) qs.set("cursor", `${cursor.ts}:${cursor.id}`);
+      const j = await api<{ events: any[]; total: number }>(
+        "GET",
+        `/api/usage/events?${qs.toString()}`,
+      );
+      const last = j.events[j.events.length - 1];
+      if (last && typeof last.ts === "number" && typeof last.id === "number") {
+        ctxCursors.set(params.startRow + j.events.length - 1, { ts: last.ts, id: last.id });
+      }
+      return { rows: j.events, total: j.total };
+    };
+  })());
 
   const keyOptions = createMemo(() => [
     { value: "", label: "All keys" },

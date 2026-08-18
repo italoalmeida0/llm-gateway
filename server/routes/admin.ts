@@ -21,7 +21,7 @@ import {
 } from "../models";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { hourlySeries, utcDate } from "../usage";
-import { gridPage, parseGridQuery, type ColSpec } from "../gridql";
+import { gridPage, parseGridQuery, parseCursor, buildGridWhere, type ColSpec } from "../gridql";
 import { queryKeys } from "../keys";
 import { normalizePricing, pricingColumns } from "../pricing";
 
@@ -1666,12 +1666,64 @@ if (path === "/api/admin/stats" && req.method === "GET") {
   if (path === "/api/admin/audit" && req.method === "GET") {
     if (url.searchParams.has("limit")) {
       const grid = parseGridQuery(url);
+      // Keyset continuation for the default (ts DESC, id DESC) ordering —
+      // deep forward pages become O(page) instead of walking O(offset) rows.
+      // Custom sorts still use gridPage's OFFSET.
+      const cursor = parseCursor(url.searchParams.get("cursor"));
+      // actor_email filters need the users join; everything else can count
+      // the bare table (LEFT JOIN costs one PK lookup per history row —
+      // ~200ms at 1.8M audit rows, measured).
+      const actorFilter = !!grid.filters && "actor_email" in grid.filters;
+      if (cursor && (!grid.sort || grid.sort.length === 0)) {
+        const cols: Record<string, ColSpec> = {
+          ts: { col: "a.ts", kind: "date" },
+          action: { col: "a.action" },
+          target: { col: "a.target" },
+          meta: { col: "a.meta" },
+          ip: { col: "a.ip" },
+          actor_email: { col: "COALESCE(u.email, '')" },
+        };
+        const { clauses, params } = buildGridWhere(grid.filters, cols);
+        // Single backward index range (`ts <= X`) plus an exclusion
+        // predicate for the boundary row — a `ts < ? OR (ts = ? AND id < ?)`
+        // collapses on a near-now cursor (SQLite's MULTI-INDEX OR temp-sorts
+        // the whole log); the exclusion is a post-filter over the indexed
+        // range: O(page + ties-at-boundary), exact even on shared ms.
+        const base = `FROM audit_log a${actorFilter ? " LEFT JOIN users u ON u.id = a.actor_id" : ""}`;
+        const filterWhere = clauses.length ? `AND ${clauses.join(" AND ")}` : "";
+        const rows = db
+          .prepare(
+            `SELECT a.id, a.ts, a.action, a.target, a.meta, a.ip,
+                    u.email AS actor_email
+             FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id
+             WHERE a.ts <= ? AND NOT (a.ts = ? AND a.id >= ?) ${filterWhere}
+             ORDER BY a.ts DESC, a.id DESC LIMIT ?`,
+          )
+          .all(cursor.ts, cursor.ts, cursor.id, ...params, grid.limit) as Array<{
+            id: number;
+            ts: number;
+            action: string;
+            target: string | null;
+            meta: string | null;
+            ip: string | null;
+            actor_email: string | null;
+          }>;
+        const total = db
+          .prepare<{ n: number }, Array<string | number>>(
+            `SELECT COUNT(*) AS n ${base}
+             ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}`,
+          )
+          .get(...params)!.n;
+        return ok({ entries: rows, total, limit: grid.limit, offset: grid.offset }, req);
+      }
       const page = gridPage({
         baseSql: `
           SELECT a.id AS audit_id, a.ts, a.action, a.target, a.meta, a.ip,
                  u.email AS actor_email
           FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id`,
         baseParams: [],
+        // join-free COUNT unless an actor_email filter needs the join
+        countFrom: actorFilter ? undefined : "FROM audit_log a",
         cols: {
            ts: { col: "ts", kind: "date" },
           action: { col: "action" },
@@ -1684,7 +1736,9 @@ if (path === "/api/admin/stats" && req.method === "GET") {
         defaultOrder: "ts DESC",
         tieBreak: "audit_id DESC",
       });
-      return ok({ entries: page.rows.map(({ audit_id: _id, ...row }) => row), total: page.total, limit: grid.limit, offset: grid.offset }, req);
+      // `id` rides along so the grid can build keyset cursors for forward
+      // scrolling (the column defs ignore it).
+      return ok({ entries: page.rows.map(({ audit_id: id, ...row }) => ({ id, ...row })), total: page.total, limit: grid.limit, offset: grid.offset }, req);
     }
     const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 500);
     const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);

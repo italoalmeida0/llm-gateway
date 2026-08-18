@@ -2,7 +2,7 @@ import { requireAuth } from "../auth";
 import { ok } from "../http";
 import { userDailySeries, userEvents, userSummary, keyDailySeries, hourlySeries, userUsageBreakdown, queryUserUsageBreakdown } from "../usage";
 import { db, type ApiKeyRow } from "../db";
-import { parseGridQuery } from "../gridql";
+import { parseGridQuery, parseCursor } from "../gridql";
 
 /** /api/usage — the authenticated user's own consumption data. */
 export async function handleUsageRoute(path: string, req: Request, url: URL): Promise<Response | null> {
@@ -46,6 +46,9 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
     }
     const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 500);
     const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);
+    // Keyset cursor ("<ts>:<id>" of the previous page's last row) replaces
+    // OFFSET for forward scrolling — O(page) instead of O(offset).
+    const cursor = parseCursor(url.searchParams.get("cursor"));
     // Server-side sort/filter (AG Grid infinite row model): JSON-encoded
     // sortModel / filterModel, translated through strict whitelists.
     let sort: Array<{ colId: string; sort: string }> | undefined;
@@ -66,7 +69,7 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
     } catch {
       /* malformed sort/filters fall back to unfiltered default */
     }
-    const { rows, total } = userEvents(ctx.user.id, { keyId, limit, offset, sort, filters });
+    const { rows, total } = userEvents(ctx.user.id, { keyId, limit, offset, sort, filters, cursor: cursor ?? undefined });
     return ok({ events: rows, total, limit, offset }, req);
   }
 

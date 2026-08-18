@@ -8,6 +8,7 @@ import { EPOCH_DATE_FILTER_PARAMS, UsageGrid, serverDatasource, timeFormatter } 
 import type { ColDef } from "ag-grid-community";
 
 interface AuditEntry {
+  id: number;
   ts: number;
   action: string;
   target?: string;
@@ -40,16 +41,37 @@ export default function AdminAuditPage() {
     const j = await api<{ total: number }>("GET", "/api/admin/audit?limit=1");
     return j.total;
   });
-  const auditDatasource = serverDatasource<AuditEntry>(async (params) => {
-    const qs = new URLSearchParams({
-      limit: String(Math.min(params.endRow - params.startRow, 500)),
-      offset: String(params.startRow),
-    });
-    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
-    if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
-    const j = await api<{ entries: AuditEntry[]; total: number }>("GET", `/api/admin/audit?${qs}`);
-    return { rows: j.entries, total: j.total };
-  });
+  /** Forward scrolling rides the keyset cursor of the previous block's last
+   *  row (server O(page)); jumps and context changes (sort/filters) fall
+   *  back to OFFSET, which stays correct either way. */
+  const auditDatasource = serverDatasource<AuditEntry>((() => {
+    const cursors = new Map<string, Map<number, { ts: number; id: number }>>();
+    return async (params) => {
+      const ctx = JSON.stringify([params.sortModel, params.filterModel]);
+      let ctxCursors = cursors.get(ctx);
+      if (!ctxCursors) {
+        ctxCursors = new Map();
+        cursors.set(ctx, ctxCursors);
+      }
+      const qs = new URLSearchParams({
+        limit: String(Math.min(params.endRow - params.startRow, 500)),
+        offset: String(params.startRow),
+      });
+      if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+      if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+      const cursor = params.startRow > 0 ? ctxCursors.get(params.startRow - 1) : undefined;
+      // Keep `offset` in the query: the server only honors the cursor for the
+      // DEFAULT (ts DESC) ordering — with a column sort or a malformed cursor
+      // it falls back to OFFSET, which must still be the right one.
+      if (cursor) qs.set("cursor", `${cursor.ts}:${cursor.id}`);
+      const j = await api<{ entries: AuditEntry[]; total: number }>("GET", `/api/admin/audit?${qs}`);
+      const last = j.entries[j.entries.length - 1];
+      if (last) {
+        ctxCursors.set(params.startRow + j.entries.length - 1, { ts: last.ts, id: last.id });
+      }
+      return { rows: j.entries, total: j.total };
+    };
+  })());
 
   const cols: ColDef[] = [
     {

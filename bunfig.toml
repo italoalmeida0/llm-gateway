@@ -1,2 +1,8 @@
+[test]
+# Restrict test discovery to test/: scripts/load_test.ts is a long-running
+# benchmark that matches bun's *_test* discovery pattern and must never run
+# as part of the suite.
+root = "test"
+
 [serve.static]
 plugins = ["./plugins/tailwind-plugin.ts", "./plugins/solid-plugin.ts"]

@@ -25,6 +25,18 @@ export function likeEscape(s: string): string {
   return s.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
 
+/** Keyset cursor for `ORDER BY ts DESC, id DESC` grids: "<ts>:<id>" of the
+ *  previous page's last row. Replaces deep OFFSET walks with O(page) index
+ *  jumps. Malformed input returns null (callers fall back to OFFSET). */
+export function parseCursor(raw: string | null): { ts: number; id: number } | null {
+  if (!raw) return null;
+  const m = raw.match(/^(\d{1,16}):(\d{1,16})$/);
+  if (!m) return null;
+  const ts = Number(m[1]);
+  const id = Number(m[2]);
+  return Number.isSafeInteger(ts) && Number.isSafeInteger(id) ? { ts, id } : null;
+}
+
 export function buildGridWhere(
   filters: Record<string, GridFilterEntry> | undefined,
   cols: Record<string, ColSpec>,
@@ -187,6 +199,13 @@ export interface GridPageArgs {
   grid: { limit: number; offset: number; sort?: GridSort[]; filters?: Record<string, GridFilterEntry> };
   defaultOrder: string;
   tieBreak?: string;
+  /** Optional FROM-clause override for the COUNT query. Default counts the
+   *  joined baseSql as a subquery — fine for small tables, but a LEFT JOIN
+   * resolves per ROW and an unbounded table (audit_log) pays one PK lookup
+   * per history row (~200ms at 1.8M rows, measured). Pass the join-free
+   * `FROM …` when no filter needs the joined columns: the count only has to
+   * agree with the filtered row set, and LEFT JOINs never filter. */
+  countFrom?: string;
 }
 
 export function gridPage(a: GridPageArgs): { rows: any[]; total: number } {
@@ -198,7 +217,9 @@ export function gridPage(a: GridPageArgs): { rows: any[]; total: number } {
     .all(...a.baseParams, ...params, a.grid.limit, a.grid.offset);
   const total = db
     .prepare<{ n: number }, Array<string | number>>(
-      `SELECT COUNT(*) AS n FROM (${a.baseSql})${where}`,
+      a.countFrom
+        ? `SELECT COUNT(*) AS n ${a.countFrom}${where}`
+        : `SELECT COUNT(*) AS n FROM (${a.baseSql})${where}`,
     )
     .get(...a.baseParams, ...params)!.n;
   return { rows, total };

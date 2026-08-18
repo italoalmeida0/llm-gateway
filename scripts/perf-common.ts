@@ -39,12 +39,12 @@ export const ADMIN_PW = "perf-admin-password-1";
 export const USER_PW = "perf-user-password-1";
 
 export const NUM_USERS = Number(process.env.PERF_NUM_USERS || 5);
-export const REQS_PER_USER_DAY = 200;
-export const AUDIT_PER_USER_DAY = 50;
+export const REQS_PER_USER_DAY = Number(process.env.PERF_REQS_PER_USER_DAY || 200);
+export const AUDIT_PER_USER_DAY = Number(process.env.PERF_AUDIT_PER_USER_DAY || 50);
 /** daily per-user token totals (averaged per request in genDayEvents) */
-export const DAY_IN = 1_000_000;
-export const DAY_CACHE = 4_000_000;
-export const DAY_OUT = 200_000;
+export const DAY_IN = Number(process.env.PERF_DAY_IN || 1_000_000);
+export const DAY_CACHE = Number(process.env.PERF_DAY_CACHE || 4_000_000);
+export const DAY_OUT = Number(process.env.PERF_DAY_OUT || 200_000);
 
 export const MODELS = [
   { proto: "anthropic", model: "claude-sonnet-4-5", weight: 50 },

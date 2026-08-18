@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import { Database } from "bun:sqlite";
 
 import { totpAt } from "../server/crypto";
 
@@ -741,6 +742,71 @@ describe("gateway end-to-end", () => {
     const all = await api("/api/usage/breakdown?days=all", { token: userToken });
     expect(all.status).toBe(200);
     expect(all.json.rows.length).toBeGreaterThanOrEqual(bd.json.rows.length);
+  });
+
+  test("every event shows up — provider-less legacy rows and hard-deleted key history", async () => {
+    // Pre-011 history looks like this row: no provider dimension at all. The
+    // test DB starts empty at migration time, so nothing injects one — plant
+    // it directly (fixture setup, not an API surface) right into the running
+    // gateway's SQLite file.
+    const list = await api("/api/keys", { token: userToken });
+    const mainKey = list.json.keys[0];
+    expect(mainKey).toBeTruthy();
+
+    const raw = new Database(path.join(dataDir, "gateway.db"));
+    raw.exec("PRAGMA busy_timeout = 5000");
+    raw
+      .prepare(
+        `INSERT INTO usage_events (key_id, user_id, ts, proto, model, in_tok, cache_tok, out_tok, latency_ms, status, stream, estimated, provider_id, provider_key_id, upstream_model)
+         VALUES (?, ?, ?, 'openai', 'legacy-model', 10, 0, 5, 100, 200, 0, 0, '', '', '')`,
+      )
+      .run(mainKey.id, mainKey.userId, Date.now() - 3_600_000);
+    raw.close();
+
+    // Hard-delete a key that HAS traffic: its history must stay visible
+    // (LEFT JOIN to api_keys, name falls back to the key prefix).
+    const c = await api("/api/keys", { token: userToken, body: { name: "legacy-hist" } });
+    expect(c.status).toBe(200);
+    const delKey = c.json.key;
+    const res = await llm("/v1/chat/completions", c.json.token, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "history" }],
+    });
+    expect(res.status).toBe(200);
+    const del = await api(`/api/keys/${delKey.id}?hard=true`, { token: userToken, method: "DELETE" });
+    expect(del.status).toBe(200);
+    await Bun.sleep(1500); // usage buffer flush
+
+    const ev = await api(`/api/usage/events?limit=500`, { token: userToken });
+    expect(ev.status).toBe(200);
+    // No row may be dropped by the joins: returned slice == server-side total.
+    expect(ev.json.total).toBeLessThanOrEqual(500);
+    expect(ev.json.events).toHaveLength(ev.json.total);
+
+    // the planted pre-011 row is there, with empty provider fields tolerated
+    const legacy = ev.json.events.find((e: any) => e.model === "legacy-model");
+    expect(legacy).toBeTruthy();
+    expect(legacy.provider_name ?? null).toBeNull();
+
+    // the hard-deleted key's events are there, named by the id fallback
+    const dke = ev.json.events.find((e: any) => e.key_id === delKey.id);
+    expect(dke).toBeTruthy();
+    expect(dke.key_name).toBe(delKey.id.slice(0, 8));
+
+    // the user breakdown still attributes usage to the deleted key
+    const bd = await api("/api/usage/breakdown?days=7", { token: userToken });
+    const myRow = bd.json.rows.find(
+      (r: any) => r.key_id === delKey.id && r.model === "fake-llm-1",
+    );
+    expect(myRow).toBeTruthy();
+
+    // …and the admin's global breakdown still aggregates deleted keys' traffic
+    const ab = await api("/api/admin/usage-breakdown?days=7", { token: adminToken });
+    expect(ab.status).toBe(200);
+    const fakeRow = ab.json.models.find((r: any) => r.model === "fake-llm-1");
+    expect(fakeRow).toBeTruthy();
+    expect(fakeRow.reqs).toBeGreaterThan(0);
+    expect(ab.json.users.length).toBeGreaterThan(0);
   });
 
   test("hour granularity endpoints feed the 1D views", async () => {

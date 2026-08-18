@@ -276,7 +276,7 @@ export function Card(props: {
 }) {
   return (
     <div
-      class={`rounded-[1.75rem] border border-line bg-card overflow-hidden ${
+      class={`rounded-xl border border-line bg-card overflow-hidden ${
         props.interactive
           ? "transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 hover:border-ink-600/50"
           : ""
@@ -667,7 +667,7 @@ export function Badge(props: {
   };
   return (
     <span
-      class={`fit-content rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tones[props.tone]}`}
+      class={`max-h-5 min-h-5 max-w-fit min-w-fit inline-flex items-center rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tones[props.tone]}`}
     >
       {props.children}
     </span>

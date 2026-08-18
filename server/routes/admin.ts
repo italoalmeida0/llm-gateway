@@ -1282,23 +1282,23 @@ if (path === "/api/admin/stats" && req.method === "GET") {
       hours !== null
         ? db
             .prepare(
-              `SELECT ue.user_id, u.email, SUM(ue.in_tok) AS in_tok, SUM(ue.cache_tok) AS cache_tok, SUM(ue.out_tok) AS out_tok, COUNT(*) AS reqs
-               FROM usage_events ue JOIN users u ON u.id = ue.user_id
-               WHERE ue.ts >= ? GROUP BY ue.user_id ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 50`,
+`SELECT ue.user_id, COALESCE(u.email, ue.user_id) AS email, SUM(ue.in_tok) AS in_tok, SUM(ue.cache_tok) AS cache_tok, SUM(ue.out_tok) AS out_tok, COUNT(*) AS reqs
+                FROM usage_events ue LEFT JOIN users u ON u.id = ue.user_id
+                WHERE ue.ts >= ? GROUP BY ue.user_id ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 50`,
             )
             .all(Date.now() - hours * 3_600_000)
         : days === "all"
           ? db
               .prepare(
-                `SELECT ud.user_id, u.email, SUM(ud.in_tok) AS in_tok, SUM(ud.cache_tok) AS cache_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
-                 FROM usage_daily ud JOIN users u ON u.id = ud.user_id
+                `SELECT ud.user_id, COALESCE(u.email, ud.user_id) AS email, SUM(ud.in_tok) AS in_tok, SUM(ud.cache_tok) AS cache_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
+                 FROM usage_daily ud LEFT JOIN users u ON u.id = ud.user_id
                  GROUP BY ud.user_id ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 50`,
               )
               .all()
           : db
               .prepare(
-                `SELECT ud.user_id, u.email, SUM(ud.in_tok) AS in_tok, SUM(ud.cache_tok) AS cache_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
-                 FROM usage_daily ud JOIN users u ON u.id = ud.user_id
+                `SELECT ud.user_id, COALESCE(u.email, ud.user_id) AS email, SUM(ud.in_tok) AS in_tok, SUM(ud.cache_tok) AS cache_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
+                 FROM usage_daily ud LEFT JOIN users u ON u.id = ud.user_id
                  WHERE ud.date >= date('now', ?) GROUP BY ud.user_id ORDER BY (in_tok + cache_tok + out_tok) DESC LIMIT 50`,
               )
               .all(`-${days} days`);
@@ -1386,9 +1386,9 @@ if (path === "/api/admin/stats" && req.method === "GET") {
     const uWhere = uClauses.length ? `WHERE ${uClauses.join(" AND ")}` : "";
     const users = db
       .prepare(
-        `SELECT ud.user_id, u.email,
+        `SELECT ud.user_id, COALESCE(u.email, ud.user_id) AS email,
                 SUM(ud.in_tok) AS in_tok, SUM(ud.cache_tok) AS cache_tok, SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
-         FROM usage_model_provider_daily ud JOIN users u ON u.id = ud.user_id
+         FROM usage_model_provider_daily ud LEFT JOIN users u ON u.id = ud.user_id
          ${uWhere}
          GROUP BY ud.user_id
          ORDER BY (SUM(ud.in_tok) + SUM(ud.cache_tok) + SUM(ud.out_tok)) DESC

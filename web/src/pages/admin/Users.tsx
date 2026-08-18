@@ -156,14 +156,14 @@ export default function AdminUsersPage() {
     const u = props.data;
     if (!u) return null;
     return (
-      <div class="flex items-center gap-1.5 flex-wrap">
+      <>
         <Badge tone={u.role === "admin" ? "indigo" : "zinc"}>
           {u.role === "admin" ? "Admin" : "User"}
         </Badge>
         <Show when={u.status === "banned"}>
           <Badge tone="red">Banned</Badge>
         </Show>
-      </div>
+      </>
     );
   }
 

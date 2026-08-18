@@ -25,6 +25,8 @@ import {
 import type { ColDef } from "ag-grid-community";
 
 const RECENT_PAGE = 50;
+/** Recent-requests fetch window: the grid paginates client-side over it. */
+const EVENTS_FETCH = 500;
 
 interface BreakdownRow {
   key_id: string;
@@ -130,7 +132,7 @@ export default function UsagePage() {
   const [events] = createResource(query, async (q) => {
     const j = await api<{ events: any[]; total: number }>(
       "GET",
-      `/api/usage/events?limit=${RECENT_PAGE}${q.k ? `&key_id=${q.k}` : ""}`,
+      `/api/usage/events?limit=${EVENTS_FETCH}${q.k ? `&key_id=${q.k}` : ""}`,
     );
     return j;
   });

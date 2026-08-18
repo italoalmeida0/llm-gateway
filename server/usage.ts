@@ -327,12 +327,12 @@ export function userUsageBreakdown(
   }
   return db
     .prepare(
-      `SELECT m.key_id, k.name AS key_name, m.model, m.proto,
+      `SELECT m.key_id, COALESCE(k.name, substr(m.key_id, 1, 8)) AS key_name, m.model, m.proto,
               m.provider_id, p.name AS provider_name, m.provider_key_id, pk.label AS provider_key_label,
               m.upstream_model,
               SUM(m.in_tok) AS in_tok, SUM(m.cache_tok) AS cache_tok, SUM(m.out_tok) AS out_tok, SUM(m.reqs) AS reqs
        FROM usage_model_provider_daily m
-       JOIN api_keys k ON k.id = m.key_id
+       LEFT JOIN api_keys k ON k.id = m.key_id
        LEFT JOIN providers p ON p.id = m.provider_id
        LEFT JOIN provider_keys pk ON pk.id = m.provider_key_id
        WHERE ${clauses.join(" AND ")}
@@ -362,12 +362,13 @@ export function userEvents(userId: string, opts: { keyId?: string; limit: number
   const params = opts.keyId ? [userId, opts.keyId] : [userId];
   const rows = db
     .prepare(
-      `SELECT e.id, e.key_id, k.name AS key_name, e.ts, e.proto, e.model,
+      // LEFT JOINs: hard-deleted keys/providers must not hide their history.
+      `SELECT e.id, e.key_id, COALESCE(k.name, substr(e.key_id, 1, 8)) AS key_name, e.ts, e.proto, e.model,
               e.in_tok, e.cache_tok, e.out_tok, e.latency_ms, e.status, e.stream,
               e.provider_id, p.name AS provider_name, e.provider_key_id, pk.label AS provider_key_label,
               e.upstream_model
        FROM usage_events e
-       JOIN api_keys k ON k.id = e.key_id
+       LEFT JOIN api_keys k ON k.id = e.key_id
        LEFT JOIN providers p ON p.id = e.provider_id
        LEFT JOIN provider_keys pk ON pk.id = e.provider_key_id
        WHERE ${where}

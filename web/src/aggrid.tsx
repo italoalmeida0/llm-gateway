@@ -180,30 +180,12 @@ export function UsageGrid(props: {
         : [[column.colId ?? column.field ?? "", column.headerName ?? column.colId ?? column.field ?? "Column"]],
     ),
   );
-  const stateKey = (state: ColumnState) =>
-    JSON.stringify({
-      hide: state.hide ?? false,
-      width: state.width,
-      flex: state.flex ?? null,
-      sort: state.sort ?? null,
-      sortIndex: state.sortIndex ?? null,
-      pinned: state.pinned ?? null,
-      rowGroup: state.rowGroup ?? false,
-      rowGroupIndex: state.rowGroupIndex ?? null,
-      pivot: state.pivot ?? false,
-      pivotIndex: state.pivotIndex ?? null,
-      aggFunc: state.aggFunc ?? null,
-    });
   const updateChangedColumns = (api: GridApi) => {
     const defaults = new Map(defaultColumnState.map((state) => [state.colId, state]));
-    const defaultPositions = new Map(
-      defaultColumnState.map((state, index) => [state.colId, index]),
-    );
     const changed = api
       .getColumnState()
-      .filter((state, index) =>
-        index !== defaultPositions.get(state.colId) ||
-        stateKey(state) !== stateKey(defaults.get(state.colId) ?? state) ||
+      .filter((state) =>
+        (state.hide ?? false) !== (defaults.get(state.colId)?.hide ?? false) ||
         api.getColumnFilterModel(state.colId) != null,
       )
       .map((state) => state.colId);
@@ -255,12 +237,9 @@ export function UsageGrid(props: {
     if (!api) return;
     const defaultState = defaultColumnState.find((state) => state.colId === colId);
     if (defaultState) {
-      const current = api.getColumnState();
-      const currentWithoutColumn = current.filter((state) => state.colId !== colId);
-      const defaultIndex = defaultColumnState.findIndex((state) => state.colId === colId);
-      const insertAt = Math.min(Math.max(defaultIndex, 0), currentWithoutColumn.length);
-      currentWithoutColumn.splice(insertAt, 0, { ...defaultState });
-      api.applyColumnState({ state: currentWithoutColumn, applyOrder: true });
+      api.applyColumnState({
+        state: [{ colId, hide: defaultState.hide ?? false }],
+      });
     }
     await api.setColumnFilterModel(colId, null);
     api.onFilterChanged("api");
@@ -335,10 +314,11 @@ export function UsageGrid(props: {
               <Btn
                 variant="ghost"
                 size="sm"
-                class="!px-2 text-[11px] text-ink-500 hover:text-ink-200"
+                class="!px-2 border border-brand-500/30 bg-brand-500/10 text-[11px] text-brand-400 hover:border-brand-500/50 hover:bg-brand-500/20 hover:text-brand-300"
                 title={`Reset ${columnLabels.get(colId) ?? colId}`}
                 onClick={() => resetColumn(colId)}
               >
+                <Icon name={Icons.refresh} size={12} />
                 Reset {columnLabels.get(colId) ?? colId}
               </Btn>
             )}

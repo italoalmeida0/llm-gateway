@@ -7,6 +7,7 @@ import { DailyChart } from "../../charts";
 import {
   Card,
   CardHeader,
+  EmptyState,
   Icons,
   Segmented,
   Select,
@@ -17,6 +18,7 @@ import {
 import {
   UsageGrid,
   ProtoCell,
+  serverDatasource,
   countFormatter,
   tokenFormatter,
 } from "../../aggrid";
@@ -116,17 +118,38 @@ export default function AdminStatsPage() {
     ...(providers() ?? []).map((p) => ({ value: p.id, label: p.name })),
   ]);
 
-  const breakdownQuery = createMemo(() => ({
-    d: days(),
-    p: providerId(),
-  }));
-  const [breakdown] = createResource(breakdownQuery, async (q) => {
-    const params = new URLSearchParams({ days: q.d });
+  const [breakdownCounts] = createResource(statsQuery, async (q) => {
+    const params = new URLSearchParams({ days: q.d, limit: "1" });
     if (q.p) params.set("provider_id", q.p);
-    return api<{ users: UserRow[]; models: ModelRow[] }>(
-      "GET",
-      `/api/admin/usage-breakdown?${params.toString()}`,
-    );
+    const [users, models] = await Promise.all([
+      api<{ total: number }>("GET", `/api/admin/usage-breakdown/users?${params.toString()}`),
+      api<{ total: number }>("GET", `/api/admin/usage-breakdown/models?${params.toString()}`),
+    ]);
+    return { users: users.total, models: models.total };
+  });
+  const usersDatasource = serverDatasource<UserRow>(async (params) => {
+    const qs = new URLSearchParams({
+      days: days(),
+      limit: String(Math.min(params.endRow - params.startRow, 500)),
+      offset: String(params.startRow),
+    });
+    if (providerId()) qs.set("provider_id", providerId());
+    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+    if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+    const j = await api<{ users: UserRow[]; total: number }>("GET", `/api/admin/usage-breakdown/users?${qs}`);
+    return { rows: j.users, total: j.total };
+  });
+  const modelsDatasource = serverDatasource<ModelRow>(async (params) => {
+    const qs = new URLSearchParams({
+      days: days(),
+      limit: String(Math.min(params.endRow - params.startRow, 500)),
+      offset: String(params.startRow),
+    });
+    if (providerId()) qs.set("provider_id", providerId());
+    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+    if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+    const j = await api<{ models: ModelRow[]; total: number }>("GET", `/api/admin/usage-breakdown/models?${qs}`);
+    return { rows: j.models, total: j.total };
   });
 
   // Window totals are summed from the displayed series (per bucket — never
@@ -232,14 +255,24 @@ export default function AdminStatsPage() {
               title="Top users"
               subtitle={`By category · ${windowLabel(days())}`}
             />
-            <div class="p-2" {...usalItems("fade-u", 60)}>
-              <UsageGrid
-                columnDefs={userCols}
-                rowData={breakdown()?.users}
-                pageSize={15}
-                storageKey="llmgw-grid:admin.users"
-              />
-            </div>
+            <Show
+              when={(breakdownCounts()?.users ?? 0) > 0}
+              fallback={
+                <div class="p-6">
+                  <EmptyState icon={Icons.users} title="No user data in this window" />
+                </div>
+              }
+            >
+              <div class="p-2" {...usalItems("fade-u", 60)}>
+                <UsageGrid
+                  columnDefs={userCols}
+                  datasource={usersDatasource}
+                  cacheBlockSize={100}
+                  refreshDeps={`${days()}:${providerId()}`}
+                  storageKey="llmgw-grid:admin.stats.users"
+                />
+              </div>
+            </Show>
           </Card>
 
           <Card>
@@ -247,14 +280,24 @@ export default function AdminStatsPage() {
               title="Models by provider"
               subtitle={`Model × provider breakdown · ${windowLabel(days())}`}
             />
-            <div class="p-2" {...usalItems("fade-u", 60)}>
-              <UsageGrid
-                columnDefs={modelCols}
-                rowData={breakdown()?.models}
-                pageSize={15}
-                storageKey="llmgw-grid:admin.models"
-              />
-            </div>
+            <Show
+              when={(breakdownCounts()?.models ?? 0) > 0}
+              fallback={
+                <div class="p-6">
+                  <EmptyState icon={Icons.chart} title="No model data in this window" />
+                </div>
+              }
+            >
+              <div class="p-2" {...usalItems("fade-u", 60)}>
+                <UsageGrid
+                  columnDefs={modelCols}
+                  datasource={modelsDatasource}
+                  cacheBlockSize={100}
+                  refreshDeps={`${days()}:${providerId()}`}
+                  storageKey="llmgw-grid:admin.stats.models"
+                />
+              </div>
+            </Show>
           </Card>
         </div>
       </Show>

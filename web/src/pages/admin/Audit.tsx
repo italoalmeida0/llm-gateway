@@ -4,11 +4,8 @@ import { api } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { Badge, Card, CardHeader, EmptyState, Icons, fmtNum } from "../../ui";
-import { UsageGrid, timeFormatter } from "../../aggrid";
+import { UsageGrid, serverDatasource, timeFormatter } from "../../aggrid";
 import type { ColDef } from "ag-grid-community";
-
-const FETCH = 500;
-const PAGE_SIZE = 50;
 
 interface AuditEntry {
   ts: number;
@@ -39,12 +36,19 @@ function ActionCell(props: { value?: string }) {
 }
 
 export default function AdminAuditPage() {
-  const [data] = createResource(async () => {
-    const j = await api<{ entries: AuditEntry[]; total: number }>(
-      "GET",
-      `/api/admin/audit?limit=${FETCH}`,
-    );
-    return j;
+  const [auditCount] = createResource(async () => {
+    const j = await api<{ total: number }>("GET", "/api/admin/audit?limit=1");
+    return j.total;
+  });
+  const auditDatasource = serverDatasource<AuditEntry>(async (params) => {
+    const qs = new URLSearchParams({
+      limit: String(Math.min(params.endRow - params.startRow, 500)),
+      offset: String(params.startRow),
+    });
+    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+    if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+    const j = await api<{ entries: AuditEntry[]; total: number }>("GET", `/api/admin/audit?${qs}`);
+    return { rows: j.entries, total: j.total };
   });
 
   const cols: ColDef[] = [
@@ -92,18 +96,16 @@ export default function AdminAuditPage() {
       />
 
       <Card>
-        <CardHeader
-          title={`${fmtNum(data()?.total ?? 0)} events · latest ${FETCH}`}
-        />
+        <CardHeader title={`${fmtNum(auditCount() ?? 0)} events`} />
         <Show
-          when={(data()?.entries.length ?? 0) > 0}
+          when={(auditCount() ?? 0) > 0}
           fallback={<EmptyState icon={Icons.book} title="No audit entries" />}
         >
           <div class="p-2" {...usalItems("fade-u", 60)}>
             <UsageGrid
               columnDefs={cols}
-              rowData={data()?.entries}
-              pageSize={PAGE_SIZE}
+              datasource={auditDatasource}
+              cacheBlockSize={100}
               heightClass="h-[560px]"
               storageKey="llmgw-grid:admin.audit"
             />

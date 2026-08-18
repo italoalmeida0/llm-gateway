@@ -744,6 +744,97 @@ describe("gateway end-to-end", () => {
     expect(all.json.rows.length).toBeGreaterThanOrEqual(bd.json.rows.length);
   });
 
+  test("server-driven grids paginate, filter and sort", async () => {
+    const query = (pathname: string, params: Record<string, string>) =>
+      `${pathname}?${new URLSearchParams(params).toString()}`;
+    const sortBy = (colId: string, sort: "asc" | "desc") =>
+      JSON.stringify([{ colId, sort }]);
+    const contains = (filter: string) =>
+      JSON.stringify({ name: { filterType: "text", type: "contains", filter } });
+
+    const userKeys0 = await api(query("/api/keys", { limit: "1", offset: "0" }), { token: userToken });
+    const userKeys1 = await api(query("/api/keys", { limit: "1", offset: "1" }), { token: userToken });
+    expect(userKeys0.status).toBe(200);
+    expect(userKeys0.json.limit).toBe(1);
+    expect(userKeys0.json.total).toBeGreaterThanOrEqual(2);
+    expect(userKeys0.json.keys).toHaveLength(1);
+    expect(userKeys1.json.keys[0].id).not.toBe(userKeys0.json.keys[0].id);
+
+    const filteredKeys = await api(
+      query("/api/keys", { limit: "50", sort: sortBy("name", "asc"), filters: contains("my-first") }),
+      { token: userToken },
+    );
+    expect(filteredKeys.json.keys).toHaveLength(1);
+    expect(filteredKeys.json.keys[0].name).toBe("my-first");
+
+    const adminUsers = await api(query("/api/admin/users", { limit: "1", offset: "0", sort: sortBy("email", "asc") }), {
+      token: adminToken,
+    });
+    expect(adminUsers.status).toBe(200);
+    expect(adminUsers.json.total).toBeGreaterThanOrEqual(2);
+    expect(adminUsers.json.users).toHaveLength(1);
+    expect(adminUsers.json.users[0].keyCount).toBeGreaterThanOrEqual(0);
+
+    const adminKeys = await api(query("/api/admin/keys", { limit: "1", offset: "0", sort: sortBy("createdAt", "desc") }), {
+      token: adminToken,
+    });
+    expect(adminKeys.status).toBe(200);
+    expect(adminKeys.json.total).toBeGreaterThanOrEqual(2);
+    expect(adminKeys.json.keys).toHaveLength(1);
+
+    const models = await api(query("/api/admin/models", { limit: "1", offset: "0", filters: JSON.stringify({ id: { filterType: "text", type: "contains", filter: "fake-llm-1" } }) }), {
+      token: adminToken,
+    });
+    expect(models.status).toBe(200);
+    expect(models.json.total).toBeGreaterThanOrEqual(1);
+    expect(models.json.models).toHaveLength(1);
+    expect(models.json.models[0].id).toBe("fake-llm-1");
+    expect(models.json.models[0].targets.length).toBeGreaterThanOrEqual(1);
+
+    const userBreakdown = await api(query("/api/usage/breakdown", {
+      days: "7",
+      limit: "1",
+      offset: "0",
+      sort: sortBy("out_tok", "desc"),
+      filters: JSON.stringify({ model: { filterType: "text", type: "contains", filter: "fake" } }),
+    }), { token: userToken });
+    expect(userBreakdown.status).toBe(200);
+    expect(userBreakdown.json.total).toBeGreaterThanOrEqual(1);
+    expect(userBreakdown.json.rows).toHaveLength(1);
+    expect(userBreakdown.json.rows[0].model).toContain("fake");
+
+    const adminBreakdownUsers = await api(query("/api/admin/usage-breakdown/users", {
+      days: "7",
+      limit: "1",
+      offset: "0",
+      sort: sortBy("out_tok", "desc"),
+    }), { token: adminToken });
+    expect(adminBreakdownUsers.status).toBe(200);
+    expect(adminBreakdownUsers.json.total).toBeGreaterThanOrEqual(1);
+    expect(adminBreakdownUsers.json.users).toHaveLength(1);
+
+    const adminBreakdownModels = await api(query("/api/admin/usage-breakdown/models", {
+      days: "7",
+      limit: "1",
+      offset: "0",
+      filters: JSON.stringify({ provider_name: { filterType: "text", type: "contains", filter: "provider" } }),
+    }), { token: adminToken });
+    expect(adminBreakdownModels.status).toBe(200);
+    expect(adminBreakdownModels.json.total).toBeGreaterThanOrEqual(1);
+    expect(adminBreakdownModels.json.models).toHaveLength(1);
+
+    const audit = await api(query("/api/admin/audit", {
+      limit: "2",
+      offset: "0",
+      sort: sortBy("ts", "desc"),
+      filters: JSON.stringify({ action: { filterType: "text", type: "contains", filter: "created" } }),
+    }), { token: adminToken });
+    expect(audit.status).toBe(200);
+    expect(audit.json.total).toBeGreaterThanOrEqual(1);
+    expect(audit.json.entries.length).toBeLessThanOrEqual(2);
+    expect(audit.json.entries.every((e: any) => e.action.includes("created"))).toBe(true);
+  });
+
   test("every event shows up — provider-less legacy rows and hard-deleted key history", async () => {
     // Pre-011 history looks like this row: no provider dimension at all. The
     // test DB starts empty at migration time, so nothing injects one — plant

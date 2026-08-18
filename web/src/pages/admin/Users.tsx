@@ -18,13 +18,28 @@ import {
   fmtDate,
   toast,
 } from "../../ui";
-import { UsageGrid } from "../../aggrid";
+import { UsageGrid, serverDatasource } from "../../aggrid";
 import type { ColDef } from "ag-grid-community";
 
 export default function AdminUsersPage() {
-  const [users, { refetch }] = createResource(async () => {
-    const j = await api<{ users: AdminUserDto[] }>("GET", "/api/admin/users");
-    return j.users;
+  const [userCount, { refetch: refetchUserCount }] = createResource(async () => {
+    const j = await api<{ total: number }>("GET", "/api/admin/users?limit=1");
+    return j.total;
+  });
+  const [gridVersion, setGridVersion] = createSignal(0);
+  const refreshGrid = () => {
+    setGridVersion((v) => v + 1);
+    refetchUserCount();
+  };
+  const usersDatasource = serverDatasource<AdminUserDto>(async (params) => {
+    const qs = new URLSearchParams({
+      limit: String(Math.min(params.endRow - params.startRow, 500)),
+      offset: String(params.startRow),
+    });
+    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+    if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+    const j = await api<{ users: AdminUserDto[]; total: number }>("GET", `/api/admin/users?${qs}`);
+    return { rows: j.users, total: j.total };
   });
 
   const [showCreate, setShowCreate] = createSignal(false);
@@ -69,7 +84,7 @@ export default function AdminUsersPage() {
       } else if (j.invite?.link) {
         setInviteLink(fullLink(j.invite.link));
       }
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed", "err");
     } finally {
@@ -89,7 +104,7 @@ export default function AdminUsersPage() {
       });
       toast("User updated");
       setEditing(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed", "err");
     } finally {
@@ -101,7 +116,7 @@ export default function AdminUsersPage() {
     try {
       await api("POST", `/api/admin/users/${u.id}/${action}`);
       toast("Done");
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed", "err");
     }
@@ -115,7 +130,7 @@ export default function AdminUsersPage() {
       await api("POST", `/api/admin/users/${u.id}/reset-2fa`);
       toast("2FA reset");
       setConfirmReset2fa(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed", "err");
     } finally {
@@ -144,7 +159,7 @@ export default function AdminUsersPage() {
       await api("DELETE", `/api/admin/users/${u.id}`);
       toast("User deleted");
       setConfirmDelete(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed", "err");
     } finally {
@@ -276,11 +291,17 @@ export default function AdminUsersPage() {
 
       <Card>
         <Show
-          when={(users() ?? []).length > 0}
+          when={(userCount() ?? 0) > 0}
           fallback={<EmptyState icon={Icons.users} title="No users" />}
         >
           <div class="p-2" {...usalItems("fade-u", 60)}>
-            <UsageGrid columnDefs={cols} rowData={users()} storageKey="llmgw-grid:admin.users.list" />
+            <UsageGrid
+              columnDefs={cols}
+              datasource={usersDatasource}
+              cacheBlockSize={100}
+              refreshDeps={gridVersion()}
+              storageKey="llmgw-grid:admin.users.list"
+            />
           </div>
         </Show>
       </Card>

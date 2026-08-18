@@ -1,7 +1,8 @@
 import { requireAuth } from "../auth";
 import { ok } from "../http";
-import { userDailySeries, userEvents, userSummary, keyDailySeries, hourlySeries, userUsageBreakdown } from "../usage";
+import { userDailySeries, userEvents, userSummary, keyDailySeries, hourlySeries, userUsageBreakdown, queryUserUsageBreakdown } from "../usage";
 import { db, type ApiKeyRow } from "../db";
+import { parseGridQuery } from "../gridql";
 
 /** /api/usage — the authenticated user's own consumption data. */
 export async function handleUsageRoute(path: string, req: Request, url: URL): Promise<Response | null> {
@@ -13,7 +14,7 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
   if (path === "/api/usage/daily" && req.method === "GET") {
     const ctx = await requireAuth(req);
     const keyId = url.searchParams.get("key_id");
-    let key: ApiKeyRow | undefined;
+    let key: ApiKeyRow | null = null;
     if (keyId) {
       key = db.prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?").get(keyId);
       if (!key || key.user_id !== ctx.user.id) return ok({ series: [] }, req);
@@ -78,7 +79,17 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
       if (!key || key.user_id !== ctx.user.id) return ok({ rows: [] }, req);
     }
     const providerId = url.searchParams.get("provider_id") || undefined;
-    const days = daysParam === "all" ? "all" : daysParam;
+    const days = daysParam === "all" ? "all" : (Number(daysParam || 14) || 14);
+    if (url.searchParams.has("limit")) {
+      const grid = parseGridQuery(url);
+      const page = queryUserUsageBreakdown(ctx.user.id, {
+        keyId: keyId ?? undefined,
+        providerId,
+        days: days as number | "all",
+        ...grid,
+      });
+      return ok({ rows: page.rows, total: page.total, limit: grid.limit, offset: grid.offset }, req);
+    }
     const rows = userUsageBreakdown(ctx.user.id, {
       keyId: keyId ?? undefined,
       providerId,

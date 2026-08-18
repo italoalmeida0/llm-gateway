@@ -21,6 +21,8 @@ import {
 } from "../models";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { hourlySeries, utcDate } from "../usage";
+import { gridPage, parseGridQuery, type ColSpec } from "../gridql";
+import { queryKeys } from "../keys";
 
 /**
  * /api/admin/* — everything requires role=admin. Every mutation is audited.
@@ -805,34 +807,64 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
   // ================= models (registry) =================
 
   if (path === "/api/admin/models" && req.method === "GET") {
-    const rows = db
+    const grid = url.searchParams.has("limit") ? parseGridQuery(url) : null;
+    const page = grid
+      ? gridPage({
+          baseSql: `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id`,
+          baseParams: [],
+          cols: {
+            id: { col: "id" },
+            providerId: { col: "provider_id" },
+            providerName: { col: "provider_name" },
+            upstreamModel: { col: "upstream_model" },
+            proto: { col: "proto" },
+            name: { col: "name" },
+            source: { col: "source" },
+            enabled: { col: "enabled", kind: "number" },
+            contextLength: { col: "context_length", kind: "number" },
+            createdAt: { col: "created_at", kind: "number" },
+            updatedAt: { col: "updated_at", kind: "number" },
+          },
+          grid,
+          defaultOrder: "id ASC",
+          tieBreak: "id ASC",
+        })
+      : null;
+    const rows = (page?.rows ?? db
       .prepare<ModelRow & { provider_name: string | null }, []>(
         `SELECT m.*, p.name AS provider_name FROM models m
          LEFT JOIN providers p ON p.id = m.provider_id
          ORDER BY m.id`,
       )
-      .all();
+      .all()) as Array<ModelRow & { provider_name: string | null }>;
     const byModel = new Map<string, ModelTargetDto[]>();
-    for (const t of db
-      .prepare<ModelTargetDto & { model_id: string }, []>(
-        `SELECT t.model_id, t.provider_id AS "providerId", p.name AS "providerName",
-                t.upstream_model AS "upstreamModel", t.priority, t.enabled
-         FROM model_targets t JOIN providers p ON p.id = t.provider_id
-         ORDER BY t.priority ASC`,
-      )
-      .all()) {
-      const dto: ModelTargetDto = {
-        providerId: t.providerId,
-        providerName: t.providerName,
-        upstreamModel: t.upstreamModel,
-        priority: t.priority,
-        enabled: !!t.enabled,
-      };
-      const list = byModel.get(t.model_id);
-      if (list) list.push(dto);
-      else byModel.set(t.model_id, [dto]);
+    const modelIds = rows.map((m) => m.id);
+    if (modelIds.length > 0) {
+      const placeholders = modelIds.map(() => "?").join(",");
+      const targetRows = db
+        .prepare<ModelTargetDto & { model_id: string }, any>(
+          `SELECT t.model_id, t.provider_id AS "providerId", p.name AS "providerName",
+                  t.upstream_model AS "upstreamModel", t.priority, t.enabled
+           FROM model_targets t JOIN providers p ON p.id = t.provider_id
+           WHERE t.model_id IN (${placeholders}) ORDER BY t.priority ASC`,
+        )
+        .all(...(modelIds as any));
+      for (const t of targetRows) {
+        const dto: ModelTargetDto = {
+          providerId: t.providerId,
+          providerName: t.providerName,
+          upstreamModel: t.upstreamModel,
+          priority: t.priority,
+          enabled: !!t.enabled,
+        };
+        const list = byModel.get(t.model_id);
+        if (list) list.push(dto);
+        else byModel.set(t.model_id, [dto]);
+      }
     }
-    return ok({ models: rows.map((m) => publicModelAdmin(m, byModel.get(m.id) ?? [])) }, req);
+    const models = rows.map((m) => publicModelAdmin(m, byModel.get(m.id) ?? []));
+    if (grid && page) return ok({ models, total: page.total, limit: grid.limit, offset: grid.offset }, req);
+    return ok({ models }, req);
   }
 
   if (path === "/api/admin/models" && req.method === "POST") {
@@ -921,7 +953,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       }
     })();
     invalidateModelCache();
-    auditAdmin(ctx.user, "models.bulk_deleted", null, { requested: ids.length, deleted }, ip);
+    auditAdmin(ctx.user, "models.bulk_deleted", undefined, { requested: ids.length, deleted }, ip);
     return ok({ deleted }, req);
   }
 
@@ -1064,6 +1096,44 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
   // ================= users =================
 
   if (path === "/api/admin/users" && req.method === "GET") {
+    if (url.searchParams.has("limit")) {
+      const grid = parseGridQuery(url);
+      const cols: Record<string, ColSpec> = {
+        email: { col: "email" },
+        name: { col: "name" },
+        role: { col: "role" },
+        status: { col: "status" },
+        keyCount: { col: "key_count", kind: "number" },
+        lastLoginAt: { col: "last_login_at", kind: "number" },
+        createdAt: { col: "created_at", kind: "number" },
+      };
+      const { rows, total } = gridPage({
+        baseSql: `SELECT u.*, (SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id) AS key_count FROM users u`,
+        baseParams: [],
+        cols,
+        grid,
+        defaultOrder: "created_at DESC",
+        tieBreak: "id DESC",
+      });
+      return ok({
+        users: rows.map((u: UserRow & { key_count: number }) => ({
+          id: u.id,
+          email: u.email,
+          name: u.name,
+          role: u.role,
+          status: u.status,
+          hasPassword: !!u.password_hash,
+          googleLinked: !!u.google_id,
+          totpEnabled: !!u.totp_secret,
+          createdAt: u.created_at,
+          lastLoginAt: u.last_login_at,
+          keyCount: u.key_count,
+        })),
+        total,
+        limit: grid.limit,
+        offset: grid.offset,
+      }, req);
+    }
     const rows = db
       .prepare<UserRow, []>("SELECT * FROM users ORDER BY created_at DESC LIMIT 1000")
       .all();
@@ -1196,6 +1266,11 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
   // ================= keys (global view) =================
 
   if (path === "/api/admin/keys" && req.method === "GET") {
+    if (url.searchParams.has("limit")) {
+      const grid = parseGridQuery(url);
+      const { keys, total } = queryKeys(null, grid);
+      return ok({ keys, total, limit: grid.limit, offset: grid.offset }, req);
+    }
     const rows = db
       .prepare<ApiKeyRow, []>("SELECT * FROM api_keys ORDER BY created_at DESC LIMIT 1000")
       .all();
@@ -1358,6 +1433,87 @@ if (path === "/api/admin/stats" && req.method === "GET") {
 
   // ================= usage breakdown (per user + per model × provider) =================
 
+  if ((path === "/api/admin/usage-breakdown/users" || path === "/api/admin/usage-breakdown/models") && req.method === "GET") {
+    const grid = parseGridQuery(url);
+    const daysAll = url.searchParams.get("days") === "all";
+    const days = daysAll ? "all" : Math.min(Number(url.searchParams.get("days") || 14), 365);
+    const providerId = url.searchParams.get("provider_id");
+    const userId = url.searchParams.get("user_id");
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (!daysAll) {
+      clauses.push("ud.date >= date('now', ?)");
+      params.push(`-${days as number} days`);
+    }
+    if (providerId) {
+      clauses.push("ud.provider_id = ?");
+      params.push(providerId);
+    }
+    if (userId) {
+      clauses.push("ud.user_id = ?");
+      params.push(userId);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    if (path.endsWith("/users")) {
+      const page = gridPage({
+        baseSql: `
+          SELECT ud.user_id, COALESCE(u.email, ud.user_id) AS email,
+                 SUM(ud.in_tok) AS in_tok, SUM(ud.cache_tok) AS cache_tok,
+                 SUM(ud.out_tok) AS out_tok, SUM(ud.reqs) AS reqs
+          FROM usage_model_provider_daily ud
+          LEFT JOIN users u ON u.id = ud.user_id
+          ${where}
+          GROUP BY ud.user_id`,
+        baseParams: params,
+        cols: {
+          user_id: { col: "user_id" },
+          email: { col: "email" },
+          in_tok: { col: "in_tok", kind: "number" },
+          cache_tok: { col: "cache_tok", kind: "number" },
+          out_tok: { col: "out_tok", kind: "number" },
+          reqs: { col: "reqs", kind: "number" },
+        },
+        grid,
+        defaultOrder: "(in_tok + cache_tok + out_tok) DESC",
+        tieBreak: "user_id DESC",
+      });
+      return ok({ users: page.rows, total: page.total, limit: grid.limit, offset: grid.offset }, req);
+    }
+    const modelClauses = clauses.map((c) => c.replaceAll("ud.", "m."));
+    const modelParams = params;
+    const modelWhere = modelClauses.length ? `WHERE ${modelClauses.join(" AND ")}` : "";
+    const page = gridPage({
+      baseSql: `
+        SELECT m.model, m.proto, m.provider_id, p.name AS provider_name,
+               m.provider_key_id, pk.label AS provider_key_label, m.upstream_model,
+               SUM(m.in_tok) AS in_tok, SUM(m.cache_tok) AS cache_tok,
+               SUM(m.out_tok) AS out_tok, SUM(m.reqs) AS reqs
+        FROM usage_model_provider_daily m
+        LEFT JOIN providers p ON p.id = m.provider_id
+        LEFT JOIN provider_keys pk ON pk.id = m.provider_key_id
+        ${modelWhere}
+        GROUP BY m.model, m.proto, m.provider_id, m.provider_key_id, m.upstream_model`,
+      baseParams: modelParams,
+      cols: {
+        model: { col: "model" },
+        proto: { col: "proto" },
+        provider_id: { col: "provider_id" },
+        provider_name: { col: "provider_name" },
+        provider_key_id: { col: "provider_key_id" },
+        provider_key_label: { col: "provider_key_label" },
+        upstream_model: { col: "upstream_model" },
+        in_tok: { col: "in_tok", kind: "number" },
+        cache_tok: { col: "cache_tok", kind: "number" },
+        out_tok: { col: "out_tok", kind: "number" },
+        reqs: { col: "reqs", kind: "number" },
+      },
+      grid,
+      defaultOrder: "(in_tok + cache_tok + out_tok) DESC",
+      tieBreak: "model DESC, provider_id DESC, provider_key_id DESC, upstream_model DESC",
+    });
+    return ok({ models: page.rows, total: page.total, limit: grid.limit, offset: grid.offset }, req);
+  }
+
   if (path === "/api/admin/usage-breakdown" && req.method === "GET") {
     // Day-granularity breakdown over the migration-011 rollup (usage_model_
     // provider_daily): feeds the AG Grid panels (per-user aggregate + the
@@ -1431,6 +1587,28 @@ if (path === "/api/admin/stats" && req.method === "GET") {
   }
 
   if (path === "/api/admin/audit" && req.method === "GET") {
+    if (url.searchParams.has("limit")) {
+      const grid = parseGridQuery(url);
+      const page = gridPage({
+        baseSql: `
+          SELECT a.id AS audit_id, a.ts, a.action, a.target, a.meta, a.ip,
+                 u.email AS actor_email
+          FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id`,
+        baseParams: [],
+        cols: {
+          ts: { col: "ts", kind: "number" },
+          action: { col: "action" },
+          target: { col: "target" },
+          meta: { col: "meta" },
+          ip: { col: "ip" },
+          actor_email: { col: "actor_email" },
+        },
+        grid,
+        defaultOrder: "ts DESC",
+        tieBreak: "audit_id DESC",
+      });
+      return ok({ entries: page.rows.map(({ audit_id: _id, ...row }) => row), total: page.total, limit: grid.limit, offset: grid.offset }, req);
+    }
     const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 500);
     const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);
     const rows = db

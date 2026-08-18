@@ -75,6 +75,40 @@ const DEFAULT_COL_DEF: ColDef = {
 };
 const PAGE_SIZE_SELECTOR: number[] = [15, 20, 25, 50, 100, 250];
 
+export interface GridRowsParams {
+  startRow: number;
+  endRow: number;
+  sortModel: Array<{ colId: string; sort: string }>;
+  filterModel: Record<string, unknown>;
+  successCallback: (rowsThisBlock: unknown[], lastRow: number) => void;
+  failCallback: () => void;
+}
+
+export function serverDatasource<T>(
+  load: (params: {
+    startRow: number;
+    endRow: number;
+    sortModel: Array<{ colId: string; sort: string }>;
+    filterModel: Record<string, unknown>;
+  }) => Promise<{ rows: T[]; total: number }>,
+) {
+  return {
+    getRows: async (params: GridRowsParams) => {
+      try {
+        const result = await load({
+          startRow: params.startRow,
+          endRow: params.endRow,
+          sortModel: params.sortModel,
+          filterModel: params.filterModel,
+        });
+        params.successCallback(result.rows, result.total);
+      } catch {
+        params.failCallback();
+      }
+    },
+  };
+}
+
 export function UsageGrid(props: {
   columnDefs: Array<ColDef | ColGroupDef>;
   /** undefined = data still loading (grid mounts only when ready). Optional in
@@ -95,14 +129,7 @@ export function UsageGrid(props: {
    *  pagination props). The datasource maps startRow/endRow to
    *  limit/offset API calls with sort/filter forwarded to SQL. */
   datasource?: {
-    getRows: (params: {
-      startRow: number;
-      endRow: number;
-      sortModel: Array<{ colId: string; sort: string }>;
-      filterModel: Record<string, unknown>;
-      successCallback: (rowsThisBlock: unknown[], lastRow: number) => void;
-      failCallback: () => void;
-    }) => void;
+    getRows: (params: GridRowsParams) => void;
   };
   /** Block size the grid requests per fetch (default 100). */
   cacheBlockSize?: number;
@@ -219,7 +246,7 @@ export function UsageGrid(props: {
           size="sm"
           class="!px-2 text-[11px] text-ink-500 hover:text-ink-200"
           title="Reset column order, sizes, sorting and filters to the default layout"
-          disabled={!props.rowData}
+          disabled={!props.rowData && !props.datasource}
           onClick={resetLayout}
         >
           <Icon name={Icons.refresh} size={12} />

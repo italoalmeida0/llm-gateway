@@ -5,7 +5,7 @@ import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
 import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtNum } from "../../ui";
-import { UsageGrid } from "../../aggrid";
+import { UsageGrid, serverDatasource } from "../../aggrid";
 import type { ColDef } from "ag-grid-community";
 
 /** Editor-state of one failover routing target. */
@@ -58,9 +58,24 @@ export function syncSummary(sync?: Partial<Record<string, SyncOutcome>>): string
 }
 
 export default function AdminModelsPage() {
-  const [models, { refetch }] = createResource(async () => {
-    const j = await api<{ models: ModelDto[] }>("GET", "/api/admin/models");
-    return j.models;
+  const [modelCount, { refetch: refetchModelCount }] = createResource(async () => {
+    const j = await api<{ total: number }>("GET", "/api/admin/models?limit=1");
+    return j.total;
+  });
+  const [gridVersion, setGridVersion] = createSignal(0);
+  const refreshGrid = () => {
+    setGridVersion((v) => v + 1);
+    refetchModelCount();
+  };
+  const modelsDatasource = serverDatasource<ModelDto>(async (params) => {
+    const qs = new URLSearchParams({
+      limit: String(Math.min(params.endRow - params.startRow, 500)),
+      offset: String(params.startRow),
+    });
+    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+    if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+    const j = await api<{ models: ModelDto[]; total: number }>("GET", `/api/admin/models?${qs}`);
+    return { rows: j.models, total: j.total };
   });
   const [providers] = createResource(async () => {
     const j = await api<{ providers: ProviderDto[] }>("GET", "/api/admin/providers");
@@ -214,7 +229,7 @@ export default function AdminModelsPage() {
         toast(newId && newId !== m.id ? "Model renamed" : "Model updated");
       }
       setEditing(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "save failed", "err");
     } finally {
@@ -225,7 +240,7 @@ export default function AdminModelsPage() {
   const toggleEnabled = async (m: ModelDto) => {
     try {
       await api("PATCH", `/api/admin/models/${encodeURIComponent(m.id)}`, { enabled: !m.enabled });
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "update failed", "err");
     }
@@ -239,7 +254,7 @@ export default function AdminModelsPage() {
       await api("DELETE", `/api/admin/models/${encodeURIComponent(m.id)}`);
       toast("Model deleted");
       setConfirmDelete(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "delete failed", "err");
     } finally {
@@ -256,7 +271,7 @@ export default function AdminModelsPage() {
       toast(`Deleted ${j.deleted} model${j.deleted === 1 ? "" : "s"}`);
       setConfirmBulk(false);
       setSelected(new Set<string>());
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "bulk delete failed", "err");
     } finally {
@@ -424,7 +439,7 @@ export default function AdminModelsPage() {
       </Show>
 
       <Show
-        when={(models() ?? []).length > 0}
+        when={(modelCount() ?? 0) > 0}
         fallback={
           <Card>
             <EmptyState
@@ -439,9 +454,10 @@ export default function AdminModelsPage() {
           <div class="p-2" {...usalItems("fade-u", 60)}>
             <UsageGrid
               columnDefs={cols}
-              rowData={models()}
+              datasource={modelsDatasource}
+              cacheBlockSize={100}
+              refreshDeps={gridVersion()}
               storageKey="llmgw-grid:admin.models"
-              pageSize={20}
               heightClass="h-[560px]"
               rowSelection="multiple"
               suppressRowClickSelection

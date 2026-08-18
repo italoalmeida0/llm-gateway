@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { buildGridWhere, buildGridOrder, gridPage, type ColSpec, type GridFilterEntry, type GridSort } from "./gridql";
 
 /**
  * Usage accounting.
@@ -304,13 +305,28 @@ export function userSummary(userId: string) {
 /**
  * Detailed per-key × model × (provider × upstream-model × provider key) rollup read
  * (migration 011's usage_model_provider_daily) for the dashboard grids.
- * Joins resolve display names; the grid itself filters/sorts client-side.
+ * Joins resolve display names; paged grid reads apply filters and sorting in SQL.
  */
-export function userUsageBreakdown(
+export interface UsageBreakdownRow {
+  key_id: string;
+  key_name: string;
+  model: string;
+  proto: "openai" | "anthropic";
+  provider_id: string;
+  provider_name: string | null;
+  provider_key_id: string;
+  provider_key_label: string | null;
+  upstream_model: string;
+  in_tok: number;
+  cache_tok: number;
+  out_tok: number;
+  reqs: number;
+}
+
+function usageBreakdownScope(
   userId: string,
-  opts: { keyId?: string; providerId?: string; days: number | "all"; limit?: number },
-) {
-  const limit = opts.limit ?? 2000;
+  opts: { keyId?: string; providerId?: string; days: number | "all" },
+): { where: string; params: Array<string | number> } {
   const clauses: string[] = ["m.user_id = ?"];
   const params: Array<string | number> = [userId];
   if (opts.keyId) {
@@ -325,6 +341,30 @@ export function userUsageBreakdown(
     clauses.push("m.date >= date('now', ?)");
     params.push(`-${Math.min(Math.max(Number(opts.days) || 14, 1), 365)} days`);
   }
+  return { where: clauses.join(" AND "), params };
+}
+
+const USER_BREAKDOWN_COLS: Record<string, ColSpec> = {
+  key_id: { col: "key_id" },
+  key_name: { col: "key_name" },
+  model: { col: "model" },
+  proto: { col: "proto" },
+  provider_id: { col: "provider_id" },
+  provider_name: { col: "provider_name" },
+  provider_key_id: { col: "provider_key_id" },
+  provider_key_label: { col: "provider_key_label" },
+  upstream_model: { col: "upstream_model" },
+  in_tok: { col: "in_tok", kind: "number" },
+  cache_tok: { col: "cache_tok", kind: "number" },
+  out_tok: { col: "out_tok", kind: "number" },
+  reqs: { col: "reqs", kind: "number" },
+};
+
+export function userUsageBreakdown(
+  userId: string,
+  opts: { keyId?: string; providerId?: string; days: number | "all"; limit?: number },
+): UsageBreakdownRow[] {
+  const { where, params } = usageBreakdownScope(userId, opts);
   return db
     .prepare(
       `SELECT m.key_id, COALESCE(k.name, substr(m.key_id, 1, 8)) AS key_name, m.model, m.proto,
@@ -335,144 +375,80 @@ export function userUsageBreakdown(
        LEFT JOIN api_keys k ON k.id = m.key_id
        LEFT JOIN providers p ON p.id = m.provider_id
        LEFT JOIN provider_keys pk ON pk.id = m.provider_key_id
-       WHERE ${clauses.join(" AND ")}
+       WHERE ${where}
        GROUP BY m.key_id, m.model, m.proto, m.provider_id, m.provider_key_id, m.upstream_model
        ORDER BY (SUM(m.in_tok) + SUM(m.cache_tok) + SUM(m.out_tok)) DESC
        LIMIT ?`,
     )
-    .all(...params, limit) as Array<{
-    key_id: string;
-    key_name: string;
-    model: string;
-    proto: "openai" | "anthropic";
-    provider_id: string;
-    provider_name: string | null;
-    provider_key_id: string;
-    provider_key_label: string | null;
-    upstream_model: string;
-    in_tok: number;
-    cache_tok: number;
-    out_tok: number;
-    reqs: number;
-  }>;
+    .all(...params, opts.limit ?? 2000) as UsageBreakdownRow[];
+}
+
+export function queryUserUsageBreakdown(
+  userId: string,
+  opts: {
+    keyId?: string;
+    providerId?: string;
+    days: number | "all";
+    limit: number;
+    offset: number;
+    sort?: GridSort[];
+    filters?: Record<string, GridFilterEntry>;
+  },
+): { rows: UsageBreakdownRow[]; total: number } {
+  const { where, params } = usageBreakdownScope(userId, opts);
+  const baseSql = `
+    SELECT m.key_id,
+           COALESCE(k.name, substr(m.key_id, 1, 8)) AS key_name,
+           m.model, m.proto, m.provider_id, p.name AS provider_name,
+           m.provider_key_id, pk.label AS provider_key_label, m.upstream_model,
+           SUM(m.in_tok) AS in_tok, SUM(m.cache_tok) AS cache_tok,
+           SUM(m.out_tok) AS out_tok, SUM(m.reqs) AS reqs
+    FROM usage_model_provider_daily m
+    LEFT JOIN api_keys k ON k.id = m.key_id
+    LEFT JOIN providers p ON p.id = m.provider_id
+    LEFT JOIN provider_keys pk ON pk.id = m.provider_key_id
+    WHERE ${where}
+    GROUP BY m.key_id, m.model, m.proto, m.provider_id, m.provider_key_id, m.upstream_model`;
+  return gridPage({
+    baseSql,
+    baseParams: params,
+    cols: USER_BREAKDOWN_COLS,
+    grid: opts,
+    defaultOrder: "(in_tok + cache_tok + out_tok) DESC",
+    tieBreak: "key_id DESC, model DESC, provider_id DESC, provider_key_id DESC, upstream_model DESC",
+  }) as { rows: UsageBreakdownRow[]; total: number };
 }
 
 // ===== Server-driven events query (AG Grid infinite row model) =====
 
 /** Grid sort/filter column map — STRICT whitelist; unknown columns are simply
- *  ignored (never spliced into SQL). */
-const EVENT_SORT_COLS: Record<string, string> = {
-  ts: "e.ts",
-  key_name: "COALESCE(k.name, substr(e.key_id, 1, 8))",
-  proto: "e.proto",
-  provider_name: "COALESCE(p.name, '')",
-  model: "e.model",
-  upstream_model: "e.upstream_model",
-  latency_ms: "e.latency_ms",
-  in_tok: "e.in_tok",
-  cache_tok: "e.cache_tok",
-  out_tok: "e.out_tok",
-  status: "e.status",
-};
-const EVENT_TEXT_COLS: Record<string, string> = {
-  key_name: "COALESCE(k.name, substr(e.key_id, 1, 8))",
-  proto: "e.proto",
-  provider_name: "COALESCE(p.name, '')",
-  model: "e.model",
-  upstream_model: "e.upstream_model",
-};
-const EVENT_NUM_COLS: Record<string, string> = {
-  ts: "e.ts",
-  latency_ms: "e.latency_ms",
-  in_tok: "e.in_tok",
-  cache_tok: "e.cache_tok",
-  out_tok: "e.out_tok",
-  status: "e.status",
+ *  ignored (never spliced into SQL). Translation lives in server/gridql. */
+const EVENT_COLS: Record<string, ColSpec> = {
+  ts: { col: "e.ts", kind: "number" },
+  key_name: { col: "COALESCE(k.name, substr(e.key_id, 1, 8))" },
+  proto: { col: "e.proto" },
+  provider_name: { col: "COALESCE(p.name, '')" },
+  model: { col: "e.model" },
+  upstream_model: { col: "e.upstream_model" },
+  latency_ms: { col: "e.latency_ms", kind: "number" },
+  in_tok: { col: "e.in_tok", kind: "number" },
+  cache_tok: { col: "e.cache_tok", kind: "number" },
+  out_tok: { col: "e.out_tok", kind: "number" },
+  status: { col: "e.status", kind: "number" },
 };
 
-export interface EventFilterEntry {
-  filterType?: string;
-  type?: string;
-  filter?: unknown;
-  filterTo?: unknown;
-}
+export type EventFilterEntry = GridFilterEntry;
 
-function likeEscape(s: string): string {
-  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
-}
-
-/**
- * Translate an AG Grid filterModel to SQL WHERE fragments, strictly through
- * the whitelisted column map. Returns clauses + params; unknown/malformed
- * entries are dropped (never interpolated).
- */
 export function buildEventFilter(
   filters: Record<string, EventFilterEntry>,
 ): { clauses: string[]; params: Array<string | number> } {
-  const clauses: string[] = [];
-  const params: Array<string | number> = [];
-  for (const [colId, f] of Object.entries(filters)) {
-    if (!f || typeof f !== "object") continue;
-    const type = String(f.type ?? "").toLowerCase();
-    const val = String(f.filter ?? "").slice(0, 200);
-    if (f.filterType === "number" && colId in EVENT_NUM_COLS) {
-      const col = EVENT_NUM_COLS[colId]!;
-      const n = Number(f.filter);
-      const nTo = Number(f.filterTo);
-      if (type === "inrange" && Number.isFinite(n) && Number.isFinite(nTo)) {
-        clauses.push(`${col} BETWEEN ? AND ?`);
-        params.push(n, nTo);
-      } else if (Number.isFinite(n)) {
-        const op =
-          type === "equals" ? "="
-          : type === "notequal" ? "<>"
-          : type === "lessthan" ? "<"
-          : type === "lessthanorequal" ? "<="
-          : type === "greaterthan" ? ">"
-          : type === "greaterthanorequal" ? ">="
-          : null;
-        if (op) {
-          clauses.push(`${col} ${op} ?`);
-          params.push(n);
-        }
-      }
-      continue;
-    }
-    if (colId in EVENT_TEXT_COLS && val.length > 0) {
-      const col = EVENT_TEXT_COLS[colId]!;
-      const neg = type === "notcontains" || type === "notequal";
-      const like = type === "equals" || type === "notequal"
-        ? val
-        : type === "startswith" ? `${likeEscape(val)}%`
-        : type === "endswith" ? `%${likeEscape(val)}`
-        : `%${likeEscape(val)}%`; // contains/notContains
-      if (type === "equals" || type === "notequal") {
-        clauses.push(`${col} ${neg ? "<>" : "="} ?`);
-        params.push(val);
-      } else {
-        clauses.push(`${col} ${neg ? "NOT " : ""}LIKE ? ESCAPE '\\'`);
-        params.push(like);
-      }
-    }
-  }
-  return { clauses, params };
+  return buildGridWhere(filters, EVENT_COLS);
 }
 
-/** Whitelisted ORDER BY from AG Grid sortModel; id tie-break keeps OFFSET
- *  pagination deterministic across blocks. */
 export function buildEventOrder(
   sort: Array<{ colId: string; sort: string }> | undefined,
 ): string {
-  const parts: string[] = [];
-  for (const s of sort ?? []) {
-    const col = EVENT_SORT_COLS[s.colId];
-    if (!col) continue;
-    const dir = s.sort === "asc" ? "ASC" : "DESC";
-    parts.push(`${col} ${dir}`);
-  }
-  if (parts.length === 0) return "e.ts DESC, e.id DESC";
-  parts.push("e.id DESC");
-  return parts.join(", ");
+  return buildGridOrder(sort, EVENT_COLS, "e.ts DESC", "e.id DESC");
 }
 
 export function userEvents(
@@ -482,18 +458,18 @@ export function userEvents(
     limit: number;
     offset: number;
     sort?: Array<{ colId: string; sort: string }>;
-    filters?: Record<string, EventFilterEntry>;
+    filters?: Record<string, GridFilterEntry>;
   },
 ) {
   const clauses = [opts.keyId ? "e.user_id = ? AND e.key_id = ?" : "e.user_id = ?"];
   const params = opts.keyId ? [userId, opts.keyId] : [userId];
   if (opts.filters) {
-    const { clauses: fc, params: fp } = buildEventFilter(opts.filters);
+    const { clauses: fc, params: fp } = buildGridWhere(opts.filters, EVENT_COLS);
     clauses.push(...fc);
     (params as Array<string | number>).push(...fp);
   }
   const where = clauses.join(" AND ");
-  const order = buildEventOrder(opts.sort);
+  const order = buildGridOrder(opts.sort, EVENT_COLS, "e.ts DESC", "e.id DESC");
   const rows = db
     .prepare(
       // LEFT JOINs: hard-deleted keys/providers must not hide their history.

@@ -21,7 +21,7 @@ import {
   timeUntil,
   toast,
 } from "../ui";
-import { UsageGrid } from "../aggrid";
+import { UsageGrid, serverDatasource } from "../aggrid";
 import type { ColDef } from "ag-grid-community";
 
 const STATUS_TONE: Record<
@@ -64,9 +64,24 @@ function computeExpiresAt(f: KeyFormState): number | null {
 }
 
 export default function KeysPage() {
-  const [keys, { refetch }] = createResource(async () => {
-    const j = await api<{ keys: ApiKeyDto[] }>("GET", "/api/keys");
-    return j.keys;
+  const [keyCount, { refetch: refetchKeyCount }] = createResource(async () => {
+    const j = await api<{ total: number }>("GET", "/api/keys?limit=1");
+    return j.total;
+  });
+  const [gridVersion, setGridVersion] = createSignal(0);
+  const refreshGrid = () => {
+    setGridVersion((v) => v + 1);
+    refetchKeyCount();
+  };
+  const keysDatasource = serverDatasource<ApiKeyDto>(async (params) => {
+    const qs = new URLSearchParams({
+      limit: String(Math.min(params.endRow - params.startRow, 500)),
+      offset: String(params.startRow),
+    });
+    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+    if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+    const j = await api<{ keys: ApiKeyDto[]; total: number }>("GET", `/api/keys?${qs}`);
+    return { rows: j.keys, total: j.total };
   });
 
   const [showCreate, setShowCreate] = createSignal(false);
@@ -116,7 +131,7 @@ export default function KeysPage() {
       setNewToken(j.token);
       setShowCreate(false);
       resetForm();
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed to create key", "err");
     } finally {
@@ -149,7 +164,7 @@ export default function KeysPage() {
       });
       toast("Key updated");
       setEditing(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed to update", "err");
     } finally {
@@ -165,7 +180,7 @@ export default function KeysPage() {
       await api("DELETE", `/api/keys/${k.id}`);
       toast("Key revoked");
       setConfirmRevoke(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed to revoke", "err");
     } finally {
@@ -190,7 +205,7 @@ export default function KeysPage() {
       await api("DELETE", `/api/keys/${k.id}?hard=true`);
       toast("Key permanently deleted");
       setConfirmDelete(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed to delete", "err");
     } finally {
@@ -339,7 +354,7 @@ export default function KeysPage() {
 
       <Card>
         <Show
-          when={(keys() ?? []).length > 0}
+          when={(keyCount() ?? 0) > 0}
           fallback={
             <EmptyState
               icon={Icons.key}
@@ -349,7 +364,13 @@ export default function KeysPage() {
           }
         >
           <div class="p-2" {...usalItems("fade-u", 60)}>
-            <UsageGrid columnDefs={cols} rowData={keys()} storageKey="llmgw-grid:keys.user" />
+            <UsageGrid
+              columnDefs={cols}
+              datasource={keysDatasource}
+              cacheBlockSize={100}
+              refreshDeps={gridVersion()}
+              storageKey="llmgw-grid:keys.user"
+            />
           </div>
         </Show>
       </Card>

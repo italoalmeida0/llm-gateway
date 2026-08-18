@@ -1,8 +1,9 @@
 import { LIMITS, GATEWAY_SECRET } from "../config";
 import { db, audit, type ApiKeyRow } from "../db";
 import { requireAuth } from "../auth";
-import { createKey, publicKey, revokeKey } from "../keys";
+import { createKey, publicKey, queryKeys, revokeKey } from "../keys";
 import { decryptSecret } from "../crypto";
+import { parseGridQuery } from "../gridql";
 import { clientIp, err, ok, readJsonBody, v } from "../http";
 
 const MAX_KEYS_PER_USER = 50;
@@ -20,6 +21,11 @@ function ownKey(userId: string, keyId: string): ApiKeyRow | null {
 export async function handleKeysRoute(path: string, req: Request): Promise<Response | null> {
   if (path === "/api/keys" && req.method === "GET") {
     const ctx = await requireAuth(req);
+    if (new URL(req.url).searchParams.has("limit")) {
+      const grid = parseGridQuery(new URL(req.url));
+      const { keys, total } = queryKeys(ctx.user.id, grid);
+      return ok({ keys, total, limit: grid.limit, offset: grid.offset }, req);
+    }
     const rows = db
       .prepare<ApiKeyRow, [string]>(
         "SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",

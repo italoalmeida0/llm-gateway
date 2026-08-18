@@ -17,7 +17,7 @@ import {
   fmtNum,
   timeUntil,
 } from "../../ui";
-import { UsageGrid } from "../../aggrid";
+import { UsageGrid, serverDatasource } from "../../aggrid";
 import type { ColDef } from "ag-grid-community";
 
 const TONE: Record<
@@ -33,9 +33,24 @@ const TONE: Record<
 };
 
 export default function AdminKeysPage() {
-  const [keys, { refetch }] = createResource(async () => {
-    const j = await api<{ keys: ApiKeyDto[] }>("GET", "/api/admin/keys");
-    return j.keys;
+  const [keyCount, { refetch: refetchKeyCount }] = createResource(async () => {
+    const j = await api<{ total: number }>("GET", "/api/admin/keys?limit=1");
+    return j.total;
+  });
+  const [gridVersion, setGridVersion] = createSignal(0);
+  const refreshGrid = () => {
+    setGridVersion((v) => v + 1);
+    refetchKeyCount();
+  };
+  const keysDatasource = serverDatasource<ApiKeyDto>(async (params) => {
+    const qs = new URLSearchParams({
+      limit: String(Math.min(params.endRow - params.startRow, 500)),
+      offset: String(params.startRow),
+    });
+    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+    if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+    const j = await api<{ keys: ApiKeyDto[]; total: number }>("GET", `/api/admin/keys?${qs}`);
+    return { rows: j.keys, total: j.total };
   });
   const [confirmRevoke, setConfirmRevoke] = createSignal<ApiKeyDto | null>(
     null,
@@ -53,7 +68,7 @@ export default function AdminKeysPage() {
       await api("DELETE", `/api/admin/keys/${k.id}`);
       toast("Key revoked");
       setConfirmRevoke(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed", "err");
     } finally {
@@ -69,7 +84,7 @@ export default function AdminKeysPage() {
       await api("DELETE", `/api/admin/keys/${k.id}?hard=true`);
       toast("Key permanently deleted");
       setConfirmDelete(null);
-      refetch();
+      refreshGrid();
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed", "err");
     } finally {
@@ -202,13 +217,19 @@ export default function AdminKeysPage() {
 
       <Card>
         <Show
-          when={(keys() ?? []).length > 0}
+          when={(keyCount() ?? 0) > 0}
           fallback={
             <EmptyState icon={Icons.key} title="No keys in the system" />
           }
         >
           <div class="p-2" {...usalItems("fade-u", 60)}>
-            <UsageGrid columnDefs={cols} rowData={keys()} storageKey="llmgw-grid:admin.keys" />
+            <UsageGrid
+              columnDefs={cols}
+              datasource={keysDatasource}
+              cacheBlockSize={100}
+              refreshDeps={gridVersion()}
+              storageKey="llmgw-grid:admin.keys"
+            />
           </div>
         </Show>
       </Card>

@@ -17,6 +17,7 @@ import {
 import {
   UsageGrid,
   ProtoCell,
+  serverDatasource,
   StatusCell,
   latencyFormatter,
   timeFormatter,
@@ -120,12 +121,24 @@ export default function UsagePage() {
     return j.series;
   });
 
-  const [breakdown] = createResource(query, async (q) => {
-    const j = await api<{ rows: BreakdownRow[] }>(
+  const [breakdownCount] = createResource(query, async (q) => {
+    const j = await api<{ total: number }>(
       "GET",
-      `/api/usage/breakdown?days=${q.d}${q.k ? `&key_id=${q.k}` : ""}`,
+      `/api/usage/breakdown?days=${q.d}&limit=1${q.k ? `&key_id=${q.k}` : ""}`,
     );
-    return j.rows;
+    return j.total;
+  });
+  const breakdownDatasource = serverDatasource<BreakdownRow>(async (params) => {
+    const qs = new URLSearchParams({
+      days: days(),
+      limit: String(Math.min(params.endRow - params.startRow, 500)),
+      offset: String(params.startRow),
+    });
+    if (keyId()) qs.set("key_id", keyId());
+    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+    if (Object.keys(params.filterModel).length > 0) qs.set("filters", JSON.stringify(params.filterModel));
+    const j = await api<{ rows: BreakdownRow[]; total: number }>("GET", `/api/usage/breakdown?${qs}`);
+    return { rows: j.rows, total: j.total };
   });
 
   // Header count only — LIMIT 1 (the grid below pulls its own blocks).
@@ -139,35 +152,22 @@ export default function UsagePage() {
 
   /** AG Grid infinite row model: blocks are fetched from the API on scroll,
    *  with the grid's sortModel/filterModel translated to SQL server-side. */
-  const eventsDatasource = {
-    getRows: async (params: {
-      startRow: number;
-      endRow: number;
-      sortModel: Array<{ colId: string; sort: string }>;
-      filterModel: Record<string, unknown>;
-      successCallback: (rowsThisBlock: any[], lastRow: number) => void;
-      failCallback: () => void;
-    }) => {
-      const qs = new URLSearchParams({
-        limit: String(Math.min(params.endRow - params.startRow, 500)),
-        offset: String(params.startRow),
-      });
-      if (keyId()) qs.set("key_id", keyId());
-      if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
-      if (Object.keys(params.filterModel).length > 0) {
-        qs.set("filters", JSON.stringify(params.filterModel));
-      }
-      try {
-        const j = await api<{ events: any[]; total: number }>(
-          "GET",
-          `/api/usage/events?${qs.toString()}`,
-        );
-        params.successCallback(j.events, j.total);
-      } catch {
-        params.failCallback();
-      }
-    },
-  };
+  const eventsDatasource = serverDatasource<any>(async (params) => {
+    const qs = new URLSearchParams({
+      limit: String(Math.min(params.endRow - params.startRow, 500)),
+      offset: String(params.startRow),
+    });
+    if (keyId()) qs.set("key_id", keyId());
+    if (params.sortModel.length > 0) qs.set("sort", JSON.stringify(params.sortModel));
+    if (Object.keys(params.filterModel).length > 0) {
+      qs.set("filters", JSON.stringify(params.filterModel));
+    }
+    const j = await api<{ events: any[]; total: number }>(
+      "GET",
+      `/api/usage/events?${qs.toString()}`,
+    );
+    return { rows: j.events, total: j.total };
+  });
 
   const keyOptions = createMemo(() => [
     { value: "", label: "All keys" },
@@ -236,16 +236,18 @@ export default function UsagePage() {
           subtitle={`Model × provider breakdown · ${windowLabel(days())}`}
         />
         <Show
-          when={(breakdown()?.length ?? 0) > 0}
-          fallback={
-            <EmptyState
-              icon={Icons.chart}
-              title="No model data in this window"
-            />
-          }
+          when={(breakdownCount() ?? 0) > 0}
+          fallback={<EmptyState icon={Icons.chart} title="No model data in this window" />}
         >
           <div class="px-1 py-1" {...usalItems("fade-u", 60)}>
-            <UsageGrid columnDefs={byModelCols} rowData={breakdown()} pageSize={15} storageKey="llmgw-grid:usage.by-model" />
+            <UsageGrid
+              columnDefs={byModelCols}
+              datasource={breakdownDatasource}
+              cacheBlockSize={100}
+              refreshDeps={`${days()}:${keyId()}`}
+              heightClass="h-[420px]"
+              storageKey="llmgw-grid:usage.by-model"
+            />
           </div>
         </Show>
       </Card>

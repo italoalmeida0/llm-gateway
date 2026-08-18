@@ -285,7 +285,7 @@ export interface ModelDto {
   samplingParams: string[];
   features: string[];
   reasoningEfforts: string[] | null;
-  pricing: Record<string, string> | null;
+  pricing: Record<string, string | number> | null;
   datacenters: Array<{ country_code: string }> | null;
   source: "auto" | "manual";
   createdAt: number;

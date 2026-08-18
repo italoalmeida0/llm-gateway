@@ -251,7 +251,7 @@ describe("model sync payload parsing", () => {
           supported_parameters: ["max_tokens", "temperature"],
           supported_features: ["tools"],
           reasoning_parameters: { efforts: ["low", "high"] },
-          pricing: { prompt: "0.0000004", completion: 0.000002, junk: { nested: true } },
+          pricing: { prompt: "$0.0000004 per token", completion: "USD 0.000002", junk: { nested: true } },
           datacenters: [{ country_code: "US" }, { country_code: "not valid!" }, { bad: 1 }],
           openrouter: { slug: "z-ai/glm-5.2" },
           architecture: { modality: "text+image->text" },
@@ -265,7 +265,7 @@ describe("model sync payload parsing", () => {
     expect(m.sampling_params).toEqual(["max_tokens", "temperature"]);
     expect(m.features).toEqual(["tools"]);
     expect(m.reasoning_efforts).toEqual(["low", "high"]);
-    expect(m.pricing).toEqual({ prompt: "0.0000004", completion: "0.000002" });
+    expect(m.pricing).toEqual({ prompt: 0.0000004, completion: 0.000002 });
     expect(m.datacenters).toEqual([{ country_code: "US" }]);
     expect(m.openrouter_slug).toBe("z-ai/glm-5.2");
     expect(m.input_modalities).toEqual(["text", "image"]);

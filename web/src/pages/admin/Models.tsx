@@ -44,10 +44,11 @@ const USER_SELECTION_SOURCES = new Set([
 const PRICING_KEYS = ["prompt", "completion", "image", "request", "input_cache_reads", "input_cache_writes"];
 
 /** Registry pricing is stored as USD per token; the table displays USD per 1M. */
-function pricePerMillion(value: string | undefined): string {
+function pricePerMillion(value: string | number | undefined): string {
   if (value == null || value === "") return "—";
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return value;
+  const cleaned = String(value).replace(/[^0-9.]/g, "");
+  const amount = Number(cleaned);
+  if (!Number.isFinite(amount)) return String(value);
   return `$${(amount * 1_000_000).toLocaleString(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 4,
@@ -301,7 +302,11 @@ export default function AdminModelsPage() {
       setFSampling(m.samplingParams.join(", ")); setFFeatures(m.features.join(", "));
       setFEfforts((m.reasoningEfforts ?? []).join(", "));
       setFDatacenters((m.datacenters ?? []).map((d) => d.country_code).join(", "));
-      setFPricing({ ...(m.pricing ?? {}) });
+      setFPricing(
+        Object.fromEntries(
+          Object.entries(m.pricing ?? {}).map(([key, value]) => [key, String(value)]),
+        ),
+      );
     }
     setShowAdvanced(false);
     setEditing(m);
@@ -507,35 +512,43 @@ export default function AdminModelsPage() {
       valueFormatter: (p) => (p.value != null ? fmtNum(p.value) : "—"),
     },
     {
-      colId: "pricing",
-      headerName: "Pricing / 1M tokens",
-      width: 220,
-      cellRenderer: (p: { data?: ModelDto }) =>
-        p.data?.pricing ? (
-          <div
-            class="flex flex-col gap-0.5 py-1 text-[10px] leading-tight text-ink-400"
-            title={JSON.stringify(p.data.pricing)}
-          >
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-ink-500">Input</span>
-              <code>{pricePerMillion(p.data.pricing.prompt)}</code>
-            </div>
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-ink-500">Input cache read</span>
-              <code>{pricePerMillion(p.data.pricing.input_cache_reads)}</code>
-            </div>
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-ink-500">Input cache write</span>
-              <code>{pricePerMillion(p.data.pricing.input_cache_writes)}</code>
-            </div>
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-ink-500">Output</span>
-              <code>{pricePerMillion(p.data.pricing.completion)}</code>
-            </div>
-          </div>
-        ) : (
-          <span class="text-ink-500">—</span>
-        ),
+      colId: "pricing_input",
+      headerName: "Input / 1M",
+      width: 125,
+      cellRenderer: (p: { data?: ModelDto }) => (
+        <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
+          {pricePerMillion(p.data?.pricing?.prompt)}
+        </code>
+      ),
+      filter: false,
+      floatingFilter: false,
+    },
+    {
+      colId: "pricing_cache",
+      headerName: "Input cache / 1M",
+      width: 150,
+      cellRenderer: (p: { data?: ModelDto }) => (
+        <div class="flex flex-col gap-0.5 py-1 text-[10px] leading-tight" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
+          <code class="text-ink-400">{pricePerMillion(p.data?.pricing?.input_cache_reads)}</code>
+          <Show when={p.data?.pricing?.input_cache_writes != null}>
+            <span class="text-[9px] text-ink-500">
+              write {pricePerMillion(p.data?.pricing?.input_cache_writes)}
+            </span>
+          </Show>
+        </div>
+      ),
+      filter: false,
+      floatingFilter: false,
+    },
+    {
+      colId: "pricing_output",
+      headerName: "Output / 1M",
+      width: 125,
+      cellRenderer: (p: { data?: ModelDto }) => (
+        <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
+          {pricePerMillion(p.data?.pricing?.completion)}
+        </code>
+      ),
       filter: false,
       floatingFilter: false,
     },

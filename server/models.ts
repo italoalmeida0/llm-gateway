@@ -72,7 +72,7 @@ export interface ParsedModel {
   sampling_params: string[];
   features: string[];
   reasoning_efforts: string[] | null;
-  pricing: Record<string, string> | null;
+  pricing: Record<string, number> | null;
   datacenters: Array<{ country_code: string }> | null;
 }
 
@@ -88,14 +88,22 @@ const strArr = (v: unknown): string[] | null => {
 const posInt = (v: unknown): number | null =>
   typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 1e10 ? Math.floor(v) : null;
 
-function parsePricing(v: unknown): Record<string, string> | null {
+function parsePricingValue(v: unknown): number | null {
+  if (typeof v !== "string" && typeof v !== "number") return null;
+  const cleaned = String(v).replace(/[^0-9.]/g, "");
+  if (!cleaned) return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function parsePricing(v: unknown): Record<string, number> | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
-  const out: Record<string, string> = {};
+  const out: Record<string, number> = {};
   for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
     if (Object.keys(out).length >= 16) break;
     if (k.length > 48) continue;
-    if (typeof val === "string" && val.length <= 32) out[k] = val;
-    else if (typeof val === "number" && Number.isFinite(val)) out[k] = String(val);
+    const n = parsePricingValue(val);
+    if (n !== null) out[k] = n;
   }
   return Object.keys(out).length ? out : null;
 }
@@ -741,4 +749,3 @@ export function listableModels(snap: RouterSnapshot, proto: "openai" | "anthropi
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
-

@@ -20,7 +20,7 @@
  *        - SPA delivery (static index)
  *      and at chosen checkpoints also runs the failover probes
  *      (skip-exhausted / active-failover / burst / provider-fallback).
- *   5. writes docs/performance/results/crescimento-v2-router.json + prints a table
+ *   5. writes docs/performance/results/v2-router.json + prints a table
  *
  * Run: bun run perf:sim            (goes up to PERF_MAX_DAYS, default 10 years)
  */
@@ -270,7 +270,7 @@ const outDir = path.join(import.meta.dir, "..", "docs", "performance", "results"
 mkdirSync(outDir, { recursive: true });
 // keep the 5-user file name stable (docs reference it); larger runs get a
 // suffixed file so both scenarios coexist
-const outName = NUM_USERS === 5 ? "crescimento-v2-router.json" : `crescimento-v2-router-${NUM_USERS}users.json`;
+const outName = NUM_USERS === 5 ? "v2-router.json" : `v2-router-${NUM_USERS}users.json`;
 const outFile = path.join(outDir, outName);
 writeFileSync(outFile, JSON.stringify({ generatedAt: new Date().toISOString(), scenario: scenarioText(), results }, null, 2));
 

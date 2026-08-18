@@ -59,9 +59,15 @@ function latestSession(): Session | null {
 }
 
 export function setSession(s: Session | null): void {
-  setSessionSignal(s);
+  // Storage BEFORE the signal: signal updates re-render synchronously, and a
+  // mounted AppShell fires its first `api()` call inside that render — whose
+  // latestSession() reads localStorage. If the signal went first, that read
+  // found an empty store, zeroed the signal back to null mid-render (killing
+  // the fresh session: no setItem, no reload, a 401 without a bearer), which
+  // is exactly what happened when signing in from "/" (no #/login hash).
   if (s) localStorage.setItem(LS, JSON.stringify(s));
   else localStorage.removeItem(LS);
+  setSessionSignal(s);
   for (const fn of listeners) fn(session());
 }
 

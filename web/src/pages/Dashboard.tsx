@@ -226,6 +226,7 @@ export default function DashboardPage() {
                 <DailyChart
                   series={view()}
                   unit={days() === "1" ? "hour" : "day"}
+                  resetKey={days()}
                 />
               </div>
             </Card>
@@ -253,6 +254,7 @@ export default function DashboardPage() {
                 <AreaChart
                   values={view().map((d) => d.reqs ?? 0)}
                   labels={view().map((d) => pointLabel(d))}
+                  resetKey={days()}
                 />
               </div>
             </Card>

@@ -245,6 +245,7 @@ export default function AdminStatsPage() {
             <DailyChart
               series={stats()!.series}
               unit={days() === "1" ? "hour" : "day"}
+              resetKey={`${days()}:${providerId()}`}
             />
           </div>
         </Card>

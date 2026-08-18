@@ -225,6 +225,7 @@ export default function UsagePage() {
               series={series()!}
               metric={chartMetric()}
               unit={days() === "1" ? "hour" : "day"}
+              resetKey={`${days()}:${keyId()}`}
             />
           </Show>
         </div>

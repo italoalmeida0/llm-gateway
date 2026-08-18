@@ -202,6 +202,9 @@ export function watchSystemTheme(): void {
       setThemeSignal(t);
     }
   };
+  // Apply once on setup (covers any stale pre-mount signal value), then keep
+  // following the OS while no manual choice exists.
+  apply();
   mq.addEventListener?.("change", apply);
 }
 

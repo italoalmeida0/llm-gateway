@@ -41,7 +41,7 @@ export function baseHeaders(req?: Request, isHtml = false): Headers {
         "connect-src 'self' https://accounts.google.com/gsi/ https://api.iconify.design",
         "img-src 'self' data:",
         "style-src 'self' 'unsafe-inline'",
-        "font-src 'self'",
+        "font-src 'self' data:",
         "base-uri 'none'",
         "form-action 'self'",
         "frame-ancestors 'none'",

@@ -4,7 +4,7 @@ import type { ColDef, ColGroupDef } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-quartz.css";
 
-import { Badge, fmtDate, fmtNum, theme } from "./ui";
+import { Badge, fmtDate, fmtNum, getTheme, theme } from "./ui";
 
 /**
  * AG Grid usage tables (ag-grid-community + solid-ag-grid, user-sanctioned).
@@ -60,11 +60,15 @@ export function UsageGrid(props: {
   /** Tailwind height class for the grid wrapper (default h-[420px]). */
   heightClass?: string;
 }) {
+  const darkClass = () => {
+    // Track the signal (updates live on toggle) but trust the DOM attribute —
+    // it is the single source of truth that the whole app already styles by.
+    theme();
+    return getTheme() === "dark" ? "ag-theme-quartz-dark" : "ag-theme-quartz";
+  };
   return (
     <div
-      class={`w-full ${theme() === "dark" ? "ag-theme-quartz-dark" : "ag-theme-quartz"} ${
-        props.heightClass ?? "h-[420px]"
-      }`}
+      class={`w-full ${darkClass()} ${props.heightClass ?? "h-[420px]"}`}
     >
       <AgGridSolid
         rowData={props.rowData}

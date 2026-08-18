@@ -328,7 +328,7 @@ function PageTitle(props: {
 }) {
   return (
     <div
-      class="flex flex-wrap items-end justify-between gap-4 mb-8"
+      class="relative z-30 flex flex-wrap items-end justify-between gap-4 mb-8"
       {...usal("fade-d duration-500 threshold-20")}
     >
       <div>

@@ -73,7 +73,7 @@ function BucketStat(props: {
       <div class="text-[28px] leading-tight font-light tracking-tight truncate">
         <CountUp value={props.count} />
       </div>
-      <div class="mt-1.5 flex items-center sm:flex-col gap-1.5 text-[11px] text-ink-500 min-h-[22px]">
+      <div class="mt-1.5 flex sm:items-center max-sm:flex-col gap-1.5 text-[11px] text-ink-500 min-h-[22px]">
         <span class="flex items-center gap-1.5">
           <span
             class="w-2 h-2 rounded-sm inline-block shrink-0"

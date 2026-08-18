@@ -237,7 +237,7 @@ export default function AdminStatsPage() {
             <div class="p-2">
               <UsageGrid
                 columnDefs={userCols}
-                rowData={breakdown()?.users ?? []}
+                rowData={breakdown()?.users}
                 pageSize={15}
               />
             </div>
@@ -251,7 +251,7 @@ export default function AdminStatsPage() {
             <div class="p-2">
               <UsageGrid
                 columnDefs={modelCols}
-                rowData={breakdown()?.models ?? []}
+                rowData={breakdown()?.models}
                 pageSize={15}
               />
             </div>

@@ -453,6 +453,7 @@ html[data-theme="dark"] .ag-theme-quartz-dark {
  * stacked in the floating filter row (.llmgw-dtfloating). Colored only via
  * the --ag-* variables remapped above, so both themes flip for free.
  */
+.ag-floating-filter { overflow: hidden }
 .llmgw-dtfilter { display: flex; flex-direction: column; gap: 6px; padding: 8px; width: 232px; }
 .llmgw-dtfilter-row { display: flex; flex-direction: column; gap: 3px; font-size: 10px; letter-spacing: 0.02em; text-transform: uppercase; color: var(--ag-secondary-foreground-color, var(--ag-foreground-color)); }
 .llmgw-dt-input { width: 100%; font-family: inherit; font-size: 11px; color: var(--ag-foreground-color); background: var(--ag-background-color); border: 1px solid var(--ag-border-color); border-radius: var(--ag-border-radius); padding: 3px 6px; }

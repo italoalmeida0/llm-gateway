@@ -39,7 +39,7 @@ import { StreamMeter, estimateBodyTokens } from "../server/proxy/index";
 import { estimateTokenCount } from "tokenx";
 import type { ModelRow, ModelTargetRow, ProviderRow } from "../server/db";
 import { buildGridWhere } from "../server/gridql";
-import { normalizePricing, pricingColumns } from "../server/pricing";
+import { normalizePricing, normalizePricingValue, pricingColumns } from "../server/pricing";
 
 const SECRET = "test-secret-that-is-long-enough-32+";
 
@@ -102,6 +102,18 @@ describe("model pricing normalization", () => {
       inputCacheWrite: 0.0000002,
       output: 0.000002,
     });
+  });
+
+  test("scientific notation survives instead of collapsing into wrong digits", () => {
+    expect(normalizePricingValue("4.5e-7")).toBe(4.5e-7);
+    expect(normalizePricingValue("1E-8")).toBe(1e-8);
+    expect(normalizePricingValue("$4.5e-7")).toBe(4.5e-7);
+    expect(normalizePricing({ prompt: "4.5e-7", completion: "$0.000003" })).toEqual({
+      prompt: 4.5e-7,
+      completion: 0.000003,
+    });
+    expect(normalizePricingValue("USD 0.000002")).toBe(0.000002);
+    expect(normalizePricingValue("junk")).toBeNull();
   });
 });
 

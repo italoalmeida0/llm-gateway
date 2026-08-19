@@ -43,12 +43,23 @@ const USER_SELECTION_SOURCES = new Set([
 
 const PRICING_KEYS = ["prompt", "completion", "image", "request", "input_cache_reads", "input_cache_writes"];
 
-/** Registry pricing is stored as USD per token; the table displays USD per 1M. */
+/** Registry pricing is stored as USD per token; the table displays USD per 1M.
+ *  Number() parses scientific notation natively — digit-stripping would turn
+ *  "4.5e-7" into "4.57" and inflate the price a millionfold. */
 function pricePerMillionNumber(value: string | number | null | undefined): number | null {
   if (value == null || value === "") return null;
-  const cleaned = String(value).replace(/[^0-9.]/g, "");
-  const amount = Number(cleaned);
+  const amount =
+    typeof value === "number" ? value : Number(String(value).replace(/[\s,$€£]/g, ""));
   return Number.isFinite(amount) ? amount * 1_000_000 : null;
+}
+
+/** Plain-decimal string for the edit field — String() would render sub-micro
+ *  prices as "4.5e-7". */
+function perTokenInput(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value === 0) return "0";
+  if (value >= 1e-6) return String(value);
+  return value.toFixed(12).replace(/0+$/, "").replace(/\.$/, "") || "0";
 }
 
 function pricePerMillion(value: string | number | null | undefined): string {
@@ -309,7 +320,7 @@ export default function AdminModelsPage() {
       setFDatacenters((m.datacenters ?? []).map((d) => d.country_code).join(", "));
       setFPricing(
         Object.fromEntries(
-          Object.entries(m.pricing ?? {}).map(([key, value]) => [key, String(value)]),
+          Object.entries(m.pricing ?? {}).map(([key, value]) => [key, perTokenInput(Number(value))]),
         ),
       );
     }

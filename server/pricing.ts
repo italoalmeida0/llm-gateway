@@ -6,9 +6,16 @@ export function normalizePricingValue(value: unknown): number | null {
     return Number.isFinite(value) && value >= 0 ? value : null;
   }
   if (typeof value !== "string") return null;
-  const cleaned = value.replace(/[^0-9.]/g, "");
-  if (!cleaned) return null;
-  const number = Number(cleaned);
+  // Full numeric parse first: scientific notation ("4.5e-7") must survive —
+  // digit-stripping alone turns it into "4.57" and silently corrupts the price.
+  const cleaned = value.replace(/[\s,$€£]/g, "");
+  if (/^[+-]?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(cleaned)) {
+    const number = Number(cleaned);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  }
+  const digits = cleaned.replace(/[^0-9.]/g, "");
+  if (!digits) return null;
+  const number = Number(digits);
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 

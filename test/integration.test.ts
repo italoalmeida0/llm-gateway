@@ -1500,6 +1500,37 @@ describe("model registry & routing mode", () => {
     ).toBe(400);
   });
 
+  test("model pricing round-trips scientific notation unchanged", async () => {
+    const c = await api("/api/admin/models", {
+      token: adminToken,
+      body: {
+        id: "sci-price-model",
+        providerId,
+        upstreamModel: "fake-llm-1",
+        name: "Sci Price Model",
+        pricing: { prompt: "4.5e-7", completion: "4.5e-7" },
+      },
+    });
+    expect(c.status).toBe(200);
+    expect(c.json.model.pricing.prompt).toBe(4.5e-7);
+    expect(c.json.model.pricing.completion).toBe(4.5e-7);
+    expect(c.json.model.pricingInput).toBe(4.5e-7);
+
+    const p = await api(`/api/admin/models/${encodeURIComponent("sci-price-model")}`, {
+      token: adminToken, method: "PATCH", body: { pricing: { prompt: "1e-7" } },
+    });
+    expect(p.status).toBe(200);
+    expect(p.json.model.pricing.prompt).toBe(1e-7);
+    expect(p.json.model.pricingInput).toBe(1e-7);
+
+    // later tests assert exact registry contents — remove the extra model
+    const d = await api(`/api/admin/models/${encodeURIComponent("sci-price-model")}`, {
+      token: adminToken, method: "DELETE",
+    });
+    expect(d.status).toBe(200);
+    expect(d.json.deleted).toBe(true);
+  });
+
   test("router mode: unknown model 404s, alias rewrites the upstream model", async () => {
     const sw = await api("/api/admin/settings", {
       token: adminToken, method: "PATCH", body: { routingMode: "router" },

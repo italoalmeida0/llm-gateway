@@ -1,6 +1,13 @@
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import AgGridSolid, { type AgGridSolidRef } from "solid-ag-grid";
-import type { ColDef, ColGroupDef, ColumnState, GridApi } from "ag-grid-community";
+import type {
+  ColDef,
+  ColGroupDef,
+  ColumnState,
+  GridApi,
+  IFilterParams,
+  IFloatingFilterParams,
+} from "ag-grid-community";
 
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-quartz.css";
@@ -74,6 +81,10 @@ const DEFAULT_COL_DEF: ColDef = {
   minWidth: 72,
 };
 const PAGE_SIZE_SELECTOR: number[] = [15, 20, 25, 50, 100, 250];
+// The datetime floating filter stacks TWO datetime-local inputs — grids whose
+// colDefs use it get a taller floating row (module constants, see gotcha above).
+const FLOATING_FILTERS_TALL = { floatingFiltersHeight: 48 };
+const FLOATING_FILTERS_DEFAULT = {};
 
 /** AG Grid date filters receive native Date values by default. Our API DTOs
  * carry epoch milliseconds, so compare their local calendar day explicitly. */
@@ -101,6 +112,165 @@ export interface GridRowsParams {
   filterModel: Record<string, unknown>;
   successCallback: (rowsThisBlock: unknown[], lastRow: number) => void;
   failCallback: () => void;
+}
+
+/** Custom datetime filter model — also the server contract (gridql "datetime"
+ *  branch): from/to are epoch MILLISECONDS, timezone-corrected client-side
+ *  (datetime-local parses in the browser's local zone). */
+interface DateTimeFilterModel {
+  filterType: "datetime";
+  from: number | null;
+  to: number | null;
+}
+
+function parseLocalDateTime(value: string): number | null {
+  if (!value) return null;
+  const ms = Date.parse(value); // no offset → browser-local
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function toLocalDateTimeInput(ms: number | null): string {
+  if (ms == null) return "";
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** From/To datetime-local range filter (vanilla AG Grid IFilter). The grids
+ *  run the infinite row model — the SERVER filters (gridql datetime branch);
+ *  doesFilterPass exists only to satisfy the interface. */
+export class DateTimeFilter {
+  private params!: IFilterParams;
+  private eGui!: HTMLDivElement;
+  private fromInput!: HTMLInputElement;
+  private toInput!: HTMLInputElement;
+  private from: number | null = null;
+  private to: number | null = null;
+
+  init(params: IFilterParams): void {
+    this.params = params;
+    this.eGui = document.createElement("div");
+    this.eGui.className = "llmgw-dtfilter";
+    const row = (label: string): HTMLInputElement => {
+      const wrap = document.createElement("label");
+      wrap.className = "llmgw-dtfilter-row";
+      const span = document.createElement("span");
+      span.textContent = label;
+      const input = document.createElement("input");
+      input.type = "datetime-local";
+      input.className = "llmgw-dt-input";
+      input.addEventListener("input", () => this.onChanged());
+      wrap.append(span, input);
+      this.eGui.appendChild(wrap);
+      return input;
+    };
+    this.fromInput = row("From");
+    this.toInput = row("To");
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "llmgw-dt-clear";
+    clear.textContent = "Clear";
+    clear.addEventListener("click", () => {
+      this.fromInput.value = "";
+      this.toInput.value = "";
+      this.onChanged();
+    });
+    this.eGui.appendChild(clear);
+  }
+
+  private onChanged(): void {
+    this.from = parseLocalDateTime(this.fromInput.value);
+    this.to = parseLocalDateTime(this.toInput.value);
+    this.params.filterChangedCallback();
+  }
+
+  getGui(): HTMLElement {
+    return this.eGui;
+  }
+
+  isFilterActive(): boolean {
+    return this.from != null || this.to != null;
+  }
+
+  doesFilterPass(): boolean {
+    return true;
+  }
+
+  getModel(): DateTimeFilterModel | null {
+    if (!this.isFilterActive()) return null;
+    return { filterType: "datetime", from: this.from, to: this.to };
+  }
+
+  setModel(model: DateTimeFilterModel | null): void {
+    const valid = model != null && model.filterType === "datetime";
+    this.from = valid && Number.isFinite(model!.from) ? model!.from : null;
+    this.to = valid && Number.isFinite(model!.to) ? model!.to : null;
+    this.fromInput.value = toLocalDateTimeInput(this.from);
+    this.toInput.value = toLocalDateTimeInput(this.to);
+  }
+
+  /** Floating-filter edits land here — one source of truth for the bounds. */
+  setRangeFromFloating(from: number | null, to: number | null): void {
+    this.from = from;
+    this.to = to;
+    this.fromInput.value = toLocalDateTimeInput(from);
+    this.toInput.value = toLocalDateTimeInput(to);
+    this.params.filterChangedCallback();
+  }
+}
+
+/** Floating row companion: two compact datetime-local inputs that push bounds
+ *  into the parent DateTimeFilter. AG Grid instantiates the parent filter
+ *  alongside the floating filter, so parentFilterInstance always resolves. */
+export class DateTimeFloatingFilter {
+  private params!: IFloatingFilterParams;
+  private eGui!: HTMLDivElement;
+  private fromInput!: HTMLInputElement;
+  private toInput!: HTMLInputElement;
+
+  init(params: IFloatingFilterParams): void {
+    this.params = params;
+    this.eGui = document.createElement("div");
+    this.eGui.className = "llmgw-dtfloating";
+    const input = (): HTMLInputElement => {
+      const el = document.createElement("input");
+      el.type = "datetime-local";
+      el.className = "llmgw-dt-input";
+      el.title = "";
+      el.addEventListener("input", () => this.onChanged());
+      this.eGui.appendChild(el);
+      return el;
+    };
+    this.fromInput = input();
+    this.fromInput.title = "From";
+    this.toInput = input();
+    this.toInput.title = "To";
+  }
+
+  private onChanged(): void {
+    const from = parseLocalDateTime(this.fromInput.value);
+    const to = parseLocalDateTime(this.toInput.value);
+    this.params.parentFilterInstance?.((instance: any) => {
+      instance?.setRangeFromFloating?.(from, to);
+    });
+  }
+
+  getGui(): HTMLElement {
+    return this.eGui;
+  }
+
+  onParentModelChanged(model: DateTimeFilterModel | null): void {
+    const valid = model != null && model.filterType === "datetime";
+    const from = valid && Number.isFinite(model!.from) ? model!.from : null;
+    const to = valid && Number.isFinite(model!.to) ? model!.to : null;
+    const nextFrom = toLocalDateTimeInput(from);
+    const nextTo = toLocalDateTimeInput(to);
+    // Only write when different: this fires right after every floating edit
+    // (parent → filterChangedCallback → back here); rewriting the same value
+    // is a no-op but keeps the loop provably terminal.
+    if (this.fromInput.value !== nextFrom) this.fromInput.value = nextFrom;
+    if (this.toInput.value !== nextTo) this.toInput.value = nextTo;
+  }
 }
 
 export function serverDatasource<T>(
@@ -174,6 +344,13 @@ export function UsageGrid(props: {
     props.refreshDeps; // track
     gridRef?.api?.purgeInfiniteCache?.();
   });
+  // props.columnDefs are stable module constants per page, so this picks once.
+  const tallFloating = props.columnDefs.some(
+    (c) =>
+      !("children" in c) &&
+      ((c as ColDef).filter === DateTimeFilter ||
+        (c as ColDef).floatingFilterComponent === DateTimeFloatingFilter),
+  );
   const darkClass = () => {
     // Track the signal (updates live on toggle) but trust the DOM attribute —
     // it is the single source of truth that the whole app already styles by.
@@ -296,6 +473,7 @@ export function UsageGrid(props: {
                   paginationPageSize: props.pageSize ?? 25,
                   paginationPageSizeSelector: PAGE_SIZE_SELECTOR,
                 })}
+            {...(tallFloating ? FLOATING_FILTERS_TALL : FLOATING_FILTERS_DEFAULT)}
             animateRows
             rowHeight={38}
             suppressCellFocus

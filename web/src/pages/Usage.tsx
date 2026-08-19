@@ -16,7 +16,8 @@ import {
 } from "../ui";
 import {
   UsageGrid,
-  EPOCH_DATE_FILTER_PARAMS,
+  DateTimeFilter,
+  DateTimeFloatingFilter,
   ProtoCell,
   serverDatasource,
   StatusCell,
@@ -86,8 +87,9 @@ const byModelCols: ColDef<BreakdownRow>[] = [
 ];
 
 const eventCols: ColDef[] = [
-  // Formatted display ≠ raw epoch — no text filter on Time (sort stays).
-  { field: "ts", headerName: "Time", width: 150, filter: "agDateColumnFilter", filterParams: EPOCH_DATE_FILTER_PARAMS, valueFormatter: timeFormatter },
+  // Custom From/To datetime-local filter (menu + floating row); the epoch-ms
+  // bounds are translated server-side by the gridql "datetime" branch.
+  { field: "ts", headerName: "Time", width: 170, filter: DateTimeFilter, floatingFilterComponent: DateTimeFloatingFilter, valueFormatter: timeFormatter },
   { field: "key_name", headerName: "Key", width: 140, flex: 0.8 },
   { field: "proto", headerName: "Protocol", width: 120, cellRenderer: ProtoCell },
   { field: "provider_name", headerName: "Provider", width: 150, flex: 1, valueFormatter: (p) => fmtOrDash(p.value) },

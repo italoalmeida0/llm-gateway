@@ -4,7 +4,7 @@ import { api } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { Badge, Card, CardHeader, EmptyState, Icons, fmtNum } from "../../ui";
-import { EPOCH_DATE_FILTER_PARAMS, UsageGrid, serverDatasource, timeFormatter } from "../../aggrid";
+import { DateTimeFilter, DateTimeFloatingFilter, UsageGrid, serverDatasource, timeFormatter } from "../../aggrid";
 import type { ColDef } from "ag-grid-community";
 
 interface AuditEntry {
@@ -77,9 +77,9 @@ export default function AdminAuditPage() {
     {
       field: "ts",
       headerName: "Time",
-      width: 160,
-      filter: "agDateColumnFilter",
-      filterParams: EPOCH_DATE_FILTER_PARAMS,
+      width: 170,
+      filter: DateTimeFilter,
+      floatingFilterComponent: DateTimeFloatingFilter,
       valueFormatter: timeFormatter,
     },
     { field: "action", headerName: "Action", width: 220, cellRenderer: ActionCell },

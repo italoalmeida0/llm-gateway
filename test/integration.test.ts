@@ -870,6 +870,15 @@ describe("gateway end-to-end", () => {
       expect(ids1.has(e.id)).toBe(false);
       expect(e.ts < last.ts || (e.ts === last.ts && e.id < last.id)).toBe(true);
     }
+
+    // custom datetime filter through the gridPage path: epoch-ms bounds are
+    // translated server-side (inclusive range, no day-window math)
+    const wideAudit = await api(
+      `/api/admin/audit?limit=3&filters=${encodeURIComponent(JSON.stringify({ ts: { filterType: "datetime", from: 0, to: Date.now() + 60_000 } }))}`,
+      { token: adminToken },
+    );
+    expect(wideAudit.status).toBe(200);
+    expect(wideAudit.json.total).toBeGreaterThanOrEqual(1);
   });
 
   test("audit actor_email filter: joined count agrees, cursor pages keep filtering", async () => {
@@ -1053,6 +1062,28 @@ describe("gateway end-to-end", () => {
     const garb = await api("/api/usage/events?limit=5&sort=%7Bnot-json&filters=no", { token: userToken });
     expect(garb.status).toBe(200);
     expect(garb.json.events.length).toBeGreaterThanOrEqual(0);
+
+    // custom datetime filter: epoch-ms bounds filter server-side (inclusive)
+    const all = await api("/api/usage/events?limit=500", { token: userToken });
+    const newest = all.json.events[0];
+    const oldest = all.json.events[all.json.events.length - 1];
+    const wide = await api(
+      `/api/usage/events?limit=500&filters=${enc(JSON.stringify({ ts: { filterType: "datetime", from: oldest.ts - 1, to: newest.ts + 1 } }))}`,
+      { token: userToken },
+    );
+    expect(wide.json.total).toBe(all.json.total);
+    expect(wide.json.events).toHaveLength(all.json.events.length);
+    const afterNewest = await api(
+      `/api/usage/events?limit=10&filters=${enc(JSON.stringify({ ts: { filterType: "datetime", from: newest.ts + 1 } }))}`,
+      { token: userToken },
+    );
+    expect(afterNewest.json.total).toBe(0);
+    const fromNewest = await api(
+      `/api/usage/events?limit=500&filters=${enc(JSON.stringify({ ts: { filterType: "datetime", from: newest.ts, to: null } }))}`,
+      { token: userToken },
+    );
+    expect(fromNewest.json.total).toBeGreaterThanOrEqual(1);
+    for (const e of fromNewest.json.events) expect(e.ts).toBeGreaterThanOrEqual(newest.ts);
   });
 
   test("events keyset cursor walks the same pages as OFFSET, without overlap", async () => {

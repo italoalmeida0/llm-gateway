@@ -7,6 +7,9 @@ export interface GridFilterEntry {
   filterTo?: unknown;
   dateFrom?: unknown;
   dateTo?: unknown;
+  /** Custom datetime filter bounds (epoch millis) — see conditionWhere. */
+  from?: unknown;
+  to?: unknown;
   operator?: string;
   conditions?: GridFilterEntry[];
 }
@@ -64,6 +67,24 @@ export function buildGridWhere(
   ): { sql: string; params: Array<string | number> } | null => {
     const type = String(f.type ?? "").toLowerCase();
     const filterType = String(f.filterType ?? "").toLowerCase();
+
+    if (filterType === "datetime") {
+      // Custom dateTimeFilter (dashboard grids): from/to are epoch millis,
+      // timezone-corrected client-side — no day-window math applies. Number(null)
+      // === 0, so null/undefined must be excluded BEFORE the numeric coercion.
+      const num = (v: unknown): number =>
+        v === null || v === undefined || v === "" ? NaN : Number(v);
+      const from = num(f.from);
+      const to = num(f.to);
+      if (type === "blank") return { sql: `${spec.col} IS NULL`, params: [] };
+      if (type === "notblank") return { sql: `${spec.col} IS NOT NULL`, params: [] };
+      if (Number.isFinite(from) && Number.isFinite(to)) {
+        return { sql: `${spec.col} >= ? AND ${spec.col} <= ?`, params: [from, to] };
+      }
+      if (Number.isFinite(from)) return { sql: `${spec.col} >= ?`, params: [from] };
+      if (Number.isFinite(to)) return { sql: `${spec.col} <= ?`, params: [to] };
+      return null;
+    }
 
     if (filterType === "date" || (spec.kind === "date" && filterType !== "number")) {
       const from = utcDay(f.dateFrom ?? f.filter);

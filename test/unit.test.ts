@@ -80,6 +80,18 @@ describe("AG Grid server-side filter translation", () => {
     expect(result.clauses).toEqual(["(reqs > ? OR reqs = ?)"]);
     expect(result.params).toEqual([100, 0]);
   });
+
+  test("datetime filter: epoch-ms bounds map to inclusive range predicates", () => {
+    const cols = { ts: { col: "e.ts", kind: "date" as const } };
+    const both = buildGridWhere({ ts: { filterType: "datetime", from: 1000, to: 2000 } }, cols);
+    expect(both.clauses).toEqual(["e.ts >= ? AND e.ts <= ?"]);
+    expect(both.params).toEqual([1000, 2000]);
+    expect(buildGridWhere({ ts: { filterType: "datetime", from: 1000, to: null } }, cols).clauses).toEqual(["e.ts >= ?"]);
+    expect(buildGridWhere({ ts: { filterType: "datetime", from: null, to: 2000 } }, cols).clauses).toEqual(["e.ts <= ?"]);
+    // Number(null) === 0 trap: null bounds must NOT become 0
+    expect(buildGridWhere({ ts: { filterType: "datetime", from: null, to: null } }, cols).clauses).toEqual([]);
+    expect(buildGridWhere({ ts: { filterType: "datetime", from: "abc", to: "2026-08-19" } }, cols).clauses).toEqual([]);
+  });
 });
 
 describe("model pricing normalization", () => {

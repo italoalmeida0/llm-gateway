@@ -328,6 +328,14 @@ export default function AdminModelsPage() {
     setEditing(m);
   };
 
+  /** Clone = pre-filled "new": same metadata/targets, id suffix so the POST
+   *  does not collide with the existing row (id is the PK). */
+  const cloneModel = (m: ModelDto) => {
+    openEditor(m);
+    setFId(`${m.id}-copy`);
+    setEditing("new"); // POST a new row — openEditor(m) would PATCH/rename the original
+  };
+
   const save = async () => {
     setBusy(true);
     try {
@@ -489,6 +497,7 @@ export default function AdminModelsPage() {
     return (
       <div class="flex justify-end gap-1">
         <IconBtn icon={Icons.edit} title="Edit model" onClick={() => openEditor(m)} />
+        <IconBtn icon={Icons.copy} title="Clone model" onClick={() => cloneModel(m)} />
         <IconBtn icon={Icons.trash} title="Delete model" danger onClick={() => setConfirmDelete(m)} />
       </div>
     );
@@ -576,7 +585,7 @@ export default function AdminModelsPage() {
     {
       colId: "actions",
       headerName: "",
-      width: 100,
+      width: 132,
       cellRenderer: ActionsCell,
       sortable: false,
       filter: false,

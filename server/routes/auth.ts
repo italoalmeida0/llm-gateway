@@ -157,6 +157,11 @@ export async function handleAuthRoute(path: string, req: Request, server: any): 
     }
     if (user.status !== "active") return err(403, "account is disabled", req);
 
+    if (user.totp_secret) {
+      const tempToken = await issue2faTempToken(user.id);
+      return ok({ needs2FA: true, tempToken }, req);
+    }
+
     audit("login.success.google", { actorId: user.id, ip });
     return finishLogin(user.id, req, server);
   }
@@ -196,9 +201,12 @@ export async function handleAuthRoute(path: string, req: Request, server: any): 
     const user = stmts.userByEmail.get(email);
     if (user && user.status === "active") {
       const token = randomToken(32);
-      db.prepare(
-        "INSERT INTO password_tokens (token_hash, user_id, kind, expires_at) VALUES (?, ?, 'reset', ?)",
-      ).run(sha256Hex(token), user.id, Date.now() + LIMITS.passwordTokenTtlMs);
+      db.transaction(() => {
+        db.prepare("DELETE FROM password_tokens WHERE user_id = ? AND kind = 'reset'").run(user.id);
+        db.prepare(
+          "INSERT INTO password_tokens (token_hash, user_id, kind, expires_at) VALUES (?, ?, 'reset', ?)",
+        ).run(sha256Hex(token), user.id, Date.now() + LIMITS.passwordTokenTtlMs);
+      })();
       void sendResetEmail(email, token);
       audit("password.reset.requested", { target: user.id, ip });
     }

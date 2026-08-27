@@ -51,6 +51,11 @@ export default function LoginPage() {
           setError("");
           try {
             const j = await publicApi<any>("POST", "/api/auth/google", { idToken });
+            if (j.needs2FA) {
+              setTempToken(j.tempToken);
+              setMode("2fa");
+              return;
+            }
             enterApp(j);
           } catch (e) {
             setError(e instanceof Error ? e.message : "Google sign-in failed");

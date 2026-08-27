@@ -39,8 +39,15 @@ class TokenBucket {
   private sweep(): void {
     const now = Date.now();
     for (const [k, b] of this.buckets) if (b.resetAt <= now) this.buckets.delete(k);
-    // Hard cap: under active flooding, never let the map grow unbounded.
-    if (this.buckets.size > 50_000) this.buckets.clear();
+    // Hard cap: under active flooding, evict oldest entries instead of wiping all state.
+    if (this.buckets.size > 50_000) {
+      let count = 0;
+      for (const k of this.buckets.keys()) {
+        this.buckets.delete(k);
+        count++;
+        if (count >= 10_000) break;
+      }
+    }
   }
 }
 
@@ -58,7 +65,14 @@ export function keyRpmHit(keyId: string, rpm: number): number {
   if (!l) {
     l = new TokenBucket(rpm, 60_000);
     keyRpmLimiters.set(keyId, l);
-    if (keyRpmLimiters.size > 10_000) keyRpmLimiters.clear();
+    if (keyRpmLimiters.size > 10_000) {
+      let count = 0;
+      for (const k of keyRpmLimiters.keys()) {
+        keyRpmLimiters.delete(k);
+        count++;
+        if (count >= 2_000) break;
+      }
+    }
   }
   return l.hit("");
 }
@@ -93,7 +107,14 @@ const failSweep = setInterval(() => {
   for (const [k, r] of failures) {
     if (r.lockedUntil < now && r.windowStart + 15 * 60_000 < now) failures.delete(k);
   }
-  if (failures.size > 50_000) failures.clear();
+  if (failures.size > 50_000) {
+    let count = 0;
+    for (const k of failures.keys()) {
+      failures.delete(k);
+      count++;
+      if (count >= 10_000) break;
+    }
+  }
 }, 60_000);
 failSweep.unref();
 
@@ -114,7 +135,7 @@ export function bruteforceLocked(scope: string): number {
 /**
  * Record a failure. `max` overrides the lock threshold: per-IP scopes use a
  * much higher bar than per-account ones, because a shared IP (family, NAT,
-   * CGNAT, corporate egress) must never be one person's 10 typos away from a
+ * CGNAT, corporate egress) must never be one person's 10 typos away from a
  * collective login outage.
  */
 export function bruteforceFail(scope: string, max = FAIL_MAX): void {
@@ -142,7 +163,14 @@ const usedTotpCodes = new Map<string, number>();
 const totpSweep = setInterval(() => {
   const now = Date.now();
   for (const [k, exp] of usedTotpCodes) if (exp < now) usedTotpCodes.delete(k);
-  if (usedTotpCodes.size > 50_000) usedTotpCodes.clear();
+  if (usedTotpCodes.size > 50_000) {
+    let count = 0;
+    for (const k of usedTotpCodes.keys()) {
+      usedTotpCodes.delete(k);
+      count++;
+      if (count >= 10_000) break;
+    }
+  }
 }, 60_000);
 totpSweep.unref();
 

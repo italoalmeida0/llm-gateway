@@ -3224,6 +3224,7 @@ export default function RemoteCodePage() {
                   </For>
                 </div>
               </Show>
+            </div>
                   {/* New Project split button (Antigravity: New Project / Quick Start) */}
                 <div class="relative">
                   <button
@@ -3356,7 +3357,6 @@ export default function RemoteCodePage() {
                 </Show>
               </Show>
             </div>
-          </div>
           {/* Batch bar (chatbot selection mode) */}
           <Show when={selectionMode() && selectedSessions().size > 0}>
             <div class="p-2 border-t border-line/70 bg-ink-950/95">

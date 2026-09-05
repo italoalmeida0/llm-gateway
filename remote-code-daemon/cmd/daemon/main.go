@@ -1,0 +1,817 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/patriceckhart/zot/packages/agent/tools"
+	"github.com/patriceckhart/zot/packages/core"
+	"github.com/patriceckhart/zot/packages/provider"
+)
+
+// DaemonConfig holds credentials and gateway connection details.
+type DaemonConfig struct {
+	GatewayURL  string `json:"gateway_url"`
+	DaemonToken string `json:"daemon_token"`
+	APIKey      string `json:"api_key"`
+	HostID      string `json:"host_id"`
+	Name        string `json:"name"`
+}
+
+// SessionRecord is the on-disk format for each local session.
+type SessionRecord struct {
+	ID        string             `json:"id"`
+	CWD       string             `json:"cwd"`
+	Title     string             `json:"title"`
+	Model     string             `json:"model"`
+	Status    string             `json:"status"` // "idle" | "running"
+	CreatedAt int64              `json:"created_at"`
+	UpdatedAt int64              `json:"updated_at"`
+	Messages  []provider.Message `json:"messages"`
+}
+
+// SessionSummary is returned to the web client for listing.
+type SessionSummary struct {
+	ID           string `json:"id"`
+	CWD          string `json:"cwd"`
+	Title        string `json:"title"`
+	Model        string `json:"model"`
+	Status       string `json:"status"`
+	CreatedAt    int64  `json:"created_at"`
+	UpdatedAt    int64  `json:"updated_at"`
+	MessageCount int    `json:"message_count"`
+}
+
+// ActiveSession holds in-memory execution state for a session.
+type ActiveSession struct {
+	mu           sync.Mutex
+	record       *SessionRecord
+	agent        *core.Agent
+	cancel       context.CancelFunc
+	approvalReqs map[string]chan bool
+}
+
+// DaemonServer coordinates WebSocket connection, relay commands, and local sessions.
+type DaemonServer struct {
+	configPath string
+	dataDir    string
+	config     *DaemonConfig
+	wsConn     *websocket.Conn
+	wsMu       sync.Mutex
+
+	sessionsMu sync.RWMutex
+	sessions   map[string]*ActiveSession
+}
+
+func defaultDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	return filepath.Join(home, ".llmgw-daemon")
+}
+
+func (d *DaemonServer) sessionsDir() string {
+	return filepath.Join(d.dataDir, "sessions")
+}
+
+func (d *DaemonServer) loadConfig() error {
+	data, err := os.ReadFile(d.configPath)
+	if err != nil {
+		return err
+	}
+	var cfg DaemonConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
+	d.config = &cfg
+	return nil
+}
+
+func (d *DaemonServer) saveConfig() error {
+	if err := os.MkdirAll(filepath.Dir(d.configPath), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(d.config, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(d.configPath, data, 0o600)
+}
+
+func (d *DaemonServer) performPairing(connectURL string, hostName string) error {
+	u, err := url.Parse(strings.TrimSpace(connectURL))
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	hostname, _ := os.Hostname()
+	if hostName == "" {
+		hostName = hostname
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"name":     hostName,
+		"hostname": hostname,
+		"os":       runtime.GOOS,
+		"arch":     runtime.GOARCH,
+	})
+
+	resp, err := http.Post(u.String(), "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("pairing request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("pairing failed (status %d): %s", resp.StatusCode, string(b))
+	}
+
+	var result struct {
+		Success     bool   `json:"success"`
+		HostID      string `json:"hostId"`
+		DaemonToken string `json:"daemonToken"`
+		APIKey      string `json:"apiKey"`
+		GatewayURL  string `json:"gatewayUrl"`
+		Error       string `json:"error"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !result.Success {
+		return fmt.Errorf("pairing unsuccessful: %s", result.Error)
+	}
+
+	d.config = &DaemonConfig{
+		GatewayURL:  result.GatewayURL,
+		DaemonToken: result.DaemonToken,
+		APIKey:      result.APIKey,
+		HostID:      result.HostID,
+		Name:        hostName,
+	}
+
+	if err := d.saveConfig(); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Printf("\n[SUCCESS] Host paired successfully! Host ID: %s\n", result.HostID)
+	return nil
+}
+
+func (d *DaemonServer) sendWS(msg any) error {
+	d.wsMu.Lock()
+	defer d.wsMu.Unlock()
+	if d.wsConn == nil {
+		return fmt.Errorf("websocket not connected")
+	}
+	return d.wsConn.WriteJSON(msg)
+}
+
+// Session Storage Helpers
+
+func (d *DaemonServer) saveSession(rec *SessionRecord) error {
+	dir := d.sessionsDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	filePath := filepath.Join(dir, rec.ID+".json")
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filePath, data, 0o600)
+}
+
+func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
+	filePath := filepath.Join(d.sessionsDir(), id+".json")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	var rawRec struct {
+		ID        string            `json:"id"`
+		CWD       string            `json:"cwd"`
+		Title     string            `json:"title"`
+		Model     string            `json:"model"`
+		Status    string            `json:"status"`
+		CreatedAt int64             `json:"createdAt"`
+		UpdatedAt int64             `json:"updatedAt"`
+		Messages  []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &rawRec); err != nil {
+		return nil, err
+	}
+	rec := &SessionRecord{
+		ID:        rawRec.ID,
+		CWD:       rawRec.CWD,
+		Title:     rawRec.Title,
+		Model:     rawRec.Model,
+		Status:    rawRec.Status,
+		CreatedAt: rawRec.CreatedAt,
+		UpdatedAt: rawRec.UpdatedAt,
+	}
+	for _, mBytes := range rawRec.Messages {
+		msg, err := core.HydrateMessageObject(mBytes)
+		if err == nil {
+			rec.Messages = append(rec.Messages, msg)
+		}
+	}
+	return rec, nil
+}
+
+func (d *DaemonServer) listSessions() []SessionSummary {
+	dir := d.sessionsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var summaries []SessionSummary
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(e.Name(), ".json")
+		rec, err := d.loadSession(id)
+		if err != nil {
+			continue
+		}
+		summaries = append(summaries, SessionSummary{
+			ID:           rec.ID,
+			CWD:          rec.CWD,
+			Title:        rec.Title,
+			Model:        rec.Model,
+			Status:       rec.Status,
+			CreatedAt:    rec.CreatedAt,
+			UpdatedAt:    rec.UpdatedAt,
+			MessageCount: len(rec.Messages),
+		})
+	}
+
+	sort.Slice(summaries, func(i, j int) bool {
+		return summaries[i].UpdatedAt > summaries[j].UpdatedAt
+	})
+	return summaries
+}
+
+func (d *DaemonServer) getOrCreateActiveSession(id string) (*ActiveSession, error) {
+	d.sessionsMu.Lock()
+	defer d.sessionsMu.Unlock()
+
+	if act, ok := d.sessions[id]; ok {
+		return act, nil
+	}
+
+	rec, err := d.loadSession(id)
+	if err != nil {
+		return nil, err
+	}
+
+	act := &ActiveSession{
+		record:       rec,
+		approvalReqs: make(map[string]chan bool),
+	}
+	d.sessions[id] = act
+	return act, nil
+}
+
+// WebSocket Dispatcher
+
+func (d *DaemonServer) handleMessage(raw []byte) {
+	var base struct {
+		Type      string `json:"type"`
+		HostID    string `json:"hostId"`
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(raw, &base); err != nil {
+		return
+	}
+
+	switch base.Type {
+	case "list_sessions":
+		summaries := d.listSessions()
+		_ = d.sendWS(map[string]any{
+			"type":     "sessions_list",
+			"hostId":   d.config.HostID,
+			"sessions": summaries,
+		})
+
+	case "get_session":
+		var req struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil {
+			_ = d.sendWS(map[string]any{
+				"type":      "error",
+				"hostId":    d.config.HostID,
+				"sessionId": req.SessionID,
+				"message":   "Session not found",
+			})
+			return
+		}
+		_ = d.sendWS(map[string]any{
+			"type":    "session_data",
+			"hostId":  d.config.HostID,
+			"session": rec,
+		})
+
+	case "create_session":
+		var req struct {
+			CWD   string `json:"cwd"`
+			Title string `json:"title"`
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(raw, &req)
+
+		cwd := strings.TrimSpace(req.CWD)
+		if cwd == "" || cwd == "~" {
+			home, _ := os.UserHomeDir()
+			cwd = home
+		} else if strings.HasPrefix(cwd, "~/") {
+			home, _ := os.UserHomeDir()
+			cwd = filepath.Join(home, cwd[2:])
+		}
+		_ = os.MkdirAll(cwd, 0o755)
+
+		sessID := fmt.Sprintf("sess_%d", time.Now().UnixNano()/1000)
+		title := req.Title
+		if title == "" {
+			title = filepath.Base(cwd)
+			if title == "/" || title == "." {
+				title = "Session"
+			}
+		}
+
+		now := time.Now().UnixMilli()
+		rec := &SessionRecord{
+			ID:        sessID,
+			CWD:       cwd,
+			Title:     title,
+			Model:     req.Model,
+			Status:    "idle",
+			CreatedAt: now,
+			UpdatedAt: now,
+			Messages:  nil,
+		}
+		if err := d.saveSession(rec); err != nil {
+			_ = d.sendWS(map[string]any{
+				"type":    "error",
+				"hostId":  d.config.HostID,
+				"message": "Failed to create session: " + err.Error(),
+			})
+			return
+		}
+
+		_ = d.sendWS(map[string]any{
+			"type":    "session_created",
+			"hostId":  d.config.HostID,
+			"session": rec,
+		})
+
+	case "delete_session":
+		var req struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+
+		d.sessionsMu.Lock()
+		if act, ok := d.sessions[req.SessionID]; ok {
+			if act.cancel != nil {
+				act.cancel()
+			}
+			delete(d.sessions, req.SessionID)
+		}
+		d.sessionsMu.Unlock()
+
+		filePath := filepath.Join(d.sessionsDir(), req.SessionID+".json")
+		_ = os.Remove(filePath)
+
+		_ = d.sendWS(map[string]any{
+			"type":      "session_deleted",
+			"hostId":    d.config.HostID,
+			"sessionId": req.SessionID,
+		})
+
+	case "cancel":
+		var req struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+
+		d.sessionsMu.RLock()
+		act := d.sessions[req.SessionID]
+		d.sessionsMu.RUnlock()
+
+		if act != nil && act.cancel != nil {
+			act.cancel()
+		}
+
+	case "tool_approval_response":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			CallID    string `json:"callId"`
+			Approved  bool   `json:"approved"`
+		}
+		_ = json.Unmarshal(raw, &req)
+
+		d.sessionsMu.RLock()
+		act := d.sessions[req.SessionID]
+		d.sessionsMu.RUnlock()
+
+		if act != nil {
+			act.mu.Lock()
+			if ch, ok := act.approvalReqs[req.CallID]; ok {
+				ch <- req.Approved
+				delete(act.approvalReqs, req.CallID)
+			}
+			act.mu.Unlock()
+		}
+
+	case "list_dir":
+		var req struct {
+			RequestID string `json:"requestId"`
+			Path      string `json:"path"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		targetPath := strings.TrimSpace(req.Path)
+		if targetPath == "" || targetPath == "~" {
+			home, _ := os.UserHomeDir()
+			targetPath = home
+		} else if strings.HasPrefix(targetPath, "~/") {
+			home, _ := os.UserHomeDir()
+			targetPath = filepath.Join(home, targetPath[2:])
+		}
+
+		type DirEntry struct {
+			Name  string `json:"name"`
+			IsDir bool   `json:"isDir"`
+			Path  string `json:"path"`
+		}
+
+		var entries []DirEntry
+		files, err := os.ReadDir(targetPath)
+		if err == nil {
+			for _, f := range files {
+				if strings.HasPrefix(f.Name(), ".") {
+					continue
+				}
+				if f.IsDir() {
+					entries = append(entries, DirEntry{
+						Name:  f.Name(),
+						IsDir: true,
+						Path:  filepath.Join(targetPath, f.Name()),
+					})
+				}
+			}
+		}
+
+		_ = d.sendWS(map[string]any{
+			"type":      "dir_list",
+			"hostId":    d.config.HostID,
+			"requestId": req.RequestID,
+			"path":      targetPath,
+			"entries":   entries,
+		})
+
+	case "prompt":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Text      string `json:"text"`
+			Model     string `json:"model"`
+			YOLO      bool   `json:"yolo"`
+		}
+		_ = json.Unmarshal(raw, &req)
+
+		act, err := d.getOrCreateActiveSession(req.SessionID)
+		if err != nil {
+			_ = d.sendWS(map[string]any{
+				"type":      "error",
+				"hostId":    d.config.HostID,
+				"sessionId": req.SessionID,
+				"message":   "Session not found: " + err.Error(),
+			})
+			return
+		}
+
+		go d.runAgentTurn(act, req.Text, req.Model, req.YOLO)
+	}
+}
+
+// Agent Loop Runner for a Session
+
+func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool) {
+	act.mu.Lock()
+	if act.record.Status == "running" {
+		act.mu.Unlock()
+		_ = d.sendWS(map[string]any{
+			"type":      "error",
+			"hostId":    d.config.HostID,
+			"sessionId": act.record.ID,
+			"message":   "Turn already in flight",
+		})
+		return
+	}
+
+	act.record.Status = "running"
+	if requestedModel != "" {
+		act.record.Model = requestedModel
+	}
+	modelToUse := act.record.Model
+	if modelToUse == "" {
+		modelToUse = "gpt-4o"
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	act.cancel = cancel
+	act.mu.Unlock()
+
+	defer func() {
+		act.mu.Lock()
+		act.record.Status = "idle"
+		act.record.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(act.record)
+		act.cancel = nil
+		act.mu.Unlock()
+
+		_ = d.sendWS(map[string]any{
+			"type":      "session_status",
+			"hostId":    d.config.HostID,
+			"sessionId": act.record.ID,
+			"status":    "idle",
+		})
+	}()
+
+	_ = d.sendWS(map[string]any{
+		"type":      "session_status",
+		"hostId":    d.config.HostID,
+		"sessionId": act.record.ID,
+		"status":    "running",
+	})
+
+	// Create OpenAI client pointing to Gateway's /v1 proxy endpoint
+	apiBase := strings.TrimRight(d.config.GatewayURL, "/") + "/v1"
+	client := provider.NewOpenAI(d.config.APIKey, apiBase)
+
+	// Setup local filesystem tools rooted at session's CWD
+	sb := tools.NewSandbox(act.record.CWD)
+	if !yolo {
+		sb.Lock()
+	}
+
+	reg := core.NewRegistry(
+		&tools.ReadTool{CWD: act.record.CWD, Sandbox: sb},
+		&tools.WriteTool{CWD: act.record.CWD, Sandbox: sb},
+		&tools.EditTool{CWD: act.record.CWD, Sandbox: sb},
+		&tools.BashTool{CWD: act.record.CWD, Sandbox: sb},
+		&tools.GlobTool{CWD: act.record.CWD, Sandbox: sb},
+	)
+
+	agent := core.NewAgent(client, modelToUse, "", reg)
+	act.mu.Lock()
+	if len(act.record.Messages) > 0 {
+		agent.SetMessages(act.record.Messages)
+	}
+	act.agent = agent
+	act.mu.Unlock()
+
+	// Tool approval hook when YOLO is false
+	if !yolo {
+		agent.BeforeToolExecute = func(call provider.ToolCallBlock) (bool, string, json.RawMessage) {
+			callID := call.ID
+			respChan := make(chan bool, 1)
+
+			act.mu.Lock()
+			act.approvalReqs[callID] = respChan
+			act.mu.Unlock()
+
+			_ = d.sendWS(map[string]any{
+				"type":      "tool_approval_request",
+				"hostId":    d.config.HostID,
+				"sessionId": act.record.ID,
+				"callId":    callID,
+				"tool":      call.Name,
+				"args":      call.Arguments,
+			})
+
+			select {
+			case approved := <-respChan:
+				if !approved {
+					return false, "User rejected tool execution", nil
+				}
+				return true, "", nil
+			case <-ctx.Done():
+				return false, "Operation cancelled", nil
+			}
+		}
+	}
+
+	// Persistent transcript hook: whenever a message is added, record it
+	agent.OnMessageAppended = func(m provider.Message) {
+		act.mu.Lock()
+		act.record.Messages = append(act.record.Messages, m)
+		act.record.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(act.record)
+		act.mu.Unlock()
+	}
+
+	// Stream events to WebSocket
+	sink := func(ev core.AgentEvent) {
+		payload := map[string]any{
+			"type":      "agent_event",
+			"hostId":    d.config.HostID,
+			"sessionId": act.record.ID,
+		}
+
+		switch e := ev.(type) {
+		case core.EvTurnStart:
+			payload["event"] = map[string]any{"type": "turn_start", "step": e.Step}
+		case core.EvTextDelta:
+			payload["event"] = map[string]any{"type": "text_delta", "delta": e.Delta}
+		case core.EvToolCall:
+			payload["event"] = map[string]any{
+				"type": "tool_call", "id": e.ID, "name": e.Name, "args": e.Args,
+			}
+		case core.EvToolResult:
+			var contentStr strings.Builder
+			for _, c := range e.Result.Content {
+				if tb, ok := c.(provider.TextBlock); ok {
+					contentStr.WriteString(tb.Text)
+				}
+			}
+			payload["event"] = map[string]any{
+				"type": "tool_result", "id": e.ID, "content": contentStr.String(), "isError": e.Result.IsError,
+			}
+		case core.EvTurnEnd:
+			payload["event"] = map[string]any{"type": "turn_end", "stop": string(e.Stop)}
+		case core.EvDone:
+			payload["event"] = map[string]any{"type": "done"}
+		default:
+			return
+		}
+
+		_ = d.sendWS(payload)
+	}
+
+	_ = agent.Prompt(ctx, promptText, nil, sink)
+}
+
+func (d *DaemonServer) connectWebSocket() error {
+	u, err := url.Parse(d.config.GatewayURL)
+	if err != nil {
+		return err
+	}
+
+	scheme := "ws"
+	if u.Scheme == "https" {
+		scheme = "wss"
+	}
+	wsURL := fmt.Sprintf("%s://%s/api/remote/daemon/ws?token=%s", scheme, u.Host, url.QueryEscape(d.config.DaemonToken))
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+	}
+
+	conn, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		return err
+	}
+
+	d.wsMu.Lock()
+	d.wsConn = conn
+	d.wsMu.Unlock()
+
+	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", d.config.GatewayURL)
+
+	// Heartbeat ticker
+	ticker := time.NewTicker(15 * time.Second)
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second)); err != nil {
+					conn.Close()
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			close(done)
+			ticker.Stop()
+			return err
+		}
+		d.handleMessage(msg)
+	}
+}
+
+func main() {
+	connectFlag := flag.String("connect", "", "Pairing connect URL (e.g. https://.../api/remote/connect/<token>)")
+	nameFlag := flag.String("name", "", "Host display name")
+	configFlag := flag.String("config", "", "Path to config.json")
+	dataDirFlag := flag.String("data-dir", "", "Path to daemon data directory")
+	flag.Parse()
+
+	dataDir := *dataDirFlag
+	if dataDir == "" {
+		dataDir = defaultDataDir()
+	}
+
+	configPath := *configFlag
+	if configPath == "" {
+		configPath = filepath.Join(dataDir, "config.json")
+	}
+
+	server := &DaemonServer{
+		configPath: configPath,
+		dataDir:    dataDir,
+		sessions:   make(map[string]*ActiveSession),
+	}
+
+	// Try loading config
+	if err := server.loadConfig(); err != nil || server.config == nil {
+		pairURL := *connectFlag
+		if pairURL == "" {
+			fmt.Println("=========================================================")
+			fmt.Println("             LLM Gateway Remote Code Daemon              ")
+			fmt.Println("=========================================================")
+			fmt.Println("No existing pairing configuration found.")
+			fmt.Println("In your LLM Gateway dashboard (/#/code), click 'Connect Host'")
+			fmt.Println("and paste the generated connection URL below:")
+			fmt.Print("\nConnection URL: ")
+
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				pairURL = strings.TrimSpace(scanner.Text())
+			}
+		}
+
+		if pairURL == "" {
+			fmt.Println("Error: connection URL required to pair host.")
+			os.Exit(1)
+		}
+
+		if err := server.performPairing(pairURL, *nameFlag); err != nil {
+			fmt.Printf("Pairing failed: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Graceful shutdown handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		fmt.Println("\n[SHUTDOWN] Exiting daemon...")
+		server.wsMu.Lock()
+		if server.wsConn != nil {
+			_ = server.wsConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
+			_ = server.wsConn.Close()
+		}
+		server.wsMu.Unlock()
+		os.Exit(0)
+	}()
+
+	// Reconnection loop
+	backoff := 1 * time.Second
+	for {
+		err := server.connectWebSocket()
+		if err != nil {
+			fmt.Printf("[DISCONNECTED] %v. Retrying in %v...\n", err, backoff)
+		}
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+	}
+}

@@ -12,8 +12,8 @@ import { totpAt } from "../server/crypto";
  * over HTTP — the same way an attacker or a real client would talk to it.
  */
 
-const GW_PORT = 4400;
-const UP_PORT = 4401;
+const GW_PORT = 4420;
+const UP_PORT = 4421;
 const GW = `http://127.0.0.1:${GW_PORT}`;
 const UP = `http://127.0.0.1:${UP_PORT}`;
 const UPSTREAM_KEY = "sk-fake-secret";

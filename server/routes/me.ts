@@ -20,6 +20,7 @@ import { verifyGoogleIdToken } from "../google";
 import { sendSecurityAlert } from "../email";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { bruteforceClear, bruteforceFail, bruteforceLocked, consumeTotpCode } from "../ratelimit";
+import { routerSnapshot } from "../models";
 
 /**
  * /api/me/* — profile, password, TOTP, Google linking, session management.
@@ -207,6 +208,15 @@ export async function handleMeRoute(path: string, req: Request): Promise<Respons
     if (!target || target.user_id !== ctx.user.id) return err(404, "session not found", req);
     revokeSession(jti);
     return ok({ revoked: true }, req);
+  }
+
+  if (path === "/api/me/models" && req.method === "GET") {
+    await requireAuth(req);
+    const snap = routerSnapshot();
+    const models = Array.from(snap.models.values())
+      .filter((m) => m.enabled)
+      .map((m) => ({ id: m.id, name: m.name || m.id }));
+    return ok({ models }, req);
   }
 
   return null;

@@ -33,6 +33,7 @@ import { usal, usalItems } from "./motion";
 import LoginPage from "./pages/Login";
 import SetPasswordPage from "./pages/SetPassword";
 import DashboardPage from "./pages/Dashboard";
+import RemoteCodePage from "./pages/RemoteCode";
 import KeysPage from "./pages/Keys";
 import UsagePage from "./pages/Usage";
 import SettingsPage from "./pages/Settings";
@@ -70,6 +71,7 @@ interface NavItem {
 
 const USER_NAV: NavItem[] = [
   { path: "/", label: "Overview", icon: Icons.home },
+  { path: "/code", label: "Remote Code", icon: Icons.terminal },
   { path: "/keys", label: "API Keys", icon: Icons.key },
   { path: "/usage", label: "Usage", icon: Icons.chart },
   { path: "/settings", label: "Settings", icon: Icons.cog },
@@ -383,6 +385,7 @@ function Root() {
               const p = route().path;
               const isAdmin = currentSession()?.user.role === "admin";
               if (p === "/") return <DashboardPage />;
+              if (p.startsWith("/code")) return <RemoteCodePage />;
               if (p === "/keys") return <KeysPage />;
               if (p === "/usage") return <UsagePage />;
               if (p === "/settings") return <SettingsPage />;

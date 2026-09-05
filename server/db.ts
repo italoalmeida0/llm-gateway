@@ -429,6 +429,35 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_audit_action_ts ON audit_log(action, ts, id);
     `,
   },
+  {
+    name: "014_remote_code",
+    // Remote Code: registered daemon hosts and temporary pairing tokens.
+    // Sessions and event transcripts reside on the remote daemon itself (local-first).
+    up: `
+      CREATE TABLE remote_hosts (
+        id                TEXT PRIMARY KEY,
+        user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name              TEXT NOT NULL DEFAULT '',
+        hostname          TEXT NOT NULL DEFAULT '',
+        os                TEXT NOT NULL DEFAULT '',
+        arch              TEXT NOT NULL DEFAULT '',
+        daemon_token_hash TEXT NOT NULL UNIQUE,
+        api_key_id        TEXT REFERENCES api_keys(id) ON DELETE SET NULL,
+        status            TEXT NOT NULL DEFAULT 'offline' CHECK (status IN ('online','offline')),
+        last_seen_at      INTEGER,
+        created_at        INTEGER NOT NULL
+      );
+      CREATE INDEX idx_remote_hosts_user ON remote_hosts(user_id);
+
+      CREATE TABLE remote_pairing_tokens (
+        token      TEXT PRIMARY KEY,
+        user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_remote_pairing_user ON remote_pairing_tokens(user_id);
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -590,6 +619,27 @@ export interface ModelTargetRow {
   upstream_model: string;
   priority: number;
   enabled: number;
+  created_at: number;
+}
+
+export interface RemoteHostRow {
+  id: string;
+  user_id: string;
+  name: string;
+  hostname: string;
+  os: string;
+  arch: string;
+  daemon_token_hash: string;
+  api_key_id: string | null;
+  status: "online" | "offline";
+  last_seen_at: number | null;
+  created_at: number;
+}
+
+export interface RemotePairingTokenRow {
+  token: string;
+  user_id: string;
+  expires_at: number;
   created_at: number;
 }
 

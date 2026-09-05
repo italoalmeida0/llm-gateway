@@ -322,3 +322,22 @@ export interface AdminUserDto {
   lastLoginAt: number | null;
   keyCount: number;
 }
+
+export interface RemoteHostDto {
+  id: string;
+  userId: string;
+  name: string;
+  hostname: string | null;
+  os: string | null;
+  arch: string | null;
+  apiKeyId: string | null;
+  status: "online" | "offline";
+  lastSeenAt: number | null;
+  createdAt: number;
+}
+
+export interface RemotePairDto {
+  token: string;
+  expiresAt: number;
+  connectUrl: string;
+}

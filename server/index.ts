@@ -8,6 +8,8 @@ import { handleMeRoute } from "./routes/me";
 import { handleKeysRoute } from "./routes/keys";
 import { handleUsageRoute } from "./routes/usage";
 import { handleAdminRoute } from "./routes/admin";
+import { handleRemoteRestRoute } from "./routes/remote";
+import { handleRemoteUpgrade, remoteRelayWsHandlers, type WsData } from "./routes/relay";
 import { handleProxy } from "./proxy/index";
 import { serveStatic } from "./static";
 import { flushUsage } from "./usage";
@@ -69,7 +71,7 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
 
 // ===== Request routing =====
 
-async function route(req: Request, server: any): Promise<Response> {
+async function route(req: Request, server: any): Promise<Response | undefined> {
   const url = new URL(req.url);
   const path = url.pathname;
 
@@ -100,6 +102,12 @@ async function route(req: Request, server: any): Promise<Response> {
   }
 
   if (path.startsWith("/api/")) {
+    // Remote Code WebSocket upgrades (/api/remote/daemon/ws and /api/remote/client/ws)
+    if (path.startsWith("/api/remote/") && path.endsWith("/ws")) {
+      return await handleRemoteUpgrade(path, req, url, server);
+    }
+    const viaRemote = await handleRemoteRestRoute(path, req, url);
+    if (viaRemote) return viaRemote;
     const viaAuth = await handleAuthRoute(path, req, server);
     if (viaAuth) return viaAuth;
     const viaMe = await handleMeRoute(path, req);
@@ -123,7 +131,7 @@ async function route(req: Request, server: any): Promise<Response> {
 
 import type { Server } from "bun";
 
-const server: Server<undefined> = Bun.serve({
+const server: Server<WsData> = Bun.serve<WsData>({
   port: PORT,
   hostname: process.env.HOST || "0.0.0.0",
   maxRequestBodySize: LIMITS.proxyBodyBytes + 64 * 1024,
@@ -135,8 +143,9 @@ const server: Server<undefined> = Bun.serve({
    * ceiling.
    */
   idleTimeout: 240,
+  websocket: remoteRelayWsHandlers,
 
-  async fetch(req): Promise<Response> {
+  async fetch(req): Promise<Response | undefined> {
     try {
       return await route(req, server);
     } catch (e) {

@@ -5,3 +5,7 @@ data/
 *.log
 .DS_Store
 .banyancode
+tmp/
+.codegraph
+remote-code-daemon/bin/
+remote-code-ref/

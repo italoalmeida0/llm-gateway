@@ -4363,7 +4363,7 @@ export default function RemoteCodePage() {
               <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
                 <Iconify icon="lucide:palette" size={15} class="text-ink-500" />
                 <span>Appearance</span>
-                
+
               </h3>
               <div class="space-y-3 text-xs">
                 <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
@@ -4430,7 +4430,7 @@ export default function RemoteCodePage() {
               <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
                 <Iconify icon="lucide:bot" size={15} class="text-ink-500" />
                 <span>Agent</span>
-                
+
               </h3>
               <div class="space-y-4 text-xs">
                 <div>
@@ -4858,7 +4858,7 @@ export default function RemoteCodePage() {
               <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
                 <Iconify icon="lucide:slash" size={15} class="text-ink-500" />
                 <span>Slash Commands</span>
-                
+
               </h3>
               <div class="space-y-2 text-xs">
                 <For each={SLASH_COMMANDS}>

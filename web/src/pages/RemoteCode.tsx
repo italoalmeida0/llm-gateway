@@ -249,18 +249,31 @@ export function toolCatOf(name?: string): ToolCat {
 
 export type MsgPart =
   | { kind: "blocks"; blocks: ContentBlock[] }
-  | { kind: "tools"; units: ToolUnit[] };
+  | { kind: "tools"; units: ToolUnit[] }
+  | { kind: "thinking"; blocks: ContentBlock[] };
 
-/** Splits a message into text runs and consecutive tool runs (order kept). */
+/**
+ * Splits a message into text runs, thinking runs and consecutive tool runs
+ * (order kept). Thinking panels break a tool series on purpose: a thinking
+ * block renders ABOVE its own group, never swallowed inside one, so every
+ * reasoning stays visible even in a tool-heavy transcript.
+ */
 export function splitToolRuns(blocks: ContentBlock[]): MsgPart[] {
   const parts: MsgPart[] = [];
   let buf: ContentBlock[] = [];
+  let think: ContentBlock[] = [];
   let run: ToolUnit[] = [];
   const byId = new Map<string, ToolUnit>();
   const flushBuf = () => {
     if (buf.length) {
       parts.push({ kind: "blocks", blocks: buf });
       buf = [];
+    }
+  };
+  const flushThink = () => {
+    if (think.length) {
+      parts.push({ kind: "thinking", blocks: think });
+      think = [];
     }
   };
   const flushRun = () => {
@@ -272,20 +285,28 @@ export function splitToolRuns(blocks: ContentBlock[]): MsgPart[] {
   for (const b of blocks) {
     if (b.type === "tool_call") {
       flushBuf();
+      flushThink();
       const u: ToolUnit = { call: b };
       run.push(u);
       if (b.toolId) byId.set(b.toolId, u);
     } else if (b.type === "tool_result") {
       flushBuf();
+      flushThink();
       const u = (b.toolId && byId.get(b.toolId)) || null;
       if (u && !u.result) u.result = b;
       else run.push({ result: b });
+    } else if (b.type === "reasoning") {
+      flushBuf();
+      flushRun();
+      think.push(b);
     } else {
       flushRun();
+      flushThink();
       buf.push(b);
     }
   }
   flushRun();
+  flushThink();
   flushBuf();
   return parts;
 }
@@ -845,7 +866,9 @@ export default function RemoteCodePage() {
   function toggleToolGroup(key: string) {
     setToolGroupOpen((prev) => ({ ...prev, [key]: !(prev[key] ?? true) }));
   }
-  // Expanded thinking blocks (message id set).
+  // Expanded thinking blocks: reasoning never starts open by itself —
+  // the exception is the live one (auto-opens while it streams, then keeps
+  // the user's toggle state after it ends).
   const [expandedThinking, setExpandedThinking] = createSignal<Record<string, boolean>>({});
   // Copied-message feedback.
   const [copiedMsgId, setCopiedMsgId] = createSignal<string | null>(null);
@@ -2146,6 +2169,119 @@ export default function RemoteCodePage() {
     if (ok) sendWS({ type: "delete_session", sessionId: id });
   }
 
+  // (Default Model editor lives in the composer-adjacent model picker —
+  //  Settings reads the same daemon signal, no duplicate UI here.)
+
+  /**
+   * One shared Model+Effort editor used by the composer picker AND by the
+   * Settings "Default Model" field. Same daemon truth (activeModel and
+   * daemonSettings signals, set_model/set_reasoning commands), same model
+   * list + search box, same effort grid. `showUsage` only makes sense in
+   * the composer popover (Settings has no session).
+   */
+  function modelPickerBody(showUsage: boolean) {
+    return (
+      <>
+        <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider flex items-center justify-between">
+          <span>Model</span>
+          <button
+            onClick={async () => {
+              await loadGatewayModels();
+              toast("Models refreshed", "ok");
+            }}
+            class="p-0.5 text-ink-600 hover:text-ink-200 cursor-pointer"
+            title="Refresh models"
+          >
+            <Iconify icon="lucide:refresh-cw" size={11} />
+          </button>
+        </div>
+        <div class="px-2 pb-1">
+          <input
+            type="text"
+            placeholder="Search models..."
+            class="w-full bg-ink-950 border border-line/60 rounded-lg px-2.5 py-1.5 text-[11px] text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
+            value={modelFilter()}
+            onInput={(e) => setModelFilter(e.currentTarget.value)}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+            ref={(el) => setTimeout(() => el?.focus(), 40)}
+          />
+        </div>
+        <div class="max-h-56 overflow-y-auto">
+          <For
+            each={filteredGatewayModels()}
+            fallback={
+              <div class="px-2.5 py-2 text-[11px] text-ink-600">
+                No models match.
+              </div>
+            }
+          >
+            {(m) => (
+              <button
+                onClick={() => {
+                  const id = m.id;
+                  setActiveModel(id);
+                  setModelMenuOpen(false);
+                  if (activeSessionId() && wsOpen()) {
+                    sendWS({ type: "set_model", sessionId: activeSessionId(), model: id });
+                  }
+                }}
+                class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
+                  m.id === activeModel()
+                    ? "bg-ink-800 text-ink-100"
+                    : "text-ink-300 hover:bg-ink-800/60"
+                }`}
+              >
+                <span class="truncate">{m.name || m.id}</span>
+                <Show when={m.id === activeModel()}>
+                  <Iconify icon="lucide:check" size={13} />
+                </Show>
+              </button>
+            )}
+          </For>
+        </div>
+        <div class="mt-1.5 pt-1.5 border-t border-line/60">
+          <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+            Reasoning effort
+          </div>
+          <div class="grid grid-cols-7 gap-1 p-1 rounded-lg bg-ink-950 border border-line/50">
+            <For each={REASONING_LEVELS}>
+              {(lvl) => (
+                <button
+                  onClick={() => {
+                    setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
+                    setModelMenuOpen(false);
+                    if (wsOpen()) sendWS({ type: "set_reasoning", effort: lvl });
+                  }}
+                  class={`py-1 rounded-md text-center text-[11px] font-medium lowercase cursor-pointer ${
+                    normalizeEffort(daemonSettings().reasoning || "none") === lvl
+                      ? "bg-ink-100 text-ink-950"
+                      : "text-ink-400 hover:text-ink-200"
+                  }`}
+                >
+                  {lvl}
+                </button>
+              )}
+            </For>
+          </div>
+        </div>
+        <Show when={showUsage}>
+          <button
+            onClick={() => {
+              setModelMenuOpen(false);
+              setUsageOpen(true);
+            }}
+            class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer"
+          >
+            <Iconify icon="lucide:chart-column" size={13} />
+            <span>View Usage</span>
+          </button>
+        </Show>
+      </>
+    );
+  }
+
   function messageText(m: ChatMessage): string {
     return m.blocks
       .filter((b) => b.type === "text" && b.text)
@@ -2385,6 +2521,110 @@ export default function RemoteCodePage() {
   }
   function toggleProjectExpanded(id: string) {
     setExpandedProjects((prev) => ({ ...prev, [id]: !(prev[id] !== false) }));
+  }
+
+  /**
+   * One thinking panel (button + collapsible body). Rendered from the
+   * dedicated "thinking" parts (never from the text path), so reasoning is
+   * always ABOVE its own tool group, live-streaming or persisted.
+   */
+  function renderThinkingBlock(msg: ChatMessage, block: ContentBlock, isLast: boolean) {
+    const thinkKey = () => `${msg.id}:think`;
+    const live = () => isLast && sessionStatus() === "running" && thinkingStart() !== null;
+    const open = () => expandedThinking()[thinkKey()] ?? live();
+    return (
+      <div class="w-full">
+        <button
+          onClick={() => setExpandedThinking((prev) => ({ ...prev, [thinkKey()]: !open() }))}
+          class={`flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
+            live() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
+          }`}
+        >
+          <Iconify icon="lucide:bot" size={14} />
+          <span>
+            {live()
+              ? `Thinking ${thinkingElapsed()}s`
+              : msg.thinkingDuration
+                ? `Thinking ${msg.thinkingDuration}s`
+                : open()
+                  ? "Hide thinking"
+                  : "Thinking"}
+          </span>
+          <Show when={live()}>
+            <span class="thinking-indicator">
+              <span />
+              <span />
+              <span />
+            </span>
+          </Show>
+          <Iconify
+            icon="lucide:chevron-down"
+            size={12}
+            class={`transition-transform ${open() ? "rotate-180" : ""}`}
+          />
+        </button>
+        <Show when={open()}>
+          <div class="mt-1.5 pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap text-xs leading-relaxed">
+            {block.reasoning}
+          </div>
+        </Show>
+      </div>
+    );
+  }
+
+  /**
+   * The special aggregate balloon: one card per consecutive tool-call series
+   * inside one assistant message. It has its own chrome (left rail + header
+   * + collapse) and NO per-message chrome — edit/regenerate/delete/copy of
+   * the parent message stay on the text parts; the card itself is static.
+   * The series ends the moment a text or thinking block arrives: the card
+   * is drawn from the tools part, so adjacency IS the grouping — anything
+   * after the series boundary forms its own isolated balloon.
+   */
+  function renderAssistantSpecial(msgId: string, units: ToolUnit[], isLast: boolean) {
+    const running = isLast && sessionStatus() === "running";
+    const summary = specialTitle(units);
+    const key = `${msgId}:special`;
+    const open = () => toolGroupOpen()[key] ?? true;
+    return (
+      <Show when={verboseChat()}>
+        <div class="w-full rounded-xl border border-line/60 bg-ink-900/40 overflow-hidden">
+          <button
+            onClick={() => toggleToolGroup(key)}
+            class="w-full flex items-center gap-2 px-3 py-2 hover:bg-ink-900/60 transition-colors cursor-pointer text-left"
+          >
+            <Show
+              when={!running}
+              fallback={
+                <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
+              }
+            >
+              <Iconify icon="lucide:bot" size={14} class="shrink-0 text-ink-500" />
+            </Show>
+            <span class="text-[13px] font-medium text-ink-300 truncate flex-1 min-w-0">
+              {summary}
+            </span>
+            <Show when={specialProgress(units)}>
+              {(t) => (
+                <span class="font-mono text-[11px] text-ink-600 truncate max-w-[40%] shrink-0">
+                  {t()}
+                </span>
+              )}
+            </Show>
+            <Iconify
+              icon="lucide:chevron-down"
+              size={12}
+              class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
+            />
+          </button>
+          <Show when={open()}>
+            <div class="border-t border-line/60 px-2 py-1.5 space-y-0.5">
+              {renderToolSegs(msgId, units, running)}
+            </div>
+          </Show>
+        </div>
+      </Show>
+    );
   }
 
   function matchQuery(s: SessionSummary) {
@@ -3083,40 +3323,8 @@ export default function RemoteCodePage() {
     return `${msgId}:${u.call?.toolId || u.result?.toolId || "u" + fallback}`;
   }
 
-  function openToolPreview(u: ToolUnit) {
-    const name = u.call?.toolName || "tool";
-    const args = tryParseArgs(u.call?.toolArgs);
-    const lang = languageForPath(String(args.path || ""));
-    if (name === "read") {
-      setPreviewFile({
-        name: baseNameOf(args.path) || "file",
-        mime: "text/plain",
-        text: u.result?.toolResult || "(no output captured)",
-        language: lang,
-      });
-    } else if (name === "write") {
-      setPreviewFile({
-        name: baseNameOf(args.path) || "file",
-        mime: "text/plain",
-        text: String(args.content || u.result?.toolResult || "(empty)"),
-        language: lang,
-      });
-    } else if (name === "edit") {
-      setPreviewFile({
-        name: (baseNameOf(args.path) || "file") + " — diff",
-        mime: "text/plain",
-        text: u.result?.toolResult || "(no diff captured)",
-        language: lang || "diff",
-      });
-    } else {
-      setPreviewFile({
-        name: `${name} output`,
-        mime: "text/plain",
-        text: u.result?.toolResult || u.call?.toolArgs || "(no output)",
-      });
-    }
-    setPreviewCopied(false);
-  }
+  // (openToolPreview modal: removed — every collapsible tool row already
+  //  is the file/diff viewer with its own scroll. Copy stays inline.)
 
   function renderToolUnit(msgId: string, u: ToolUnit, ui: number, running: boolean) {
     const key = () => toolRowKey(msgId, u, ui);
@@ -3174,7 +3382,8 @@ export default function RemoteCodePage() {
         </div>
         <Show when={open()}>
           <div class="ml-5 mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 overflow-hidden">
-            {/* Context body per tool kind */}
+            {/* Context body per tool kind (scrollable, always inline — the
+                collapsible rows already are the "open file/diff" view). */}
             <Show when={name === "edit" && u.result?.toolResult}>
               <DiffView
                 text={u.result?.toolResult || ""}
@@ -3182,12 +3391,6 @@ export default function RemoteCodePage() {
                 name={String(args.path || "")}
               />
               <div class="flex items-center gap-2 px-3 py-1.5 border-t border-line/50">
-                <button
-                  onClick={() => openToolPreview(u)}
-                  class="text-[11px] text-ink-400 hover:text-ink-100 underline underline-offset-2 cursor-pointer"
-                >
-                  Open Diff
-                </button>
                 <button
                   onClick={() => copyWithToast(u.result?.toolResult || "")}
                   class="text-[11px] text-ink-600 hover:text-ink-300 cursor-pointer"
@@ -3205,14 +3408,6 @@ export default function RemoteCodePage() {
                   text={(u.result?.toolResult || "").slice(0, 3000)}
                   language={languageForPath(String(args.path || ""))}
                 />
-                <div class="px-3 py-1.5 border-t border-line/50">
-                  <button
-                    onClick={() => openToolPreview(u)}
-                    class="text-[11px] text-ink-400 hover:text-ink-100 underline underline-offset-2 cursor-pointer"
-                  >
-                    Open file
-                  </button>
-                </div>
               </Show>
             </Show>
             <Show when={name === "write"}>
@@ -3220,14 +3415,6 @@ export default function RemoteCodePage() {
                 text={String(args.content || u.result?.toolResult || "").slice(0, 3000)}
                 language={languageForPath(String(args.path || ""))}
               />
-              <div class="px-3 py-1.5 border-t border-line/50">
-                <button
-                  onClick={() => openToolPreview(u)}
-                  class="text-[11px] text-ink-400 hover:text-ink-100 underline underline-offset-2 cursor-pointer"
-                >
-                  Open file
-                </button>
-              </div>
             </Show>
             <Show when={name !== "edit" && name !== "read" && name !== "write"}>
               <Show
@@ -3254,6 +3441,36 @@ export default function RemoteCodePage() {
     let t = `Explored ${files} file${files === 1 ? "" : "s"}`;
     if (searches > 0) t += `, ${searches} search${searches === 1 ? "" : "es"}`;
     return t;
+  }
+
+  /**
+   * One-line card title for the special aggregate balloon: tool verbs
+   * compressed (first 3 distinct, then "+N more") so a 20-call series
+   * stays one readable line instead of a paragraph.
+   */
+  function specialTitle(units: ToolUnit[]): string {
+    if (units.length === 0) return "Tools";
+    const parts = units.map((u) => {
+      const sum = toolSummary(u);
+      return `${sum.verb} ${sum.target}`.trim();
+    });
+    const seen: string[] = [];
+    for (const p of parts) {
+      if (!seen.includes(p)) seen.push(p);
+    }
+    if (units.length === 1) return seen[0] || "Tool call";
+    if (seen.length <= 3) return `${units.length} tool calls · ${seen.join(" · ")}`;
+    return `${units.length} tool calls · ${seen.slice(0, 3).join(" · ")} +${seen.length - 3} more`;
+  }
+
+  /** Newest in-flight tool progress line inside a series (spinner sidecar). */
+  function specialProgress(units: ToolUnit[]): string | undefined {
+    for (let i = units.length - 1; i >= 0; i--) {
+      const id = units[i].call?.toolId;
+      const t = id ? toolProgress()[id] : undefined;
+      if (t) return t;
+    }
+    return undefined;
   }
 
   function renderToolSegs(msgId: string, units: ToolUnit[], running: boolean) {
@@ -4233,9 +4450,16 @@ export default function RemoteCodePage() {
                           <For each={splitToolRuns(msg.blocks)}>
                             {(part) => {
                               if (part.kind === "tools") {
+                                return renderAssistantSpecial(msg.id, part.units, isLast());
+                              }
+                              if (part.kind === "thinking") {
                                 return (
                                   <Show when={verboseChat()}>
-                                    {renderToolSegs(msg.id, part.units, isLast() && sessionStatus() === "running")}
+                                    <div class="w-full space-y-2">
+                                      <For each={part.blocks}>
+                                        {(block) => renderThinkingBlock(msg, block, isLast())}
+                                      </For>
+                                    </div>
                                   </Show>
                                 );
                               }
@@ -4247,57 +4471,6 @@ export default function RemoteCodePage() {
                                         <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
                                           <Streamdown>{block.text}</Streamdown>
                                         </div>
-                                      );
-                                    }
-                                    if (block.type === "reasoning" && block.reasoning) {
-                                      const live = () =>
-                                        isLast() &&
-                                        sessionStatus() === "running" &&
-                                        thinkingStart() !== null;
-                                      return (
-                                        <Show when={verboseChat()}>
-                                          <div class="w-full">
-                                            <button
-                                              onClick={() =>
-                                                setExpandedThinking((prev) => ({
-                                                  ...prev,
-                                                  [msg.id]: !prev[msg.id],
-                                                }))
-                                              }
-                                              class={`flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
-                                                live() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
-                                              }`}
-                                            >
-                                              <Iconify icon="lucide:bot" size={14} />
-                                              <span>
-                                                {live()
-                                                  ? `Thinking ${thinkingElapsed()}s`
-                                                  : msg.thinkingDuration
-                                                    ? `Thinking ${msg.thinkingDuration}s`
-                                                    : expandedThinking()[msg.id]
-                                                      ? "Hide thinking"
-                                                      : "Thinking"}
-                                              </span>
-                                              <Show when={live()}>
-                                                <span class="thinking-indicator">
-                                                  <span />
-                                                  <span />
-                                                  <span />
-                                                </span>
-                                              </Show>
-                                              <Iconify
-                                                icon="lucide:chevron-down"
-                                                size={12}
-                                                class={`transition-transform ${expandedThinking()[msg.id] ? "rotate-180" : ""}`}
-                                              />
-                                            </button>
-                                            <Show when={expandedThinking()[msg.id] || live()}>
-                                              <div class="mt-1.5 pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap text-xs leading-relaxed">
-                                                {block.reasoning}
-                                              </div>
-                                            </Show>
-                                          </div>
-                                        </Show>
                                       );
                                     }
                                     if (block.type === "image") {
@@ -4945,101 +5118,8 @@ export default function RemoteCodePage() {
                       <span class="max-w-[130px] truncate">{activeModel().split("/").pop()}</span>
                       <Iconify icon="lucide:chevron-down" size={11} />
                     </button>
-                    <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="18rem">
-                        <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider flex items-center justify-between">
-                          <span>Model</span>
-                          <button
-                            onClick={async () => {
-                              await loadGatewayModels();
-                              toast("Models refreshed", "ok");
-                            }}
-                            class="p-0.5 text-ink-600 hover:text-ink-200 cursor-pointer"
-                            title="Refresh models"
-                          >
-                            <Iconify icon="lucide:refresh-cw" size={11} />
-                          </button>
-                        </div>
-                        <div class="px-2 pb-1">
-                          <input
-                            type="text"
-                            placeholder="Search models..."
-                            class="w-full bg-ink-950 border border-line/60 rounded-lg px-2.5 py-1.5 text-[11px] text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
-                            value={modelFilter()}
-                            onInput={(e) => setModelFilter(e.currentTarget.value)}
-                            onClick={(e) => e.stopPropagation()}
-                            onMouseDown={(e) => e.stopPropagation()}
-                            onKeyDown={(e) => e.stopPropagation()}
-                            ref={(el) => setTimeout(() => el?.focus(), 40)}
-                          />
-                        </div>
-                        <div class="max-h-56 overflow-y-auto">
-                          <For
-                            each={filteredGatewayModels()}
-                            fallback={
-                              <div class="px-2.5 py-2 text-[11px] text-ink-600">
-                                No models match.
-                              </div>
-                            }
-                          >
-                            {(m) => (
-                              <button
-                                onClick={() => {
-                                  const id = m.id;
-                                  setActiveModel(id);
-                                  setModelMenuOpen(false);
-                                  if (activeSessionId() && wsOpen()) {
-                                    sendWS({ type: "set_model", sessionId: activeSessionId(), model: id });
-                                  }
-                                }}
-                                class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
-                                  m.id === activeModel()
-                                    ? "bg-ink-800 text-ink-100"
-                                    : "text-ink-300 hover:bg-ink-800/60"
-                                }`}
-                              >
-                                <span class="truncate">{m.name || m.id}</span>
-                                <Show when={m.id === activeModel()}>
-                                  <Iconify icon="lucide:check" size={13} />
-                                </Show>
-                              </button>
-                            )}
-                          </For>
-                        </div>
-                        <div class="mt-1.5 pt-1.5 border-t border-line/60">
-                          <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-                            Reasoning effort
-                          </div>
-                          <div class="grid grid-cols-7 gap-1 p-1 rounded-lg bg-ink-950 border border-line/50">
-                            <For each={REASONING_LEVELS}>
-                              {(lvl) => (
-                                <button
-                                  onClick={() => {
-                                    setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
-                                    setModelMenuOpen(false);
-                                    if (wsOpen()) sendWS({ type: "set_reasoning", effort: lvl });
-                                  }}
-                                  class={`py-1 rounded-md text-center text-[11px] font-medium lowercase cursor-pointer ${
-                                    normalizeEffort(daemonSettings().reasoning || "none") === lvl
-                                      ? "bg-ink-100 text-ink-950"
-                                      : "text-ink-400 hover:text-ink-200"
-                                  }`}
-                                >
-                                  {lvl}
-                                </button>
-                              )}
-                            </For>
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => {
-                            setModelMenuOpen(false);
-                            setUsageOpen(true);
-                          }}
-                          class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer"
-                        >
-                          <Iconify icon="lucide:chart-column" size={13} />
-                          <span>View Usage</span>
-                        </button>
+                    <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="32rem">
+                      <div>{modelPickerBody(true)}</div>
                     </FloatMenu>
                     <FloatMenu anchor={() => modelBtn} open={usageOpen()} placement="top-start" width="16rem">
                       <div class="p-1.5 text-xs">
@@ -5549,46 +5629,26 @@ export default function RemoteCodePage() {
               </h3>
               <div class="space-y-4 text-xs">
                 <div>
-                  <Select
-                    label="Default Model"
-                    value={daemonSettings().model}
-                    onChange={(v) => {
-                      setDaemonSettings({ ...daemonSettings(), model: v });
-                      setActiveModel(v);
+                  <label class="block font-semibold text-ink-200 mb-1">
+                    Default Model
+                  </label>
+                  <button
+                    onClick={() => {
+                      setShowConfigModal(false);
+                      setModelMenuOpen(true);
                     }}
-                    options={gatewayModels().map((m) => ({ value: m.id, label: m.name || m.id }))}
-                  />
-                </div>
-
-                <div class="grid grid-cols-2 gap-4">
-                  <div>
-                    <label class="block font-semibold text-ink-200 mb-1">
-                      Reasoning Effort
-                    </label>
-                    <div class="grid grid-cols-7 gap-1 bg-ink-900 p-1 rounded-xl border border-line">
-                      <For each={REASONING_LEVELS}>
-                        {(lvl) => (
-                          <button
-                            onClick={() =>
-                              setDaemonSettings({
-                                ...daemonSettings(),
-                                reasoning: lvl,
-                              })
-                            }
-                            class={`py-1 rounded-lg text-center font-medium lowercase transition-colors ${
-                              normalizeEffort(daemonSettings().reasoning || "none") === lvl
-                                ? "bg-brand-500 text-white"
-                                : "text-ink-400 hover:text-ink-200"
-                            }`}
-                          >
-                            {lvl}
-                          </button>
-                        )}
-                      </For>
-                    </div>
-                  </div>
-
-
+                    class="w-full text-left px-3 py-2 rounded-xl bg-ink-900 border border-line text-sm text-ink-100 hover:border-ink-500 transition-colors cursor-pointer flex items-center justify-between gap-2"
+                    title={daemonSettings().model}
+                  >
+                    <span class="truncate">{daemonSettings().model || "gpt-4o"}</span>
+                    <span class="font-mono text-[11px] text-ink-500 shrink-0">
+                      {normalizeEffort(daemonSettings().reasoning || "none")}
+                    </span>
+                  </button>
+                  <p class="text-[11px] text-ink-500 mt-1">
+                    Tap to open the model + effort picker (same one as the
+                    composer, no usage card here).
+                  </p>
                 </div>
 
                 <div class="space-y-2 pt-2 border-t border-line/60">

@@ -229,7 +229,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 ## Deploy (jupyter-vps)
 
 - **Instant path (primary)**: GitHub push webhook on `main` →
-  `https://llm.hezz.it/deploy-hook` (Caddy `handle` block →
+  `https://<host>/deploy-hook` (Caddy `handle` block →
   `host.docker.internal:8099` → `~/deploy-hook-listener.py`, stdlib-only,
   binds 0.0.0.0 because container networks can't reach 127.0.0.1 — safety
   comes from the HMAC-SHA256 check against `~/.deploy-hook-secret`, never

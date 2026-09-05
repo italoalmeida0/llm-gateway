@@ -2,6 +2,7 @@
 FROM oven/bun:1-alpine AS webbuild
 WORKDIR /app
 COPY package.json bun.lock ./
+COPY patches ./patches
 RUN bun install --frozen-lockfile
 COPY plugins ./plugins
 COPY build.ts tsconfig.json ./
@@ -18,6 +19,7 @@ ENV NODE_ENV=production \
     STATIC_DIR=/app/dist
 
 COPY package.json bun.lock ./
+COPY patches ./patches
 RUN bun install --frozen-lockfile --production
 COPY server ./server
 COPY --from=webbuild /app/dist ./dist

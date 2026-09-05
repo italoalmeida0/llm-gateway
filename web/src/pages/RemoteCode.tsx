@@ -6,8 +6,11 @@ import {
   onCleanup,
   For,
   Show,
+  type JSX,
 } from "solid-js";
+import { Portal } from "solid-js/web";
 import { Streamdown } from "streamdown-solid";
+import type { Placement } from "@floating-ui/dom";
 import {
   api,
   currentSession,
@@ -19,6 +22,7 @@ import {
   Card,
   Input,
   Modal,
+  Select,
   ThemeToggle,
   copyWithToast,
   fmtDate,
@@ -26,6 +30,37 @@ import {
 } from "../ui";
 
 import { Icon as Iconify } from "../components/icon";
+import { anchorFloat } from "../floating";
+
+/** Local popover menu on the shared floating-ui layer (Portal + flip/shift). */
+function FloatMenu(props: {
+  anchor: () => HTMLElement | null | undefined;
+  open: boolean;
+  placement?: Placement;
+  width?: string;
+  children: JSX.Element;
+}) {
+  return (
+    <Show when={props.open}>
+      <Portal>
+        <div
+          ref={(el) => {
+            const a = props.anchor();
+            if (!a) return;
+            onCleanup(anchorFloat(a, el, { placement: props.placement ?? "bottom-start" }));
+          }}
+          data-floatmenu
+          class="anim-float-in rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 text-xs"
+          style={props.width ? { width: props.width } : undefined}
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {props.children}
+        </div>
+      </Portal>
+    </Show>
+  );
+}
 
 /**
  * Interfaces
@@ -468,6 +503,11 @@ export default function RemoteCodePage() {
   const [pendingApproval, setPendingApproval] = createSignal<PendingApproval | null>(null);
   // Live usage per session (from daemon usage/turn_end events).
   const [sessionUsage, setSessionUsage] = createSignal<Record<string, SessionUsage>>({});
+  /** Usage of the active session, or null — keeps "" session ids out of the union. */
+  const activeUsage = createMemo<SessionUsage | null>(() => {
+    const id = activeSessionId();
+    return id ? (sessionUsage()[id] ?? null) : null;
+  });
   // Live tool progress text per tool call id (cleared on result/turn_end).
   const [toolProgress, setToolProgress] = createSignal<Record<string, string>>({});
   // Expanded tool rows / groups (Antigravity chevrons).
@@ -535,43 +575,8 @@ export default function RemoteCodePage() {
   const [addContextOpen, setAddContextOpen] = createSignal(false);
   const [filesMenuOpen, setFilesMenuOpen] = createSignal(false);
 
-  // Custom dropdown (no native <select>): fixed-position menu that escapes
-  // every scroll container and stacking trap.
-  interface DropOption {
-    value: string;
-    label: string;
-    sub?: string;
-    dot?: string;
-  }
-  const [dropMenu, setDropMenu] = createSignal<null | {
-    x: number;
-    y: number;
-    w: number;
-    up: boolean;
-    options: DropOption[];
-    current: string;
-    onPick: (v: string) => void;
-  }>(null);
-  function openDropMenu(
-    e: MouseEvent,
-    options: DropOption[],
-    current: string,
-    onPick: (v: string) => void,
-    up = true,
-  ) {
-    e.stopPropagation();
-    closeMenus();
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setDropMenu({
-      x: Math.min(r.left, window.innerWidth - Math.max(r.width, 200) - 8),
-      y: up ? r.top : r.bottom,
-      w: Math.max(r.width, 200),
-      up,
-      options,
-      current,
-      onPick,
-    });
-  }
+  // Custom dropdowns use the shared ui.tsx <Select> (floating-ui Portal).
+  // Local popovers below use the module-level <FloatMenu> (same layer).
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [usageOpen, setUsageOpen] = createSignal(false);
   const [renamingId, setRenamingId] = createSignal<string | null>(null);
@@ -645,13 +650,9 @@ export default function RemoteCodePage() {
     });
   }
 
-  // Mobile detection (chatbot useMobile): drawer sidebar, big tap targets.
+  // Mobile: drawer below 768px regardless of touch (small desktop windows too).
   const [isMobile, setIsMobile] = createSignal(
-    typeof window !== "undefined"
-      ? /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) &&
-          "ontouchstart" in window &&
-          window.innerWidth <= 768
-      : false,
+    typeof window !== "undefined" ? window.innerWidth <= 768 : false,
   );
 
   // Live thinking timer (chatbot thinkingElapsed).
@@ -739,6 +740,14 @@ export default function RemoteCodePage() {
   const [chatContainerRef, setChatContainerRef] = createSignal<HTMLDivElement | null>(null);
 
   let ws: WebSocket | null = null;
+  // Anchor refs for floating menus (floating-ui positions them in a Portal).
+  let displayBtn: HTMLButtonElement | undefined;
+  let newProjBtn: HTMLButtonElement | undefined;
+  let modelBtn: HTMLButtonElement | undefined;
+  let addBtn: HTMLButtonElement | undefined;
+  let filesBtn: HTMLButtonElement | undefined;
+  let hostBtn: HTMLButtonElement | undefined;
+  let settingsModelBtn: HTMLButtonElement | undefined;
   let heartbeatTimer: any = null;
 
   const activeHost = createMemo(() => {
@@ -1926,7 +1935,7 @@ export default function RemoteCodePage() {
         continue;
       }
       // Text-likes convert in the background (pdf/office may take seconds).
-      const needsConvert = kind === "office" || sniff.officeFormat;
+      const needsConvert = kind === "office" || !!sniff.officeFormat;
       setPendingAttachments((prev) => [
         ...prev,
         { ...base, loading: needsConvert, text: needsConvert ? (sniff.officeFormat === "pdf" ? "Extracting PDF..." : "Converting document...") : undefined },
@@ -2138,7 +2147,7 @@ export default function RemoteCodePage() {
 
   function exitSelectionMode() {
     setSelectionMode(false);
-    setSelectedSessions(new Set());
+    setSelectedSessions(new Set<string>());
   }
 
   async function pinSelected() {
@@ -2520,11 +2529,7 @@ export default function RemoteCodePage() {
     if (isMobile()) setSidebarOpen(false);
     const onResize = () => {
       try {
-        setIsMobile(
-          /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) &&
-            "ontouchstart" in window &&
-            window.innerWidth <= 768,
-        );
+        setIsMobile(window.innerWidth <= 768);
       } catch {}
     };
     window.addEventListener("resize", onResize);
@@ -2567,6 +2572,15 @@ export default function RemoteCodePage() {
     };
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
+    // Floating menus live in a Portal (outside the root div), so outside
+    // clicks never reach the root closer — handle them at document level.
+    const onDocDown = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.closest("[data-floatmenu]") || t.closest("[data-menubtn]"))) return;
+      closeMenus();
+    };
+    document.addEventListener("pointerdown", onDocDown);
+    onCleanup(() => document.removeEventListener("pointerdown", onDocDown));
   });
 
   createEffect(() => {
@@ -2613,7 +2627,6 @@ export default function RemoteCodePage() {
     setFilesMenuOpen(false);
     setModelMenuOpen(false);
     setUsageOpen(false);
-    setDropMenu(null);
   }
 
   onCleanup(() => {
@@ -3167,8 +3180,10 @@ export default function RemoteCodePage() {
                     <Iconify icon={selectionMode() ? "lucide:x" : "lucide:list-todo"} size={13} />
                   </button>
                   {/* Display Options */}
-            <div class="relative shrink-0">
+            <div class="shrink-0">
               <button
+                ref={displayBtn}
+                data-menubtn
                 onClick={(e) => {
                   e.stopPropagation();
                   setDisplayMenuOpen(!displayMenuOpen());
@@ -3179,11 +3194,7 @@ export default function RemoteCodePage() {
               >
                 <Iconify icon="lucide:list-filter" size={14} />
               </button>
-              <Show when={displayMenuOpen()}>
-                <div
-                  onClick={(e) => e.stopPropagation()}
-                  class="absolute left-0 top-full mt-1 w-52 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-50 text-xs"
-                >
+              <FloatMenu anchor={() => displayBtn} open={displayMenuOpen()} placement="bottom-start" width="13rem">
                   <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
                     Group by
                   </div>
@@ -3222,12 +3233,13 @@ export default function RemoteCodePage() {
                       </button>
                     )}
                   </For>
-                </div>
-              </Show>
+              </FloatMenu>
             </div>
                   {/* New Project split button (Antigravity: New Project / Quick Start) */}
-                <div class="relative">
+                <div>
                   <button
+                    ref={newProjBtn}
+                    data-menubtn
                     onClick={(e) => {
                       e.stopPropagation();
                       setNewProjectMenuOpen(!newProjectMenuOpen());
@@ -3238,11 +3250,7 @@ export default function RemoteCodePage() {
                   >
                     <Iconify icon="lucide:folder-plus" size={13} />
                   </button>
-                  <Show when={newProjectMenuOpen()}>
-                    <div
-                      onClick={(e) => e.stopPropagation()}
-                      class="absolute left-0 top-full mt-1 w-44 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-50 text-xs"
-                    >
+                  <FloatMenu anchor={() => newProjBtn} open={newProjectMenuOpen()} placement="bottom-start" width="11rem">
                       <button
                         onClick={() => {
                           setNewProjectMenuOpen(false);
@@ -3263,8 +3271,7 @@ export default function RemoteCodePage() {
                         <Iconify icon="lucide:zap" size={13} />
                         <span>Quick Start</span>
                       </button>
-                    </div>
-                  </Show>
+                  </FloatMenu>
                   </div>
                 </div>
               </div>
@@ -3386,26 +3393,16 @@ export default function RemoteCodePage() {
           <div class="p-2 border-t border-line/70 space-y-1">
             <div class="flex items-center gap-1.5 px-1">
               <span class={`w-1.5 h-1.5 rounded-full shrink-0 ${activeHost()?.status === "online" ? "bg-emerald-500" : "bg-amber-500"}`} />
-              <button
-                onClick={(e) =>
-                  openDropMenu(
-                    e,
-                    hosts().map((h) => ({
-                      value: h.id,
-                      label: h.name || h.hostname || h.id,
-                      sub: h.status || "offline",
-                      dot: h.status === "online" ? "bg-emerald-500" : "bg-amber-500",
-                    })),
-                    activeHostId(),
-                    (v) => setActiveHostId(v),
-                  )
-                }
-                class="flex-1 min-w-0 flex items-center gap-1 text-xs text-ink-300 font-medium truncate hover:text-ink-100 cursor-pointer"
-                title="Switch host"
-              >
-                <span class="truncate">{activeHost()?.name || activeHost()?.hostname || "No host"}</span>
-                <Iconify icon="lucide:chevron-down" size={11} class="shrink-0 text-ink-600" />
-              </button>
+              <div class="flex-1 min-w-0">
+                <Select
+                  value={activeHostId()}
+                  onChange={(v) => setActiveHostId(v)}
+                  options={hosts().map((h) => ({
+                    value: h.id,
+                    label: `${h.name || h.hostname || h.id} (${h.status || "offline"})`,
+                  }))}
+                />
+              </div>
               <button
                 onClick={loadHosts}
                 class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer shrink-0"
@@ -3424,8 +3421,10 @@ export default function RemoteCodePage() {
                 <Iconify icon="lucide:plus" size={12} />
               </button>
             </div>
+            {/* () => … — openSettings takes an optional section id; passing it
+                directly would feed the MouseEvent in as the section. */}
             <button
-              onClick={openSettings}
+              onClick={() => openSettings()}
               class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-ink-500 hover:text-ink-200 hover:bg-ink-900/60 transition-colors cursor-pointer"
             >
               <Iconify icon="lucide:settings" size={14} />
@@ -4270,8 +4269,10 @@ export default function RemoteCodePage() {
                 <div class="flex items-center gap-0.5 text-xs text-ink-400">
                   {/* Session files (stored on the daemon) */}
                   <Show when={(sessionFiles()[activeSessionId()] || []).length > 0}>
-                    <div class="relative">
+                    <div>
                       <button
+                        ref={filesBtn}
+                        data-menubtn
                         onClick={(e) => {
                           e.stopPropagation();
                           setFilesMenuOpen(!filesMenuOpen());
@@ -4284,11 +4285,7 @@ export default function RemoteCodePage() {
                         <Iconify icon="lucide:paperclip" size={13} />
                         <span>{(sessionFiles()[activeSessionId()] || []).length}</span>
                       </button>
-                      <Show when={filesMenuOpen()}>
-                        <div
-                          onClick={(e) => e.stopPropagation()}
-                          class="absolute left-0 bottom-full mb-1.5 w-60 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-[60]"
-                        >
+                      <FloatMenu anchor={() => filesBtn} open={filesMenuOpen()} placement="top-start" width="15rem">
                           <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
                             Session files
                           </div>
@@ -4310,13 +4307,14 @@ export default function RemoteCodePage() {
                               )}
                             </For>
                           </div>
-                        </div>
-                      </Show>
+                      </FloatMenu>
                     </div>
                   </Show>
                   {/* Add Context (+) — Antigravity-style */}
-                  <div class="relative">
+                  <div>
                     <button
+                      ref={addBtn}
+                      data-menubtn
                       onClick={(e) => {
                         e.stopPropagation();
                         setAddContextOpen(!addContextOpen());
@@ -4327,11 +4325,7 @@ export default function RemoteCodePage() {
                     >
                       <Iconify icon="lucide:plus" size={14} />
                     </button>
-                    <Show when={addContextOpen()}>
-                      <div
-                        onClick={(e) => e.stopPropagation()}
-                        class="absolute left-0 bottom-full mb-1.5 w-48 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-[60]"
-                      >
+                    <FloatMenu anchor={() => addBtn} open={addContextOpen()} placement="top-start" width="12rem">
                         <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
                           Add context
                         </div>
@@ -4371,8 +4365,7 @@ export default function RemoteCodePage() {
                           <Iconify icon="lucide:slash" size={13} />
                           <span>Actions</span>
                         </button>
-                      </div>
-                    </Show>
+                      </FloatMenu>
                   </div>
                   {/* Expand to fullscreen editor (chatbot LargeEditor) */}
                   <button
@@ -4387,8 +4380,10 @@ export default function RemoteCodePage() {
                     <Iconify icon="lucide:expand" size={13} />
                   </button>
                   {/* Model picker (moved from the removed topbar) */}
-                  <div class="relative">
+                  <div>
                     <button
+                      ref={modelBtn}
+                      data-menubtn
                       onClick={(e) => {
                         e.stopPropagation();
                         setModelMenuOpen(!modelMenuOpen());
@@ -4401,11 +4396,7 @@ export default function RemoteCodePage() {
                       <span class="max-w-[130px] truncate">{activeModel().split("/").pop()}</span>
                       <Iconify icon="lucide:chevron-down" size={11} />
                     </button>
-                    <Show when={modelMenuOpen()}>
-                      <div
-                        onClick={(e) => e.stopPropagation()}
-                        class="absolute left-0 bottom-full mb-1.5 w-64 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-[60]"
-                      >
+                    <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="16rem">
                         <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider flex items-center justify-between">
                           <span>Model</span>
                           <button
@@ -4480,16 +4471,12 @@ export default function RemoteCodePage() {
                           <Iconify icon="lucide:chart-column" size={13} />
                           <span>View Usage</span>
                         </button>
-                      </div>
-                    </Show>
-                    <Show when={usageOpen()}>
-                      <div
-                        onClick={(e) => e.stopPropagation()}
-                        class="absolute left-0 bottom-full mb-1.5 w-64 rounded-xl border border-line bg-ink-900 shadow-2xl p-3 z-[60] text-xs"
-                      >
+                    </FloatMenu>
+                    <FloatMenu anchor={() => modelBtn} open={usageOpen()} placement="top-start" width="16rem">
+                      <div class="p-1.5 text-xs">
                         <div class="font-semibold text-ink-200 mb-2">Session usage</div>
                         <Show
-                          when={activeSessionId() && sessionUsage()[activeSessionId()]}
+                          when={activeUsage()}
                           fallback={
                             <p class="text-ink-500 text-[11px]">
                               No usage reported yet. Run the agent to see input / cache / output tokens here.
@@ -4509,7 +4496,7 @@ export default function RemoteCodePage() {
                           )}
                         </Show>
                       </div>
-                    </Show>
+                    </FloatMenu>
                   </div>
                 </div>
 
@@ -4548,7 +4535,7 @@ export default function RemoteCodePage() {
                 class="hidden"
                 multiple
                 onChange={(e) => {
-                  handleFiles(e.currentTarget.files);
+                  handleFiles(e.currentTarget.files ?? []);
                   e.currentTarget.value = "";
                 }}
               />
@@ -5067,30 +5054,15 @@ export default function RemoteCodePage() {
               </h3>
               <div class="space-y-4 text-xs">
                 <div>
-                  <label class="block font-semibold text-ink-200 mb-1">
-                    Default Model
-                  </label>
-                  <button
-                    onClick={(e) =>
-                      openDropMenu(
-                        e,
-                        gatewayModels().map((m) => ({ value: m.id, label: m.name || m.id })),
-                        daemonSettings().model,
-                        (v) => {
-                          setDaemonSettings({ ...daemonSettings(), model: v });
-                          setActiveModel(v);
-                        },
-                        false,
-                      )
-                    }
-                    class="w-full flex items-center justify-between gap-2 bg-ink-900 border border-line rounded-xl px-3 py-2 text-ink-100 cursor-pointer hover:border-ink-500"
-                  >
-                    <span class="truncate">
-                      {gatewayModels().find((m) => m.id === daemonSettings().model)?.name ||
-                        daemonSettings().model}
-                    </span>
-                    <Iconify icon="lucide:chevron-down" size={13} class="shrink-0 text-ink-500" />
-                  </button>
+                  <Select
+                    label="Default Model"
+                    value={daemonSettings().model}
+                    onChange={(v) => {
+                      setDaemonSettings({ ...daemonSettings(), model: v });
+                      setActiveModel(v);
+                    }}
+                    options={gatewayModels().map((m) => ({ value: m.id, label: m.name || m.id }))}
+                  />
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">

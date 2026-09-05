@@ -26,6 +26,7 @@ import {
   Icons,
   ThemeToggle,
   Toasts,
+  Tooltip,
   toast,
   watchSystemTheme,
 } from "./ui";
@@ -129,27 +130,25 @@ export { LogoMark };
 function RailItem(props: { item: NavItem; current: string; badge?: number }) {
   const active = () => isActive(props.item, props.current);
   return (
-    <a
-      href={`#${props.item.path}`}
-      class={`group relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200 ${
-        active()
-          ? "bg-brand-500/10 text-brand-500"
-          : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/60"
-      }`}
-      aria-label={props.item.label}
-      aria-current={active() ? "page" : undefined}
-    >
-      <Icon name={props.item.icon} size={22} />
-      <Show when={(props.badge ?? 0) > 0}>
-        <span class="absolute top-1 right-1 min-w-4 h-4 px-1 rounded-full bg-brand-500 text-white text-[9px] font-bold leading-4 text-center tabular-nums">
-          {props.badge}
-        </span>
-      </Show>
-      {/* tooltip */}
-      <span class="pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-4 whitespace-nowrap rounded-lg border border-line bg-elev px-2.5 py-1.5 text-xs font-medium text-ink-100 shadow-xl shadow-black/10 opacity-0 translate-x-1 transition-all duration-200 group-hover:opacity-100 group-hover:translate-x-0 z-50">
-        {props.item.label}
-      </span>
-    </a>
+    <Tooltip content={props.item.label} placement="right" delay={50}>
+      <a
+        href={`#${props.item.path}`}
+        class={`relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200 ${
+          active()
+            ? "bg-brand-500/10 text-brand-500"
+            : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/60"
+        }`}
+        aria-label={props.item.label}
+        aria-current={active() ? "page" : undefined}
+      >
+        <Icon name={props.item.icon} size={22} />
+        <Show when={(props.badge ?? 0) > 0}>
+          <span class="absolute top-1 right-1 min-w-4 h-4 px-1 rounded-full bg-brand-500 text-white text-[9px] font-bold leading-4 text-center tabular-nums">
+            {props.badge}
+          </span>
+        </Show>
+      </a>
+    </Tooltip>
   );
 }
 
@@ -227,17 +226,16 @@ function AppShell(props: { children: JSX.Element }) {
           </Show>
         </nav>
         <div class="flex flex-col items-center gap-1.5">
-          <ThemeToggle />
-          <button
-            onClick={logout}
-            class="group relative flex h-10 w-10 items-center justify-center rounded-xl text-ink-400 hover:text-rose-500 hover:bg-rose-500/10 transition-all duration-200 cursor-pointer"
-            aria-label="Sign out"
-          >
-            <Icon name={Icons.logout} size={22} />
-            <span class="pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-4 whitespace-nowrap rounded-lg border border-line bg-elev px-2.5 py-1.5 text-xs font-medium text-ink-100 shadow-xl shadow-black/10 opacity-0 translate-x-1 transition-all duration-200 group-hover:opacity-100 group-hover:translate-x-0 z-50">
-              Sign out
-            </span>
-          </button>
+          <ThemeToggle tooltipPlacement="right" />
+          <Tooltip content="Sign out" placement="right" delay={50}>
+            <button
+              onClick={logout}
+              class="flex h-10 w-10 items-center justify-center rounded-xl text-ink-400 hover:text-rose-500 hover:bg-rose-500/10 transition-all duration-200 cursor-pointer"
+              aria-label="Sign out"
+            >
+              <Icon name={Icons.logout} size={22} />
+            </button>
+          </Tooltip>
         </div>
       </aside>
 

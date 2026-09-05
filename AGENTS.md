@@ -158,6 +158,20 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   are passed from the `--chart-*` CSS vars so white/dark flip for free; chart
   entrance animations live in the stylesheet because the library does not
   animate series natively yet).
+  Floating layers (tooltips, `<Select>` menus, `<FloatMenu>` popovers) run on
+  `@floating-ui/dom` (user-sanctioned — the vanilla build, never the React
+  one) through `web/src/floating.tsx`: `anchorFloat()` (flip + shift +
+  autoUpdate, optional `matchWidth`/`maxHeight` via `size()`), the getter-based
+  `useFloating()`, the `<FloatMenu>` wrapper, and the single z-index scale `Z`
+  (modal 50 < toast 60 < floating 70 — Modal/Toasts read it too). Every
+  overlay mounts in a `<Portal>` so nothing is clipped by an ancestor's
+  overflow or stacking context; `anchorFloat` positions via **left/top, not
+  transform**, so the `anim-float-in` entrance (transform-origin set from the
+  resolved placement) is safe on the positioned element itself. Call it from a
+  `ref` callback inside `<Show>` — the cleanup is owned by the Show and
+  autoUpdate stops on close. The `Tooltip` UI-kit component replaces native
+  `title` (IconBtn/ThemeToggle/rail use it; hover-capable pointers + keyboard
+  focus only, touch taps don't pin tooltips).
   Usage AND entity tables are AG Grid (`ag-grid-community` + `solid-ag-grid`,
   user-sanctioned — wrapper in `web/src/aggrid.tsx`): usage breakdowns, recent
   requests, admin top users/models, user + admin keys, admin users, admin

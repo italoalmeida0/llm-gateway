@@ -9,7 +9,9 @@ import {
   type JSX,
 } from "solid-js";
 import { Portal } from "solid-js/web";
+import type { Placement } from "@floating-ui/dom";
 
+import { anchorFloat, Z } from "./floating";
 import { usalCount } from "./motion";
 
 /**
@@ -146,26 +148,33 @@ export function watchSystemTheme(): void {
   mq.addEventListener?.("change", apply);
 }
 
-export function ThemeToggle(props: { class?: string }) {
+export function ThemeToggle(props: {
+  class?: string;
+  tooltipPlacement?: Placement;
+}) {
   return (
-    <button
-      type="button"
-      onClick={toggleTheme}
-      title={
+    <Tooltip
+      content={
         theme() === "dark" ? "Switch to light theme" : "Switch to dark theme"
       }
-      aria-label="Toggle theme"
-      class={`relative flex h-10 w-10 items-center justify-center rounded-xl text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 transition-all duration-300 cursor-pointer ${props.class ?? ""}`}
+      placement={props.tooltipPlacement ?? "bottom"}
     >
-      <span
-        class="flex items-center justify-center transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
-        style={{
-          transform: theme() === "dark" ? "rotate(0deg)" : "rotate(180deg)",
-        }}
+      <button
+        type="button"
+        onClick={toggleTheme}
+        aria-label="Toggle theme"
+        class={`relative flex h-10 w-10 items-center justify-center rounded-xl text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 transition-all duration-300 cursor-pointer ${props.class ?? ""}`}
       >
-        <Icon name={theme() === "dark" ? Icons.sun : Icons.moon} size={18} />
-      </span>
-    </button>
+        <span
+          class="flex items-center justify-center transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
+          style={{
+            transform: theme() === "dark" ? "rotate(0deg)" : "rotate(180deg)",
+          }}
+        >
+          <Icon name={theme() === "dark" ? Icons.sun : Icons.moon} size={18} />
+        </span>
+      </button>
+    </Tooltip>
   );
 }
 
@@ -194,16 +203,21 @@ export function Btn(props: {
   }[props.variant ?? "primary"];
   const size =
     props.size === "sm" ? "text-xs px-2.5 py-1.5" : "text-sm px-4 py-2";
-  return (
+  const btn = (
     <button
       type={props.type ?? "button"}
       class={`${base} ${variant} ${size} ${props.class ?? ""}`}
       onClick={props.onClick}
       disabled={props.disabled}
-      title={props.title}
     >
       {props.children}
     </button>
+  );
+  // title floats as a themed Tooltip (never two competing labels).
+  return props.title ? (
+    <Tooltip content={props.title}>{btn}</Tooltip>
+  ) : (
+    btn
   );
 }
 
@@ -255,7 +269,8 @@ export function IconTile(props: { icon: string; class?: string }) {
 }
 
 /** Standardized icon-only row/list action button. Neutral by default;
- *  `danger` turns rose on hover. The label lives in title + aria-label. */
+ *  `danger` turns rose on hover. The label lives in a floating Tooltip +
+ *  aria-label (no native title, so grids/modals never clip it). */
 export function IconBtn(props: {
   icon: string;
   title: string;
@@ -264,20 +279,21 @@ export function IconBtn(props: {
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      title={props.title}
-      aria-label={props.title}
-      disabled={props.disabled}
-      onClick={props.onClick}
-      class={`flex items-center justify-center rounded-lg p-2 transition-all duration-200 active:scale-[0.95] disabled:opacity-40 disabled:pointer-events-none cursor-pointer ${
-        props.danger
-          ? "text-ink-400 hover:text-rose-500 hover:bg-rose-500/10"
-          : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/60"
-      }`}
-    >
-      <Icon name={props.icon} size={16} />
-    </button>
+    <Tooltip content={props.title}>
+      <button
+        type="button"
+        aria-label={props.title}
+        disabled={props.disabled}
+        onClick={props.onClick}
+        class={`flex items-center justify-center rounded-lg p-2 transition-all duration-200 active:scale-[0.95] disabled:opacity-40 disabled:pointer-events-none cursor-pointer ${
+          props.danger
+            ? "text-ink-400 hover:text-rose-500 hover:bg-rose-500/10"
+            : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/60"
+        }`}
+      >
+        <Icon name={props.icon} size={16} />
+      </button>
+    </Tooltip>
   );
 }
 
@@ -443,6 +459,9 @@ export function Input(props: {
 /**
  * Custom dropdown select — no native <select> popup. Keyboard: ↑/↓ move,
  * Enter/Space pick, Esc close; clicks outside close. Same API as before.
+ * The listbox mounts in a Portal anchored by floating-ui, so it flips above
+ * the trigger near the viewport edge, shrinks to the available height, and
+ * is never clipped by an ancestor's overflow (e.g. inside a Modal).
  */
 export function Select(props: {
   label?: string;
@@ -454,6 +473,8 @@ export function Select(props: {
   const [open, setOpen] = createSignal(false);
   const [highlight, setHighlight] = createSignal(0);
   let root: HTMLDivElement | undefined;
+  let btnRef: HTMLButtonElement | undefined;
+  let listRef: HTMLDivElement | undefined;
 
   const current = () =>
     props.options.find((o) => o.value === props.value) ?? {
@@ -462,7 +483,9 @@ export function Select(props: {
     };
 
   const onDocClick = (e: MouseEvent) => {
-    if (root && !root.contains(e.target as Node)) setOpen(false);
+    const t = e.target as Node;
+    if (root?.contains(t) || listRef?.contains(t)) return;
+    setOpen(false);
   };
   const onDocKey = (e: KeyboardEvent) => {
     if (e.key === "Escape") setOpen(false);
@@ -516,7 +539,6 @@ export function Select(props: {
     }
   };
 
-  let listRef: HTMLDivElement | undefined;
   createEffect(() => {
     if (!open()) return;
     highlight();
@@ -536,6 +558,7 @@ export function Select(props: {
       </Show>
       <div ref={root} class="relative" onKeyDown={onKeyDown}>
         <button
+          ref={btnRef}
           type="button"
           onClick={() => (open() ? setOpen(false) : openMenu())}
           aria-haspopup="listbox"
@@ -552,11 +575,27 @@ export function Select(props: {
           />
         </button>
         <Show when={open()}>
-          <div
-            ref={listRef}
-            role="listbox"
-            class="anim-pop-in absolute left-0 right-0 top-full mt-1.5 z-40 max-h-64 overflow-y-auto rounded-xl border border-line bg-elev p-1 shadow-xl shadow-black/10"
-          >
+          {/* Portal + floating-ui: escapes overflow-clipping ancestors and
+              the modal layer. Width tracks the trigger (matchWidth), height
+              shrinks to the resolved side (maxHeight 256 = the old max-h-64).
+              The anchorFloat cleanup is owned by this <Show> — autoUpdate
+              stops the moment the menu closes. */}
+          <Portal>
+            <div
+              ref={(el) => {
+                listRef = el;
+                onCleanup(
+                  anchorFloat(btnRef!, el, {
+                    placement: "bottom-start",
+                    gap: 6,
+                    matchWidth: true,
+                    maxHeight: 256,
+                  }),
+                );
+              }}
+              role="listbox"
+              class="anim-float-in overflow-y-auto rounded-xl border border-line bg-elev p-1 shadow-xl shadow-black/10"
+            >
             <For each={props.options}>
               {(o, i) => (
                 <button
@@ -581,13 +620,90 @@ export function Select(props: {
                 </button>
               )}
             </For>
-          </div>
+            </div>
+          </Portal>
         </Show>
       </div>
       <Show when={props.hint}>
         <span class="block text-xs text-ink-500 mt-1.5">{props.hint}</span>
       </Show>
     </label>
+  );
+}
+
+/**
+ * Floating-ui tooltip: hover (hover-capable pointers) or keyboard focus shows
+ * it; flip + shift keep it inside the viewport; Portal above the modal layer.
+ * Replaces native `title` — instant, themed, never clipped.
+ */
+export function Tooltip(props: {
+  content: JSX.Element;
+  placement?: Placement;
+  /** Hover-intent delay in ms (default 150). */
+  delay?: number;
+  children: JSX.Element;
+}) {
+  const [show, setShow] = createSignal(false);
+  let anchor: HTMLSpanElement | undefined;
+  let showTimer: number | undefined;
+
+  const open = () => {
+    // Touch pointers don't hover — a tap shouldn't pin a tooltip on screen.
+    if (!window.matchMedia("(hover: hover)").matches) return;
+    window.clearTimeout(showTimer);
+    showTimer = window.setTimeout(
+      () => setShow(true),
+      props.delay ?? 150,
+    );
+  };
+  const close = () => {
+    window.clearTimeout(showTimer);
+    setShow(false);
+  };
+  const onFocusIn = () => {
+    // Keyboard focus only (the wrapper itself is never focusable).
+    if (anchor?.querySelector(":focus-visible")) setShow(true);
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") close();
+  };
+  onMount(() => window.addEventListener("keydown", onKey));
+  onCleanup(() => {
+    window.removeEventListener("keydown", onKey);
+    window.clearTimeout(showTimer);
+  });
+
+  return (
+    <>
+      <span
+        ref={anchor}
+        class="inline-flex max-w-full"
+        onMouseEnter={open}
+        onMouseLeave={close}
+        onFocusIn={onFocusIn}
+        onFocusOut={close}
+      >
+        {props.children}
+      </span>
+      <Show when={show()}>
+        <Portal>
+          <div
+            ref={(el) => {
+              onCleanup(
+                anchorFloat(anchor!, el, {
+                  placement: props.placement ?? "top",
+                  gap: 8,
+                }),
+              );
+            }}
+            role="tooltip"
+            class="anim-float-in pointer-events-none max-w-60 rounded-lg border border-line bg-elev px-2.5 py-1.5 text-xs font-medium text-ink-100 shadow-xl shadow-black/10"
+          >
+            {props.content}
+          </div>
+        </Portal>
+      </Show>
+    </>
   );
 }
 
@@ -635,7 +751,8 @@ export function Modal(props: {
           data-usal here (retained transforms/filters break fixed layouts). */}
       <Portal>
         <div
-          class="fixed inset-0 z-50 overflow-y-auto bg-black/55 backdrop-blur-sm"
+          class="fixed inset-0 overflow-y-auto bg-black/55 backdrop-blur-sm"
+          style={`z-index: ${Z.modal}`}
           onMouseDown={() => props.onClose()}
           role="dialog"
           aria-modal="true"
@@ -693,7 +810,10 @@ export function toast(text: string, kind: "ok" | "err" = "ok"): void {
 
 export function Toasts() {
   return (
-    <div class="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 items-end">
+    <div
+      class="fixed bottom-4 right-4 flex flex-col gap-2 items-end"
+      style={`z-index: ${Z.toast}`}
+    >
       <For each={toasts()}>
         {(t) => (
           <div

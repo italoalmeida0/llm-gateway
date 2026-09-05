@@ -253,6 +253,16 @@ html.theme-xfade body * {
     transform: scaleY(1);
   }
 }
+@keyframes float-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
 
 /* fill-mode "backwards" (not "both"): a retained `transform` would create a
    containing block and break position:fixed descendants (e.g. modal). */
@@ -264,6 +274,12 @@ html.theme-xfade body * {
 }
 .anim-pop-in {
   animation: pop-in 0.18s ease-out backwards;
+}
+/* Floating-ui layers (tooltips, select menus): floating.ts positions via
+   left/top and sets transformOrigin from the resolved placement, so this
+   transform animation is safe — no fight over the inline transform. */
+.anim-float-in {
+  animation: float-in 0.14s ease-out backwards;
 }
 
 /* solid-charts renders plain SVG, so keep its entrance motion in CSS. */
@@ -351,6 +367,7 @@ input[type="number"]::-webkit-inner-spin-button {
   .anim-fade-in,
   .anim-slide-in,
   .anim-pop-in,
+  .anim-float-in,
   .chart-bar,
   .chart-area,
   .chart-line {

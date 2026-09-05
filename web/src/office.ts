@@ -134,11 +134,16 @@ async function getPandoc(): Promise<{ instance: any; fs: Map<string, any>; File:
     new PreopenDirectory("/", (pandocFS = new Map())),
   ];
   const wasi = new WASI(args, [], fds, { debug: false });
-  const { instance } = await WebAssembly.instantiateStreaming(
+  const { instance: rawInstance } = await WebAssembly.instantiateStreaming(
     fetch("/pandoc.wasm"),
     { wasi_snapshot_preview1: wasi.wasiImport },
   );
-  wasi.initialize(instance);
+  // pandoc.wasm's exports (malloc/hs_init_with_rtsopts/…) are plain function
+  // values — the typed WebAssembly.Exports union has no call signatures.
+  const instance = rawInstance as unknown as {
+    exports: Record<string, any> & { memory: WebAssembly.Memory };
+  };
+  wasi.initialize(rawInstance);
   instance.exports.__wasm_call_ctors();
 
   const view = () => new DataView(instance.exports.memory.buffer);

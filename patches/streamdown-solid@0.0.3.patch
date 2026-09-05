@@ -1,0 +1,13 @@
+diff --git a/src/code-block.tsx b/src/code-block.tsx
+index 179ba82790d0521f275f5d4ad7aaf2d0349b2944..9769fb6b4c19ee454c0b9498854531c8e44bd231 100644
+--- a/src/code-block.tsx
++++ b/src/code-block.tsx
+@@ -251,7 +251,7 @@ export type CodeBlockDownloadButtonProps = {
+   [key: string]: any
+ }
+ 
+-const languageExtensionMap: Record<BundledLanguage, string> = {
++const languageExtensionMap: Partial<Record<BundledLanguage, string>> = {
+   '1c': '1c',
+   '1c-query': '1cq',
+   abap: 'abap',

@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",
+    "@floating-ui/dom": "^1.8.0",
     "@opendocsg/pdf2md": "^0.3.0",
     "ag-grid-community": "31.1.1",
     "highlight.js": "^11.12.0",
@@ -50,5 +51,8 @@
     "postcss": "^8.5.26",
     "solid-js": "^1.9.14",
     "tailwindcss": "^4.3.3"
+  },
+  "patchedDependencies": {
+    "streamdown-solid@0.0.3": "patches/streamdown-solid@0.0.3.patch"
   }
 }

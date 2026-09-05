@@ -59,6 +59,15 @@ type Model struct {
 	Source string
 }
 
+// Gateway note: the daemon only speaks to the gateway's OpenAI-compatible
+// /v1 endpoint, so vendor-native clients were removed. The constants below
+// preserve the catalog data that referenced them.
+const (
+	APIResponses             = "openai-responses"
+	openrouterDefaultBaseURL = "https://openrouter.ai/api/v1"
+	gondolaDefaultBaseURL    = "https://api.gondola-ai.com/v1"
+)
+
 // Catalog is the hardcoded, read-only list of supported models.
 // Prices are USD per 1M tokens. The list is curated to what zot's
 // clients (Anthropic Messages + OpenAI Chat Completions) can actually

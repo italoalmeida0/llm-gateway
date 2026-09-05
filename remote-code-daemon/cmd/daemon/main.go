@@ -295,8 +295,16 @@ func (d *DaemonServer) loadConfig() error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return err
 	}
-	if cfg.Settings.AutoCompactThreshold == 0 {
-		cfg.Settings.AutoCompactThreshold = 85
+	// 0 = off is a valid choice; only fresh configs (key absent) get the default.
+	thresholdPresent := false
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err == nil {
+		if settings, ok := raw["settings"].(map[string]any); ok {
+			_, thresholdPresent = settings["auto_compact_threshold"]
+		}
+	}
+	if !thresholdPresent && cfg.Settings.AutoCompactThreshold == 0 {
+		cfg.Settings.AutoCompactThreshold = 95
 	}
 	if cfg.Settings.ToolRender == "" {
 		cfg.Settings.ToolRender = "box"
@@ -374,7 +382,7 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 	if d.config == nil {
 		d.config = &DaemonConfig{
 			Settings: ZotSettings{
-				AutoCompactThreshold: 85,
+				AutoCompactThreshold: 95,
 				RespectGitignore:     true,
 				ToolRender:           "box",
 				Reasoning:            "medium",
@@ -1447,6 +1455,48 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		_ = json.Unmarshal(raw, &req)
 		d.handleSlashCommand(req.SessionID, "/clear")
 
+	case "set_model":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Model     string `json:"model"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		if req.SessionID == "" || strings.TrimSpace(req.Model) == "" {
+			return
+		}
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil {
+			return
+		}
+		rec.Model = strings.TrimSpace(req.Model)
+		rec.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(rec)
+		d.sessionsMu.RLock()
+		if act, ok := d.sessions[req.SessionID]; ok {
+			act.mu.Lock()
+			act.record.Model = rec.Model
+			act.record.UpdatedAt = rec.UpdatedAt
+			act.mu.Unlock()
+		}
+		d.sessionsMu.RUnlock()
+		_ = d.sendWS(map[string]any{
+			"type":      "session_model",
+			"hostId":    d.config.HostID,
+			"sessionId": rec.ID,
+			"model":     rec.Model,
+		})
+
+	case "set_reasoning":
+		var req struct {
+			Effort string `json:"effort"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		switch strings.ToLower(strings.TrimSpace(req.Effort)) {
+		case "off", "low", "medium", "high":
+			d.config.Settings.Reasoning = strings.ToLower(strings.TrimSpace(req.Effort))
+			_ = d.saveConfig()
+		}
+
 	case "prompt":
 		var req struct {
 			SessionID     string   `json:"sessionId"`
@@ -1504,13 +1554,29 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 
 	switch head {
 	case "/clear":
-		act.record.Messages = nil
-		act.record.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(act.record)
+		// /clear starts a fresh blank session (same folder/model) instead of
+		// wiping the transcript. History stays on disk under the old session.
+		now := time.Now().UnixMilli()
+		rec := &SessionRecord{
+			ID:        fmt.Sprintf("sess_%d", time.Now().UnixNano()/1000),
+			CWD:       act.record.CWD,
+			Title:     "New conversation",
+			Model:     act.record.Model,
+			Status:    "idle",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := d.saveSession(rec); err != nil {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"message": "Failed to create session: " + err.Error(),
+			})
+			return
+		}
 		_ = d.sendWS(map[string]any{
-			"type":      "session_cleared",
-			"hostId":    d.config.HostID,
-			"sessionId": act.record.ID,
+			"type":    "session_created",
+			"hostId":  d.config.HostID,
+			"session": sessionPayload(rec),
 		})
 		return
 
@@ -1544,12 +1610,20 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 	case "/jail":
 		d.config.Settings.JailByDefault = true
 		_ = d.saveConfig()
-		reply = "🔒 **Tools jailed**: Agent tools are now strictly confined to `" + act.record.CWD + "`."
+		_ = d.sendWS(map[string]any{
+			"type": "notice", "hostId": d.config.HostID, "sessionId": act.record.ID,
+			"message": "Tools jailed to " + act.record.CWD,
+		})
+		return
 
 	case "/unjail":
 		d.config.Settings.JailByDefault = false
 		_ = d.saveConfig()
-		reply = "🔓 **Tools unjailed**: Agent tools can now access paths outside the session directory."
+		_ = d.sendWS(map[string]any{
+			"type": "notice", "hostId": d.config.HostID, "sessionId": act.record.ID,
+			"message": "Tools unjailed — external paths allowed",
+		})
+		return
 
 	case "/model":
 		if arg != "" {
@@ -1613,7 +1687,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 	case "/help":
 		reply = "### ⚡ Remote Agent Slash Commands\n" +
 			"- `/compact` — Summarize and compact conversation to free up context\n" +
-			"- `/clear` — Clear the current session transcript\n" +
+			"- `/clear` — Start a fresh blank session (history is kept)\n" +
 			"- `/jail` — Confine agent tools strictly to session directory\n" +
 			"- `/unjail` — Allow agent tools to read/write external paths\n" +
 			"- `/model <name>` — Switch the active model\n" +
@@ -1977,6 +2051,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 	_ = agent.Prompt(ctx, fullPrompt, images, sink)
 
+	// Sliding-window auto-compact: near the context ceiling, summarize the
+	// oldest ~30% so ~70% of recent context is preserved (feels infinite).
+	d.maybeAutoCompact(act, agent)
+
 	// Auto-title the session after its first exchange (chatbot-style).
 	act.mu.Lock()
 	rec := act.record
@@ -1985,6 +2063,99 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	if gen == myGen {
 		d.maybeAutoTitle(rec, client, modelToUse)
 	}
+}
+
+// contextWindowForModel estimates the model's context window in tokens.
+// Heuristic table; unknown models fall back to 200k.
+func contextWindowForModel(model string) int {
+	m := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.Contains(m, "gpt-4.1"), strings.Contains(m, "gemini-2"), strings.Contains(m, "gemini-1.5-flash"):
+		return 1000000
+	case strings.Contains(m, "gemini-1.5-pro"):
+		return 2000000
+	case strings.Contains(m, "gpt-5"):
+		return 400000
+	case strings.Contains(m, "gpt-4o"), strings.Contains(m, "gpt-4-turbo"), strings.Contains(m, "gpt-4"):
+		return 128000
+	case strings.Contains(m, "o1"), strings.Contains(m, "o3"), strings.Contains(m, "o4"):
+		return 200000
+	case strings.Contains(m, "claude"), strings.Contains(m, "anthropic"):
+		return 200000
+	case strings.Contains(m, "deepseek"), strings.Contains(m, "llama"), strings.Contains(m, "mistral"),
+		strings.Contains(m, "qwen"), strings.Contains(m, "kimi"), strings.Contains(m, "moonshot"),
+		strings.Contains(m, "grok"), strings.Contains(m, "grok-"), strings.Contains(m, "gpt-oss"):
+		return 128000
+	default:
+		return 200000
+	}
+}
+
+// maybeAutoCompact triggers an LLM compaction of the oldest ~30% of the
+// transcript once input usage passes the configured threshold percent of
+// the model's context window.
+func (d *DaemonServer) maybeAutoCompact(act *ActiveSession, agent *core.Agent) {
+	threshold := d.config.Settings.AutoCompactThreshold
+	if threshold <= 0 || agent == nil {
+		return
+	}
+	act.mu.Lock()
+	model := act.record.Model
+	n := len(act.record.Messages)
+	act.mu.Unlock()
+	if n <= 6 {
+		return
+	}
+	cum := agent.Cost()
+	used := cum.InputTokens + cum.CacheReadTokens + cum.CacheWriteTokens
+	window := contextWindowForModel(model)
+	if window <= 0 || used*100 < threshold*window {
+		return
+	}
+	keepTail := n * 7 / 10
+	if keepTail < 4 {
+		keepTail = 4
+	}
+	if n-keepTail < 2 {
+		return
+	}
+	_ = d.sendWS(map[string]any{
+		"type":      "agent_event",
+		"hostId":    d.config.HostID,
+		"sessionId": act.record.ID,
+		"event":     map[string]any{"type": "compact_progress", "text": "Compacting older context…"},
+	})
+	cctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	summary, err := agent.Compact(cctx, keepTail, func(delta string) {
+		_ = d.sendWS(map[string]any{
+			"type":      "agent_event",
+			"hostId":    d.config.HostID,
+			"sessionId": act.record.ID,
+			"event":     map[string]any{"type": "compact_progress", "text": delta},
+		})
+	})
+	_ = summary
+	if err != nil {
+		return
+	}
+	// Compact() rewrote the agent transcript; mirror it to disk + UI and
+	// reset the local usage baseline (gateway billing is unaffected).
+	act.mu.Lock()
+	act.record.Messages = append([]provider.Message(nil), agent.Messages()...)
+	act.record.UpdatedAt = time.Now().UnixMilli()
+	agent.SeedCost(provider.Usage{})
+	agent.SeedLastTurnUsage(provider.Usage{})
+	rec := act.record
+	act.mu.Unlock()
+	_ = d.saveSession(rec)
+	_ = d.sendWS(map[string]any{
+		"type":      "session_compacted",
+		"hostId":    d.config.HostID,
+		"sessionId": rec.ID,
+		"messages":  rec.Messages,
+		"auto":      true,
+	})
 }
 
 // maybeAutoTitle generates a short LLM title for fresh sessions whose title

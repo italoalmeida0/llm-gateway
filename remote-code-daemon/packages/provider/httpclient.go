@@ -37,19 +37,6 @@ func WithHTTPClient(c Client, httpClient *http.Client) Client {
 	switch v := c.(type) {
 	case *openaiClient:
 		v.http = httpClient
-	case *anthropicClient:
-		v.http = httpClient
-	case *geminiClient:
-		v.http = httpClient
-	case *bedrockClient:
-		v.http = httpClient
-	case *renamedClient:
-		v.inner = WithHTTPClient(v.inner, httpClient)
-	case *modelRouter:
-		v.fallback = WithHTTPClient(v.fallback, httpClient)
-		for api, inner := range v.byAPI {
-			v.byAPI[api] = WithHTTPClient(inner, httpClient)
-		}
 	}
 	return c
 }

@@ -15,6 +15,23 @@ import (
 
 const openaiDefaultBaseURL = "https://api.openai.com"
 
+// usesAdaptiveThinking reports whether a model only supports the adaptive
+// thinking mode (kept from the removed Anthropic client: some gateways
+// expose such models through the OpenAI-compatible wire and they accept
+// the same reasoning_effort knob including the top "xhigh" tier).
+func usesAdaptiveThinking(m Model) bool {
+	if m.AdaptiveThinking || m.AdaptiveThinkingCompat {
+		return true
+	}
+	id := strings.ToLower(m.ID)
+	for _, marker := range []string{"opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8", "opus-5", "opus.5", "sonnet-5", "fable-5"} {
+		if strings.Contains(id, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // versionSegmentSuffix matches a trailing API version segment such as
 // "/v1" or Z.AI's "/v4".
 var versionSegmentSuffix = regexp.MustCompile(`/v\d+$`)

@@ -72,6 +72,8 @@ export interface ChatMessage {
   time?: number;
   attachments?: string[];
   thinkingDuration?: number;
+  /** Synthetic transcript notices (e.g. auto-compaction summaries). */
+  system?: boolean;
 }
 
 export interface PendingApproval {
@@ -120,7 +122,7 @@ const SLASH_COMMANDS = [
   },
   {
     cmd: "/clear",
-    desc: "Wipe all messages in current session",
+    desc: "Start a fresh blank session (history is kept)",
     args: "",
   },
   {
@@ -159,6 +161,218 @@ const SLASH_COMMANDS = [
     args: "",
   },
 ];
+
+/**
+ * Tool presentation helpers (Antigravity-style one-line rows).
+ * The daemon persists raw call args + results; everything human-readable
+ * below is derived locally so transcripts stay exact.
+ */
+
+export function tryParseArgs(a?: string): any {
+  if (!a) return {};
+  try {
+    return JSON.parse(a);
+  } catch {
+    return { _raw: a };
+  }
+}
+
+export function baseNameOf(p?: string): string {
+  if (!p) return "";
+  const t = String(p).replace(/\\/g, "/").replace(/\/+$/, "");
+  const i = t.lastIndexOf("/");
+  return i >= 0 ? t.slice(i + 1) : t;
+}
+
+export function diffStat(text: string): { add: number; del: number } {
+  let add = 0;
+  let del = 0;
+  for (const ln of (text || "").split("\n")) {
+    if (ln.startsWith("+") && !ln.startsWith("+++")) add++;
+    else if (ln.startsWith("-") && !ln.startsWith("---")) del++;
+  }
+  return { add, del };
+}
+
+export interface ToolUnit {
+  call?: ContentBlock;
+  result?: ContentBlock;
+}
+
+/** Pairs each tool_call with its tool_result by call id. */
+export function pairToolUnits(blocks: ContentBlock[]): ToolUnit[] {
+  const units: ToolUnit[] = [];
+  const byId = new Map<string, ToolUnit>();
+  for (const b of blocks) {
+    if (b.type === "tool_call") {
+      const u: ToolUnit = { call: b };
+      units.push(u);
+      if (b.toolId) byId.set(b.toolId, u);
+    } else if (b.type === "tool_result") {
+      const u = (b.toolId && byId.get(b.toolId)) || null;
+      if (u && !u.result) u.result = b;
+      else units.push({ result: b });
+    }
+  }
+  return units;
+}
+
+export type ToolCat = "explore" | "command" | "edit" | "other";
+
+export function toolCatOf(name?: string): ToolCat {
+  if (name === "read" || name === "glob") return "explore";
+  if (name === "bash") return "command";
+  if (name === "edit" || name === "write") return "edit";
+  return "other";
+}
+
+export type MsgPart =
+  | { kind: "blocks"; blocks: ContentBlock[] }
+  | { kind: "tools"; units: ToolUnit[] };
+
+/** Splits a message into text runs and consecutive tool runs (order kept). */
+export function splitToolRuns(blocks: ContentBlock[]): MsgPart[] {
+  const parts: MsgPart[] = [];
+  let buf: ContentBlock[] = [];
+  let run: ToolUnit[] = [];
+  const byId = new Map<string, ToolUnit>();
+  const flushBuf = () => {
+    if (buf.length) {
+      parts.push({ kind: "blocks", blocks: buf });
+      buf = [];
+    }
+  };
+  const flushRun = () => {
+    if (run.length) {
+      parts.push({ kind: "tools", units: run });
+      run = [];
+    }
+  };
+  for (const b of blocks) {
+    if (b.type === "tool_call") {
+      flushBuf();
+      const u: ToolUnit = { call: b };
+      run.push(u);
+      if (b.toolId) byId.set(b.toolId, u);
+    } else if (b.type === "tool_result") {
+      flushBuf();
+      const u = (b.toolId && byId.get(b.toolId)) || null;
+      if (u && !u.result) u.result = b;
+      else run.push({ result: b });
+    } else {
+      flushRun();
+      buf.push(b);
+    }
+  }
+  flushRun();
+  flushBuf();
+  return parts;
+}
+
+export interface ToolSummary {
+  icon: string;
+  verb: string;
+  target: string;
+  stat?: string;
+  statAdd?: number;
+  statDel?: number;
+}
+
+/** One-line Antigravity-style summary for a tool unit. */
+export function toolSummary(u: ToolUnit): ToolSummary {
+  const name = u.call?.toolName || "tool";
+  const args = tryParseArgs(u.call?.toolArgs);
+  const res = u.result?.toolResult || "";
+  switch (name) {
+    case "read": {
+      const off = Number(args.offset || 0);
+      const lines = res ? res.split("\n").length : 0;
+      const lim = Number(args.limit || 0);
+      const end = lim > 0 ? off + lim : off + lines;
+      return {
+        icon: "lucide:file-text",
+        verb: "Analyzed",
+        target: `${baseNameOf(args.path) || args.path || "file"}#L${off + 1}-${Math.max(end, off + 1)}`,
+      };
+    }
+    case "glob": {
+      const n = res ? res.split("\n").filter((l) => l.trim()).length : 0;
+      return {
+        icon: "lucide:search",
+        verb: "Searched",
+        target: String(args.pattern || ""),
+        stat: n > 0 ? `${n} match${n === 1 ? "" : "es"}` : undefined,
+      };
+    }
+    case "bash": {
+      const cmd = String(args.command || "").replace(/\s+/g, " ").trim();
+      return {
+        icon: "lucide:terminal",
+        verb: "Ran",
+        target: cmd.length > 90 ? cmd.slice(0, 90) + "…" : cmd,
+      };
+    }
+    case "write": {
+      const content = String(args.content || "");
+      const n = content ? content.split("\n").length : 0;
+      return {
+        icon: "lucide:file-text",
+        verb: "Created",
+        target: baseNameOf(args.path) || args.path || "file",
+        stat: n > 0 ? `${n} lines` : undefined,
+      };
+    }
+    case "edit": {
+      const st = diffStat(res);
+      return {
+        icon: "lucide:pencil",
+        verb: "Edited",
+        target: baseNameOf(args.path) || args.path || "file",
+        statAdd: st.add,
+        statDel: st.del,
+      };
+    }
+    default:
+      return { icon: "lucide:wrench", verb: name, target: "" };
+  }
+}
+
+/** Renders a unified context diff (daemon edit results) red/green. */
+export function DiffView(props: { text: string; max?: number }) {
+  const [expanded, setExpanded] = createSignal(false);
+  const lines = () => (props.text || "").split("\n");
+  const shown = () => {
+    const all = lines();
+    const max = props.max ?? 80;
+    return expanded() ? all : all.slice(0, max);
+  };
+  const hidden = () => Math.max(0, lines().length - shown().length);
+  return (
+    <div class="font-mono text-[11px] leading-relaxed overflow-x-auto">
+      <For each={shown()}>
+        {(ln) => {
+          const cls =
+            ln.startsWith("+") && !ln.startsWith("+++")
+              ? "bg-emerald-500/10 text-emerald-300"
+              : ln.startsWith("-") && !ln.startsWith("---")
+                ? "bg-rose-500/10 text-rose-300"
+                : ln === "..."
+                  ? "text-ink-600"
+                  : "text-ink-400";
+          return <div class={`px-3 whitespace-pre ${cls}`}>{ln || " "}</div>;
+        }}
+      </For>
+      <Show when={hidden() > 0}>
+        <button
+          onClick={() => setExpanded(true)}
+          class="px-3 py-1 text-[11px] text-ink-500 hover:text-ink-200 cursor-pointer"
+        >
+          +{hidden()} more lines
+        </button>
+      </Show>
+    </div>
+  );
+}
 
 export default function RemoteCodePage() {
   // Hosts & Pairing
@@ -249,13 +463,22 @@ export default function RemoteCodePage() {
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [inputPrompt, setInputPrompt] = createSignal("");
   const [activeModel, setActiveModel] = createSignal("gpt-4o");
-  const [yoloMode, setYoloMode] = createSignal(false);
+  const [yoloMode, setYoloMode] = createSignal(true);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
   const [pendingApproval, setPendingApproval] = createSignal<PendingApproval | null>(null);
   // Live usage per session (from daemon usage/turn_end events).
   const [sessionUsage, setSessionUsage] = createSignal<Record<string, SessionUsage>>({});
   // Live tool progress text per tool call id (cleared on result/turn_end).
   const [toolProgress, setToolProgress] = createSignal<Record<string, string>>({});
+  // Expanded tool rows / groups (Antigravity chevrons).
+  const [toolOpen, setToolOpen] = createSignal<Record<string, boolean>>({});
+  const [toolGroupOpen, setToolGroupOpen] = createSignal<Record<string, boolean>>({});
+  function toggleToolOpen(key: string) {
+    setToolOpen((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }));
+  }
+  function toggleToolGroup(key: string) {
+    setToolGroupOpen((prev) => ({ ...prev, [key]: !(prev[key] ?? true) }));
+  }
   // Expanded thinking blocks (message id set).
   const [expandedThinking, setExpandedThinking] = createSignal<Record<string, boolean>>({});
   // Copied-message feedback.
@@ -311,6 +534,44 @@ export default function RemoteCodePage() {
   const [newProjectMenuOpen, setNewProjectMenuOpen] = createSignal(false);
   const [addContextOpen, setAddContextOpen] = createSignal(false);
   const [filesMenuOpen, setFilesMenuOpen] = createSignal(false);
+
+  // Custom dropdown (no native <select>): fixed-position menu that escapes
+  // every scroll container and stacking trap.
+  interface DropOption {
+    value: string;
+    label: string;
+    sub?: string;
+    dot?: string;
+  }
+  const [dropMenu, setDropMenu] = createSignal<null | {
+    x: number;
+    y: number;
+    w: number;
+    up: boolean;
+    options: DropOption[];
+    current: string;
+    onPick: (v: string) => void;
+  }>(null);
+  function openDropMenu(
+    e: MouseEvent,
+    options: DropOption[],
+    current: string,
+    onPick: (v: string) => void,
+    up = true,
+  ) {
+    e.stopPropagation();
+    closeMenus();
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setDropMenu({
+      x: Math.min(r.left, window.innerWidth - Math.max(r.width, 200) - 8),
+      y: up ? r.top : r.bottom,
+      w: Math.max(r.width, 200),
+      up,
+      options,
+      current,
+      onPick,
+    });
+  }
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [usageOpen, setUsageOpen] = createSignal(false);
   const [renamingId, setRenamingId] = createSignal<string | null>(null);
@@ -459,7 +720,7 @@ export default function RemoteCodePage() {
     model: "gpt-4o",
     reasoning: "off",
     temperature: 0.7,
-    autoCompactPercent: 80,
+    autoCompactPercent: 95,
     noAutoTitle: false,
     jailByDefault: false,
     autoSwarmEnabled: false,
@@ -742,12 +1003,20 @@ export default function RemoteCodePage() {
     };
   }
   function applySessionContent(sessionId: string, rawMsgs: any[]) {
-    const parsed: ChatMessage[] = (rawMsgs || []).map((m: any, idx: number) => ({
-      id: `msg_${idx}`,
-      role: m.role || "user",
-      blocks: parseContentBlocks(m),
-      time: Date.now(),
-    }));
+    const parsed: ChatMessage[] = (rawMsgs || []).map((m: any, idx: number) => {
+      const blocks = parseContentBlocks(m);
+      const firstText = blocks.find((b) => b.type === "text")?.text || "";
+      const system =
+        m?.meta?.compaction === "true" ||
+        firstText.startsWith("## Context Summary (compacted)");
+      return {
+        id: `msg_${idx}`,
+        role: m.role || "user",
+        blocks,
+        time: Date.now(),
+        system,
+      };
+    });
     setMessages(parsed);
     setIsAtBottom(true);
     scrollToBottom(true);
@@ -917,6 +1186,21 @@ export default function RemoteCodePage() {
         break;
       }
 
+      case "session_model": {
+        if (msg.sessionId && msg.model) {
+          setSessions((prev) =>
+            prev.map((s) => (s.id === msg.sessionId ? { ...s, model: msg.model } : s)),
+          );
+          if (msg.sessionId === activeSessionId()) setActiveModel(msg.model);
+        }
+        break;
+      }
+
+      case "notice": {
+        if (msg.message) toast(msg.message, "ok");
+        break;
+      }
+
       case "attachment_data": {
         const a = msg.attachment;
         if (!a?.id || (!a.data && !a.text)) break;
@@ -995,12 +1279,13 @@ export default function RemoteCodePage() {
 
       case "session_compacted": {
         if (msg.sessionId === activeSessionId()) {
-          handleIncomingMessage({
-            type: "session_content",
-            sessionId: msg.sessionId,
-            messages: msg.messages,
-          });
-          toast("Transcript compacted successfully", "ok");
+          applySessionContent(msg.sessionId, msg.messages || []);
+          toast(
+            msg.auto
+              ? "Context auto-compacted — oldest 30% summarized, recent 70% kept"
+              : "Transcript compacted successfully",
+            "ok",
+          );
         }
         break;
       }
@@ -1090,6 +1375,8 @@ export default function RemoteCodePage() {
           appendToolResult(ev.id, ev.result ?? ev.content, ev.isError);
         } else if (ev.type === "usage") {
           applyUsage(msg.sessionId, ev.usage, ev.cumulative);
+        } else if (ev.type === "compact_progress") {
+          if (ev.text === "Compacting older context…") toast(ev.text, "ok");
         } else if (ev.type === "turn_end") {
           setSessionStatus("idle");
           setPendingApproval(null);
@@ -1479,9 +1766,31 @@ export default function RemoteCodePage() {
       danger: true,
     });
     if (!ok) return;
+    const doomed = projects().find((p) => p.id === id);
     if (wsOpen()) sendWS({ type: "delete_project", projectId: id });
     const next = projects().filter((p) => p.id !== id);
     applyProjects(next);
+    // An open conversation inside the deleted project must not linger.
+    if (doomed) {
+      const norm = doomed.path.replace(/\/+$/, "");
+      const sid = activeSessionId();
+      const cur = sessions().find((s) => s.id === sid);
+      const inside =
+        !!cur && ((cur.cwd || "").replace(/\/+$/, "") === norm || (cur.cwd || "").startsWith(norm + "/"));
+      if (inside) {
+        const fallback = sessions().find(
+          (s) =>
+            s.id !== sid &&
+            !(((s.cwd || "").replace(/\/+$/, "") === norm) || (s.cwd || "").startsWith(norm + "/")),
+        );
+        if (fallback) selectSession(fallback.id);
+        else {
+          setActiveSessionId("");
+          setMessages([]);
+          setSessionStatus("idle");
+        }
+      }
+    }
   }
 
   function quickStartProject() {
@@ -1903,6 +2212,15 @@ export default function RemoteCodePage() {
   async function sendPrompt() {
     const text = inputPrompt().trim();
     const sid = activeSessionId();
+    // Slash fast-path: UI commands resolve locally, transcript ops go down.
+    if (text.startsWith("/")) {
+      setInputPrompt("");
+      try {
+        if (sid) localStorage.removeItem(`llmgw-draft:${sid}`);
+      } catch {}
+      if (routeSlash(text)) return;
+      if (!sid) return;
+    }
     if ((!text && pendingAttachments().length === 0) || !sid) return;
     if (sessionStatus() === "running") return;
 
@@ -1981,6 +2299,8 @@ export default function RemoteCodePage() {
   }
 
   function executeSlashCommand(cmd: string) {
+    // Local-first routing: UI commands never pollute the transcript.
+    if (routeSlash(cmd)) return;
     setInputPrompt("");
     if (!activeSessionId()) return;
     sendWS({
@@ -1990,6 +2310,51 @@ export default function RemoteCodePage() {
       model: activeModel(),
       yolo: yoloMode(),
     });
+  }
+
+  // Routes /commands: UI-backed ones are handled locally (modals, silent
+  // setters); transcript ops (/compact, /clear, /jail, /unjail) and unknown
+  // commands go to the daemon. Returns true when fully handled.
+  function routeSlash(text: string): boolean {
+    const clean = text.trim();
+    if (!clean.startsWith("/")) return false;
+    const sp = clean.indexOf(" ");
+    const head = (sp < 0 ? clean : clean.slice(0, sp)).toLowerCase();
+    const arg = (sp < 0 ? "" : clean.slice(sp + 1)).trim();
+    const sid = activeSessionId();
+    switch (head) {
+      case "/skills":
+        openSettings("sec-skills");
+        return true;
+      case "/mcp":
+        openSettings("sec-mcp");
+        return true;
+      case "/help":
+        setHelpOpen(true);
+        return true;
+      case "/model":
+        if (!arg) {
+          toast(`Current model: ${activeModel()}`, "ok");
+          return true;
+        }
+        setActiveModel(arg);
+        if (sid && wsOpen()) sendWS({ type: "set_model", sessionId: sid, model: arg });
+        toast(`Model set to ${arg}`, "ok");
+        return true;
+      case "/reasoning": {
+        const lvl = arg.toLowerCase();
+        if (!["off", "low", "medium", "high"].includes(lvl)) {
+          toast(`Reasoning: ${daemonSettings().reasoning}`, "ok");
+          return true;
+        }
+        setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
+        if (wsOpen()) sendWS({ type: "set_reasoning", effort: lvl });
+        toast(`Reasoning effort set to ${lvl}`, "ok");
+        return true;
+      }
+      default:
+        return false;
+    }
   }
 
   // --- Pairing Flow ---
@@ -2008,7 +2373,8 @@ export default function RemoteCodePage() {
 
   // Settings revert snapshot (chatbot backupForRevert): Cancel restores.
   const [settingsSnapshot, setSettingsSnapshot] = createSignal<string | null>(null);
-  function openSettings() {
+  const [helpOpen, setHelpOpen] = createSignal(false);
+  function openSettings(sectionId?: string) {
     try {
       setSettingsSnapshot(
         JSON.stringify({
@@ -2020,6 +2386,13 @@ export default function RemoteCodePage() {
       );
     } catch {}
     setShowConfigModal(true);
+    if (sectionId) {
+      setTimeout(() => {
+        try {
+          document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+        } catch {}
+      }, 80);
+    }
   }
   function cancelSettings() {
     try {
@@ -2240,6 +2613,7 @@ export default function RemoteCodePage() {
     setFilesMenuOpen(false);
     setModelMenuOpen(false);
     setUsageOpen(false);
+    setDropMenu(null);
   }
 
   onCleanup(() => {
@@ -2251,9 +2625,243 @@ export default function RemoteCodePage() {
     clearInterval(heartbeatTimer);
   });
 
+  // Antigravity-style tool rows: one line per call, expandable output,
+  // clickable files, inline diffs for edits.
+  function toolRowKey(msgId: string, u: ToolUnit, fallback: number) {
+    return `${msgId}:${u.call?.toolId || u.result?.toolId || "u" + fallback}`;
+  }
+
+  function openToolPreview(u: ToolUnit) {
+    const name = u.call?.toolName || "tool";
+    const args = tryParseArgs(u.call?.toolArgs);
+    if (name === "read") {
+      setPreviewFile({
+        name: baseNameOf(args.path) || "file",
+        mime: "text/plain",
+        text: u.result?.toolResult || "(no output captured)",
+      });
+    } else if (name === "write") {
+      setPreviewFile({
+        name: baseNameOf(args.path) || "file",
+        mime: "text/plain",
+        text: String(args.content || u.result?.toolResult || "(empty)"),
+      });
+    } else if (name === "edit") {
+      setPreviewFile({
+        name: (baseNameOf(args.path) || "file") + " — diff",
+        mime: "text/plain",
+        text: u.result?.toolResult || "(no diff captured)",
+      });
+    } else {
+      setPreviewFile({
+        name: `${name} output`,
+        mime: "text/plain",
+        text: u.result?.toolResult || u.call?.toolArgs || "(no output)",
+      });
+    }
+    setPreviewCopied(false);
+  }
+
+  function renderToolUnit(msgId: string, u: ToolUnit, ui: number, running: boolean) {
+    const key = () => toolRowKey(msgId, u, ui);
+    const open = () => toolOpen()[key()] ?? (running && !u.result);
+    const sum = toolSummary(u);
+    const prog = () => (u.call?.toolId ? toolProgress()[u.call.toolId] : undefined);
+    const args = tryParseArgs(u.call?.toolArgs);
+    const name = u.call?.toolName || "tool";
+    const failed = !!u.result?.isError;
+    return (
+      <div class="w-full">
+        <div
+          onClick={() => toggleToolOpen(key())}
+          class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
+          title={u.call?.toolArgs || name}
+        >
+          <Show
+            when={!(running && !u.result)}
+            fallback={
+              <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
+            }
+          >
+            <Iconify
+              icon={failed ? "lucide:x" : sum.icon}
+              size={14}
+              class={`shrink-0 ${failed ? "text-rose-400" : "text-ink-500"}`}
+            />
+          </Show>
+          <span class="text-ink-500 shrink-0">{sum.verb}</span>
+          <span class="truncate text-ink-200 font-medium min-w-0 flex-1">{sum.target}</span>
+          <Show when={sum.statAdd != null || sum.statDel != null}>
+            <span class="font-mono text-[11px] shrink-0">
+              <Show when={(sum.statAdd || 0) > 0}>
+                <span class="text-emerald-400">+{sum.statAdd}</span>
+              </Show>
+              <Show when={(sum.statAdd || 0) > 0 && (sum.statDel || 0) > 0}>
+                <span class="text-ink-600"> </span>
+              </Show>
+              <Show when={(sum.statDel || 0) > 0}>
+                <span class="text-rose-400">-{sum.statDel}</span>
+              </Show>
+            </span>
+          </Show>
+          <Show when={sum.stat && sum.statAdd == null}>
+            <span class="text-[11px] text-ink-600 shrink-0">{sum.stat}</span>
+          </Show>
+          <Show when={prog()}>
+            <span class="font-mono text-[11px] text-ink-600 truncate max-w-[40%]">{prog()}</span>
+          </Show>
+          <Iconify
+            icon="lucide:chevron-down"
+            size={12}
+            class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
+          />
+        </div>
+        <Show when={open()}>
+          <div class="ml-5 mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 overflow-hidden">
+            {/* Context body per tool kind */}
+            <Show when={name === "edit" && u.result?.toolResult}>
+              <DiffView text={u.result?.toolResult || ""} max={40} />
+              <div class="flex items-center gap-2 px-3 py-1.5 border-t border-line/50">
+                <button
+                  onClick={() => openToolPreview(u)}
+                  class="text-[11px] text-ink-400 hover:text-ink-100 underline underline-offset-2 cursor-pointer"
+                >
+                  Open Diff
+                </button>
+                <button
+                  onClick={() => copyWithToast(u.result?.toolResult || "")}
+                  class="text-[11px] text-ink-600 hover:text-ink-300 cursor-pointer"
+                >
+                  Copy
+                </button>
+              </div>
+            </Show>
+            <Show when={name === "read"}>
+              <Show
+                when={u.result?.toolResult}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Waiting for output…</div>}
+              >
+                <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
+                  {(u.result?.toolResult || "").slice(0, 3000)}
+                </pre>
+                <div class="px-3 py-1.5 border-t border-line/50">
+                  <button
+                    onClick={() => openToolPreview(u)}
+                    class="text-[11px] text-ink-400 hover:text-ink-100 underline underline-offset-2 cursor-pointer"
+                  >
+                    Open file
+                  </button>
+                </div>
+              </Show>
+            </Show>
+            <Show when={name === "write"}>
+              <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
+                {String(args.content || u.result?.toolResult || "").slice(0, 3000)}
+              </pre>
+              <div class="px-3 py-1.5 border-t border-line/50">
+                <button
+                  onClick={() => openToolPreview(u)}
+                  class="text-[11px] text-ink-400 hover:text-ink-100 underline underline-offset-2 cursor-pointer"
+                >
+                  Open file
+                </button>
+              </div>
+            </Show>
+            <Show when={name !== "edit" && name !== "read" && name !== "write"}>
+              <Show
+                when={u.result?.toolResult}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Waiting for output…</div>}
+              >
+                <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
+                  {(u.result?.toolResult || "").slice(0, 3000)}
+                </pre>
+              </Show>
+            </Show>
+          </div>
+        </Show>
+      </div>
+    );
+  }
+
+  function groupTitle(cat: "explore" | "command", units: ToolUnit[]): string {
+    if (cat === "command") {
+      return `Ran ${units.length} command${units.length === 1 ? "" : "s"}`;
+    }
+    const files = units.filter((u) => u.call?.toolName === "read").length;
+    const searches = units.filter((u) => u.call?.toolName === "glob").length;
+    let t = `Explored ${files} file${files === 1 ? "" : "s"}`;
+    if (searches > 0) t += `, ${searches} search${searches === 1 ? "" : "es"}`;
+    return t;
+  }
+
+  function renderToolSegs(msgId: string, units: ToolUnit[], running: boolean) {
+    // Partition consecutive explore/command runs into collapsible groups.
+    const segs: Array<{ kind: "group"; cat: "explore" | "command"; units: ToolUnit[] } | { kind: "unit"; unit: ToolUnit; idx: number }> = [];
+    let run: ToolUnit[] = [];
+    let runIdx: number[] = [];
+    let runCat: "explore" | "command" | null = null;
+    const flush = () => {
+      if (run.length >= 2 && runCat) segs.push({ kind: "group", cat: runCat, units: run });
+      else run.forEach((unit, k) => segs.push({ kind: "unit", unit, idx: runIdx[k] }));
+      run = [];
+      runIdx = [];
+      runCat = null;
+    };
+    units.forEach((unit, i) => {
+      const cat = toolCatOf(unit.call?.toolName);
+      if ((cat === "explore" || cat === "command") && (runCat === null || runCat === cat)) {
+        runCat = cat;
+        run.push(unit);
+        runIdx.push(i);
+      } else {
+        flush();
+        if (cat === "explore" || cat === "command") {
+          runCat = cat;
+          run.push(unit);
+          runIdx.push(i);
+        } else {
+          segs.push({ kind: "unit", unit, idx: i });
+        }
+      }
+    });
+    flush();
+    return (
+      <div class="w-full space-y-0.5">
+        <For each={segs}>
+          {(seg, si) => {
+            if (seg.kind === "unit") return renderToolUnit(msgId, seg.unit, seg.idx, running);
+            const gkey = `${msgId}:g${si()}`;
+            const open = () => toolGroupOpen()[gkey] ?? true;
+            return (
+              <div class="w-full">
+                <button
+                  onClick={() => toggleToolGroup(gkey)}
+                  class="w-full flex items-center gap-1.5 pl-1 pr-1.5 py-1 rounded-lg hover:bg-ink-900/70 text-[13px] text-ink-400 hover:text-ink-200 cursor-pointer"
+                >
+                  <span class="font-medium">{groupTitle(seg.cat, seg.units)}</span>
+                  <Iconify
+                    icon="lucide:chevron-down"
+                    size={12}
+                    class={`text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
+                  />
+                </button>
+                <Show when={open()}>
+                  <div class="ml-3 border-l border-line/40 pl-1.5 space-y-0.5">
+                    <For each={seg.units}>
+                      {(u, ui) => renderToolUnit(msgId, u, ui() + si() * 100, running)}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+            );
+          }}
+        </For>
+      </div>
+    );
+  }
+
   // One session row, reused by the nested project groups and the flat list.
-  function sessionRow(s: SessionSummary) {
-    const isActive = () => s.id === activeSessionId();
+  function sessionRow(s: SessionSummary) {    const isActive = () => s.id === activeSessionId();
     const selected = () => selectedSessions().has(s.id);
     return (
       <div
@@ -2532,17 +3140,33 @@ export default function RemoteCodePage() {
             </button>
           </div>
 
-          {/* Filter + Display Options */}
-          <div class="px-2 pb-2 flex items-center gap-1.5">
-            <input
-              id="rc-filter"
-              type="text"
-              placeholder="Filter..."
-              class="flex-1 min-w-0 text-xs bg-transparent border border-line/60 rounded-lg px-2.5 py-1.5 text-ink-200 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
-              value={sessionFilter()}
-              onInput={(e) => setSessionFilter(e.currentTarget.value)}
-            />
-            {/* Display Options (Antigravity) */}
+
+          {/* Projects */}
+          <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-3 min-h-0">
+              <div class="flex items-center justify-between px-1.5 pb-1 pt-1 sticky top-0 bg-ink-950 z-10">
+                <Show
+                  when={selectionMode()}
+                  fallback={
+                    <span class="text-[11px] font-medium text-ink-500">Projects</span>
+                  }
+                >
+                  <span class="text-[11px] font-medium text-ink-300">
+                    {selectedSessions().size} selected
+                  </span>
+                </Show>
+                <div class="flex items-center gap-0.5">
+                  {/* Selection mode toggle (chatbot) */}
+                  <button
+                    onClick={() => {
+                      if (selectionMode()) exitSelectionMode();
+                      else setSelectionMode(true);
+                    }}
+                    class={`p-1 rounded cursor-pointer ${selectionMode() ? "bg-ink-800 text-ink-100" : "text-ink-500 hover:text-ink-200 hover:bg-ink-900"}`}
+                    title={selectionMode() ? "Exit selection mode" : "Select conversations"}
+                  >
+                    <Iconify icon={selectionMode() ? "lucide:x" : "lucide:list-todo"} size={13} />
+                  </button>
+                  {/* Display Options */}
             <div class="relative shrink-0">
               <button
                 onClick={(e) => {
@@ -2600,35 +3224,6 @@ export default function RemoteCodePage() {
                   </For>
                 </div>
               </Show>
-            </div>
-          </div>
-
-          {/* Projects */}
-          <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-4">
-            <div>
-              <div class="flex items-center justify-between px-1.5 pb-1">
-                <Show
-                  when={selectionMode()}
-                  fallback={
-                    <span class="text-[11px] font-medium text-ink-500">Projects</span>
-                  }
-                >
-                  <span class="text-[11px] font-medium text-ink-300">
-                    {selectedSessions().size} selected
-                  </span>
-                </Show>
-                <div class="flex items-center gap-0.5">
-                  {/* Selection mode toggle (chatbot) */}
-                  <button
-                    onClick={() => {
-                      if (selectionMode()) exitSelectionMode();
-                      else setSelectionMode(true);
-                    }}
-                    class={`p-1 rounded cursor-pointer ${selectionMode() ? "bg-ink-800 text-ink-100" : "text-ink-500 hover:text-ink-200 hover:bg-ink-900"}`}
-                    title={selectionMode() ? "Exit selection mode" : "Select conversations"}
-                  >
-                    <Iconify icon={selectionMode() ? "lucide:x" : "lucide:list-todo"} size={13} />
-                  </button>
                   {/* New Project split button (Antigravity: New Project / Quick Start) */}
                 <div class="relative">
                   <button
@@ -2762,7 +3357,6 @@ export default function RemoteCodePage() {
               </Show>
             </div>
           </div>
-
           {/* Batch bar (chatbot selection mode) */}
           <Show when={selectionMode() && selectedSessions().size > 0}>
             <div class="p-2 border-t border-line/70 bg-ink-950/95">
@@ -2792,20 +3386,26 @@ export default function RemoteCodePage() {
           <div class="p-2 border-t border-line/70 space-y-1">
             <div class="flex items-center gap-1.5 px-1">
               <span class={`w-1.5 h-1.5 rounded-full shrink-0 ${activeHost()?.status === "online" ? "bg-emerald-500" : "bg-amber-500"}`} />
-              <select
-                class="flex-1 min-w-0 bg-transparent text-xs text-ink-300 font-medium focus:outline-none cursor-pointer truncate"
-                value={activeHostId()}
-                onChange={(e) => setActiveHostId(e.currentTarget.value)}
+              <button
+                onClick={(e) =>
+                  openDropMenu(
+                    e,
+                    hosts().map((h) => ({
+                      value: h.id,
+                      label: h.name || h.hostname || h.id,
+                      sub: h.status || "offline",
+                      dot: h.status === "online" ? "bg-emerald-500" : "bg-amber-500",
+                    })),
+                    activeHostId(),
+                    (v) => setActiveHostId(v),
+                  )
+                }
+                class="flex-1 min-w-0 flex items-center gap-1 text-xs text-ink-300 font-medium truncate hover:text-ink-100 cursor-pointer"
                 title="Switch host"
               >
-                <For each={hosts()}>
-                  {(h) => (
-                    <option value={h.id} class="bg-ink-900 text-ink-100">
-                      {h.name || h.hostname || h.id} ({h.status || "offline"})
-                    </option>
-                  )}
-                </For>
-              </select>
+                <span class="truncate">{activeHost()?.name || activeHost()?.hostname || "No host"}</span>
+                <Iconify icon="lucide:chevron-down" size={11} class="shrink-0 text-ink-600" />
+              </button>
               <button
                 onClick={loadHosts}
                 class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer shrink-0"
@@ -2997,7 +3597,7 @@ export default function RemoteCodePage() {
                     <div class="space-y-3">
                       <div class="text-sm text-ink-300 font-medium">No project selected</div>
                       <p class="text-xs text-ink-500 max-w-sm mx-auto leading-relaxed">
-                        Projects are just folders on the host. Select one to group its conversations — like Antigravity.
+                        Projects are just folders on the host. Select one to group its conversations.
                       </p>
                       <button
                         onClick={() => setShowNewProjectModal(true)}
@@ -3042,6 +3642,26 @@ export default function RemoteCodePage() {
                       msg.role === "user" ? "items-end" : "items-start"
                     }`}
                   >
+                    {/* ===== SYSTEM NOTICE (e.g. auto-compaction) ===== */}
+                    <Show when={msg.system}>
+                      <div class="w-full flex justify-center">
+                        <div class="max-w-xl text-center px-4 py-2.5 rounded-xl border border-line/60 bg-ink-900/60">
+                          <div class="flex items-center justify-center gap-1.5 text-xs font-medium text-ink-300">
+                            <Iconify icon="lucide:boxes" size={13} class="text-ink-500" />
+                            <span>Context auto-compacted — oldest 30% summarized</span>
+                          </div>
+                          <details class="mt-1.5 text-left">
+                            <summary class="text-[11px] text-ink-500 hover:text-ink-300 cursor-pointer select-none text-center">
+                              View summary
+                            </summary>
+                            <div class="rc-markdown mt-2 text-left text-xs max-h-48 overflow-y-auto">
+                              <Streamdown>{textOf().replace(/^## Context Summary \(compacted\)\n\n/, "")}</Streamdown>
+                            </div>
+                          </details>
+                        </div>
+                      </div>
+                    </Show>
+                    <Show when={!msg.system}>
                     {/* ===== USER ===== */}
                     <Show when={msg.role === "user"}>
                       <div class="flex flex-col items-end max-w-[90%] sm:max-w-[80%]">
@@ -3160,196 +3780,111 @@ export default function RemoteCodePage() {
                           when={editingMsgIdx() === idx()}
                           fallback={
                         <div class="w-full space-y-2.5">
-                          <For each={msg.blocks}>
-                            {(block) => {
-                              if (block.type === "text" && block.text) {
-                                return (
-                                  <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
-                                    <Streamdown>{block.text}</Streamdown>
-                                  </div>
-                                );
-                              }
-
-                              if (block.type === "reasoning" && block.reasoning) {
-                                const live = () =>
-                                  isLast() &&
-                                  sessionStatus() === "running" &&
-                                  thinkingStart() !== null;
+                          <For each={splitToolRuns(msg.blocks)}>
+                            {(part) => {
+                              if (part.kind === "tools") {
                                 return (
                                   <Show when={verboseChat()}>
-                                    <div class="w-full">
-                                      <button
-                                        onClick={() =>
-                                          setExpandedThinking((prev) => ({
-                                            ...prev,
-                                            [msg.id]: !prev[msg.id],
-                                          }))
-                                        }
-                                        class={`flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
-                                          live() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
-                                        }`}
-                                      >
-                                        <Iconify icon="lucide:bot" size={14} />
-                                        <span>
-                                          {live()
-                                            ? `Thinking ${thinkingElapsed()}s`
-                                            : msg.thinkingDuration
-                                              ? `Thinking ${msg.thinkingDuration}s`
-                                              : expandedThinking()[msg.id]
-                                                ? "Hide thinking"
-                                                : "Thinking"}
-                                        </span>
-                                        <Show when={live()}>
-                                          <span class="thinking-indicator">
-                                            <span />
-                                            <span />
-                                            <span />
-                                          </span>
-                                        </Show>
-                                        <Iconify
-                                          icon="lucide:chevron-down"
-                                          size={12}
-                                          class={`transition-transform ${expandedThinking()[msg.id] ? "rotate-180" : ""}`}
-                                        />
-                                      </button>
-                                      <Show when={expandedThinking()[msg.id] || live()}>
-                                        <div class="mt-1.5 pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap text-xs leading-relaxed">
-                                          {block.reasoning}
-                                        </div>
-                                      </Show>
-                                    </div>
+                                    {renderToolSegs(msg.id, part.units, isLast() && sessionStatus() === "running")}
                                   </Show>
                                 );
                               }
-
-                              if (block.type === "image") {
-                                const src = () =>
-                                  block.imageData
-                                    ? `data:${block.imageMime || "image/jpeg"};base64,${block.imageData}`
-                                    : undefined;
-                                return (
-                                  <Show
-                                    when={src()}
-                                    fallback={
-                                      <div class="flex items-center gap-1.5 text-[11px] text-ink-500 border border-line/60 rounded-lg px-2 py-1">
-                                        <Iconify icon="lucide:image" size={12} />
-                                        <span>[attached {block.text || "image"}]</span>
-                                      </div>
+                              return (
+                                <For each={part.blocks}>
+                                  {(block) => {
+                                    if (block.type === "text" && block.text) {
+                                      return (
+                                        <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
+                                          <Streamdown>{block.text}</Streamdown>
+                                        </div>
+                                      );
                                     }
-                                  >
-                                    <button
-                                      onClick={() =>
-                                        setPreviewFile({
-                                          name: "attached image",
-                                          mime: block.imageMime || "image/jpeg",
-                                          dataUrl: src(),
-                                        })
-                                      }
-                                      class="block rounded-lg overflow-hidden border border-line/60 hover:border-ink-500 transition-colors cursor-pointer"
-                                      title="Open preview"
-                                    >
-                                      <img src={src()} class="max-h-64 max-w-full object-contain" />
-                                    </button>
-                                  </Show>
-                                );
-                              }
-
-                              if (block.type === "tool_call") {
-                                const prog = () => toolProgress()[block.toolId || ""];
-                                return (
-                                  <Show when={verboseChat()}>
-                                    <div class="w-full rounded-xl border border-line/70 bg-ink-900/50 overflow-hidden text-xs">
-                                      <div class="px-3 py-1.5 flex items-center justify-between gap-2">
-                                        <div class="flex items-center gap-2 text-ink-200 font-medium min-w-0">
-                                          <Show
-                                            when={!prog()}
-                                            fallback={
-                                              <span class="w-3 h-3 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
-                                            }
-                                          >
-                                            <Iconify
-                                              icon={
-                                                block.toolName === "bash"
-                                                  ? "lucide:terminal"
-                                                  : block.toolName === "read"
-                                                    ? "lucide:file-text"
-                                                    : block.toolName === "write" ||
-                                                        block.toolName === "edit"
-                                                      ? "lucide:code"
-                                                      : "lucide:wrench"
+                                    if (block.type === "reasoning" && block.reasoning) {
+                                      const live = () =>
+                                        isLast() &&
+                                        sessionStatus() === "running" &&
+                                        thinkingStart() !== null;
+                                      return (
+                                        <Show when={verboseChat()}>
+                                          <div class="w-full">
+                                            <button
+                                              onClick={() =>
+                                                setExpandedThinking((prev) => ({
+                                                  ...prev,
+                                                  [msg.id]: !prev[msg.id],
+                                                }))
                                               }
-                                              size={13}
-                                              class="text-ink-400 shrink-0"
-                                            />
-                                          </Show>
-                                          <span class="truncate font-mono">
-                                            {block.toolName || "tool"}
-                                          </span>
-                                        </div>
-                                        <button
-                                          onClick={() => copyWithToast(block.toolArgs || "")}
-                                          class="text-ink-600 hover:text-ink-300 p-0.5 shrink-0 cursor-pointer"
-                                          title="Copy args"
+                                              class={`flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
+                                                live() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
+                                              }`}
+                                            >
+                                              <Iconify icon="lucide:bot" size={14} />
+                                              <span>
+                                                {live()
+                                                  ? `Thinking ${thinkingElapsed()}s`
+                                                  : msg.thinkingDuration
+                                                    ? `Thinking ${msg.thinkingDuration}s`
+                                                    : expandedThinking()[msg.id]
+                                                      ? "Hide thinking"
+                                                      : "Thinking"}
+                                              </span>
+                                              <Show when={live()}>
+                                                <span class="thinking-indicator">
+                                                  <span />
+                                                  <span />
+                                                  <span />
+                                                </span>
+                                              </Show>
+                                              <Iconify
+                                                icon="lucide:chevron-down"
+                                                size={12}
+                                                class={`transition-transform ${expandedThinking()[msg.id] ? "rotate-180" : ""}`}
+                                              />
+                                            </button>
+                                            <Show when={expandedThinking()[msg.id] || live()}>
+                                              <div class="mt-1.5 pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap text-xs leading-relaxed">
+                                                {block.reasoning}
+                                              </div>
+                                            </Show>
+                                          </div>
+                                        </Show>
+                                      );
+                                    }
+                                    if (block.type === "image") {
+                                      const src = () =>
+                                        block.imageData
+                                          ? `data:${block.imageMime || "image/jpeg"};base64,${block.imageData}`
+                                          : undefined;
+                                      return (
+                                        <Show
+                                          when={src()}
+                                          fallback={
+                                            <div class="flex items-center gap-1.5 text-[11px] text-ink-500 border border-line/60 rounded-lg px-2 py-1">
+                                              <Iconify icon="lucide:image" size={12} />
+                                              <span>[attached {block.text || "image"}]</span>
+                                            </div>
+                                          }
                                         >
-                                          <Iconify icon="lucide:copy" size={11} />
-                                        </button>
-                                      </div>
-                                      <Show when={prog()}>
-                                        <div class="px-3 pb-2 font-mono text-[11px] text-ink-500 truncate">
-                                          {prog()}
-                                        </div>
-                                      </Show>
-                                      <Show when={block.toolArgs}>
-                                        <details class="border-t border-line/50">
-                                          <summary class="px-3 py-1 text-[11px] text-ink-600 hover:text-ink-400 cursor-pointer select-none">
-                                            Arguments
-                                          </summary>
-                                          <pre class="px-3 pb-2.5 font-mono text-[11px] text-ink-400 overflow-x-auto whitespace-pre-wrap max-h-48">
-                                            {block.toolArgs}
-                                          </pre>
-                                        </details>
-                                      </Show>
-                                    </div>
-                                  </Show>
-                                );
-                              }
-
-                              if (block.type === "tool_result") {
-                                return (
-                                  <Show when={verboseChat()}>
-                                    <div
-                                      class={`w-full rounded-xl border overflow-hidden font-mono text-xs ${
-                                        block.isError
-                                          ? "border-rose-500/30 bg-rose-500/5"
-                                          : "border-line/60 bg-ink-950"
-                                      }`}
-                                    >
-                                      <div class="px-3 py-1 flex items-center justify-between text-[11px] text-ink-500">
-                                        <div class="flex items-center gap-1.5">
-                                          <Iconify
-                                            icon={block.isError ? "lucide:x" : "lucide:check"}
-                                            size={12}
-                                            class={block.isError ? "text-rose-400" : "text-emerald-400"}
-                                          />
-                                          <span>{block.isError ? "Error" : "Output"}</span>
-                                        </div>
-                                        <button
-                                          onClick={() => copyWithToast(block.toolResult || "")}
-                                          class="hover:text-ink-300 p-0.5 cursor-pointer"
-                                          title="Copy output"
-                                        >
-                                          <Iconify icon="lucide:copy" size={11} />
-                                        </button>
-                                      </div>
-                                      <pre class="px-3 pb-2.5 text-[11px] text-ink-300 overflow-x-auto max-h-64 whitespace-pre-wrap">
-                                        {(block.toolResult || "").slice(0, 4000)}
-                                      </pre>
-                                    </div>
-                                  </Show>
-                                );
-                              }
-
-                              return null;
+                                          <button
+                                            onClick={() =>
+                                              setPreviewFile({
+                                                name: "attached image",
+                                                mime: block.imageMime || "image/jpeg",
+                                                dataUrl: src(),
+                                              })
+                                            }
+                                            class="block rounded-lg overflow-hidden border border-line/60 hover:border-ink-500 transition-colors cursor-pointer"
+                                            title="Open preview"
+                                          >
+                                            <img src={src()} class="max-h-64 max-w-full object-contain" />
+                                          </button>
+                                        </Show>
+                                      );
+                                    }
+                                    return null;
+                                  }}
+                                </For>
+                              );
                             }}
                           </For>
                         </div>
@@ -3415,60 +3950,141 @@ export default function RemoteCodePage() {
                         </Show>
                       </div>
                     </Show>
+                    </Show>
                   </div>
                 );
               }}
             </For>
 
-            {/* Pending Tool Approval Banner (Safe Mode) */}
+            {/* Pending Tool Approval (Antigravity-style, human-readable) */}
             <Show when={pendingApproval()}>
-              <div class="max-w-3xl mx-auto rounded-2xl border-2 border-amber-500/60 bg-amber-500/10 p-4 shadow-xl backdrop-blur">
-                <div class="flex items-center gap-2.5 text-amber-400 font-semibold text-sm">
-                  <Iconify icon="lucide:shield" size={18} />
-                  <span>Action Approval Required</span>
-                  <span class="text-xs font-normal text-amber-300/80">
-                    (Safe mode active)
-                  </span>
-                </div>
-
-                <div class="mt-2 bg-ink-950/80 rounded-xl p-3 border border-amber-500/30 font-mono text-xs text-ink-200">
-                  <div class="text-amber-400 font-bold mb-1">
-                    Tool: {pendingApproval()?.tool}
+              {(pa) => {
+                const args = tryParseArgs(pa().args);
+                const name = pa().tool || "tool";
+                return (
+                  <div class={`${convWidthClass()} mx-auto rounded-2xl border border-amber-500/40 bg-amber-500/[0.06] p-4 shadow-xl`}>
+                    <div class="flex items-center gap-2 text-[13px]">
+                      <Iconify icon="lucide:shield" size={15} class="text-amber-400 shrink-0" />
+                      <span class="font-semibold text-ink-100">Review tool call</span>
+                      <span class="text-[11px] text-ink-500">Safe mode — nothing ran yet</span>
+                    </div>
+                    {/* Human summary per tool (never raw JSON) */}
+                    <div class="mt-2.5 rounded-xl border border-line/60 bg-ink-950/70 overflow-hidden">
+                      <Show when={name === "bash"}>
+                        <div class="px-3.5 py-2.5">
+                          <div class="text-[11px] text-ink-500 mb-1">Run command</div>
+                          <pre class="font-mono text-[13px] text-ink-100 whitespace-pre-wrap break-all">{String(args.command || "")}</pre>
+                        </div>
+                      </Show>
+                      <Show when={name === "read"}>
+                        <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
+                          <Iconify icon="lucide:file-text" size={14} class="text-ink-400 shrink-0" />
+                          <span class="text-ink-500">Read</span>
+                          <span class="font-mono text-ink-100 truncate">{String(args.path || "")}</span>
+                          <Show when={args.limit || args.offset}>
+                            <span class="font-mono text-[11px] text-ink-500 shrink-0">
+                              L{Number(args.offset || 0) + 1}-{Number(args.offset || 0) + Number(args.limit || 0)}
+                            </span>
+                          </Show>
+                        </div>
+                      </Show>
+                      <Show when={name === "write"}>
+                        <div class="px-3.5 py-2.5 text-[13px]">
+                          <div class="flex items-center gap-2">
+                            <Iconify icon="lucide:file-text" size={14} class="text-ink-400 shrink-0" />
+                            <span class="text-ink-500">Create</span>
+                            <span class="font-mono text-ink-100 truncate">{String(args.path || "")}</span>
+                          </div>
+                          <Show when={args.content}>
+                            <pre class="mt-2 font-mono text-[11px] text-ink-400 whitespace-pre-wrap max-h-32 overflow-y-auto border-t border-line/50 pt-2">
+                              {String(args.content).split("\n").slice(0, 12).join("\n")}
+                              {String(args.content).split("\n").length > 12 ? "\n…" : ""}
+                            </pre>
+                          </Show>
+                        </div>
+                      </Show>
+                      <Show when={name === "edit"}>
+                        <div class="px-3.5 py-2.5 text-[13px]">
+                          <div class="flex items-center gap-2">
+                            <Iconify icon="lucide:pencil" size={14} class="text-ink-400 shrink-0" />
+                            <span class="text-ink-500">Edit</span>
+                            <span class="font-mono text-ink-100 truncate">{String(args.path || "")}</span>
+                            <Show when={Array.isArray(args.edits)}>
+                              <span class="text-[11px] text-ink-500 shrink-0">
+                                {args.edits.length} change{args.edits.length === 1 ? "" : "s"}
+                              </span>
+                            </Show>
+                          </div>
+                          <Show when={Array.isArray(args.edits) && args.edits.length > 0}>
+                            <div class="mt-2 rounded-lg overflow-hidden border border-line/50 font-mono text-[11px]">
+                              <For each={args.edits.slice(0, 2)}>
+                                {(e: any) => (
+                                  <>
+                                    <div class="px-2.5 py-1 bg-rose-500/10 text-rose-300 whitespace-pre-wrap break-all max-h-20 overflow-y-auto">
+                                      {(String(e.oldText || "").split("\n").slice(0, 6).join("\n"))}
+                                    </div>
+                                    <div class="px-2.5 py-1 bg-emerald-500/10 text-emerald-300 whitespace-pre-wrap break-all max-h-20 overflow-y-auto">
+                                      {(String(e.newText || "").split("\n").slice(0, 6).join("\n"))}
+                                    </div>
+                                  </>
+                                )}
+                              </For>
+                              <Show when={args.edits.length > 2}>
+                                <div class="px-2.5 py-1 text-ink-600">+{args.edits.length - 2} more changes</div>
+                              </Show>
+                            </div>
+                          </Show>
+                        </div>
+                      </Show>
+                      <Show when={name === "glob"}>
+                        <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
+                          <Iconify icon="lucide:search" size={14} class="text-ink-400 shrink-0" />
+                          <span class="text-ink-500">Search files</span>
+                          <span class="font-mono text-ink-100 truncate">{String(args.pattern || "")}</span>
+                        </div>
+                      </Show>
+                      <Show when={!["bash", "read", "write", "edit", "glob"].includes(name)}>
+                        <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
+                          <Iconify icon="lucide:wrench" size={14} class="text-ink-400 shrink-0" />
+                          <span class="font-mono text-ink-100">{name}</span>
+                        </div>
+                      </Show>
+                      <details>
+                        <summary class="px-3.5 py-1.5 text-[11px] text-ink-600 hover:text-ink-300 cursor-pointer select-none border-t border-line/50">
+                          Details
+                        </summary>
+                        <pre class="px-3.5 pb-3 font-mono text-[11px] text-ink-500 overflow-x-auto whitespace-pre-wrap max-h-40">
+                          {pa().args}
+                        </pre>
+                      </details>
+                    </div>
+                    <div class="mt-3 flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => respondApproval(false)}
+                        class="px-3.5 py-1.5 rounded-xl text-xs font-medium text-ink-300 hover:text-ink-100 border border-line hover:bg-ink-800 transition-colors cursor-pointer"
+                      >
+                        Reject
+                      </button>
+                      <button
+                        onClick={() => respondApproval(true)}
+                        class="px-4 py-1.5 rounded-xl bg-ink-100 text-ink-950 hover:bg-white text-xs font-semibold transition-colors cursor-pointer"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => {
+                          setYoloMode(true);
+                          respondApproval(true);
+                        }}
+                        class="px-3.5 py-1.5 rounded-xl bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 text-xs font-semibold transition-colors cursor-pointer"
+                        title="Approve and stop asking (YOLO)"
+                      >
+                        Always allow
+                      </button>
+                    </div>
                   </div>
-                  <pre class="text-[11px] text-ink-300 overflow-x-auto whitespace-pre-wrap max-h-48">
-                    {pendingApproval()?.args}
-                  </pre>
-                </div>
-
-                <div class="mt-3 flex items-center justify-between">
-                  <span class="text-xs text-ink-400">
-                    Approve execution on host machine?
-                  </span>
-                  <div class="flex items-center gap-2">
-                    <button
-                      onClick={() => respondApproval(false)}
-                      class="px-3 py-1.5 rounded-lg bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 border border-rose-500/40 text-xs font-medium transition-colors"
-                    >
-                      Reject
-                    </button>
-                    <button
-                      onClick={() => respondApproval(true)}
-                      class="px-4 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 text-xs font-semibold shadow-sm transition-colors"
-                    >
-                      Approve & Execute
-                    </button>
-                    <button
-                      onClick={() => {
-                        setYoloMode(true);
-                        respondApproval(true);
-                      }}
-                      class="px-3 py-1.5 rounded-lg bg-amber-500 text-ink-950 hover:bg-amber-400 text-xs font-bold transition-colors"
-                    >
-                      Always Approve (YOLO)
-                    </button>
-                  </div>
-                </div>
-              </div>
+                );
+              }}
             </Show>
           </div>
           </Show>
@@ -3493,7 +4109,7 @@ export default function RemoteCodePage() {
             </Show>
             {/* Slash Command Autocomplete Menu */}
             <Show when={slashMatches().length > 0}>
-              <div class="absolute bottom-full left-4 right-4 md:left-8 md:right-8 mb-2 rounded-xl border border-line bg-ink-900/95 shadow-2xl p-1.5 max-h-60 overflow-y-auto z-[60] backdrop-blur">
+              <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-full max-w-2xl rounded-xl border border-line bg-ink-900/95 shadow-2xl p-1.5 max-h-60 overflow-y-auto z-[60] backdrop-blur">
                 <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-500 tracking-wider">
                   Slash Commands
                 </div>
@@ -3521,15 +4137,6 @@ export default function RemoteCodePage() {
             </Show>
 
             <div class="max-w-2xl mx-auto">
-              <Show when={activeProject()}>
-                <div class="flex justify-center pb-2">
-                  <span class="inline-flex items-center gap-1.5 text-xs text-ink-400">
-                    <Iconify icon="lucide:folder" size={12} />
-                    <span>{activeProject()?.name}</span>
-                    <Iconify icon="lucide:chevron-down" size={11} />
-                  </span>
-                </div>
-              </Show>
               {/* z-index: composer sits above the chat (z-30); popovers z-[60]
                   escape via no overflow clipping on this box. */}
               <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors relative">
@@ -3820,12 +4427,8 @@ export default function RemoteCodePage() {
                                   const id = m.id;
                                   setActiveModel(id);
                                   setModelMenuOpen(false);
-                                  if (activeSessionId()) {
-                                    sendWS({
-                                      type: "prompt",
-                                      sessionId: activeSessionId(),
-                                      text: `/model ${id}`,
-                                    });
+                                  if (activeSessionId() && wsOpen()) {
+                                    sendWS({ type: "set_model", sessionId: activeSessionId(), model: id });
                                   }
                                 }}
                                 class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
@@ -3853,13 +4456,7 @@ export default function RemoteCodePage() {
                                   onClick={() => {
                                     setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
                                     setModelMenuOpen(false);
-                                    if (activeSessionId()) {
-                                      sendWS({
-                                        type: "prompt",
-                                        sessionId: activeSessionId(),
-                                        text: `/reasoning ${lvl}`,
-                                      });
-                                    }
+                                    if (wsOpen()) sendWS({ type: "set_reasoning", effort: lvl });
                                   }}
                                   class={`py-1 rounded-md text-center text-[11px] font-medium capitalize cursor-pointer ${
                                     (daemonSettings().reasoning || "medium") === lvl
@@ -4283,6 +4880,42 @@ export default function RemoteCodePage() {
         )}
       </Show>
 
+      {/* Modal: Slash command reference */}
+      <Modal
+        open={helpOpen()}
+        onClose={() => setHelpOpen(false)}
+        title="Slash Commands"
+        width="max-w-lg"
+        fullOnMobile
+      >
+        <div class="space-y-1.5 max-h-[60vh] overflow-y-auto pr-0.5">
+          <For each={SLASH_COMMANDS}>
+            {(sc) => (
+              <div class="p-3 rounded-xl border border-line/70 bg-ink-900/50 flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="font-mono font-bold text-[13px] text-ink-100 flex items-center gap-2">
+                    <span>{sc.cmd}</span>
+                    <Show when={sc.args}>
+                      <span class="text-ink-500 font-normal text-[11px]">{sc.args}</span>
+                    </Show>
+                  </div>
+                  <div class="text-[11px] text-ink-500 mt-0.5">{sc.desc}</div>
+                </div>
+                <button
+                  onClick={() => {
+                    setHelpOpen(false);
+                    executeSlashCommand(sc.cmd + (sc.args ? " " : ""));
+                  }}
+                  class="px-3 py-1.5 rounded-lg bg-ink-800 hover:bg-ink-100 hover:text-ink-950 text-ink-300 text-xs font-medium transition-colors shrink-0 cursor-pointer"
+                >
+                  Run
+                </button>
+              </div>
+            )}
+          </For>
+        </div>
+      </Modal>
+
       {/* Modal: Pair Daemon Host */}
       <Modal
         open={showPairModal()}
@@ -4437,20 +5070,27 @@ export default function RemoteCodePage() {
                   <label class="block font-semibold text-ink-200 mb-1">
                     Default Model
                   </label>
-                  <select
-                    class="w-full bg-ink-900 border border-line rounded-xl px-3 py-2 text-ink-100 focus:outline-none"
-                    value={daemonSettings().model}
-                    onChange={(e) =>
-                      setDaemonSettings({
-                        ...daemonSettings(),
-                        model: e.currentTarget.value,
-                      })
+                  <button
+                    onClick={(e) =>
+                      openDropMenu(
+                        e,
+                        gatewayModels().map((m) => ({ value: m.id, label: m.name || m.id })),
+                        daemonSettings().model,
+                        (v) => {
+                          setDaemonSettings({ ...daemonSettings(), model: v });
+                          setActiveModel(v);
+                        },
+                        false,
+                      )
                     }
+                    class="w-full flex items-center justify-between gap-2 bg-ink-900 border border-line rounded-xl px-3 py-2 text-ink-100 cursor-pointer hover:border-ink-500"
                   >
-                    <For each={gatewayModels()}>
-                      {(m) => <option value={m.id}>{m.name || m.id}</option>}
-                    </For>
-                  </select>
+                    <span class="truncate">
+                      {gatewayModels().find((m) => m.id === daemonSettings().model)?.name ||
+                        daemonSettings().model}
+                    </span>
+                    <Iconify icon="lucide:chevron-down" size={13} class="shrink-0 text-ink-500" />
+                  </button>
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
@@ -4481,25 +5121,7 @@ export default function RemoteCodePage() {
                     </div>
                   </div>
 
-                  <div>
-                    <label class="block font-semibold text-ink-200 mb-1">
-                      Temperature ({(daemonSettings().temperature ?? 0.7).toFixed(2)})
-                    </label>
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.05"
-                      class="w-full cursor-pointer accent-brand-500"
-                      value={daemonSettings().temperature ?? 0.7}
-                      onInput={(e) =>
-                        setDaemonSettings({
-                          ...daemonSettings(),
-                          temperature: parseFloat(e.currentTarget.value),
-                        })
-                      }
-                    />
-                  </div>
+
                 </div>
 
                 <div class="space-y-2 pt-2 border-t border-line/60">
@@ -4524,27 +5146,12 @@ export default function RemoteCodePage() {
                         Autonomous execution (YOLO)
                       </span>
                       <span class="block text-[11px] text-ink-500 font-normal">
-                        Off by default. When off, every file write and shell command asks for approval first.
+                        On by default. When off, every file write and shell command asks for approval first.
                       </span>
                     </span>
                   </label>
 
-                  <label class="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={daemonSettings().jailByDefault ?? false}
-                      onChange={(e) =>
-                        setDaemonSettings({
-                          ...daemonSettings(),
-                          jailByDefault: e.currentTarget.checked,
-                        })
-                      }
-                      class="rounded accent-brand-500"
-                    />
-                    <span class="text-ink-200 font-medium">
-                      Strict Sandbox Jail (Confine tools strictly to session CWD)
-                    </span>
-                  </label>
+
 
                   <label class="flex items-center gap-2 cursor-pointer select-none">
                     <input
@@ -4576,15 +5183,15 @@ export default function RemoteCodePage() {
                   <label class="block font-semibold text-ink-200 mb-1">
                     Auto-compact threshold
                   </label>
-                  <div class="grid grid-cols-5 gap-1 bg-ink-900 p-1 rounded-xl border border-line">
-                    <For each={[0, 70, 80, 85, 90]}>
+                  <div class="grid grid-cols-6 gap-1 bg-ink-900 p-1 rounded-xl border border-line">
+                    <For each={[0, 70, 80, 85, 90, 95]}>
                       {(v) => (
                         <button
                           onClick={() =>
                             setDaemonSettings({ ...daemonSettings(), autoCompactPercent: v })
                           }
                           class={`py-1 rounded-lg text-center font-medium transition-colors cursor-pointer ${
-                            (daemonSettings().autoCompactPercent ?? 80) === v
+                            (daemonSettings().autoCompactPercent ?? 95) === v
                               ? "bg-ink-100 text-ink-950"
                               : "text-ink-400 hover:text-ink-200"
                           }`}
@@ -4598,33 +5205,6 @@ export default function RemoteCodePage() {
                     Compact the transcript automatically past this context usage.
                   </p>
                 </div>
-                <div>
-                  <label class="block font-semibold text-ink-200 mb-1">
-                    HTTP proxy
-                  </label>
-                  <input
-                    type="text"
-                    class="w-full bg-ink-900 border border-line rounded-xl px-3 py-2 text-ink-100 focus:outline-none font-mono"
-                    placeholder="http://proxy:8080"
-                    value={daemonSettings().httpProxy || ""}
-                    onInput={(e) =>
-                      setDaemonSettings({ ...daemonSettings(), httpProxy: e.currentTarget.value })
-                    }
-                  />
-                </div>
-                <label class="flex items-center gap-2 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={daemonSettings().insecureTls ?? false}
-                    onChange={(e) =>
-                      setDaemonSettings({ ...daemonSettings(), insecureTls: e.currentTarget.checked })
-                    }
-                    class="rounded accent-brand-500"
-                  />
-                  <span class="text-ink-200 font-medium">
-                    Insecure TLS (skip certificate verification)
-                  </span>
-                </label>
               </div>
             </div>
 
@@ -4652,7 +5232,7 @@ export default function RemoteCodePage() {
             </div>
 
             <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
-              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+              <h3 id="sec-mcp" class="text-sm font-semibold text-ink-100 flex items-center gap-2 scroll-mt-2">
                 <Iconify icon="lucide:cpu" size={15} class="text-ink-500" />
                 <span>MCP Servers</span>
                 <span class="px-1.5 py-0.2 rounded-full bg-ink-800 text-[10px] text-ink-400">{Object.keys(mcpServers()).length}</span>
@@ -4662,7 +5242,7 @@ export default function RemoteCodePage() {
                   <div class="font-semibold text-ink-200 text-xs">
                     Add Model Context Protocol (MCP) Server
                   </div>
-                  <div class="grid grid-cols-3 gap-2">
+                  <div class="grid grid-cols-2 gap-2">
                     <input
                       type="text"
                       placeholder="Server name (e.g. github)"
@@ -4670,15 +5250,6 @@ export default function RemoteCodePage() {
                       value={newMcpName()}
                       onInput={(e) => setNewMcpName(e.currentTarget.value)}
                     />
-                    <select
-                      class="bg-ink-900 border border-line rounded-lg px-2.5 py-1.5 text-ink-100"
-                      value={newMcpTransport()}
-                      onChange={(e) => setNewMcpTransport(e.currentTarget.value)}
-                    >
-                      <option value="stdio">stdio (Local binary)</option>
-                      <option value="sse">SSE (Server-Sent Events)</option>
-                      <option value="http">HTTP</option>
-                    </select>
                     <input
                       type="text"
                       placeholder="Command (e.g. npx, uvx)"
@@ -4687,6 +5258,31 @@ export default function RemoteCodePage() {
                       onInput={(e) => setNewMcpCmd(e.currentTarget.value)}
                     />
                   </div>
+                  <div class="grid grid-cols-3 gap-1 bg-ink-950 p-1 rounded-lg border border-line/60">
+                    <For each={[["stdio", "stdio"], ["sse", "SSE"], ["http", "HTTP"]] as const}>
+                      {([v, label]) => (
+                        <button
+                          onClick={() => setNewMcpTransport(v)}
+                          class={`py-1 rounded-md text-center font-medium cursor-pointer ${
+                            newMcpTransport() === v
+                              ? "bg-ink-100 text-ink-950"
+                              : "text-ink-400 hover:text-ink-200"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <Show when={newMcpTransport() !== "stdio"}>
+                    <input
+                      type="text"
+                      placeholder="Server URL"
+                      class="w-full bg-ink-900 border border-line rounded-lg px-2.5 py-1.5 text-ink-100"
+                      value={newMcpUrl()}
+                      onInput={(e) => setNewMcpUrl(e.currentTarget.value)}
+                    />
+                  </Show>
                   <input
                     type="text"
                     placeholder="Arguments (e.g. -y @modelcontextprotocol/server-filesystem /path)"
@@ -4744,7 +5340,7 @@ export default function RemoteCodePage() {
             </div>
 
             <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
-              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+              <h3 id="sec-skills" class="text-sm font-semibold text-ink-100 flex items-center gap-2 scroll-mt-2">
                 <Iconify icon="lucide:puzzle" size={15} class="text-ink-500" />
                 <span>Skills</span>
                 <span class="px-1.5 py-0.2 rounded-full bg-ink-800 text-[10px] text-ink-400">{Object.keys(skills()).length}</span>

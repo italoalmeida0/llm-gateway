@@ -96,7 +96,7 @@ func TestOpenAIRequestUsesReasoningLevelMap(t *testing.T) {
 	}})
 	t.Cleanup(func() { SetLiveModels(nil) })
 
-	client := NewOpenAICompat("custom", "test", "", "").(*openaiClient)
+	client := NewOpenAI("test", "").(*openaiClient)
 	for _, tt := range []struct {
 		requested string
 		want      string

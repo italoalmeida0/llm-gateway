@@ -642,7 +642,7 @@ export function Modal(props: {
         >
           <div class="min-h-full flex items-center justify-center p-4">
             <div
-              class={`anim-pop-in w-full ${props.width ?? "max-w-md"} rounded-[1.5rem] border border-line bg-card shadow-2xl shadow-black/30 ${
+              class={`anim-pop-in w-full ${props.width ?? "max-w-md"} rounded-xl border border-line bg-card shadow-2xl shadow-black/30 ${
                 props.fullOnMobile
                   ? "max-sm:min-h-[100dvh] max-sm:max-w-full max-sm:rounded-none max-sm:border-0"
                   : ""
@@ -650,7 +650,7 @@ export function Modal(props: {
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
             >
-              <div class="flex items-center justify-between px-6 py-4 border-b border-line">
+              <div class="flex items-center justify-between px-5 py-3 border-b border-line">
                 <h3 class="text-sm font-semibold">{props.title}</h3>
                 <button
                   onClick={props.onClose}
@@ -660,7 +660,7 @@ export function Modal(props: {
                   <Icon name={Icons.x} />
                 </button>
               </div>
-              <div class="px-6 py-5">{props.children}</div>
+              <div class="px-5 py-4">{props.children}</div>
             </div>
           </div>
         </div>

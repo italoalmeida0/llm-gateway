@@ -173,6 +173,55 @@ export default function RemoteCodePage() {
   const [newSessionCwd, setNewSessionCwd] = createSignal("");
   const [newSessionTitle, setNewSessionTitle] = createSignal("");
 
+  // Projects (Antigravity-style: pasta no host agrupa conversas)
+  interface Project {
+    id: string;
+    hostId: string;
+    name: string;
+    path: string;
+    createdAt: number;
+  }
+  const [projects, setProjects] = createSignal<Project[]>([]);
+  const [activeProjectId, setActiveProjectId] = createSignal<string>("");
+  const [showNewProjectModal, setShowNewProjectModal] = createSignal(false);
+  const [newProjectPath, setNewProjectPath] = createSignal("");
+
+  function projectsKey(hostId: string) {
+    return `llmgw-projects:${hostId}`;
+  }
+  function loadProjects(hostId: string) {
+    if (!hostId) {
+      setProjects([]);
+      setActiveProjectId("");
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(projectsKey(hostId));
+      const list: Project[] = raw ? JSON.parse(raw) : [];
+      const scoped = Array.isArray(list) ? list.filter((p) => p.hostId === hostId) : [];
+      setProjects(scoped);
+      if (scoped.length > 0 && !scoped.some((p) => p.id === activeProjectId())) {
+        setActiveProjectId(scoped[0].id);
+      }
+      if (scoped.length === 0) setActiveProjectId("");
+    } catch {
+      setProjects([]);
+      setActiveProjectId("");
+    }
+  }
+  function persistProjects(list: Project[]) {
+    try {
+      const hid = activeHostId();
+      if (hid) localStorage.setItem(projectsKey(hid), JSON.stringify(list));
+    } catch {}
+  }
+  function basename(p: string) {
+    const t = p.replace(/\/+$/, "").trim();
+    if (!t) return p;
+    const parts = t.split("/");
+    return parts[parts.length - 1] || t;
+  }
+
   // Chat Transcript & In-Flight State
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [inputPrompt, setInputPrompt] = createSignal("");
@@ -220,10 +269,40 @@ export default function RemoteCodePage() {
     return sessions().find((s) => s.id === activeSessionId()) ?? null;
   });
 
+  const activeProject = createMemo(() => {
+    const list = projects();
+    if (list.length === 0) return null;
+    return list.find((p) => p.id === activeProjectId()) ?? list[0] ?? null;
+  });
+
+  function sessionsOfProject(projectPath: string) {
+    const norm = projectPath.replace(/\/+$/, "");
+    return sessions().filter((s) => {
+      const cwd = (s.cwd || "").replace(/\/+$/, "");
+      return cwd === norm || cwd.startsWith(norm + "/");
+    });
+  }
+
+  function timeAgo(ts: number) {
+    const d = Date.now() - ts;
+    const m = Math.floor(d / 60000);
+    if (m < 1) return "now";
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h`;
+    const days = Math.floor(h / 24);
+    return `${days}d`;
+  }
+
   const filteredSessions = createMemo(() => {
     const q = sessionFilter().toLowerCase().trim();
-    if (!q) return sessions();
-    return sessions().filter(
+    let base = sessions();
+    const ap = activeProject();
+    // Quando há projeto ativo, a lista filtra por ele (como no Antigravity).
+    // Sem projeto, mostra tudo.
+    if (ap) base = sessionsOfProject(ap.path);
+    if (!q) return base;
+    return base.filter(
       (s) =>
         s.title.toLowerCase().includes(q) ||
         s.cwd.toLowerCase().includes(q) ||
@@ -345,6 +424,16 @@ export default function RemoteCodePage() {
   // --- Message Handling ---
   function handleIncomingMessage(msg: any) {
     switch (msg.type) {
+      case "relay_connected":
+        break;
+      case "host_status": {
+        if (msg.hostId && msg.status) {
+          setHosts((prev) =>
+            prev.map((h) => (h.id === msg.hostId ? { ...h, status: msg.status } : h)),
+          );
+        }
+        break;
+      }
       case "sessions_list": {
         const rawList = msg.sessions || [];
         const mapped: SessionSummary[] = rawList.map((r: any) => ({
@@ -639,17 +728,67 @@ export default function RemoteCodePage() {
     sendWS({ type: "get_session", sessionId: id });
   }
 
+  function openNewSessionModal() {
+    const ap = activeProject();
+    // Pré-preenche com a pasta do projeto ativo (padrão Antigravity).
+    setNewSessionCwd(ap?.path || activeSession()?.cwd || "");
+    setNewSessionTitle("");
+    setShowNewSessionModal(true);
+  }
+
+  function createProject() {
+    const rawPath = newProjectPath().trim();
+    if (!rawPath) {
+      toast("Project folder cannot be empty", "err");
+      return;
+    }
+    const hid = activeHostId();
+    if (!hid) {
+      toast("Connect a host first", "err");
+      return;
+    }
+    const p: Project = {
+      id: `proj_${Date.now().toString(36)}`,
+      hostId: hid,
+      name: basename(rawPath),
+      path: rawPath,
+      createdAt: Date.now(),
+    };
+    const next = [p, ...projects()];
+    setProjects(next);
+    persistProjects(next);
+    setActiveProjectId(p.id);
+    setNewProjectPath("");
+    setShowNewProjectModal(false);
+    toast(`Project '${p.name}' added`, "ok");
+    // Já abre a criação de conversa dentro do projeto.
+    openNewSessionModal();
+  }
+
+  function deleteProject(id: string, e: MouseEvent) {
+    e.stopPropagation();
+    if (!confirm("Remove this project from the list? Sessions on the host are kept.")) return;
+    const next = projects().filter((p) => p.id !== id);
+    setProjects(next);
+    persistProjects(next);
+    if (activeProjectId() === id) setActiveProjectId(next[0]?.id || "");
+  }
+
   function createNewSession() {
     const cwd = newSessionCwd().trim();
     if (!cwd) {
       toast("Working directory cannot be empty", "err");
       return;
     }
+    if (!ws || (ws as WebSocket).readyState !== WebSocket.OPEN) {
+      toast("Not connected to host yet — wait for online status", "err");
+      return;
+    }
     sendWS({
       type: "create_session",
       requestId: "new_" + Date.now(),
       cwd,
-      title: newSessionTitle().trim() || cwd,
+      title: newSessionTitle().trim() || basename(cwd),
       model: activeModel(),
     });
     setShowNewSessionModal(false);
@@ -829,6 +968,7 @@ export default function RemoteCodePage() {
   onMount(async () => {
     await loadGatewayModels();
     await loadHosts();
+    if (activeHostId()) loadProjects(activeHostId());
     if (hosts().length === 0) {
       generatePairingToken();
     }
@@ -837,6 +977,7 @@ export default function RemoteCodePage() {
   createEffect(() => {
     const hid = activeHostId();
     if (hid) {
+      loadProjects(hid);
       connectWebSocket(hid);
     }
   });
@@ -875,31 +1016,35 @@ export default function RemoteCodePage() {
       {/* ========================================================================= */}
       {/* Top Application Navigation Bar                                             */}
       {/* ========================================================================= */}
-      <header class="h-14 border-b border-line bg-ink-950/90 backdrop-blur flex items-center justify-between px-4 shrink-0 z-30">
+      <header class="h-12 border-b border-line/70 bg-ink-950/95 backdrop-blur flex items-center justify-between px-3 shrink-0 z-30">
         {/* Left: Exit to Gateway & App Identifier */}
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2 min-w-0">
           <a
             href="#/"
-            class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-ink-300 hover:text-ink-50 hover:bg-ink-900 border border-line/60 transition-colors text-xs font-medium"
+            class="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-900 transition-colors text-xs font-medium"
             title="Return to LLM Gateway Dashboard"
           >
-            <Iconify icon="lucide:arrow-left" size={15} />
-            <span>LLM Gateway</span>
+            <Iconify icon="lucide:arrow-left" size={14} />
+            <span class="hidden sm:inline">LLM Gateway</span>
           </a>
 
-          <div class="h-4 w-px bg-line/80" />
+          <div class="h-4 w-px bg-line/70" />
 
-          <div class="flex items-center gap-2">
-            <div class="w-7 h-7 rounded-lg bg-brand-500/20 text-brand-400 border border-brand-500/30 flex items-center justify-center font-bold text-xs">
-              <Iconify icon="lucide:terminal" size={16} />
+          <div class="flex items-center gap-2 min-w-0">
+            <div class="w-6 h-6 rounded-md bg-ink-800 text-ink-200 flex items-center justify-center">
+              <Iconify icon="lucide:terminal" size={14} />
             </div>
-            <div class="flex items-baseline gap-1.5">
-              <span class="text-sm font-semibold tracking-tight text-ink-100">
-                Code Remote
+            {/* Breadcrumb estilo Antigravity: projeto / conversa */}
+            <div class="flex items-center gap-1.5 text-[13px] min-w-0">
+              <span class="text-ink-400 truncate max-w-[140px]" title={activeProject()?.path || "No project"}>
+                {activeProject()?.name || "No project"}
               </span>
-              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20 uppercase tracking-widest font-semibold">
-                Autonomous Agent
-              </span>
+              <Show when={activeSession()}>
+                <span class="text-ink-600">/</span>
+                <span class="text-ink-200 truncate max-w-[220px] font-medium" title={activeSession()?.title}>
+                  {activeSession()?.title}
+                </span>
+              </Show>
             </div>
           </div>
         </div>
@@ -911,38 +1056,37 @@ export default function RemoteCodePage() {
             fallback={
               <button
                 onClick={generatePairingToken}
-                class="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-brand-500 text-white font-medium hover:bg-brand-600 transition-colors shadow-sm cursor-pointer"
+                class="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-ink-100 text-ink-950 font-medium hover:bg-white transition-colors cursor-pointer"
               >
                 <Iconify icon="lucide:plus" size={14} />
                 <span>Connect Host</span>
               </button>
             }
           >
-            <div class="flex items-center gap-2 px-3 py-1 rounded-lg bg-ink-900 border border-line text-xs">
+            <div class="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-ink-900/70 border border-line/70 text-xs">
               <span
-                class={`w-2 h-2 rounded-full ${
+                class={`w-1.5 h-1.5 rounded-full ${
                   activeHost()?.status === "online"
                     ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.7)] animate-pulse"
                     : "bg-amber-500"
                 }`}
               />
-              <span class="text-ink-400 text-[11px]">Host:</span>
               <select
-                class="bg-transparent text-ink-200 font-medium focus:outline-none cursor-pointer"
+                class="bg-transparent text-ink-300 font-medium focus:outline-none cursor-pointer max-w-[160px]"
                 value={activeHostId()}
                 onChange={(e) => setActiveHostId(e.currentTarget.value)}
               >
                 <For each={hosts()}>
                   {(h) => (
                     <option value={h.id} class="bg-ink-900 text-ink-100">
-                      {h.name || h.hostname || h.id} ({h.status || (h.os ? `${h.os}/${h.arch}` : "offline")})
+                      {h.name || h.hostname || h.id} ({h.status || "offline"})
                     </option>
                   )}
                 </For>
               </select>
               <button
                 onClick={generatePairingToken}
-                class="text-ink-400 hover:text-ink-200 p-0.5 cursor-pointer"
+                class="text-ink-500 hover:text-ink-200 p-0.5 cursor-pointer"
                 title="Connect another host"
               >
                 <Iconify icon="lucide:plus" size={13} />
@@ -951,24 +1095,13 @@ export default function RemoteCodePage() {
           </Show>
         </div>
 
-        {/* Right: Agent Mode, Model, Settings & Theme */}
-        <div class="flex items-center gap-2.5">
-          {/* Working Directory Pill */}
-          <Show when={activeSession()?.cwd}>
-            <div
-              class="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-ink-900/80 border border-line text-[11px] text-ink-400 max-w-xs truncate font-mono"
-              title={activeSession()?.cwd}
-            >
-              <Iconify icon="lucide:folder" size={13} class="text-ink-500" />
-              <span class="truncate">{activeSession()?.cwd}</span>
-            </div>
-          </Show>
-
+        {/* Right: Model, Mode, Settings */}
+        <div class="flex items-center gap-1.5">
           {/* Model Selector Dropdown (Live Gateway Models) */}
-          <div class="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-ink-900 border border-line text-xs">
-            <Iconify icon="lucide:sparkles" size={13} class="text-brand-400" />
+          <div class="flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-ink-900 text-xs text-ink-300">
+            <Iconify icon="lucide:sparkles" size={13} class="text-ink-500" />
             <select
-              class="bg-transparent text-ink-200 font-medium focus:outline-none cursor-pointer max-w-[150px] truncate"
+              class="bg-transparent font-medium focus:outline-none cursor-pointer max-w-[150px] truncate"
               value={activeModel()}
               onChange={(e) => {
                 const m = e.currentTarget.value;
@@ -992,43 +1125,38 @@ export default function RemoteCodePage() {
             </select>
           </div>
 
-          {/* YOLO Autonomous Toggle */}
+          {/* Safe/YOLO Toggle */}
           <button
             onClick={() => {
               const next = !yoloMode();
               setYoloMode(next);
               toast(
                 next
-                  ? "YOLO Mode Active: Agent executes tools autonomously"
-                  : "Safe Mode Active: User approval required for tool runs",
+                  ? "YOLO Mode: tools run autonomously"
+                  : "Safe Mode: approval required",
                 next ? "warn" : "info",
               );
             }}
-            class={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium transition-all ${
+            class={`hidden sm:flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-colors ${
               yoloMode()
-                ? "bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25"
-                : "bg-ink-900 border-line text-ink-400 hover:text-ink-200 hover:bg-ink-800"
+                ? "text-amber-300 hover:bg-amber-500/10"
+                : "text-ink-400 hover:bg-ink-900 hover:text-ink-200"
             }`}
-            title="YOLO Mode skips confirmation for file writes and shell commands"
+            title="YOLO skips confirmation for file writes and shell"
           >
             <Iconify
               icon={yoloMode() ? "lucide:zap" : "lucide:shield"}
               size={13}
             />
-            <span>{yoloMode() ? "YOLO Mode" : "Safe Mode"}</span>
           </button>
 
-          {/* Agent Settings & MCP Center Button */}
+          {/* Settings */}
           <button
             onClick={() => setShowConfigModal(true)}
-            class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-ink-900 hover:bg-ink-800 border border-line text-xs font-medium text-ink-300 hover:text-ink-100 transition-colors cursor-pointer"
+            class="p-1.5 rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-900 transition-colors cursor-pointer"
             title="Agent Configuration, MCP Servers & Skills"
           >
-            <Iconify icon="lucide:settings-2" size={14} />
-            <span>Settings & MCP</span>
-            <Show when={Object.keys(mcpServers()).length > 0}>
-              <span class="w-1.5 h-1.5 rounded-full bg-brand-500" />
-            </Show>
+            <Iconify icon="lucide:settings-2" size={15} />
           </button>
 
           <ThemeToggle />
@@ -1172,140 +1300,158 @@ export default function RemoteCodePage() {
         }
       >
         <div class="flex-1 flex min-h-0 overflow-hidden relative">
-        {/* --- Left Sidebar: Sessions --- */}
+        {/* --- Left Sidebar: Projects + Conversations (Antigravity) --- */}
         <aside
-          class={`border-r border-line bg-ink-950 flex flex-col shrink-0 transition-all duration-200 ${
-            sidebarOpen() ? "w-72" : "w-0 overflow-hidden"
+          class={`border-r border-line/70 bg-ink-950 flex flex-col shrink-0 transition-all duration-200 ${
+            sidebarOpen() ? "w-64" : "w-0 overflow-hidden"
           }`}
         >
-          {/* Sidebar Top Header */}
-          <div class="p-3 border-b border-line flex items-center justify-between gap-2">
-            <div class="flex items-center gap-2 text-xs font-semibold text-ink-300">
-              <Iconify icon="lucide:terminal" size={14} />
-              <span>Sessions ({sessions().length})</span>
-            </div>
+          {/* New Conversation */}
+          <div class="p-2">
             <button
               onClick={() => {
-                setNewSessionCwd(activeSession()?.cwd || "");
-                setShowNewSessionModal(true);
+                if (projects().length === 0) setShowNewProjectModal(true);
+                else openNewSessionModal();
               }}
-              class="flex items-center gap-1 text-xs px-2.5 py-1 rounded-md bg-brand-500/15 text-brand-400 border border-brand-500/30 hover:bg-brand-500/25 transition-colors font-medium"
+              class="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-ink-900 hover:bg-ink-800 border border-line/60 text-[13px] font-medium text-ink-200 transition-colors cursor-pointer"
             >
-              <Iconify icon="lucide:plus" size={13} />
-              <span>New</span>
+              <Iconify icon="lucide:plus" size={14} />
+              <span>New Conversation</span>
+            </button>
+            <button
+              onClick={() => (document.querySelector<HTMLInputElement>("#rc-filter")?.focus())}
+              class="w-full flex items-center gap-2 px-3 py-1.5 mt-1 rounded-lg text-xs text-ink-500 hover:text-ink-300 hover:bg-ink-900/60 transition-colors cursor-pointer"
+            >
+              <Iconify icon="lucide:history" size={13} />
+              <span>Conversation History</span>
             </button>
           </div>
 
-          {/* Filter Input */}
-          <div class="p-2 border-b border-line/60">
-            <div class="relative">
-              <input
-                type="text"
-                placeholder="Filter sessions..."
-                class="w-full text-xs bg-ink-900 border border-line rounded-md px-2.5 py-1 text-ink-200 placeholder:text-ink-600 focus:outline-none focus:border-brand-500/50"
-                value={sessionFilter()}
-                onInput={(e) => setSessionFilter(e.currentTarget.value)}
-              />
-            </div>
+          {/* Filter */}
+          <div class="px-2 pb-2">
+            <input
+              id="rc-filter"
+              type="text"
+              placeholder="Filter..."
+              class="w-full text-xs bg-transparent border border-line/60 rounded-lg px-2.5 py-1.5 text-ink-200 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
+              value={sessionFilter()}
+              onInput={(e) => setSessionFilter(e.currentTarget.value)}
+            />
           </div>
 
-          {/* Sessions List */}
-          <div class="flex-1 overflow-y-auto p-2 space-y-1">
-            <For
-              each={filteredSessions()}
-              fallback={
-                <div class="p-6 text-center text-xs text-ink-600">
-                  <Iconify
-                    icon="lucide:terminal"
-                    size={28}
-                    class="mx-auto mb-2 opacity-40"
-                  />
-                  <p>No active sessions found.</p>
+          {/* Projects */}
+          <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-4">
+            <div>
+              <div class="flex items-center justify-between px-1.5 pb-1">
+                <span class="text-[11px] font-medium text-ink-500">Projects</span>
+                <button
+                  onClick={() => setShowNewProjectModal(true)}
+                  class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
+                  title="Add project folder from host"
+                >
+                  <Iconify icon="lucide:folder-plus" size={13} />
+                </button>
+              </div>
+              <Show
+                when={projects().length > 0}
+                fallback={
                   <button
-                    onClick={() => setShowNewSessionModal(true)}
-                    class="mt-2 text-brand-400 hover:underline font-medium"
+                    onClick={() => setShowNewProjectModal(true)}
+                    class="w-full text-left px-2.5 py-2 rounded-lg border border-dashed border-line text-xs text-ink-500 hover:text-ink-300 hover:border-ink-500 transition-colors cursor-pointer"
                   >
-                    + Create a session
+                    + Select a project folder on the host
                   </button>
+                }
+              >
+                <div class="space-y-0.5">
+                  <For each={projects()}>
+                    {(p) => {
+                      const isActive = () => p.id === (activeProject()?.id || "");
+                      const count = () => sessionsOfProject(p.path).length;
+                      return (
+                        <div
+                          onClick={() => setActiveProjectId(p.id)}
+                          class={`group flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer text-[13px] transition-colors ${
+                            isActive() ? "bg-ink-900 text-ink-100" : "text-ink-400 hover:bg-ink-900/60 hover:text-ink-200"
+                          }`}
+                          title={p.path}
+                        >
+                          <Iconify icon="lucide:folder" size={14} class="shrink-0 text-ink-500" />
+                          <span class="truncate flex-1 font-medium">{p.name}</span>
+                          <span class="text-[10px] text-ink-600">{count() > 0 ? count() : ""}</span>
+                          <button
+                            onClick={(e) => deleteProject(p.id, e)}
+                            class="opacity-0 group-hover:opacity-100 p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
+                            title="Remove project"
+                          >
+                            <Iconify icon="lucide:x" size={12} />
+                          </button>
+                        </div>
+                      );
+                    }}
+                  </For>
                 </div>
-              }
-            >
-              {(s) => {
-                const isActive = () => s.id === activeSessionId();
-                return (
-                  <div
-                    onClick={() => selectSession(s.id)}
-                    class={`group relative p-2.5 rounded-lg border cursor-pointer transition-all ${
-                      isActive()
-                        ? "bg-ink-900/90 border-brand-500/40 shadow-sm"
-                        : "bg-transparent border-transparent hover:bg-ink-900/50 hover:border-line"
-                    }`}
-                  >
-                    <div class="flex items-center justify-between gap-1 mb-1">
-                      <span class="text-xs font-medium text-ink-200 truncate flex-1">
-                        {s.title}
-                      </span>
-                      <Show when={s.status === "running"}>
-                        <span class="flex h-2 w-2 relative">
-                          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-400 opacity-75" />
-                          <span class="relative inline-flex rounded-full h-2 w-2 bg-brand-500" />
-                        </span>
-                      </Show>
-                    </div>
+              </Show>
+            </div>
 
-                    <div class="flex items-center gap-1.5 text-[11px] text-ink-500 font-mono truncate mb-1.5">
-                      <Iconify icon="lucide:folder" size={11} />
-                      <span class="truncate">{s.cwd}</span>
+            {/* Conversations do projeto ativo */}
+            <div>
+              <div class="px-1.5 pb-1 text-[11px] font-medium text-ink-500 truncate">
+                {activeProject() ? activeProject()?.name : "Conversations"}
+              </div>
+              <div class="space-y-0.5">
+                <For
+                  each={filteredSessions().slice().sort((a, b) => b.updatedAt - a.updatedAt)}
+                  fallback={
+                    <div class="px-2.5 py-3 text-xs text-ink-600 leading-relaxed">
+                      {projects().length === 0
+                        ? "Create a project first, then start a conversation inside it."
+                        : "No conversations yet. Start one above."}
                     </div>
-
-                    <div class="flex items-center justify-between text-[10px] text-ink-500 pt-1 border-t border-line/40">
-                      <span class="px-1.5 py-0.2 rounded bg-ink-800 text-ink-400">
-                        {s.model}
-                      </span>
-                      <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            sendWS({
-                              type: "compact_session",
-                              sessionId: s.id,
-                            });
-                          }}
-                          class="p-1 text-ink-400 hover:text-ink-200 hover:bg-ink-800 rounded"
-                          title="Compact session context"
-                        >
-                          <Iconify icon="lucide:boxes" size={12} />
-                        </button>
-                        <button
-                          onClick={(e) => deleteSession(s.id, e)}
-                          class="p-1 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 rounded"
-                          title="Delete session"
-                        >
-                          <Iconify icon="lucide:trash-2" size={12} />
-                        </button>
+                  }
+                >
+                  {(s) => {
+                    const isActive = () => s.id === activeSessionId();
+                    return (
+                      <div
+                        onClick={() => selectSession(s.id)}
+                        class={`group flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer text-[13px] transition-colors ${
+                          isActive() ? "bg-ink-800 text-ink-50" : "text-ink-400 hover:bg-ink-900/60 hover:text-ink-200"
+                        }`}
+                        title={`${s.title}\n${s.cwd}`}
+                      >
+                        <span class="truncate flex-1">{s.title}</span>
+                        <span class="text-[10px] text-ink-600 shrink-0">{timeAgo(s.updatedAt)}</span>
+                        <Show when={s.status === "running"}>
+                          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                        </Show>
+                        <div class="hidden group-hover:flex items-center shrink-0">
+                          <button
+                            onClick={(e) => deleteSession(s.id, e)}
+                            class="p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
+                            title="Delete"
+                          >
+                            <Iconify icon="lucide:trash-2" size={11} />
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                );
-              }}
-            </For>
+                    );
+                  }}
+                </For>
+              </div>
+            </div>
           </div>
 
-          {/* Sidebar Footer: Host Status & Slash Cheatsheet */}
-          <div class="p-2.5 border-t border-line bg-ink-950/60 flex items-center justify-between text-[11px] text-ink-500">
-            <div class="flex items-center gap-1.5 truncate">
-              <Iconify icon="lucide:server" size={12} />
-              <span class="truncate">{activeHost()?.name || "Connected"}</span>
-            </div>
+          {/* Sidebar Footer: host estilo Antigravity */}
+          <div class="p-2 border-t border-line/70 flex items-center gap-2">
+            <span class={`w-1.5 h-1.5 rounded-full shrink-0 ${activeHost()?.status === "online" ? "bg-emerald-500" : "bg-amber-500"}`} />
+            <span class="text-xs text-ink-300 truncate flex-1 font-medium">{activeHost()?.name || activeHost()?.hostname || "No host"}</span>
             <button
-              onClick={() => {
-                setConfigTab("slash");
-                setShowConfigModal(true);
-              }}
-              class="text-brand-400 hover:underline flex items-center gap-1 text-[11px]"
+              onClick={loadHosts}
+              class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
+              title="Refresh hosts"
             >
-              <Iconify icon="lucide:help-circle" size={12} />
-              <span>Commands</span>
+              <Iconify icon="lucide:refresh-cw" size={12} />
             </button>
           </div>
         </aside>
@@ -1361,90 +1507,42 @@ export default function RemoteCodePage() {
             ref={setChatContainerRef}
             class="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 select-text"
           >
-            {/* Welcome State when no messages exist */}
-            <Show when={messages().length === 0}>
-              <div class="max-w-2xl mx-auto my-12 text-center">
-                <div class="w-14 h-14 rounded-2xl bg-brand-500/10 border border-brand-500/20 text-brand-400 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-brand-500/5">
-                  <Iconify icon="lucide:terminal" size={32} />
-                </div>
-                <h2 class="text-xl font-bold tracking-tight text-ink-100">
-                  Ready to code with Code Remote
-                </h2>
-                <p class="text-sm text-ink-400 mt-1 max-w-md mx-auto">
-                  Autonomous agent connected directly to your machine. Type a prompt
-                  or select an action to start.
-                </p>
-
-                <div class="mt-4 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-ink-900 border border-line text-xs font-mono text-ink-300">
-                  <Iconify icon="lucide:folder" size={13} class="text-brand-400" />
-                  <span>{activeSession()?.cwd || "No working directory"}</span>
-                </div>
-
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-8 text-left">
-                  <button
-                    onClick={() => {
-                      setInputPrompt("Inspect repository and outline architecture");
-                      sendPrompt();
-                    }}
-                    class="p-3.5 rounded-xl border border-line bg-ink-900/60 hover:bg-ink-900 hover:border-brand-500/40 text-left transition-all group cursor-pointer"
-                  >
-                    <div class="flex items-center gap-2 font-medium text-xs text-ink-200 group-hover:text-brand-400">
-                      <Iconify icon="lucide:code" size={14} />
-                      <span>Inspect Repository</span>
+            {/* Empty state estilo Antigravity: só projeto + hint */}
+            <Show when={messages().length === 0 && !activeSessionId()}>
+              <div class="max-w-xl mx-auto my-16 text-center">
+                <Show
+                  when={activeProject()}
+                  fallback={
+                    <div class="space-y-3">
+                      <div class="text-sm text-ink-300 font-medium">No project selected</div>
+                      <p class="text-xs text-ink-500 max-w-sm mx-auto leading-relaxed">
+                        Projects are just folders on the host. Select one to group its conversations — like Antigravity.
+                      </p>
+                      <button
+                        onClick={() => setShowNewProjectModal(true)}
+                        class="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-[13px] font-medium hover:bg-white cursor-pointer"
+                      >
+                        <Iconify icon="lucide:folder-plus" size={14} />
+                        <span>Select project folder</span>
+                      </button>
                     </div>
-                    <div class="text-[11px] text-ink-500 mt-1">
-                      Explore codebase tree and outline major components
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setInputPrompt("Run test suite and fix any failing tests");
-                      sendPrompt();
-                    }}
-                    class="p-3.5 rounded-xl border border-line bg-ink-900/60 hover:bg-ink-900 hover:border-brand-500/40 text-left transition-all group cursor-pointer"
-                  >
-                    <div class="flex items-center gap-2 font-medium text-xs text-ink-200 group-hover:text-brand-400">
-                      <Iconify icon="lucide:wrench" size={14} />
-                      <span>Run & Fix Tests</span>
-                    </div>
-                    <div class="text-[11px] text-ink-500 mt-1">
-                      Execute test runner and repair syntax or logic errors
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setInputPrompt("Search codebase for TODO comments and summarize them");
-                      sendPrompt();
-                    }}
-                    class="p-3.5 rounded-xl border border-line bg-ink-900/60 hover:bg-ink-900 hover:border-brand-500/40 text-left transition-all group cursor-pointer"
-                  >
-                    <div class="flex items-center gap-2 font-medium text-xs text-ink-200 group-hover:text-brand-400">
-                      <Iconify icon="lucide:sparkles" size={14} />
-                      <span>Find Code Debt</span>
-                    </div>
-                    <div class="text-[11px] text-ink-500 mt-1">
-                      Scan all files for TODO or FIXME comments
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setInputPrompt("/skills");
-                      sendPrompt();
-                    }}
-                    class="p-3.5 rounded-xl border border-line bg-ink-900/60 hover:bg-ink-900 hover:border-brand-500/40 text-left transition-all group cursor-pointer"
-                  >
-                    <div class="flex items-center gap-2 font-medium text-xs text-ink-200 group-hover:text-brand-400">
-                      <Iconify icon="lucide:puzzle" size={14} />
-                      <span>List Skills & Tools</span>
-                    </div>
-                    <div class="text-[11px] text-ink-500 mt-1">
-                      Review all active capabilities, MCP servers and custom skills
-                    </div>
-                  </button>
-                </div>
+                  }
+                >
+                  <div class="space-y-3">
+                    <button
+                      onClick={() => setShowNewProjectModal(true)}
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-ink-900 border border-line/70 text-xs text-ink-300 hover:text-ink-100 cursor-pointer"
+                      title={activeProject()?.path}
+                    >
+                      <Iconify icon="lucide:folder" size={13} />
+                      <span>{activeProject()?.name}</span>
+                      <Iconify icon="lucide:chevron-down" size={12} />
+                    </button>
+                    <p class="text-xs text-ink-500">
+                      Start a conversation in <span class="text-ink-300 font-mono">{activeProject()?.path}</span> below.
+                    </p>
+                  </div>
+                </Show>
               </div>
             </Show>
 
@@ -1646,10 +1744,8 @@ export default function RemoteCodePage() {
             </Show>
           </div>
 
-          {/* ========================================================================= */}
-          {/* Floating Composer Area (Input Textarea + Slash Palette)                    */}
-          {/* ========================================================================= */}
-          <div class="p-4 bg-ink-950/90 border-t border-line relative z-20">
+          {/* Composer estilo Antigravity */}
+          <div class="px-4 pb-4 pt-2 bg-ink-950 relative z-20">
             {/* Slash Command Autocomplete Menu */}
             <Show when={slashMatches().length > 0}>
               <div class="absolute bottom-full left-4 right-4 md:left-8 md:right-8 mb-2 rounded-xl border border-line bg-ink-900/95 shadow-2xl p-1.5 max-h-60 overflow-y-auto z-40 backdrop-blur">
@@ -1664,7 +1760,7 @@ export default function RemoteCodePage() {
                       }}
                       class={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between transition-colors ${
                         idx() === slashIndex()
-                          ? "bg-brand-500 text-white"
+                          ? "bg-ink-100 text-ink-950"
                           : "text-ink-200 hover:bg-ink-800"
                       }`}
                     >
@@ -1679,16 +1775,28 @@ export default function RemoteCodePage() {
               </div>
             </Show>
 
-            <div class="max-w-4xl mx-auto rounded-2xl border border-line bg-ink-900/70 p-2 shadow-lg focus-within:border-brand-500/50 transition-colors">
-              <textarea
-                class="w-full bg-transparent text-sm text-ink-100 placeholder:text-ink-600 focus:outline-none resize-none px-2 py-1 max-h-48 min-h-[56px]"
-                placeholder={
-                  activeSession()
-                    ? `Type a message or slash command (e.g. /compact, /skills)...`
-                    : "Create or select a session to start coding..."
-                }
-                value={inputPrompt()}
-                onInput={(e) => setInputPrompt(e.currentTarget.value)}
+            <div class="max-w-2xl mx-auto">
+              <Show when={activeProject()}>
+                <div class="flex justify-center pb-2">
+                  <span class="inline-flex items-center gap-1.5 text-xs text-ink-400">
+                    <Iconify icon="lucide:folder" size={12} />
+                    <span>{activeProject()?.name}</span>
+                    <Iconify icon="lucide:chevron-down" size={11} />
+                  </span>
+                </div>
+              </Show>
+              <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors overflow-hidden">
+                <textarea
+                  class="w-full bg-transparent text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 max-h-48 min-h-[48px]"
+                  placeholder={
+                    activeSession()
+                      ? `Ask anything, @ to mention, / for actions`
+                      : projects().length === 0
+                        ? "Select a project folder first..."
+                        : "Start a New Conversation to begin..."
+                  }
+                  value={inputPrompt()}
+                  onInput={(e) => setInputPrompt(e.currentTarget.value)}
                 onKeyDown={(e) => {
                   if (slashMatches().length > 0) {
                     if (e.key === "ArrowDown") {
@@ -1720,66 +1828,114 @@ export default function RemoteCodePage() {
                 }}
               />
 
-              <div class="flex items-center justify-between pt-2 border-t border-line/40 px-1">
-                <div class="flex items-center gap-2 text-xs text-ink-500">
-                  <span class="font-mono text-[11px]">
-                    Shift+Enter for newline
-                  </span>
-                  <span>•</span>
+              <div class="flex items-center justify-between px-3 pb-2.5 pt-1">
+                <div class="flex items-center gap-1 text-xs text-ink-400">
                   <button
-                    onClick={() => executeSlashCommand("/compact")}
-                    class="text-[11px] text-ink-400 hover:text-brand-400 transition-colors"
+                    onClick={() => toast("Attachments em breve", "info")}
+                    class="w-6 h-6 rounded-full hover:bg-ink-800 flex items-center justify-center cursor-pointer"
+                    title="Add"
                   >
-                    /compact
+                    <Iconify icon="lucide:plus" size={14} />
                   </button>
-                  <span>•</span>
-                  <button
-                    onClick={() => executeSlashCommand("/skills")}
-                    class="text-[11px] text-ink-400 hover:text-brand-400 transition-colors"
-                  >
-                    /skills
-                  </button>
+                  <span class="font-medium">{activeModel().split("/").pop()}</span>
+                  <Iconify icon="lucide:chevron-down" size={11} />
                 </div>
 
                 <div class="flex items-center gap-2">
                   <Show when={sessionStatus() === "running"}>
                     <button
                       onClick={cancelCurrentTurn}
-                      class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/30 hover:bg-rose-500/30 text-xs font-semibold transition-colors"
+                      class="w-7 h-7 rounded-full bg-ink-700 text-ink-100 hover:bg-ink-600 flex items-center justify-center transition-colors cursor-pointer"
+                      title="Stop"
                     >
                       <Iconify icon="lucide:square" size={13} />
-                      <span>Stop</span>
                     </button>
                   </Show>
 
                   <button
-                    onClick={sendPrompt}
+                    onClick={() => {
+                      if (!activeSessionId() && activeProject()) openNewSessionModal();
+                      else sendPrompt();
+                    }}
                     disabled={
-                      !inputPrompt().trim() ||
-                      !activeSessionId() ||
+                      (!inputPrompt().trim() && !!activeSessionId()) ||
                       sessionStatus() === "running"
                     }
-                    class="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-brand-500 text-white font-semibold text-xs hover:bg-brand-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-md shadow-brand-500/20"
+                    class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
+                    title={!activeSessionId() ? "New conversation" : "Send"}
                   >
-                    <span>Send</span>
-                    <Iconify icon="lucide:send" size={13} />
+                    <Iconify icon="lucide:arrow-right" size={14} />
                   </button>
                 </div>
               </div>
+              <div class="flex items-center justify-between px-4 pb-2 text-[11px] text-ink-600">
+                <span class="flex items-center gap-1">
+                  <Iconify icon="lucide:hard-drive" size={11} />
+                  <span>{yoloMode() ? "YOLO" : "Local"}</span>
+                </span>
+                <button
+                  onClick={() => setYoloMode(!yoloMode())}
+                  class="hover:text-ink-300 cursor-pointer"
+                  title="Toggle Safe/YOLO"
+                >
+                  {yoloMode() ? "YOLO Agent" : "Main Agent"} ▾
+                </button>
+              </div>
+            </div>
             </div>
           </div>
         </main>
       </div>
       </Show>
 
-      {/* ========================================================================= */}
-      {/* Modal: New Session                                                        */}
-      {/* ========================================================================= */}
-      <Show when={showNewSessionModal()}>
-        <Modal
-          title="New Agent Session"
-          onClose={() => setShowNewSessionModal(false)}
-        >
+      {/* Modal: New Project (pasta no host) */}
+      <Modal
+        open={showNewProjectModal()}
+        onClose={() => setShowNewProjectModal(false)}
+        title="Select project folder"
+      >
+        <div class="space-y-4">
+          <p class="text-xs text-ink-400 leading-relaxed">
+            A project is just a folder on the host <span class="font-mono text-ink-200">{activeHost()?.name || ""}</span>. Conversations created inside it share that root.
+          </p>
+          <div>
+            <label class="block text-xs font-medium text-ink-300 mb-1">
+              Folder path on host
+            </label>
+            <input
+              type="text"
+              class="w-full bg-ink-900 border border-line rounded-xl px-3 py-2 text-sm text-ink-100 focus:outline-none focus:border-ink-400 font-mono"
+              placeholder="/home/user/workspace/my-project"
+              value={newProjectPath()}
+              onInput={(e) => setNewProjectPath(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") createProject();
+              }}
+            />
+          </div>
+          <div class="flex justify-end gap-2 pt-1">
+            <button
+              onClick={() => setShowNewProjectModal(false)}
+              class="px-4 py-2 rounded-xl text-xs text-ink-400 hover:text-ink-100 hover:bg-ink-800 cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={createProject}
+              class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
+            >
+              Add project
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Modal: New Conversation */}
+      <Modal
+        open={showNewSessionModal()}
+        onClose={() => setShowNewSessionModal(false)}
+        title={`New conversation${activeProject() ? ` in ${activeProject()?.name}` : ""}`}
+      >
           <div class="space-y-4">
             <div>
               <label class="block text-xs font-semibold text-ink-300 mb-1">
@@ -1813,29 +1969,26 @@ export default function RemoteCodePage() {
             <div class="flex justify-end gap-2 pt-2">
               <button
                 onClick={() => setShowNewSessionModal(false)}
-                class="px-4 py-2 rounded-xl border border-line text-xs font-medium text-ink-300 hover:bg-ink-800"
+                class="px-4 py-2 rounded-xl text-xs text-ink-400 hover:text-ink-100 hover:bg-ink-800 cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 onClick={createNewSession}
-                class="px-5 py-2 rounded-xl bg-brand-500 text-white text-xs font-semibold hover:bg-brand-600 shadow-sm"
+                class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
               >
-                Launch Session
+                Start conversation
               </button>
             </div>
           </div>
         </Modal>
-      </Show>
 
-      {/* ========================================================================= */}
-      {/* Modal: Pair Daemon Host                                                    */}
-      {/* ========================================================================= */}
-      <Show when={showPairModal()}>
-        <Modal
-          title="Pair Remote Daemon Host"
-          onClose={() => setShowPairModal(false)}
-        >
+      {/* Modal: Pair Daemon Host */}
+      <Modal
+        open={showPairModal()}
+        title="Pair Remote Daemon Host"
+        onClose={() => setShowPairModal(false)}
+      >
           <div class="space-y-4 text-xs">
             <p class="text-ink-400">
               Run the following command on your target machine to pair it with your
@@ -1844,12 +1997,12 @@ export default function RemoteCodePage() {
 
             <Show when={pairingData()}>
               {(p) => {
-                const cmd = `./code-daemon -connect "${p().connectUrl}"`;
+                const cmd = `./llmgw-daemon -connect "${p().connectUrl}"`;
                 return (
                   <div class="space-y-3">
                     <div class="space-y-1">
                       <div class="text-[11px] text-ink-300 font-medium">1. Run daemon with connection flag:</div>
-                      <div class="p-3 bg-ink-950 rounded-xl border border-line font-mono text-[11px] text-brand-300 flex items-center justify-between gap-2">
+                      <div class="p-3 bg-ink-950 rounded-xl border border-line font-mono text-[11px] text-ink-200 flex items-center justify-between gap-2">
                         <span class="truncate">{cmd}</span>
                         <button
                           onClick={() => copyWithToast(cmd)}
@@ -1889,23 +2042,20 @@ export default function RemoteCodePage() {
             <div class="flex justify-end pt-2">
               <button
                 onClick={() => setShowPairModal(false)}
-                class="px-4 py-2 rounded-xl bg-brand-500 text-white text-xs font-semibold cursor-pointer"
+                class="px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
               >
                 Done
               </button>
             </div>
           </div>
         </Modal>
-      </Show>
 
-      {/* ========================================================================= */}
-      {/* Modal: Code Remote Configuration, MCP & Skills Center                       */}
-      {/* ========================================================================= */}
-      <Show when={showConfigModal()}>
-        <Modal
-          title="Code Remote Configuration Center"
-          onClose={() => setShowConfigModal(false)}
-        >
+      {/* Modal: Code Remote Configuration, MCP & Skills Center */}
+      <Modal
+        open={showConfigModal()}
+        title="Code Remote Configuration Center"
+        onClose={() => setShowConfigModal(false)}
+      >
           <div class="w-full max-w-2xl space-y-4">
             {/* Tabs Header */}
             <div class="flex border-b border-line gap-1">
@@ -2302,7 +2452,6 @@ export default function RemoteCodePage() {
             </Show>
           </div>
         </Modal>
-      </Show>
     </div>
   );
 }

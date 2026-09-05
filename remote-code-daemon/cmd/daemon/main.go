@@ -1198,7 +1198,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		_ = json.Unmarshal(raw, &req)
 		d.handleSlashCommand(req.SessionID, "/clear")
 
- 	case "prompt":
+	case "prompt":
 		var req struct {
 			SessionID     string   `json:"sessionId"`
 			Text          string   `json:"text"`

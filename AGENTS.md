@@ -117,6 +117,27 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   script in `web/index.html` picks localStorage `llmgw-theme` else OS;
   `ThemeToggle`/`theme` helpers live in `ui.tsx` (watchSystemTheme keeps
   following the OS until the user picks once).
+- **Remote Code** (`web/src/pages/RemoteCode.tsx` + `remote-code-daemon/` Go
+  binary + relay in `server/routes/relay.ts`): the gateway is a dumb fan-out
+  pipe (daemon → all of the user's clients; client → target daemon by hostId).
+  **The Go daemon owns ALL truth** (sessions/projects/config on its disk). The
+  page mirrors it with SignalDB (`@signaldb/core|solid|sync|indexeddb`,
+  user-sanctioned) via `web/src/rcStore.ts`: one store per hostId, IndexedDB
+  persistence (`rc:<host>:<collection>`), pull-through-sync. **No pushes and
+  no per-field WS events for mirrored data**: mutations are daemon commands
+  (`create_session`, `delete_project`, `rename_session`, …); every persistence
+  funnel on the daemon (`saveSession`/`saveProjects`/`saveConfig`/
+  `purgeSession`) emits a 300ms-debounced `{type:"change", collection}` ping
+  (`notifyChange`), and clients re-pull full snapshots over
+  `{type:"pull", id, collection}`. Deletions are real deletions: deleting a
+  project cascades `purgeSession` over every conversation inside it
+  (transcript + attachment dir — purging marks the active turn stale first so
+  its deferred save can't resurrect the file). Foreground UX wiring: the
+  transcript (`agent_event`, `session_content`, attachments, search) stays
+  event-driven (streaming is not mirroring); tool results are hoisted onto
+  their assistant carrier for display (`srcIdx` maps rendered messages back to
+  raw daemon indices for edit/delete/regenerate). Slash palette only lists
+  commands that are not already configurable in the UI.
 - **Animations**: `usal` (see `web/src/motion.ts` — config once, `once:true`
   + `forwards:true`; helpers `usal()`/`usalItems()`/`CountUp`). USAL observes
   DOM mutations, no manual restarts needed. **Never put `data-usal` on
@@ -153,7 +174,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   (drag-and-drop ordering, user-sanctioned — only imported
   by `web/src/sortable.ts`; rows carry `data-id` + a `[data-handle]` grip,
   the reordered ids are POSTed to the matching `/reorder` / `PUT …/targets`
-  endpoint) and `solid-charts` (charts, user-sanctioned — composable SVG
+  endpoint), `@signaldb/core|solid|sync|indexeddb` (Remote Code offline
+  mirror, user-sanctioned — only imported by `web/src/rcStore.ts`) and
+  `solid-charts` (charts, user-sanctioned — composable SVG
   `Chart`/`Axis`/`Bar`/`Area`/`Line` components in `web/src/charts.tsx`; colors
   are passed from the `--chart-*` CSS vars so white/dark flip for free; chart
   entrance animations live in the stylesheet because the library does not

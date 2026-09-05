@@ -180,7 +180,11 @@ func (d *DaemonServer) saveProjects(list []ProjectEntry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.projectsFile(), data, 0o600)
+	if err := os.WriteFile(d.projectsFile(), data, 0o600); err != nil {
+		return err
+	}
+	d.notifyChange("projects")
+	return nil
 }
 
 func safeFileName(name string) string {
@@ -259,6 +263,32 @@ type DaemonServer struct {
 
 	sessionsMu sync.RWMutex
 	sessions   map[string]*ActiveSession
+
+	// Change pings (SignalDB sync): one debounced timer per collection so a
+	// busy turn (a save per appended message) collapses into a single ping.
+	pingMu     sync.Mutex
+	pingTimers map[string]*time.Timer
+}
+
+// notifyChange broadcasts {type:"change", collection} to every connected
+// web client (the relay fans out), telling SignalDB sync managers to re-pull.
+// Debounced 300ms per collection; every persistence mutation funnelled here.
+func (d *DaemonServer) notifyChange(collection string) {
+	d.pingMu.Lock()
+	defer d.pingMu.Unlock()
+	if d.pingTimers == nil {
+		d.pingTimers = make(map[string]*time.Timer)
+	}
+	if t, ok := d.pingTimers[collection]; ok {
+		t.Stop()
+	}
+	d.pingTimers[collection] = time.AfterFunc(300*time.Millisecond, func() {
+		_ = d.sendWS(map[string]any{
+			"type":       "change",
+			"hostId":     d.config.HostID,
+			"collection": collection,
+		})
+	})
 }
 
 func defaultDataDir() string {
@@ -330,7 +360,11 @@ func (d *DaemonServer) saveConfig() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.configPath, data, 0o600)
+	if err := os.WriteFile(d.configPath, data, 0o600); err != nil {
+		return err
+	}
+	d.notifyChange("config")
+	return nil
 }
 
 func (d *DaemonServer) performPairing(connectURL string, hostName string) error {
@@ -428,7 +462,11 @@ func (d *DaemonServer) saveSession(rec *SessionRecord) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filePath, data, 0o600)
+	if err := os.WriteFile(filePath, data, 0o600); err != nil {
+		return err
+	}
+	d.notifyChange("sessions")
+	return nil
 }
 
 func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
@@ -516,6 +554,156 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 		return summaries[i].UpdatedAt > summaries[j].UpdatedAt
 	})
 	return summaries
+}
+
+// purgeSession removes a session completely: any in-flight turn is marked
+// stale and cancelled (its deferred save can't resurrect the transcript),
+// then the JSON record and the attachment folder are wiped from disk and a
+// session_deleted event goes out. Deletions are always 100%, never hides.
+func (d *DaemonServer) purgeSession(id string) {
+	d.sessionsMu.Lock()
+	if act, ok := d.sessions[id]; ok {
+		act.mu.Lock()
+		act.gen++
+		if act.cancel != nil {
+			act.cancel()
+		}
+		act.mu.Unlock()
+		delete(d.sessions, id)
+	}
+	d.sessionsMu.Unlock()
+	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".json"))
+	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id))
+	_ = d.sendWS(map[string]any{
+		"type":      "session_deleted",
+		"hostId":    d.config.HostID,
+		"sessionId": id,
+	})
+	d.notifyChange("sessions")
+}
+
+// sessionRaw mirrors the on-disk record without hydrating message content —
+// pull/list sweeps must stay cheap even with fat transcripts on disk.
+type sessionRaw struct {
+	ID          string            `json:"id"`
+	CWD         string            `json:"cwd"`
+	Title       string            `json:"title"`
+	Model       string            `json:"model"`
+	Status      string            `json:"status"`
+	Pinned      bool              `json:"pinned"`
+	CreatedAt   int64             `json:"createdAt"`
+	UpdatedAt   int64             `json:"updatedAt"`
+	CreatedAtSnake int64          `json:"created_at"`
+	UpdatedAtSnake int64          `json:"updated_at"`
+	Messages    []json.RawMessage `json:"messages"`
+	Attachments []AttachmentRef   `json:"attachments"`
+}
+
+func (r *sessionRaw) created() int64 {
+	if r.CreatedAt != 0 {
+		return r.CreatedAt
+	}
+	return r.CreatedAtSnake
+}
+
+func (r *sessionRaw) updated() int64 {
+	if r.UpdatedAt != 0 {
+		return r.UpdatedAt
+	}
+	return r.UpdatedAtSnake
+}
+
+// listSessionSummaries reads every session record but parses messages only
+// as opaque blobs (count, no hydration) — the SignalDB pull path calls this
+// on every change ping, possibly mid-turn.
+func (d *DaemonServer) listSessionSummaries() []SessionSummary {
+	dir := d.sessionsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var summaries []SessionSummary
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var r sessionRaw
+		if err := json.Unmarshal(data, &r); err != nil {
+			continue
+		}
+		summaries = append(summaries, SessionSummary{
+			ID:           r.ID,
+			CWD:          r.CWD,
+			Title:        r.Title,
+			Model:        r.Model,
+			Status:       r.Status,
+			Pinned:       r.Pinned,
+			CreatedAt:    r.created(),
+			UpdatedAt:    r.updated(),
+			MessageCount: len(r.Messages),
+		})
+	}
+	sort.Slice(summaries, func(i, j int) bool {
+		return summaries[i].UpdatedAt > summaries[j].UpdatedAt
+	})
+	return summaries
+}
+
+// resetRunningSessions flips records left "running" by a previous process
+// (crash/kill/power loss mid-turn) back to "idle". No turn can be in flight
+// at boot; without this the stale flag permanently refuses new prompts with
+// "Turn already in flight".
+func (d *DaemonServer) resetRunningSessions() {
+	dir := d.sessionsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(data, &doc); err != nil {
+			continue
+		}
+		if doc["status"] != "running" {
+			continue
+		}
+		doc["status"] = "idle"
+		if out, err := json.MarshalIndent(doc, "", "  "); err == nil {
+			_ = os.WriteFile(p, out, 0o600)
+			fmt.Printf("[INFO] Reset stale running session: %s\n", e.Name())
+		}
+	}
+}
+
+// quiesceSessions marks every active turn stale, cancels it and persists
+// "idle" — called on graceful shutdown (SIGTERM/SIGINT) so a restart never
+// inherits phantom "running" statuses. The turns' deferred finalizers see
+// the gen bump and skip their save.
+func (d *DaemonServer) quiesceSessions() {
+	d.sessionsMu.Lock()
+	defer d.sessionsMu.Unlock()
+	for _, act := range d.sessions {
+		act.mu.Lock()
+		act.gen++
+		if act.cancel != nil {
+			act.cancel()
+		}
+		act.record.Status = "idle"
+		_ = d.saveSession(act.record)
+		act.mu.Unlock()
+	}
 }
 
 func (d *DaemonServer) getOrCreateActiveSession(id string) (*ActiveSession, error) {
@@ -653,24 +841,84 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"projects": items,
 		})
 
+	case "pull":
+		// SignalDB sync protocol: the client asks for the full snapshot of a
+		// collection; live updates ride the debounced {type:"change"} pings.
+		var req struct {
+			ID         json.RawMessage `json:"id"`
+			Collection string          `json:"collection"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		reply := func(items []map[string]any, errMsg string) {
+			msg := map[string]any{
+				"type":       "pull-response",
+				"hostId":     d.config.HostID,
+				"id":         req.ID,
+				"collection": req.Collection,
+			}
+			if errMsg != "" {
+				msg["error"] = errMsg
+			} else {
+				msg["items"] = items
+			}
+			_ = d.sendWS(msg)
+		}
+		switch req.Collection {
+		case "projects":
+			list := d.loadProjects()
+			items := make([]map[string]any, 0, len(list))
+			for _, p := range list {
+				items = append(items, projectPayload(p))
+			}
+			reply(items, "")
+		case "sessions":
+			items := make([]map[string]any, 0)
+			for _, s := range d.listSessionSummaries() {
+				items = append(items, sessionListItem(s))
+			}
+			reply(items, "")
+		case "config":
+			reply([]map[string]any{{
+				"id":         "daemon",
+				"settings":   d.config.Settings,
+				"mcpServers": d.config.MCPServers,
+				"skills":     d.config.Skills,
+				"name":       d.config.Name,
+			}}, "")
+		default:
+			reply(nil, "unknown collection")
+		}
+
 	case "create_project":
 		var req struct {
 			Path string `json:"path"`
 			Name string `json:"name"`
 		}
 		_ = json.Unmarshal(raw, &req)
-		path := strings.TrimSpace(req.Path)
-		if path == "" {
+		rawPath := strings.TrimSpace(req.Path)
+		if rawPath == "" {
 			_ = d.sendWS(map[string]any{
 				"type": "error", "hostId": d.config.HostID,
 				"message": "Project path cannot be empty",
 			})
 			return
 		}
+		// Store the resolved absolute path ("~" → the user's home) so session
+		// cwd containment checks compare like with like.
+		path := resolvePath(rawPath)
+		if path == "" {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"message": "Project path cannot be resolved",
+			})
+			return
+		}
+		_ = os.MkdirAll(path, 0o755)
 		name := strings.TrimSpace(req.Name)
 		if name == "" {
 			trimmed := strings.TrimRight(path, "/")
-			if trimmed == "" || trimmed == "~" {
+			home, _ := os.UserHomeDir()
+			if trimmed == "" || trimmed == home {
 				name = "Home"
 			} else {
 				name = filepath.Base(trimmed)
@@ -681,10 +929,13 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		list := d.loadProjects()
 		for _, p := range list {
-			if p.Path == path {
+			if resolvePath(p.Path) == path {
+				// Idempotent "ensure": re-ack the existing entry so flows like
+				// Quick Start (~) just reopen the project instead of failing.
 				_ = d.sendWS(map[string]any{
-					"type": "error", "hostId": d.config.HostID,
-					"message": "Project already exists",
+					"type":    "project_created",
+					"hostId":  d.config.HostID,
+					"project": projectPayload(p),
 				})
 				return
 			}
@@ -719,9 +970,28 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		list := d.loadProjects()
 		next := make([]ProjectEntry, 0, len(list))
+		var doomed *ProjectEntry
 		for _, p := range list {
-			if p.ID != req.ProjectID {
-				next = append(next, p)
+			if p.ID == req.ProjectID {
+				cp := p
+				doomed = &cp
+				continue
+			}
+			next = append(next, p)
+		}
+		// Removing a project cascades: every conversation rooted inside the
+		// project folder is deleted 100% (transcript + attachments) so no
+		// trace is left on the host. The filesystem root is never cascaded.
+		if doomed != nil {
+			target := strings.TrimRight(resolvePath(doomed.Path), "/")
+			if len(target) > 1 {
+				for _, s := range d.listSessionSummaries() {
+					cwd := strings.TrimRight(s.CWD, "/")
+					if cwd != target && !strings.HasPrefix(cwd, target+"/") {
+						continue
+					}
+					d.purgeSession(s.ID)
+				}
 			}
 		}
 		_ = d.saveProjects(next)
@@ -1177,24 +1447,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			SessionID string `json:"sessionId"`
 		}
 		_ = json.Unmarshal(raw, &req)
-
-		d.sessionsMu.Lock()
-		if act, ok := d.sessions[req.SessionID]; ok {
-			if act.cancel != nil {
-				act.cancel()
-			}
-			delete(d.sessions, req.SessionID)
-		}
-		d.sessionsMu.Unlock()
-
-		filePath := filepath.Join(d.sessionsDir(), req.SessionID+".json")
-		_ = os.Remove(filePath)
-
-		_ = d.sendWS(map[string]any{
-			"type":      "session_deleted",
-			"hostId":    d.config.HostID,
-			"sessionId": req.SessionID,
-		})
+		d.purgeSession(req.SessionID)
 
 	case "cancel":
 		var req struct {
@@ -1787,6 +2040,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	if requestedModel != "" {
 		act.record.Model = requestedModel
 	}
+	act.record.UpdatedAt = time.Now().UnixMilli()
+	// Persist the running flip right away (not only in the finalizer) so
+	// synced clients on every device see live session status.
+	_ = d.saveSession(act.record)
 	modelToUse := act.record.Model
 	if modelToUse == "" {
 		modelToUse = "gpt-4o"
@@ -2377,6 +2634,9 @@ func main() {
 		fmt.Println("[INFO] Tip: To switch to another gateway link or user account, run: ./code-daemon -connect <new-url>")
 	}
 
+	// A previous run dying mid-turn must not brick sessions forever.
+	server.resetRunningSessions()
+
 	// Graceful shutdown handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -2384,6 +2644,7 @@ func main() {
 	go func() {
 		<-sigChan
 		fmt.Println("\n[SHUTDOWN] Exiting daemon...")
+		server.quiesceSessions()
 		server.wsMu.Lock()
 		if server.wsConn != nil {
 			_ = server.wsConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))

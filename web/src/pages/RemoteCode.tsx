@@ -18,6 +18,11 @@ import {
   type RemotePairDto,
 } from "../api";
 import {
+  createDataLayer,
+  type RcProject,
+  type RcSession,
+} from "../rcStore";
+import {
   Modal,
   Select,
   ThemeToggle,
@@ -62,17 +67,9 @@ function FloatMenu(props: {
  * Interfaces
  */
 
-export interface SessionSummary {
-  id: string;
-  cwd: string;
-  title: string;
-  model: string;
-  status: "idle" | "running";
-  pinned: boolean;
-  createdAt: number;
-  updatedAt: number;
-  messageCount: number;
-}
+/** Mirrored daemon data comes from the SignalDB layer (RcSession/RcProject). */
+export type SessionSummary = RcSession;
+type Project = RcProject;
 
 export interface ContentBlock {
   type: "text" | "tool_call" | "tool_result" | "reasoning" | "image";
@@ -105,6 +102,13 @@ export interface ChatMessage {
   thinkingDuration?: number;
   /** Synthetic transcript notices (e.g. auto-compaction summaries). */
   system?: boolean;
+  /**
+   * Index of the source message in the daemon's raw transcript. Display
+   * normalization merges/drops raw messages (tool results are hoisted onto
+   * their assistant carrier), so per-message ops (edit/delete/regenerate)
+   * must send this index, never the rendered position.
+   */
+  srcIdx?: number;
 }
 
 export interface PendingApproval {
@@ -145,6 +149,8 @@ export interface SkillConfig {
 /**
  * Slash command definitions for autocomplete palette
  */
+// Only commands NOT already configurable somewhere in the UI are listed:
+// model + reasoning effort live in the composer picker / Settings modal.
 const SLASH_COMMANDS = [
   {
     cmd: "/compact",
@@ -165,16 +171,6 @@ const SLASH_COMMANDS = [
     cmd: "/unjail",
     desc: "Allow agent to access files outside session working directory",
     args: "",
-  },
-  {
-    cmd: "/model",
-    desc: "Switch the active language model",
-    args: "<model-name>",
-  },
-  {
-    cmd: "/reasoning",
-    desc: "Adjust reasoning effort (off, low, medium, high)",
-    args: "<effort>",
   },
   {
     cmd: "/skills",
@@ -418,29 +414,31 @@ export default function RemoteCodePage() {
     Array<{ id: string; name: string }>
   >([]);
 
-  // Sessions
-  const [sessions, setSessions] = createSignal<SessionSummary[]>([]);
+  // UI-only state. Projects / sessions / config are NOT signals here: they
+  // are SignalDB collections mirroring the daemon (IndexedDB per host), so
+  // they paint instantly from cache and self-correct on every change ping.
+  // The page never owns this data — reconnecting from any device/domain
+  // shows the very same truth.
   const [activeSessionId, setActiveSessionId] = createSignal<string>("");
   const [sessionFilter, setSessionFilter] = createSignal<string>("");
-  const [showNewSessionModal, setShowNewSessionModal] = createSignal(false);
-  const [newSessionCwd, setNewSessionCwd] = createSignal("");
-  const [newSessionTitle, setNewSessionTitle] = createSignal("");
+  // (No "new conversation" modal — sessions are created directly in the
+  // active project so the composer at the bottom is the only input.)
 
   // Projects (Antigravity-style: pasta no host agrupa conversas)
-  interface Project {
-    id: string;
-    hostId: string;
-    name: string;
-    path: string;
-    createdAt: number;
-  }
-  const [projects, setProjects] = createSignal<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = createSignal<string>("");
   const [showNewProjectModal, setShowNewProjectModal] = createSignal(false);
   const [newProjectPath, setNewProjectPath] = createSignal("");
+  const [projectMenuOpen, setProjectMenuOpen] = createSignal(false);
+  // First message queued while the auto-created session is being registered.
+  const [pendingFirstText, setPendingFirstText] = createSignal<string | null>(null);
 
-  function projectsKey(hostId: string) {
-    return `llmgw-projects:${hostId}`;
+  function pickProject(id: string) {
+    setActiveProjectId(id);
+  }
+  function openNewProjectModal() {
+    // With zero projects the home folder is the sane default ("usa o ~").
+    setNewProjectPath(projects().length === 0 ? "~" : "");
+    setShowNewProjectModal(true);
   }
   function wsOpen() {
     try {
@@ -449,46 +447,40 @@ export default function RemoteCodePage() {
       return false;
     }
   }
-  function applyProjects(list: Project[]) {
-    setProjects(list);
-    persistProjects(list);
-    if (list.length > 0 && !list.some((p) => p.id === activeProjectId())) {
-      setActiveProjectId(list[0].id);
-    }
-    if (list.length === 0) setActiveProjectId("");
-  }
-  // Projects live on the daemon (source of truth); localStorage is only a
-  // cache so the list survives reconnects and host switches.
-  function loadProjects(hostId: string) {
-    if (!hostId) {
-      setProjects([]);
-      setActiveProjectId("");
-      return;
-    }
-    try {
-      const raw = localStorage.getItem(projectsKey(hostId));
-      const cached: Project[] = raw ? JSON.parse(raw) : [];
-      if (Array.isArray(cached) && cached.length > 0) {
-        setProjects(cached.filter((p) => p.hostId === hostId));
-        if (!cached.some((p) => p.id === activeProjectId())) {
-          setActiveProjectId(cached[0].id);
-        }
-      }
-    } catch {}
-    if (wsOpen()) sendWS({ type: "list_projects" });
-  }
-  function persistProjects(list: Project[]) {
-    try {
-      const hid = activeHostId();
-      if (hid) localStorage.setItem(projectsKey(hid), JSON.stringify(list));
-    } catch {}
-  }
-  function basename(p: string) {
-    const t = p.replace(/\/+$/, "").trim();
-    if (!t) return p;
-    const parts = t.split("/");
-    return parts[parts.length - 1] || t;
-  }
+  // SignalDB data layer (see rcStore.ts). One store per host, persisted.
+  const dataLayer = createDataLayer({
+    send: (payload) => sendWS(payload),
+    isOpen: wsOpen,
+  });
+  const store = createMemo(() => {
+    const hid = activeHostId();
+    return hid ? dataLayer.storeFor(hid) : null;
+  });
+  const projects = createMemo<Project[]>(() => {
+    const st = store();
+    if (!st) return [];
+    const hid = activeHostId();
+    return st.projects
+      .find({ hostId: hid })
+      .fetch()
+      .slice()
+      .sort((a, b) => b.createdAt - a.createdAt);
+  });
+  const sessions = createMemo<SessionSummary[]>(() => {
+    const st = store();
+    if (!st) return [];
+    const hid = activeHostId();
+    return st.sessions
+      .find({ hostId: hid })
+      .fetch()
+      .slice()
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  });
+  const configDoc = createMemo(() => {
+    const st = store();
+    if (!st) return null;
+    return st.config.find({ hostId: activeHostId() }).fetch()[0] ?? null;
+  });
 
   // Chat Transcript & In-Flight State
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
@@ -740,6 +732,7 @@ export default function RemoteCodePage() {
   let displayBtn: HTMLButtonElement | undefined;
   let newProjBtn: HTMLButtonElement | undefined;
   let modelBtn: HTMLButtonElement | undefined;
+  let projBtn: HTMLButtonElement | undefined;
   let addBtn: HTMLButtonElement | undefined;
   let filesBtn: HTMLButtonElement | undefined;
   let heartbeatTimer: any = null;
@@ -760,12 +753,33 @@ export default function RemoteCodePage() {
     return list.find((p) => p.id === activeProjectId()) ?? list[0] ?? null;
   });
 
+  function sessionInPath(s: SessionSummary, path: string) {
+    const norm = path.replace(/\/+$/, "");
+    const cwd = (s.cwd || "").replace(/\/+$/, "");
+    return cwd === norm || cwd.startsWith(norm + "/");
+  }
+
   function sessionsOfProject(projectPath: string) {
-    const norm = projectPath.replace(/\/+$/, "");
-    return sessions().filter((s) => {
-      const cwd = (s.cwd || "").replace(/\/+$/, "");
-      return cwd === norm || cwd.startsWith(norm + "/");
+    return sessions().filter((s) => sessionInPath(s, projectPath));
+  }
+
+  /** Removes local leftovers of a session that vanished from the mirror. */
+  function purgeSessionTrace(id: string) {
+    setSessionUsage((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
     });
+    setSessionFiles((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    try {
+      localStorage.removeItem(`llmgw-draft:${id}`);
+    } catch {}
   }
 
   function timeAgo(ts: number) {
@@ -779,12 +793,32 @@ export default function RemoteCodePage() {
     return `${days}d`;
   }
 
+  // Palette visibility rules: open only while the head token is a partial
+  // prefix of some command. An exact match hides it (Enter will run the
+  // command); typing args (space) or a non-matching token hides it too.
   const slashMatches = createMemo(() => {
-    const text = inputPrompt().trim();
-    if (!text.startsWith("/")) return [];
-    const prefix = text.toLowerCase();
-    return SLASH_COMMANDS.filter((sc) => sc.cmd.startsWith(prefix));
+    const raw = inputPrompt().trim().toLowerCase();
+    if (!raw.startsWith("/") || raw.includes(" ")) return [];
+    if (SLASH_COMMANDS.some((sc) => sc.cmd === raw)) return [];
+    return SLASH_COMMANDS.filter((sc) => sc.cmd.startsWith(raw));
   });
+  // Selection resets on every keystroke so the focused row never goes stale.
+  createEffect(() => {
+    inputPrompt();
+    setSlashIndex(0);
+  });
+
+  // Accepts a palette pick: fills the composer with the full command and
+  // hides the palette (an exact command is no longer a "match"). Focus
+  // stays in the textarea so typing/Enter continues naturally.
+  function pickSlash(cmd: string) {
+    setInputPrompt(cmd + " ");
+    try {
+      const el = document.querySelector<HTMLTextAreaElement>("#rc-composer");
+      el?.focus();
+      el?.setSelectionRange(el.value.length, el.value.length);
+    } catch {}
+  }
 
   // --- Fetch Gateway Models ---
   async function loadGatewayModels() {
@@ -855,9 +889,9 @@ export default function RemoteCodePage() {
     ws = new WebSocket(url);
 
     ws.onopen = () => {
-      sendWS({ type: "list_sessions", requestId: "init_" + Date.now() });
-      sendWS({ type: "get_config", requestId: "cfg_" + Date.now() });
-      sendWS({ type: "list_projects", requestId: "proj_" + Date.now() });
+      // SignalDB sync paints IndexedDB state instantly; this reconciles it
+      // with the daemon truth (and picks up anything missed while offline).
+      dataLayer.storeFor(hostId).syncAll();
 
       heartbeatTimer = setInterval(() => {
         sendWS({ type: "ping", ts: Date.now() });
@@ -988,6 +1022,7 @@ export default function RemoteCodePage() {
   function mapSummary(r: any): SessionSummary {
     return {
       id: r.id,
+      hostId: activeHostId(),
       cwd: r.cwd,
       title: r.title || r.cwd,
       model: r.model || "gpt-4o",
@@ -1005,22 +1040,73 @@ export default function RemoteCodePage() {
               : 0,
     };
   }
+  // Normalizes the raw daemon transcript for display. The daemon persists
+  // tool results as separate "tool" (or Anthropic-style "user") messages;
+  // rendered as-is they show up as disconnected rows or stray user bubbles.
+  // Here each tool_result is hoisted onto the preceding assistant message
+  // (its tool_call carrier) and hollow user/tool envelopes are dropped, so
+  // calls and outputs always render as one linked unit — the same shape the
+  // live streaming path builds incrementally.
   function applySessionContent(sessionId: string, rawMsgs: any[]) {
-    const parsed: ChatMessage[] = (rawMsgs || []).map((m: any, idx: number) => {
+    const out: ChatMessage[] = [];
+    let carrier: ChatMessage | null = null;
+    const ensureCarrier = (srcIdx: number): ChatMessage => {
+      if (!carrier || carrier.role !== "assistant") {
+        carrier = {
+          id: `tools_${srcIdx}`,
+          role: "assistant",
+          blocks: [],
+          time: Date.now(),
+          srcIdx,
+        };
+        out.push(carrier);
+      }
+      return carrier;
+    };
+    (rawMsgs || []).forEach((m: any, idx: number) => {
       const blocks = parseContentBlocks(m);
       const firstText = blocks.find((b) => b.type === "text")?.text || "";
       const system =
         m?.meta?.compaction === "true" ||
         firstText.startsWith("## Context Summary (compacted)");
-      return {
+      const role = m.role === "assistant" ? "assistant" : m.role === "tool" ? "tool" : "user";
+      if (role === "assistant") {
+        const msg: ChatMessage = {
+          id: `msg_${idx}`,
+          role,
+          blocks,
+          time: Date.now(),
+          system,
+          srcIdx: idx,
+        };
+        out.push(msg);
+        carrier = msg;
+        return;
+      }
+      // user / tool envelope: split tool results away from real content.
+      const rest: ContentBlock[] = [];
+      for (const b of blocks) {
+        if (b.type === "tool_result") ensureCarrier(idx).blocks.push(b);
+        else rest.push(b);
+      }
+      if (role === "tool" || rest.length === 0) {
+        // "tool" envelopes never become bubbles; a user envelope holding
+        // only tool results must not render as an empty user bubble.
+        if (rest.length > 0) ensureCarrier(idx).blocks.push(...rest);
+        return;
+      }
+      const msg: ChatMessage = {
         id: `msg_${idx}`,
-        role: m.role || "user",
-        blocks,
+        role: "user",
+        blocks: rest,
         time: Date.now(),
         system,
+        srcIdx: idx,
       };
+      out.push(msg);
+      carrier = msg;
     });
-    setMessages(parsed);
+    setMessages(out);
     setIsAtBottom(true);
     scrollToBottom(true);
   }
@@ -1042,6 +1128,9 @@ export default function RemoteCodePage() {
     }));
   }
   function handleIncomingMessage(msg: any) {
+    // SignalDB sync protocol messages (pull responses / change pings) are
+    // owned by the data layer; everything else is event-driven below.
+    if (dataLayer.handleMessage(msg)) return;
     switch (msg.type) {
       case "relay_connected":
         break;
@@ -1053,87 +1142,39 @@ export default function RemoteCodePage() {
         }
         break;
       }
-      case "sessions_list": {
-        const rawList = msg.sessions || [];
-        const mapped: SessionSummary[] = rawList.map(mapSummary);
-        setSessions(mapped);
-        if (!activeSessionId() && mapped.length > 0) {
-          const ap = activeProject();
-          const norm = ap ? ap.path.replace(/\/+$/, "") : "";
-          const inProject = norm
-            ? mapped.filter((s) => {
-                const cwd = (s.cwd || "").replace(/\/+$/, "");
-                return cwd === norm || cwd.startsWith(norm + "/");
-              })
-            : [];
-          selectSession((inProject[0] || mapped[0]).id);
-        }
-        break;
-      }
+
+      // NOTE: sessions/projects/config lists never arrive as events — the
+      // SignalDB sync owns them (daemon change ping → pull → collection).
+      // The events below are action acks that drive local continuation.
 
       case "session_created": {
         const r = msg.session;
         if (!r) break;
         const s = mapSummary(r);
-        setSessions((prev) => [s, ...prev.filter((x) => x.id !== s.id)]);
         selectSession(s.id);
-        toast(`Session created in ${s.cwd}`, "ok");
-        break;
-      }
-
-      case "session_renamed": {
-        if (!msg.sessionId) break;
-        setSessions((prev) =>
-          prev.map((s) => (s.id === msg.sessionId ? { ...s, title: msg.title || s.title } : s)),
-        );
-        break;
-      }
-
-      case "projects_list": {
-        const raw = Array.isArray(msg.projects) ? msg.projects : [];
-        const hid = activeHostId();
-        const mapped: Project[] = raw.map((p: any) => ({
-          id: p.id,
-          hostId: hid,
-          name: p.name || basename(p.path || ""),
-          path: p.path,
-          createdAt: p.createdAt ?? p.created_at ?? Date.now(),
-        }));
-        // Merge daemon truth with any offline-created cache entries.
-        const cached = projects();
-        const byId = new Map(mapped.map((p) => [p.id, p]));
-        for (const c of cached) {
-          if (!byId.has(c.id) && c.hostId === hid) byId.set(c.id, c);
+        // A composer send with no active session auto-creates one and the
+        // typed text was held back — deliver it now.
+        const pending = pendingFirstText();
+        if (pending) {
+          setPendingFirstText(null);
+          sendTextToSession(s.id, pending);
         }
-        applyProjects([...byId.values()].sort((a, b) => b.createdAt - a.createdAt));
         break;
       }
 
       case "project_created": {
         const p = msg.project;
         if (!p?.id) break;
-        const entry: Project = {
-          id: p.id,
-          hostId: activeHostId(),
-          name: p.name || basename(p.path || ""),
-          path: p.path,
-          createdAt: p.createdAt ?? p.created_at ?? Date.now(),
-        };
-        if (!projects().some((x) => x.id === entry.id)) {
-          applyProjects([entry, ...projects()]);
-        }
-        setActiveProjectId(entry.id);
-        toast(`Project '${entry.name}' added`, "ok");
+        setActiveProjectId(p.id);
+        toast(`Project '${p.name || "Project"}' added`, "ok");
+        // Project wizards lead straight into a conversation — the input
+        // stays at the bottom, nothing pops up in the middle.
         if (sessionAfterProject()) {
           setSessionAfterProject(false);
-          openNewSessionModal();
+          if (wsOpen()) {
+            sendWS({ type: "create_session", cwd: p.path, title: "", model: activeModel() });
+          }
         }
-        break;
-      }
-
-      case "project_deleted": {
-        if (!msg.projectId) break;
-        applyProjects(projects().filter((p) => p.id !== msg.projectId));
         break;
       }
 
@@ -1181,24 +1222,6 @@ export default function RemoteCodePage() {
         break;
       }
 
-      case "session_pinned": {
-        if (!msg.sessionId) break;
-        setSessions((prev) =>
-          prev.map((s) => (s.id === msg.sessionId ? { ...s, pinned: !!msg.pinned } : s)),
-        );
-        break;
-      }
-
-      case "session_model": {
-        if (msg.sessionId && msg.model) {
-          setSessions((prev) =>
-            prev.map((s) => (s.id === msg.sessionId ? { ...s, model: msg.model } : s)),
-          );
-          if (msg.sessionId === activeSessionId()) setActiveModel(msg.model);
-        }
-        break;
-      }
-
       case "notice": {
         if (msg.message) toast(msg.message, "ok");
         break;
@@ -1212,20 +1235,6 @@ export default function RemoteCodePage() {
           [a.id]: { name: a.name, mime: a.mime, dataB64: a.data || "", text: a.text },
         }));
         openStoredPreview(msg.sessionId, a.id);
-        break;
-      }
-
-      case "session_deleted": {
-        setSessions((prev) => prev.filter((s) => s.id !== msg.sessionId));
-        if (activeSessionId() === msg.sessionId) {
-          const rem = sessions().filter((s) => s.id !== msg.sessionId);
-          if (rem.length > 0) selectSession(rem[0].id);
-          else {
-            setActiveSessionId("");
-            setMessages([]);
-          }
-        }
-        toast("Session removed", "ok");
         break;
       }
 
@@ -1261,14 +1270,11 @@ export default function RemoteCodePage() {
       }
 
       case "session_status": {
+        // Composer responsiveness only (stop button state) — the collections
+        // get the same truth via the sessions change ping.
         if (msg.sessionId === activeSessionId()) {
           setSessionStatus(msg.status);
         }
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === msg.sessionId ? { ...s, status: msg.status } : s,
-          ),
-        );
         break;
       }
 
@@ -1289,40 +1295,6 @@ export default function RemoteCodePage() {
               : "Transcript compacted successfully",
             "ok",
           );
-        }
-        break;
-      }
-
-      case "config_data":
-      case "config_updated": {
-        // The daemon speaks Go keys (auto_compact_threshold, jail_by_default,
-        // temperature omitted when 0). Normalize to the UI shape with safe
-        // defaults — a partial payload must never crash the Settings render.
-        if (msg.settings) {
-          const s = msg.settings;
-          setDaemonSettings({
-            model: s.model || "gpt-4o",
-            reasoning: s.reasoning || "off",
-            temperature: typeof s.temperature === "number" ? s.temperature : 0.7,
-            autoCompactPercent:
-              s.autoCompactPercent ??
-              s.autoCompactThreshold ??
-              s.auto_compact_threshold ??
-              80,
-            noAutoTitle: s.noAutoTitle ?? s.no_auto_title ?? false,
-            jailByDefault: s.jailByDefault ?? s.jail_by_default ?? false,
-            autoSwarmEnabled: s.autoSwarmEnabled ?? s.auto_swarm_enabled ?? false,
-            insecureTls: s.insecureTls ?? s.insecure ?? false,
-            httpProxy: s.httpProxy ?? s.http_proxy ?? "",
-            maxExecutionTimeSec: s.maxExecutionTimeSec ?? 600,
-          });
-          if (s.model) setActiveModel(s.model);
-        }
-        const mcp = msg.mcpServers ?? msg.mcp_servers;
-        if (mcp && typeof mcp === "object") setMcpServers(mcp);
-        if (msg.skills && typeof msg.skills === "object") setSkills(msg.skills);
-        if (msg.type === "config_updated") {
-          toast("Daemon configuration saved", "ok");
         }
         break;
       }
@@ -1408,6 +1380,8 @@ export default function RemoteCodePage() {
           w.fail(msg.message || "Upload failed");
           break;
         }
+        // Sync pulls on an offline host are expected background noise.
+        if (msg.replyTo === "pull") break;
         if (typeof msg.message === "string" && msg.message.toLowerCase().includes("project")) {
           setSessionAfterProject(false);
         }
@@ -1718,12 +1692,20 @@ export default function RemoteCodePage() {
     sendWS({ type: "get_session", sessionId: id });
   }
 
-  function openNewSessionModal() {
-    const ap = activeProject();
-    // Pré-preenche com a pasta do projeto ativo (padrão Antigravity).
-    setNewSessionCwd(ap?.path || activeSession()?.cwd || "");
-    setNewSessionTitle("");
-    setShowNewSessionModal(true);
+  // "New Conversation" never pops a centered dialog: the daemon registers a
+  // blank session in the active project and the composer at the bottom is
+  // where typing happens. Without any project, ask for the folder instead.
+  function startNewConversation() {
+    const proj = activeProject();
+    if (!proj) {
+      openNewProjectModal();
+      return;
+    }
+    if (!wsOpen()) {
+      toast("Not connected to host yet — wait for online status", "err");
+      return;
+    }
+    sendWS({ type: "create_session", cwd: proj.path, title: "", model: activeModel() });
   }
 
   function createProject() {
@@ -1732,116 +1714,48 @@ export default function RemoteCodePage() {
       toast("Project folder cannot be empty", "err");
       return;
     }
-    const hid = activeHostId();
-    if (!hid) {
+    if (!activeHostId()) {
       toast("Connect a host first", "err");
       return;
     }
-    setSessionAfterProject(true);
-    if (wsOpen()) {
-      // Daemon is the source of truth; ack arrives as project_created.
-      sendWS({ type: "create_project", path: rawPath, requestId: "cp_" + Date.now() });
-      setNewProjectPath("");
-      setShowNewProjectModal(false);
-    } else {
-      // Offline fallback: local cache only, synced on next connect.
-      const p: Project = {
-        id: `proj_${Date.now().toString(36)}`,
-        hostId: hid,
-        name: basename(rawPath),
-        path: rawPath,
-        createdAt: Date.now(),
-      };
-      applyProjects([p, ...projects()]);
-      setActiveProjectId(p.id);
-      setNewProjectPath("");
-      setShowNewProjectModal(false);
-      openNewSessionModal();
+    if (!wsOpen()) {
+      // Frontend holds no state of its own — no offline project shadow copies.
+      toast("Not connected to host yet — wait for online status", "err");
+      return;
     }
+    setSessionAfterProject(true);
+    // Daemon is the source of truth; ack arrives as project_created.
+    sendWS({ type: "create_project", path: rawPath, requestId: "cp_" + Date.now() });
+    setNewProjectPath("");
+    setShowNewProjectModal(false);
   }
 
   async function deleteProject(id: string, e: MouseEvent) {
     e.stopPropagation();
     const ok = await showConfirm({
-      title: "Remove project?",
-      message: "The project is removed from the list. Sessions on the host are kept.",
-      confirmText: "Remove",
+      title: "Delete project?",
+      message: "The project AND all of its conversations (transcripts and attached files) are permanently deleted from the host.\n\nThis action cannot be undone.",
+      confirmText: "Delete",
       danger: true,
     });
     if (!ok) return;
-    const doomed = projects().find((p) => p.id === id);
+    // The daemon cascades (wipes every conversation inside, then pings) —
+    // the collections converge on their own; nothing local to purge by hand.
     if (wsOpen()) sendWS({ type: "delete_project", projectId: id });
-    const next = projects().filter((p) => p.id !== id);
-    applyProjects(next);
-    // An open conversation inside the deleted project must not linger.
-    if (doomed) {
-      const norm = doomed.path.replace(/\/+$/, "");
-      const sid = activeSessionId();
-      const cur = sessions().find((s) => s.id === sid);
-      const inside =
-        !!cur && ((cur.cwd || "").replace(/\/+$/, "") === norm || (cur.cwd || "").startsWith(norm + "/"));
-      if (inside) {
-        const fallback = sessions().find(
-          (s) =>
-            s.id !== sid &&
-            !(((s.cwd || "").replace(/\/+$/, "") === norm) || (s.cwd || "").startsWith(norm + "/")),
-        );
-        if (fallback) selectSession(fallback.id);
-        else {
-          setActiveSessionId("");
-          setMessages([]);
-          setSessionStatus("idle");
-        }
-      }
-    }
   }
 
   function quickStartProject() {
     // Quick Start: project rooted at the host home dir + immediate conversation.
-    const hid = activeHostId();
-    if (!hid) {
+    if (!activeHostId()) {
       toast("Connect a host first", "err");
       return;
     }
-    setSessionAfterProject(true);
-    if (wsOpen()) {
-      sendWS({ type: "create_project", path: "~", requestId: "cp_" + Date.now() });
-    } else {
-      const p = {
-        id: `proj_${Date.now().toString(36)}`,
-        hostId: hid,
-        name: "Home",
-        path: "~",
-        createdAt: Date.now(),
-      };
-      applyProjects([p, ...projects()]);
-      setActiveProjectId(p.id);
-      setNewSessionCwd("~");
-      setNewSessionTitle("");
-      setShowNewSessionModal(true);
-    }
-  }
-
-  function createNewSession() {
-    const cwd = newSessionCwd().trim();
-    if (!cwd) {
-      toast("Working directory cannot be empty", "err");
-      return;
-    }
-    if (!ws || (ws as WebSocket).readyState !== WebSocket.OPEN) {
+    if (!wsOpen()) {
       toast("Not connected to host yet — wait for online status", "err");
       return;
     }
-    sendWS({
-      type: "create_session",
-      requestId: "new_" + Date.now(),
-      cwd,
-      title: newSessionTitle().trim(),
-      model: activeModel(),
-    });
-    setShowNewSessionModal(false);
-    setNewSessionCwd("");
-    setNewSessionTitle("");
+    setSessionAfterProject(true);
+    sendWS({ type: "create_project", path: "~", requestId: "cp_" + Date.now() });
   }
 
   async function deleteSession(id: string, e?: MouseEvent) {
@@ -1996,6 +1910,12 @@ export default function RemoteCodePage() {
     setTimeout(() => setCopiedMsgId((cur) => (cur === id ? null : cur)), 1500);
   }
 
+  // Rendered position → raw daemon transcript index (normalization merges
+  // tool envelopes, so naive For indices mismatch the raw array).
+  function rawIdx(idx: number): number {
+    return messages()[idx]?.srcIdx ?? idx;
+  }
+
   // Regenerate from message idx: the daemon drops that message and everything
   // after it, then re-runs the turn (chatbot regenerateMessage semantics).
   function regenerateMsg(idx: number) {
@@ -2005,7 +1925,7 @@ export default function RemoteCodePage() {
       toast("Stop the current turn first", "err");
       return;
     }
-    sendWS({ type: "regenerate", sessionId: sid, index: idx, model: activeModel(), yolo: yoloMode() });
+    sendWS({ type: "regenerate", sessionId: sid, index: rawIdx(idx), model: activeModel(), yolo: yoloMode() });
   }
 
   // Inline edit (chatbot startEditMessage): user edits resubmit, assistant
@@ -2037,7 +1957,7 @@ export default function RemoteCodePage() {
     sendWS({
       type: "edit_message",
       sessionId: sid,
-      index: idx,
+      index: rawIdx(idx),
       text,
       model: activeModel(),
       yolo: yoloMode(),
@@ -2056,7 +1976,7 @@ export default function RemoteCodePage() {
       confirmText: "Delete",
       danger: true,
     });
-    if (ok) sendWS({ type: "delete_message", sessionId: sid, index: idx });
+    if (ok) sendWS({ type: "delete_message", sessionId: sid, index: rawIdx(idx) });
   }
 
   function editUserMsg(m: ChatMessage) {
@@ -2068,13 +1988,8 @@ export default function RemoteCodePage() {
 
   function togglePin(id: string, e: MouseEvent) {
     e.stopPropagation();
-    if (wsOpen()) {
-      sendWS({ type: "toggle_pin", sessionId: id });
-      // Optimistic flip; the daemon confirms via session_pinned.
-      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, pinned: !s.pinned } : s)));
-    } else {
-      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, pinned: !s.pinned } : s)));
-    }
+    // Command only — the daemon's change ping brings the new pin state.
+    if (wsOpen()) sendWS({ type: "toggle_pin", sessionId: id });
   }
 
   function toggleSessionSelect(id: string) {
@@ -2139,9 +2054,6 @@ export default function RemoteCodePage() {
       const cur = sessions().find((s) => s.id === id);
       if (!cur || !!cur.pinned === target) continue;
       if (wsOpen()) sendWS({ type: "toggle_pin", sessionId: id });
-      setSessions((prev) =>
-        prev.map((s) => (s.id === id ? { ...s, pinned: target } : s)),
-      );
     }
     toast(`${ids.length} conversation${ids.length === 1 ? "" : "s"} ${target ? "pinned" : "unpinned"}`, "ok");
     exitSelectionMode();
@@ -2169,7 +2081,6 @@ export default function RemoteCodePage() {
       return;
     }
     sendWS({ type: "rename_session", sessionId: id, title: t });
-    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title: t } : s)));
     setRenamingId(null);
   }
 
@@ -2198,6 +2109,44 @@ export default function RemoteCodePage() {
     }, 300);
   }
 
+  // No session is ever a dead end: typing + Enter auto-starts a
+  // conversation inside the active project, then the text is delivered.
+  function beginConversationWith(firstText: string) {
+    const proj = activeProject();
+    if (!proj) {
+      toast("Create a project first", "err");
+      return;
+    }
+    if (!wsOpen()) {
+      toast("Not connected to host yet — wait for online status", "err");
+      return;
+    }
+    setPendingFirstText(firstText);
+    setInputPrompt("");
+    sendWS({ type: "create_session", cwd: proj.path, title: "", model: activeModel() });
+  }
+
+  function sendTextToSession(sid: string, text: string) {
+    const userMsg: ChatMessage = {
+      id: `user_${Date.now()}`,
+      role: "user",
+      blocks: [{ type: "text", text }],
+      time: Date.now(),
+    };
+    setMessages((prev) => [...prev, userMsg]);
+    setSessionStatus("running");
+    setIsAtBottom(true);
+    scrollToBottom(true);
+    sendWS({
+      type: "prompt",
+      sessionId: sid,
+      text,
+      model: activeModel(),
+      yolo: yoloMode(),
+      attachmentIds: [],
+    });
+  }
+
   async function sendPrompt() {
     const text = inputPrompt().trim();
     const sid = activeSessionId();
@@ -2208,9 +2157,16 @@ export default function RemoteCodePage() {
         if (sid) localStorage.removeItem(`llmgw-draft:${sid}`);
       } catch {}
       if (routeSlash(text)) return;
-      if (!sid) return;
+      if (!sid) {
+        beginConversationWith(text);
+        return;
+      }
     }
-    if ((!text && pendingAttachments().length === 0) || !sid) return;
+    if (!text && pendingAttachments().length === 0) return;
+    if (!sid) {
+      beginConversationWith(text);
+      return;
+    }
     if (sessionStatus() === "running") return;
 
     // Upload pending attachments first so the daemon owns the bytes.
@@ -2501,7 +2457,6 @@ export default function RemoteCodePage() {
   onMount(async () => {
     await loadGatewayModels();
     await loadHosts();
-    if (activeHostId()) loadProjects(activeHostId());
     if (hosts().length === 0) {
       generatePairingToken();
     }
@@ -2525,8 +2480,7 @@ export default function RemoteCodePage() {
       }
       if (mod && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        if (projects().length === 0) setShowNewProjectModal(true);
-        else openNewSessionModal();
+        startNewConversation();
         return;
       }
       if (e.key === "Escape") {
@@ -2566,9 +2520,108 @@ export default function RemoteCodePage() {
   createEffect(() => {
     const hid = activeHostId();
     if (hid) {
-      loadProjects(hid);
+      // Switching hosts swaps the whole world: nothing from the previous
+      // daemon may bleed through (frontend = dumb monitor).
+      setActiveSessionId("");
+      setMessages([]);
+      setPendingFirstText(null);
       connectWebSocket(hid);
     }
+  });
+
+  // Default project: the one holding the newest conversation (computed from
+  // the mirrored data — same answer on every device), else the first one.
+  const newestSessionProjectId = createMemo(() => {
+    let best: SessionSummary | null = null;
+    for (const s of sessions()) {
+      if (!best || s.createdAt > best.createdAt) best = s;
+    }
+    if (!best) return "";
+    let bestId = "";
+    let bestLen = -1;
+    for (const p of projects()) {
+      const pp = p.path.replace(/\/+$/, "");
+      if (pp.length < 2) continue;
+      if (sessionInPath(best, p.path) && pp.length > bestLen) {
+        bestLen = pp.length;
+        bestId = p.id;
+      }
+    }
+    return bestId;
+  });
+  createEffect(() => {
+    const list = projects();
+    if (list.length === 0) {
+      if (activeProjectId()) setActiveProjectId("");
+      return;
+    }
+    if (!list.some((p) => p.id === activeProjectId())) {
+      const fallback = newestSessionProjectId();
+      setActiveProjectId(list.some((p) => p.id === fallback) ? fallback : list[0].id);
+    }
+  });
+
+  // A conversation that vanished from the mirror (deleted here or on
+  // another device) must leave no trace: close the transcript, purge its
+  // usage/files/draft leftovers and drop it from bulk selection.
+  let knownSessionIds = new Set<string>();
+  createEffect(() => {
+    const cur = new Set(sessions().map((s) => s.id));
+    for (const id of knownSessionIds) {
+      if (cur.has(id)) continue;
+      purgeSessionTrace(id);
+      if (activeSessionId() === id) {
+        setActiveSessionId("");
+        setMessages([]);
+        setSessionStatus("idle");
+      }
+      if (selectedSessions().has(id)) {
+        setSelectedSessions((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    }
+    knownSessionIds = cur;
+  });
+
+  // Default open conversation: the newest one inside the active project.
+  // If the project has none, stay blank — typing in the composer starts one.
+  createEffect(() => {
+    if (activeSessionId()) return;
+    if (!activeProjectId()) return;
+    const ap = activeProject();
+    if (!ap) return;
+    const fresh = sessionsOfProject(ap.path)[0];
+    if (fresh) selectSession(fresh.id);
+  });
+
+  // Daemon config mirror → local settings signals. Never clobbers an open
+  // Settings modal (that would fight the user's in-flight edits).
+  createEffect(() => {
+    const doc = configDoc();
+    if (!doc || showConfigModal()) return;
+    const s: any = doc.settings || {};
+    setDaemonSettings({
+      model: s.model || "gpt-4o",
+      reasoning: s.reasoning || "off",
+      temperature: typeof s.temperature === "number" ? s.temperature : 0.7,
+      autoCompactPercent:
+        s.autoCompactPercent ??
+        s.autoCompactThreshold ??
+        s.auto_compact_threshold ??
+        80,
+      noAutoTitle: s.noAutoTitle ?? s.no_auto_title ?? false,
+      jailByDefault: s.jailByDefault ?? s.jail_by_default ?? false,
+      autoSwarmEnabled: s.autoSwarmEnabled ?? s.auto_swarm_enabled ?? false,
+      insecureTls: s.insecureTls ?? s.insecure ?? false,
+      httpProxy: s.httpProxy ?? s.http_proxy ?? "",
+      maxExecutionTimeSec: s.maxExecutionTimeSec ?? 600,
+    });
+    if (s.model) setActiveModel(s.model);
+    if (doc.mcpServers && typeof doc.mcpServers === "object") setMcpServers(doc.mcpServers);
+    if (doc.skills && typeof doc.skills === "object") setSkills(doc.skills);
   });
 
   // Auto-poll hosts while waiting for initial daemon pairing
@@ -2606,6 +2659,7 @@ export default function RemoteCodePage() {
     setAddContextOpen(false);
     setFilesMenuOpen(false);
     setModelMenuOpen(false);
+    setProjectMenuOpen(false);
     setUsageOpen(false);
   }
 
@@ -3112,8 +3166,7 @@ export default function RemoteCodePage() {
           <div class="p-2">
             <button
               onClick={() => {
-                if (projects().length === 0) setShowNewProjectModal(true);
-                else openNewSessionModal();
+                startNewConversation();
                 closeSidebarOnMobile();
               }}
               class="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-ink-900 hover:bg-ink-800 border border-line/60 text-[13px] font-medium text-ink-200 transition-colors cursor-pointer"
@@ -3234,7 +3287,7 @@ export default function RemoteCodePage() {
                       <button
                         onClick={() => {
                           setNewProjectMenuOpen(false);
-                          setShowNewProjectModal(true);
+                          openNewProjectModal();
                         }}
                         class="w-full text-left px-2.5 py-1.5 rounded-lg text-ink-200 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
                       >
@@ -3259,7 +3312,7 @@ export default function RemoteCodePage() {
                 when={projects().length > 0}
                 fallback={
                   <button
-                    onClick={() => setShowNewProjectModal(true)}
+                    onClick={openNewProjectModal}
                     class="w-full text-left px-2.5 py-2 rounded-lg border border-dashed border-line text-xs text-ink-500 hover:text-ink-300 hover:border-ink-500 transition-colors cursor-pointer"
                   >
                     + Select a project folder on the host
@@ -3292,7 +3345,7 @@ export default function RemoteCodePage() {
                           <div>
                             <div
                               onClick={() => {
-                                setActiveProjectId(p.id);
+                                pickProject(p.id);
                                 toggleProjectExpanded(p.id);
                               }}
                               class={`group flex items-center gap-1.5 px-2 py-1.5 rounded-lg cursor-pointer text-[13px] transition-colors ${
@@ -3567,41 +3620,42 @@ export default function RemoteCodePage() {
             onScroll={onChatScroll}
             class="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 select-text scroll-smooth"
           >
-            {/* Empty state estilo Antigravity: só projeto + hint */}
+            {/* Empty state: subtle hint only — the real input is the
+                composer pinned at the bottom, never something mid-screen. */}
             <Show when={messages().length === 0 && !activeSessionId()}>
               <div class="max-w-xl mx-auto my-16 text-center">
                 <Show
                   when={activeProject()}
                   fallback={
                     <div class="space-y-3">
-                      <div class="text-sm text-ink-300 font-medium">No project selected</div>
+                      <div class="text-sm text-ink-300 font-medium">No project yet</div>
                       <p class="text-xs text-ink-500 max-w-sm mx-auto leading-relaxed">
-                        Projects are just folders on the host. Select one to group its conversations.
+                        Projects are just folders on the host. Create one first — every conversation lives inside a project.
                       </p>
-                      <button
-                        onClick={() => setShowNewProjectModal(true)}
-                        class="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-[13px] font-medium hover:bg-white cursor-pointer"
-                      >
-                        <Iconify icon="lucide:folder-plus" size={14} />
-                        <span>Select project folder</span>
-                      </button>
+                      <div class="flex items-center justify-center gap-2 pt-1">
+                        <button
+                          onClick={openNewProjectModal}
+                          class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-[13px] font-medium hover:bg-white cursor-pointer"
+                        >
+                          <Iconify icon="lucide:folder-plus" size={14} />
+                          <span>Select project folder</span>
+                        </button>
+                        <button
+                          onClick={quickStartProject}
+                          class="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-line text-[13px] text-ink-300 hover:text-ink-100 hover:bg-ink-900 cursor-pointer"
+                          title="Use your home folder (~) as the project"
+                        >
+                          <Iconify icon="lucide:zap" size={14} />
+                          <span>Quick start (~)</span>
+                        </button>
+                      </div>
                     </div>
                   }
                 >
-                  <div class="space-y-3">
-                    <button
-                      onClick={() => setShowNewProjectModal(true)}
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-ink-900 border border-line/70 text-xs text-ink-300 hover:text-ink-100 cursor-pointer"
-                      title={activeProject()?.path}
-                    >
-                      <Iconify icon="lucide:folder" size={13} />
-                      <span>{activeProject()?.name}</span>
-                      <Iconify icon="lucide:chevron-down" size={12} />
-                    </button>
-                    <p class="text-xs text-ink-500">
-                      Start a conversation in <span class="text-ink-300 font-mono">{activeProject()?.path}</span> below.
-                    </p>
-                  </div>
+                  <p class="text-xs text-ink-600">
+                    Type below to start a conversation in{" "}
+                    <span class="text-ink-300 font-mono">{activeProject()?.path}</span>
+                  </p>
                 </Show>
               </div>
             </Show>
@@ -4068,8 +4122,39 @@ export default function RemoteCodePage() {
           </div>
           </Show>
 
-          {/* Composer estilo Antigravity */}
+          {/* Composer estilo Antigravity — hidden entirely until a project
+              exists: without a project there is nothing to type into. */}
           <Show when={!historyView()}>
+          <Show
+            when={projects().length > 0}
+            fallback={
+              <div class="px-4 pb-4 pt-2 bg-ink-950 relative z-20">
+                <div class="max-w-2xl mx-auto rounded-2xl border border-dashed border-line/70 bg-ink-900/50 px-4 py-3.5 flex flex-wrap items-center justify-between gap-3">
+                  <p class="text-xs text-ink-400 leading-relaxed">
+                    <span class="text-ink-200 font-medium">Create a project first.</span>{" "}
+                    Conversations live inside a project folder on the host.
+                  </p>
+                  <div class="flex items-center gap-2">
+                    <button
+                      onClick={openNewProjectModal}
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
+                    >
+                      <Iconify icon="lucide:folder-plus" size={13} />
+                      <span>Select folder</span>
+                    </button>
+                    <button
+                      onClick={quickStartProject}
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-line text-xs text-ink-300 hover:text-ink-100 hover:bg-ink-900 cursor-pointer"
+                      title="Use your home folder (~) as the project"
+                    >
+                      <Iconify icon="lucide:zap" size={13} />
+                      <span>Quick start (~)</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            }
+          >
           <div class="px-4 pb-4 pt-2 bg-ink-950 relative z-20">
             {/* Floating scroll-to-bottom (chatbot FEAT-06) */}
             <Show when={!isAtBottom() && messages().length > 0}>
@@ -4095,9 +4180,8 @@ export default function RemoteCodePage() {
                 <For each={slashMatches()}>
                   {(sc, idx) => (
                     <button
-                      onClick={() => {
-                        setInputPrompt(sc.cmd + " ");
-                      }}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => pickSlash(sc.cmd)}
                       class={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between transition-colors ${
                         idx() === slashIndex()
                           ? "bg-ink-100 text-ink-950"
@@ -4168,9 +4252,7 @@ export default function RemoteCodePage() {
                   placeholder={
                     activeSession()
                       ? `Ask anything, @ to mention, / for actions`
-                      : projects().length === 0
-                        ? "Select a project folder first..."
-                        : "Start a New Conversation to begin..."
+                      : `Start a conversation in ${activeProject()?.name || "project"}...`
                   }
                   value={inputPrompt()}
                   onInput={(e) => {
@@ -4222,9 +4304,7 @@ export default function RemoteCodePage() {
                     if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
                       e.preventDefault();
                       const pick = slashMatches()[slashIndex()];
-                      if (pick) {
-                        setInputPrompt(pick.cmd + " ");
-                      }
+                      if (pick) pickSlash(pick.cmd);
                       return;
                     }
                   }
@@ -4359,6 +4439,77 @@ export default function RemoteCodePage() {
                   >
                     <Iconify icon="lucide:expand" size={13} />
                   </button>
+                  {/* Project picker — where the next conversation starts.
+                      Default: project of the newest conversation (daemon). */}
+                  <div>
+                    <button
+                      ref={projBtn}
+                      data-menubtn
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setProjectMenuOpen(!projectMenuOpen());
+                        setModelMenuOpen(false);
+                        setAddContextOpen(false);
+                        setUsageOpen(false);
+                      }}
+                      class="flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-ink-800 font-medium cursor-pointer"
+                      title="Project (where new conversations start)"
+                    >
+                      <Iconify icon="lucide:folder" size={13} />
+                      <span class="max-w-[110px] truncate">
+                        {activeProject()?.name || "Select project"}
+                      </span>
+                      <Iconify icon="lucide:chevron-down" size={11} />
+                    </button>
+                    <FloatMenu anchor={() => projBtn} open={projectMenuOpen()} placement="top-start" width="15rem">
+                        <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                          Project
+                        </div>
+                        <div class="max-h-56 overflow-y-auto">
+                          <For
+                            each={projects()}
+                            fallback={
+                              <div class="px-2.5 py-2 text-[11px] text-ink-600">
+                                No projects yet.
+                              </div>
+                            }
+                          >
+                            {(p) => (
+                              <button
+                                onClick={() => {
+                                  pickProject(p.id);
+                                  setProjectMenuOpen(false);
+                                }}
+                                class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
+                                  p.id === activeProject()?.id
+                                    ? "bg-ink-800 text-ink-100"
+                                    : "text-ink-300 hover:bg-ink-800/60"
+                                }`}
+                                title={p.path}
+                              >
+                                <span class="flex items-center gap-1.5 min-w-0">
+                                  <Iconify icon="lucide:folder" size={13} class="shrink-0 text-ink-500" />
+                                  <span class="truncate">{p.name}</span>
+                                </span>
+                                <Show when={p.id === activeProject()?.id}>
+                                  <Iconify icon="lucide:check" size={13} />
+                                </Show>
+                              </button>
+                            )}
+                          </For>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setProjectMenuOpen(false);
+                            openNewProjectModal();
+                          }}
+                          class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer border-t border-line/60"
+                        >
+                          <Iconify icon="lucide:folder-plus" size={13} />
+                          <span>New project…</span>
+                        </button>
+                    </FloatMenu>
+                  </div>
                   {/* Model picker (moved from the removed topbar) */}
                   <div>
                     <button
@@ -4367,6 +4518,7 @@ export default function RemoteCodePage() {
                       onClick={(e) => {
                         e.stopPropagation();
                         setModelMenuOpen(!modelMenuOpen());
+                        setProjectMenuOpen(false);
                         setAddContextOpen(false);
                         setUsageOpen(false);
                       }}
@@ -4492,18 +4644,15 @@ export default function RemoteCodePage() {
                   </Show>
 
                   <button
-                    onClick={() => {
-                      if (!activeSessionId() && activeProject()) openNewSessionModal();
-                      else sendPrompt();
-                    }}
+                    onClick={sendPrompt}
                     disabled={
-                      (!inputPrompt().trim() &&
-                        pendingAttachments().length === 0 &&
-                        !!activeSessionId()) ||
-                      sessionStatus() === "running"
+                      sessionStatus() === "running" ||
+                      (activeSessionId()
+                        ? !inputPrompt().trim() && pendingAttachments().length === 0
+                        : !inputPrompt().trim() || !activeProject())
                     }
                     class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
-                    title={!activeSessionId() ? "New conversation" : "Send"}
+                    title={!activeSessionId() ? "Start conversation" : "Send"}
                   >
                     <Iconify icon="lucide:arrow-right" size={14} />
                   </button>
@@ -4518,10 +4667,11 @@ export default function RemoteCodePage() {
                   handleFiles(e.currentTarget.files ?? []);
                   e.currentTarget.value = "";
                 }}
-              />
+               />
             </div>
             </div>
           </div>
+          </Show>
           </Show>
         </main>
       </div>
@@ -4569,60 +4719,6 @@ export default function RemoteCodePage() {
           </div>
         </div>
       </Modal>
-
-      {/* Modal: New Conversation */}
-      <Modal
-        open={showNewSessionModal()}
-        onClose={() => setShowNewSessionModal(false)}
-        title={`New conversation${activeProject() ? ` in ${activeProject()?.name}` : ""}`}
-        fullOnMobile
-      >
-          <div class="space-y-4">
-            <div>
-              <label class="block text-xs font-semibold text-ink-300 mb-1">
-                Working Directory (Path on Host)
-              </label>
-              <input
-                type="text"
-                class="w-full bg-ink-900 border border-line rounded-xl px-3 py-2 text-sm text-ink-100 focus:outline-none focus:border-brand-500"
-                placeholder="/home/user/my-project or ~/workspace"
-                value={newSessionCwd()}
-                onInput={(e) => setNewSessionCwd(e.currentTarget.value)}
-              />
-              <p class="text-[11px] text-ink-500 mt-1">
-                Agent tools (read, write, bash) execute inside this folder.
-              </p>
-            </div>
-
-              <div>
-                <label class="block text-xs font-semibold text-ink-300 mb-1">
-                  Session Title (Optional)
-                </label>
-                <input
-                  type="text"
-                  class="w-full bg-ink-900 border border-line rounded-xl px-3 py-2 text-sm text-ink-100 focus:outline-none focus:border-brand-500"
-                  placeholder="Blank = auto-generated after first reply"
-                  value={newSessionTitle()}
-                  onInput={(e) => setNewSessionTitle(e.currentTarget.value)}
-                />
-              </div>
-
-            <div class="flex justify-end gap-2 pt-2">
-              <button
-                onClick={() => setShowNewSessionModal(false)}
-                class="px-4 py-2 rounded-xl text-xs text-ink-400 hover:text-ink-100 hover:bg-ink-800 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={createNewSession}
-                class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
-              >
-                Start conversation
-              </button>
-            </div>
-          </div>
-        </Modal>
 
       {/* Modal: Large editor (chatbot FullscreenEditor) */}
       <Modal

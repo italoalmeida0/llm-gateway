@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync } from "fs";
+import { mkdtempSync, rmSync, mkdirSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -353,6 +353,14 @@ describe("Remote Code Relay and Pairing", () => {
       expect(featHostId).not.toBeEmpty();
 
       const clientWs = new WebSocket(`${GW_WS}/api/remote/client/ws?token=${userToken}`);
+      // Single permanent handler + buffer: reassigning/nulling `onchange`
+      // mid-test races Bun's ws internals and silently drops frames.
+      const recv: any[] = [];
+      clientWs.onmessage = (ev) => {
+        try {
+          recv.push(JSON.parse(String(ev.data)));
+        } catch {}
+      };
       await new Promise<void>((resolve, reject) => {
         clientWs.onopen = () => resolve();
         clientWs.onerror = (e) => reject(e);
@@ -360,23 +368,22 @@ describe("Remote Code Relay and Pairing", () => {
 
       const waitFor = (pred: (m: any) => boolean, timeout = 5000): Promise<any> =>
         new Promise((resolve, reject) => {
+          // Only messages arriving after this call (buffer holds history).
+          const startIdx = recv.length;
+          const poll = setInterval(() => {
+            for (let i = startIdx; i < recv.length; i++) {
+              if (pred(recv[i])) {
+                clearInterval(poll);
+                clearTimeout(timer);
+                resolve(recv[i]);
+                return;
+              }
+            }
+          }, 25);
           const timer = setTimeout(() => {
-            clientWs.onmessage = null;
+            clearInterval(poll);
             reject(new Error("timed out waiting for daemon message"));
           }, timeout);
-          clientWs.onmessage = (ev) => {
-            let msg: any;
-            try {
-              msg = JSON.parse(String(ev.data));
-            } catch {
-              return;
-            }
-            if (pred(msg)) {
-              clearTimeout(timer);
-              clientWs.onmessage = null;
-              resolve(msg);
-            }
-          };
         });
       const send = (obj: any) => clientWs.send(JSON.stringify({ hostId: featHostId, ...obj }));
 
@@ -418,18 +425,7 @@ describe("Remote Code Relay and Pairing", () => {
       );
       expect(afterDel).toBeDefined();
 
-      // Projects CRUD (daemon-owned)
-      send({ type: "create_project", path: workDir });
-      const projCreated = await waitFor((m) => m.type === "project_created");
-      expect(projCreated.project.path).toBe(workDir);
-      send({ type: "list_projects" });
-      const projList = await waitFor((m) => m.type === "projects_list");
-      expect(projList.projects.some((p: any) => p.id === projCreated.project.id)).toBe(true);
-      send({ type: "delete_project", projectId: projCreated.project.id });
-      const projDel = await waitFor((m) => m.type === "project_deleted");
-      expect(projDel.projectId).toBe(projCreated.project.id);
-
-      // Attachment upload + fetch round-trip
+      // Attachment upload + fetch round-trip (before the cascade tests wipe sessions)
       const helloB64 = Buffer.from("hello attachment").toString("base64");
       send({ type: "upload_attachment", sessionId: sid, name: "note.txt", mime: "text/plain", data: helloB64, requestId: "ua_test_1" });
       const uploaded = await waitFor((m) => m.type === "attachment_uploaded");
@@ -437,6 +433,67 @@ describe("Remote Code Relay and Pairing", () => {
       send({ type: "get_attachment", sessionId: sid, attachmentId: uploaded.attachment.id });
       const fetched = await waitFor((m) => m.type === "attachment_data");
       expect(Buffer.from(fetched.attachment.data, "base64").toString()).toBe("hello attachment");
+
+      // SignalDB sync protocol: pull returns full snapshots with the echoed id
+      send({ type: "pull", id: 4242, collection: "sessions" });
+      const pullSessions = await waitFor((m) => m.type === "pull-response" && m.collection === "sessions");
+      expect(pullSessions.id).toBe(4242);
+      expect(pullSessions.items.some((s: any) => s.id === sid)).toBe(true);
+      send({ type: "pull", id: 4343, collection: "config" });
+      const pullConfig = await waitFor((m) => m.type === "pull-response" && m.collection === "config");
+      expect(pullConfig.id).toBe(4343);
+      expect(pullConfig.items[0].id).toBe("daemon");
+      send({ type: "pull", id: 4545, collection: "projects" });
+      const pullProjectsEmpty = await waitFor((m) => m.type === "pull-response" && m.collection === "projects");
+      expect(pullProjectsEmpty.items.length).toBe(0);
+
+      // Change pings: a mutation must broadcast a debounced change notice
+      send({ type: "rename_session", sessionId: sid, title: "Ping Source" });
+      await waitFor((m) => m.type === "session_renamed" && m.title === "Ping Source");
+      const ping = await waitFor((m) => m.type === "change" && m.collection === "sessions");
+      expect(ping.hostId).toBe(featHostId);
+
+      // Projects CRUD (daemon-owned)
+      send({ type: "create_project", path: workDir });
+      const projCreated = await waitFor((m) => m.type === "project_created");
+      expect(projCreated.project.path).toBe(workDir);
+      send({ type: "pull", id: 4646, collection: "projects" });
+      const pullProjects = await waitFor((m) => m.type === "pull-response" && m.collection === "projects" && m.id === 4646);
+      expect(pullProjects.items.some((p: any) => p.id === projCreated.project.id)).toBe(true);
+
+      // Nested session inside the project tree (cwd = <workDir>/sub)
+      send({ type: "create_session", cwd: `${workDir}/sub`, title: "Nested", model: "gpt-4o" });
+      const nestedCreated = await waitFor((m) => m.type === "session_created" && m.session.cwd === `${workDir}/sub`);
+      const nestedSid = nestedCreated.session.id;
+      send({ type: "upload_attachment", sessionId: nestedSid, name: "nested.txt", mime: "text/plain", data: helloB64, requestId: "ua_test_2" });
+      await waitFor((m) => m.type === "attachment_uploaded" && m.sessionId === nestedSid);
+
+      // Deleting the project cascades: BOTH sessions wiped 100% (json + dirs)
+      const mark = recv.length;
+      send({ type: "delete_project", projectId: projCreated.project.id });
+      const hasCascade = () => {
+        const later = recv.slice(mark);
+        return (
+          later.some((m) => m.type === "session_deleted" && m.sessionId === sid) &&
+          later.some((m) => m.type === "session_deleted" && m.sessionId === nestedSid) &&
+          later.some((m) => m.type === "project_deleted")
+        );
+      };
+      const cascadeDeadline = Date.now() + 5000;
+      while (Date.now() < cascadeDeadline && !hasCascade()) {
+        await Bun.sleep(50);
+      }
+      expect(hasCascade()).toBe(true);
+
+      send({ type: "list_sessions" });
+      const afterCascade = await waitFor((m) => m.type === "sessions_list");
+      expect(afterCascade.sessions.length).toBe(0);
+      // No trace left on the daemon's disk: record file AND attachment folders
+      const sessDir = path.join(daemonData, "sessions");
+      expect(existsSync(path.join(sessDir, `${sid}.json`))).toBe(false);
+      expect(existsSync(path.join(sessDir, sid))).toBe(false);
+      expect(existsSync(path.join(sessDir, `${nestedSid}.json`))).toBe(false);
+      expect(existsSync(path.join(sessDir, nestedSid))).toBe(false);
 
       clientWs.close();
       const delRes = await fetch(`${GW}/api/remote/hosts/${featHostId}`, {

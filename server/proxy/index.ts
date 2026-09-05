@@ -1,5 +1,5 @@
 import { LIMITS } from "../config";
-import { stmts, audit, type ApiKeyRow, type AuthStyle } from "../db";
+import { stmts, audit, type AuthStyle } from "../db";
 import { randomToken, sha256Hex } from "../crypto";
 import { clientIp, baseHeaders } from "../http";
 import { estimateTokenCount } from "tokenx";
@@ -603,7 +603,7 @@ export class StreamMeter {
     }
   }
 
-  result(bodyBytesSent: number): UsageResult {
+  result(): UsageResult {
     if (this.sawUsage && (this.inTok > 0 || this.outTok > 0 || this.cacheTok > 0)) {
       return { inTok: this.inTok, cacheTok: this.cacheTok, outTok: this.outTok, model: this.model, estimated: false };
     }
@@ -628,7 +628,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
   const ip = clientIp(req, server);
 
   // ---- authenticate the gateway API key ----
-  let token = "";
+  let token: string;
   const authz = req.headers.get("authorization");
   if (proto === "openai") {
     token = authz?.startsWith("Bearer ") ? authz.slice(7).trim() : (req.headers.get("x-api-key") ?? "");
@@ -965,7 +965,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         const finalize = (status: number) => {
           if (counted) return;
           counted = true;
-          record(meter.result(0), status, Math.round(performance.now() - started), true, cand);
+          record(meter.result(), status, Math.round(performance.now() - started), true, cand);
         };
 
         const idleLimit = LIMITS.proxyStreamIdleMs;

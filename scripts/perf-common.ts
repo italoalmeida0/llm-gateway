@@ -461,8 +461,6 @@ const AUDIT_ACTIONS = [
   ["2fa.enabled", 1],
   ["password.changed", 2],
 ] as const;
-const AUDIT_TOTAL = AUDIT_ACTIONS.reduce((s, a) => s + a[1], 0);
-
 const STATUSES = [
   [200, 940],
   [400, 20],
@@ -470,7 +468,6 @@ const STATUSES = [
   [500, 15],
   [502, 10],
 ] as const;
-const STATUS_TOTAL = STATUSES.reduce((s, st) => s + st[1], 0);
 
 function pickWeighted<T>(rnd: () => number, table: readonly (readonly [T, number])[]): T {
   let r = rnd() * table.reduce((s, row) => s + row[1], 0);

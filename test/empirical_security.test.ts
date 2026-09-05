@@ -2,8 +2,6 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
-import { totpAt } from "../server/crypto";
-
 const GW_PORT = 4600;
 const UP_PORT = 4601;
 const GW = `http://127.0.0.1:${GW_PORT}`;

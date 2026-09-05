@@ -1,5 +1,5 @@
 import { LIMITS, SMTP_ENABLED } from "../config";
-import { db, stmts, audit, type ProviderRow, type ProviderKeyRow, type ModelTargetRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow, type ModelProto } from "../db";
+import { db, stmts, type ProviderRow, type ProviderKeyRow, type ModelTargetRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow, type ModelProto } from "../db";
 import { encryptSecret, decryptSecret, randomToken, sha256Hex } from "../crypto";
 import { requireAdmin, revokeAllUserSessions, auditAdmin } from "../auth";
 import { publicKey, revokeKey } from "../keys";
@@ -918,6 +918,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
   if (path === "/api/admin/models" && req.method === "POST") {
     const body = await readJsonBody(req, LIMITS.apiBodyBytes);
     const id = v.str(body, "id", { min: 1, max: 256 })!;
+    // eslint-disable-next-line no-control-regex -- intentional: reject control chars in model ids
     if (/\s|[\x00-\x1f]/.test(id)) {
       throw new ApiError(400, "id must not contain whitespace or control characters");
     }
@@ -926,7 +927,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     }
     // Either a single providerId (legacy) or an ordered targets chain.
     const targets = "targets" in body ? validateTargets(body.targets, id) : null;
-    let providerId = targets?.[0]?.providerId ?? v.str(body, "providerId", { min: 1, max: 64 })!;
+    const providerId = targets?.[0]?.providerId ?? v.str(body, "providerId", { min: 1, max: 64 })!;
     const provider = db
       .prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?")
       .get(providerId);
@@ -1011,7 +1012,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
 
   const modelTargetsMatch = path.match(/^\/api\/admin\/models\/(.+)\/targets$/);
   if (modelTargetsMatch && (req.method === "PUT" || req.method === "POST")) {
-    let modelId = modelTargetsMatch[1]!;
+    let modelId: string;
     try {
       modelId = decodeURIComponent(modelTargetsMatch[1]!);
     } catch {
@@ -1080,6 +1081,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       let newId: string | undefined;
       if ("id" in body) {
         const candidate = v.str(body, "id", { min: 1, max: 256 })!;
+        // eslint-disable-next-line no-control-regex -- intentional: reject control chars in model ids
         if (/\s|[\x00-\x1f]/.test(candidate)) {
           throw new ApiError(400, "id must not contain whitespace or control characters");
         }

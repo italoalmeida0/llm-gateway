@@ -18,14 +18,10 @@ import {
   type RemotePairDto,
 } from "../api";
 import {
-  Btn,
-  Card,
-  Input,
   Modal,
   Select,
   ThemeToggle,
   copyWithToast,
-  fmtDate,
   toast,
 } from "../ui";
 
@@ -617,7 +613,7 @@ export default function RemoteCodePage() {
   // Large editor modal (chatbot LargeEditor).
   const [largeEditorOpen, setLargeEditorOpen] = createSignal(false);
   const [largeEditorText, setLargeEditorText] = createSignal("");
-  const [largeEditorSend, setLargeEditorSend] = createSignal(false);
+  const [, setLargeEditorSend] = createSignal(false);
   // When a project is created, open the conversation modal on ack.
   const [sessionAfterProject, setSessionAfterProject] = createSignal(false);
 
@@ -746,8 +742,6 @@ export default function RemoteCodePage() {
   let modelBtn: HTMLButtonElement | undefined;
   let addBtn: HTMLButtonElement | undefined;
   let filesBtn: HTMLButtonElement | undefined;
-  let hostBtn: HTMLButtonElement | undefined;
-  let settingsModelBtn: HTMLButtonElement | undefined;
   let heartbeatTimer: any = null;
 
   const activeHost = createMemo(() => {
@@ -1871,20 +1865,6 @@ export default function RemoteCodePage() {
   // --- Attachments (chatbot-style; bytes live on the daemon) ---
   const MAX_ATTACHMENTS = 5;
   const MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;
-  const MAX_TEXT_BYTES = 512 * 1024;
-
-  function fileToB64(file: File): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onload = () => {
-        const res = String(r.result || "");
-        const comma = res.indexOf(",");
-        resolve(comma >= 0 ? res.slice(comma + 1) : res);
-      };
-      r.onerror = () => reject(new Error("read failed"));
-      r.readAsDataURL(file);
-    });
-  }
 
   async function handleFiles(files: FileList | File[]) {
     const list = Array.from(files || []);

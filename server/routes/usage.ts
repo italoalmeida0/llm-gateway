@@ -14,9 +14,9 @@ export async function handleUsageRoute(path: string, req: Request, url: URL): Pr
   if (path === "/api/usage/daily" && req.method === "GET") {
     const ctx = await requireAuth(req);
     const keyId = url.searchParams.get("key_id");
-    let key: ApiKeyRow | null = null;
     if (keyId) {
-      key = db.prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?").get(keyId);
+      // Ownership check only — the queries below key off keyId itself.
+      const key = db.prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?").get(keyId);
       if (!key || key.user_id !== ctx.user.id) return ok({ series: [] }, req);
     }
 

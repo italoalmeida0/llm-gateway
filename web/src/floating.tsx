@@ -10,12 +10,9 @@
  * CSS entrance animation (anim-float-in) is free to use transform, with
  * transform-origin derived from the resolved placement.
  *
- * Call anchorFloat() from a `ref` callback inside a <Show>, or use the
- * <FloatMenu> wrapper for plain anchored menus — both clean up their
- * listeners when Solid unmounts the layer.
+ * Call anchorFloat() from a `ref` callback inside a <Show> — Solid runs the
+ * returned cleanup (scroll/resize listeners) when the layer unmounts.
  */
-import { createEffect, onCleanup, Show, type JSX } from "solid-js";
-import { Portal } from "solid-js/web";
 import {
   autoUpdate,
   computePosition,
@@ -141,47 +138,4 @@ export function anchorFloat(
       cleanup?.();
     } catch {}
   };
-}
-
-/** Reactive anchorFloat for getter-style refs (Solid components). */
-export function useFloating(
-  anchor: () => HTMLElement | null | undefined,
-  floatingEl: () => HTMLElement | null | undefined,
-  placement: Placement = "bottom-start",
-) {
-  createEffect(() => {
-    const a = anchor();
-    const f = floatingEl();
-    if (!a || !f) return;
-    const cleanup = anchorFloat(a, f, { placement });
-    onCleanup(cleanup);
-  });
-}
-
-/** Portaled anchored menu — click/mouse-down inside never bubbles out. */
-export function FloatMenu(props: {
-  /** Anchor element getter (usually a button ref). */
-  anchor: () => HTMLElement | null | undefined;
-  open: boolean;
-  placement?: Placement;
-  width?: string;
-  children: JSX.Element;
-}) {
-  let pop: HTMLDivElement | undefined;
-  useFloating(props.anchor, () => pop, props.placement ?? "bottom-start");
-  return (
-    <Show when={props.open}>
-      <Portal>
-        <div
-          ref={pop}
-          class="rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 text-xs"
-          style={props.width ? { width: props.width } : undefined}
-          onClick={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          {props.children}
-        </div>
-      </Portal>
-    </Show>
-  );
 }

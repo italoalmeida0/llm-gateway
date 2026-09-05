@@ -111,10 +111,9 @@ afterAll(() => {
 // Shared state across the ordered steps.
 let adminToken = "";
 let userToken = "";
-let userEmail = "friend@example.com";
+const userEmail = "friend@example.com";
 const userPw = "user-password-xyz";
 let gatewayKey = "";
-let totpSecret = "";
 let userRefresh = "";
 
 describe("gateway end-to-end", () => {
@@ -1392,7 +1391,6 @@ describe("gateway end-to-end", () => {
     expect(right.status).toBe(200);
     expect(right.json.accessToken).toBeTruthy();
     userToken = right.json.accessToken;
-    totpSecret = secret;
     userRefresh = right.json.refreshToken; // reused by the rotation test (TOTP anti-replay blocks a same-window relogin)
   });
 
@@ -1924,7 +1922,6 @@ describe("upstream failover", () => {
   let provB = "";
   let keyA1 = ""; // provider A, priority 0
   let keyA2 = ""; // provider A, priority 10
-  let keyB1 = ""; // provider B, priority 0
   let plainUserToken = ""; // fresh non-admin for the 403 assertions
   const SEC_A1 = "sk-fb-a1";
   const SEC_A2 = "sk-fb-a2";
@@ -1977,7 +1974,6 @@ describe("upstream failover", () => {
     });
     expect(b.status).toBe(200);
     provB = b.json.provider.id;
-    keyB1 = b.json.provider.keys[0].id;
 
     // a fresh non-admin user whose token is guaranteed valid right now
     const u = await api("/api/admin/users", {

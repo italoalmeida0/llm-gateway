@@ -17,7 +17,7 @@ import { closeDaemonSocket } from "./relay";
 export async function handleRemoteRestRoute(
   path: string,
   req: Request,
-  url: URL,
+  _url: URL,
 ): Promise<Response | null> {
   // POST /api/remote/pair
   if (path === "/api/remote/pair" && req.method === "POST") {

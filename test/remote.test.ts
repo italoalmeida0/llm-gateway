@@ -70,7 +70,6 @@ describe("Remote Code Relay and Pairing", () => {
     userToken = json.accessToken;
   });
 
-  let pairingToken: string;
   let connectUrl: string;
 
   test("POST /api/remote/pair generates pairing token", async () => {
@@ -83,13 +82,11 @@ describe("Remote Code Relay and Pairing", () => {
     expect(json.success).toBe(true);
     expect(json.token).toBeDefined();
     expect(json.connectUrl).toContain(`/api/remote/connect/${json.token}`);
-    pairingToken = json.token;
     connectUrl = json.connectUrl;
   });
 
   let hostId: string;
   let daemonToken: string;
-  let daemonApiKey: string;
 
   test("POST /api/remote/connect/:token completes handshake", async () => {
     const res = await fetch(connectUrl, {
@@ -112,7 +109,6 @@ describe("Remote Code Relay and Pairing", () => {
 
     hostId = json.hostId;
     daemonToken = json.daemonToken;
-    daemonApiKey = json.apiKey;
 
     // Second call with same token must fail (single-use)
     const replayRes = await fetch(connectUrl, {

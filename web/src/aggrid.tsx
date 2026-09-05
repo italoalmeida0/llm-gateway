@@ -341,7 +341,8 @@ export function UsageGrid(props: {
 }) {
   const [changedColumns, setChangedColumns] = createSignal<string[]>([]);
   createEffect(() => {
-    props.refreshDeps; // track
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions -- read inside the effect so refreshDeps re-triggers the purge
+    props.refreshDeps;
     gridRef?.api?.purgeInfiniteCache?.();
   });
   // props.columnDefs are stable module constants per page, so this picks once.

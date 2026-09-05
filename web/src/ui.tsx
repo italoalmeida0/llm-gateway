@@ -1,6 +1,5 @@
 import {
   createSignal,
-  createMemo,
   createEffect,
   For,
   onCleanup,
@@ -83,6 +82,7 @@ export function Icon(props: {
     <span
       class={`inline-flex items-center justify-center shrink-0 ${props.class ?? ""}`}
     >
+      {/* eslint-disable solid/no-innerhtml -- icon bodies come from the build-time icon registry, never user input */}
       <svg
         innerHTML={iconData()?.body || ""}
         viewBox={`0 0 ${iconData()?.width ?? 24} ${iconData()?.height ?? 24}`}
@@ -95,6 +95,7 @@ export function Icon(props: {
         height={props.size ?? 16}
         aria-hidden="true"
       />
+      {/* eslint-enable solid/no-innerhtml */}
     </span>
   );
 }
@@ -214,10 +215,10 @@ export function Btn(props: {
     </button>
   );
   // title floats as a themed Tooltip (never two competing labels).
-  return props.title ? (
-    <Tooltip content={props.title}>{btn}</Tooltip>
-  ) : (
-    btn
+  return (
+    <Show when={props.title} fallback={btn}>
+      {(title) => <Tooltip content={title()}>{btn}</Tooltip>}
+    </Show>
   );
 }
 
@@ -752,7 +753,7 @@ export function Modal(props: {
       <Portal>
         <div
           class="fixed inset-0 overflow-y-auto bg-black/55 backdrop-blur-sm"
-          style={`z-index: ${Z.modal}`}
+          style={{ "z-index": Z.modal }}
           onMouseDown={() => props.onClose()}
           role="dialog"
           aria-modal="true"
@@ -812,7 +813,7 @@ export function Toasts() {
   return (
     <div
       class="fixed bottom-4 right-4 flex flex-col gap-2 items-end"
-      style={`z-index: ${Z.toast}`}
+      style={{ "z-index": Z.toast }}
     >
       <For each={toasts()}>
         {(t) => (

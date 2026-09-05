@@ -23,7 +23,7 @@ import {
   GW, UP, UPSTREAM_KEY, NUM_USERS,
   startStack, stopStack, provisionRouter, setUpstreamFail,
   measureDirect,
-  type Stack, type ProxyStats, type RouterTopology,
+  type Stack, type ProxyStats,
 } from "./perf-common";
 
 const REQUESTS = Number(process.env.BENCH_REQUESTS || 2000);

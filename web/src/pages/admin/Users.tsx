@@ -2,7 +2,6 @@ import { createResource, createSignal, Show } from "solid-js";
 
 import { api, currentSession, type AdminUserDto } from "../../api";
 import { PageTitle } from "../../index";
-import { usalItems } from "../../motion";
 import {
   Badge,
   Btn,

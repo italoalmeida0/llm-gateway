@@ -158,20 +158,26 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   are passed from the `--chart-*` CSS vars so white/dark flip for free; chart
   entrance animations live in the stylesheet because the library does not
   animate series natively yet).
-  Floating layers (tooltips, `<Select>` menus, `<FloatMenu>` popovers) run on
-  `@floating-ui/dom` (user-sanctioned — the vanilla build, never the React
-  one) through `web/src/floating.tsx`: `anchorFloat()` (flip + shift +
-  autoUpdate, optional `matchWidth`/`maxHeight` via `size()`), the getter-based
-  `useFloating()`, the `<FloatMenu>` wrapper, and the single z-index scale `Z`
-  (modal 50 < toast 60 < floating 70 — Modal/Toasts read it too). Every
-  overlay mounts in a `<Portal>` so nothing is clipped by an ancestor's
-  overflow or stacking context; `anchorFloat` positions via **left/top, not
-  transform**, so the `anim-float-in` entrance (transform-origin set from the
-  resolved placement) is safe on the positioned element itself. Call it from a
-  `ref` callback inside `<Show>` — the cleanup is owned by the Show and
-  autoUpdate stops on close. The `Tooltip` UI-kit component replaces native
-  `title` (IconBtn/ThemeToggle/rail use it; hover-capable pointers + keyboard
-  focus only, touch taps don't pin tooltips).
+   Floating layers (tooltips, `<Select>` menus, popover menus) run on
+   `@floating-ui/dom` (user-sanctioned — the vanilla build, never the React
+   one) through `web/src/floating.tsx`: `anchorFloat()` (flip + shift +
+   autoUpdate, optional `matchWidth`/`maxHeight` via `size()`; rAF-deferred
+   setup + visibility guard so Portal timing can never throw on detached
+   nodes) and the single z-index scale `Z` (modal 50 < toast 60 < floating 70
+   — Modal/Toasts read it too). Every overlay mounts in a `<Portal>` so
+   nothing is clipped by an ancestor's overflow or stacking context;
+   `anchorFloat` positions via **left/top, not transform**, so the
+   `anim-float-in` entrance (transform-origin set from the resolved placement)
+   is safe on the positioned element itself. Call it from a `ref` callback
+   inside `<Show>` — the cleanup is owned by the Show and autoUpdate stops on
+   close. Menus that need one (e.g. RemoteCode) build a tiny local component
+   on top of `anchorFloat`. The `Tooltip` UI-kit component replaces native
+   `title` (IconBtn/Btn/ThemeToggle/rail use it; hover-capable pointers +
+   keyboard focus only, touch taps don't pin tooltips). Lint/typecheck gate:
+   `bun run lint` (eslint flat config — TS + eslint-plugin-solid; refs are
+   why `no-unassigned-vars` is off for web, and AG Grid cell renderers are
+   why `solid/reactivity` + `solid/components-return-once` are off) and
+   `bun run typecheck` (`tsc --noEmit`) must both stay clean.
   Usage AND entity tables are AG Grid (`ag-grid-community` + `solid-ag-grid`,
   user-sanctioned — wrapper in `web/src/aggrid.tsx`): usage breakdowns, recent
   requests, admin top users/models, user + admin keys, admin users, admin
@@ -194,12 +200,18 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   `ag-theme-quartz(-dark)` class; the `--ag-*` CSS variables are remapped to
   the semantic tokens in `style.tailwindcss.css` (never hardcode hex).
   `@fontsource-variable/inter` is a bundled dev asset (no runtime CDN).
-  Bun-native or hand-rolled beats a new dep.
+   `streamdown-solid@0.0.3` ships raw `.tsx` sources and its
+   `Record<BundledLanguage, …>` broke against the installed shiki — patched
+   via `bun patch` (`patches/streamdown-solid@0.0.3.patch`, widened to
+   `Partial<Record>`); revisit the patch if the package is ever upgraded.
+   Bun-native or hand-rolled beats a new dep.
 
 ## Commands
 
 - `bun run dev` / `bun run dev:web` — backend :3000 / frontend dev :5700 (proxies /api,/v1)
 - `bun run build` — build SPA into `dist/`
+- `bun run lint` — ESLint 10 flat config (`eslint.config.js`: TS + eslint-plugin-solid); keep it at zero
+- `bun run typecheck` — `tsc --noEmit`; keep it at zero
 - `bun test` — must stay green (unit + black-box integration with fake upstream)
 - `bun run bench` — perf harness; do not let non-stream overhead regress wildly
 - `bun run perf:sim` — day-by-day growth sim (real gateway+upstream, HTTP

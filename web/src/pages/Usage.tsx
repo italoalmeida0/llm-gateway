@@ -2,7 +2,6 @@ import { createMemo, createResource, createSignal, Show } from "solid-js";
 
 import { api, type ApiKeyDto } from "../api";
 import { PageTitle } from "../index";
-import { usalItems } from "../motion";
 import { DailyChart } from "../charts";
 import {
   Card,

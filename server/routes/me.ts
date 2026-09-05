@@ -213,7 +213,7 @@ export async function handleMeRoute(path: string, req: Request): Promise<Respons
   if (path === "/api/me/models" && req.method === "GET") {
     await requireAuth(req);
     const snap = await routerSnapshot();
-    let models = Array.from(snap.models.values())
+    const models = Array.from(snap.models.values())
       .filter((m) => m.enabled)
       .map((m) => ({ id: m.id, name: m.name || m.id }));
 

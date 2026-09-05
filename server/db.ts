@@ -464,7 +464,7 @@ export function migrate(): void {
   const row = Object.values(
     db.query<Record<string, number>, []>("PRAGMA user_version").get() ?? {},
   );
-  let version = Number(row[0] ?? 0);
+  const version = Number(row[0] ?? 0);
   for (let i = version; i < MIGRATIONS.length; i++) {
     const m = MIGRATIONS[i]!;
     db.transaction(() => {
@@ -473,7 +473,6 @@ export function migrate(): void {
       db.exec(`PRAGMA user_version = ${i + 1}`);
     })();
     console.log(`[DB] migration applied: ${m.name}`);
-    version = i + 1;
   }
   // Give the query planner table statistics. Without ANALYZE data, SQLite
   // picks bad plans once usage_events grows (measured: the admin 24h per-user

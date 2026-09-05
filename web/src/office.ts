@@ -67,7 +67,7 @@ export function sniffFile(
   bytes: Uint8Array,
 ): { blocked?: string; kind?: ExtractKind; officeFormat?: string } {
   const ext = extOf(file.name);
-  let info: Array<{ extension?: string; mime?: string; typename?: string }> = [];
+  let info: Array<{ extension?: string; mime?: string; typename?: string }>;
   try {
     info = filetypeinfo(Array.from(bytes.slice(0, 100))) as any;
   } catch {

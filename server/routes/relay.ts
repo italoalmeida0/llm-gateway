@@ -165,7 +165,7 @@ export const remoteRelayWsHandlers = {
     }
   },
 
-  close(ws: ServerWebSocket<WsData>, code: number, reason: string) {
+  close(ws: ServerWebSocket<WsData>, code: number, _reason: string) {
     if (ws.data.type === "daemon") {
       const { hostId, userId } = ws.data;
       if (daemons.get(hostId) === ws) {

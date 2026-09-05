@@ -130,6 +130,7 @@ export function parseUpstreamModels(payload: unknown): ParsedModel[] {
     if (!raw || typeof raw !== "object") continue;
     const m = raw as Record<string, unknown>;
     const id = str(m.id);
+    // eslint-disable-next-line no-control-regex -- intentional: reject control chars in public model ids
     if (!id || /\s/.test(id) || /[\x00-\x1f]/.test(id)) continue;
     const openrouter = (m.openrouter ?? null) as Record<string, unknown> | null;
     const reasoningParams = (m.reasoning_parameters ?? null) as Record<string, unknown> | null;

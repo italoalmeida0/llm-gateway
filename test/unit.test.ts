@@ -664,7 +664,7 @@ describe("StreamMeter fallback (upstream never reports usage)", () => {
     for (let i = 0; i < 20; i++) {
       m.feed(enc.encode(`data: {"model":"m1","choices":[{"delta":{"content":"${"y".repeat(100)}"}}]}\n\n`));
     }
-    const r = m.result(0);
+    const r = m.result();
     expect(r.estimated).toBe(true);
     expect(r.inTok).toBe(0); // input estimate happens at the call site
     // Whole text (2000 chars) fits the estimation sample, so the meter must
@@ -677,7 +677,7 @@ describe("StreamMeter fallback (upstream never reports usage)", () => {
   test("anthropic stream: text_delta is tokenx-estimated when usage events are missing", () => {
     const m = new StreamMeter("anthropic");
     m.feed(enc.encode(`event: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"${"z".repeat(400)}"}}\n\n`));
-    const r = m.result(0);
+    const r = m.result();
     expect(r.estimated).toBe(true);
     expect(r.outTok).toBe(estimateTokenCount("z".repeat(400)));
     expect(r.outTok).toBeGreaterThan(10);
@@ -692,7 +692,7 @@ describe("StreamMeter fallback (upstream never reports usage)", () => {
     for (const chunk of stream.match(/.{1,100}/g)!) {
       m.feed(enc.encode(`data: {"model":"m1","choices":[{"delta":{"content":${JSON.stringify(chunk)}}}]}\n\n`));
     }
-    const r = m.result(0);
+    const r = m.result();
     expect(r.estimated).toBe(true);
     // The per-char ratio of the first sample extrapolates to (at least) the
     // same order as counting the whole text — never the pre-fix ~1 token.
@@ -705,7 +705,7 @@ describe("StreamMeter fallback (upstream never reports usage)", () => {
     const m = new StreamMeter("openai");
     m.feed(enc.encode(`data: {"model":"m1","choices":[{"delta":{"content":"${"y".repeat(100)}"}}]}\n\n`));
     m.feed(enc.encode(`data: {"usage":{"prompt_tokens":7,"completion_tokens":42}}\n\n`));
-    const r = m.result(0);
+    const r = m.result();
     expect(r.estimated).toBe(false);
     expect(r.outTok).toBe(42);
     expect(r.inTok).toBe(7);

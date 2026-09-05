@@ -180,6 +180,7 @@ function AppShell(props: { children: JSX.Element }) {
 
   // Close the mobile drawer on navigation.
   createEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions -- read inside the effect so route changes re-trigger
     route().path;
     setMobileNav(false);
   });

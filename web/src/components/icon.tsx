@@ -22,6 +22,7 @@ export function Icon(props: IconProps) {
     typeof props.icon === "string" ? registry[props.icon] : props.icon;
 
   return (
+    /* eslint-disable solid/no-innerhtml -- icon bodies come from the build-time icon registry, never user input */
     <svg
       innerHTML={iconData()?.body || ""}
       height={props.size ? `${props.size}px` : "1em"}
@@ -35,6 +36,7 @@ export function Icon(props: IconProps) {
       }}
       aria-hidden="true"
     />
+    /* eslint-enable solid/no-innerhtml */
   );
 }
 

@@ -3143,7 +3143,7 @@ export default function RemoteCodePage() {
 
           {/* Projects */}
           <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-3 min-h-0">
-              <div class="flex items-center justify-between px-1.5 pb-1 pt-1 sticky top-0 bg-ink-950 z-10">
+              <div class="flex items-center justify-between px-1.5 py-1 bg-ink-950 border-b border-line/50">
                 <Show
                   when={selectionMode()}
                   fallback={

@@ -1,9 +1,12 @@
+process.env.NODE_ENV = "production";
+
 import { cpSync, existsSync, mkdirSync, rmSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
 import tailwindPlugin from "./plugins/tailwind-plugin";
 import solidPlugin from "./plugins/solid-plugin";
+import iconify from "@zomme/bun-plugin-iconify";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(ROOT, "dist");
@@ -21,7 +24,7 @@ async function build() {
     // No source maps in the published bundle: dist/ is served to the public
     // internet; a linked .map would expose the whole frontend source.
     sourcemap: "none",
-    plugins: [tailwindPlugin, solidPlugin],
+    plugins: [iconify, tailwindPlugin, solidPlugin],
   });
 
   if (!result.success) {
@@ -36,6 +39,7 @@ async function build() {
   }
 
   console.log(`[build] OK -> dist/ (${result.outputs.length} outputs)`);
+  process.exit(0);
 }
 
 build();

@@ -9,3 +9,4 @@ tmp/
 .codegraph
 remote-code-daemon/bin/
 remote-code-ref/
+.cache/iconify/

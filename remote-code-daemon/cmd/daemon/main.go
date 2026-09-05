@@ -27,6 +27,24 @@ import (
 	"github.com/patriceckhart/zot/packages/provider"
 )
 
+// MCPServerConfig describes one Model Context Protocol server entry.
+type MCPServerConfig struct {
+	Command   string            `json:"command,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Transport string            `json:"transport,omitempty"` // "stdio" | "streamable-http" | "sse"
+	URL       string            `json:"url,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+}
+
+// SkillConfig describes one custom user or project skill.
+type SkillConfig struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Body        string `json:"body"`
+	Enabled     bool   `json:"enabled"`
+}
+
 // ZotSettings stores user-tunable agent behavior and runtime flags.
 type ZotSettings struct {
 	Model                string  `json:"model,omitempty"`
@@ -34,6 +52,7 @@ type ZotSettings struct {
 	Temperature          float32 `json:"temperature,omitempty"`
 	AutoCompactThreshold int     `json:"auto_compact_threshold"` // 0=off, 70, 80, 85, 90
 	JailByDefault        bool    `json:"jail_by_default"`
+	AutoSwarmEnabled     bool    `json:"auto_swarm_enabled"`
 	ToolRender           string  `json:"tool_render,omitempty"` // "box" | "flat"
 	CompactInput         bool    `json:"compact_input"`
 	CompactMode          bool    `json:"compact_mode"`
@@ -45,12 +64,14 @@ type ZotSettings struct {
 
 // DaemonConfig holds credentials and gateway connection details.
 type DaemonConfig struct {
-	GatewayURL  string      `json:"gateway_url"`
-	DaemonToken string      `json:"daemon_token"`
-	APIKey      string      `json:"api_key"`
-	HostID      string      `json:"host_id"`
-	Name        string      `json:"name"`
-	Settings    ZotSettings `json:"settings"`
+	GatewayURL  string                     `json:"gateway_url"`
+	DaemonToken string                     `json:"daemon_token"`
+	APIKey      string                     `json:"api_key"`
+	HostID      string                     `json:"host_id"`
+	Name        string                     `json:"name"`
+	Settings    ZotSettings                `json:"settings"`
+	MCPServers  map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+	Skills      map[string]SkillConfig     `json:"skills,omitempty"`
 }
 
 // SessionRecord is the on-disk format for each local session.
@@ -141,6 +162,12 @@ func (d *DaemonServer) loadConfig() error {
 	if cfg.Settings.Reasoning == "" {
 		cfg.Settings.Reasoning = "medium"
 	}
+	if cfg.MCPServers == nil {
+		cfg.MCPServers = make(map[string]MCPServerConfig)
+	}
+	if cfg.Skills == nil {
+		cfg.Skills = make(map[string]SkillConfig)
+	}
 	d.config = &cfg
 	return nil
 }
@@ -215,6 +242,8 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 			Reasoning:            "medium",
 			Temperature:          0.7,
 		},
+		MCPServers: make(map[string]MCPServerConfig),
+		Skills:     make(map[string]SkillConfig),
 	}
 
 	if err := d.saveConfig(); err != nil {
@@ -673,23 +702,37 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"hostId":     d.config.HostID,
 			"requestId":  req.RequestID,
 			"settings":   d.config.Settings,
+			"mcpServers": d.config.MCPServers,
+			"skills":     d.config.Skills,
 			"name":       d.config.Name,
 			"gatewayUrl": d.config.GatewayURL,
 		})
 
 	case "update_config":
 		var req struct {
-			RequestID string      `json:"requestId"`
-			Settings  ZotSettings `json:"settings"`
+			RequestID  string                     `json:"requestId"`
+			Settings   *ZotSettings               `json:"settings,omitempty"`
+			MCPServers map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+			Skills     map[string]SkillConfig     `json:"skills,omitempty"`
 		}
 		_ = json.Unmarshal(raw, &req)
-		d.config.Settings = req.Settings
+		if req.Settings != nil {
+			d.config.Settings = *req.Settings
+		}
+		if req.MCPServers != nil {
+			d.config.MCPServers = req.MCPServers
+		}
+		if req.Skills != nil {
+			d.config.Skills = req.Skills
+		}
 		_ = d.saveConfig()
 		_ = d.sendWS(map[string]any{
-			"type":      "config_updated",
-			"hostId":    d.config.HostID,
-			"requestId": req.RequestID,
-			"settings":  d.config.Settings,
+			"type":       "config_updated",
+			"hostId":     d.config.HostID,
+			"requestId":  req.RequestID,
+			"settings":   d.config.Settings,
+			"mcpServers": d.config.MCPServers,
+			"skills":     d.config.Skills,
 		})
 
 	case "compact_session":
@@ -834,13 +877,39 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 		}
 
 	case "/skills":
-		reply = "### 🛠️ Discovered Tools & Capabilities\n" +
-			"- `read` — Read file contents with line limits\n" +
-			"- `write` — Create or overwrite files atomically\n" +
-			"- `edit` — Precise substring / regex file editing\n" +
-			"- `bash` — Execute arbitrary shell commands in sandbox\n" +
-			"- `glob` — Fuzzy search directory tree with gitignore support\n\n" +
-			"*All tools execute natively on host `" + d.config.Name + "`.*"
+		var b strings.Builder
+		b.WriteString("### 🛠️ Configured Skills & Built-in Tools\n\n")
+		b.WriteString("**Built-in Tools:**\n")
+		b.WriteString("- `read` — Read file contents with line limits\n")
+		b.WriteString("- `write` — Create or overwrite files atomically\n")
+		b.WriteString("- `edit` — Precise substring / regex file editing\n")
+		b.WriteString("- `bash` — Execute arbitrary shell commands in sandbox\n")
+		b.WriteString("- `glob` — Fuzzy search directory tree with gitignore support\n\n")
+		if len(d.config.Skills) > 0 {
+			b.WriteString("**Custom Skills:**\n")
+			for name, sk := range d.config.Skills {
+				status := "enabled"
+				if !sk.Enabled {
+					status = "disabled"
+				}
+				b.WriteString(fmt.Sprintf("- `%s` (%s): %s\n", name, status, sk.Description))
+			}
+		} else {
+			b.WriteString("*No custom skills configured yet. Add them in Settings > Skills.*\n")
+		}
+		reply = b.String()
+
+	case "/mcp":
+		var b strings.Builder
+		b.WriteString("### 🔌 Configured MCP Servers\n\n")
+		if len(d.config.MCPServers) > 0 {
+			for name, s := range d.config.MCPServers {
+				b.WriteString(fmt.Sprintf("- **%s** (`%s`): `%s %s`\n", name, s.Transport, s.Command, strings.Join(s.Args, " ")))
+			}
+		} else {
+			b.WriteString("*No MCP servers configured yet. Add them in Settings > MCP Servers.*\n")
+		}
+		reply = b.String()
 
 	case "/help":
 		reply = "### ⚡ Remote Agent Slash Commands\n" +
@@ -850,7 +919,8 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 			"- `/unjail` — Allow agent tools to read/write external paths\n" +
 			"- `/model <name>` — Switch the active model\n" +
 			"- `/reasoning <off|low|medium|high>` — Adjust reasoning effort\n" +
-			"- `/skills` — List available agent tools and capabilities\n" +
+			"- `/skills` — List available agent tools and custom skills\n" +
+			"- `/mcp` — List configured Model Context Protocol servers\n" +
 			"- `/help` — Show this command reference\n\n" +
 			"*You can also configure all Zot settings directly in the Settings pane.*"
 
@@ -947,7 +1017,29 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		&tools.GlobTool{CWD: act.record.CWD, Sandbox: sb},
 	)
 
-	agent := core.NewAgent(client, modelToUse, "", reg)
+	// Build rich system instructions with working directory, jail status, and active skills
+	var sysPrompt strings.Builder
+	sysPrompt.WriteString("You are an expert autonomous AI software engineering agent running directly on the user's machine.\n")
+	sysPrompt.WriteString(fmt.Sprintf("Working Directory: %s\n", act.record.CWD))
+	if d.config.Settings.JailByDefault {
+		sysPrompt.WriteString("Sandbox: Strict jail mode is active. Only access files inside the working directory.\n")
+	}
+	if len(d.config.Skills) > 0 {
+		sysPrompt.WriteString("\n### Active Skills & Custom Instructions:\n")
+		for name, sk := range d.config.Skills {
+			if sk.Enabled {
+				sysPrompt.WriteString(fmt.Sprintf("#### Skill [%s]: %s\n%s\n\n", name, sk.Description, sk.Body))
+			}
+		}
+	}
+	if len(d.config.MCPServers) > 0 {
+		sysPrompt.WriteString("\n### Configured MCP Servers:\n")
+		for name, mcp := range d.config.MCPServers {
+			sysPrompt.WriteString(fmt.Sprintf("- %s (%s): %s %s\n", name, mcp.Transport, mcp.Command, strings.Join(mcp.Args, " ")))
+		}
+	}
+
+	agent := core.NewAgent(client, modelToUse, sysPrompt.String(), reg)
 	act.mu.Lock()
 	if len(act.record.Messages) > 0 {
 		agent.SetMessages(act.record.Messages)

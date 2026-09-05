@@ -380,27 +380,33 @@ function Root() {
             )
           }
         >
-          <AppShell>
-            {(() => {
-              const p = route().path;
-              const isAdmin = currentSession()?.user.role === "admin";
-              if (p === "/") return <DashboardPage />;
-              if (p.startsWith("/code")) return <RemoteCodePage />;
-              if (p === "/keys") return <KeysPage />;
-              if (p === "/usage") return <UsagePage />;
-              if (p === "/settings") return <SettingsPage />;
-              if (p.startsWith("/admin") && isAdmin) {
-                if (p === "/admin" || p === "/admin/stats")
-                  return <AdminStatsPage />;
-                if (p === "/admin/providers") return <AdminProvidersPage />;
-                if (p === "/admin/models") return <AdminModelsPage />;
-                if (p === "/admin/users") return <AdminUsersPage />;
-                if (p === "/admin/keys") return <AdminKeysPage />;
-                if (p === "/admin/audit") return <AdminAuditPage />;
-              }
-              return <DashboardPage />;
-            })()}
-          </AppShell>
+          {(() => {
+            const p = route().path;
+            if (p.startsWith("/code")) {
+              return <RemoteCodePage />;
+            }
+            return (
+              <AppShell>
+                {(() => {
+                  const isAdmin = currentSession()?.user.role === "admin";
+                  if (p === "/") return <DashboardPage />;
+                  if (p === "/keys") return <KeysPage />;
+                  if (p === "/usage") return <UsagePage />;
+                  if (p === "/settings") return <SettingsPage />;
+                  if (p.startsWith("/admin") && isAdmin) {
+                    if (p === "/admin" || p === "/admin/stats")
+                      return <AdminStatsPage />;
+                    if (p === "/admin/providers") return <AdminProvidersPage />;
+                    if (p === "/admin/models") return <AdminModelsPage />;
+                    if (p === "/admin/users") return <AdminUsersPage />;
+                    if (p === "/admin/keys") return <AdminKeysPage />;
+                    if (p === "/admin/audit") return <AdminAuditPage />;
+                  }
+                  return <DashboardPage />;
+                })()}
+              </AppShell>
+            );
+          })()}
         </Show>
       </Show>
       <Toasts />

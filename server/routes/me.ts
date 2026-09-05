@@ -212,10 +212,24 @@ export async function handleMeRoute(path: string, req: Request): Promise<Respons
 
   if (path === "/api/me/models" && req.method === "GET") {
     await requireAuth(req);
-    const snap = routerSnapshot();
-    const models = Array.from(snap.models.values())
+    const snap = await routerSnapshot();
+    let models = Array.from(snap.models.values())
       .filter((m) => m.enabled)
       .map((m) => ({ id: m.id, name: m.name || m.id }));
+
+    if (models.length === 0) {
+      // In passthrough mode or when models table is empty, collect from targets or providers
+      const seen = new Set<string>();
+      for (const targets of snap.targets.values()) {
+        for (const t of targets) {
+          if (!seen.has(t.upstream_model)) {
+            seen.add(t.upstream_model);
+            models.push({ id: t.upstream_model, name: t.upstream_model });
+          }
+        }
+      }
+    }
+
     return ok({ models }, req);
   }
 

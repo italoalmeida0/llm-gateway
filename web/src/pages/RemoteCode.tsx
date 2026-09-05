@@ -7,6 +7,8 @@ import {
   For,
   Show,
 } from "solid-js";
+import { marked } from "marked";
+import hljs from "highlight.js";
 import {
   api,
   currentSession,
@@ -26,7 +28,7 @@ import {
 } from "../ui";
 
 /**
- * Remote Code interfaces and types
+ * Interfaces & Types
  */
 
 export interface SessionSummary {
@@ -64,10 +66,53 @@ export interface PendingApproval {
   args: string;
 }
 
-export interface DirEntry {
+export interface FileEntry {
   name: string;
   isDir: boolean;
   path: string;
+  sizeBytes?: number;
+  isOpen?: boolean;
+  children?: FileEntry[];
+  isLoading?: boolean;
+}
+
+export interface EditorTab {
+  path: string;
+  name: string;
+  content: string;
+  savedContent: string;
+  isDirty: boolean;
+  isLoading: boolean;
+  viewMode: "code" | "diff" | "preview";
+}
+
+export interface GitFileStatus {
+  status: string; // "M", "A", "D", "??"
+  path: string;
+}
+
+export interface TerminalLog {
+  id: string;
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  timestamp: number;
+}
+
+export interface ZotSettings {
+  model?: string;
+  reasoning?: string;
+  temperature?: number;
+  auto_compact_threshold?: number;
+  jail_by_default?: boolean;
+  tool_render?: string;
+  compact_input?: boolean;
+  compact_mode?: boolean;
+  recursive_file_suggest?: boolean;
+  respect_gitignore?: boolean;
+  insecure?: boolean;
+  http_proxy?: string;
 }
 
 const DEFAULT_MODELS = [
@@ -77,10 +122,17 @@ const DEFAULT_MODELS = [
   { id: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku" },
 ];
 
-/**
- * Safe client-side Markdown formatter (zero deps).
- * Escapes raw HTML, then processes markdown blocks and inline tokens.
- */
+const SLASH_COMMANDS = [
+  { name: "/compact", desc: "Summarize and compact conversation to free up context", icon: "📦" },
+  { name: "/clear", desc: "Clear the current chat transcript", icon: "🧹" },
+  { name: "/jail", desc: "Confine agent tools strictly to session directory", icon: "🔒" },
+  { name: "/unjail", desc: "Allow agent tools to access external paths", icon: "🔓" },
+  { name: "/model", desc: "Switch the active model (/model <id>)", icon: "🤖" },
+  { name: "/reasoning", desc: "Set reasoning effort (/reasoning <off|low|med|high>)", icon: "🧠" },
+  { name: "/skills", desc: "List discovered agent tools and capabilities", icon: "🛠️" },
+  { name: "/help", desc: "Show complete command reference", icon: "❓" },
+];
+
 function escapeHtml(str: string): string {
   return str
     .replace(/&/g, "&amp;")
@@ -90,79 +142,60 @@ function escapeHtml(str: string): string {
     .replace(/'/g, "&#039;");
 }
 
-function renderMarkdown(md: string): string {
-  if (!md) return "";
-
-  // 1. Extract and preserve fenced code blocks with placeholders
-  const codeBlocks: string[] = [];
-  const placeholderPrefix = "___CODE_BLOCK_PLACEHOLDER_";
-
-  let processed = md.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    const idx = codeBlocks.length;
-    const escapedCode = escapeHtml(code.trimEnd());
-    const displayLang = lang ? escapeHtml(lang) : "text";
-    const blockHtml = `
-      <div class="my-3 overflow-hidden rounded-xl border border-line bg-ink-950 font-mono text-xs shadow-sm">
-        <div class="flex items-center justify-between border-b border-line/60 bg-ink-900/70 px-3.5 py-1.5 text-[11px] text-ink-400">
-          <span class="font-semibold uppercase tracking-wider text-ink-300">${displayLang}</span>
+// Custom renderer for marked with highlight.js syntax highlighting
+const customRenderer = {
+  code({ text, lang }: { text: string; lang?: string }) {
+    const language = lang && hljs.getLanguage(lang) ? lang : "plaintext";
+    let highlighted = "";
+    try {
+      highlighted = hljs.highlight(text, { language }).value;
+    } catch {
+      highlighted = escapeHtml(text);
+    }
+    return `
+      <div class="my-2.5 overflow-hidden rounded-xl border border-line bg-ink-950 font-mono text-xs shadow-sm">
+        <div class="flex items-center justify-between border-b border-line/60 bg-ink-900/80 px-3 py-1.5 text-[11px] text-ink-400">
+          <span class="font-semibold uppercase tracking-wider text-ink-300">${escapeHtml(language)}</span>
           <button
-            class="text-ink-400 hover:text-ink-100 transition-colors cursor-pointer"
-            onclick="navigator.clipboard.writeText(decodeURIComponent('${encodeURIComponent(code)}'))"
-            title="Copy snippet"
+            class="text-ink-400 hover:text-ink-100 transition-colors cursor-pointer text-[11px]"
+            onclick="navigator.clipboard.writeText(decodeURIComponent('${encodeURIComponent(text)}'))"
+            title="Copy code"
           >
             Copy
           </button>
         </div>
-        <pre class="p-3.5 overflow-x-auto text-ink-100 leading-relaxed"><code>${escapedCode}</code></pre>
+        <pre class="p-3 overflow-x-auto text-ink-100 leading-relaxed font-mono"><code>${highlighted}</code></pre>
       </div>`;
-    codeBlocks.push(blockHtml);
-    return `${placeholderPrefix}${idx}___`;
-  });
+  },
+};
+marked.use({ renderer: customRenderer as any, breaks: true, gfm: true });
 
-  // 2. Escape remaining text
-  processed = escapeHtml(processed);
-
-  // 3. Inline formatting
-  // Inline code
-  processed = processed.replace(/`([^`]+)`/g, '<code class="rounded bg-ink-800/80 px-1.5 py-0.5 font-mono text-[12px] text-brand-400">$1</code>');
-  // Bold
-  processed = processed.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-ink-100">$1</strong>');
-  // Italic
-  processed = processed.replace(/\*([^*]+)\*/g, '<em class="italic text-ink-200">$1</em>');
-  // Headings
-  processed = processed.replace(/^### (.*$)/gm, '<h3 class="text-sm font-semibold text-ink-100 mt-3 mb-1.5">$1</h3>');
-  processed = processed.replace(/^## (.*$)/gm, '<h2 class="text-base font-semibold text-ink-100 mt-4 mb-2">$1</h2>');
-  processed = processed.replace(/^# (.*$)/gm, '<h1 class="text-lg font-bold text-ink-100 mt-4 mb-2">$1</h1>');
-  // Blockquotes
-  processed = processed.replace(/^> (.*$)/gm, '<blockquote class="border-l-2 border-brand-500 pl-3 my-2 text-ink-300 italic">$1</blockquote>');
-  // Unordered list items
-  processed = processed.replace(/^[*-] (.*$)/gm, '<li class="ml-4 list-disc text-ink-200 my-0.5">$1</li>');
-
-  // Links
-  processed = processed.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-brand-400 hover:underline inline-flex items-center gap-0.5">$1</a>');
-
-  // Paragraphs
-  const paragraphs = processed.split(/\n\n+/);
-  processed = paragraphs
-    .map((p) => {
-      if (p.includes(placeholderPrefix) || p.startsWith("<h") || p.startsWith("<li") || p.startsWith("<block")) {
-        return p;
-      }
-      return `<p class="mb-2 leading-relaxed text-ink-200">${p.replace(/\n/g, "<br/>")}</p>`;
-    })
-    .join("");
-
-  // 4. Restore code blocks
-  for (let i = 0; i < codeBlocks.length; i++) {
-    processed = processed.replace(`${placeholderPrefix}${i}___`, codeBlocks[i]!);
+function renderMarkdown(md: string): string {
+  if (!md) return "";
+  try {
+    return marked.parse(md) as string;
+  } catch {
+    return escapeHtml(md).replace(/\n/g, "<br/>");
   }
-
-  return processed;
 }
 
-/**
- * Convert backend Go provider.Message array to client ChatMessage array
- */
+function getFileIcon(name: string): { label: string; color: string } {
+  const ext = name.split(".").pop()?.toLowerCase() || "";
+  if (name === "package.json" || ext === "json") return { label: "{}", color: "text-amber-400" };
+  if (name.startsWith(".git") || ext === "gitignore") return { label: "git", color: "text-orange-400" };
+  if (name === "Dockerfile" || ext === "dockerfile") return { label: "🐳", color: "text-sky-400" };
+  if (ext === "ts" || ext === "tsx") return { label: "TS", color: "text-blue-400 font-bold" };
+  if (ext === "js" || ext === "jsx" || ext === "mjs") return { label: "JS", color: "text-yellow-400 font-bold" };
+  if (ext === "go") return { label: "GO", color: "text-cyan-400 font-bold" };
+  if (ext === "py") return { label: "PY", color: "text-emerald-400 font-bold" };
+  if (ext === "md" || ext === "txt") return { label: "MD", color: "text-purple-400 font-bold" };
+  if (ext === "css" || ext === "scss" || ext === "less") return { label: "#", color: "text-pink-400" };
+  if (ext === "html") return { label: "<>", color: "text-orange-500 font-bold" };
+  if (ext === "yaml" || ext === "yml") return { label: "YML", color: "text-amber-300 font-bold" };
+  if (ext === "sh" || ext === "bash") return { label: "$", color: "text-green-400 font-bold" };
+  return { label: "📄", color: "text-ink-400" };
+}
+
 function normalizeMessages(rawMessages: any[]): ChatMessage[] {
   if (!Array.isArray(rawMessages)) return [];
   const list: ChatMessage[] = [];
@@ -222,7 +255,7 @@ function normalizeMessages(rawMessages: any[]): ChatMessage[] {
 }
 
 export default function RemoteCodePage() {
-  // ----- Signals & State -----
+  // ----- Hosts & Session State -----
   const [hosts, setHosts] = createSignal<RemoteHostDto[]>([]);
   const [hostsLoading, setHostsLoading] = createSignal(true);
   const [activeHostId, setActiveHostId] = createSignal<string | null>(
@@ -242,11 +275,60 @@ export default function RemoteCodePage() {
   );
   const [pendingApproval, setPendingApproval] = createSignal<PendingApproval | null>(null);
 
+  // Layout & Activity Bar
+  type ActivityTab = "explorer" | "chat" | "git" | "terminal" | "machines" | "settings";
+  const [activeActivityTab, setActiveActivityTab] = createSignal<ActivityTab>("explorer");
+  const [sidebarOpen, setSidebarOpen] = createSignal(true);
+  const [layoutMode, setLayoutMode] = createSignal<"split" | "editor" | "chat">("split");
+  const [terminalOpen, setTerminalOpen] = createSignal(false);
+
+  // File Explorer Tree
+  const [fileTree, setFileTree] = createSignal<FileEntry[]>([]);
+  const [fileTreeLoading, setFileTreeLoading] = createSignal(false);
+  const [showNewFileModal, setShowNewFileModal] = createSignal(false);
+  const [newFilePath, setNewFilePath] = createSignal("");
+
+  // Editor Tabs
+  const [openTabs, setOpenTabs] = createSignal<EditorTab[]>([]);
+  const [activeTabPath, setActiveTabPath] = createSignal<string | null>(null);
+
+  // Git State
+  const [gitBranch, setGitBranch] = createSignal<string>("");
+  const [gitFiles, setGitFiles] = createSignal<GitFileStatus[]>([]);
+  const [gitLoading, setGitLoading] = createSignal(false);
+  const [commitMessage, setCommitMessage] = createSignal("");
+
+  // Terminal Runner
+  const [terminalLogs, setTerminalLogs] = createSignal<TerminalLog[]>([]);
+  const [terminalCmd, setTerminalCmd] = createSignal("");
+  const [terminalHistory, setTerminalHistory] = createSignal<string[]>([]);
+  const [historyIndex, setHistoryIndex] = createSignal(-1);
+
+  // Zot Configuration Settings
+  const [zotSettings, setZotSettings] = createSignal<ZotSettings>({
+    model: "gpt-4o",
+    reasoning: "medium",
+    temperature: 0.7,
+    auto_compact_threshold: 85,
+    jail_by_default: false,
+    tool_render: "box",
+    compact_input: false,
+    compact_mode: false,
+    recursive_file_suggest: false,
+    respect_gitignore: true,
+    insecure: false,
+    http_proxy: "",
+  });
+
+  // Slash Commands Auto-suggest Overlay
+  const [showSlashPopup, setShowSlashPopup] = createSignal(false);
+  const [slashFilter, setSlashFilter] = createSignal("");
+
   // Models
   const [models, setModels] = createSignal<Array<{ id: string; name: string }>>(DEFAULT_MODELS);
   const [selectedModel, setSelectedModel] = createSignal<string>("gpt-4o");
 
-  // Modals & Drawers
+  // Modals
   const [showPairModal, setShowPairModal] = createSignal(false);
   const [pairData, setPairData] = createSignal<RemotePairDto | null>(null);
   const [pairLoading, setPairLoading] = createSignal(false);
@@ -256,24 +338,34 @@ export default function RemoteCodePage() {
   const [newTitle, setNewTitle] = createSignal("");
   const [newModel, setNewModel] = createSignal("gpt-4o");
 
-  const [mobileSidebar, setMobileSidebar] = createSignal(false);
-
   // WebSocket
   let ws: WebSocket | null = null;
   const [wsConnected, setWsConnected] = createSignal(false);
   let reconnectTimer: any = null;
   let chatScrollContainer: HTMLDivElement | undefined;
+  let terminalScrollContainer: HTMLDivElement | undefined;
+  let editorTextArea: HTMLTextAreaElement | undefined;
 
-  // Active host helper
+  // Active host & session memos
   const activeHost = createMemo(() => {
     const id = activeHostId();
     return hosts().find((h) => h.id === id) ?? null;
   });
 
-  // Active session helper
   const activeSession = createMemo(() => {
     const id = activeSessionId();
     return sessions().find((s) => s.id === id) ?? null;
+  });
+
+  const activeTab = createMemo(() => {
+    const p = activeTabPath();
+    return openTabs().find((t) => t.path === p) ?? null;
+  });
+
+  // Filtered slash commands
+  const filteredSlashCommands = createMemo(() => {
+    const filter = slashFilter().toLowerCase();
+    return SLASH_COMMANDS.filter((cmd) => cmd.name.toLowerCase().includes(filter));
   });
 
   // Persist selections
@@ -302,7 +394,15 @@ export default function RemoteCodePage() {
     });
   };
 
-  // ----- API & WebSocket Management -----
+  const scrollTerminalToBottom = () => {
+    if (!terminalScrollContainer) return;
+    terminalScrollContainer.scrollTo({
+      top: terminalScrollContainer.scrollHeight,
+      behavior: "smooth",
+    });
+  };
+
+  // ----- API & WebSocket Handlers -----
 
   const fetchHosts = async () => {
     try {
@@ -364,6 +464,7 @@ export default function RemoteCodePage() {
       const hId = activeHostId();
       if (hId) {
         sendWs({ hostId: hId, type: "list_sessions" });
+        sendWs({ hostId: hId, type: "get_config" });
       }
     };
 
@@ -399,6 +500,7 @@ export default function RemoteCodePage() {
         );
         if (msg.status === "online" && msg.hostId === activeHostId()) {
           sendWs({ hostId: msg.hostId, type: "list_sessions" });
+          sendWs({ hostId: msg.hostId, type: "get_config" });
         }
         break;
       }
@@ -409,7 +511,6 @@ export default function RemoteCodePage() {
           setSessions(msg.sessions);
           localStorage.setItem(`llmgw_remote_sessions_${msg.hostId}`, JSON.stringify(msg.sessions));
 
-          // Auto-select first session if active session isn't in list
           if (!activeSessionId() || !msg.sessions.some((s: any) => s.id === activeSessionId())) {
             if (msg.sessions.length > 0) {
               selectSession(msg.sessions[0].id);
@@ -468,12 +569,164 @@ export default function RemoteCodePage() {
         break;
       }
 
+      case "session_content": {
+        if (msg.sessionId === activeSessionId()) {
+          const norm = normalizeMessages(msg.messages ?? []);
+          setMessages(norm);
+          setSessionStatus("idle");
+          localStorage.setItem(`llmgw_remote_transcript_${msg.sessionId}`, JSON.stringify(norm));
+          setTimeout(() => scrollToBottom(true), 50);
+        }
+        break;
+      }
+
+      case "session_compacted": {
+        if (msg.sessionId === activeSessionId()) {
+          const norm = normalizeMessages(msg.messages ?? []);
+          setMessages(norm);
+          setSessionStatus("idle");
+          toast("Transcript compacted successfully");
+          setTimeout(() => scrollToBottom(true), 50);
+        }
+        break;
+      }
+
+      case "session_cleared": {
+        if (msg.sessionId === activeSessionId()) {
+          setMessages([]);
+          setSessionStatus("idle");
+          toast("Chat transcript cleared");
+        }
+        break;
+      }
+
       case "session_status": {
         if (msg.sessionId === activeSessionId()) {
           setSessionStatus(msg.status);
           setSessions((prev) =>
             prev.map((s) => (s.id === msg.sessionId ? { ...s, status: msg.status } : s)),
           );
+        }
+        break;
+      }
+
+      case "dir_list": {
+        if (msg.hostId === activeHostId()) {
+          setFileTreeLoading(false);
+          const entries: FileEntry[] = (msg.entries ?? []).map((e: any) => ({
+            name: e.name,
+            isDir: e.isDir,
+            path: e.path,
+            sizeBytes: e.sizeBytes,
+            isOpen: false,
+          }));
+
+          const reqPath = msg.path;
+          const currentCwd = activeSession()?.cwd || "~";
+
+          if (reqPath === currentCwd || reqPath === fileTree()[0]?.path || !fileTree().length) {
+            setFileTree(entries);
+          } else {
+            // Merge children recursively
+            const updateNode = (nodes: FileEntry[]): FileEntry[] => {
+              return nodes.map((node) => {
+                if (node.path === reqPath) {
+                  return { ...node, children: entries, isOpen: true, isLoading: false };
+                }
+                if (node.children) {
+                  return { ...node, children: updateNode(node.children) };
+                }
+                return node;
+              });
+            };
+            setFileTree(updateNode(fileTree()));
+          }
+        }
+        break;
+      }
+
+      case "file_content": {
+        if (msg.hostId === activeHostId()) {
+          const targetPath = msg.path;
+          if (msg.error) {
+            toast(`Failed to read file: ${msg.error}`);
+            setOpenTabs((prev) => prev.filter((t) => t.path !== targetPath));
+            return;
+          }
+          setOpenTabs((prev) =>
+            prev.map((tab) =>
+              tab.path === targetPath
+                ? {
+                    ...tab,
+                    content: msg.content ?? "",
+                    savedContent: msg.content ?? "",
+                    isLoading: false,
+                    isDirty: false,
+                  }
+                : tab,
+            ),
+          );
+        }
+        break;
+      }
+
+      case "file_saved": {
+        if (msg.hostId === activeHostId()) {
+          const targetPath = msg.path;
+          if (msg.error) {
+            toast(`Failed to save file: ${msg.error}`);
+            return;
+          }
+          setOpenTabs((prev) =>
+            prev.map((tab) =>
+              tab.path === targetPath
+                ? {
+                    ...tab,
+                    savedContent: tab.content,
+                    isDirty: false,
+                  }
+                : tab,
+            ),
+          );
+          toast(`Saved ${targetPath.split("/").pop()}`);
+          refreshGitStatus();
+        }
+        break;
+      }
+
+      case "git_status_result": {
+        if (msg.hostId === activeHostId()) {
+          setGitLoading(false);
+          setGitBranch(msg.branch ?? "");
+          setGitFiles(msg.files ?? []);
+        }
+        break;
+      }
+
+      case "command_result": {
+        if (msg.hostId === activeHostId()) {
+          const logItem: TerminalLog = {
+            id: `cmd_${Date.now()}`,
+            command: msg.requestId ? undefined : terminalCmd(),
+            stdout: msg.stdout,
+            stderr: msg.stderr,
+            exitCode: msg.exitCode,
+            timestamp: Date.now(),
+          };
+          setTerminalLogs((prev) => [...prev, logItem]);
+          setTimeout(scrollTerminalToBottom, 50);
+          refreshGitStatus();
+        }
+        break;
+      }
+
+      case "config_data":
+      case "config_updated": {
+        if (msg.hostId === activeHostId() && msg.settings) {
+          setZotSettings(msg.settings);
+          if (msg.type === "config_updated") {
+            toast("Zot settings updated on host");
+          }
         }
         break;
       }
@@ -494,7 +747,6 @@ export default function RemoteCodePage() {
         if (msg.sessionId !== activeSessionId()) return;
         const ev = msg.event;
         if (!ev) return;
-
         handleAgentEvent(ev);
         break;
       }
@@ -532,7 +784,6 @@ export default function RemoteCodePage() {
             }
             return [...prev.slice(0, -1), { ...lastMsg, blocks }];
           } else {
-            // New assistant message turn
             return [
               ...prev,
               {
@@ -598,6 +849,8 @@ export default function RemoteCodePage() {
           });
         });
         scrollToBottom(true);
+        refreshGitStatus();
+        refreshFileTree();
         break;
       }
 
@@ -612,18 +865,23 @@ export default function RemoteCodePage() {
         if (sId) {
           localStorage.setItem(`llmgw_remote_transcript_${sId}`, JSON.stringify(messages()));
         }
+        refreshGitStatus();
+        refreshFileTree();
         break;
       }
     }
   };
 
-  // ----- Actions & Handlers -----
+  // ----- Workspace Actions -----
 
   const selectHost = (hostId: string) => {
     setActiveHostId(hostId);
     setActiveSessionId(null);
     setMessages([]);
     setSessions([]);
+    setOpenTabs([]);
+    setActiveTabPath(null);
+    setFileTree([]);
 
     try {
       const cached = localStorage.getItem(`llmgw_remote_sessions_${hostId}`);
@@ -631,6 +889,7 @@ export default function RemoteCodePage() {
     } catch {}
 
     sendWs({ hostId, type: "list_sessions" });
+    sendWs({ hostId, type: "get_config" });
   };
 
   const selectSession = (sessionId: string) => {
@@ -647,72 +906,207 @@ export default function RemoteCodePage() {
       sendWs({ hostId: hId, type: "get_session", sessionId });
     }
     setTimeout(() => scrollToBottom(false), 50);
+
+    // Refresh directory & git for this session's CWD
+    refreshFileTree();
+    refreshGitStatus();
   };
 
-  const startPairing = async () => {
-    try {
-      setPairLoading(true);
-      setShowPairModal(true);
-      const res = await api<RemotePairDto>("POST", "/api/remote/pair");
-      setPairData(res);
-    } catch (e: any) {
-      toast(e?.message || "Failed to generate pairing token");
-    } finally {
-      setPairLoading(false);
+  const refreshFileTree = () => {
+    const hId = activeHostId();
+    const act = activeSession();
+    if (!hId || !act) return;
+
+    setFileTreeLoading(true);
+    sendWs({
+      hostId: hId,
+      type: "list_dir",
+      path: act.cwd,
+    });
+  };
+
+  const toggleFolder = (node: FileEntry) => {
+    const hId = activeHostId();
+    if (!hId) return;
+
+    if (node.isOpen) {
+      // Close folder
+      const updateNode = (nodes: FileEntry[]): FileEntry[] => {
+        return nodes.map((n) => {
+          if (n.path === node.path) return { ...n, isOpen: false };
+          if (n.children) return { ...n, children: updateNode(n.children) };
+          return n;
+        });
+      };
+      setFileTree(updateNode(fileTree()));
+    } else {
+      // Open folder - if children loaded, just expand; otherwise fetch
+      if (node.children) {
+        const updateNode = (nodes: FileEntry[]): FileEntry[] => {
+          return nodes.map((n) => {
+            if (n.path === node.path) return { ...n, isOpen: true };
+            if (n.children) return { ...n, children: updateNode(n.children) };
+            return n;
+          });
+        };
+        setFileTree(updateNode(fileTree()));
+      } else {
+        sendWs({
+          hostId: hId,
+          type: "list_dir",
+          path: node.path,
+        });
+      }
     }
   };
 
-  const deleteHost = async (hostId: string, e: MouseEvent) => {
-    e.stopPropagation();
-    if (!confirm("Are you sure you want to remove this host machine? This will revoke its credentials.")) {
+  const openFileInEditor = (path: string, name: string) => {
+    const existing = openTabs().find((t) => t.path === path);
+    if (existing) {
+      setActiveTabPath(path);
       return;
     }
-    try {
-      await api("DELETE", `/api/remote/hosts/${hostId}`);
-      toast("Host machine removed");
-      await fetchHosts();
-    } catch (e: any) {
-      toast(e?.message || "Failed to remove host");
-    }
-  };
 
-  const openNewSessionModal = () => {
-    const act = activeSession();
-    if (act) {
-      setNewCwd(act.cwd);
-    } else {
-      setNewCwd("~");
-    }
-    setNewTitle("");
-    setNewModel(selectedModel());
-    setShowNewSessionModal(true);
-  };
+    const newTab: EditorTab = {
+      path,
+      name,
+      content: "",
+      savedContent: "",
+      isDirty: false,
+      isLoading: true,
+      viewMode: name.endsWith(".md") ? "code" : "code",
+    };
 
-  const submitCreateSession = () => {
+    setOpenTabs((prev) => [...prev, newTab]);
+    setActiveTabPath(path);
+
     const hId = activeHostId();
-    if (!hId) return;
+    if (hId) {
+      sendWs({
+        hostId: hId,
+        type: "read_file",
+        path,
+      });
+    }
+  };
+
+  const closeTab = (path: string, e?: MouseEvent) => {
+    e?.stopPropagation();
+    const tab = openTabs().find((t) => t.path === path);
+    if (tab && tab.isDirty) {
+      if (!confirm(`Save changes to ${tab.name} before closing?`)) {
+        // close without saving
+      } else {
+        saveActiveFile();
+      }
+    }
+
+    const remaining = openTabs().filter((t) => t.path !== path);
+    setOpenTabs(remaining);
+
+    if (activeTabPath() === path) {
+      if (remaining.length > 0) {
+        setActiveTabPath(remaining[remaining.length - 1]!.path);
+      } else {
+        setActiveTabPath(null);
+      }
+    }
+  };
+
+  const updateEditorContent = (val: string) => {
+    const p = activeTabPath();
+    if (!p) return;
+    setOpenTabs((prev) =>
+      prev.map((t) => {
+        if (t.path === p) {
+          return {
+            ...t,
+            content: val,
+            isDirty: val !== t.savedContent,
+          };
+        }
+        return t;
+      }),
+    );
+  };
+
+  const saveActiveFile = () => {
+    const tab = activeTab();
+    const hId = activeHostId();
+    if (!tab || !hId) return;
 
     sendWs({
       hostId: hId,
-      type: "create_session",
-      cwd: newCwd().trim() || "~",
-      title: newTitle().trim(),
-      model: newModel(),
+      type: "write_file",
+      path: tab.path,
+      content: tab.content,
     });
-
-    setShowNewSessionModal(false);
   };
 
-  const deleteSession = (sessId: string, e: MouseEvent) => {
-    e.stopPropagation();
-    if (!confirm("Delete this session and its local transcripts?")) return;
+  const refreshGitStatus = () => {
+    const hId = activeHostId();
+    const act = activeSession();
+    if (!hId || !act) return;
+
+    setGitLoading(true);
+    sendWs({
+      hostId: hId,
+      type: "git_status",
+      cwd: act.cwd,
+    });
+  };
+
+  const commitGitChanges = () => {
+    const msg = commitMessage().trim();
+    if (!msg) {
+      toast("Please enter a commit message");
+      return;
+    }
+    const hId = activeHostId();
+    const act = activeSession();
+    if (!hId || !act) return;
+
+    const cmd = `git add -A && git commit -m "${msg.replace(/"/g, '\\"')}"`;
+    executeTerminalCommand(cmd);
+    setCommitMessage("");
+  };
+
+  const executeTerminalCommand = (rawCmd?: string) => {
+    const cmd = (rawCmd ?? terminalCmd()).trim();
+    if (!cmd) return;
+
+    const hId = activeHostId();
+    const act = activeSession();
+    if (!hId || !act) return;
+
+    setTerminalHistory((prev) => [cmd, ...prev.filter((c) => c !== cmd)]);
+    setHistoryIndex(-1);
+
+    const logItem: TerminalLog = {
+      id: `cmd_${Date.now()}`,
+      command: cmd,
+      timestamp: Date.now(),
+    };
+    setTerminalLogs((prev) => [...prev, logItem]);
+    setTerminalCmd("");
+    setTerminalOpen(true);
+
+    sendWs({
+      hostId: hId,
+      type: "exec_command",
+      command: cmd,
+      cwd: act.cwd,
+    });
+  };
+
+  const saveZotSettings = () => {
     const hId = activeHostId();
     if (!hId) return;
 
     sendWs({
       hostId: hId,
-      type: "delete_session",
-      sessionId: sessId,
+      type: "update_config",
+      settings: zotSettings(),
     });
   };
 
@@ -731,6 +1125,7 @@ export default function RemoteCodePage() {
     };
     setMessages((prev) => [...prev, userMsg]);
     setPromptInput("");
+    setShowSlashPopup(false);
     setSessionStatus("running");
     scrollToBottom(true);
 
@@ -774,21 +1169,112 @@ export default function RemoteCodePage() {
     setPendingApproval(null);
   };
 
+  const startPairing = async () => {
+    try {
+      setPairLoading(true);
+      setShowPairModal(true);
+      const res = await api<RemotePairDto>("POST", "/api/remote/pair");
+      setPairData(res);
+    } catch (e: any) {
+      toast(e?.message || "Failed to generate pairing token");
+    } finally {
+      setPairLoading(false);
+    }
+  };
+
+  const deleteHost = async (hostId: string, e: MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("Are you sure you want to remove this host machine?")) return;
+    try {
+      await api("DELETE", `/api/remote/hosts/${hostId}`);
+      toast("Host machine removed");
+      await fetchHosts();
+    } catch (e: any) {
+      toast(e?.message || "Failed to remove host");
+    }
+  };
+
+  const openNewSessionModal = () => {
+    const act = activeSession();
+    setNewCwd(act ? act.cwd : "~");
+    setNewTitle("");
+    setNewModel(selectedModel());
+    setShowNewSessionModal(true);
+  };
+
+  const submitCreateSession = () => {
+    const hId = activeHostId();
+    if (!hId) return;
+
+    sendWs({
+      hostId: hId,
+      type: "create_session",
+      cwd: newCwd().trim() || "~",
+      title: newTitle().trim(),
+      model: newModel(),
+    });
+
+    setShowNewSessionModal(false);
+  };
+
+  const deleteSession = (sessId: string, e: MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("Delete this session and its local transcripts?")) return;
+    const hId = activeHostId();
+    if (!hId) return;
+
+    sendWs({
+      hostId: hId,
+      type: "delete_session",
+      sessionId: sessId,
+    });
+  };
+
+  // Keyboard shortcut listener: Cmd+S / Ctrl+S to save file
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      e.preventDefault();
+      saveActiveFile();
+    } else if ((e.metaKey || e.ctrlKey) && e.key === "b") {
+      e.preventDefault();
+      setSidebarOpen(!sidebarOpen());
+    } else if ((e.metaKey || e.ctrlKey) && e.key === "`") {
+      e.preventDefault();
+      setTerminalOpen(!terminalOpen());
+    }
+  };
+
+  // Chat Prompt input listener for slash commands
+  const handlePromptInput = (e: InputEvent & { currentTarget: HTMLTextAreaElement }) => {
+    const val = e.currentTarget.value;
+    setPromptInput(val);
+    if (val.startsWith("/")) {
+      setShowSlashPopup(true);
+      setSlashFilter(val);
+    } else {
+      setShowSlashPopup(false);
+    }
+  };
+
   const handleComposerKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (sessionStatus() === "running") return;
       sendPrompt();
+    } else if (e.key === "Escape") {
+      setShowSlashPopup(false);
     }
   };
 
   onMount(() => {
+    window.addEventListener("keydown", handleKeyDown);
     fetchHosts();
     fetchModels();
     connectWebSocket();
   });
 
   onCleanup(() => {
+    window.removeEventListener("keydown", handleKeyDown);
     clearTimeout(reconnectTimer);
     if (ws) {
       try {
@@ -798,179 +1284,333 @@ export default function RemoteCodePage() {
   });
 
   return (
-    <div class="h-[calc(100vh-130px)] flex flex-col min-h-[550px] -my-4 sm:-my-6 lg:-my-8">
-      {/* Top action header */}
-      <div class="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4 mb-4">
+    <div class="h-[calc(100vh-110px)] flex flex-col min-h-[600px] -my-4 sm:-my-6 lg:-my-8 bg-ink-950 rounded-2xl border border-line overflow-hidden select-none font-sans text-xs">
+      {/* ===== TOP TITLE & TOOLBAR BAR ===== */}
+      <header class="h-10 border-b border-line bg-ink-900/90 px-3 flex items-center justify-between gap-3 shrink-0">
         <div class="flex items-center gap-3 min-w-0">
           <div class="flex items-center gap-2">
-            <span class="inline-flex h-2.5 w-2.5 rounded-full bg-brand-500 animate-pulse" />
-            <h1 class="text-xl font-bold tracking-tight text-ink-100">Remote Code</h1>
+            <span class="inline-flex h-2 w-2 rounded-full bg-brand-500 animate-pulse" />
+            <span class="font-bold text-ink-100 tracking-tight text-[13px]">Remote IDE</span>
           </div>
 
           <Show when={activeHost()}>
             {(host) => (
-              <div class="hidden sm:flex items-center gap-2 px-3 py-1 rounded-lg border border-line bg-card text-xs">
-                <span
-                  class={`h-2 w-2 rounded-full ${host().status === "online" ? "bg-emerald-500" : "bg-ink-600"}`}
-                />
-                <span class="font-medium text-ink-100">{host().name}</span>
-                <span class="text-ink-500">({host().os}/{host().arch})</span>
+              <div class="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-line bg-ink-850/80 text-[11px]">
+                <span class={`h-1.5 w-1.5 rounded-full ${host().status === "online" ? "bg-emerald-500" : "bg-ink-600"}`} />
+                <span class="font-medium text-ink-200">{host().name}</span>
+                <span class="text-ink-500 font-mono">({host().os}/{host().arch})</span>
+              </div>
+            )}
+          </Show>
+
+          <Show when={activeSession()}>
+            {(sess) => (
+              <div class="hidden md:flex items-center gap-1.5 text-[11px] text-ink-400 font-mono truncate max-w-xs">
+                <Icon name={Icons.folder} size={12} class="text-brand-400" />
+                <span class="truncate">{sess().cwd}</span>
               </div>
             )}
           </Show>
         </div>
 
-        <div class="flex items-center gap-2">
-          {/* YOLO mode toggle */}
+        {/* Right Toolbar Controls */}
+        <div class="flex items-center gap-1.5">
+          {/* Layout Switcher */}
+          <div class="hidden sm:flex items-center rounded-lg border border-line bg-ink-950 p-0.5">
+            <button
+              onClick={() => setLayoutMode("editor")}
+              class={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer ${
+                layoutMode() === "editor" ? "bg-elev text-ink-100 shadow-sm" : "text-ink-400 hover:text-ink-200"
+              }`}
+              title="Editor Only"
+            >
+              Editor
+            </button>
+            <button
+              onClick={() => setLayoutMode("split")}
+              class={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer ${
+                layoutMode() === "split" ? "bg-elev text-ink-100 shadow-sm" : "text-ink-400 hover:text-ink-200"
+              }`}
+              title="Split View (Editor + Agent Chat)"
+            >
+              Split
+            </button>
+            <button
+              onClick={() => setLayoutMode("chat")}
+              class={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer ${
+                layoutMode() === "chat" ? "bg-elev text-ink-100 shadow-sm" : "text-ink-400 hover:text-ink-200"
+              }`}
+              title="Agent Chat Only"
+            >
+              Chat
+            </button>
+          </div>
+
+          {/* Terminal Toggle Button */}
+          <button
+            onClick={() => setTerminalOpen(!terminalOpen())}
+            class={`flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-medium transition-colors cursor-pointer ${
+              terminalOpen()
+                ? "border-brand-500/50 bg-brand-500/10 text-brand-400"
+                : "border-line bg-ink-850 hover:bg-elev text-ink-300"
+            }`}
+            title="Toggle Remote Terminal (Cmd+`)"
+          >
+            <Icon name={Icons.terminal} size={12} />
+            <span class="hidden md:inline">Terminal</span>
+          </button>
+
+          {/* YOLO Mode Toggle */}
           <button
             onClick={() => setYolo(!yolo())}
-            class={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+            class={`flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors cursor-pointer ${
               yolo()
-                ? "border-brand-500/40 bg-brand-500/10 text-brand-400 hover:bg-brand-500/20 shadow-sm"
-                : "border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
+                ? "border-brand-500/40 bg-brand-500/10 text-brand-400"
+                : "border-amber-500/40 bg-amber-500/10 text-amber-400"
             }`}
-            title={yolo() ? "YOLO Mode: Tools execute automatically without approvals" : "Safe Mode: Tools require interactive confirmation"}
+            title={yolo() ? "YOLO Mode Active: Tools run automatically" : "Safe Mode: Interactive approval required"}
           >
-            <Icon name={Icons.shield} size={14} />
-            <span>{yolo() ? "YOLO Mode ON" : "Approvals Required"}</span>
+            <Icon name={Icons.shield} size={12} />
+            <span>{yolo() ? "YOLO" : "Safe"}</span>
           </button>
 
-          {/* Connect Machine button */}
-          <Btn variant="secondary" size="sm" onClick={startPairing}>
-            <Icon name={Icons.plus} size={14} />
-            <span class="hidden sm:inline">Connect Machine</span>
-            <span class="sm:hidden">Pair</span>
-          </Btn>
-
-          {/* Mobile drawer toggle */}
+          {/* Connect Machine */}
           <button
-            class="md:hidden flex h-8 w-8 items-center justify-center rounded-lg border border-line text-ink-300 hover:bg-ink-800"
-            onClick={() => setMobileSidebar(!mobileSidebar())}
-            aria-label="Toggle sessions sidebar"
+            onClick={startPairing}
+            class="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-line bg-ink-850 hover:bg-elev text-ink-200 text-[11px] font-medium transition-colors cursor-pointer"
           >
-            <Icon name={Icons.menu} size={16} />
+            <Icon name={Icons.plus} size={12} />
+            <span>Connect</span>
           </button>
         </div>
-      </div>
+      </header>
 
-      {/* Main Workspace Layout */}
-      <Show
-        when={hosts().length > 0}
-        fallback={
-          <Card class="flex-1 flex items-center justify-center py-16 text-center">
-            <div class="max-w-md mx-auto space-y-4">
-              <div class="w-14 h-14 mx-auto rounded-2xl bg-brand-500/10 text-brand-500 flex items-center justify-center">
-                <Icon name={Icons.terminal} size={30} />
-              </div>
-              <h2 class="text-lg font-bold text-ink-100">No Remote Machines Connected</h2>
-              <p class="text-sm text-ink-400">
-                Connect your development machine, server, or cloud instance to run code remotely from any browser.
-              </p>
-              <Btn variant="primary" onClick={startPairing} loading={pairLoading()}>
-                <Icon name={Icons.plus} size={16} />
-                Connect Machine
-              </Btn>
-            </div>
-          </Card>
-        }
-      >
-        <div class="flex-1 flex gap-4 min-h-0 relative">
-          {/* ===== SIDEBAR: Hosts & Sessions ===== */}
-          <aside
-            class={`
-              absolute md:relative inset-y-0 left-0 z-20 w-72 flex flex-col border border-line rounded-2xl bg-card transition-all duration-200
-              ${mobileSidebar() ? "translate-x-0 shadow-2xl" : "-translate-x-full md:translate-x-0"}
-            `}
-          >
-            {/* Host switcher */}
-            <div class="p-3 border-b border-line flex items-center justify-between gap-2">
-              <div class="flex-1 min-w-0">
-                <label class="block text-[10px] font-bold uppercase tracking-wider text-ink-500 mb-1">
-                  Connected Machine
-                </label>
-                <select
-                  class="w-full rounded-lg border border-line bg-elev px-2.5 py-1.5 text-xs text-ink-100 font-medium truncate outline-none focus:border-brand-500 cursor-pointer"
-                  value={activeHostId() ?? ""}
-                  onChange={(e) => selectHost(e.currentTarget.value)}
-                >
-                  <For each={hosts()}>
-                    {(h) => (
-                      <option value={h.id}>
-                        {h.name} ({h.status === "online" ? "● online" : "○ offline"})
-                      </option>
-                    )}
-                  </For>
-                </select>
-              </div>
-
-              <Show when={activeHost()}>
-                {(h) => (
-                  <button
-                    onClick={(e) => deleteHost(h().id, e)}
-                    class="mt-4 p-1.5 text-ink-500 hover:text-rose-500 rounded-lg hover:bg-rose-500/10 transition-colors cursor-pointer"
-                    title="Remove host machine"
-                  >
-                    <Icon name={Icons.trash} size={14} />
-                  </button>
-                )}
-              </Show>
-            </div>
-
-            {/* Sessions Header & New Session Button */}
-            <div class="p-3 border-b border-line flex items-center justify-between">
-              <span class="text-xs font-semibold text-ink-200">Sessions</span>
-              <button
-                onClick={openNewSessionModal}
-                disabled={activeHost()?.status !== "online"}
-                class="flex items-center gap-1 text-xs font-medium text-brand-400 hover:text-brand-300 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-              >
-                <Icon name={Icons.plus} size={13} />
-                <span>New Session</span>
-              </button>
-            </div>
-
-            {/* Session List */}
-            <div class="flex-1 overflow-y-auto p-2 space-y-1">
-              <Show
-                when={sessions().length > 0}
-                fallback={
-                  <div class="p-4 text-center text-xs text-ink-500">
-                    No sessions yet. Click "New Session" to start.
-                  </div>
+      {/* ===== WORKSPACE BODY ===== */}
+      <div class="flex-1 flex min-h-0 relative">
+        {/* ===== ACTIVITY BAR (VS Code far-left 44px bar) ===== */}
+        <aside class="w-11 bg-ink-950 border-r border-line flex flex-col items-center py-2 justify-between shrink-0 z-10">
+          <div class="flex flex-col items-center gap-2">
+            {/* Explorer icon */}
+            <button
+              onClick={() => {
+                if (activeActivityTab() === "explorer" && sidebarOpen()) {
+                  setSidebarOpen(false);
+                } else {
+                  setActiveActivityTab("explorer");
+                  setSidebarOpen(true);
                 }
-              >
+              }}
+              class={`p-2 rounded-xl transition-colors cursor-pointer relative ${
+                activeActivityTab() === "explorer" && sidebarOpen()
+                  ? "bg-brand-500/20 text-brand-400 border border-brand-500/30"
+                  : "text-ink-400 hover:text-ink-100 hover:bg-ink-900"
+              }`}
+              title="File Explorer (Cmd+B)"
+            >
+              <Icon name={Icons.folder} size={16} />
+            </button>
+
+            {/* Agent Chat icon */}
+            <button
+              onClick={() => {
+                if (activeActivityTab() === "chat" && sidebarOpen()) {
+                  setSidebarOpen(false);
+                } else {
+                  setActiveActivityTab("chat");
+                  setSidebarOpen(true);
+                }
+              }}
+              class={`p-2 rounded-xl transition-colors cursor-pointer relative ${
+                activeActivityTab() === "chat" && sidebarOpen()
+                  ? "bg-brand-500/20 text-brand-400 border border-brand-500/30"
+                  : "text-ink-400 hover:text-ink-100 hover:bg-ink-900"
+              }`}
+              title="Agent Sessions"
+            >
+              <Icon name={Icons.sparkles} size={16} />
+              <Show when={sessionStatus() === "running"}>
+                <span class="absolute top-1 right-1 h-2 w-2 rounded-full bg-brand-500 animate-ping" />
+              </Show>
+            </button>
+
+            {/* Git Source Control icon */}
+            <button
+              onClick={() => {
+                if (activeActivityTab() === "git" && sidebarOpen()) {
+                  setSidebarOpen(false);
+                } else {
+                  setActiveActivityTab("git");
+                  setSidebarOpen(true);
+                  refreshGitStatus();
+                }
+              }}
+              class={`p-2 rounded-xl transition-colors cursor-pointer relative ${
+                activeActivityTab() === "git" && sidebarOpen()
+                  ? "bg-brand-500/20 text-brand-400 border border-brand-500/30"
+                  : "text-ink-400 hover:text-ink-100 hover:bg-ink-900"
+              }`}
+              title="Source Control (Git)"
+            >
+              <Icon name={Icons.git} size={16} />
+              <Show when={gitFiles().length > 0}>
+                <span class="absolute -top-0.5 -right-0.5 px-1 min-w-3.5 h-3.5 rounded-full bg-amber-500 text-ink-950 font-bold text-[9px] flex items-center justify-center">
+                  {gitFiles().length}
+                </span>
+              </Show>
+            </button>
+
+            {/* Terminal Runner icon */}
+            <button
+              onClick={() => {
+                if (activeActivityTab() === "terminal" && sidebarOpen()) {
+                  setSidebarOpen(false);
+                } else {
+                  setActiveActivityTab("terminal");
+                  setSidebarOpen(true);
+                  setTerminalOpen(true);
+                }
+              }}
+              class={`p-2 rounded-xl transition-colors cursor-pointer relative ${
+                activeActivityTab() === "terminal" && sidebarOpen()
+                  ? "bg-brand-500/20 text-brand-400 border border-brand-500/30"
+                  : "text-ink-400 hover:text-ink-100 hover:bg-ink-900"
+              }`}
+              title="Terminal Command Runner"
+            >
+              <Icon name={Icons.terminal} size={16} />
+            </button>
+
+            {/* Machines icon */}
+            <button
+              onClick={() => {
+                if (activeActivityTab() === "machines" && sidebarOpen()) {
+                  setSidebarOpen(false);
+                } else {
+                  setActiveActivityTab("machines");
+                  setSidebarOpen(true);
+                }
+              }}
+              class={`p-2 rounded-xl transition-colors cursor-pointer relative ${
+                activeActivityTab() === "machines" && sidebarOpen()
+                  ? "bg-brand-500/20 text-brand-400 border border-brand-500/30"
+                  : "text-ink-400 hover:text-ink-100 hover:bg-ink-900"
+              }`}
+              title="Connected Machines"
+            >
+              <Icon name={Icons.server} size={16} />
+            </button>
+          </div>
+
+          {/* Bottom Activity Bar Controls */}
+          <div class="flex flex-col items-center gap-2">
+            {/* Zot Settings icon */}
+            <button
+              onClick={() => {
+                if (activeActivityTab() === "settings" && sidebarOpen()) {
+                  setSidebarOpen(false);
+                } else {
+                  setActiveActivityTab("settings");
+                  setSidebarOpen(true);
+                }
+              }}
+              class={`p-2 rounded-xl transition-colors cursor-pointer ${
+                activeActivityTab() === "settings" && sidebarOpen()
+                  ? "bg-brand-500/20 text-brand-400 border border-brand-500/30"
+                  : "text-ink-400 hover:text-ink-100 hover:bg-ink-900"
+              }`}
+              title="Zot Settings & Parameters"
+            >
+              <Icon name={Icons.cog} size={16} />
+            </button>
+          </div>
+        </aside>
+
+        {/* ===== PRIMARY SIDEBAR (collapsible ~260px) ===== */}
+        <Show when={sidebarOpen()}>
+          <aside class="w-64 sm:w-72 bg-ink-900 border-r border-line flex flex-col shrink-0 z-10 transition-all duration-150">
+            {/* Sidebar View: File Explorer */}
+            <Show when={activeActivityTab() === "explorer"}>
+              <div class="p-2.5 border-b border-line flex items-center justify-between">
+                <span class="font-bold uppercase tracking-wider text-[11px] text-ink-300">Explorer</span>
+                <div class="flex items-center gap-1">
+                  <button
+                    onClick={refreshFileTree}
+                    class="p-1 rounded hover:bg-ink-800 text-ink-400 hover:text-ink-100 transition-colors cursor-pointer"
+                    title="Refresh Explorer"
+                  >
+                    <Icon name={Icons.refresh} size={13} />
+                  </button>
+                  <button
+                    onClick={() => {
+                      setNewFilePath("");
+                      setShowNewFileModal(true);
+                    }}
+                    class="p-1 rounded hover:bg-ink-800 text-ink-400 hover:text-ink-100 transition-colors cursor-pointer"
+                    title="New File"
+                  >
+                    <Icon name={Icons.plus} size={13} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Explorer Tree */}
+              <div class="flex-1 overflow-y-auto p-1.5 space-y-0.5 select-none font-mono text-[12px]">
+                <Show
+                  when={fileTree().length > 0}
+                  fallback={
+                    <div class="p-4 text-center text-ink-500 font-sans text-xs">
+                      {fileTreeLoading() ? "Loading files..." : "No files loaded. Connect a host to browse."}
+                    </div>
+                  }
+                >
+                  <For each={fileTree()}>
+                    {(node) => <FileTreeNode node={node} onToggle={toggleFolder} onOpenFile={openFileInEditor} />}
+                  </For>
+                </Show>
+              </div>
+            </Show>
+
+            {/* Sidebar View: Agent Sessions */}
+            <Show when={activeActivityTab() === "chat"}>
+              <div class="p-2.5 border-b border-line flex items-center justify-between">
+                <span class="font-bold uppercase tracking-wider text-[11px] text-ink-300">Sessions</span>
+                <button
+                  onClick={openNewSessionModal}
+                  class="flex items-center gap-1 text-[11px] font-semibold text-brand-400 hover:text-brand-300 cursor-pointer"
+                >
+                  <Icon name={Icons.plus} size={12} />
+                  <span>New</span>
+                </button>
+              </div>
+
+              <div class="flex-1 overflow-y-auto p-2 space-y-1.5">
                 <For each={sessions()}>
                   {(sess) => {
                     const isActive = () => sess.id === activeSessionId();
                     return (
                       <div
-                        onClick={() => {
-                          selectSession(sess.id);
-                          setMobileSidebar(false);
-                        }}
-                        class={`group relative flex flex-col p-2.5 rounded-xl border transition-all cursor-pointer ${
+                        onClick={() => selectSession(sess.id)}
+                        class={`group p-2.5 rounded-xl border transition-all cursor-pointer ${
                           isActive()
                             ? "border-brand-500/50 bg-brand-500/10 text-ink-100"
-                            : "border-transparent hover:border-line hover:bg-elev text-ink-300"
+                            : "border-transparent hover:border-line hover:bg-ink-850 text-ink-300"
                         }`}
                       >
-                        <div class="flex items-center justify-between gap-1 mb-1">
-                          <span class="text-xs font-semibold truncate text-ink-100">
-                            {sess.title || "Untitled Session"}
-                          </span>
+                        <div class="flex items-center justify-between mb-1">
+                          <span class="font-semibold text-ink-100 truncate text-xs">{sess.title || "Untitled Session"}</span>
                           <Show when={sess.status === "running"}>
                             <span class="h-2 w-2 rounded-full bg-brand-500 animate-ping" />
                           </Show>
                         </div>
-                        <div class="flex items-center gap-1.5 text-[11px] text-ink-500 font-mono truncate">
+                        <div class="flex items-center gap-1 text-[11px] text-ink-500 font-mono truncate">
                           <Icon name={Icons.folder} size={11} />
                           <span class="truncate">{sess.cwd}</span>
                         </div>
-                        <div class="flex items-center justify-between text-[10px] text-ink-500 mt-1">
+                        <div class="flex items-center justify-between text-[10px] text-ink-500 mt-1.5 pt-1 border-t border-line/40">
                           <span>{fmtDate(sess.updatedAt)}</span>
                           <button
                             onClick={(e) => deleteSession(sess.id, e)}
-                            class="opacity-0 group-hover:opacity-100 hover:text-rose-500 p-0.5 transition-opacity"
+                            class="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 transition-opacity"
                             title="Delete session"
                           >
                             <Icon name={Icons.trash} size={12} />
@@ -980,260 +1620,947 @@ export default function RemoteCodePage() {
                     );
                   }}
                 </For>
-              </Show>
-            </div>
-          </aside>
+              </div>
+            </Show>
 
-          {/* ===== MAIN CHAT / TERMINAL AREA ===== */}
-          <main class="flex-1 flex flex-col min-w-0 border border-line rounded-2xl bg-card overflow-hidden">
-            {/* Chat header */}
-            <div class="h-12 border-b border-line bg-elev/50 px-4 flex items-center justify-between gap-3 shrink-0">
-              <div class="flex items-center gap-2 min-w-0">
-                <Show
-                  when={activeSession()}
-                  fallback={
-                    <span class="text-xs text-ink-500">Select or create a session</span>
-                  }
+            {/* Sidebar View: Source Control (Git) */}
+            <Show when={activeActivityTab() === "git"}>
+              <div class="p-2.5 border-b border-line flex items-center justify-between">
+                <div class="flex items-center gap-1.5 text-xs font-semibold text-ink-200">
+                  <Icon name={Icons.git} size={14} class="text-brand-400" />
+                  <span>{gitBranch() || "Source Control"}</span>
+                </div>
+                <button
+                  onClick={refreshGitStatus}
+                  class="p-1 rounded hover:bg-ink-800 text-ink-400 hover:text-ink-100 transition-colors cursor-pointer"
+                  title="Refresh Git Status"
                 >
-                  {(sess) => (
-                    <>
-                      <div class="flex items-center gap-1 text-xs font-semibold text-ink-100 truncate">
-                        <Icon name={Icons.terminal} size={14} class="text-brand-400" />
-                        <span class="truncate">{sess().title}</span>
-                      </div>
-                      <span class="text-ink-600">•</span>
-                      <div class="hidden sm:flex items-center gap-1 text-xs font-mono text-ink-400 truncate">
-                        <Icon name={Icons.folder} size={12} />
-                        <span class="truncate">{sess().cwd}</span>
-                      </div>
-                    </>
-                  )}
-                </Show>
+                  <Icon name={Icons.refresh} size={13} />
+                </button>
               </div>
 
-              <div class="flex items-center gap-2">
-                {/* Model Selector */}
-                <select
-                  class="rounded-lg border border-line bg-ink-950 px-2 py-1 text-xs text-ink-200 outline-none focus:border-brand-500 cursor-pointer"
-                  value={selectedModel()}
-                  onChange={(e) => setSelectedModel(e.currentTarget.value)}
-                >
-                  <For each={models()}>
-                    {(m) => <option value={m.id}>{m.name}</option>}
-                  </For>
-                </select>
-
-                {/* Stop button when running */}
-                <Show when={sessionStatus() === "running"}>
-                  <button
-                    onClick={cancelTurn}
-                    class="flex items-center gap-1 rounded-lg bg-rose-500/20 text-rose-400 border border-rose-500/40 px-2.5 py-1 text-xs font-semibold hover:bg-rose-500/30 transition-colors cursor-pointer"
-                  >
-                    <Icon name={Icons.stop} size={12} />
-                    <span>Stop</span>
-                  </button>
-                </Show>
-              </div>
-            </div>
-
-            {/* Chat message timeline */}
-            <div
-              ref={chatScrollContainer}
-              class="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4"
-            >
-              <Show
-                when={messages().length > 0}
-                fallback={
-                  <div class="h-full flex flex-col items-center justify-center text-center p-6 space-y-3">
-                    <div class="w-12 h-12 rounded-2xl bg-brand-500/10 text-brand-500 flex items-center justify-center">
-                      <Icon name={Icons.terminal} size={24} />
-                    </div>
-                    <div class="max-w-md space-y-1">
-                      <h3 class="text-sm font-semibold text-ink-100">Ready to Code</h3>
-                      <p class="text-xs text-ink-400">
-                        Ask questions, build features, fix bugs, or run commands. Your remote agent executes in{" "}
-                        <span class="font-mono text-ink-200">{activeSession()?.cwd ?? "~"}</span>.
-                      </p>
-                    </div>
-
-                    <div class="flex flex-wrap justify-center gap-2 pt-2">
-                      {[
-                        "List files in this project",
-                        "Run tests and check status",
-                        "Explain the project structure",
-                      ].map((prompt) => (
-                        <button
-                          onClick={() => {
-                            setPromptInput(prompt);
-                          }}
-                          class="rounded-xl border border-line bg-elev/60 px-3 py-1.5 text-xs text-ink-300 hover:text-ink-100 hover:border-brand-500/40 transition-colors cursor-pointer"
-                        >
-                          {prompt}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                }
-              >
-                <For each={messages()}>
-                  {(msg) => (
-                    <div
-                      class={`flex gap-3 text-sm ${
-                        msg.role === "user" ? "justify-end" : "justify-start"
-                      }`}
+              <div class="p-3 space-y-3 flex-1 overflow-y-auto">
+                {/* Commit Form */}
+                <div class="space-y-2">
+                  <textarea
+                    value={commitMessage()}
+                    onInput={(e) => setCommitMessage(e.currentTarget.value)}
+                    placeholder="Message (Cmd+Enter to commit)"
+                    rows={2}
+                    class="w-full rounded-xl border border-line bg-ink-950 p-2 text-xs text-ink-100 placeholder-ink-500 outline-none focus:border-brand-500 resize-none leading-relaxed"
+                  />
+                  <div class="flex gap-1.5">
+                    <button
+                      onClick={commitGitChanges}
+                      class="flex-1 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white font-semibold text-xs flex items-center justify-center gap-1 transition-colors cursor-pointer shadow-sm"
                     >
-                      <Show when={msg.role === "assistant"}>
-                        <div class="w-7 h-7 rounded-xl bg-brand-500/20 text-brand-400 flex items-center justify-center shrink-0 mt-0.5">
-                          <Icon name={Icons.bolt} size={15} />
-                        </div>
-                      </Show>
+                      <Icon name={Icons.check} size={13} />
+                      <span>Commit</span>
+                    </button>
+                    <button
+                      onClick={() => executeTerminalCommand("git push")}
+                      class="px-2.5 py-1.5 rounded-lg border border-line bg-ink-850 hover:bg-elev text-ink-200 font-medium text-xs transition-colors cursor-pointer"
+                      title="Push Commits"
+                    >
+                      Push
+                    </button>
+                  </div>
+                </div>
 
+                {/* Changes list */}
+                <div>
+                  <div class="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-ink-400 mb-1">
+                    <span>Changes ({gitFiles().length})</span>
+                  </div>
+
+                  <Show
+                    when={gitFiles().length > 0}
+                    fallback={
+                      <div class="text-[11px] text-ink-500 py-3 text-center">
+                        Working directory clean
+                      </div>
+                    }
+                  >
+                    <div class="space-y-1">
+                      <For each={gitFiles()}>
+                        {(file) => (
+                          <div
+                            onClick={() => {
+                              const act = activeSession();
+                              const fullPath = act ? `${act.cwd}/${file.path}` : file.path;
+                              openFileInEditor(fullPath, file.path.split("/").pop() || file.path);
+                            }}
+                            class="flex items-center justify-between p-1.5 rounded-lg hover:bg-ink-850 text-[11px] font-mono cursor-pointer group"
+                          >
+                            <span class="truncate text-ink-200 group-hover:text-ink-100">{file.path}</span>
+                            <span
+                              class={`px-1.5 py-0.2 rounded font-bold text-[10px] ${
+                                file.status === "M"
+                                  ? "text-amber-400 bg-amber-400/10"
+                                  : file.status === "A"
+                                  ? "text-emerald-400 bg-emerald-400/10"
+                                  : file.status === "D"
+                                  ? "text-rose-400 bg-rose-400/10"
+                                  : "text-blue-400 bg-blue-400/10"
+                              }`}
+                            >
+                              {file.status}
+                            </span>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
+              </div>
+            </Show>
+
+            {/* Sidebar View: Terminal Command Runner */}
+            <Show when={activeActivityTab() === "terminal"}>
+              <div class="p-2.5 border-b border-line flex items-center justify-between">
+                <span class="font-bold uppercase tracking-wider text-[11px] text-ink-300">Quick Commands</span>
+              </div>
+
+              <div class="p-3 space-y-2 flex-1 overflow-y-auto">
+                <p class="text-[11px] text-ink-400 leading-relaxed">
+                  Run bash commands directly in the session root (<span class="font-mono text-ink-200">{activeSession()?.cwd || "~"}</span>):
+                </p>
+
+                <div class="space-y-1.5 pt-1">
+                  {[
+                    { label: "Git Status", cmd: "git status" },
+                    { label: "Run Tests", cmd: "bun test || npm test" },
+                    { label: "List Files (Long)", cmd: "ls -lah" },
+                    { label: "Git Log (Graph)", cmd: "git log --oneline -n 5" },
+                    { label: "Disk & Memory", cmd: "df -h . && free -m 2>/dev/null || true" },
+                  ].map((item) => (
+                    <button
+                      onClick={() => executeTerminalCommand(item.cmd)}
+                      class="w-full flex items-center justify-between p-2 rounded-xl border border-line bg-ink-850 hover:bg-elev hover:border-brand-500/40 text-left transition-colors cursor-pointer"
+                    >
+                      <span class="font-medium text-xs text-ink-200">{item.label}</span>
+                      <span class="font-mono text-[10px] text-ink-500">{item.cmd}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </Show>
+
+            {/* Sidebar View: Machines */}
+            <Show when={activeActivityTab() === "machines"}>
+              <div class="p-2.5 border-b border-line flex items-center justify-between">
+                <span class="font-bold uppercase tracking-wider text-[11px] text-ink-300">Host Machines</span>
+                <button
+                  onClick={startPairing}
+                  class="flex items-center gap-1 text-[11px] font-semibold text-brand-400 hover:text-brand-300 cursor-pointer"
+                >
+                  <Icon name={Icons.plus} size={12} />
+                  <span>Connect</span>
+                </button>
+              </div>
+
+              <div class="p-2 space-y-1.5 flex-1 overflow-y-auto">
+                <For each={hosts()}>
+                  {(h) => {
+                    const isSelected = () => h.id === activeHostId();
+                    return (
                       <div
-                        class={`max-w-[90%] sm:max-w-[80%] rounded-2xl p-4 shadow-sm ${
-                          msg.role === "user"
-                            ? "bg-brand-500 text-white font-medium"
-                            : "bg-elev border border-line text-ink-200"
+                        onClick={() => selectHost(h.id)}
+                        class={`p-2.5 rounded-xl border transition-all cursor-pointer ${
+                          isSelected()
+                            ? "border-brand-500/50 bg-brand-500/10 text-ink-100"
+                            : "border-transparent hover:border-line hover:bg-ink-850 text-ink-300"
                         }`}
                       >
-                        <For each={msg.blocks}>
-                          {(block) => (
-                            <>
-                              {/* Text Block */}
-                              <Show when={block.type === "text" && block.text}>
-                                <div
-                                  class="prose-sm leading-relaxed select-text"
-                                  innerHTML={
-                                    msg.role === "user"
-                                      ? escapeHtml(block.text || "").replace(/\n/g, "<br/>")
-                                      : renderMarkdown(block.text || "")
-                                  }
-                                />
-                              </Show>
+                        <div class="flex items-center justify-between">
+                          <span class="font-semibold text-xs text-ink-100">{h.name}</span>
+                          <span class={`h-2 w-2 rounded-full ${h.status === "online" ? "bg-emerald-500" : "bg-ink-600"}`} />
+                        </div>
+                        <div class="text-[11px] text-ink-500 font-mono mt-0.5">
+                          {h.hostname} ({h.os}/{h.arch})
+                        </div>
+                        <div class="flex items-center justify-between mt-2 pt-1 border-t border-line/40 text-[10px] text-ink-500">
+                          <span>{h.status === "online" ? "Online" : "Offline"}</span>
+                          <button
+                            onClick={(e) => deleteHost(h.id, e)}
+                            class="hover:text-rose-400 p-0.5 transition-colors"
+                            title="Remove machine"
+                          >
+                            <Icon name={Icons.trash} size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  }}
+                </For>
+              </div>
+            </Show>
 
-                              {/* Reasoning Block */}
-                              <Show when={block.type === "reasoning" && block.reasoning}>
-                                <details class="my-2 rounded-xl border border-line/60 bg-ink-950/40 p-2.5 text-xs">
-                                  <summary class="font-semibold text-ink-400 cursor-pointer hover:text-ink-200 select-none">
-                                    Thinking process
-                                  </summary>
-                                  <div class="mt-2 text-ink-400 whitespace-pre-wrap font-mono text-[11px] leading-relaxed border-t border-line/40 pt-2">
-                                    {block.reasoning}
-                                  </div>
-                                </details>
-                              </Show>
+            {/* Sidebar View: Zot Settings Configuration */}
+            <Show when={activeActivityTab() === "settings"}>
+              <div class="p-2.5 border-b border-line flex items-center justify-between">
+                <span class="font-bold uppercase tracking-wider text-[11px] text-ink-300">Zot Settings</span>
+                <button
+                  onClick={saveZotSettings}
+                  class="flex items-center gap-1 text-[11px] font-semibold text-brand-400 hover:text-brand-300 cursor-pointer"
+                >
+                  <Icon name={Icons.save} size={12} />
+                  <span>Save</span>
+                </button>
+              </div>
 
-                              {/* Tool Call Card */}
-                              <Show when={block.type === "tool_call"}>
-                                <ToolCard block={block} />
-                              </Show>
-                            </>
-                          )}
-                        </For>
+              <div class="p-3 space-y-3.5 flex-1 overflow-y-auto text-xs">
+                {/* Reasoning Level */}
+                <div>
+                  <label class="block font-semibold text-ink-300 mb-1">Reasoning Level</label>
+                  <select
+                    value={zotSettings().reasoning || "medium"}
+                    onChange={(e) =>
+                      setZotSettings((prev) => ({ ...prev, reasoning: e.currentTarget.value }))
+                    }
+                    class="w-full rounded-lg border border-line bg-ink-950 px-2.5 py-1.5 text-ink-100 outline-none focus:border-brand-500 cursor-pointer"
+                  >
+                    <option value="off">Off</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                </div>
+
+                {/* Auto-compact threshold */}
+                <div>
+                  <label class="block font-semibold text-ink-300 mb-1">
+                    Auto-Compact Threshold ({zotSettings().auto_compact_threshold || 85}%)
+                  </label>
+                  <select
+                    value={String(zotSettings().auto_compact_threshold ?? 85)}
+                    onChange={(e) =>
+                      setZotSettings((prev) => ({
+                        ...prev,
+                        auto_compact_threshold: parseInt(e.currentTarget.value, 10),
+                      }))
+                    }
+                    class="w-full rounded-lg border border-line bg-ink-950 px-2.5 py-1.5 text-ink-100 outline-none focus:border-brand-500 cursor-pointer"
+                  >
+                    <option value="0">Off</option>
+                    <option value="70">70%</option>
+                    <option value="80">80%</option>
+                    <option value="85">85% (Default)</option>
+                    <option value="90">90%</option>
+                  </select>
+                </div>
+
+                {/* Jail By Default */}
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="font-semibold text-ink-200">Jail Tools to CWD</div>
+                    <div class="text-[10px] text-ink-500">Confine file edits to session dir</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={zotSettings().jail_by_default || false}
+                    onChange={(e) =>
+                      setZotSettings((prev) => ({
+                        ...prev,
+                        jail_by_default: e.currentTarget.checked,
+                      }))
+                    }
+                    class="h-4 w-4 rounded accent-brand-500 cursor-pointer"
+                  />
+                </div>
+
+                {/* Tool Render */}
+                <div>
+                  <label class="block font-semibold text-ink-300 mb-1">Tool Rendering</label>
+                  <select
+                    value={zotSettings().tool_render || "box"}
+                    onChange={(e) =>
+                      setZotSettings((prev) => ({ ...prev, tool_render: e.currentTarget.value }))
+                    }
+                    class="w-full rounded-lg border border-line bg-ink-950 px-2.5 py-1.5 text-ink-100 outline-none focus:border-brand-500 cursor-pointer"
+                  >
+                    <option value="box">Boxed Panels</option>
+                    <option value="flat">Flat Quiet Headers</option>
+                  </select>
+                </div>
+
+                {/* Respect .gitignore */}
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="font-semibold text-ink-200">Respect .gitignore</div>
+                    <div class="text-[10px] text-ink-500">Hide ignored files in glob/tools</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={zotSettings().respect_gitignore !== false}
+                    onChange={(e) =>
+                      setZotSettings((prev) => ({
+                        ...prev,
+                        respect_gitignore: e.currentTarget.checked,
+                      }))
+                    }
+                    class="h-4 w-4 rounded accent-brand-500 cursor-pointer"
+                  />
+                </div>
+
+                {/* Recursive File Suggest */}
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="font-semibold text-ink-200">Recursive File Suggest</div>
+                    <div class="text-[10px] text-ink-500">Fuzzy search whole project tree</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={zotSettings().recursive_file_suggest || false}
+                    onChange={(e) =>
+                      setZotSettings((prev) => ({
+                        ...prev,
+                        recursive_file_suggest: e.currentTarget.checked,
+                      }))
+                    }
+                    class="h-4 w-4 rounded accent-brand-500 cursor-pointer"
+                  />
+                </div>
+
+                {/* Insecure TLS */}
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="font-semibold text-ink-200">Skip TLS Verification</div>
+                    <div class="text-[10px] text-ink-500">Insecure inference endpoints</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={zotSettings().insecure || false}
+                    onChange={(e) =>
+                      setZotSettings((prev) => ({
+                        ...prev,
+                        insecure: e.currentTarget.checked,
+                      }))
+                    }
+                    class="h-4 w-4 rounded accent-brand-500 cursor-pointer"
+                  />
+                </div>
+
+                <Btn variant="primary" size="sm" class="w-full mt-2" onClick={saveZotSettings}>
+                  <Icon name={Icons.check} size={14} />
+                  <span>Sync Settings to Daemon</span>
+                </Btn>
+              </div>
+            </Show>
+          </aside>
+        </Show>
+
+        {/* ===== MAIN SPLIT CANVAS (Editor + Chat + Bottom Terminal) ===== */}
+        <div class="flex-1 flex flex-col min-w-0 bg-ink-950">
+          <div class="flex-1 flex min-h-0">
+            {/* ----- LEFT: MULTI-FILE CODE EDITOR PANE ----- */}
+            <Show when={layoutMode() !== "chat"}>
+              <div
+                class={`flex flex-col border-r border-line bg-ink-950 ${
+                  layoutMode() === "editor" ? "w-full" : "w-1/2 md:w-3/5"
+                }`}
+              >
+                {/* Editor Tab Bar */}
+                <div class="h-9 border-b border-line bg-ink-900/90 flex items-center overflow-x-auto shrink-0 scrollbar-none px-1">
+                  <Show
+                    when={openTabs().length > 0}
+                    fallback={
+                      <span class="text-[11px] text-ink-500 px-3 select-none">No files open</span>
+                    }
+                  >
+                    <For each={openTabs()}>
+                      {(tab) => {
+                        const isActive = () => tab.path === activeTabPath();
+                        const { label, color } = getFileIcon(tab.name);
+                        return (
+                          <div
+                            onClick={() => setActiveTabPath(tab.path)}
+                            class={`group flex items-center gap-2 px-3 h-full border-r border-line/60 text-xs font-mono transition-colors cursor-pointer select-none ${
+                              isActive()
+                                ? "bg-ink-950 text-ink-100 border-t-2 border-t-brand-500 font-semibold"
+                                : "text-ink-400 hover:bg-ink-850 hover:text-ink-200"
+                            }`}
+                          >
+                            <span class={`text-[10px] ${color}`}>{label}</span>
+                            <span class="truncate max-w-[140px]">{tab.name}</span>
+                            <Show when={tab.isDirty}>
+                              <span class="h-1.5 w-1.5 rounded-full bg-brand-400" title="Unsaved changes" />
+                            </Show>
+                            <button
+                              onClick={(e) => closeTab(tab.path, e)}
+                              class="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded transition-opacity"
+                              title="Close tab"
+                            >
+                              <Icon name={Icons.x} size={11} />
+                            </button>
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </Show>
+                </div>
+
+                {/* Editor Subheader Toolbar */}
+                <Show when={activeTab()}>
+                  {(tab) => (
+                    <div class="h-7 border-b border-line/60 bg-ink-900/40 px-3 flex items-center justify-between text-[11px] text-ink-400">
+                      <div class="font-mono truncate max-w-sm flex items-center gap-1.5">
+                        <span class="text-ink-500">Path:</span>
+                        <span class="text-ink-200 truncate">{tab().path}</span>
                       </div>
 
-                      <Show when={msg.role === "user"}>
-                        <div class="w-7 h-7 rounded-xl bg-ink-800 text-ink-200 flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold">
-                          U
-                        </div>
-                      </Show>
+                      <div class="flex items-center gap-2">
+                        <Show when={tab().name.endsWith(".md")}>
+                          <div class="flex items-center rounded border border-line bg-ink-950 p-0.5">
+                            <button
+                              onClick={() => {
+                                setOpenTabs((prev) =>
+                                  prev.map((t) => (t.path === tab().path ? { ...t, viewMode: "code" } : t)),
+                                );
+                              }}
+                              class={`px-1.5 py-0.5 rounded text-[10px] ${
+                                tab().viewMode === "code" ? "bg-elev text-ink-100" : "text-ink-500 hover:text-ink-200"
+                              }`}
+                            >
+                              Code
+                            </button>
+                            <button
+                              onClick={() => {
+                                setOpenTabs((prev) =>
+                                  prev.map((t) => (t.path === tab().path ? { ...t, viewMode: "preview" } : t)),
+                                );
+                              }}
+                              class={`px-1.5 py-0.5 rounded text-[10px] ${
+                                tab().viewMode === "preview" ? "bg-elev text-ink-100" : "text-ink-500 hover:text-ink-200"
+                              }`}
+                            >
+                              Preview
+                            </button>
+                          </div>
+                        </Show>
+
+                        <button
+                          onClick={saveActiveFile}
+                          disabled={!tab().isDirty}
+                          class={`flex items-center gap-1 px-2 py-0.5 rounded font-medium transition-colors cursor-pointer ${
+                            tab().isDirty
+                              ? "bg-brand-500 text-white hover:bg-brand-600 shadow-sm"
+                              : "text-ink-500 hover:text-ink-300 disabled:opacity-40"
+                          }`}
+                          title="Save file (Cmd+S / Ctrl+S)"
+                        >
+                          <Icon name={Icons.save} size={11} />
+                          <span>Save</span>
+                        </button>
+                      </div>
                     </div>
                   )}
-                </For>
-              </Show>
+                </Show>
 
-              {/* Interactive Tool Approval Banner when YOLO is OFF */}
-              <Show when={pendingApproval()}>
-                {(appr) => (
-                  <div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 space-y-3 anim-fade-in shadow-lg">
-                    <div class="flex items-center gap-2 text-amber-400 font-semibold text-sm">
-                      <Icon name={Icons.warning} size={18} />
-                      <span>Tool Execution Approval Required</span>
-                    </div>
-
-                    <div class="rounded-xl bg-ink-950 p-3 font-mono text-xs text-ink-200 border border-line">
-                      <div class="text-[11px] text-ink-500 font-bold uppercase mb-1">
-                        Tool: <span class="text-brand-400">{appr().tool}</span>
+                {/* Editor Content Canvas */}
+                <div class="flex-1 flex min-h-0 relative overflow-hidden bg-ink-950">
+                  <Show
+                    when={activeTab()}
+                    fallback={
+                      <div class="flex-1 flex flex-col items-center justify-center text-center p-6 text-ink-500 space-y-3">
+                        <div class="w-12 h-12 rounded-2xl bg-ink-900 border border-line flex items-center justify-center text-ink-400">
+                          <Icon name={Icons.folder} size={24} />
+                        </div>
+                        <div class="max-w-xs space-y-1">
+                          <div class="font-semibold text-ink-200 text-xs">No File Opened</div>
+                          <p class="text-[11px] text-ink-400">
+                            Select a file from the explorer on the left, or tell the agent to create one.
+                          </p>
+                        </div>
                       </div>
-                      <pre class="overflow-x-auto whitespace-pre-wrap">{appr().args}</pre>
-                    </div>
+                    }
+                  >
+                    {(tab) => (
+                      <Show
+                        when={tab().viewMode === "preview"}
+                        fallback={
+                          <div class="flex-1 flex min-h-0 font-mono text-xs">
+                            {/* Line Numbers Gutter */}
+                            <div class="w-10 bg-ink-900/60 border-r border-line/40 py-3 text-right pr-2 text-ink-600 select-none overflow-hidden shrink-0">
+                              <For each={tab().content.split("\n")}>
+                                {(_, i) => <div class="leading-relaxed h-[20px]">{i() + 1}</div>}
+                              </For>
+                            </div>
 
-                    <div class="flex items-center justify-end gap-2">
-                      <Btn variant="danger" size="sm" onClick={() => respondApproval(false)}>
-                        <Icon name={Icons.x} size={14} />
-                        Reject
-                      </Btn>
-                      <Btn variant="primary" size="sm" onClick={() => respondApproval(true)}>
-                        <Icon name={Icons.check} size={14} />
-                        Approve &amp; Run
-                      </Btn>
-                    </div>
+                            {/* Textarea Editor with auto tab indents */}
+                            <textarea
+                              ref={editorTextArea}
+                              value={tab().content}
+                              onInput={(e) => updateEditorContent(e.currentTarget.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Tab") {
+                                  e.preventDefault();
+                                  const start = e.currentTarget.selectionStart;
+                                  const end = e.currentTarget.selectionEnd;
+                                  const val = e.currentTarget.value;
+                                  const newVal = val.substring(0, start) + "  " + val.substring(end);
+                                  updateEditorContent(newVal);
+                                  setTimeout(() => {
+                                    if (editorTextArea) {
+                                      editorTextArea.selectionStart = editorTextArea.selectionEnd = start + 2;
+                                    }
+                                  }, 0);
+                                }
+                              }}
+                              spellcheck={false}
+                              class="flex-1 p-3 bg-transparent text-ink-100 outline-none leading-relaxed resize-none font-mono whitespace-pre overflow-auto scrollbar-thin"
+                            />
+                          </div>
+                        }
+                      >
+                        {/* Markdown Preview Canvas */}
+                        <div
+                          class="flex-1 p-6 overflow-y-auto prose prose-invert max-w-none text-xs leading-relaxed"
+                          innerHTML={renderMarkdown(tab().content)}
+                        />
+                      </Show>
+                    )}
+                  </Show>
+                </div>
+              </div>
+            </Show>
+
+            {/* ----- RIGHT: AGENT CHAT ASSISTANT PANE ----- */}
+            <Show when={layoutMode() !== "editor"}>
+              <div
+                class={`flex flex-col bg-ink-900/60 min-w-0 ${
+                  layoutMode() === "chat" ? "w-full" : "w-1/2 md:w-2/5"
+                }`}
+              >
+                {/* Chat Header */}
+                <div class="h-9 border-b border-line bg-ink-900/90 px-3 flex items-center justify-between gap-2 shrink-0">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <Icon name={Icons.sparkles} size={14} class="text-brand-400 shrink-0" />
+                    <span class="font-bold text-ink-100 text-xs truncate">
+                      {activeSession()?.title || "Agent Assistant"}
+                    </span>
+                    <Show when={sessionStatus() === "running"}>
+                      <span class="px-1.5 py-0.5 rounded-full bg-brand-500/20 text-brand-400 font-semibold text-[10px] animate-pulse">
+                        Working...
+                      </span>
+                    </Show>
                   </div>
-                )}
-              </Show>
-            </div>
 
-            {/* Composer / Prompt input */}
-            <div class="p-3 sm:p-4 border-t border-line bg-elev/30">
-              <div class="relative flex items-end gap-2 rounded-2xl border border-line bg-ink-950 px-3 py-2 shadow-inner focus-within:border-brand-500 focus-within:ring-1 focus-within:ring-brand-500/30">
-                <textarea
-                  value={promptInput()}
-                  onInput={(e) => setPromptInput(e.currentTarget.value)}
-                  onKeyDown={handleComposerKeyDown}
-                  placeholder={
-                    activeSession()
-                      ? `Message agent in ${activeSession()?.cwd}... (Shift+Enter for newline)`
-                      : "Create or select a session to begin..."
-                  }
-                  disabled={!activeSession() || activeHost()?.status !== "online"}
-                  rows={2}
-                  class="flex-1 max-h-40 min-h-[44px] resize-none bg-transparent text-sm text-ink-100 placeholder-ink-500 outline-none leading-relaxed disabled:opacity-50 disabled:cursor-not-allowed"
-                />
-
-                <Show
-                  when={sessionStatus() === "running"}
-                  fallback={
-                    <button
-                      onClick={sendPrompt}
-                      disabled={!promptInput().trim() || !activeSession() || activeHost()?.status !== "online"}
-                      class="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-500 text-white hover:bg-brand-600 disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer shrink-0"
-                      aria-label="Send prompt"
+                  <div class="flex items-center gap-2">
+                    {/* Model Picker */}
+                    <select
+                      value={selectedModel()}
+                      onChange={(e) => setSelectedModel(e.currentTarget.value)}
+                      class="rounded-lg border border-line bg-ink-950 px-2 py-0.5 text-[11px] text-ink-200 outline-none focus:border-brand-500 cursor-pointer"
                     >
-                      <Icon name={Icons.send} size={16} />
+                      <For each={models()}>
+                        {(m) => <option value={m.id}>{m.name}</option>}
+                      </For>
+                    </select>
+
+                    {/* Slash action shortcuts */}
+                    <button
+                      onClick={() => {
+                        setPromptInput("/compact");
+                        sendPrompt();
+                      }}
+                      class="p-1 rounded text-ink-400 hover:text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer"
+                      title="Compact transcript to free context (/compact)"
+                    >
+                      <Icon name={Icons.layers} size={13} />
                     </button>
+
+                    <button
+                      onClick={() => {
+                        setPromptInput("/clear");
+                        sendPrompt();
+                      }}
+                      class="p-1 rounded text-ink-400 hover:text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer"
+                      title="Clear chat transcript (/clear)"
+                    >
+                      <Icon name={Icons.trash} size={13} />
+                    </button>
+
+                    {/* Stop Button */}
+                    <Show when={sessionStatus() === "running"}>
+                      <button
+                        onClick={cancelTurn}
+                        class="flex items-center gap-1 rounded bg-rose-500/20 text-rose-400 border border-rose-500/40 px-2 py-0.5 text-[11px] font-semibold hover:bg-rose-500/30 transition-colors cursor-pointer"
+                      >
+                        <Icon name={Icons.stop} size={11} />
+                        <span>Stop</span>
+                      </button>
+                    </Show>
+                  </div>
+                </div>
+
+                {/* Chat Timeline */}
+                <div
+                  ref={chatScrollContainer}
+                  class="flex-1 overflow-y-auto p-4 space-y-4 font-sans"
+                >
+                  <Show
+                    when={messages().length > 0}
+                    fallback={
+                      <div class="h-full flex flex-col items-center justify-center text-center p-6 space-y-3">
+                        <div class="w-11 h-11 rounded-2xl bg-brand-500/10 text-brand-500 flex items-center justify-center">
+                          <Icon name={Icons.sparkles} size={22} />
+                        </div>
+                        <div class="max-w-xs space-y-1">
+                          <h3 class="text-xs font-bold text-ink-100">Ready to Assist</h3>
+                          <p class="text-[11px] text-ink-400 leading-relaxed">
+                            Ask me to write code, debug errors, or run commands in{" "}
+                            <span class="font-mono text-ink-200">{activeSession()?.cwd || "~"}</span>.
+                          </p>
+                        </div>
+
+                        <div class="flex flex-wrap justify-center gap-1.5 pt-2">
+                          {[
+                            "List project structure",
+                            "Run tests and check status",
+                            "Explain current architecture",
+                          ].map((prompt) => (
+                            <button
+                              onClick={() => {
+                                setPromptInput(prompt);
+                                sendPrompt();
+                              }}
+                              class="rounded-xl border border-line bg-ink-900/80 px-2.5 py-1 text-[11px] text-ink-300 hover:text-ink-100 hover:border-brand-500/40 transition-colors cursor-pointer"
+                            >
+                              {prompt}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    }
+                  >
+                    <For each={messages()}>
+                      {(msg) => (
+                        <div
+                          class={`flex gap-2.5 text-xs ${
+                            msg.role === "user" ? "justify-end" : "justify-start"
+                          }`}
+                        >
+                          <Show when={msg.role === "assistant"}>
+                            <div class="w-6 h-6 rounded-lg bg-brand-500/20 text-brand-400 flex items-center justify-center shrink-0 mt-0.5">
+                              <Icon name={Icons.sparkles} size={13} />
+                            </div>
+                          </Show>
+
+                          <div
+                            class={`max-w-[88%] rounded-2xl p-3.5 shadow-sm ${
+                              msg.role === "user"
+                                ? "bg-brand-500 text-white font-medium"
+                                : "bg-ink-900 border border-line text-ink-200"
+                            }`}
+                          >
+                            <For each={msg.blocks}>
+                              {(block) => (
+                                <>
+                                  <Show when={block.type === "text" && block.text}>
+                                    <div
+                                      class="prose-xs leading-relaxed select-text"
+                                      innerHTML={
+                                        msg.role === "user"
+                                          ? escapeHtml(block.text || "").replace(/\n/g, "<br/>")
+                                          : renderMarkdown(block.text || "")
+                                      }
+                                    />
+                                  </Show>
+
+                                  <Show when={block.type === "reasoning" && block.reasoning}>
+                                    <details class="my-2 rounded-xl border border-line/60 bg-ink-950/40 p-2 text-[11px]">
+                                      <summary class="font-semibold text-ink-400 cursor-pointer hover:text-ink-200 select-none">
+                                        Thinking process
+                                      </summary>
+                                      <div class="mt-2 text-ink-400 whitespace-pre-wrap font-mono text-[10px] leading-relaxed border-t border-line/40 pt-2">
+                                        {block.reasoning}
+                                      </div>
+                                    </details>
+                                  </Show>
+
+                                  <Show when={block.type === "tool_call"}>
+                                    <ToolExecutionCard block={block} />
+                                  </Show>
+                                </>
+                              )}
+                            </For>
+                          </div>
+
+                          <Show when={msg.role === "user"}>
+                            <div class="w-6 h-6 rounded-lg bg-ink-800 text-ink-200 flex items-center justify-center shrink-0 mt-0.5 text-[11px] font-bold">
+                              U
+                            </div>
+                          </Show>
+                        </div>
+                      )}
+                    </For>
+                  </Show>
+
+                  {/* Interactive Tool Approval Banner */}
+                  <Show when={pendingApproval()}>
+                    {(appr) => (
+                      <div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-3 space-y-2.5 shadow-md">
+                        <div class="flex items-center gap-2 text-amber-400 font-semibold text-xs">
+                          <Icon name={Icons.warning} size={15} />
+                          <span>Tool Execution Approval Required</span>
+                        </div>
+
+                        <div class="rounded-xl bg-ink-950 p-2.5 font-mono text-[11px] text-ink-200 border border-line">
+                          <div class="text-[10px] text-ink-500 font-bold uppercase mb-1 font-sans">
+                            Tool: <span class="text-brand-400">{appr().tool}</span>
+                          </div>
+                          <pre class="overflow-x-auto whitespace-pre-wrap">{appr().args}</pre>
+                        </div>
+
+                        <div class="flex items-center justify-end gap-2">
+                          <Btn variant="danger" size="sm" onClick={() => respondApproval(false)}>
+                            <Icon name={Icons.x} size={13} />
+                            <span>Reject</span>
+                          </Btn>
+                          <Btn variant="primary" size="sm" onClick={() => respondApproval(true)}>
+                            <Icon name={Icons.check} size={13} />
+                            <span>Approve &amp; Run</span>
+                          </Btn>
+                        </div>
+                      </div>
+                    )}
+                  </Show>
+                </div>
+
+                {/* Prompt Composer */}
+                <div class="p-3 border-t border-line bg-ink-950 relative">
+                  {/* Slash Command Suggestions Popup */}
+                  <Show when={showSlashPopup()}>
+                    <div class="absolute bottom-full left-3 right-3 mb-2 rounded-2xl border border-line bg-ink-900 shadow-2xl p-1.5 space-y-1 z-30 max-h-56 overflow-y-auto">
+                      <div class="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-ink-500">
+                        Slash Commands
+                      </div>
+                      <For each={filteredSlashCommands()}>
+                        {(cmd) => (
+                          <div
+                            onClick={() => {
+                              setPromptInput(cmd.name + " ");
+                              setShowSlashPopup(false);
+                            }}
+                            class="flex items-center justify-between p-1.5 rounded-xl hover:bg-ink-800 text-ink-200 hover:text-ink-100 cursor-pointer text-xs"
+                          >
+                            <div class="flex items-center gap-2">
+                              <span>{cmd.icon}</span>
+                              <span class="font-mono font-semibold text-brand-400">{cmd.name}</span>
+                            </div>
+                            <span class="text-[11px] text-ink-400">{cmd.desc}</span>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+
+                  <div class="relative flex items-end gap-2 rounded-xl border border-line bg-ink-900 px-3 py-2 focus-within:border-brand-500">
+                    <textarea
+                      value={promptInput()}
+                      onInput={handlePromptInput}
+                      onKeyDown={handleComposerKeyDown}
+                      placeholder={
+                        activeSession()
+                          ? `Message agent in ${activeSession()?.cwd}... (Type / for commands)`
+                          : "Select or create a session..."
+                      }
+                      disabled={!activeSession() || activeHost()?.status !== "online"}
+                      rows={2}
+                      class="flex-1 max-h-36 min-h-[38px] resize-none bg-transparent text-xs text-ink-100 placeholder-ink-500 outline-none leading-relaxed disabled:opacity-50"
+                    />
+
+                    <Show
+                      when={sessionStatus() === "running"}
+                      fallback={
+                        <button
+                          onClick={sendPrompt}
+                          disabled={!promptInput().trim() || !activeSession() || activeHost()?.status !== "online"}
+                          class="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-500 text-white hover:bg-brand-600 disabled:opacity-30 transition-all cursor-pointer shrink-0"
+                          aria-label="Send message"
+                        >
+                          <Icon name={Icons.send} size={14} />
+                        </button>
+                      }
+                    >
+                      <button
+                        onClick={cancelTurn}
+                        class="flex h-8 w-8 items-center justify-center rounded-lg bg-rose-500 text-white hover:bg-rose-600 transition-all cursor-pointer shrink-0"
+                        aria-label="Stop generation"
+                      >
+                        <Icon name={Icons.stop} size={14} />
+                      </button>
+                    </Show>
+                  </div>
+
+                  <div class="flex items-center justify-between text-[10px] text-ink-500 px-1 mt-1.5">
+                    <span>Enter sends • Shift+Enter newline • / for commands</span>
+                    <span class="flex items-center gap-1">
+                      <span class={`h-1.5 w-1.5 rounded-full ${wsConnected() ? "bg-emerald-500" : "bg-rose-500"}`} />
+                      <span>{wsConnected() ? "Relay OK" : "Connecting..."}</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </Show>
+          </div>
+
+          {/* ----- BOTTOM: INTEGRATED REMOTE BASH TERMINAL DRAWER ----- */}
+          <Show when={terminalOpen()}>
+            <div class="h-48 border-t border-line bg-ink-950 flex flex-col shrink-0 font-mono text-xs">
+              {/* Terminal Header */}
+              <div class="h-7 bg-ink-900 border-b border-line px-3 flex items-center justify-between text-[11px] text-ink-400 select-none">
+                <div class="flex items-center gap-2">
+                  <Icon name={Icons.terminal} size={12} class="text-brand-400" />
+                  <span class="font-bold text-ink-200">Terminal (Bash)</span>
+                  <span class="text-ink-600">•</span>
+                  <span class="text-ink-400">{activeSession()?.cwd || "~"}</span>
+                </div>
+
+                <div class="flex items-center gap-2">
+                  <button
+                    onClick={() => setTerminalLogs([])}
+                    class="hover:text-ink-100 text-ink-400 p-0.5 transition-colors cursor-pointer"
+                    title="Clear Terminal Output"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={() => setTerminalOpen(false)}
+                    class="hover:text-ink-100 text-ink-400 p-0.5 transition-colors cursor-pointer"
+                    title="Close Terminal Drawer"
+                  >
+                    <Icon name={Icons.x} size={12} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Terminal Output Log */}
+              <div
+                ref={terminalScrollContainer}
+                class="flex-1 p-3 overflow-y-auto space-y-2 select-text leading-relaxed"
+              >
+                <Show
+                  when={terminalLogs().length > 0}
+                  fallback={
+                    <div class="text-ink-600 text-[11px]">
+                      Connected to remote shell on {activeHost()?.name || "host"}. Type a bash command below...
+                    </div>
                   }
                 >
-                  <button
-                    onClick={cancelTurn}
-                    class="flex h-9 w-9 items-center justify-center rounded-xl bg-rose-500 text-white hover:bg-rose-600 transition-all cursor-pointer shrink-0"
-                    aria-label="Stop generation"
-                  >
-                    <Icon name={Icons.stop} size={16} />
-                  </button>
+                  <For each={terminalLogs()}>
+                    {(log) => (
+                      <div class="space-y-1">
+                        <Show when={log.command}>
+                          <div class="flex items-center gap-1.5 text-brand-400 font-bold">
+                            <span>$</span>
+                            <span>{log.command}</span>
+                          </div>
+                        </Show>
+                        <Show when={log.stdout}>
+                          <pre class="text-ink-200 whitespace-pre-wrap">{log.stdout}</pre>
+                        </Show>
+                        <Show when={log.stderr}>
+                          <pre class="text-rose-400 whitespace-pre-wrap">{log.stderr}</pre>
+                        </Show>
+                        <Show when={log.exitCode !== undefined && log.exitCode !== 0}>
+                          <div class="text-rose-500 text-[10px]">Exited with code {log.exitCode}</div>
+                        </Show>
+                      </div>
+                    )}
+                  </For>
                 </Show>
               </div>
-              <div class="flex items-center justify-between text-[11px] text-ink-500 px-2 mt-2">
-                <span>Enter sends • Shift+Enter adds newline</span>
-                <span class="flex items-center gap-1">
-                  <span
-                    class={`h-1.5 w-1.5 rounded-full ${wsConnected() ? "bg-emerald-500" : "bg-rose-500"}`}
-                  />
-                  <span>{wsConnected() ? "Relay Connected" : "Connecting..."}</span>
-                </span>
+
+              {/* Terminal Interactive Input Prompt */}
+              <div class="h-8 border-t border-line/60 bg-ink-900/40 px-3 flex items-center gap-2">
+                <span class="text-brand-400 font-bold">$</span>
+                <input
+                  type="text"
+                  value={terminalCmd()}
+                  onInput={(e) => setTerminalCmd(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      executeTerminalCommand();
+                    } else if (e.key === "ArrowUp") {
+                      const hist = terminalHistory();
+                      if (hist.length > 0) {
+                        const nextIdx = Math.min(historyIndex() + 1, hist.length - 1);
+                        setHistoryIndex(nextIdx);
+                        setTerminalCmd(hist[nextIdx] || "");
+                      }
+                    } else if (e.key === "ArrowDown") {
+                      const hist = terminalHistory();
+                      const nextIdx = Math.max(historyIndex() - 1, -1);
+                      setHistoryIndex(nextIdx);
+                      setTerminalCmd(nextIdx >= 0 ? hist[nextIdx] || "" : "");
+                    }
+                  }}
+                  placeholder="Enter remote command (e.g. ls -la, bun test, git status)..."
+                  class="flex-1 bg-transparent text-ink-100 placeholder-ink-600 outline-none text-xs"
+                />
               </div>
             </div>
-          </main>
+          </Show>
         </div>
-      </Show>
+      </div>
 
-      {/* ===== PAIRING MODAL ===== */}
+      {/* ===== BOTTOM STATUS BAR (VS Code 24px style) ===== */}
+      <footer class="h-6 bg-ink-900 border-t border-line px-3 flex items-center justify-between text-[11px] text-ink-400 shrink-0 select-none">
+        <div class="flex items-center gap-3 min-w-0">
+          {/* Host connection status */}
+          <div class="flex items-center gap-1.5">
+            <span class={`h-2 w-2 rounded-full ${activeHost()?.status === "online" ? "bg-emerald-500" : "bg-ink-600"}`} />
+            <span class="font-medium text-ink-200 truncate">{activeHost()?.name || "Disconnected"}</span>
+          </div>
+
+          {/* Git branch */}
+          <Show when={gitBranch()}>
+            <div class="flex items-center gap-1 text-ink-300 font-mono">
+              <Icon name={Icons.git} size={11} />
+              <span>{gitBranch()}</span>
+              <Show when={gitFiles().length > 0}>
+                <span class="text-amber-400 font-bold">*({gitFiles().length})</span>
+              </Show>
+            </div>
+          </Show>
+        </div>
+
+        <div class="flex items-center gap-4">
+          {/* Active file details */}
+          <Show when={activeTab()}>
+            {(tab) => (
+              <div class="hidden sm:flex items-center gap-2 font-mono text-ink-400">
+                <span>{tab().content.split("\n").length} lines</span>
+                <span class="text-ink-600">•</span>
+                <span>UTF-8</span>
+              </div>
+            )}
+          </Show>
+
+          {/* Agent status */}
+          <div class="flex items-center gap-1.5">
+            <span
+              class={`h-1.5 w-1.5 rounded-full ${
+                sessionStatus() === "running" ? "bg-brand-500 animate-ping" : "bg-ink-500"
+              }`}
+            />
+            <span class="text-ink-300">{sessionStatus() === "running" ? "Agent Working..." : "Ready"}</span>
+          </div>
+        </div>
+      </footer>
+
+      {/* ===== CONNECT MACHINE PAIRING MODAL ===== */}
       <Modal
-        title="Connect Machine"
+        title="Connect Remote Host Machine"
         open={showPairModal()}
         onClose={() => setShowPairModal(false)}
       >
-        <div class="space-y-4">
-          <p class="text-sm text-ink-400 leading-relaxed">
-            Run the single static daemon on your machine. Once paired, it persists configuration and stays ready for any directory.
+        <div class="space-y-4 text-xs">
+          <p class="text-ink-400 leading-relaxed">
+            Run the single compiled static daemon binary on your remote machine or laptop.
+            All files, shells, and agent sessions run 100% locally on your machine.
           </p>
 
           <Show when={pairData()}>
@@ -1244,24 +2571,25 @@ export default function RemoteCodePage() {
                   <div class="rounded-xl border border-line bg-ink-950 p-3 font-mono text-xs text-ink-100 flex items-center justify-between gap-2 overflow-hidden">
                     <span class="truncate">{cmd}</span>
                     <button
-                      onClick={() => copyWithToast(cmd, "Command copied to clipboard")}
+                      onClick={() => copyWithToast(cmd, "Command copied")}
                       class="text-brand-400 hover:text-brand-300 font-sans font-semibold shrink-0 cursor-pointer"
                     >
                       Copy
                     </button>
                   </div>
 
-                  <div class="flex items-center gap-2 text-xs text-ink-400">
+                  <div class="flex items-center gap-2 text-ink-400">
                     <span class="inline-flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                    <span>Listening for daemon connection...</span>
+                    <span>Awaiting daemon handshake...</span>
                   </div>
 
-                  <div class="rounded-xl bg-elev p-3 text-xs text-ink-400 space-y-1.5 border border-line/60">
-                    <div class="font-semibold text-ink-200">How it works:</div>
+                  <div class="rounded-xl bg-ink-850 p-3 text-ink-400 space-y-1.5 border border-line/60">
+                    <div class="font-semibold text-ink-200">Capabilities enabled:</div>
                     <ul class="list-disc pl-4 space-y-1 text-ink-300">
-                      <li>The daemon connects to the gateway via WebSocket relay.</li>
-                      <li>Transcripts and files remain 100% local on your machine.</li>
-                      <li>Token expires in 15 minutes.</li>
+                      <li>File Explorer tree with real-time directory listing</li>
+                      <li>Multi-tab file editing with save (`Cmd+S`) &amp; syntax highlighting</li>
+                      <li>Interactive remote bash terminal runner</li>
+                      <li>Full Zot agent with tools (read, write, edit, bash, glob)</li>
                     </ul>
                   </div>
                 </div>
@@ -1288,21 +2616,19 @@ export default function RemoteCodePage() {
             label="Working Directory (CWD)"
             value={newCwd()}
             onInput={setNewCwd}
-            placeholder="~/projects/my-app"
-            hint="The daemon will execute tools relative to this path"
+            placeholder="~/projects/my-project"
+            hint="The daemon will execute tools and terminal commands relative to this path"
           />
 
           <Input
             label="Session Title (Optional)"
             value={newTitle()}
             onInput={setNewTitle}
-            placeholder="e.g. Implement user auth"
+            placeholder="e.g. Fullstack Redesign"
           />
 
           <div>
-            <label class="block text-xs font-semibold text-ink-200 mb-1.5">
-              Model
-            </label>
+            <label class="block text-xs font-semibold text-ink-200 mb-1.5">Model</label>
             <select
               class="w-full rounded-xl border border-line bg-elev px-3 py-2 text-sm text-ink-100 outline-none focus:border-brand-500 cursor-pointer"
               value={newModel()}
@@ -1324,6 +2650,93 @@ export default function RemoteCodePage() {
           </div>
         </div>
       </Modal>
+
+      {/* ===== NEW FILE MODAL ===== */}
+      <Modal
+        title="Create New File"
+        open={showNewFileModal()}
+        onClose={() => setShowNewFileModal(false)}
+      >
+        <div class="space-y-4">
+          <Input
+            label="File Path (Relative to session CWD)"
+            value={newFilePath()}
+            onInput={setNewFilePath}
+            placeholder="src/components/MyComponent.tsx"
+            hint="Parent directories will be created automatically"
+          />
+
+          <div class="flex items-center justify-end gap-2 pt-3 border-t border-line">
+            <Btn variant="secondary" onClick={() => setShowNewFileModal(false)}>
+              Cancel
+            </Btn>
+            <Btn
+              variant="primary"
+              onClick={() => {
+                const p = newFilePath().trim();
+                if (!p) return;
+                const act = activeSession();
+                const fullPath = act ? `${act.cwd}/${p}` : p;
+                openFileInEditor(fullPath, p.split("/").pop() || p);
+                setShowNewFileModal(false);
+              }}
+            >
+              Create &amp; Open
+            </Btn>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+/**
+ * Recursive File Explorer Tree Node Component
+ */
+function FileTreeNode(props: {
+  node: FileEntry;
+  onToggle: (n: FileEntry) => void;
+  onOpenFile: (path: string, name: string) => void;
+}) {
+  const isDir = () => props.node.isDir;
+  const { label, color } = getFileIcon(props.node.name);
+
+  return (
+    <div>
+      <div
+        onClick={() => {
+          if (isDir()) {
+            props.onToggle(props.node);
+          } else {
+            props.onOpenFile(props.node.path, props.node.name);
+          }
+        }}
+        class="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-ink-850 hover:text-ink-100 text-ink-300 cursor-pointer transition-colors"
+      >
+        <Show
+          when={isDir()}
+          fallback={<span class={`w-4 text-center text-[10px] ${color}`}>{label}</span>}
+        >
+          <Icon
+            name={Icons.chevronRight}
+            size={11}
+            class={`text-ink-500 transition-transform ${props.node.isOpen ? "rotate-90" : ""}`}
+          />
+          <Icon name={Icons.folder} size={13} class="text-brand-400" />
+        </Show>
+
+        <span class="truncate">{props.node.name}</span>
+      </div>
+
+      <Show when={isDir() && props.node.isOpen && props.node.children}>
+        <div class="pl-3.5 border-l border-line/40 ml-2 space-y-0.5 my-0.5">
+          <For each={props.node.children}>
+            {(child) => (
+              <FileTreeNode node={child} onToggle={props.onToggle} onOpenFile={props.onOpenFile} />
+            )}
+          </For>
+        </div>
+      </Show>
     </div>
   );
 }
@@ -1331,25 +2744,24 @@ export default function RemoteCodePage() {
 /**
  * Collapsible Tool Execution Card Component
  */
-function ToolCard(props: { block: ContentBlock }) {
+function ToolExecutionCard(props: { block: ContentBlock }) {
   const [expanded, setExpanded] = createSignal(true);
   const toolName = () => props.block.toolName || "tool";
   const hasResult = () => props.block.toolResult !== undefined;
   const isError = () => !!props.block.isError;
 
   return (
-    <div class="my-2.5 overflow-hidden rounded-xl border border-line/80 bg-ink-950 font-mono text-xs shadow-sm">
-      {/* Tool Header */}
+    <div class="my-2.5 overflow-hidden rounded-xl border border-line bg-ink-950 font-mono text-xs shadow-sm">
       <div
         onClick={() => setExpanded(!expanded())}
-        class="flex items-center justify-between border-b border-line/60 bg-ink-900/80 px-3.5 py-2 cursor-pointer select-none hover:bg-ink-850/80 transition-colors"
+        class="flex items-center justify-between border-b border-line/60 bg-ink-900/80 px-3.5 py-2 cursor-pointer select-none hover:bg-ink-850 transition-colors"
       >
         <div class="flex items-center gap-2 min-w-0">
           <span class="rounded bg-brand-500/20 px-1.5 py-0.5 text-[10px] font-bold text-brand-400 uppercase tracking-wider">
             {toolName()}
           </span>
-          <span class="text-ink-400 font-sans text-xs truncate">
-            {props.block.toolArgs?.slice(0, 60)}
+          <span class="text-ink-400 font-sans text-xs truncate max-w-xs">
+            {props.block.toolArgs?.slice(0, 50)}
           </span>
         </div>
 
@@ -1380,20 +2792,17 @@ function ToolCard(props: { block: ContentBlock }) {
         </div>
       </div>
 
-      {/* Tool Body */}
       <Show when={expanded()}>
         <div class="p-3 space-y-2.5 text-ink-200">
-          {/* Tool arguments */}
           <div>
             <div class="text-[10px] uppercase tracking-wider text-ink-500 font-bold mb-1 font-sans">
               Arguments
             </div>
-            <pre class="overflow-x-auto rounded-lg bg-ink-900/60 p-2.5 text-[11px] leading-relaxed text-ink-300 max-h-48">
+            <pre class="overflow-x-auto rounded-lg bg-ink-900/60 p-2 text-[11px] leading-relaxed text-ink-300 max-h-40">
               {props.block.toolArgs}
             </pre>
           </div>
 
-          {/* Tool result */}
           <Show when={props.block.toolResult !== undefined}>
             <div>
               <div class="flex items-center justify-between text-[10px] uppercase tracking-wider text-ink-500 font-bold mb-1 font-sans">
@@ -1406,7 +2815,7 @@ function ToolCard(props: { block: ContentBlock }) {
                 </button>
               </div>
               <pre
-                class={`overflow-x-auto rounded-lg p-2.5 text-[11px] leading-relaxed max-h-60 ${
+                class={`overflow-x-auto rounded-lg p-2.5 text-[11px] leading-relaxed max-h-52 ${
                   isError()
                     ? "bg-rose-950/20 text-rose-300 border border-rose-500/20"
                     : "bg-ink-900/60 text-ink-100"

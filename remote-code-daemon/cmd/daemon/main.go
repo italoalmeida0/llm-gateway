@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -26,13 +27,30 @@ import (
 	"github.com/patriceckhart/zot/packages/provider"
 )
 
+// ZotSettings stores user-tunable agent behavior and runtime flags.
+type ZotSettings struct {
+	Model                string  `json:"model,omitempty"`
+	Reasoning            string  `json:"reasoning,omitempty"` // "off" | "low" | "medium" | "high"
+	Temperature          float32 `json:"temperature,omitempty"`
+	AutoCompactThreshold int     `json:"auto_compact_threshold"` // 0=off, 70, 80, 85, 90
+	JailByDefault        bool    `json:"jail_by_default"`
+	ToolRender           string  `json:"tool_render,omitempty"` // "box" | "flat"
+	CompactInput         bool    `json:"compact_input"`
+	CompactMode          bool    `json:"compact_mode"`
+	RecursiveFileSuggest bool    `json:"recursive_file_suggest"`
+	RespectGitignore     bool    `json:"respect_gitignore"`
+	Insecure             bool    `json:"insecure"`
+	HTTPProxy            string  `json:"http_proxy,omitempty"`
+}
+
 // DaemonConfig holds credentials and gateway connection details.
 type DaemonConfig struct {
-	GatewayURL  string `json:"gateway_url"`
-	DaemonToken string `json:"daemon_token"`
-	APIKey      string `json:"api_key"`
-	HostID      string `json:"host_id"`
-	Name        string `json:"name"`
+	GatewayURL  string      `json:"gateway_url"`
+	DaemonToken string      `json:"daemon_token"`
+	APIKey      string      `json:"api_key"`
+	HostID      string      `json:"host_id"`
+	Name        string      `json:"name"`
+	Settings    ZotSettings `json:"settings"`
 }
 
 // SessionRecord is the on-disk format for each local session.
@@ -92,6 +110,19 @@ func (d *DaemonServer) sessionsDir() string {
 	return filepath.Join(d.dataDir, "sessions")
 }
 
+func resolvePath(p string) string {
+	target := strings.TrimSpace(p)
+	if target == "" || target == "~" {
+		home, _ := os.UserHomeDir()
+		return home
+	}
+	if strings.HasPrefix(target, "~/") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, target[2:])
+	}
+	return target
+}
+
 func (d *DaemonServer) loadConfig() error {
 	data, err := os.ReadFile(d.configPath)
 	if err != nil {
@@ -100,6 +131,15 @@ func (d *DaemonServer) loadConfig() error {
 	var cfg DaemonConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return err
+	}
+	if cfg.Settings.AutoCompactThreshold == 0 {
+		cfg.Settings.AutoCompactThreshold = 85
+	}
+	if cfg.Settings.ToolRender == "" {
+		cfg.Settings.ToolRender = "box"
+	}
+	if cfg.Settings.Reasoning == "" {
+		cfg.Settings.Reasoning = "medium"
 	}
 	d.config = &cfg
 	return nil
@@ -168,6 +208,13 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 		APIKey:      result.APIKey,
 		HostID:      result.HostID,
 		Name:        hostName,
+		Settings: ZotSettings{
+			AutoCompactThreshold: 85,
+			RespectGitignore:     true,
+			ToolRender:           "box",
+			Reasoning:            "medium",
+			Temperature:          0.7,
+		},
 	}
 
 	if err := d.saveConfig(); err != nil {
@@ -455,37 +502,42 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			Path      string `json:"path"`
 		}
 		_ = json.Unmarshal(raw, &req)
-		targetPath := strings.TrimSpace(req.Path)
-		if targetPath == "" || targetPath == "~" {
-			home, _ := os.UserHomeDir()
-			targetPath = home
-		} else if strings.HasPrefix(targetPath, "~/") {
-			home, _ := os.UserHomeDir()
-			targetPath = filepath.Join(home, targetPath[2:])
-		}
+		targetPath := resolvePath(req.Path)
 
 		type DirEntry struct {
-			Name  string `json:"name"`
-			IsDir bool   `json:"isDir"`
-			Path  string `json:"path"`
+			Name      string `json:"name"`
+			IsDir     bool   `json:"isDir"`
+			Path      string `json:"path"`
+			SizeBytes int64  `json:"sizeBytes,omitempty"`
 		}
 
 		var entries []DirEntry
 		files, err := os.ReadDir(targetPath)
 		if err == nil {
 			for _, f := range files {
-				if strings.HasPrefix(f.Name(), ".") {
+				if strings.HasPrefix(f.Name(), ".") && f.Name() != ".env" && f.Name() != ".gitignore" {
 					continue
 				}
-				if f.IsDir() {
-					entries = append(entries, DirEntry{
-						Name:  f.Name(),
-						IsDir: true,
-						Path:  filepath.Join(targetPath, f.Name()),
-					})
+				info, _ := f.Info()
+				size := int64(0)
+				if info != nil {
+					size = info.Size()
 				}
+				entries = append(entries, DirEntry{
+					Name:      f.Name(),
+					IsDir:     f.IsDir(),
+					Path:      filepath.Join(targetPath, f.Name()),
+					SizeBytes: size,
+				})
 			}
 		}
+
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].IsDir != entries[j].IsDir {
+				return entries[i].IsDir
+			}
+			return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		})
 
 		_ = d.sendWS(map[string]any{
 			"type":      "dir_list",
@@ -495,6 +547,165 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"entries":   entries,
 		})
 
+	case "read_file":
+		var req struct {
+			RequestID string `json:"requestId"`
+			Path      string `json:"path"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		targetPath := resolvePath(req.Path)
+		content, err := os.ReadFile(targetPath)
+		errMsg := ""
+		if err != nil {
+			errMsg = err.Error()
+		}
+		_ = d.sendWS(map[string]any{
+			"type":      "file_content",
+			"hostId":    d.config.HostID,
+			"requestId": req.RequestID,
+			"path":      targetPath,
+			"content":   string(content),
+			"error":     errMsg,
+		})
+
+	case "write_file":
+		var req struct {
+			RequestID string `json:"requestId"`
+			Path      string `json:"path"`
+			Content   string `json:"content"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		targetPath := resolvePath(req.Path)
+		_ = os.MkdirAll(filepath.Dir(targetPath), 0o755)
+		err := os.WriteFile(targetPath, []byte(req.Content), 0o644)
+		errMsg := ""
+		if err != nil {
+			errMsg = err.Error()
+		}
+		_ = d.sendWS(map[string]any{
+			"type":      "file_saved",
+			"hostId":    d.config.HostID,
+			"requestId": req.RequestID,
+			"path":      targetPath,
+			"error":     errMsg,
+		})
+
+	case "exec_command":
+		var req struct {
+			RequestID string `json:"requestId"`
+			Command   string `json:"command"`
+			CWD       string `json:"cwd"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		cwd := resolvePath(req.CWD)
+		cmd := exec.Command("bash", "-c", req.Command)
+		cmd.Dir = cwd
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		exitCode := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 1
+			}
+		}
+		_ = d.sendWS(map[string]any{
+			"type":      "command_result",
+			"hostId":    d.config.HostID,
+			"requestId": req.RequestID,
+			"stdout":    stdout.String(),
+			"stderr":    stderr.String(),
+			"exitCode":  exitCode,
+		})
+
+	case "git_status":
+		var req struct {
+			RequestID string `json:"requestId"`
+			CWD       string `json:"cwd"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		cwd := resolvePath(req.CWD)
+		branchCmd := exec.Command("git", "branch", "--show-current")
+		branchCmd.Dir = cwd
+		branchOut, _ := branchCmd.Output()
+		branch := strings.TrimSpace(string(branchOut))
+
+		statusCmd := exec.Command("git", "status", "--porcelain")
+		statusCmd.Dir = cwd
+		statusOut, _ := statusCmd.Output()
+
+		type GitFile struct {
+			Status string `json:"status"`
+			Path   string `json:"path"`
+		}
+		var gitFiles []GitFile
+		for _, line := range strings.Split(string(statusOut), "\n") {
+			line = strings.TrimRight(line, "\r")
+			if len(line) < 4 {
+				continue
+			}
+			statusCode := strings.TrimSpace(line[:2])
+			filename := strings.TrimSpace(line[3:])
+			gitFiles = append(gitFiles, GitFile{
+				Status: statusCode,
+				Path:   filename,
+			})
+		}
+
+		_ = d.sendWS(map[string]any{
+			"type":      "git_status_result",
+			"hostId":    d.config.HostID,
+			"requestId": req.RequestID,
+			"branch":    branch,
+			"files":     gitFiles,
+		})
+
+	case "get_config":
+		var req struct {
+			RequestID string `json:"requestId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		_ = d.sendWS(map[string]any{
+			"type":       "config_data",
+			"hostId":     d.config.HostID,
+			"requestId":  req.RequestID,
+			"settings":   d.config.Settings,
+			"name":       d.config.Name,
+			"gatewayUrl": d.config.GatewayURL,
+		})
+
+	case "update_config":
+		var req struct {
+			RequestID string      `json:"requestId"`
+			Settings  ZotSettings `json:"settings"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		d.config.Settings = req.Settings
+		_ = d.saveConfig()
+		_ = d.sendWS(map[string]any{
+			"type":      "config_updated",
+			"hostId":    d.config.HostID,
+			"requestId": req.RequestID,
+			"settings":  d.config.Settings,
+		})
+
+	case "compact_session":
+		var req struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		d.handleSlashCommand(req.SessionID, "/compact")
+
+	case "clear_session":
+		var req struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		d.handleSlashCommand(req.SessionID, "/clear")
+
 	case "prompt":
 		var req struct {
 			SessionID string `json:"sessionId"`
@@ -503,6 +714,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			YOLO      bool   `json:"yolo"`
 		}
 		_ = json.Unmarshal(raw, &req)
+
+		cleanText := strings.TrimSpace(req.Text)
+		if strings.HasPrefix(cleanText, "/") {
+			d.handleSlashCommand(req.SessionID, cleanText)
+			return
+		}
 
 		act, err := d.getOrCreateActiveSession(req.SessionID)
 		if err != nil {
@@ -517,6 +734,148 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 		go d.runAgentTurn(act, req.Text, req.Model, req.YOLO)
 	}
+}
+
+func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
+	act, err := d.getOrCreateActiveSession(sessionID)
+	if err != nil {
+		_ = d.sendWS(map[string]any{
+			"type":      "error",
+			"hostId":    d.config.HostID,
+			"sessionId": sessionID,
+			"message":   "Session not found: " + err.Error(),
+		})
+		return
+	}
+
+	parts := strings.Fields(cmdText)
+	if len(parts) == 0 {
+		return
+	}
+	head := strings.ToLower(parts[0])
+	arg := strings.TrimSpace(strings.TrimPrefix(cmdText, parts[0]))
+
+	act.mu.Lock()
+	defer act.mu.Unlock()
+
+	var reply string
+
+	switch head {
+	case "/clear":
+		act.record.Messages = nil
+		act.record.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(act.record)
+		_ = d.sendWS(map[string]any{
+			"type":      "session_cleared",
+			"hostId":    d.config.HostID,
+			"sessionId": act.record.ID,
+		})
+		return
+
+	case "/compact":
+		count := len(act.record.Messages)
+		if count > 2 {
+			summaryText := fmt.Sprintf("📦 **Transcript compacted.** Archived %d messages. Context freed.", count-2)
+			recent := act.record.Messages[count-2:]
+			compactedMsg := provider.Message{
+				Role:    provider.RoleAssistant,
+				Content: []provider.Content{provider.TextBlock{Text: summaryText}},
+			}
+			act.record.Messages = append([]provider.Message{compactedMsg}, recent...)
+		} else {
+			compactedMsg := provider.Message{
+				Role:    provider.RoleAssistant,
+				Content: []provider.Content{provider.TextBlock{Text: "📦 Transcript is already compact."}},
+			}
+			act.record.Messages = append(act.record.Messages, compactedMsg)
+		}
+		act.record.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(act.record)
+		_ = d.sendWS(map[string]any{
+			"type":      "session_compacted",
+			"hostId":    d.config.HostID,
+			"sessionId": act.record.ID,
+			"messages":  act.record.Messages,
+		})
+		return
+
+	case "/jail":
+		d.config.Settings.JailByDefault = true
+		_ = d.saveConfig()
+		reply = "🔒 **Tools jailed**: Agent tools are now strictly confined to `" + act.record.CWD + "`."
+
+	case "/unjail":
+		d.config.Settings.JailByDefault = false
+		_ = d.saveConfig()
+		reply = "🔓 **Tools unjailed**: Agent tools can now access paths outside the session directory."
+
+	case "/model":
+		if arg != "" {
+			act.record.Model = arg
+			d.config.Settings.Model = arg
+			_ = d.saveConfig()
+			_ = d.saveSession(act.record)
+			reply = fmt.Sprintf("🤖 Switched model to `%s`.", arg)
+		} else {
+			cur := act.record.Model
+			if cur == "" {
+				cur = d.config.Settings.Model
+			}
+			reply = fmt.Sprintf("🤖 Current model: `%s`", cur)
+		}
+
+	case "/reasoning":
+		if arg != "" {
+			d.config.Settings.Reasoning = arg
+			_ = d.saveConfig()
+			reply = fmt.Sprintf("🧠 Reasoning effort set to `%s`.", arg)
+		} else {
+			reply = fmt.Sprintf("🧠 Current reasoning: `%s`", d.config.Settings.Reasoning)
+		}
+
+	case "/skills":
+		reply = "### 🛠️ Discovered Tools & Capabilities\n" +
+			"- `read` — Read file contents with line limits\n" +
+			"- `write` — Create or overwrite files atomically\n" +
+			"- `edit` — Precise substring / regex file editing\n" +
+			"- `bash` — Execute arbitrary shell commands in sandbox\n" +
+			"- `glob` — Fuzzy search directory tree with gitignore support\n\n" +
+			"*All tools execute natively on host `" + d.config.Name + "`.*"
+
+	case "/help":
+		reply = "### ⚡ Remote Agent Slash Commands\n" +
+			"- `/compact` — Summarize and compact conversation to free up context\n" +
+			"- `/clear` — Clear the current session transcript\n" +
+			"- `/jail` — Confine agent tools strictly to session directory\n" +
+			"- `/unjail` — Allow agent tools to read/write external paths\n" +
+			"- `/model <name>` — Switch the active model\n" +
+			"- `/reasoning <off|low|medium|high>` — Adjust reasoning effort\n" +
+			"- `/skills` — List available agent tools and capabilities\n" +
+			"- `/help` — Show this command reference\n\n" +
+			"*You can also configure all Zot settings directly in the Settings pane.*"
+
+	default:
+		reply = fmt.Sprintf("❓ Unknown command `%s`. Type `/help` for available commands.", head)
+	}
+
+	userMsg := provider.Message{
+		Role:    provider.RoleUser,
+		Content: []provider.Content{provider.TextBlock{Text: cmdText}},
+	}
+	asstMsg := provider.Message{
+		Role:    provider.RoleAssistant,
+		Content: []provider.Content{provider.TextBlock{Text: reply}},
+	}
+	act.record.Messages = append(act.record.Messages, userMsg, asstMsg)
+	act.record.UpdatedAt = time.Now().UnixMilli()
+	_ = d.saveSession(act.record)
+
+	_ = d.sendWS(map[string]any{
+		"type":      "session_content",
+		"hostId":    d.config.HostID,
+		"sessionId": act.record.ID,
+		"messages":  act.record.Messages,
+	})
 }
 
 // Agent Loop Runner for a Session

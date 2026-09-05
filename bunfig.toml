@@ -5,7 +5,4 @@
 root = "test"
 
 [serve.static]
-plugins = ["./plugins/tailwind-plugin.ts", "./plugins/solid-plugin.ts", "@zomme/bun-plugin-iconify"]
-
-[plugins.iconify]
-dirs = ["web/src"]
+plugins = ["./plugins/iconify-solid-plugin.ts", "./plugins/tailwind-plugin.ts", "./plugins/solid-plugin.ts"]

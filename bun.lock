@@ -27,7 +27,6 @@
         "@types/nodemailer": "^8.0.1",
         "@types/qrcode": "^1.5.6",
         "@types/sortablejs": "^1.15.9",
-        "@zomme/bun-plugin-iconify": "^0.1.3",
         "babel-preset-solid": "^1.9.12",
         "postcss": "^8.5.26",
         "solid-js": "^1.9.14",
@@ -173,8 +172,6 @@
     "@types/qrcode": ["@types/qrcode@1.5.6", "", { "dependencies": { "@types/node": "*" } }, "sha512-te7NQcV2BOvdj2b1hCAHzAoMNuj65kNBMz0KBaxM6c3VGBOhU0dURQKOtH8CFNI/dsKkwlv32p26qYQTWoB5bw=="],
 
     "@types/sortablejs": ["@types/sortablejs@1.15.9", "", {}, "sha512-7HP+rZGE2p886PKV9c9OJzLBI6BBJu1O7lJGYnPyG3fS4/duUCcngkNCjsLwIMV+WMqANe3tt4irrXHSIe68OQ=="],
-
-    "@zomme/bun-plugin-iconify": ["@zomme/bun-plugin-iconify@0.1.3", "", { "peerDependencies": { "@iconify-json/*": ">=1.0.0", "@iconify/json": ">=2.0.0" }, "optionalPeers": ["@iconify-json/*", "@iconify/json"] }, "sha512-+a6gY7KlRGimHdojksNXmlS386VGXSmURsXsA9tHsILhPQ0XzDW6mG+BwSAfxBHFVssE+UVf6KLgsjotvRn4sg=="],
 
     "ag-grid-community": ["ag-grid-community@31.1.1", "", {}, "sha512-tiQZ7VQ07yJScTMIQpaYoUMPgiyXMwYDcwTxe4riRrcYGTg0e258XEihoPUZFejR60P1fYWMxdJaR2JUnyhGrg=="],
 

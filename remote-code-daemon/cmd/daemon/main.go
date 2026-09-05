@@ -98,6 +98,24 @@ type SessionSummary struct {
 	MessageCount int    `json:"message_count"`
 }
 
+// sessionListItem serializes a summary for the web client. It carries BOTH
+// snake_case (historic) and camelCase keys so old and new frontends parse it.
+func sessionListItem(s SessionSummary) map[string]any {
+	return map[string]any{
+		"id": s.ID, "cwd": s.CWD, "title": s.Title, "model": s.Model, "status": s.Status,
+		"created_at": s.CreatedAt, "updated_at": s.UpdatedAt, "message_count": s.MessageCount,
+		"createdAt": s.CreatedAt, "updatedAt": s.UpdatedAt, "messageCount": s.MessageCount,
+	}
+}
+
+// sessionPayload serializes a full record for the web client (both key styles).
+func sessionPayload(rec *SessionRecord) map[string]any {
+	return map[string]any{
+		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
+		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": rec.Messages,
+		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt,
+	}
+}
 // ActiveSession holds in-memory execution state for a session.
 type ActiveSession struct {
 	mu           sync.Mutex
@@ -389,10 +407,14 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 	switch base.Type {
 	case "list_sessions":
 		summaries := d.listSessions()
+		items := make([]map[string]any, 0, len(summaries))
+		for _, s := range summaries {
+			items = append(items, sessionListItem(s))
+		}
 		_ = d.sendWS(map[string]any{
 			"type":     "sessions_list",
 			"hostId":   d.config.HostID,
-			"sessions": summaries,
+			"sessions": items,
 		})
 
 	case "get_session":
@@ -410,10 +432,53 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			})
 			return
 		}
+		// session_data: historic full-record shape; session_content: what the
+		// web client renders (id + messages array).
 		_ = d.sendWS(map[string]any{
 			"type":    "session_data",
 			"hostId":  d.config.HostID,
-			"session": rec,
+			"session": sessionPayload(rec),
+		})
+		_ = d.sendWS(map[string]any{
+			"type":      "session_content",
+			"hostId":    d.config.HostID,
+			"sessionId": rec.ID,
+			"messages":  rec.Messages,
+		})
+
+	case "rename_session":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Title     string `json:"title"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		title := strings.TrimSpace(req.Title)
+		if req.SessionID == "" || title == "" {
+			return
+		}
+		if len(title) > 120 {
+			title = title[:120]
+		}
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil {
+			return
+		}
+		rec.Title = title
+		rec.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(rec)
+		d.sessionsMu.RLock()
+		if act, ok := d.sessions[req.SessionID]; ok {
+			act.mu.Lock()
+			act.record.Title = title
+			act.record.UpdatedAt = rec.UpdatedAt
+			act.mu.Unlock()
+		}
+		d.sessionsMu.RUnlock()
+		_ = d.sendWS(map[string]any{
+			"type":      "session_renamed",
+			"hostId":    d.config.HostID,
+			"sessionId": rec.ID,
+			"title":     title,
 		})
 
 	case "create_session":
@@ -466,7 +531,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		_ = d.sendWS(map[string]any{
 			"type":    "session_created",
 			"hostId":  d.config.HostID,
-			"session": rec,
+			"session": sessionPayload(rec),
 		})
 
 	case "delete_session":
@@ -1103,6 +1168,14 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 			payload["event"] = map[string]any{"type": "turn_start", "step": e.Step}
 		case core.EvTextDelta:
 			payload["event"] = map[string]any{"type": "text_delta", "delta": e.Delta}
+		case core.EvToolUseStart:
+			payload["event"] = map[string]any{"type": "tool_use_start", "id": e.ID, "name": e.Name}
+		case core.EvToolUseArgs:
+			payload["event"] = map[string]any{"type": "tool_use_args", "id": e.ID, "delta": e.Delta}
+		case core.EvToolUseEnd:
+			payload["event"] = map[string]any{"type": "tool_use_end", "id": e.ID}
+		case core.EvToolProgress:
+			payload["event"] = map[string]any{"type": "tool_progress", "id": e.ID, "text": e.Text}
 		case core.EvToolCall:
 			payload["event"] = map[string]any{
 				"type": "tool_call", "id": e.ID, "name": e.Name, "args": e.Args,
@@ -1117,10 +1190,28 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 			payload["event"] = map[string]any{
 				"type": "tool_result", "id": e.ID, "content": contentStr.String(), "isError": e.Result.IsError,
 			}
+		case core.EvUsage:
+			payload["event"] = map[string]any{
+				"type": "usage", "usage": e.Usage, "cumulative": e.Cumulative,
+			}
 		case core.EvTurnEnd:
-			payload["event"] = map[string]any{"type": "turn_end", "stop": string(e.Stop)}
+			evMap := map[string]any{"type": "turn_end", "stop": string(e.Stop)}
+			if e.Err != nil {
+				evMap["error"] = e.Err.Error()
+			}
+			if act.agent != nil {
+				evMap["usage"] = act.agent.LastTurnUsage()
+				evMap["cumulative"] = act.agent.Cost()
+			}
+			payload["event"] = evMap
 		case core.EvDone:
 			payload["event"] = map[string]any{"type": "done"}
+		case core.EvError:
+			msg := "agent error"
+			if e.Err != nil {
+				msg = e.Err.Error()
+			}
+			payload["event"] = map[string]any{"type": "error", "message": msg}
 		default:
 			return
 		}

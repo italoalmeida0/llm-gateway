@@ -27,6 +27,7 @@
     "solid-ag-grid": "^0.0.230",
     "solid-charts": "0.0.2",
     "sortablejs": "^1.15.7",
+    "streamdown-solid": "^0.0.3",
     "tokenx": "^2.1.0",
     "usal": "^2.0.0"
   },

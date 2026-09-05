@@ -7,8 +7,7 @@ import {
   For,
   Show,
 } from "solid-js";
-import { marked } from "marked";
-import hljs from "highlight.js";
+import { Streamdown } from "streamdown-solid";
 import {
   api,
   currentSession,
@@ -25,12 +24,6 @@ import {
   fmtDate,
   toast,
 } from "../ui";
-
-// Configure marked with syntax highlighting
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-});
 
 import { Icon as Iconify } from "../components/icon";
 
@@ -50,14 +43,23 @@ export interface SessionSummary {
 }
 
 export interface ContentBlock {
-  type: "text" | "tool_call" | "tool_result" | "reasoning";
+  type: "text" | "tool_call" | "tool_result" | "reasoning" | "image";
   text?: string;
   toolId?: string;
   toolName?: string;
   toolArgs?: string;
   toolResult?: string;
+  toolProgress?: string;
   isError?: boolean;
   reasoning?: string;
+}
+
+export interface SessionUsage {
+  inTok: number;
+  outTok: number;
+  cacheTok: number;
+  reasoningTok: number;
+  costUsd: number;
 }
 
 export interface ChatMessage {
@@ -229,11 +231,74 @@ export default function RemoteCodePage() {
   const [yoloMode, setYoloMode] = createSignal(false);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
   const [pendingApproval, setPendingApproval] = createSignal<PendingApproval | null>(null);
+  // Live usage per session (from daemon usage/turn_end events).
+  const [sessionUsage, setSessionUsage] = createSignal<Record<string, SessionUsage>>({});
+  // Live tool progress text per tool call id (cleared on result/turn_end).
+  const [toolProgress, setToolProgress] = createSignal<Record<string, string>>({});
+  // Expanded thinking blocks (message id set).
+  const [expandedThinking, setExpandedThinking] = createSignal<Record<string, boolean>>({});
+  // Copied-message feedback.
+  const [copiedMsgId, setCopiedMsgId] = createSignal<string | null>(null);
+
+  // Appearance (Antigravity-style, persisted per browser).
+  const [verboseChat, setVerboseChat] = createSignal(
+    (() => {
+      try {
+        return localStorage.getItem("llmgw-rc-verbose") !== "0";
+      } catch {
+        return true;
+      }
+    })(),
+  );
+  const [convWidth, setConvWidth] = createSignal<"narrow" | "default" | "wide">(
+    (() => {
+      try {
+        return (localStorage.getItem("llmgw-rc-width") as any) || "default";
+      } catch {
+        return "default";
+      }
+    })(),
+  );
+  const convWidthClass = createMemo(() => {
+    const w = convWidth();
+    if (w === "narrow") return "max-w-xl";
+    if (w === "wide") return "max-w-5xl";
+    return "max-w-3xl";
+  });
+
+  // Sidebar display options (Antigravity Display Options menu).
+  const [groupBy, setGroupBy] = createSignal<"project" | "none">(
+    (() => {
+      try {
+        return (localStorage.getItem("llmgw-rc-groupby") as any) || "project";
+      } catch {
+        return "project";
+      }
+    })(),
+  );
+  const [sortBy, setSortBy] = createSignal<"updated" | "added" | "alpha">(
+    (() => {
+      try {
+        return (localStorage.getItem("llmgw-rc-sort") as any) || "updated";
+      } catch {
+        return "updated";
+      }
+    })(),
+  );
+  const [historyView, setHistoryView] = createSignal(false);
+  const [displayMenuOpen, setDisplayMenuOpen] = createSignal(false);
+  const [newProjectMenuOpen, setNewProjectMenuOpen] = createSignal(false);
+  const [addContextOpen, setAddContextOpen] = createSignal(false);
+  const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
+  const [usageOpen, setUsageOpen] = createSignal(false);
+  const [renamingId, setRenamingId] = createSignal<string | null>(null);
+  const [renameText, setRenameText] = createSignal("");
+  const [isAtBottom, setIsAtBottom] = createSignal(true);
 
   // Agent Configuration & MCP Center
   const [showConfigModal, setShowConfigModal] = createSignal(false);
   const [configTab, setConfigTab] = createSignal<
-    "settings" | "mcp" | "skills" | "slash"
+    "settings" | "mcp" | "skills" | "slash" | "appearance"
   >("settings");
   const [daemonSettings, setDaemonSettings] = createSignal<AgentSettings>({
     model: "gpt-4o",
@@ -298,9 +363,8 @@ export default function RemoteCodePage() {
     const q = sessionFilter().toLowerCase().trim();
     let base = sessions();
     const ap = activeProject();
-    // Quando há projeto ativo, a lista filtra por ele (como no Antigravity).
-    // Sem projeto, mostra tudo.
-    if (ap) base = sessionsOfProject(ap.path);
+    // Quando há projeto ativo e agrupamento por projeto, filtra por ele.
+    if (ap && groupBy() === "project") base = sessionsOfProject(ap.path);
     if (!q) return base;
     return base.filter(
       (s) =>
@@ -422,6 +486,141 @@ export default function RemoteCodePage() {
   }
 
   // --- Message Handling ---
+  // The daemon speaks two dialects on the wire: Anthropic-style blocks
+  // ({type:"text"|"tool_use"|"tool_result"}) and raw Go structs
+  // ({text}, {id,name,arguments}, {call_id,content,is_error},
+  // {reasoning_id,summary}, {mime_type,data}). Parse both.
+  function prettyArgs(v: any): string {
+    if (v == null) return "";
+    if (typeof v === "string") return v;
+    try {
+      return JSON.stringify(v, null, 2);
+    } catch {
+      return String(v);
+    }
+  }
+  function toolResultText(c: any): string {
+    const content = c.content ?? c.result;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content
+        .map((p: any) =>
+          typeof p === "string" ? p : typeof p?.text === "string" ? p.text : prettyArgs(p),
+        )
+        .join("\n");
+    }
+    return prettyArgs(content);
+  }
+  function parseContentBlocks(m: any): ContentBlock[] {
+    const blocks: ContentBlock[] = [];
+    const pushBlock = (c: any) => {
+      if (c == null) return;
+      if (typeof c === "string") {
+        blocks.push({ type: "text", text: c });
+        return;
+      }
+      // Reasoning / thinking (Go ReasoningBlock has no `type`).
+      if (
+        c.type === "reasoning" ||
+        c.type === "thinking" ||
+        typeof c.summary === "string" ||
+        typeof c.reasoning_id === "string" ||
+        typeof c.encrypted_content === "string"
+      ) {
+        const txt = c.summary || c.text || "";
+        if (txt) blocks.push({ type: "reasoning", reasoning: txt });
+        return;
+      }
+      // Tool call: Anthropic {type:"tool_use",id,name,input} or Go {id,name,arguments}.
+      if (c.type === "tool_use" || (typeof c.name === "string" && typeof c.id === "string")) {
+        blocks.push({
+          type: "tool_call",
+          toolId: c.id,
+          toolName: c.name,
+          toolArgs: prettyArgs(c.input ?? c.arguments ?? c.args),
+        });
+        return;
+      }
+      // Tool result: Anthropic {type:"tool_result",tool_use_id/content/is_error}
+      // or Go {call_id, content:[{text}], is_error} or flat {id,result,isError}.
+      if (
+        c.type === "tool_result" ||
+        typeof c.call_id === "string" ||
+        (typeof c.tool_use_id === "string" && c.content !== undefined)
+      ) {
+        blocks.push({
+          type: "tool_result",
+          toolId: c.tool_use_id || c.call_id || c.id,
+          toolResult: toolResultText(c),
+          isError: !!(c.is_error ?? c.isError ?? c.is_error === true),
+        });
+        return;
+      }
+      // Image (Go ImageBlock) — render as a placeholder chip.
+      if (typeof c.mime_type === "string" || c.type === "image") {
+        blocks.push({ type: "image", text: c.mime_type || "image" });
+        return;
+      }
+      // Plain text (both dialects).
+      if (c.type === "text" || typeof c.text === "string") {
+        blocks.push({ type: "text", text: c.text });
+        return;
+      }
+    };
+    if (Array.isArray(m.content)) {
+      for (const c of m.content) pushBlock(c);
+    } else if (typeof m.content === "string") {
+      blocks.push({ type: "text", text: m.content });
+    }
+    return blocks;
+  }
+  function mapSummary(r: any): SessionSummary {
+    return {
+      id: r.id,
+      cwd: r.cwd,
+      title: r.title || r.cwd,
+      model: r.model || "gpt-4o",
+      status: r.status || "idle",
+      createdAt: r.createdAt ?? r.created_at ?? Date.now(),
+      updatedAt: r.updatedAt ?? r.updated_at ?? Date.now(),
+      messageCount:
+        typeof r.messageCount === "number"
+          ? r.messageCount
+          : typeof r.message_count === "number"
+            ? r.message_count
+            : Array.isArray(r.messages)
+              ? r.messages.length
+              : 0,
+    };
+  }
+  function applySessionContent(sessionId: string, rawMsgs: any[]) {
+    const parsed: ChatMessage[] = (rawMsgs || []).map((m: any, idx: number) => ({
+      id: `msg_${idx}`,
+      role: m.role || "user",
+      blocks: parseContentBlocks(m),
+      time: Date.now(),
+    }));
+    setMessages(parsed);
+    setIsAtBottom(true);
+    scrollToBottom(true);
+  }
+  function applyUsage(sessionId: string, u: any, cum: any) {
+    if (!sessionId) return;
+    const src = cum || u || {};
+    setSessionUsage((prev) => ({
+      ...prev,
+      [sessionId]: {
+        inTok: src.input_tokens ?? src.inTok ?? prev[sessionId]?.inTok ?? 0,
+        outTok: src.output_tokens ?? src.outTok ?? prev[sessionId]?.outTok ?? 0,
+        cacheTok:
+          (src.cache_read_tokens ?? 0) + (src.cache_write_tokens ?? src.cache_creation_tokens ?? 0) ||
+          prev[sessionId]?.cacheTok ||
+          0,
+        reasoningTok: src.reasoning_tokens ?? prev[sessionId]?.reasoningTok ?? 0,
+        costUsd: src.cost_usd ?? prev[sessionId]?.costUsd ?? 0,
+      },
+    }));
+  }
   function handleIncomingMessage(msg: any) {
     switch (msg.type) {
       case "relay_connected":
@@ -436,19 +635,18 @@ export default function RemoteCodePage() {
       }
       case "sessions_list": {
         const rawList = msg.sessions || [];
-        const mapped: SessionSummary[] = rawList.map((r: any) => ({
-          id: r.id,
-          cwd: r.cwd,
-          title: r.title || r.cwd,
-          model: r.model || "gpt-4o",
-          status: r.status || "idle",
-          createdAt: r.createdAt || Date.now(),
-          updatedAt: r.updatedAt || Date.now(),
-          messageCount: r.messages ? r.messages.length : 0,
-        }));
+        const mapped: SessionSummary[] = rawList.map(mapSummary);
         setSessions(mapped);
         if (!activeSessionId() && mapped.length > 0) {
-          selectSession(mapped[0].id);
+          const ap = activeProject();
+          const norm = ap ? ap.path.replace(/\/+$/, "") : "";
+          const inProject = norm
+            ? mapped.filter((s) => {
+                const cwd = (s.cwd || "").replace(/\/+$/, "");
+                return cwd === norm || cwd.startsWith(norm + "/");
+              })
+            : [];
+          selectSession((inProject[0] || mapped[0]).id);
         }
         break;
       }
@@ -456,19 +654,18 @@ export default function RemoteCodePage() {
       case "session_created": {
         const r = msg.session;
         if (!r) break;
-        const s: SessionSummary = {
-          id: r.id,
-          cwd: r.cwd,
-          title: r.title || r.cwd,
-          model: r.model || "gpt-4o",
-          status: r.status || "idle",
-          createdAt: r.createdAt || Date.now(),
-          updatedAt: r.updatedAt || Date.now(),
-          messageCount: 0,
-        };
+        const s = mapSummary(r);
         setSessions((prev) => [s, ...prev.filter((x) => x.id !== s.id)]);
         selectSession(s.id);
         toast(`Session created in ${s.cwd}`, "ok");
+        break;
+      }
+
+      case "session_renamed": {
+        if (!msg.sessionId) break;
+        setSessions((prev) =>
+          prev.map((s) => (s.id === msg.sessionId ? { ...s, title: msg.title || s.title } : s)),
+        );
         break;
       }
 
@@ -486,49 +683,20 @@ export default function RemoteCodePage() {
         break;
       }
 
+      case "session_data": {
+        // Historic full-record shape; render it like session_content.
+        const r = msg.session;
+        if (!r) break;
+        const sid = r.id || msg.sessionId;
+        if (sid && sid === activeSessionId()) {
+          applySessionContent(sid, r.messages || r.Messages || []);
+        }
+        break;
+      }
+
       case "session_content": {
         if (msg.sessionId !== activeSessionId()) break;
-        const rawMsgs = msg.messages || [];
-        const parsed: ChatMessage[] = rawMsgs.map((m: any, idx: number) => {
-          const blocks: ContentBlock[] = [];
-          if (Array.isArray(m.content)) {
-            for (const c of m.content) {
-              if (c.type === "text" || typeof c.text === "string") {
-                blocks.push({ type: "text", text: c.text });
-              } else if (c.type === "tool_use" || c.name) {
-                blocks.push({
-                  type: "tool_call",
-                  toolId: c.id,
-                  toolName: c.name,
-                  toolArgs:
-                    typeof c.input === "string"
-                      ? c.input
-                      : JSON.stringify(c.input ?? c.arguments, null, 2),
-                });
-              } else if (c.type === "tool_result") {
-                blocks.push({
-                  type: "tool_result",
-                  toolId: c.tool_use_id || c.id,
-                  toolResult:
-                    typeof c.content === "string"
-                      ? c.content
-                      : JSON.stringify(c.content, null, 2),
-                  isError: !!c.is_error,
-                });
-              }
-            }
-          } else if (typeof m.content === "string") {
-            blocks.push({ type: "text", text: m.content });
-          }
-          return {
-            id: `msg_${idx}`,
-            role: m.role || "user",
-            blocks,
-            time: Date.now(),
-          };
-        });
-        setMessages(parsed);
-        scrollToBottom();
+        applySessionContent(msg.sessionId, msg.messages || []);
         break;
       }
 
@@ -601,14 +769,39 @@ export default function RemoteCodePage() {
           setSessionStatus("running");
         } else if (ev.type === "text_delta") {
           appendStreamingDelta(ev.delta);
+        } else if (ev.type === "tool_use_start") {
+          // Pre-render a live "composing call" card while args stream in.
+          appendToolCall(ev.id, ev.name, "");
+        } else if (ev.type === "tool_use_args") {
+          appendToolArgsDelta(ev.id, ev.delta);
+        } else if (ev.type === "tool_use_end") {
+          // No-op: the final tool_call event carries the full block.
+        } else if (ev.type === "tool_progress") {
+          setToolProgress((prev) => ({ ...prev, [ev.id]: ev.text }));
         } else if (ev.type === "tool_call") {
           appendToolCall(ev.id, ev.name, ev.args);
         } else if (ev.type === "tool_result") {
           setPendingApproval(null);
-          appendToolResult(ev.id, ev.result, ev.isError);
+          setToolProgress((prev) => {
+            const next = { ...prev };
+            delete next[ev.id];
+            return next;
+          });
+          appendToolResult(ev.id, ev.result ?? ev.content, ev.isError);
+        } else if (ev.type === "usage") {
+          applyUsage(msg.sessionId, ev.usage, ev.cumulative);
         } else if (ev.type === "turn_end") {
           setSessionStatus("idle");
           setPendingApproval(null);
+          setToolProgress({});
+          if (ev.usage || ev.cumulative) applyUsage(msg.sessionId, ev.usage, ev.cumulative);
+          if (ev.error) toast(ev.error, "err");
+          // Refresh the transcript so tool blocks persisted by the daemon
+          // (with full args/results) replace the streamed approximations.
+          sendWS({ type: "get_session", sessionId: msg.sessionId });
+        } else if (ev.type === "error") {
+          toast(ev.message || "Agent error", "err");
+          setSessionStatus("idle");
         }
         scrollToBottom();
         break;
@@ -652,16 +845,31 @@ export default function RemoteCodePage() {
     });
   }
 
-  function appendToolCall(callId: string, name: string, args: string) {
+  function appendToolCall(callId: string, name: string, args: any) {
+    const argsStr = prettyArgs(args);
     setMessages((prev) => {
-      const last = prev[prev.length - 1];
+      // Upsert: tool_use_start pre-creates the card, tool_call finalizes it.
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const m = prev[i];
+        if (m.role !== "assistant") continue;
+        const bi = m.blocks.findIndex(
+          (b) => b.type === "tool_call" && b.toolId === callId,
+        );
+        if (bi >= 0) {
+          const blocks = [...m.blocks];
+          blocks[bi] = { ...blocks[bi], toolName: name || blocks[bi].toolName, toolArgs: argsStr || blocks[bi].toolArgs };
+          return [...prev.slice(0, i), { ...m, blocks }, ...prev.slice(i + 1)];
+        }
+        break;
+      }
       const toolBlock: ContentBlock = {
         type: "tool_call",
         toolId: callId,
         toolName: name,
-        toolArgs: args,
+        toolArgs: argsStr,
       };
 
+      const last = prev[prev.length - 1];
       if (last && last.role === "assistant") {
         return [
           ...prev.slice(0, -1),
@@ -678,6 +886,26 @@ export default function RemoteCodePage() {
           },
         ];
       }
+    });
+  }
+
+  function appendToolArgsDelta(callId: string, delta: string) {
+    if (!delta) return;
+    setMessages((prev) => {
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const m = prev[i];
+        if (m.role !== "assistant") continue;
+        const bi = m.blocks.findIndex(
+          (b) => b.type === "tool_call" && b.toolId === callId,
+        );
+        if (bi >= 0) {
+          const blocks = [...m.blocks];
+          blocks[bi] = { ...blocks[bi], toolArgs: (blocks[bi].toolArgs || "") + delta };
+          return [...prev.slice(0, i), { ...m, blocks }, ...prev.slice(i + 1)];
+        }
+        break;
+      }
+      return prev;
     });
   }
 
@@ -710,11 +938,18 @@ export default function RemoteCodePage() {
     });
   }
 
-  function scrollToBottom() {
+  function scrollToBottom(force = false) {
+    if (!force && !isAtBottom()) return;
     setTimeout(() => {
       const el = chatContainerRef();
       if (el) el.scrollTop = el.scrollHeight;
     }, 40);
+  }
+
+  function onChatScroll() {
+    const el = chatContainerRef();
+    if (!el) return;
+    setIsAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 100);
   }
 
   function selectSession(id: string) {
@@ -774,6 +1009,29 @@ export default function RemoteCodePage() {
     if (activeProjectId() === id) setActiveProjectId(next[0]?.id || "");
   }
 
+  function quickStartProject() {
+    // Quick Start: project rooted at the host home dir + immediate conversation.
+    const hid = activeHostId();
+    if (!hid) {
+      toast("Connect a host first", "err");
+      return;
+    }
+    const p = {
+      id: `proj_${Date.now().toString(36)}`,
+      hostId: hid,
+      name: "Home",
+      path: "~",
+      createdAt: Date.now(),
+    };
+    const next = [p, ...projects()];
+    setProjects(next);
+    persistProjects(next);
+    setActiveProjectId(p.id);
+    setNewSessionCwd("~");
+    setNewSessionTitle("");
+    setShowNewSessionModal(true);
+  }
+
   function createNewSession() {
     const cwd = newSessionCwd().trim();
     if (!cwd) {
@@ -802,6 +1060,62 @@ export default function RemoteCodePage() {
     sendWS({ type: "delete_session", sessionId: id });
   }
 
+  function messageText(m: ChatMessage): string {
+    return m.blocks
+      .filter((b) => b.type === "text" && b.text)
+      .map((b) => b.text as string)
+      .join("\n");
+  }
+
+  function copyMsg(id: string, text: string) {
+    copyWithToast(text || "");
+    setCopiedMsgId(id);
+    setTimeout(() => setCopiedMsgId((cur) => (cur === id ? null : cur)), 1500);
+  }
+
+  function regenerateFrom(idx: number) {
+    // Re-send the last user text before message idx (or the message itself).
+    const list = messages();
+    for (let i = idx; i >= 0; i--) {
+      if (list[i].role === "user") {
+        const t = messageText(list[i]);
+        if (!t.trim()) return;
+        setInputPrompt(t);
+        sendPrompt();
+        return;
+      }
+    }
+    toast("Nothing to regenerate", "info");
+  }
+
+  function editUserMsg(m: ChatMessage) {
+    // Load the text into the composer for review before re-sending.
+    setInputPrompt(messageText(m));
+    setIsAtBottom(true);
+    try {
+      document.querySelector<HTMLTextAreaElement>("#rc-composer")?.focus();
+    } catch {}
+  }
+
+  function submitRename(id: string) {
+    const t = renameText().trim();
+    if (!t) {
+      setRenamingId(null);
+      return;
+    }
+    sendWS({ type: "rename_session", sessionId: id, title: t });
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title: t } : s)));
+    setRenamingId(null);
+  }
+
+  function sortedSessions(list: SessionSummary[]) {
+    const arr = [...list];
+    if (sortBy() === "alpha") arr.sort((a, b) => a.title.localeCompare(b.title));
+    else if (sortBy() === "added") arr.sort((a, b) => a.createdAt - b.createdAt);
+    else arr.sort((a, b) => b.updatedAt - a.updatedAt);
+    return arr;
+  }
+
   function sendPrompt() {
     const text = inputPrompt().trim();
     if (!text || !activeSessionId()) return;
@@ -814,8 +1128,13 @@ export default function RemoteCodePage() {
     };
     setMessages((prev) => [...prev, userMsg]);
     setInputPrompt("");
+    try {
+      const sid = activeSessionId();
+      if (sid) localStorage.removeItem(`llmgw-draft:${sid}`);
+    } catch {}
     setSessionStatus("running");
-    scrollToBottom();
+    setIsAtBottom(true);
+    scrollToBottom(true);
 
     sendWS({
       type: "prompt",
@@ -992,6 +1311,33 @@ export default function RemoteCodePage() {
     }
   });
 
+  // Per-session composer drafts (survive session switches, like the Vue app).
+  createEffect(() => {
+    const sid = activeSessionId();
+    if (!sid) return;
+    try {
+      setInputPrompt(localStorage.getItem(`llmgw-draft:${sid}`) || "");
+    } catch {}
+  });
+  createEffect(() => {
+    const text = inputPrompt();
+    const sid = activeSessionId();
+    if (!sid) return;
+    try {
+      if (text) localStorage.setItem(`llmgw-draft:${sid}`, text);
+      else localStorage.removeItem(`llmgw-draft:${sid}`);
+    } catch {}
+  });
+
+  // Close popover menus on outside click / Escape.
+  function closeMenus() {
+    setDisplayMenuOpen(false);
+    setNewProjectMenuOpen(false);
+    setAddContextOpen(false);
+    setModelMenuOpen(false);
+    setUsageOpen(false);
+  }
+
   onCleanup(() => {
     if (ws) {
       try {
@@ -1001,18 +1347,11 @@ export default function RemoteCodePage() {
     clearInterval(heartbeatTimer);
   });
 
-  // Render markdown with syntax highlighted code
-  function renderMarkdown(txt: string) {
-    try {
-      const rawHtml = marked.parse(txt) as string;
-      return rawHtml;
-    } catch {
-      return txt;
-    }
-  }
-
   return (
-    <div class="fixed inset-0 w-screen h-screen flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50">
+    <div
+      class="fixed inset-0 w-screen h-screen flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50"
+      onClick={closeMenus}
+    >
       {/* ========================================================================= */}
       {/* Top Application Navigation Bar                                             */}
       {/* ========================================================================= */}
@@ -1097,32 +1436,159 @@ export default function RemoteCodePage() {
 
         {/* Right: Model, Mode, Settings */}
         <div class="flex items-center gap-1.5">
-          {/* Model Selector Dropdown (Live Gateway Models) */}
-          <div class="flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-ink-900 text-xs text-ink-300">
-            <Iconify icon="lucide:sparkles" size={13} class="text-ink-500" />
-            <select
-              class="bg-transparent font-medium focus:outline-none cursor-pointer max-w-[150px] truncate"
-              value={activeModel()}
-              onChange={(e) => {
-                const m = e.currentTarget.value;
-                setActiveModel(m);
-                if (activeSessionId()) {
-                  sendWS({
-                    type: "prompt",
-                    sessionId: activeSessionId(),
-                    text: `/model ${m}`,
-                  });
-                }
+          {/* Token badge (chatbot-style context counter) */}
+          <Show
+            when={activeSessionId() && sessionUsage()[activeSessionId()]}
+          >
+            {(u) => {
+              const total = () => u().inTok + u().outTok + u().cacheTok;
+              const fmt = () =>
+                total() > 999 ? `${(total() / 1000).toFixed(1)}k` : `${total()}`;
+              return (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setUsageOpen(!usageOpen());
+                    setModelMenuOpen(false);
+                  }}
+                  class="hidden sm:flex items-center gap-1 px-2 py-1 rounded-full bg-ink-900 border border-line/60 text-[11px] text-ink-400 hover:text-ink-200 cursor-pointer"
+                  title="Session token usage"
+                >
+                  <Iconify icon="lucide:hash" size={11} />
+                  <span>{fmt()}</span>
+                </button>
+              );
+            }}
+          </Show>
+
+          {/* Model Picker (Antigravity-style with effort + usage) */}
+          <div class="relative">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setModelMenuOpen(!modelMenuOpen());
+                setUsageOpen(false);
+                setAddContextOpen(false);
               }}
+              class="flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-ink-900 text-xs text-ink-300 cursor-pointer"
+              title="Switch model"
             >
-              <For each={gatewayModels()}>
-                {(m) => (
-                  <option value={m.id} class="bg-ink-900 text-ink-100">
-                    {m.name || m.id}
-                  </option>
-                )}
-              </For>
-            </select>
+              <Iconify icon="lucide:sparkles" size={13} class="text-ink-500" />
+              <span class="max-w-[130px] truncate font-medium">
+                {activeModel().split("/").pop()}
+              </span>
+              <Iconify icon="lucide:chevron-down" size={11} />
+            </button>
+            <Show when={modelMenuOpen()}>
+              <div
+                onClick={(e) => e.stopPropagation()}
+                class="absolute right-0 top-full mt-1.5 w-64 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-50"
+              >
+                <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                  Model
+                </div>
+                <div class="max-h-56 overflow-y-auto">
+                  <For each={gatewayModels()}>
+                    {(m) => (
+                      <button
+                        onClick={() => {
+                          const id = m.id;
+                          setActiveModel(id);
+                          setModelMenuOpen(false);
+                          if (activeSessionId()) {
+                            sendWS({
+                              type: "prompt",
+                              sessionId: activeSessionId(),
+                              text: `/model ${id}`,
+                            });
+                          }
+                        }}
+                        class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
+                          m.id === activeModel()
+                            ? "bg-ink-800 text-ink-100"
+                            : "text-ink-300 hover:bg-ink-800/60"
+                        }`}
+                      >
+                        <span class="truncate">{m.name || m.id}</span>
+                        <Show when={m.id === activeModel()}>
+                          <Iconify icon="lucide:check" size={13} />
+                        </Show>
+                      </button>
+                    )}
+                  </For>
+                </div>
+                <div class="mt-1.5 pt-1.5 border-t border-line/60">
+                  <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                    Reasoning effort
+                  </div>
+                  <div class="grid grid-cols-4 gap-1 p-1 rounded-lg bg-ink-950 border border-line/50">
+                    <For each={["off", "low", "medium", "high"]}>
+                      {(lvl) => (
+                        <button
+                          onClick={() => {
+                            setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
+                            setModelMenuOpen(false);
+                            if (activeSessionId()) {
+                              sendWS({
+                                type: "prompt",
+                                sessionId: activeSessionId(),
+                                text: `/reasoning ${lvl}`,
+                              });
+                            }
+                          }}
+                          class={`py-1 rounded-md text-center text-[11px] font-medium capitalize cursor-pointer ${
+                            (daemonSettings().reasoning || "medium") === lvl
+                              ? "bg-ink-100 text-ink-950"
+                              : "text-ink-400 hover:text-ink-200"
+                          }`}
+                        >
+                          {lvl}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setModelMenuOpen(false);
+                    setUsageOpen(true);
+                  }}
+                  class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer"
+                >
+                  <Iconify icon="lucide:chart-column" size={13} />
+                  <span>View Usage</span>
+                </button>
+              </div>
+            </Show>
+            {/* Usage popover */}
+            <Show when={usageOpen()}>
+              <div
+                onClick={(e) => e.stopPropagation()}
+                class="absolute right-0 top-full mt-1.5 w-64 rounded-xl border border-line bg-ink-900 shadow-2xl p-3 z-50 text-xs"
+              >
+                <div class="font-semibold text-ink-200 mb-2">Session usage</div>
+                <Show
+                  when={activeSessionId() && sessionUsage()[activeSessionId()]}
+                  fallback={
+                    <p class="text-ink-500 text-[11px]">
+                      No usage reported yet. Run the agent to see input / cache / output tokens here.
+                    </p>
+                  }
+                >
+                  {(u) => (
+                    <div class="space-y-1.5 font-mono text-[11px]">
+                      <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}</span></div>
+                      <div class="flex justify-between"><span class="text-ink-500">Cache</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
+                      <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}</span></div>
+                      <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}</span></div>
+                      <Show when={u().costUsd > 0}>
+                        <div class="flex justify-between pt-1 border-t border-line/60"><span class="text-ink-500">Cost</span><span class="text-ink-200">${u().costUsd.toFixed(4)}</span></div>
+                      </Show>
+                    </div>
+                  )}
+                </Show>
+              </div>
+            </Show>
           </div>
 
           {/* Safe/YOLO Toggle */}
@@ -1319,7 +1785,7 @@ export default function RemoteCodePage() {
               <span>New Conversation</span>
             </button>
             <button
-              onClick={() => (document.querySelector<HTMLInputElement>("#rc-filter")?.focus())}
+              onClick={() => setHistoryView(true)}
               class="w-full flex items-center gap-2 px-3 py-1.5 mt-1 rounded-lg text-xs text-ink-500 hover:text-ink-300 hover:bg-ink-900/60 transition-colors cursor-pointer"
             >
               <Iconify icon="lucide:history" size={13} />
@@ -1327,16 +1793,75 @@ export default function RemoteCodePage() {
             </button>
           </div>
 
-          {/* Filter */}
-          <div class="px-2 pb-2">
+          {/* Filter + Display Options */}
+          <div class="px-2 pb-2 flex items-center gap-1.5">
             <input
               id="rc-filter"
               type="text"
               placeholder="Filter..."
-              class="w-full text-xs bg-transparent border border-line/60 rounded-lg px-2.5 py-1.5 text-ink-200 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
+              class="flex-1 min-w-0 text-xs bg-transparent border border-line/60 rounded-lg px-2.5 py-1.5 text-ink-200 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
               value={sessionFilter()}
               onInput={(e) => setSessionFilter(e.currentTarget.value)}
             />
+            {/* Display Options (Antigravity) */}
+            <div class="relative shrink-0">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDisplayMenuOpen(!displayMenuOpen());
+                  setNewProjectMenuOpen(false);
+                }}
+                class="p-1.5 rounded-lg text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
+                title="Display options"
+              >
+                <Iconify icon="lucide:list-filter" size={14} />
+              </button>
+              <Show when={displayMenuOpen()}>
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  class="absolute left-0 top-full mt-1 w-52 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-50 text-xs"
+                >
+                  <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                    Group by
+                  </div>
+                  <For each={[["project", "Project"], ["none", "None"]] as const}>
+                    {([v, label]) => (
+                      <button
+                        onClick={() => {
+                          setGroupBy(v);
+                          try { localStorage.setItem("llmgw-rc-groupby", v); } catch {}
+                        }}
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-ink-300 hover:bg-ink-800/60 flex items-center justify-between cursor-pointer"
+                      >
+                        <span>{label}</span>
+                        <Show when={groupBy() === v}>
+                          <Iconify icon="lucide:check" size={13} />
+                        </Show>
+                      </button>
+                    )}
+                  </For>
+                  <div class="mt-1 pt-1 border-t border-line/60 px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                    Sort conversations
+                  </div>
+                  <For each={[["updated", "Last updated"], ["added", "Date added"], ["alpha", "Alphabetical (A-Z)"]] as const}>
+                    {([v, label]) => (
+                      <button
+                        onClick={() => {
+                          setSortBy(v);
+                          try { localStorage.setItem("llmgw-rc-sort", v); } catch {}
+                        }}
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-ink-300 hover:bg-ink-800/60 flex items-center justify-between cursor-pointer"
+                      >
+                        <span>{label}</span>
+                        <Show when={sortBy() === v}>
+                          <Iconify icon="lucide:check" size={13} />
+                        </Show>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
           </div>
 
           {/* Projects */}
@@ -1344,13 +1869,47 @@ export default function RemoteCodePage() {
             <div>
               <div class="flex items-center justify-between px-1.5 pb-1">
                 <span class="text-[11px] font-medium text-ink-500">Projects</span>
-                <button
-                  onClick={() => setShowNewProjectModal(true)}
-                  class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
-                  title="Add project folder from host"
-                >
-                  <Iconify icon="lucide:folder-plus" size={13} />
-                </button>
+                {/* New Project split button (Antigravity: New Project / Quick Start) */}
+                <div class="relative">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setNewProjectMenuOpen(!newProjectMenuOpen());
+                      setDisplayMenuOpen(false);
+                    }}
+                    class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
+                    title="Create new project"
+                  >
+                    <Iconify icon="lucide:folder-plus" size={13} />
+                  </button>
+                  <Show when={newProjectMenuOpen()}>
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      class="absolute left-0 top-full mt-1 w-44 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-50 text-xs"
+                    >
+                      <button
+                        onClick={() => {
+                          setNewProjectMenuOpen(false);
+                          setShowNewProjectModal(true);
+                        }}
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-ink-200 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
+                      >
+                        <Iconify icon="lucide:folder-plus" size={13} />
+                        <span>New Project</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setNewProjectMenuOpen(false);
+                          quickStartProject();
+                        }}
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
+                      >
+                        <Iconify icon="lucide:zap" size={13} />
+                        <span>Quick Start</span>
+                      </button>
+                    </div>
+                  </Show>
+                </div>
               </div>
               <Show
                 when={projects().length > 0}
@@ -1401,7 +1960,7 @@ export default function RemoteCodePage() {
               </div>
               <div class="space-y-0.5">
                 <For
-                  each={filteredSessions().slice().sort((a, b) => b.updatedAt - a.updatedAt)}
+                  each={sortedSessions(filteredSessions())}
                   fallback={
                     <div class="px-2.5 py-3 text-xs text-ink-600 leading-relaxed">
                       {projects().length === 0
@@ -1412,28 +1971,72 @@ export default function RemoteCodePage() {
                 >
                   {(s) => {
                     const isActive = () => s.id === activeSessionId();
+                    const projName = () => {
+                      const norm = (p: string) => p.replace(/\/+$/, "");
+                      const cwd = norm(s.cwd || "");
+                      const hit = projects().find((p) => {
+                        const pp = norm(p.path);
+                        return cwd === pp || cwd.startsWith(pp + "/");
+                      });
+                      return hit?.name;
+                    };
                     return (
                       <div
-                        onClick={() => selectSession(s.id)}
+                        onClick={() => {
+                          setHistoryView(false);
+                          selectSession(s.id);
+                        }}
+                        onDblClick={() => {
+                          setRenamingId(s.id);
+                          setRenameText(s.title);
+                        }}
                         class={`group flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer text-[13px] transition-colors ${
                           isActive() ? "bg-ink-800 text-ink-50" : "text-ink-400 hover:bg-ink-900/60 hover:text-ink-200"
                         }`}
                         title={`${s.title}\n${s.cwd}`}
                       >
-                        <span class="truncate flex-1">{s.title}</span>
-                        <span class="text-[10px] text-ink-600 shrink-0">{timeAgo(s.updatedAt)}</span>
-                        <Show when={s.status === "running"}>
-                          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                        <Show
+                          when={renamingId() === s.id}
+                          fallback={
+                            <>
+                              <span class="truncate flex-1">
+                                {s.title}
+                                <Show when={groupBy() === "none" && projName()}>
+                                  <span class="block text-[10px] text-ink-600 font-normal truncate">
+                                    {projName()}
+                                  </span>
+                                </Show>
+                              </span>
+                              <span class="text-[10px] text-ink-600 shrink-0">{timeAgo(s.updatedAt)}</span>
+                              <Show when={s.status === "running"}>
+                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                              </Show>
+                              <div class="hidden group-hover:flex items-center shrink-0">
+                                <button
+                                  onClick={(e) => deleteSession(s.id, e)}
+                                  class="p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
+                                  title="Delete"
+                                >
+                                  <Iconify icon="lucide:trash-2" size={11} />
+                                </button>
+                              </div>
+                            </>
+                          }
+                        >
+                          <input
+                            type="text"
+                            class="flex-1 min-w-0 bg-ink-950 border border-ink-500 rounded px-1.5 py-0.5 text-[13px] text-ink-100 focus:outline-none"
+                            value={renameText()}
+                            onInput={(e) => setRenameText(e.currentTarget.value)}
+                            onKeyDown={(e) => {
+                              e.stopPropagation();
+                              if (e.key === "Enter") submitRename(s.id);
+                              if (e.key === "Escape") setRenamingId(null);
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            ref={(el) => setTimeout(() => el?.select(), 30)}
+                          />
                         </Show>
-                        <div class="hidden group-hover:flex items-center shrink-0">
-                          <button
-                            onClick={(e) => deleteSession(s.id, e)}
-                            class="p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
-                            title="Delete"
-                          >
-                            <Iconify icon="lucide:trash-2" size={11} />
-                          </button>
-                        </div>
                       </div>
                     );
                   }}
@@ -1464,7 +2067,7 @@ export default function RemoteCodePage() {
               <div class="flex items-center gap-2">
                 <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
                 <span>
-                  Host <strong>{activeHost()?.name || activeHost()?.hostname || activeHost()?.id}</strong> is offline. Start the daemon on your machine: <code class="bg-amber-500/20 px-1 py-0.5 rounded font-mono">./code-daemon</code>
+                  Host <strong>{activeHost()?.name || activeHost()?.hostname || activeHost()?.id}</strong> is offline. Start the daemon on your machine: <code class="bg-amber-500/20 px-1 py-0.5 rounded font-mono">./llmgw-daemon</code>
                 </span>
               </div>
               <div class="flex items-center gap-2">
@@ -1503,9 +2106,66 @@ export default function RemoteCodePage() {
           </div>
 
           {/* Chat Stream Viewport */}
+          <Show
+            when={!historyView()}
+            fallback={
+              <div class="flex-1 overflow-y-auto px-4 md:px-8 py-8">
+                <div class="max-w-2xl mx-auto">
+                  <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-base font-semibold text-ink-100">Conversation History</h2>
+                    <button
+                      onClick={() => setHistoryView(false)}
+                      class="p-1.5 rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-900 cursor-pointer"
+                      title="Back to chat"
+                    >
+                      <Iconify icon="lucide:x" size={15} />
+                    </button>
+                  </div>
+                  <div class="relative mb-4">
+                    <Iconify icon="lucide:search" size={14} class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-600" />
+                    <input
+                      type="text"
+                      placeholder="Search conversations..."
+                      class="w-full text-[13px] bg-ink-900 border border-line/70 rounded-xl pl-9 pr-3 py-2 text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
+                      value={sessionFilter()}
+                      onInput={(e) => setSessionFilter(e.currentTarget.value)}
+                    />
+                  </div>
+                  <div class="space-y-1">
+                    <For
+                      each={sortedSessions(filteredSessions())}
+                      fallback={
+                        <p class="text-xs text-ink-600 py-6 text-center">No conversations found.</p>
+                      }
+                    >
+                      {(s) => (
+                        <button
+                          onClick={() => {
+                            setHistoryView(false);
+                            selectSession(s.id);
+                          }}
+                          class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-ink-900/70 transition-colors group cursor-pointer"
+                        >
+                          <div class="flex items-center justify-between gap-3">
+                            <span class="text-[13px] text-ink-200 truncate font-medium">{s.title}</span>
+                            <span class="text-[11px] text-ink-600 shrink-0">{timeAgo(s.updatedAt)}</span>
+                          </div>
+                          <div class="flex items-center gap-1.5 mt-0.5 text-[11px] text-ink-500">
+                            <Iconify icon="lucide:folder" size={11} />
+                            <span class="truncate font-mono">{s.cwd}</span>
+                          </div>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </div>
+              </div>
+            }
+          >
           <div
             ref={setChatContainerRef}
-            class="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 select-text"
+            onScroll={onChatScroll}
+            class="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 select-text scroll-smooth"
           >
             {/* Empty state estilo Antigravity: só projeto + hint */}
             <Show when={messages().length === 0 && !activeSessionId()}>
@@ -1548,148 +2208,239 @@ export default function RemoteCodePage() {
 
             {/* Conversation Messages */}
             <For each={messages()}>
-              {(msg) => (
-                <div
-                  class={`flex flex-col max-w-4xl mx-auto ${
-                    msg.role === "user" ? "items-end" : "items-start"
-                  }`}
-                >
-                  {/* Message Bubble Container */}
+              {(msg, idx) => {
+                const isLast = () => idx() === messages().length - 1;
+                const textOf = () =>
+                  msg.blocks
+                    .filter((b) => b.type === "text" && b.text)
+                    .map((b) => b.text as string)
+                    .join("\n");
+                return (
                   <div
-                    class={`w-full rounded-2xl p-4 transition-all ${
-                      msg.role === "user"
-                        ? "bg-ink-900/90 border border-line max-w-2xl text-ink-100"
-                        : "bg-transparent text-ink-200"
+                    class={`group/msg flex flex-col w-full ${convWidthClass()} mx-auto ${
+                      msg.role === "user" ? "items-end" : "items-start"
                     }`}
                   >
-                    {/* Header with avatar & role badge */}
-                    <div class="flex items-center gap-2 mb-2">
-                      <span
-                        class={`w-6 h-6 rounded-md flex items-center justify-center text-xs font-semibold ${
-                          msg.role === "user"
-                            ? "bg-brand-500 text-white"
-                            : "bg-ink-800 text-brand-400 border border-brand-500/20"
-                        }`}
-                      >
-                        <Iconify
-                          icon={
-                            msg.role === "user"
-                              ? "lucide:terminal"
-                              : "lucide:bot"
-                          }
-                          size={13}
-                        />
-                      </span>
-                      <span class="text-xs font-medium text-ink-300">
-                        {msg.role === "user" ? "You" : "Agent"}
-                      </span>
-                    </div>
+                    {/* ===== USER ===== */}
+                    <Show when={msg.role === "user"}>
+                      <div class="flex flex-col items-end max-w-[90%] sm:max-w-[80%]">
+                        <div class="bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md">
+                          <p class="whitespace-pre-line text-sm leading-relaxed">{textOf()}</p>
+                        </div>
+                        <div class="flex items-center gap-0.5 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+                          <button
+                            onClick={() => copyMsg(msg.id, textOf())}
+                            class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                            title="Copy"
+                          >
+                            <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={13} />
+                          </button>
+                          <button
+                            onClick={() => editUserMsg(msg)}
+                            class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                            title="Edit in composer"
+                          >
+                            <Iconify icon="lucide:pencil" size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    </Show>
 
-                    {/* Content Blocks (Text, Reasoning, Tool Calls, Tool Results) */}
-                    <div class="space-y-3">
-                      <For each={msg.blocks}>
-                        {(block) => {
-                          if (block.type === "text" && block.text) {
-                            return (
-                              <div
-                                class="prose prose-invert max-w-none text-sm leading-relaxed overflow-x-auto"
-                                innerHTML={renderMarkdown(block.text)}
-                              />
-                            );
+                    {/* ===== ASSISTANT ===== */}
+                    <Show when={msg.role !== "user"}>
+                      <div class="w-full flex flex-col items-start overflow-hidden">
+                        {/* Loading dots while the first tokens arrive */}
+                        <Show
+                          when={
+                            sessionStatus() === "running" &&
+                            isLast() &&
+                            msg.blocks.length === 0
                           }
+                        >
+                          <div class="dot-typing flex items-center gap-1 px-1 py-2">
+                            <span class="w-1.5 h-1.5 bg-ink-500 rounded-full inline-block" />
+                            <span class="w-1.5 h-1.5 bg-ink-500 rounded-full inline-block" />
+                            <span class="w-1.5 h-1.5 bg-ink-500 rounded-full inline-block" />
+                          </div>
+                        </Show>
 
-                          if (block.type === "reasoning" && block.reasoning) {
-                            return (
-                              <details class="rounded-xl border border-line/80 bg-ink-900/40 p-3 text-xs text-ink-400">
-                                <summary class="cursor-pointer font-medium text-ink-300 flex items-center gap-2 select-none">
-                                  <Iconify icon="lucide:cpu" size={13} class="text-brand-400" />
-                                  <span>Thought Process</span>
-                                </summary>
-                                <div class="mt-2 pl-4 border-l-2 border-line text-ink-400 whitespace-pre-wrap font-mono text-[11px]">
-                                  {block.reasoning}
-                                </div>
-                              </details>
-                            );
-                          }
-
-                          if (block.type === "tool_call") {
-                            return (
-                              <div class="rounded-xl border border-line bg-ink-900/90 overflow-hidden font-mono text-xs my-2 shadow-sm">
-                                <div class="bg-ink-800/80 px-3 py-1.5 border-b border-line flex items-center justify-between">
-                                  <div class="flex items-center gap-2 text-brand-400 font-semibold">
-                                    <Iconify
-                                      icon={
-                                        block.toolName === "bash"
-                                          ? "lucide:terminal"
-                                          : block.toolName === "read"
-                                            ? "lucide:file-text"
-                                            : block.toolName === "write" ||
-                                                block.toolName === "edit"
-                                              ? "lucide:code"
-                                              : "lucide:wrench"
-                                      }
-                                      size={13}
-                                    />
-                                    <span>tool: {block.toolName}</span>
+                        <div class="w-full space-y-2.5">
+                          <For each={msg.blocks}>
+                            {(block) => {
+                              if (block.type === "text" && block.text) {
+                                return (
+                                  <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
+                                    <Streamdown>{block.text}</Streamdown>
                                   </div>
-                                  <span class="text-[10px] text-ink-500">
-                                    id: {block.toolId}
-                                  </span>
-                                </div>
-                                <div class="p-3 bg-ink-950/60 overflow-x-auto text-[11px] text-ink-300 whitespace-pre-wrap">
-                                  {block.toolArgs}
-                                </div>
-                              </div>
-                            );
-                          }
+                                );
+                              }
 
-                          if (block.type === "tool_result") {
-                            return (
-                              <div class="rounded-xl border border-line/70 bg-ink-950 overflow-hidden font-mono text-xs my-2">
-                                <div class="bg-ink-900 px-3 py-1 border-b border-line/60 flex items-center justify-between text-[11px] text-ink-400">
-                                  <div class="flex items-center gap-1.5">
-                                    <Iconify
-                                      icon={
-                                        block.isError
-                                          ? "lucide:x"
-                                          : "lucide:check"
-                                      }
-                                      size={12}
-                                      class={
-                                        block.isError
-                                          ? "text-rose-400"
-                                          : "text-emerald-400"
-                                      }
-                                    />
-                                    <span>
-                                      Output (
-                                      {block.isError ? "Error" : "Success"})
-                                    </span>
+                              if (block.type === "reasoning" && block.reasoning) {
+                                return (
+                                  <Show when={verboseChat()}>
+                                    <div class="w-full">
+                                      <button
+                                        onClick={() =>
+                                          setExpandedThinking((prev) => ({
+                                            ...prev,
+                                            [msg.id]: !prev[msg.id],
+                                          }))
+                                        }
+                                        class="flex items-center gap-1.5 text-xs text-ink-500 hover:text-ink-300 transition-colors cursor-pointer"
+                                      >
+                                        <Iconify icon="lucide:bot" size={14} />
+                                        <span>
+                                          {expandedThinking()[msg.id] ? "Hide thinking" : "Thinking"}
+                                        </span>
+                                        <Iconify
+                                          icon="lucide:chevron-down"
+                                          size={12}
+                                          class={`transition-transform ${expandedThinking()[msg.id] ? "rotate-180" : ""}`}
+                                        />
+                                      </button>
+                                      <Show when={expandedThinking()[msg.id]}>
+                                        <div class="mt-1.5 pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap text-xs leading-relaxed">
+                                          {block.reasoning}
+                                        </div>
+                                      </Show>
+                                    </div>
+                                  </Show>
+                                );
+                              }
+
+                              if (block.type === "image") {
+                                return (
+                                  <div class="flex items-center gap-1.5 text-[11px] text-ink-500 border border-line/60 rounded-lg px-2 py-1">
+                                    <Iconify icon="lucide:image" size={12} />
+                                    <span>[attached {block.text || "image"}]</span>
                                   </div>
-                                  <button
-                                    onClick={() =>
-                                      copyWithToast(block.toolResult || "")
-                                    }
-                                    class="text-ink-500 hover:text-ink-300 p-0.5"
-                                    title="Copy output"
-                                  >
-                                    <Iconify icon="lucide:copy" size={11} />
-                                  </button>
-                                </div>
-                                <pre class="p-3 text-[11px] text-ink-300 overflow-x-auto max-h-64 whitespace-pre-wrap">
-                                  {block.toolResult}
-                                </pre>
-                              </div>
-                            );
-                          }
+                                );
+                              }
 
-                          return null;
-                        }}
-                      </For>
-                    </div>
+                              if (block.type === "tool_call") {
+                                const prog = () => toolProgress()[block.toolId || ""];
+                                return (
+                                  <Show when={verboseChat()}>
+                                    <div class="w-full rounded-xl border border-line/70 bg-ink-900/50 overflow-hidden text-xs">
+                                      <div class="px-3 py-1.5 flex items-center justify-between gap-2">
+                                        <div class="flex items-center gap-2 text-ink-200 font-medium min-w-0">
+                                          <Show
+                                            when={!prog()}
+                                            fallback={
+                                              <span class="w-3 h-3 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
+                                            }
+                                          >
+                                            <Iconify
+                                              icon={
+                                                block.toolName === "bash"
+                                                  ? "lucide:terminal"
+                                                  : block.toolName === "read"
+                                                    ? "lucide:file-text"
+                                                    : block.toolName === "write" ||
+                                                        block.toolName === "edit"
+                                                      ? "lucide:code"
+                                                      : "lucide:wrench"
+                                              }
+                                              size={13}
+                                              class="text-ink-400 shrink-0"
+                                            />
+                                          </Show>
+                                          <span class="truncate font-mono">
+                                            {block.toolName || "tool"}
+                                          </span>
+                                        </div>
+                                        <button
+                                          onClick={() => copyWithToast(block.toolArgs || "")}
+                                          class="text-ink-600 hover:text-ink-300 p-0.5 shrink-0 cursor-pointer"
+                                          title="Copy args"
+                                        >
+                                          <Iconify icon="lucide:copy" size={11} />
+                                        </button>
+                                      </div>
+                                      <Show when={prog()}>
+                                        <div class="px-3 pb-2 font-mono text-[11px] text-ink-500 truncate">
+                                          {prog()}
+                                        </div>
+                                      </Show>
+                                      <Show when={block.toolArgs}>
+                                        <details class="border-t border-line/50">
+                                          <summary class="px-3 py-1 text-[11px] text-ink-600 hover:text-ink-400 cursor-pointer select-none">
+                                            Arguments
+                                          </summary>
+                                          <pre class="px-3 pb-2.5 font-mono text-[11px] text-ink-400 overflow-x-auto whitespace-pre-wrap max-h-48">
+                                            {block.toolArgs}
+                                          </pre>
+                                        </details>
+                                      </Show>
+                                    </div>
+                                  </Show>
+                                );
+                              }
+
+                              if (block.type === "tool_result") {
+                                return (
+                                  <Show when={verboseChat()}>
+                                    <div
+                                      class={`w-full rounded-xl border overflow-hidden font-mono text-xs ${
+                                        block.isError
+                                          ? "border-rose-500/30 bg-rose-500/5"
+                                          : "border-line/60 bg-ink-950"
+                                      }`}
+                                    >
+                                      <div class="px-3 py-1 flex items-center justify-between text-[11px] text-ink-500">
+                                        <div class="flex items-center gap-1.5">
+                                          <Iconify
+                                            icon={block.isError ? "lucide:x" : "lucide:check"}
+                                            size={12}
+                                            class={block.isError ? "text-rose-400" : "text-emerald-400"}
+                                          />
+                                          <span>{block.isError ? "Error" : "Output"}</span>
+                                        </div>
+                                        <button
+                                          onClick={() => copyWithToast(block.toolResult || "")}
+                                          class="hover:text-ink-300 p-0.5 cursor-pointer"
+                                          title="Copy output"
+                                        >
+                                          <Iconify icon="lucide:copy" size={11} />
+                                        </button>
+                                      </div>
+                                      <pre class="px-3 pb-2.5 text-[11px] text-ink-300 overflow-x-auto max-h-64 whitespace-pre-wrap">
+                                        {(block.toolResult || "").slice(0, 4000)}
+                                      </pre>
+                                    </div>
+                                  </Show>
+                                );
+                              }
+
+                              return null;
+                            }}
+                          </For>
+                        </div>
+
+                        {/* Hover actions (chatbot-style) */}
+                        <Show when={!sessionStatus() || !isLast()}>
+                          <div class="flex items-center gap-0.5 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+                            <button
+                              onClick={() => copyMsg(msg.id, textOf())}
+                              class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                              title="Copy"
+                            >
+                              <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={14} />
+                            </button>
+                            <button
+                              onClick={() => regenerateFrom(idx())}
+                              class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                              title="Regenerate response"
+                            >
+                              <Iconify icon="lucide:rotate-cw" size={14} />
+                            </button>
+                          </div>
+                        </Show>
+                      </div>
+                    </Show>
                   </div>
-                </div>
-              )}
+                );
+              }}
             </For>
 
             {/* Pending Tool Approval Banner (Safe Mode) */}
@@ -1743,9 +2494,26 @@ export default function RemoteCodePage() {
               </div>
             </Show>
           </div>
+          </Show>
 
           {/* Composer estilo Antigravity */}
+          <Show when={!historyView()}>
           <div class="px-4 pb-4 pt-2 bg-ink-950 relative z-20">
+            {/* Floating scroll-to-bottom (chatbot FEAT-06) */}
+            <Show when={!isAtBottom() && messages().length > 0}>
+              <div class="flex justify-center pb-2">
+                <button
+                  onClick={() => {
+                    setIsAtBottom(true);
+                    scrollToBottom(true);
+                  }}
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-ink-900 border border-line/70 text-ink-300 shadow-lg hover:text-ink-100 cursor-pointer"
+                >
+                  <Iconify icon="lucide:arrow-down" size={13} />
+                  <span>Scroll to bottom</span>
+                </button>
+              </div>
+            </Show>
             {/* Slash Command Autocomplete Menu */}
             <Show when={slashMatches().length > 0}>
               <div class="absolute bottom-full left-4 right-4 md:left-8 md:right-8 mb-2 rounded-xl border border-line bg-ink-900/95 shadow-2xl p-1.5 max-h-60 overflow-y-auto z-40 backdrop-blur">
@@ -1785,9 +2553,11 @@ export default function RemoteCodePage() {
                   </span>
                 </div>
               </Show>
-              <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors overflow-hidden">
+              <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors overflow-hidden relative">
                 <textarea
-                  class="w-full bg-transparent text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 max-h-48 min-h-[48px]"
+                  id="rc-composer"
+                  rows={1}
+                  class="w-full bg-transparent text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto"
                   placeholder={
                     activeSession()
                       ? `Ask anything, @ to mention, / for actions`
@@ -1796,7 +2566,12 @@ export default function RemoteCodePage() {
                         : "Start a New Conversation to begin..."
                   }
                   value={inputPrompt()}
-                  onInput={(e) => setInputPrompt(e.currentTarget.value)}
+                  onInput={(e) => {
+                    setInputPrompt(e.currentTarget.value);
+                    const el = e.currentTarget;
+                    el.style.height = "auto";
+                    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+                  }}
                 onKeyDown={(e) => {
                   if (slashMatches().length > 0) {
                     if (e.key === "ArrowDown") {
@@ -1827,16 +2602,88 @@ export default function RemoteCodePage() {
                   }
                 }}
               />
+              <Show when={inputPrompt().length > 0}>
+                <button
+                  onClick={() => setInputPrompt("")}
+                  class="absolute top-2.5 right-2.5 p-1 rounded-md text-ink-600 hover:text-ink-300 hover:bg-ink-800 transition-colors cursor-pointer"
+                  title="Clear input"
+                >
+                  <Iconify icon="lucide:x" size={13} />
+                </button>
+              </Show>
 
               <div class="flex items-center justify-between px-3 pb-2.5 pt-1">
                 <div class="flex items-center gap-1 text-xs text-ink-400">
-                  <button
-                    onClick={() => toast("Attachments em breve", "info")}
-                    class="w-6 h-6 rounded-full hover:bg-ink-800 flex items-center justify-center cursor-pointer"
-                    title="Add"
-                  >
-                    <Iconify icon="lucide:plus" size={14} />
-                  </button>
+                  {/* Add Context (+) — Antigravity-style */}
+                  <div class="relative">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setAddContextOpen(!addContextOpen());
+                        setModelMenuOpen(false);
+                      }}
+                      class="w-6 h-6 rounded-full hover:bg-ink-800 flex items-center justify-center cursor-pointer"
+                      title="Add context"
+                    >
+                      <Iconify icon="lucide:plus" size={14} />
+                    </button>
+                    <Show when={addContextOpen()}>
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        class="absolute left-0 bottom-full mb-1.5 w-48 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-50"
+                      >
+                        <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                          Add context
+                        </div>
+                        <button
+                          onClick={() => {
+                            setAddContextOpen(false);
+                            setInputPrompt((p) => p + "@");
+                            try {
+                              document.querySelector<HTMLTextAreaElement>("#rc-composer")?.focus();
+                            } catch {}
+                          }}
+                          class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
+                        >
+                          <Iconify icon="lucide:at-sign" size={13} />
+                          <span>Mentions</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setAddContextOpen(false);
+                            setInputPrompt("/");
+                            try {
+                              document.querySelector<HTMLTextAreaElement>("#rc-composer")?.focus();
+                            } catch {}
+                          }}
+                          class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
+                        >
+                          <Iconify icon="lucide:slash" size={13} />
+                          <span>Actions</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setAddContextOpen(false);
+                            toast("File attachments are coming soon", "info");
+                          }}
+                          class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-600 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
+                        >
+                          <Iconify icon="lucide:image" size={13} />
+                          <span>Media (soon)</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setAddContextOpen(false);
+                            toast("Browser context is coming soon", "info");
+                          }}
+                          class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-600 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
+                        >
+                          <Iconify icon="lucide:globe" size={13} />
+                          <span>Browser (soon)</span>
+                        </button>
+                      </div>
+                    </Show>
+                  </div>
                   <span class="font-medium">{activeModel().split("/").pop()}</span>
                   <Iconify icon="lucide:chevron-down" size={11} />
                 </div>
@@ -1884,6 +2731,7 @@ export default function RemoteCodePage() {
             </div>
             </div>
           </div>
+          </Show>
         </main>
       </div>
       </Show>
@@ -2104,6 +2952,16 @@ export default function RemoteCodePage() {
                 }`}
               >
                 Slash Commands
+              </button>
+              <button
+                onClick={() => setConfigTab("appearance")}
+                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
+                  configTab() === "appearance"
+                    ? "border-brand-500 text-brand-400"
+                    : "border-transparent text-ink-400 hover:text-ink-200"
+                }`}
+              >
+                Appearance
               </button>
             </div>
 
@@ -2448,6 +3306,60 @@ export default function RemoteCodePage() {
                     </div>
                   )}
                 </For>
+              </div>
+            </Show>
+
+            {/* TAB 5: APPEARANCE (Antigravity Chat Settings) */}
+            <Show when={configTab() === "appearance"}>
+              <div class="space-y-3 text-xs">
+                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
+                  <div>
+                    <div class="font-semibold text-ink-200">Verbose Agent Chat</div>
+                    <div class="text-[11px] text-ink-500 mt-0.5">
+                      Display intermediate thinking steps and tool calls.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const v = !verboseChat();
+                      setVerboseChat(v);
+                      try { localStorage.setItem("llmgw-rc-verbose", v ? "1" : "0"); } catch {}
+                    }}
+                    class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${verboseChat() ? "bg-sky-500" : "bg-ink-700"}`}
+                    style={{ height: "22px" }}
+                    title="Toggle verbose agent chat"
+                  >
+                    <span
+                      class={`block w-4 h-4 rounded-full bg-white transition-transform ${verboseChat() ? "translate-x-[18px]" : "translate-x-0"}`}
+                      style={{ height: "16px", width: "16px" }}
+                    />
+                  </button>
+                </div>
+                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60">
+                  <div class="font-semibold text-ink-200">Conversation Width</div>
+                  <div class="text-[11px] text-ink-500 mt-0.5 mb-2">
+                    Maximum width of the conversation panel.
+                  </div>
+                  <div class="grid grid-cols-3 gap-1 bg-ink-950 p-1 rounded-xl border border-line/60">
+                    <For each={[["narrow", "Narrow"], ["default", "Default"], ["wide", "Wide"]] as const}>
+                      {([v, label]) => (
+                        <button
+                          onClick={() => {
+                            setConvWidth(v);
+                            try { localStorage.setItem("llmgw-rc-width", v); } catch {}
+                          }}
+                          class={`py-1.5 rounded-lg text-center font-medium transition-colors cursor-pointer ${
+                            convWidth() === v
+                              ? "bg-ink-800 text-ink-100"
+                              : "text-ink-500 hover:text-ink-300"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </div>
               </div>
             </Show>
           </div>

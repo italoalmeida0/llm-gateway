@@ -252,6 +252,32 @@ export type MsgPart =
   | { kind: "tools"; units: ToolUnit[] }
   | { kind: "thinking"; blocks: ContentBlock[] };
 
+/** A message with no visible content (loading dots only) never forms part of a series. */
+export function msgIsEmpty(m: { blocks: ContentBlock[] }): boolean {
+  return (m.blocks || []).every(
+    (b) =>
+      (b.type === "text" && !(b.text || "").trim()) ||
+      (b.type === "reasoning" && !(b.reasoning || "").trim()) ||
+      b.type === "image",
+  );
+}
+
+/** A message carries tool activity when it has a call, a result, or (after
+ * normalization) anything only a tool run leaves behind. Display helpers
+ * treat image-only leftovers as tool residue, never as new thought. */
+export function msgHasTools(m: { blocks: ContentBlock[] }): boolean {
+  return (m.blocks || []).some((b) => b.type === "tool_call" || b.type === "tool_result");
+}
+
+/**
+ * Pairs the tool units of one assistant message, then attaches any orphan
+ * tool_result blocks found in the following user/tool envelopes to the SAME
+ * series (the daemon persists results separately; rendering must not
+ * pretend they belong to a later turn). `tail` is the slice of following
+ * raw messages considered part of the still-open turn; indices of consumed
+ * envelopes are reported so the renderer can skip them.
+ */
+
 /**
  * Splits a message into text runs, thinking runs and consecutive tool runs
  * (order kept). Thinking panels break a tool series on purpose: a thinking
@@ -309,6 +335,110 @@ export function splitToolRuns(blocks: ContentBlock[]): MsgPart[] {
   flushThink();
   flushBuf();
   return parts;
+}
+
+/**
+ * Display-only cross-message series grouping. The renderer calls this with
+ * the rendered message array; consecutive rendered assistant messages that
+ * contain ONLY tool blocks (no visible text/thinking of their own) fuse
+ * into one "series" block that renders as a single aggregate balloon —
+ * whatever tools happened inside, in whatever invocation order, with no
+ * distinction. A series ends at the first assistant message with its own
+ * real text/thinking, at any user message, or at an empty (pending) one.
+ *
+ * Implementation detail: series fusing happens at RENDER time over
+ * ChatMessage[] (not in applySessionContent) so the raw transcript array
+ * — and therefore every srcIdx used by edit/delete/regenerate — stays
+ * byte-identical to the daemon's wire order.
+ */
+export type RenderBlockKind = "single" | "series";
+
+export interface RenderBlockBase {
+  kind: RenderBlockKind;
+}
+
+export interface RenderBlockSingle extends RenderBlockBase {
+  kind: "single";
+  msg: ChatMessage;
+}
+
+export interface RenderBlockSeries extends RenderBlockBase {
+  kind: "series";
+  /** Lead message (carries the visible header chunk + thinking/text). */
+  msg: ChatMessage;
+  /** Fused-in following tool-only messages (rendered inside the card). */
+  extras: ChatMessage[];
+  /** Every ToolUnit of the whole series, in display order. */
+  units: ToolUnit[];
+}
+
+export type RenderBlock = RenderBlockSingle | RenderBlockSeries;
+
+/** A rendered assistant message is series-fusible when it shows tools and
+ * nothing else of its own (empty loading shells never fuse). */
+function fusableAssistant(m: ChatMessage): boolean {
+  if (m.role === "user" || m.system || msgIsEmpty(m)) return false;
+  if (!msgHasTools(m)) return false;
+  return (m.blocks || []).every(
+    (b) =>
+      b.type === "tool_call" ||
+      b.type === "tool_result" ||
+      (b.type === "text" && !(b.text || "").trim()) ||
+      (b.type === "reasoning" && !(b.reasoning || "").trim()) ||
+      b.type === "image",
+  );
+}
+
+export function collectSeriesUnits(
+  head: ChatMessage,
+  tail: ChatMessage[],
+): { units: ToolUnit[]; consumed: number } {
+  const units: ToolUnit[] = [];
+  const byId = new Map<string, ToolUnit>();
+  const absorb = (m: ChatMessage) => {
+    for (const b of m.blocks || []) {
+      if (b.type === "tool_call") {
+        const u: ToolUnit = { call: b };
+        units.push(u);
+        if (b.toolId) byId.set(b.toolId, u);
+      } else if (b.type === "tool_result") {
+        const u = (b.toolId && byId.get(b.toolId)) || null;
+        if (u && !u.result) u.result = b;
+        else units.push({ result: b });
+      }
+    }
+  };
+  absorb(head);
+  let consumed = 0;
+  for (const m of tail) {
+    if (!fusableAssistant(m)) break;
+    absorb(m);
+    consumed++;
+  }
+  return { units, consumed };
+}
+
+export function buildRenderBlocks(list: ChatMessage[]): RenderBlock[] {
+  const out: RenderBlock[] = [];
+  let i = 0;
+  while (i < list.length) {
+    const m = list[i];
+    if (fusableAssistant(m)) {
+      const tail = list.slice(i + 1);
+      const { units, consumed } = collectSeriesUnits(m, tail);
+      out.push({
+        kind: "series",
+        msg: m,
+        extras: tail.slice(0, consumed),
+        units,
+      });
+      i += 1 + consumed;
+      continue;
+    }
+    out.push({ kind: "single", msg: m });
+    i++;
+  }
+  return out;
 }
 
 export interface ToolSummary {
@@ -1018,9 +1148,13 @@ export default function RemoteCodePage() {
     typeof window !== "undefined" ? window.innerWidth <= 768 : false,
   );
 
-  // Live thinking timer (chatbot thinkingElapsed).
+  // Live thinking timer (chatbot thinkingElapsed). thinkingIndex tracks
+  // WHICH reasoning block of the live assistant message the timer belongs
+  // to, so the clock + ticking dots stick to the right panel when one
+  // message carries several thinkings.
   const [thinkingStart, setThinkingStart] = createSignal<number | null>(null);
   const [thinkingElapsed, setThinkingElapsed] = createSignal(0);
+  const [thinkingIndex, setThinkingIndex] = createSignal(0);
   let thinkingTimer: any = null;
   function startThinkingTimer() {
     stopThinkingTimer();
@@ -1342,7 +1476,9 @@ export default function RemoteCodePage() {
         typeof c.encrypted_content === "string"
       ) {
         const txt = c.summary || c.text || "";
-        if (txt) blocks.push({ type: "reasoning", reasoning: txt });
+        if (txt || typeof c.reasoning_id === "string" || typeof c.encrypted_content === "string") {
+          blocks.push({ type: "reasoning", reasoning: txt });
+        }
         return;
       }
       // Tool call: Anthropic {type:"tool_use",id,name,input} or Go {id,name,arguments}.
@@ -1800,11 +1936,15 @@ export default function RemoteCodePage() {
         // so the live view already matches the normalized refresh (top).
         const ri = blocks.findIndex((b) => b.type === "reasoning");
         if (ri >= 0) {
-          blocks[ri] = {
+          const merged = {
             ...blocks[ri],
             reasoning: (blocks[ri].reasoning || "") + delta,
           };
-          return [...prev.slice(0, -1), { ...last, blocks }];
+          const next = [...blocks];
+          // Keep the merged panel at the top so text never overtakes it.
+          next.splice(ri, 1);
+          next.unshift(merged);
+          return [...prev.slice(0, -1), { ...last, blocks: next }];
         }
         return [
           ...prev.slice(0, -1),
@@ -1821,6 +1961,8 @@ export default function RemoteCodePage() {
         },
       ];
     });
+    // The live clock/ticks belong to this message's first reasoning block.
+    setThinkingIndex(0);
   }
 
   function stampThinkingDuration(dur: number) {
@@ -2526,18 +2668,26 @@ export default function RemoteCodePage() {
   /**
    * One thinking panel (button + collapsible body). Rendered from the
    * dedicated "thinking" parts (never from the text path), so reasoning is
-   * always ABOVE its own tool group, live-streaming or persisted.
+   * always ABOVE its own tool group, live-streaming or persisted. The block
+   * carries its own id so two thinkings inside one series never collide.
    */
-  function renderThinkingBlock(msg: ChatMessage, block: ContentBlock, isLast: boolean) {
-    const thinkKey = () => `${msg.id}:think`;
-    const live = () => isLast && sessionStatus() === "running" && thinkingStart() !== null;
-    const open = () => expandedThinking()[thinkKey()] ?? live();
+  function renderThinkingBlock(
+    msg: ChatMessage,
+    block: ContentBlock,
+    isLast: boolean,
+    nth: number,
+  ) {
+    const thinkKey = () => `${msg.id}:think:${nth}`;
+    const openNow = () => isLast && sessionStatus() === "running";
+    const live = () =>
+      openNow() && thinkingStart() !== null && thinkingIndex() === nth;
+    const open = () => expandedThinking()[thinkKey()] ?? openNow();
     return (
       <div class="w-full">
         <button
           onClick={() => setExpandedThinking((prev) => ({ ...prev, [thinkKey()]: !open() }))}
           class={`flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
-            live() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
+            openNow() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
           }`}
         >
           <Iconify icon="lucide:bot" size={14} />
@@ -2565,7 +2715,7 @@ export default function RemoteCodePage() {
         </button>
         <Show when={open()}>
           <div class="mt-1.5 pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap text-xs leading-relaxed">
-            {block.reasoning}
+            {block.reasoning || "(thinking…)"}
           </div>
         </Show>
       </div>
@@ -2574,17 +2724,21 @@ export default function RemoteCodePage() {
 
   /**
    * The special aggregate balloon: one card per consecutive tool-call series
-   * inside one assistant message. It has its own chrome (left rail + header
-   * + collapse) and NO per-message chrome — edit/regenerate/delete/copy of
-   * the parent message stay on the text parts; the card itself is static.
-   * The series ends the moment a text or thinking block arrives: the card
-   * is drawn from the tools part, so adjacency IS the grouping — anything
-   * after the series boundary forms its own isolated balloon.
+   * (possibly spanning several rendered assistant messages — see
+   * buildRenderBlocks). It has its own chrome (header + collapse) and NO
+   * per-message chrome of its own: the lead message's hover actions cover
+   * the whole turn; the card itself carries no edit/delete/copy buttons.
+   * `extraSrcIds` are the raw daemon indices fused in, used only for keys.
    */
-  function renderAssistantSpecial(msgId: string, units: ToolUnit[], isLast: boolean) {
+  function renderAssistantSpecial(
+    msgId: string,
+    units: ToolUnit[],
+    isLast: boolean,
+    extraSrcIds: number[] = [],
+  ) {
     const running = isLast && sessionStatus() === "running";
     const summary = specialTitle(units);
-    const key = `${msgId}:special`;
+    const key = `${msgId}:special:${extraSrcIds.join(",")}`;
     const open = () => toolGroupOpen()[key] ?? true;
     return (
       <Show when={verboseChat()}>
@@ -2619,7 +2773,7 @@ export default function RemoteCodePage() {
           </button>
           <Show when={open()}>
             <div class="border-t border-line/60 px-2 py-1.5 space-y-0.5">
-              {renderToolSegs(msgId, units, running)}
+              {renderToolSegs(msgId, extraSrcIds.join(",") || "lead", units, running)}
             </div>
           </Show>
         </div>
@@ -3473,7 +3627,134 @@ export default function RemoteCodePage() {
     return undefined;
   }
 
-  function renderToolSegs(msgId: string, units: ToolUnit[], running: boolean) {
+  /**
+   * Renders the non-tool content of ONE assistant message: thinking panels
+   * (top) + text + images in wire order. Images pulled out into their own
+   * helper so the series card and the single message share the renderer.
+   * Lead thinking/text of a series head render through this same helper.
+   */
+  function renderImageBlock(block: ContentBlock) {
+    const src = () =>
+      block.imageData
+        ? `data:${block.imageMime || "image/jpeg"};base64,${block.imageData}`
+        : undefined;
+    return (
+      <Show
+        when={src()}
+        fallback={
+          <div class="flex items-center gap-1.5 text-[11px] text-ink-500 border border-line/60 rounded-lg px-2 py-1">
+            <Iconify icon="lucide:image" size={12} />
+            <span>[attached {block.text || "image"}]</span>
+          </div>
+        }
+      >
+        <button
+          onClick={() =>
+            setPreviewFile({
+              name: "attached image",
+              mime: block.imageMime || "image/jpeg",
+              dataUrl: src(),
+            })
+          }
+          class="block rounded-lg overflow-hidden border border-line/60 hover:border-ink-500 transition-colors cursor-pointer"
+          title="Open preview"
+        >
+          <img src={src()} class="max-h-64 max-w-full object-contain" />
+        </button>
+      </Show>
+    );
+  }
+
+  function renderMessageContent(msg: ChatMessage, isLast: boolean) {
+    let thinkNth = 0;
+    return (
+      <div class="w-full space-y-2.5">
+        <For each={splitToolRuns(msg.blocks)}>
+          {(part) => {
+            if (part.kind === "tools") {
+              return renderAssistantSpecial(msg.id, part.units, isLast);
+            }
+            if (part.kind === "thinking") {
+              return (
+                <Show when={verboseChat()}>
+                  <div class="w-full space-y-2">
+                    <For each={part.blocks}>
+                      {(block) => renderThinkingBlock(msg, block, isLast, thinkNth++)}
+                    </For>
+                  </div>
+                </Show>
+              );
+            }
+            return (
+              <For each={part.blocks}>
+                {(block) => {
+                  if (block.type === "text" && block.text) {
+                    return (
+                      <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
+                        <Streamdown>{block.text}</Streamdown>
+                      </div>
+                    );
+                  }
+                  if (block.type === "image") return renderImageBlock(block);
+                  return null;
+                }}
+              </For>
+            );
+          }}
+        </For>
+      </div>
+    );
+  }
+  /**
+   * Renders ONE render block: either a series (lead text/thinking in wire
+   * order, then the aggregate card of the whole fused run) or a single
+   * message with the legacy per-bubble chrome (edit/copy/regenerate/delete
+   * on its own rendered position).
+   */
+  function renderSeriesLead(lead: ChatMessage, isLast: boolean) {
+    let thinkNth = 0;
+    return (
+      <div class="w-full space-y-2.5">
+        <For each={splitToolRuns(lead.blocks)}>
+          {(part) => {
+            if (part.kind === "tools") return null;
+            if (part.kind === "thinking") {
+              return (
+                <Show when={verboseChat()}>
+                  <div class="w-full space-y-2">
+                    <For each={part.blocks}>
+                      {(block) => renderThinkingBlock(lead, block, isLast, thinkNth++)}
+                    </For>
+                  </div>
+                </Show>
+              );
+            }
+            return (
+              <For each={part.blocks}>
+                {(block) => {
+                  if (block.type === "text" && block.text) {
+                    return (
+                      <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
+                        <Streamdown>{block.text}</Streamdown>
+                      </div>
+                    );
+                  }
+                  if (block.type === "image") return renderImageBlock(block);
+                  return null;
+                }}
+              </For>
+            );
+          }}
+        </For>
+      </div>
+    );
+  }
+  /**
+   * Per-series collapsible sub-groups (explore/command runs) inside the
+   * special card. Same grouping as before, keyed on the series card so
+   * state never collides across fused messages.
+   */
+  function renderToolSegs(msgId: string, keySalt: string, units: ToolUnit[], running: boolean) {
     // Partition consecutive explore/command runs into collapsible groups.
     const segs: Array<{ kind: "group"; cat: "explore" | "command"; units: ToolUnit[] } | { kind: "unit"; unit: ToolUnit; idx: number }> = [];
     let run: ToolUnit[] = [];
@@ -3509,7 +3790,7 @@ export default function RemoteCodePage() {
         <For each={segs}>
           {(seg, si) => {
             if (seg.kind === "unit") return renderToolUnit(msgId, seg.unit, seg.idx, running);
-            const gkey = `${msgId}:g${si()}`;
+            const gkey = `${msgId}:${keySalt}:g${si()}`;
             const open = () => toolGroupOpen()[gkey] ?? true;
             return (
               <div class="w-full">
@@ -3540,6 +3821,19 @@ export default function RemoteCodePage() {
   }
 
   // One session row, reused by the nested project groups and the flat list.
+
+  /**
+   * Render blocks for the conversation (recomputed when the transcript
+   * changes). Series fusing is visual only: every block keeps its lead's
+   * raw index (blockRawIdx) for per-message ops.
+   */
+  const renderBlocks = createMemo<RenderBlock[]>(() => buildRenderBlocks(messages()));
+
+  /** Raw daemon index of a render block's lead message. */
+  function blockRawIdx(block: RenderBlock): number {
+    const i = messages().indexOf(block.msg);
+    return i >= 0 ? i : 0;
+  }
   function sessionRow(s: SessionSummary) {    const isActive = () => s.id === activeSessionId();
     const selected = () => selectedSessions().has(s.id);
     return (
@@ -4294,15 +4588,24 @@ export default function RemoteCodePage() {
               </div>
             </Show>
 
-            {/* Conversation Messages */}
-            <For each={messages()}>
-              {(msg, idx) => {
-                const isLast = () => idx() === messages().length - 1;
+            {/* Conversation Messages.
+                buildRenderBlocks fuses consecutive assistant messages that
+                are tool-only into one "series" block. Index bookkeeping
+                below stays on RAW message positions: series extras are
+                skipped for actions, and the lead keeps its own raw index so
+                every per-message op still maps 1:1 to the daemon
+                transcript — fusing is purely visual. */}
+            <For each={renderBlocks()}>
+              {(block, bi) => {
+                const msg = block.msg;
+                const isLast = () => bi() === renderBlocks().length - 1;
+                const rawIdx = () => blockRawIdx(block);
                 const textOf = () =>
                   msg.blocks
                     .filter((b) => b.type === "text" && b.text)
                     .map((b) => b.text as string)
                     .join("\n");
+                const isEditing = () => editingMsgIdx() === rawIdx();
                 return (
                   <div
                     class={`group/msg flex flex-col w-full ${convWidthClass()} mx-auto ${
@@ -4346,7 +4649,7 @@ export default function RemoteCodePage() {
                         </Show>
                         {/* Inline edit mode (chatbot) */}
                         <Show
-                          when={editingMsgIdx() === idx()}
+                          when={isEditing()}
                           fallback={
                             <div class="bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md">
                               <p class="whitespace-pre-line text-sm leading-relaxed">{textOf()}</p>
@@ -4380,7 +4683,7 @@ export default function RemoteCodePage() {
                                   Cancel
                                 </button>
                                 <button
-                                  onClick={() => saveEditMsg(idx(), msg)}
+                                  onClick={() => saveEditMsg(rawIdx(), msg)}
                                   class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-white font-medium cursor-pointer"
                                 >
                                   Save and Send
@@ -4389,7 +4692,7 @@ export default function RemoteCodePage() {
                             </div>
                           </div>
                         </Show>
-                        <Show when={editingMsgIdx() !== idx()}>
+                        <Show when={!isEditing()}>
                           <div class="flex items-center gap-0.5 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
                             <button
                               onClick={() => copyMsg(msg.id, textOf())}
@@ -4399,7 +4702,7 @@ export default function RemoteCodePage() {
                               <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={13} />
                             </button>
                             <button
-                              onClick={() => startEditMsg(idx(), msg)}
+                              onClick={() => startEditMsg(rawIdx(), msg)}
                               class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
                               title="Edit and resend"
                             >
@@ -4413,7 +4716,7 @@ export default function RemoteCodePage() {
                               <Iconify icon="lucide:expand" size={13} />
                             </button>
                             <button
-                              onClick={() => deleteMsg(idx())}
+                              onClick={() => deleteMsg(rawIdx())}
                               class="p-1 rounded-md text-ink-500 hover:text-rose-400 hover:bg-ink-900 transition-colors cursor-pointer"
                               title="Delete"
                             >
@@ -4444,73 +4747,21 @@ export default function RemoteCodePage() {
 
                         {/* Inline edit mode for assistant text (chatbot) */}
                         <Show
-                          when={editingMsgIdx() === idx()}
+                          when={isEditing()}
                           fallback={
-                        <div class="w-full space-y-2.5">
-                          <For each={splitToolRuns(msg.blocks)}>
-                            {(part) => {
-                              if (part.kind === "tools") {
-                                return renderAssistantSpecial(msg.id, part.units, isLast());
-                              }
-                              if (part.kind === "thinking") {
-                                return (
-                                  <Show when={verboseChat()}>
-                                    <div class="w-full space-y-2">
-                                      <For each={part.blocks}>
-                                        {(block) => renderThinkingBlock(msg, block, isLast())}
-                                      </For>
-                                    </div>
-                                  </Show>
-                                );
-                              }
-                              return (
-                                <For each={part.blocks}>
-                                  {(block) => {
-                                    if (block.type === "text" && block.text) {
-                                      return (
-                                        <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
-                                          <Streamdown>{block.text}</Streamdown>
-                                        </div>
-                                      );
-                                    }
-                                    if (block.type === "image") {
-                                      const src = () =>
-                                        block.imageData
-                                          ? `data:${block.imageMime || "image/jpeg"};base64,${block.imageData}`
-                                          : undefined;
-                                      return (
-                                        <Show
-                                          when={src()}
-                                          fallback={
-                                            <div class="flex items-center gap-1.5 text-[11px] text-ink-500 border border-line/60 rounded-lg px-2 py-1">
-                                              <Iconify icon="lucide:image" size={12} />
-                                              <span>[attached {block.text || "image"}]</span>
-                                            </div>
-                                          }
-                                        >
-                                          <button
-                                            onClick={() =>
-                                              setPreviewFile({
-                                                name: "attached image",
-                                                mime: block.imageMime || "image/jpeg",
-                                                dataUrl: src(),
-                                              })
-                                            }
-                                            class="block rounded-lg overflow-hidden border border-line/60 hover:border-ink-500 transition-colors cursor-pointer"
-                                            title="Open preview"
-                                          >
-                                            <img src={src()} class="max-h-64 max-w-full object-contain" />
-                                          </button>
-                                        </Show>
-                                      );
-                                    }
-                                    return null;
-                                  }}
-                                </For>
-                              );
-                            }}
-                          </For>
-                        </div>
+                            block.kind === "series" ? (
+                              <>
+                                {renderSeriesLead(msg, isLast())}
+                                {renderAssistantSpecial(
+                                  msg.id,
+                                  block.units,
+                                  isLast(),
+                                  block.extras.map((e) => e.srcIdx ?? 0),
+                                )}
+                              </>
+                            ) : (
+                              renderMessageContent(msg, isLast())
+                            )
                           }
                         >
                           <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60">
@@ -4529,7 +4780,7 @@ export default function RemoteCodePage() {
                                 Cancel
                               </button>
                               <button
-                                onClick={() => saveEditMsg(idx(), msg)}
+                                onClick={() => saveEditMsg(rawIdx(), msg)}
                                 class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-white font-medium cursor-pointer"
                               >
                                 Save
@@ -4539,7 +4790,7 @@ export default function RemoteCodePage() {
                         </Show>
 
                         {/* Hover actions (chatbot-style) */}
-                        <Show when={(!sessionStatus() || !isLast()) && editingMsgIdx() !== idx()}>
+                        <Show when={(!sessionStatus() || !isLast()) && !isEditing()}>
                           <div class="flex items-center gap-0.5 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
                             <button
                               onClick={() => copyMsg(msg.id, textOf())}
@@ -4549,21 +4800,21 @@ export default function RemoteCodePage() {
                               <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={14} />
                             </button>
                             <button
-                              onClick={() => regenerateMsg(idx())}
+                              onClick={() => regenerateMsg(rawIdx())}
                               class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
                               title="Regenerate response"
                             >
                               <Iconify icon="lucide:rotate-cw" size={14} />
                             </button>
                             <button
-                              onClick={() => startEditMsg(idx(), msg)}
+                              onClick={() => startEditMsg(rawIdx(), msg)}
                               class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
                               title="Edit response"
                             >
                               <Iconify icon="lucide:pencil" size={14} />
                             </button>
                             <button
-                              onClick={() => deleteMsg(idx())}
+                              onClick={() => deleteMsg(rawIdx())}
                               class="p-1.5 rounded-md text-ink-500 hover:text-rose-400 hover:bg-ink-900 transition-colors cursor-pointer"
                               title="Delete"
                             >

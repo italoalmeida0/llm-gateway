@@ -604,6 +604,7 @@ func (c *codexClient) runStream(ctx context.Context, resp *http.Response, req Re
 				_ = json.Unmarshal([]byte(ev.Data), &p)
 				if it, ok := items[p.OutputIndex]; ok && it.kind == "reasoning" {
 					it.summary.WriteString(p.Delta)
+					out <- EventReasoningDelta{Delta: p.Delta}
 				}
 			case "response.reasoning_summary_text.done":
 				// summary text already accumulated via deltas

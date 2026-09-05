@@ -737,7 +737,7 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 						out <- EventToolArgs{ID: be.toolCall.ID, Delta: d.PartialJSON}
 					}
 				case "thinking_delta":
-					// Not surfaced in v1.
+					out <- EventReasoningDelta{Delta: d.Thinking}
 				}
 			case "content_block_stop":
 				var idx int

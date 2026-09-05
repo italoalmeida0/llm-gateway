@@ -617,6 +617,8 @@ export function Modal(props: {
   onClose: () => void;
   title: string;
   width?: string;
+  /** Fullscreen sheet on small screens (mobile-first modals). */
+  fullOnMobile?: boolean;
   children: JSX.Element;
 }) {
   const onKey = (e: KeyboardEvent) => {
@@ -640,7 +642,11 @@ export function Modal(props: {
         >
           <div class="min-h-full flex items-center justify-center p-4">
             <div
-              class={`anim-pop-in w-full ${props.width ?? "max-w-md"} rounded-[1.5rem] border border-line bg-card shadow-2xl shadow-black/30`}
+              class={`anim-pop-in w-full ${props.width ?? "max-w-md"} rounded-[1.5rem] border border-line bg-card shadow-2xl shadow-black/30 ${
+                props.fullOnMobile
+                  ? "max-sm:min-h-[100dvh] max-sm:max-w-full max-sm:rounded-none max-sm:border-0"
+                  : ""
+              }`}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
             >

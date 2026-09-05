@@ -214,6 +214,16 @@ type EventTextDelta struct {
 
 func (EventTextDelta) isEvent() {}
 
+// EventReasoningDelta carries one chunk of the model's chain-of-thought
+// while it streams (reasoning_content / thinking deltas). UIs render it
+// live in a "Thinking…" panel; the full text also lands in the final
+// message as a ReasoningBlock.
+type EventReasoningDelta struct {
+	Delta string
+}
+
+func (EventReasoningDelta) isEvent() {}
+
 type EventToolStart struct {
 	ID   string
 	Name string

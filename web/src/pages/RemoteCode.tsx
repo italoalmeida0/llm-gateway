@@ -37,6 +37,7 @@ export interface SessionSummary {
   title: string;
   model: string;
   status: "idle" | "running";
+  pinned: boolean;
   createdAt: number;
   updatedAt: number;
   messageCount: number;
@@ -52,6 +53,8 @@ export interface ContentBlock {
   toolProgress?: string;
   isError?: boolean;
   reasoning?: string;
+  imageMime?: string;
+  imageData?: string;
 }
 
 export interface SessionUsage {
@@ -68,6 +71,7 @@ export interface ChatMessage {
   blocks: ContentBlock[];
   time?: number;
   attachments?: string[];
+  thinkingDuration?: number;
 }
 
 export interface PendingApproval {
@@ -81,6 +85,7 @@ export interface AgentSettings {
   reasoning: string;
   temperature: number;
   autoCompactPercent: number;
+  noAutoTitle: boolean;
   jailByDefault: boolean;
   autoSwarmEnabled: boolean;
   insecureTls: boolean;
@@ -305,6 +310,7 @@ export default function RemoteCodePage() {
   const [displayMenuOpen, setDisplayMenuOpen] = createSignal(false);
   const [newProjectMenuOpen, setNewProjectMenuOpen] = createSignal(false);
   const [addContextOpen, setAddContextOpen] = createSignal(false);
+  const [filesMenuOpen, setFilesMenuOpen] = createSignal(false);
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [usageOpen, setUsageOpen] = createSignal(false);
   const [renamingId, setRenamingId] = createSignal<string | null>(null);
@@ -319,6 +325,10 @@ export default function RemoteCodePage() {
     size: number;
     dataB64: string;
     objectUrl?: string;
+    /** Browser-extracted markdown/text for pdf/office/plain files. */
+    text?: string;
+    loading?: boolean;
+    loadError?: string;
     serverId?: string;
     uploading?: boolean;
     uploadKey?: string;
@@ -345,16 +355,112 @@ export default function RemoteCodePage() {
   // When a project is created, open the conversation modal on ack.
   const [sessionAfterProject, setSessionAfterProject] = createSignal(false);
 
+  // Promise-based confirm modal (chatbot showConfirm, no native confirm()).
+  interface ConfirmState {
+    title: string;
+    message: string;
+    confirmText: string;
+    cancelText: string;
+    danger: boolean;
+    resolve: (v: boolean) => void;
+  }
+  const [confirmState, setConfirmState] = createSignal<ConfirmState | null>(null);
+  function showConfirm(opts: {
+    title?: string;
+    message?: string;
+    confirmText?: string;
+    cancelText?: string;
+    danger?: boolean;
+  }): Promise<boolean> {
+    return new Promise((resolve) => {
+      setConfirmState({
+        title: opts.title || "Confirm",
+        message: opts.message || "",
+        confirmText: opts.confirmText || "Confirm",
+        cancelText: opts.cancelText || "Cancel",
+        danger: !!opts.danger,
+        resolve,
+      });
+    });
+  }
+
+  // Mobile detection (chatbot useMobile): drawer sidebar, big tap targets.
+  const [isMobile, setIsMobile] = createSignal(
+    typeof window !== "undefined"
+      ? /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) &&
+          "ontouchstart" in window &&
+          window.innerWidth <= 768
+      : false,
+  );
+
+  // Live thinking timer (chatbot thinkingElapsed).
+  const [thinkingStart, setThinkingStart] = createSignal<number | null>(null);
+  const [thinkingElapsed, setThinkingElapsed] = createSignal(0);
+  let thinkingTimer: any = null;
+  function startThinkingTimer() {
+    stopThinkingTimer();
+    setThinkingStart(Date.now());
+    setThinkingElapsed(0);
+    thinkingTimer = setInterval(() => {
+      const s = thinkingStart();
+      if (s) setThinkingElapsed(Math.floor((Date.now() - s) / 1000));
+    }, 1000);
+  }
+  function stopThinkingTimer(): number {
+    if (thinkingTimer) {
+      clearInterval(thinkingTimer);
+      thinkingTimer = null;
+    }
+    const s = thinkingStart();
+    const d = s ? Math.floor((Date.now() - s) / 1000) : 0;
+    setThinkingStart(null);
+    setThinkingElapsed(0);
+    return d;
+  }
+
+  // Inline message editing (chatbot editingMessageIndex).
+  const [editingMsgIdx, setEditingMsgIdx] = createSignal<number | null>(null);
+  const [editingMsgText, setEditingMsgText] = createSignal("");
+
+  // Selection mode for bulk ops (chatbot thread selection).
+  const [selectionMode, setSelectionMode] = createSignal(false);
+  const [selectedSessions, setSelectedSessions] = createSignal<Set<string>>(new Set());
+
+  // Stored attachments per session (from session_data + uploads).
+  interface StoredAttachment {
+    id: string;
+    name: string;
+    mime: string;
+    size: number;
+  }
+  const [sessionFiles, setSessionFiles] = createSignal<Record<string, StoredAttachment[]>>({});
+  // Fetched bytes cache for preview (attachmentId -> data).
+  const [previewCache, setPreviewCache] = createSignal<
+    Record<string, { name: string; mime: string; dataB64: string; text?: string }>
+  >({});
+  // File preview modal target.
+  const [previewFile, setPreviewFile] = createSignal<{
+    name: string;
+    mime: string;
+    text?: string;
+    dataUrl?: string;
+    dataB64?: string;
+    size?: number;
+    truncated?: boolean;
+    fullText?: string;
+  } | null>(null);
+  const [previewCopied, setPreviewCopied] = createSignal(false);
+  const [truncateTokens, setTruncateTokens] = createSignal(16000);
+  const [showTruncateInput, setShowTruncateInput] = createSignal(false);
+
   // Agent Configuration & MCP Center
   const [showConfigModal, setShowConfigModal] = createSignal(false);
-  const [configTab, setConfigTab] = createSignal<
-    "settings" | "mcp" | "skills" | "slash" | "appearance"
-  >("settings");
   const [daemonSettings, setDaemonSettings] = createSignal<AgentSettings>({
     model: "gpt-4o",
     reasoning: "off",
     temperature: 0.7,
     autoCompactPercent: 80,
+    noAutoTitle: false,
     jailByDefault: false,
     autoSwarmEnabled: false,
     insecureTls: false,
@@ -408,21 +514,6 @@ export default function RemoteCodePage() {
     const days = Math.floor(h / 24);
     return `${days}d`;
   }
-
-  const filteredSessions = createMemo(() => {
-    const q = sessionFilter().toLowerCase().trim();
-    let base = sessions();
-    const ap = activeProject();
-    // Quando há projeto ativo e agrupamento por projeto, filtra por ele.
-    if (ap && groupBy() === "project") base = sessionsOfProject(ap.path);
-    if (!q) return base;
-    return base.filter(
-      (s) =>
-        s.title.toLowerCase().includes(q) ||
-        s.cwd.toLowerCase().includes(q) ||
-        s.model.toLowerCase().includes(q),
-    );
-  });
 
   const slashMatches = createMemo(() => {
     const text = inputPrompt().trim();
@@ -607,9 +698,14 @@ export default function RemoteCodePage() {
         });
         return;
       }
-      // Image (Go ImageBlock) — render as a placeholder chip.
+      // Image (Go ImageBlock {mime_type, data}) — render the real bytes.
       if (typeof c.mime_type === "string" || c.type === "image") {
-        blocks.push({ type: "image", text: c.mime_type || "image" });
+        blocks.push({
+          type: "image",
+          text: c.mime_type || "image",
+          imageMime: c.mime_type,
+          imageData: typeof c.data === "string" ? c.data : undefined,
+        });
         return;
       }
       // Plain text (both dialects).
@@ -632,6 +728,7 @@ export default function RemoteCodePage() {
       title: r.title || r.cwd,
       model: r.model || "gpt-4o",
       status: r.status || "idle",
+      pinned: !!r.pinned,
       createdAt: r.createdAt ?? r.created_at ?? Date.now(),
       updatedAt: r.updatedAt ?? r.updated_at ?? Date.now(),
       messageCount:
@@ -771,6 +868,16 @@ export default function RemoteCodePage() {
       case "attachment_uploaded": {
         const a = msg.attachment;
         if (!a?.id) break;
+        if (msg.sessionId) {
+          setSessionFiles((prev) => {
+            const list = prev[msg.sessionId] || [];
+            if (list.some((x) => x.id === a.id)) return prev;
+            return {
+              ...prev,
+              [msg.sessionId]: [...list, { id: a.id, name: a.name, mime: a.mime, size: a.size || 0 }],
+            };
+          });
+        }
         setPendingAttachments((prev) =>
           prev.map((p) =>
             p.uploadKey === msg.requestId || (!p.serverId && p.name === a.name)
@@ -802,6 +909,25 @@ export default function RemoteCodePage() {
         break;
       }
 
+      case "session_pinned": {
+        if (!msg.sessionId) break;
+        setSessions((prev) =>
+          prev.map((s) => (s.id === msg.sessionId ? { ...s, pinned: !!msg.pinned } : s)),
+        );
+        break;
+      }
+
+      case "attachment_data": {
+        const a = msg.attachment;
+        if (!a?.id || (!a.data && !a.text)) break;
+        setPreviewCache((prev) => ({
+          ...prev,
+          [a.id]: { name: a.name, mime: a.mime, dataB64: a.data || "", text: a.text },
+        }));
+        openStoredPreview(msg.sessionId, a.id);
+        break;
+      }
+
       case "session_deleted": {
         setSessions((prev) => prev.filter((s) => s.id !== msg.sessionId));
         if (activeSessionId() === msg.sessionId) {
@@ -821,6 +947,20 @@ export default function RemoteCodePage() {
         const r = msg.session;
         if (!r) break;
         const sid = r.id || msg.sessionId;
+        if (sid) {
+          const atts = r.attachments || r.Attachments || [];
+          if (Array.isArray(atts)) {
+            setSessionFiles((prev) => ({
+              ...prev,
+              [sid]: atts.map((a: any) => ({
+                id: a.id,
+                name: a.name,
+                mime: a.mime,
+                size: a.size || 0,
+              })),
+            }));
+          }
+        }
         if (sid && sid === activeSessionId()) {
           applySessionContent(sid, r.messages || r.Messages || []);
         }
@@ -881,6 +1021,7 @@ export default function RemoteCodePage() {
               s.autoCompactThreshold ??
               s.auto_compact_threshold ??
               80,
+            noAutoTitle: s.noAutoTitle ?? s.no_auto_title ?? false,
             jailByDefault: s.jailByDefault ?? s.jail_by_default ?? false,
             autoSwarmEnabled: s.autoSwarmEnabled ?? s.auto_swarm_enabled ?? false,
             insecureTls: s.insecureTls ?? s.insecure ?? false,
@@ -920,7 +1061,14 @@ export default function RemoteCodePage() {
         if (ev.type === "turn_start") {
           setSessionStatus("running");
         } else if (ev.type === "text_delta") {
+          // First content chunk freezes the thinking clock (chatbot-style).
+          if (thinkingStart() !== null) {
+            const dur = stopThinkingTimer();
+            stampThinkingDuration(dur);
+          }
           appendStreamingDelta(ev.delta);
+        } else if (ev.type === "reasoning_delta") {
+          appendReasoningDelta(ev.delta || "");
         } else if (ev.type === "tool_use_start") {
           // Pre-render a live "composing call" card while args stream in.
           appendToolCall(ev.id, ev.name, "");
@@ -946,6 +1094,10 @@ export default function RemoteCodePage() {
           setSessionStatus("idle");
           setPendingApproval(null);
           setToolProgress({});
+          if (thinkingStart() !== null) {
+            const dur = stopThinkingTimer();
+            stampThinkingDuration(dur);
+          }
           if (ev.usage || ev.cumulative) applyUsage(msg.sessionId, ev.usage, ev.cumulative);
           if (ev.error) toast(ev.error, "err");
           // Refresh the transcript so tool blocks persisted by the daemon
@@ -975,6 +1127,147 @@ export default function RemoteCodePage() {
         break;
       }
     }
+  }
+
+  function appendReasoningDelta(delta: string) {
+    if (!delta) return;
+    if (thinkingStart() === null) startThinkingTimer();
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === "assistant") {
+        const blocks = [...last.blocks];
+        const lastBlock = blocks[blocks.length - 1];
+        if (lastBlock && lastBlock.type === "reasoning") {
+          blocks[blocks.length - 1] = {
+            ...lastBlock,
+            reasoning: (lastBlock.reasoning || "") + delta,
+          };
+        } else {
+          blocks.push({ type: "reasoning", reasoning: delta });
+        }
+        return [...prev.slice(0, -1), { ...last, blocks }];
+      }
+      return [
+        ...prev,
+        {
+          id: `asst_${Date.now()}`,
+          role: "assistant",
+          blocks: [{ type: "reasoning", reasoning: delta }],
+          time: Date.now(),
+        },
+      ];
+    });
+  }
+
+  function stampThinkingDuration(dur: number) {
+    setMessages((prev) => {
+      for (let i = prev.length - 1; i >= 0; i--) {
+        if (prev[i].role === "assistant") {
+          const m = { ...prev[i], thinkingDuration: dur };
+          return [...prev.slice(0, i), m, ...prev.slice(i + 1)];
+        }
+      }
+      return prev;
+    });
+  }
+
+  function downloadPreviewFile() {
+    const f = previewFile();
+    if (!f?.dataB64) {
+      toast("Original bytes unavailable for download", "err");
+      return;
+    }
+    try {
+      const bin = atob(f.dataB64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes as any], { type: f.mime }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = f.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch {
+      toast("Download failed", "err");
+    }
+  }
+
+  function truncatePreviewFile() {
+    const f = previewFile();
+    const maxChars = (truncateTokens() || 16000) * 4;
+    if (!f?.text || f.text.length <= maxChars) {
+      toast("File is already within the token limit", "err");
+      return;
+    }
+    setPreviewFile({
+      ...f,
+      fullText: f.fullText || f.text,
+      text: f.text.substring(0, maxChars),
+      truncated: true,
+    });
+    toast(`Truncated to ~${truncateTokens().toLocaleString()} tokens`, "ok");
+  }
+
+  function restorePreviewFile() {
+    const f = previewFile();
+    if (f?.fullText) {
+      setPreviewFile({ ...f, text: f.fullText, fullText: undefined, truncated: false });
+      toast("Original content restored", "ok");
+    }
+  }
+
+  function previewPending(a: { name: string; mime: string; text?: string; objectUrl?: string; dataB64?: string; size?: number }) {    if (a.objectUrl) {
+      setPreviewFile({ name: a.name, mime: a.mime, dataUrl: a.objectUrl, size: a.size });
+    } else {
+      setPreviewFile({ name: a.name, mime: a.mime, text: a.text || "(still extracting...)", size: a.size });
+    }
+    setPreviewCopied(false);
+  }
+
+  function b64ToDataUrl(mime: string, b64: string) {
+    return `data:${mime || "application/octet-stream"};base64,${b64}`;
+  }
+
+  function openStoredPreview(sessionId: string, attachmentId: string) {
+    const cached = previewCache()[attachmentId];
+    const meta = (sessionFiles()[sessionId] || []).find((a) => a.id === attachmentId);
+    const name = cached?.name || meta?.name || "attachment";
+    const mime = cached?.mime || meta?.mime || "";
+    if (!cached) {
+      if (wsOpen()) {
+        sendWS({ type: "get_attachment", sessionId, attachmentId });
+        toast("Loading attachment...", "ok");
+      } else {
+        toast("Not connected to host", "err");
+      }
+      return;
+    }
+    if (mime.startsWith("image/")) {
+      setPreviewFile({
+        name,
+        mime,
+        dataUrl: b64ToDataUrl(mime, cached.dataB64),
+        dataB64: cached.dataB64,
+        size: meta?.size,
+      });
+      setPreviewCopied(false);
+      return;
+    }
+    let text = cached.text || "";
+    if (!text) {
+      try {
+        const bin = atob(cached.dataB64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      } catch {
+        text = "(could not decode file)";
+      }
+    }
+    setPreviewFile({ name, mime, text, dataB64: cached.dataB64, size: meta?.size });
+    setPreviewCopied(false);
   }
 
   function appendStreamingDelta(delta: string) {
@@ -1117,6 +1410,8 @@ export default function RemoteCodePage() {
     setActiveSessionId(id);
     setPendingApproval(null);
     setSearchResults([]);
+    cancelEditMsg();
+    stopThinkingTimer();
     for (const p of pendingAttachments()) {
       if (p.objectUrl) {
         try {
@@ -1175,9 +1470,15 @@ export default function RemoteCodePage() {
     }
   }
 
-  function deleteProject(id: string, e: MouseEvent) {
+  async function deleteProject(id: string, e: MouseEvent) {
     e.stopPropagation();
-    if (!confirm("Remove this project from the list? Sessions on the host are kept.")) return;
+    const ok = await showConfirm({
+      title: "Remove project?",
+      message: "The project is removed from the list. Sessions on the host are kept.",
+      confirmText: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
     if (wsOpen()) sendWS({ type: "delete_project", projectId: id });
     const next = projects().filter((p) => p.id !== id);
     applyProjects(next);
@@ -1223,7 +1524,7 @@ export default function RemoteCodePage() {
       type: "create_session",
       requestId: "new_" + Date.now(),
       cwd,
-      title: newSessionTitle().trim() || basename(cwd),
+      title: newSessionTitle().trim(),
       model: activeModel(),
     });
     setShowNewSessionModal(false);
@@ -1231,10 +1532,15 @@ export default function RemoteCodePage() {
     setNewSessionTitle("");
   }
 
-  function deleteSession(id: string, e: MouseEvent) {
-    e.stopPropagation();
-    if (!confirm("Are you sure you want to delete this session?")) return;
-    sendWS({ type: "delete_session", sessionId: id });
+  async function deleteSession(id: string, e?: MouseEvent) {
+    e?.stopPropagation();
+    const ok = await showConfirm({
+      title: "Delete conversation?",
+      message: "This conversation will be permanently deleted from the host.\n\nThis action cannot be undone.",
+      confirmText: "Delete",
+      danger: true,
+    });
+    if (ok) sendWS({ type: "delete_session", sessionId: id });
   }
 
   function messageText(m: ChatMessage): string {
@@ -1274,28 +1580,63 @@ export default function RemoteCodePage() {
       toast(`Max ${MAX_ATTACHMENTS} attachments per message`, "err");
       return;
     }
+    const { sniffFile, extractText, uint8ToB64 } = await import("../office");
     for (const file of list.slice(0, room)) {
-      const isImage = file.type.startsWith("image/");
-      const cap = isImage ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES;
-      if (file.size > cap) {
-        toast(`'${file.name}' too large (max ${isImage ? "2.5MB" : "512KB"})`, "err");
-        continue;
-      }
+      let bytes: Uint8Array;
       try {
-        const dataB64 = await fileToB64(file);
-        setPendingAttachments((prev) => [
-          ...prev,
-          {
-            key: `pa_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
-            name: file.name,
-            mime: file.type || "application/octet-stream",
-            size: file.size,
-            dataB64,
-            objectUrl: isImage ? URL.createObjectURL(file) : undefined,
-          },
-        ]);
+        bytes = new Uint8Array(await file.arrayBuffer());
       } catch {
         toast(`Could not read '${file.name}'`, "err");
+        continue;
+      }
+      const sniff = sniffFile(file, bytes);
+      if (sniff.blocked) {
+        toast(sniff.blocked, "err");
+        continue;
+      }
+      const kind = sniff.kind || "text";
+      const isImage = kind === "image";
+      const cap = isImage ? MAX_IMAGE_BYTES : 12 * 1024 * 1024;
+      if (bytes.length > cap) {
+        toast(`'${file.name}' too large (max ${isImage ? "2.5MB" : "12MB"})`, "err");
+        continue;
+      }
+      const key = `pa_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`;
+      const base = {
+        key,
+        name: file.name,
+        mime: file.type || "application/octet-stream",
+        size: file.size,
+        dataB64: uint8ToB64(bytes),
+      };
+      if (isImage) {
+        setPendingAttachments((prev) => [
+          ...prev,
+          { ...base, objectUrl: URL.createObjectURL(file) },
+        ]);
+        continue;
+      }
+      // Text-likes convert in the background (pdf/office may take seconds).
+      const needsConvert = kind === "office" || sniff.officeFormat;
+      setPendingAttachments((prev) => [
+        ...prev,
+        { ...base, loading: needsConvert, text: needsConvert ? (sniff.officeFormat === "pdf" ? "Extracting PDF..." : "Converting document...") : undefined },
+      ]);
+      if (needsConvert || sniff.officeFormat === "pdf" || kind === "text") {
+        try {
+          let text: string;
+          if (kind === "text" && !sniff.officeFormat) {
+            text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+          } else {
+            text = await extractText(bytes, file.name, sniff.officeFormat);
+          }
+          setPendingAttachments((prev) =>
+            prev.map((p) => (p.key === key ? { ...p, loading: false, text } : p)),
+          );
+        } catch (e: any) {
+          setPendingAttachments((prev) => prev.filter((p) => p.key !== key));
+          toast(`Could not extract '${file.name}': ${e?.message || e}`, "err");
+        }
       }
     }
   }
@@ -1346,6 +1687,7 @@ export default function RemoteCodePage() {
         name: a.name,
         mime: a.mime,
         data: a.dataB64,
+        text: a.text || undefined,
       });
     });
   }
@@ -1356,19 +1698,67 @@ export default function RemoteCodePage() {
     setTimeout(() => setCopiedMsgId((cur) => (cur === id ? null : cur)), 1500);
   }
 
-  function regenerateFrom(idx: number) {
-    // Re-send the last user text before message idx (or the message itself).
-    const list = messages();
-    for (let i = idx; i >= 0; i--) {
-      if (list[i].role === "user") {
-        const t = messageText(list[i]);
-        if (!t.trim()) return;
-        setInputPrompt(t);
-        sendPrompt();
-        return;
-      }
+  // Regenerate from message idx: the daemon drops that message and everything
+  // after it, then re-runs the turn (chatbot regenerateMessage semantics).
+  function regenerateMsg(idx: number) {
+    const sid = activeSessionId();
+    if (!sid || !wsOpen()) return;
+    if (sessionStatus() === "running") {
+      toast("Stop the current turn first", "err");
+      return;
     }
-    toast("Nothing to regenerate", "info");
+    sendWS({ type: "regenerate", sessionId: sid, index: idx, model: activeModel(), yolo: yoloMode() });
+  }
+
+  // Inline edit (chatbot startEditMessage): user edits resubmit, assistant
+  // edits just save.
+  function startEditMsg(idx: number, m: ChatMessage) {
+    setEditingMsgIdx(idx);
+    setEditingMsgText(messageText(m));
+  }
+  function cancelEditMsg() {
+    setEditingMsgIdx(null);
+    setEditingMsgText("");
+  }
+  function saveEditMsg(idx: number, m: ChatMessage) {
+    const sid = activeSessionId();
+    const text = editingMsgText().trim();
+    if (!sid || !wsOpen()) {
+      cancelEditMsg();
+      return;
+    }
+    if (!text) {
+      toast("Message cannot be empty", "err");
+      return;
+    }
+    const regen = m.role === "user";
+    if (regen && sessionStatus() === "running") {
+      toast("Stop the current turn first", "err");
+      return;
+    }
+    sendWS({
+      type: "edit_message",
+      sessionId: sid,
+      index: idx,
+      text,
+      model: activeModel(),
+      yolo: yoloMode(),
+      regenerate: regen,
+    });
+    cancelEditMsg();
+    if (regen) setSessionStatus("running");
+  }
+
+  async function deleteMsg(idx: number) {
+    const sid = activeSessionId();
+    if (!sid || !wsOpen()) return;
+    const ok = await showConfirm({
+      title: "Delete message?",
+      message: "This message will be permanently deleted from the transcript.\n\nThis action cannot be undone.",
+      confirmText: "Delete",
+      danger: true,
+    });
+    if (ok) sendWS({ type: "delete_message", sessionId: sid, index: idx });
   }
 
   function editUserMsg(m: ChatMessage) {
@@ -1376,6 +1766,102 @@ export default function RemoteCodePage() {
     setLargeEditorText(messageText(m));
     setLargeEditorSend(false);
     setLargeEditorOpen(true);
+  }
+
+  function togglePin(id: string, e: MouseEvent) {
+    e.stopPropagation();
+    if (wsOpen()) {
+      sendWS({ type: "toggle_pin", sessionId: id });
+      // Optimistic flip; the daemon confirms via session_pinned.
+      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, pinned: !s.pinned } : s)));
+    } else {
+      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, pinned: !s.pinned } : s)));
+    }
+  }
+
+  function toggleSessionSelect(id: string) {
+    setSelectedSessions((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  // Nested sidebar state: expanded projects (default all expanded).
+  const [expandedProjects, setExpandedProjects] = createSignal<Record<string, boolean>>({});
+  function isProjectExpanded(p: { id: string }) {
+    return expandedProjects()[p.id] !== false;
+  }
+  function toggleProjectExpanded(id: string) {
+    setExpandedProjects((prev) => ({ ...prev, [id]: !(prev[id] !== false) }));
+  }
+
+  function matchQuery(s: SessionSummary) {
+    const q = sessionFilter().toLowerCase().trim();
+    if (!q) return true;
+    return (
+      s.title.toLowerCase().includes(q) ||
+      s.cwd.toLowerCase().includes(q) ||
+      s.model.toLowerCase().includes(q)
+    );
+  }
+  function projectSessions(path: string) {
+    return sortedSessions(sessionsOfProject(path).filter(matchQuery));
+  }
+  function looseSessions() {
+    const norm = (p: string) => p.replace(/\/+$/, "");
+    return sortedSessions(
+      sessions().filter((s) => {
+        if (!matchQuery(s)) return false;
+        const cwd = norm(s.cwd || "");
+        return !projects().some((p) => {
+          const pp = norm(p.path);
+          return cwd === pp || cwd.startsWith(pp + "/");
+        });
+      }),
+    );
+  }
+
+  function closeSidebarOnMobile() {
+    if (isMobile()) setSidebarOpen(false);
+  }
+
+  function exitSelectionMode() {
+    setSelectionMode(false);
+    setSelectedSessions(new Set());
+  }
+
+  async function pinSelected() {
+    const ids = [...selectedSessions()];
+    if (ids.length === 0) return;
+    const allPinned = ids.every((id) => sessions().find((s) => s.id === id)?.pinned);
+    const target = !allPinned;
+    for (const id of ids) {
+      const cur = sessions().find((s) => s.id === id);
+      if (!cur || !!cur.pinned === target) continue;
+      if (wsOpen()) sendWS({ type: "toggle_pin", sessionId: id });
+      setSessions((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, pinned: target } : s)),
+      );
+    }
+    toast(`${ids.length} conversation${ids.length === 1 ? "" : "s"} ${target ? "pinned" : "unpinned"}`, "ok");
+    exitSelectionMode();
+  }
+
+  async function deleteSelected() {
+    const ids = [...selectedSessions()];
+    if (ids.length === 0) return;
+    const ok = await showConfirm({
+      title: `Delete ${ids.length} conversation${ids.length === 1 ? "" : "s"}?`,
+      message: `This will permanently delete ${ids.length} conversation${ids.length === 1 ? "" : "s"} from the host.\n\nThis action cannot be undone.`,
+      confirmText: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    for (const id of ids) sendWS({ type: "delete_session", sessionId: id });
+    toast(`${ids.length} conversation${ids.length === 1 ? "" : "s"} deleted`, "ok");
+    exitSelectionMode();
   }
 
   function submitRename(id: string) {
@@ -1391,9 +1877,13 @@ export default function RemoteCodePage() {
 
   function sortedSessions(list: SessionSummary[]) {
     const arr = [...list];
-    if (sortBy() === "alpha") arr.sort((a, b) => a.title.localeCompare(b.title));
-    else if (sortBy() === "added") arr.sort((a, b) => a.createdAt - b.createdAt);
-    else arr.sort((a, b) => b.updatedAt - a.updatedAt);
+    // Pinned first (chatbot sortedThreads), then the chosen order.
+    arr.sort((a, b) => {
+      if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+      if (sortBy() === "alpha") return a.title.localeCompare(b.title);
+      if (sortBy() === "added") return a.createdAt - b.createdAt;
+      return b.updatedAt - a.updatedAt;
+    });
     return arr;
   }
 
@@ -1419,6 +1909,10 @@ export default function RemoteCodePage() {
     // Upload pending attachments first so the daemon owns the bytes.
     let attachmentIds: string[] = [];
     const pending = pendingAttachments();
+    if (pending.some((a) => a.loading)) {
+      toast("Wait for files to finish extracting", "err");
+      return;
+    }
     if (pending.length > 0) {
       setSessionStatus("running");
       try {
@@ -1471,7 +1965,7 @@ export default function RemoteCodePage() {
     sendWS({ type: "cancel", sessionId: activeSessionId() });
     setSessionStatus("idle");
     setPendingApproval(null);
-    toast("Generation stopped", "info");
+    toast("Generation stopped", "ok");
   }
 
   function respondApproval(approved: boolean) {
@@ -1512,6 +2006,37 @@ export default function RemoteCodePage() {
     }
   }
 
+  // Settings revert snapshot (chatbot backupForRevert): Cancel restores.
+  const [settingsSnapshot, setSettingsSnapshot] = createSignal<string | null>(null);
+  function openSettings() {
+    try {
+      setSettingsSnapshot(
+        JSON.stringify({
+          settings: daemonSettings(),
+          mcp: mcpServers(),
+          skills: skills(),
+          yolo: yoloMode(),
+        }),
+      );
+    } catch {}
+    setShowConfigModal(true);
+  }
+  function cancelSettings() {
+    try {
+      const raw = settingsSnapshot();
+      if (raw) {
+        const s = JSON.parse(raw);
+        if (s.settings) setDaemonSettings(s.settings);
+        if (s.mcp) setMcpServers(s.mcp);
+        if (s.skills) setSkills(s.skills);
+        if (typeof s.yolo === "boolean") setYoloMode(s.yolo);
+        // Push the reverted state back so per-action saves don't linger.
+        setTimeout(() => saveDaemonConfig(), 30);
+      }
+    } catch {}
+    setShowConfigModal(false);
+  }
+
   // Save Settings to Daemon (translate UI keys to the daemon's Go keys).
   function saveDaemonConfig() {
     const s = daemonSettings();
@@ -1523,6 +2048,7 @@ export default function RemoteCodePage() {
         reasoning: s.reasoning,
         temperature: s.temperature,
         auto_compact_threshold: s.autoCompactPercent,
+        no_auto_title: s.noAutoTitle,
         jail_by_default: s.jailByDefault,
         auto_swarm_enabled: s.autoSwarmEnabled,
         insecure: s.insecureTls,
@@ -1555,7 +2081,6 @@ export default function RemoteCodePage() {
       url: newMcpUrl().trim(),
     };
     setMcpServers(current);
-    saveDaemonConfig();
     setNewMcpName("");
     setNewMcpCmd("");
     setNewMcpArgs("");
@@ -1567,7 +2092,6 @@ export default function RemoteCodePage() {
     const current = { ...mcpServers() };
     delete current[name];
     setMcpServers(current);
-    saveDaemonConfig();
     toast(`MCP Server '${name}' removed`, "ok");
   }
 
@@ -1590,7 +2114,6 @@ export default function RemoteCodePage() {
       enabled: true,
     };
     setSkills(current);
-    saveDaemonConfig();
     setNewSkillName("");
     setNewSkillDesc("");
     setNewSkillBody("");
@@ -1602,7 +2125,6 @@ export default function RemoteCodePage() {
     if (current[name]) {
       current[name] = { ...current[name], enabled: !current[name].enabled };
       setSkills(current);
-      saveDaemonConfig();
     }
   }
 
@@ -1610,7 +2132,6 @@ export default function RemoteCodePage() {
     const current = { ...skills() };
     delete current[name];
     setSkills(current);
-    saveDaemonConfig();
     toast(`Skill '${name}' removed`, "ok");
   }
 
@@ -1622,12 +2143,53 @@ export default function RemoteCodePage() {
     if (hosts().length === 0) {
       generatePairingToken();
     }
-    // Ctrl+K / Cmd+K opens search, like the reference chatbot.
+    // Sidebar starts closed on mobile (chatbot useMobile).
+    if (isMobile()) setSidebarOpen(false);
+    const onResize = () => {
+      try {
+        setIsMobile(
+          /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) &&
+            "ontouchstart" in window &&
+            window.innerWidth <= 768,
+        );
+      } catch {}
+    };
+    window.addEventListener("resize", onResize);
+    onCleanup(() => window.removeEventListener("resize", onResize));
+    // Shortcuts: Ctrl/Cmd+K search, Ctrl/Cmd+N new conversation (chatbot).
+    // Esc cascades: menus -> history -> editor -> preview -> confirm.
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setHistoryView(true);
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        if (projects().length === 0) setShowNewProjectModal(true);
+        else openNewSessionModal();
+        return;
+      }
+      if (e.key === "Escape") {
+        if (confirmState()) {
+          confirmState()?.resolve(false);
+          setConfirmState(null);
+          return;
+        }
+        if (largeEditorOpen()) {
+          setLargeEditorOpen(false);
+          return;
+        }
+        if (previewFile()) {
+          setPreviewFile(null);
+          return;
+        }
+        if (historyView()) {
+          setHistoryView(false);
+          return;
+        }
+        closeMenus();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1675,6 +2237,7 @@ export default function RemoteCodePage() {
     setDisplayMenuOpen(false);
     setNewProjectMenuOpen(false);
     setAddContextOpen(false);
+    setFilesMenuOpen(false);
     setModelMenuOpen(false);
     setUsageOpen(false);
   }
@@ -1687,6 +2250,102 @@ export default function RemoteCodePage() {
     }
     clearInterval(heartbeatTimer);
   });
+
+  // One session row, reused by the nested project groups and the flat list.
+  function sessionRow(s: SessionSummary) {
+    const isActive = () => s.id === activeSessionId();
+    const selected = () => selectedSessions().has(s.id);
+    return (
+      <div
+        onClick={() => {
+          if (selectionMode()) {
+            toggleSessionSelect(s.id);
+            return;
+          }
+          setHistoryView(false);
+          selectSession(s.id);
+          closeSidebarOnMobile();
+        }}
+        onDblClick={() => {
+          if (selectionMode()) return;
+          setRenamingId(s.id);
+          setRenameText(s.title);
+        }}
+        class={`group flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg cursor-pointer text-[13px] transition-colors ${
+          isActive() && !selectionMode()
+            ? "bg-ink-800 text-ink-50"
+            : selected()
+              ? "bg-ink-900 text-ink-100 ring-1 ring-ink-500/50"
+              : "text-ink-400 hover:bg-ink-900/60 hover:text-ink-200"
+        }`}
+        title={`${s.title}\n${s.cwd}`}
+      >
+        <Show when={selectionMode()}>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleSessionSelect(s.id);
+            }}
+            class={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
+              selected() ? "bg-ink-100 border-ink-100" : "border-line bg-ink-950"
+            }`}
+            title="Select"
+          >
+            <Show when={selected()}>
+              <Iconify icon="lucide:check" size={11} class="text-ink-950" />
+            </Show>
+          </button>
+        </Show>
+        <Show when={s.pinned && !selectionMode()}>
+          <Iconify icon="lucide:pin" size={11} class="text-ink-500 shrink-0" />
+        </Show>
+        <Show
+          when={renamingId() === s.id}
+          fallback={
+            <>
+              <span class="truncate flex-1 min-w-0">{s.title}</span>
+              <span class="text-[10px] text-ink-600 shrink-0">{timeAgo(s.updatedAt)}</span>
+              <Show when={s.status === "running"}>
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              </Show>
+              <Show when={!selectionMode()}>
+                <div class="hidden group-hover:flex items-center shrink-0">
+                  <button
+                    onClick={(e) => togglePin(s.id, e)}
+                    class="p-0.5 text-ink-600 hover:text-ink-200 cursor-pointer"
+                    title={s.pinned ? "Unpin" : "Pin"}
+                  >
+                    <Iconify icon={s.pinned ? "lucide:pin-off" : "lucide:pin"} size={11} />
+                  </button>
+                  <button
+                    onClick={(e) => deleteSession(s.id, e)}
+                    class="p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
+                    title="Delete"
+                  >
+                    <Iconify icon="lucide:trash-2" size={11} />
+                  </button>
+                </div>
+              </Show>
+            </>
+          }
+        >
+          <input
+            type="text"
+            class="flex-1 min-w-0 bg-ink-950 border border-ink-500 rounded px-1.5 py-0.5 text-[13px] text-ink-100 focus:outline-none"
+            value={renameText()}
+            onInput={(e) => setRenameText(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") submitRename(s.id);
+              if (e.key === "Escape") setRenamingId(null);
+            }}
+            onClick={(e) => e.stopPropagation()}
+            ref={(el) => setTimeout(() => el?.select(), 30)}
+          />
+        </Show>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1832,9 +2491,20 @@ export default function RemoteCodePage() {
       >
         <div class="flex-1 flex min-h-0 overflow-hidden relative">
         {/* --- Left Sidebar: Projects + Conversations (Antigravity) --- */}
+        {/* Mobile: overlay drawer with backdrop (chatbot useMobile). */}
+        <Show when={isMobile() && sidebarOpen()}>
+          <div
+            class="fixed inset-0 z-30 bg-black/55 backdrop-blur-sm md:hidden"
+            onClick={() => setSidebarOpen(false)}
+          />
+        </Show>
         <aside
           class={`border-r border-line/70 bg-ink-950 flex flex-col shrink-0 transition-all duration-200 ${
-            sidebarOpen() ? "w-64" : "w-0 overflow-hidden"
+            sidebarOpen()
+              ? isMobile()
+                ? "fixed inset-y-0 left-0 z-40 w-72 shadow-2xl"
+                : "w-64"
+              : "w-0 overflow-hidden border-r-0"
           }`}
         >
           {/* New Conversation */}
@@ -1843,6 +2513,7 @@ export default function RemoteCodePage() {
               onClick={() => {
                 if (projects().length === 0) setShowNewProjectModal(true);
                 else openNewSessionModal();
+                closeSidebarOnMobile();
               }}
               class="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-ink-900 hover:bg-ink-800 border border-line/60 text-[13px] font-medium text-ink-200 transition-colors cursor-pointer"
             >
@@ -1850,7 +2521,10 @@ export default function RemoteCodePage() {
               <span>New Conversation</span>
             </button>
             <button
-              onClick={() => setHistoryView(true)}
+              onClick={() => {
+                setHistoryView(true);
+                closeSidebarOnMobile();
+              }}
               class="w-full flex items-center gap-2 px-3 py-1.5 mt-1 rounded-lg text-xs text-ink-500 hover:text-ink-300 hover:bg-ink-900/60 transition-colors cursor-pointer"
             >
               <Iconify icon="lucide:clock" size={13} />
@@ -1933,8 +2607,29 @@ export default function RemoteCodePage() {
           <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-4">
             <div>
               <div class="flex items-center justify-between px-1.5 pb-1">
-                <span class="text-[11px] font-medium text-ink-500">Projects</span>
-                {/* New Project split button (Antigravity: New Project / Quick Start) */}
+                <Show
+                  when={selectionMode()}
+                  fallback={
+                    <span class="text-[11px] font-medium text-ink-500">Projects</span>
+                  }
+                >
+                  <span class="text-[11px] font-medium text-ink-300">
+                    {selectedSessions().size} selected
+                  </span>
+                </Show>
+                <div class="flex items-center gap-0.5">
+                  {/* Selection mode toggle (chatbot) */}
+                  <button
+                    onClick={() => {
+                      if (selectionMode()) exitSelectionMode();
+                      else setSelectionMode(true);
+                    }}
+                    class={`p-1 rounded cursor-pointer ${selectionMode() ? "bg-ink-800 text-ink-100" : "text-ink-500 hover:text-ink-200 hover:bg-ink-900"}`}
+                    title={selectionMode() ? "Exit selection mode" : "Select conversations"}
+                  >
+                    <Iconify icon={selectionMode() ? "lucide:x" : "lucide:list-todo"} size={13} />
+                  </button>
+                  {/* New Project split button (Antigravity: New Project / Quick Start) */}
                 <div class="relative">
                   <button
                     onClick={(e) => {
@@ -1974,6 +2669,7 @@ export default function RemoteCodePage() {
                       </button>
                     </div>
                   </Show>
+                  </div>
                 </div>
               </div>
               <Show
@@ -1987,128 +2683,110 @@ export default function RemoteCodePage() {
                   </button>
                 }
               >
-                <div class="space-y-0.5">
-                  <For each={projects()}>
-                    {(p) => {
-                      const isActive = () => p.id === (activeProject()?.id || "");
-                      const count = () => sessionsOfProject(p.path).length;
-                      return (
-                        <div
-                          onClick={() => setActiveProjectId(p.id)}
-                          class={`group flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer text-[13px] transition-colors ${
-                            isActive() ? "bg-ink-900 text-ink-100" : "text-ink-400 hover:bg-ink-900/60 hover:text-ink-200"
-                          }`}
-                          title={p.path}
-                        >
-                          <Iconify icon="lucide:folder" size={14} class="shrink-0 text-ink-500" />
-                          <span class="truncate flex-1 font-medium">{p.name}</span>
-                          <span class="text-[10px] text-ink-600">{count() > 0 ? count() : ""}</span>
-                          <button
-                            onClick={(e) => deleteProject(p.id, e)}
-                            class="opacity-0 group-hover:opacity-100 p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
-                            title="Remove project"
-                          >
-                            <Iconify icon="lucide:x" size={12} />
-                          </button>
-                        </div>
-                      );
-                    }}
-                  </For>
-                </div>
-              </Show>
-            </div>
-
-            {/* Conversations do projeto ativo */}
-            <div>
-              <div class="px-1.5 pb-1 text-[11px] font-medium text-ink-500 truncate">
-                {activeProject() ? activeProject()?.name : "Conversations"}
-              </div>
-              <div class="space-y-0.5">
-                <For
-                  each={sortedSessions(filteredSessions())}
+                {/* Nested view (Antigravity): sessions live under their project */}
+                <Show
+                  when={groupBy() === "project"}
                   fallback={
-                    <div class="px-2.5 py-3 text-xs text-ink-600 leading-relaxed">
-                      {projects().length === 0
-                        ? "Create a project first, then start a conversation inside it."
-                        : "No conversations yet. Start one above."}
+                    <div class="space-y-0.5">
+                      <For
+                        each={sortedSessions(sessions().filter(matchQuery))}
+                        fallback={
+                          <div class="px-2.5 py-3 text-xs text-ink-600">
+                            No conversations yet. Start one above.
+                          </div>
+                        }
+                      >
+                        {(s) => sessionRow(s)}
+                      </For>
                     </div>
                   }
                 >
-                  {(s) => {
-                    const isActive = () => s.id === activeSessionId();
-                    const projName = () => {
-                      const norm = (p: string) => p.replace(/\/+$/, "");
-                      const cwd = norm(s.cwd || "");
-                      const hit = projects().find((p) => {
-                        const pp = norm(p.path);
-                        return cwd === pp || cwd.startsWith(pp + "/");
-                      });
-                      return hit?.name;
-                    };
-                    return (
-                      <div
-                        onClick={() => {
-                          setHistoryView(false);
-                          selectSession(s.id);
-                        }}
-                        onDblClick={() => {
-                          setRenamingId(s.id);
-                          setRenameText(s.title);
-                        }}
-                        class={`group flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer text-[13px] transition-colors ${
-                          isActive() ? "bg-ink-800 text-ink-50" : "text-ink-400 hover:bg-ink-900/60 hover:text-ink-200"
-                        }`}
-                        title={`${s.title}\n${s.cwd}`}
-                      >
-                        <Show
-                          when={renamingId() === s.id}
-                          fallback={
-                            <>
-                              <span class="truncate flex-1">
-                                {s.title}
-                                <Show when={groupBy() === "none" && projName()}>
-                                  <span class="block text-[10px] text-ink-600 font-normal truncate">
-                                    {projName()}
-                                  </span>
-                                </Show>
-                              </span>
-                              <span class="text-[10px] text-ink-600 shrink-0">{timeAgo(s.updatedAt)}</span>
-                              <Show when={s.status === "running"}>
-                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                              </Show>
-                              <div class="hidden group-hover:flex items-center shrink-0">
-                                <button
-                                  onClick={(e) => deleteSession(s.id, e)}
-                                  class="p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
-                                  title="Delete"
-                                >
-                                  <Iconify icon="lucide:trash-2" size={11} />
-                                </button>
+                  <div class="space-y-2">
+                    <For each={projects()}>
+                      {(p) => {
+                        const list = () => projectSessions(p.path);
+                        return (
+                          <div>
+                            <div
+                              onClick={() => {
+                                setActiveProjectId(p.id);
+                                toggleProjectExpanded(p.id);
+                              }}
+                              class={`group flex items-center gap-1.5 px-2 py-1.5 rounded-lg cursor-pointer text-[13px] transition-colors ${
+                                p.id === (activeProject()?.id || "")
+                                  ? "text-ink-100"
+                                  : "text-ink-400 hover:bg-ink-900/60 hover:text-ink-200"
+                              }`}
+                              title={p.path}
+                            >
+                              <Iconify
+                                icon="lucide:chevron-right"
+                                size={12}
+                                class={`shrink-0 text-ink-600 transition-transform ${isProjectExpanded(p) ? "rotate-90" : ""}`}
+                              />
+                              <Iconify icon="lucide:folder" size={14} class="shrink-0 text-ink-500" />
+                              <span class="truncate flex-1 font-medium">{p.name}</span>
+                              <button
+                                onClick={(e) => deleteProject(p.id, e)}
+                                class="opacity-0 group-hover:opacity-100 p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer shrink-0"
+                                title="Remove project"
+                              >
+                                <Iconify icon="lucide:x" size={12} />
+                              </button>
+                            </div>
+                            <Show when={isProjectExpanded(p)}>
+                              <div class="ml-[13px] mt-0.5 space-y-0.5 border-l border-line/50 pl-1.5">
+                                <For each={list()}>
+                                  {(s) => sessionRow(s)}
+                                </For>
                               </div>
-                            </>
-                          }
-                        >
-                          <input
-                            type="text"
-                            class="flex-1 min-w-0 bg-ink-950 border border-ink-500 rounded px-1.5 py-0.5 text-[13px] text-ink-100 focus:outline-none"
-                            value={renameText()}
-                            onInput={(e) => setRenameText(e.currentTarget.value)}
-                            onKeyDown={(e) => {
-                              e.stopPropagation();
-                              if (e.key === "Enter") submitRename(s.id);
-                              if (e.key === "Escape") setRenamingId(null);
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            ref={(el) => setTimeout(() => el?.select(), 30)}
-                          />
-                        </Show>
+                            </Show>
+                          </div>
+                        );
+                      }}
+                    </For>
+                    <Show when={looseSessions().length > 0}>
+                      <div>
+                        <div class="px-2 py-1.5 text-[11px] font-medium text-ink-600">
+                          Not in Project
+                        </div>
+                        <div class="space-y-0.5">
+                          <For each={looseSessions()}>
+                            {(s) => sessionRow(s)}
+                          </For>
+                        </div>
                       </div>
-                    );
-                  }}
-                </For>
-              </div>
+                    </Show>
+                  </div>
+                </Show>
+              </Show>
             </div>
           </div>
+
+          {/* Batch bar (chatbot selection mode) */}
+          <Show when={selectionMode() && selectedSessions().size > 0}>
+            <div class="p-2 border-t border-line/70 bg-ink-950/95">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] text-ink-500 pl-1">
+                  {selectedSessions().size} selected
+                </span>
+                <div class="flex items-center gap-1.5">
+                  <button
+                    onClick={pinSelected}
+                    class="px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-ink-900 border border-line/70 text-ink-300 hover:text-ink-100 cursor-pointer"
+                  >
+                    Pin / Unpin
+                  </button>
+                  <button
+                    onClick={deleteSelected}
+                    class="px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20 cursor-pointer"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          </Show>
 
           {/* Sidebar Footer: host switcher + settings (Antigravity) */}
           <div class="p-2 border-t border-line/70 space-y-1">
@@ -2147,7 +2825,7 @@ export default function RemoteCodePage() {
               </button>
             </div>
             <button
-              onClick={() => setShowConfigModal(true)}
+              onClick={openSettings}
               class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-ink-500 hover:text-ink-200 hover:bg-ink-900/60 transition-colors cursor-pointer"
             >
               <Iconify icon="lucide:settings" size={14} />
@@ -2229,7 +2907,11 @@ export default function RemoteCodePage() {
                     <Iconify icon="lucide:search" size={14} class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-600" />
                     <input
                       type="text"
-                      placeholder="Search conversations and messages... (Ctrl+K)"
+                      placeholder={
+                        isMobile()
+                          ? "Search conversations and messages..."
+                          : "Search conversations and messages... (Ctrl+K)"
+                      }
                       class="w-full text-[13px] bg-ink-900 border border-line/70 rounded-xl pl-9 pr-3 py-2 text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
                       value={sessionFilter()}
                       onInput={(e) => {
@@ -2272,7 +2954,7 @@ export default function RemoteCodePage() {
                   </div>
                   <div class="space-y-1">
                     <For
-                      each={sortedSessions(filteredSessions())}
+                      each={sortedSessions(sessions().filter(matchQuery))}
                       fallback={
                         <p class="text-xs text-ink-600 py-6 text-center">No conversations found.</p>
                       }
@@ -2375,25 +3057,83 @@ export default function RemoteCodePage() {
                             </For>
                           </div>
                         </Show>
-                        <div class="bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md">
-                          <p class="whitespace-pre-line text-sm leading-relaxed">{textOf()}</p>
-                        </div>
-                        <div class="flex items-center gap-0.5 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
-                          <button
-                            onClick={() => copyMsg(msg.id, textOf())}
-                            class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                            title="Copy"
-                          >
-                            <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={13} />
-                          </button>
-                          <button
-                            onClick={() => editUserMsg(msg)}
-                            class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                            title="Edit in large editor"
-                          >
-                            <Iconify icon="lucide:pencil" size={13} />
-                          </button>
-                        </div>
+                        {/* Inline edit mode (chatbot) */}
+                        <Show
+                          when={editingMsgIdx() === idx()}
+                          fallback={
+                            <div class="bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md">
+                              <p class="whitespace-pre-line text-sm leading-relaxed">{textOf()}</p>
+                            </div>
+                          }
+                        >
+                          <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60">
+                            <textarea
+                              value={editingMsgText()}
+                              onInput={(e) => setEditingMsgText(e.currentTarget.value)}
+                              class="w-full bg-transparent text-ink-100 text-sm outline-none resize-none"
+                              rows={4}
+                              ref={(el) => setTimeout(() => el?.focus(), 40)}
+                            />
+                            <div class="flex justify-between items-center mt-2">
+                              <button
+                                onClick={() => {
+                                  setEditingMsgText(messageText(msg));
+                                  setLargeEditorOpen(true);
+                                }}
+                                class="p-1.5 hover:bg-ink-800 rounded-lg text-ink-500 hover:text-ink-200 cursor-pointer"
+                                title="Expand editor"
+                              >
+                                <Iconify icon="lucide:expand" size={14} />
+                              </button>
+                              <div class="flex gap-2">
+                                <button
+                                  onClick={cancelEditMsg}
+                                  class="text-xs text-ink-400 hover:text-ink-100 px-2 py-1 cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  onClick={() => saveEditMsg(idx(), msg)}
+                                  class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-white font-medium cursor-pointer"
+                                >
+                                  Save and Send
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </Show>
+                        <Show when={editingMsgIdx() !== idx()}>
+                          <div class="flex items-center gap-0.5 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+                            <button
+                              onClick={() => copyMsg(msg.id, textOf())}
+                              class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                              title="Copy"
+                            >
+                              <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={13} />
+                            </button>
+                            <button
+                              onClick={() => startEditMsg(idx(), msg)}
+                              class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                              title="Edit and resend"
+                            >
+                              <Iconify icon="lucide:pencil" size={13} />
+                            </button>
+                            <button
+                              onClick={() => editUserMsg(msg)}
+                              class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                              title="Edit in large editor"
+                            >
+                              <Iconify icon="lucide:expand" size={13} />
+                            </button>
+                            <button
+                              onClick={() => deleteMsg(idx())}
+                              class="p-1 rounded-md text-ink-500 hover:text-rose-400 hover:bg-ink-900 transition-colors cursor-pointer"
+                              title="Delete"
+                            >
+                              <Iconify icon="lucide:trash-2" size={13} />
+                            </button>
+                          </div>
+                        </Show>
                       </div>
                     </Show>
 
@@ -2415,6 +3155,10 @@ export default function RemoteCodePage() {
                           </div>
                         </Show>
 
+                        {/* Inline edit mode for assistant text (chatbot) */}
+                        <Show
+                          when={editingMsgIdx() === idx()}
+                          fallback={
                         <div class="w-full space-y-2.5">
                           <For each={msg.blocks}>
                             {(block) => {
@@ -2427,6 +3171,10 @@ export default function RemoteCodePage() {
                               }
 
                               if (block.type === "reasoning" && block.reasoning) {
+                                const live = () =>
+                                  isLast() &&
+                                  sessionStatus() === "running" &&
+                                  thinkingStart() !== null;
                                 return (
                                   <Show when={verboseChat()}>
                                     <div class="w-full">
@@ -2437,19 +3185,34 @@ export default function RemoteCodePage() {
                                             [msg.id]: !prev[msg.id],
                                           }))
                                         }
-                                        class="flex items-center gap-1.5 text-xs text-ink-500 hover:text-ink-300 transition-colors cursor-pointer"
+                                        class={`flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
+                                          live() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
+                                        }`}
                                       >
                                         <Iconify icon="lucide:bot" size={14} />
                                         <span>
-                                          {expandedThinking()[msg.id] ? "Hide thinking" : "Thinking"}
+                                          {live()
+                                            ? `Thinking ${thinkingElapsed()}s`
+                                            : msg.thinkingDuration
+                                              ? `Thinking ${msg.thinkingDuration}s`
+                                              : expandedThinking()[msg.id]
+                                                ? "Hide thinking"
+                                                : "Thinking"}
                                         </span>
+                                        <Show when={live()}>
+                                          <span class="thinking-indicator">
+                                            <span />
+                                            <span />
+                                            <span />
+                                          </span>
+                                        </Show>
                                         <Iconify
                                           icon="lucide:chevron-down"
                                           size={12}
                                           class={`transition-transform ${expandedThinking()[msg.id] ? "rotate-180" : ""}`}
                                         />
                                       </button>
-                                      <Show when={expandedThinking()[msg.id]}>
+                                      <Show when={expandedThinking()[msg.id] || live()}>
                                         <div class="mt-1.5 pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap text-xs leading-relaxed">
                                           {block.reasoning}
                                         </div>
@@ -2460,11 +3223,34 @@ export default function RemoteCodePage() {
                               }
 
                               if (block.type === "image") {
+                                const src = () =>
+                                  block.imageData
+                                    ? `data:${block.imageMime || "image/jpeg"};base64,${block.imageData}`
+                                    : undefined;
                                 return (
-                                  <div class="flex items-center gap-1.5 text-[11px] text-ink-500 border border-line/60 rounded-lg px-2 py-1">
-                                    <Iconify icon="lucide:image" size={12} />
-                                    <span>[attached {block.text || "image"}]</span>
-                                  </div>
+                                  <Show
+                                    when={src()}
+                                    fallback={
+                                      <div class="flex items-center gap-1.5 text-[11px] text-ink-500 border border-line/60 rounded-lg px-2 py-1">
+                                        <Iconify icon="lucide:image" size={12} />
+                                        <span>[attached {block.text || "image"}]</span>
+                                      </div>
+                                    }
+                                  >
+                                    <button
+                                      onClick={() =>
+                                        setPreviewFile({
+                                          name: "attached image",
+                                          mime: block.imageMime || "image/jpeg",
+                                          dataUrl: src(),
+                                        })
+                                      }
+                                      class="block rounded-lg overflow-hidden border border-line/60 hover:border-ink-500 transition-colors cursor-pointer"
+                                      title="Open preview"
+                                    >
+                                      <img src={src()} class="max-h-64 max-w-full object-contain" />
+                                    </button>
+                                  </Show>
                                 );
                               }
 
@@ -2567,9 +3353,35 @@ export default function RemoteCodePage() {
                             }}
                           </For>
                         </div>
+                          }
+                        >
+                          <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60">
+                            <textarea
+                              value={editingMsgText()}
+                              onInput={(e) => setEditingMsgText(e.currentTarget.value)}
+                              class="w-full bg-transparent text-ink-200 text-sm outline-none resize-none"
+                              rows={8}
+                              ref={(el) => setTimeout(() => el?.focus(), 40)}
+                            />
+                            <div class="flex justify-end gap-2 mt-2">
+                              <button
+                                onClick={cancelEditMsg}
+                                class="text-xs text-ink-400 hover:text-ink-100 px-2 py-1 cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => saveEditMsg(idx(), msg)}
+                                class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-white font-medium cursor-pointer"
+                              >
+                                Save
+                              </button>
+                            </div>
+                          </div>
+                        </Show>
 
                         {/* Hover actions (chatbot-style) */}
-                        <Show when={!sessionStatus() || !isLast()}>
+                        <Show when={(!sessionStatus() || !isLast()) && editingMsgIdx() !== idx()}>
                           <div class="flex items-center gap-0.5 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
                             <button
                               onClick={() => copyMsg(msg.id, textOf())}
@@ -2579,11 +3391,25 @@ export default function RemoteCodePage() {
                               <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={14} />
                             </button>
                             <button
-                              onClick={() => regenerateFrom(idx())}
+                              onClick={() => regenerateMsg(idx())}
                               class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
                               title="Regenerate response"
                             >
                               <Iconify icon="lucide:rotate-cw" size={14} />
+                            </button>
+                            <button
+                              onClick={() => startEditMsg(idx(), msg)}
+                              class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                              title="Edit response"
+                            >
+                              <Iconify icon="lucide:pencil" size={14} />
+                            </button>
+                            <button
+                              onClick={() => deleteMsg(idx())}
+                              class="p-1.5 rounded-md text-ink-500 hover:text-rose-400 hover:bg-ink-900 transition-colors cursor-pointer"
+                              title="Delete"
+                            >
+                              <Iconify icon="lucide:trash-2" size={14} />
                             </button>
                           </div>
                         </Show>
@@ -2713,21 +3539,32 @@ export default function RemoteCodePage() {
                     <For each={pendingAttachments()}>
                       {(att) => (
                         <div
-                          class="relative group flex items-center gap-1.5 bg-ink-950 rounded-lg border border-line/70 pl-1.5 pr-2 py-1 text-xs max-w-[180px]"
-                          title={`${att.name} (${Math.round(att.size / 1024)}KB)`}
+                          onClick={() => previewPending(att)}
+                          class="relative group flex items-center gap-1.5 bg-ink-950 rounded-lg border border-line/70 pl-1.5 pr-2 py-1 text-xs max-w-[180px] cursor-pointer hover:border-ink-500 transition-colors"
+                          title={`${att.name} (${Math.round(att.size / 1024)}KB) — click to preview`}
                         >
                           <Show
-                            when={att.objectUrl}
-                            fallback={<Iconify icon="lucide:file-text" size={20} class="text-ink-500 shrink-0" />}
+                            when={att.loading}
+                            fallback={
+                              <Show
+                                when={att.objectUrl}
+                                fallback={<Iconify icon="lucide:file-text" size={20} class="text-ink-500 shrink-0" />}
+                              >
+                                <img src={att.objectUrl} class="w-7 h-7 object-cover rounded shrink-0 border border-line/60" />
+                              </Show>
+                            }
                           >
-                            <img src={att.objectUrl} class="w-7 h-7 object-cover rounded shrink-0 border border-line/60" />
+                            <span class="w-5 h-5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
                           </Show>
                           <span class="truncate text-ink-300">{att.name}</span>
                           <Show when={att.uploading}>
                             <span class="w-3 h-3 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
                           </Show>
                           <button
-                            onClick={() => removePendingAttachment(att.key)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removePendingAttachment(att.key);
+                            }}
                             class="absolute -top-1.5 -right-1.5 bg-ink-700 hover:bg-rose-500 rounded-full p-0.5 transition-colors shadow cursor-pointer"
                             title="Remove"
                           >
@@ -2741,7 +3578,7 @@ export default function RemoteCodePage() {
                 <textarea
                   id="rc-composer"
                   rows={1}
-                  class="w-full bg-transparent text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto"
+                  class="w-full bg-transparent text-base sm:text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto"
                   placeholder={
                     activeSession()
                       ? `Ask anything, @ to mention, / for actions`
@@ -2824,6 +3661,52 @@ export default function RemoteCodePage() {
 
               <div class="flex items-center justify-between px-3 pb-2.5 pt-1">
                 <div class="flex items-center gap-0.5 text-xs text-ink-400">
+                  {/* Session files (stored on the daemon) */}
+                  <Show when={(sessionFiles()[activeSessionId()] || []).length > 0}>
+                    <div class="relative">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setFilesMenuOpen(!filesMenuOpen());
+                          setAddContextOpen(false);
+                          setModelMenuOpen(false);
+                        }}
+                        class="flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-ink-800 cursor-pointer"
+                        title="Session files"
+                      >
+                        <Iconify icon="lucide:paperclip" size={13} />
+                        <span>{(sessionFiles()[activeSessionId()] || []).length}</span>
+                      </button>
+                      <Show when={filesMenuOpen()}>
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          class="absolute left-0 bottom-full mb-1.5 w-60 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-[60]"
+                        >
+                          <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                            Session files
+                          </div>
+                          <div class="max-h-48 overflow-y-auto">
+                            <For each={sessionFiles()[activeSessionId()] || []}>
+                              {(f) => (
+                                <button
+                                  onClick={() => {
+                                    setFilesMenuOpen(false);
+                                    openStoredPreview(activeSessionId(), f.id);
+                                  }}
+                                  class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
+                                  title={`${f.name} (${Math.round(f.size / 1024)}KB)`}
+                                >
+                                  <Iconify icon="lucide:file-text" size={13} class="shrink-0 text-ink-500" />
+                                  <span class="truncate flex-1">{f.name}</span>
+                                  <span class="text-[10px] text-ink-600 shrink-0">{Math.round(f.size / 1024)}K</span>
+                                </button>
+                              )}
+                            </For>
+                          </div>
+                        </div>
+                      </Show>
+                    </div>
+                  </Show>
                   {/* Add Context (+) — Antigravity-style */}
                   <div class="relative">
                     <button
@@ -2916,8 +3799,18 @@ export default function RemoteCodePage() {
                         onClick={(e) => e.stopPropagation()}
                         class="absolute left-0 bottom-full mb-1.5 w-64 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-[60]"
                       >
-                        <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-                          Model
+                        <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider flex items-center justify-between">
+                          <span>Model</span>
+                          <button
+                            onClick={async () => {
+                              await loadGatewayModels();
+                              toast("Models refreshed", "ok");
+                            }}
+                            class="p-0.5 text-ink-600 hover:text-ink-200 cursor-pointer"
+                            title="Refresh models"
+                          >
+                            <Iconify icon="lucide:refresh-cw" size={11} />
+                          </button>
                         </div>
                         <div class="max-h-56 overflow-y-auto">
                           <For each={gatewayModels()}>
@@ -3075,6 +3968,7 @@ export default function RemoteCodePage() {
         open={showNewProjectModal()}
         onClose={() => setShowNewProjectModal(false)}
         title="Select project folder"
+        fullOnMobile
       >
         <div class="space-y-4">
           <p class="text-xs text-ink-400 leading-relaxed">
@@ -3117,6 +4011,7 @@ export default function RemoteCodePage() {
         open={showNewSessionModal()}
         onClose={() => setShowNewSessionModal(false)}
         title={`New conversation${activeProject() ? ` in ${activeProject()?.name}` : ""}`}
+        fullOnMobile
       >
           <div class="space-y-4">
             <div>
@@ -3135,18 +4030,18 @@ export default function RemoteCodePage() {
               </p>
             </div>
 
-            <div>
-              <label class="block text-xs font-semibold text-ink-300 mb-1">
-                Session Title (Optional)
-              </label>
-              <input
-                type="text"
-                class="w-full bg-ink-900 border border-line rounded-xl px-3 py-2 text-sm text-ink-100 focus:outline-none focus:border-brand-500"
-                placeholder="e.g. Refactor Auth Flow"
-                value={newSessionTitle()}
-                onInput={(e) => setNewSessionTitle(e.currentTarget.value)}
-              />
-            </div>
+              <div>
+                <label class="block text-xs font-semibold text-ink-300 mb-1">
+                  Session Title (Optional)
+                </label>
+                <input
+                  type="text"
+                  class="w-full bg-ink-900 border border-line rounded-xl px-3 py-2 text-sm text-ink-100 focus:outline-none focus:border-brand-500"
+                  placeholder="Blank = auto-generated after first reply"
+                  value={newSessionTitle()}
+                  onInput={(e) => setNewSessionTitle(e.currentTarget.value)}
+                />
+              </div>
 
             <div class="flex justify-end gap-2 pt-2">
               <button
@@ -3171,6 +4066,7 @@ export default function RemoteCodePage() {
         onClose={() => setLargeEditorOpen(false)}
         title="Edit message"
         width="max-w-2xl"
+        fullOnMobile
       >
         <div class="space-y-3">
           <textarea
@@ -3216,6 +4112,176 @@ export default function RemoteCodePage() {
           </div>
         </div>
       </Modal>
+
+      {/* Modal: File Preview (chatbot FilePreviewModal) */}
+      <Modal
+        open={!!previewFile()}
+        onClose={() => setPreviewFile(null)}
+        title={previewFile()?.name || "File Preview"}
+        width="max-w-3xl"
+        fullOnMobile
+      >
+        <Show when={previewFile()}>
+          {(f) => (
+            <div class="space-y-3">
+              <Show when={f().truncated}>
+                <span class="inline-flex text-[10px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30 px-1.5 py-0.5 rounded-full">
+                  truncated
+                </span>
+              </Show>
+              {/* Toolbar */}
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <Show when={f().truncated && f().fullText}>
+                  <button
+                    onClick={restorePreviewFile}
+                    class="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20 cursor-pointer"
+                  >
+                    <Iconify icon="lucide:rotate-ccw" size={13} />
+                    <span>Restore</span>
+                  </button>
+                </Show>
+                <Show when={!f().dataUrl}>
+                  <button
+                    onClick={() => setShowTruncateInput(!showTruncateInput())}
+                    class="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border bg-ink-900 border-line text-ink-400 hover:text-ink-200 cursor-pointer"
+                    title="Truncate to reduce tokens"
+                  >
+                    <Iconify icon="lucide:scissors" size={13} />
+                    <span>Truncate</span>
+                  </button>
+                </Show>
+                <Show when={f().text}>
+                  <button
+                    onClick={() => {
+                      copyWithToast(f().text || "");
+                      setPreviewCopied(true);
+                      setTimeout(() => setPreviewCopied(false), 1500);
+                    }}
+                    class="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border bg-ink-900 border-line text-ink-400 hover:text-ink-200 cursor-pointer"
+                  >
+                    <Iconify icon={previewCopied() ? "lucide:check" : "lucide:copy"} size={13} />
+                    <span>{previewCopied() ? "Copied!" : "Copy all"}</span>
+                  </button>
+                </Show>
+                <Show when={f().dataB64}>
+                  <button
+                    onClick={downloadPreviewFile}
+                    class="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border bg-ink-900 border-line text-ink-400 hover:text-ink-200 cursor-pointer"
+                  >
+                    <Iconify icon="lucide:download" size={13} />
+                    <span>Download</span>
+                  </button>
+                </Show>
+              </div>
+              {/* Truncate input */}
+              <Show when={showTruncateInput() && !f().dataUrl}>
+                <div class="flex flex-wrap items-center gap-2 p-2.5 rounded-xl bg-ink-900/60 border border-line/60">
+                  <Iconify icon="lucide:scissors" size={14} class="text-ink-500" />
+                  <span class="text-xs text-ink-400">Truncate to</span>
+                  <input
+                    type="number"
+                    min={100}
+                    max={200000}
+                    step={1000}
+                    class="w-24 bg-ink-950 border border-line rounded-lg px-2 py-1 text-ink-100 text-xs focus:outline-none"
+                    value={truncateTokens() || 16000}
+                    onInput={(e) => setTruncateTokens(parseInt(e.currentTarget.value) || 16000)}
+                  />
+                  <span class="text-xs text-ink-500">tokens (~{(((truncateTokens() || 16000) * 4)).toLocaleString()} chars)</span>
+                  <div class="flex items-center gap-2 ml-auto">
+                    <button
+                      onClick={() => setShowTruncateInput(false)}
+                      class="text-xs text-ink-400 hover:text-ink-100 px-2 py-1 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => {
+                        truncatePreviewFile();
+                        setShowTruncateInput(false);
+                      }}
+                      class="px-3 py-1.5 text-xs font-medium bg-ink-100 text-ink-950 rounded-lg hover:bg-white cursor-pointer"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              </Show>
+              {/* Content */}
+              <div class="max-h-[50vh] overflow-auto rounded-xl border border-line/60 bg-ink-950 p-3">
+                <Show
+                  when={f().dataUrl}
+                  fallback={
+                    <pre class="text-xs text-ink-200 font-mono whitespace-pre-wrap break-words leading-relaxed">{f().text || "(empty)"}</pre>
+                  }
+                >
+                  <div class="flex items-center justify-center">
+                    <img src={f().dataUrl} class="max-w-full rounded-lg object-contain" />
+                  </div>
+                </Show>
+              </div>
+              {/* Footer stats */}
+              <Show when={f().text}>
+                <div class="flex items-center justify-between text-[11px] text-ink-500">
+                  <span>
+                    {(f().text || "").length.toLocaleString()} chars ·{" "}
+                    {(f().text || "").split("\n").length.toLocaleString()} lines
+                    <Show when={f().truncated && f().fullText}>
+                      <span class="text-amber-400"> (original: {(f().fullText || "").length.toLocaleString()} chars)</span>
+                    </Show>
+                  </span>
+                  <span class="flex items-center gap-1 font-mono">
+                    <Iconify icon="lucide:hash" size={11} />
+                    {Math.round((f().text || "").length / 4).toLocaleString()} tokens
+                  </span>
+                </div>
+              </Show>
+            </div>
+          )}
+        </Show>
+      </Modal>
+
+      {/* Confirm dialog (chatbot showConfirm, promise-based) */}
+      <Show when={confirmState()}>
+        {(c) => (
+          <div class="fixed inset-0 z-[70] overflow-y-auto bg-black/55 backdrop-blur-sm">
+            <div class="min-h-full flex items-center justify-center p-4">
+              <div class="anim-pop-in w-full max-w-sm rounded-2xl border border-line bg-ink-900 shadow-2xl">
+                <div class="px-5 pt-5 pb-3">
+                  <h3 class="text-sm font-semibold text-ink-100">{c().title}</h3>
+                  <p class="text-xs text-ink-400 mt-1.5 whitespace-pre-line leading-relaxed">
+                    {c().message}
+                  </p>
+                </div>
+                <div class="flex justify-end gap-2 px-5 pb-5">
+                  <button
+                    onClick={() => {
+                      c().resolve(false);
+                      setConfirmState(null);
+                    }}
+                    class="px-4 py-2 rounded-xl text-xs font-medium text-ink-300 hover:text-ink-100 border border-line hover:bg-ink-800 transition-colors cursor-pointer"
+                  >
+                    {c().cancelText}
+                  </button>
+                  <button
+                    onClick={() => {
+                      c().resolve(true);
+                      setConfirmState(null);
+                    }}
+                    class={`px-4 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                      c().danger
+                        ? "bg-rose-500/90 text-white hover:bg-rose-500"
+                        : "bg-ink-100 text-ink-950 hover:bg-white"
+                    }`}
+                  >
+                    {c().confirmText}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
 
       {/* Modal: Pair Daemon Host */}
       <Modal
@@ -3284,75 +4350,88 @@ export default function RemoteCodePage() {
           </div>
         </Modal>
 
-      {/* Modal: Code Remote Configuration, MCP & Skills Center */}
+      {/* Modal: Settings (chatbot-style sections) */}
       <Modal
         open={showConfigModal()}
-        title="Code Remote Configuration Center"
-        onClose={() => setShowConfigModal(false)}
+        title="Settings"
+        width="max-w-2xl"
+        fullOnMobile
+        onClose={cancelSettings}
       >
-          <div class="w-full max-w-2xl space-y-4">
-            {/* Tabs Header */}
-            <div class="flex border-b border-line gap-1">
-              <button
-                onClick={() => setConfigTab("settings")}
-                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-                  configTab() === "settings"
-                    ? "border-brand-500 text-brand-400"
-                    : "border-transparent text-ink-400 hover:text-ink-200"
-                }`}
-              >
-                Agent Settings
-              </button>
-              <button
-                onClick={() => setConfigTab("mcp")}
-                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer ${
-                  configTab() === "mcp"
-                    ? "border-brand-500 text-brand-400"
-                    : "border-transparent text-ink-400 hover:text-ink-200"
-                }`}
-              >
-                <span>MCP Servers</span>
-                <span class="px-1.5 py-0.2 rounded-full bg-ink-800 text-[10px]">
-                  {Object.keys(mcpServers()).length}
-                </span>
-              </button>
-              <button
-                onClick={() => setConfigTab("skills")}
-                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer ${
-                  configTab() === "skills"
-                    ? "border-brand-500 text-brand-400"
-                    : "border-transparent text-ink-400 hover:text-ink-200"
-                }`}
-              >
-                <span>Skills</span>
-                <span class="px-1.5 py-0.2 rounded-full bg-ink-800 text-[10px]">
-                  {Object.keys(skills()).length}
-                </span>
-              </button>
-              <button
-                onClick={() => setConfigTab("slash")}
-                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-                  configTab() === "slash"
-                    ? "border-brand-500 text-brand-400"
-                    : "border-transparent text-ink-400 hover:text-ink-200"
-                }`}
-              >
-                Slash Commands
-              </button>
-              <button
-                onClick={() => setConfigTab("appearance")}
-                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-                  configTab() === "appearance"
-                    ? "border-brand-500 text-brand-400"
-                    : "border-transparent text-ink-400 hover:text-ink-200"
-                }`}
-              >
-                Appearance
-              </button>
+          <div class="w-full space-y-4 max-h-[70vh] overflow-y-auto pr-0.5">
+            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+                <Iconify icon="lucide:palette" size={15} class="text-ink-500" />
+                <span>Appearance</span>
+                
+              </h3>
+              <div class="space-y-3 text-xs">
+                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
+                  <div>
+                    <div class="font-semibold text-ink-200">Theme</div>
+                    <div class="text-[11px] text-ink-500 mt-0.5">
+                      White or dark interface.
+                    </div>
+                  </div>
+                  <ThemeToggle />
+                </div>
+                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
+                  <div>
+                    <div class="font-semibold text-ink-200">Verbose Agent Chat</div>
+                    <div class="text-[11px] text-ink-500 mt-0.5">
+                      Display intermediate thinking steps and tool calls.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const v = !verboseChat();
+                      setVerboseChat(v);
+                      try { localStorage.setItem("llmgw-rc-verbose", v ? "1" : "0"); } catch {}
+                    }}
+                    class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${verboseChat() ? "bg-sky-500" : "bg-ink-700"}`}
+                    style={{ height: "22px" }}
+                    title="Toggle verbose agent chat"
+                  >
+                    <span
+                      class={`block w-4 h-4 rounded-full bg-white transition-transform ${verboseChat() ? "translate-x-[18px]" : "translate-x-0"}`}
+                      style={{ height: "16px", width: "16px" }}
+                    />
+                  </button>
+                </div>
+                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60">
+                  <div class="font-semibold text-ink-200">Conversation Width</div>
+                  <div class="text-[11px] text-ink-500 mt-0.5 mb-2">
+                    Maximum width of the conversation panel.
+                  </div>
+                  <div class="grid grid-cols-3 gap-1 bg-ink-950 p-1 rounded-xl border border-line/60">
+                    <For each={[["narrow", "Narrow"], ["default", "Default"], ["wide", "Wide"]] as const}>
+                      {([v, label]) => (
+                        <button
+                          onClick={() => {
+                            setConvWidth(v);
+                            try { localStorage.setItem("llmgw-rc-width", v); } catch {}
+                          }}
+                          class={`py-1.5 rounded-lg text-center font-medium transition-colors cursor-pointer ${
+                            convWidth() === v
+                              ? "bg-ink-800 text-ink-100"
+                              : "text-ink-500 hover:text-ink-300"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </div>
+              </div>
             </div>
 
-            {/* TAB 1: AGENT SETTINGS */}
-            <Show when={configTab() === "settings"}>
+            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+                <Iconify icon="lucide:bot" size={15} class="text-ink-500" />
+                <span>Agent</span>
+                
+              </h3>
               <div class="space-y-4 text-xs">
                 <div>
                   <label class="block font-semibold text-ink-200 mb-1">
@@ -3435,7 +4514,7 @@ export default function RemoteCodePage() {
                           next
                             ? "YOLO Mode: tools run without asking"
                             : "Safe Mode: each tool asks for approval",
-                          next ? "warn" : "info",
+                          next ? "err" : "ok",
                         );
                       }}
                       class="rounded accent-amber-500 mt-0.5"
@@ -3484,20 +4563,100 @@ export default function RemoteCodePage() {
                     </span>
                   </label>
                 </div>
-
-                <div class="flex justify-end pt-3">
-                  <button
-                    onClick={saveDaemonConfig}
-                    class="px-5 py-2 rounded-xl bg-brand-500 text-white font-semibold hover:bg-brand-600"
-                  >
-                    Save Settings
-                  </button>
-                </div>
               </div>
-            </Show>
+            </div>
 
-            {/* TAB 2: MCP SERVERS */}
-            <Show when={configTab() === "mcp"}>
+            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+                <Iconify icon="lucide:sliders-horizontal" size={15} class="text-ink-500" />
+                <span>Advanced</span>
+              </h3>
+              <div class="space-y-4 text-xs">
+                <div>
+                  <label class="block font-semibold text-ink-200 mb-1">
+                    Auto-compact threshold
+                  </label>
+                  <div class="grid grid-cols-5 gap-1 bg-ink-900 p-1 rounded-xl border border-line">
+                    <For each={[0, 70, 80, 85, 90]}>
+                      {(v) => (
+                        <button
+                          onClick={() =>
+                            setDaemonSettings({ ...daemonSettings(), autoCompactPercent: v })
+                          }
+                          class={`py-1 rounded-lg text-center font-medium transition-colors cursor-pointer ${
+                            (daemonSettings().autoCompactPercent ?? 80) === v
+                              ? "bg-ink-100 text-ink-950"
+                              : "text-ink-400 hover:text-ink-200"
+                          }`}
+                        >
+                          {v === 0 ? "Off" : `${v}%`}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <p class="text-[11px] text-ink-500 mt-1">
+                    Compact the transcript automatically past this context usage.
+                  </p>
+                </div>
+                <div>
+                  <label class="block font-semibold text-ink-200 mb-1">
+                    HTTP proxy
+                  </label>
+                  <input
+                    type="text"
+                    class="w-full bg-ink-900 border border-line rounded-xl px-3 py-2 text-ink-100 focus:outline-none font-mono"
+                    placeholder="http://proxy:8080"
+                    value={daemonSettings().httpProxy || ""}
+                    onInput={(e) =>
+                      setDaemonSettings({ ...daemonSettings(), httpProxy: e.currentTarget.value })
+                    }
+                  />
+                </div>
+                <label class="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={daemonSettings().insecureTls ?? false}
+                    onChange={(e) =>
+                      setDaemonSettings({ ...daemonSettings(), insecureTls: e.currentTarget.checked })
+                    }
+                    class="rounded accent-brand-500"
+                  />
+                  <span class="text-ink-200 font-medium">
+                    Insecure TLS (skip certificate verification)
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+                <Iconify icon="lucide:type" size={15} class="text-ink-500" />
+                <span>Title Generator</span>
+              </h3>
+              <label class="flex items-start gap-2 cursor-pointer select-none text-xs">
+                <input
+                  type="checkbox"
+                  checked={!(daemonSettings().noAutoTitle ?? false)}
+                  onChange={(e) =>
+                    setDaemonSettings({ ...daemonSettings(), noAutoTitle: !e.currentTarget.checked })
+                  }
+                  class="rounded accent-brand-500 mt-0.5"
+                />
+                <span>
+                  <span class="text-ink-200 font-medium">Auto-generate conversation titles</span>
+                  <span class="block text-[11px] text-ink-500 font-normal mt-0.5">
+                    The host asks the model for a short title after the first exchange. Off leaves "New conversation".
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+                <Iconify icon="lucide:cpu" size={15} class="text-ink-500" />
+                <span>MCP Servers</span>
+                <span class="px-1.5 py-0.2 rounded-full bg-ink-800 text-[10px] text-ink-400">{Object.keys(mcpServers()).length}</span>
+              </h3>
               <div class="space-y-4 text-xs">
                 <div class="border border-line rounded-xl p-3 bg-ink-900/50 space-y-2">
                   <div class="font-semibold text-ink-200 text-xs">
@@ -3582,10 +4741,14 @@ export default function RemoteCodePage() {
                   </For>
                 </div>
               </div>
-            </Show>
+            </div>
 
-            {/* TAB 3: SKILLS */}
-            <Show when={configTab() === "skills"}>
+            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+                <Iconify icon="lucide:puzzle" size={15} class="text-ink-500" />
+                <span>Skills</span>
+                <span class="px-1.5 py-0.2 rounded-full bg-ink-800 text-[10px] text-ink-400">{Object.keys(skills()).length}</span>
+              </h3>
               <div class="space-y-4 text-xs">
                 {/* Built-in Tools Summary */}
                 <div class="p-3 rounded-xl bg-ink-900/60 border border-line/60">
@@ -3689,11 +4852,15 @@ export default function RemoteCodePage() {
                   </For>
                 </div>
               </div>
-            </Show>
+            </div>
 
-            {/* TAB 4: SLASH COMMANDS REFERENCE */}
-            <Show when={configTab() === "slash"}>
-              <div class="space-y-2 text-xs max-h-80 overflow-y-auto">
+            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+                <Iconify icon="lucide:slash" size={15} class="text-ink-500" />
+                <span>Slash Commands</span>
+                
+              </h3>
+              <div class="space-y-2 text-xs">
                 <For each={SLASH_COMMANDS}>
                   {(sc) => (
                     <div class="p-2.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between">
@@ -3719,70 +4886,27 @@ export default function RemoteCodePage() {
                   )}
                 </For>
               </div>
-            </Show>
+            </div>
 
-            {/* TAB 5: APPEARANCE (Antigravity Chat Settings) */}
-            <Show when={configTab() === "appearance"}>
-              <div class="space-y-3 text-xs">
-                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
-                  <div>
-                    <div class="font-semibold text-ink-200">Theme</div>
-                    <div class="text-[11px] text-ink-500 mt-0.5">
-                      White or dark interface.
-                    </div>
-                  </div>
-                  <ThemeToggle />
-                </div>
-                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
-                  <div>
-                    <div class="font-semibold text-ink-200">Verbose Agent Chat</div>
-                    <div class="text-[11px] text-ink-500 mt-0.5">
-                      Display intermediate thinking steps and tool calls.
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => {
-                      const v = !verboseChat();
-                      setVerboseChat(v);
-                      try { localStorage.setItem("llmgw-rc-verbose", v ? "1" : "0"); } catch {}
-                    }}
-                    class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${verboseChat() ? "bg-sky-500" : "bg-ink-700"}`}
-                    style={{ height: "22px" }}
-                    title="Toggle verbose agent chat"
-                  >
-                    <span
-                      class={`block w-4 h-4 rounded-full bg-white transition-transform ${verboseChat() ? "translate-x-[18px]" : "translate-x-0"}`}
-                      style={{ height: "16px", width: "16px" }}
-                    />
-                  </button>
-                </div>
-                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60">
-                  <div class="font-semibold text-ink-200">Conversation Width</div>
-                  <div class="text-[11px] text-ink-500 mt-0.5 mb-2">
-                    Maximum width of the conversation panel.
-                  </div>
-                  <div class="grid grid-cols-3 gap-1 bg-ink-950 p-1 rounded-xl border border-line/60">
-                    <For each={[["narrow", "Narrow"], ["default", "Default"], ["wide", "Wide"]] as const}>
-                      {([v, label]) => (
-                        <button
-                          onClick={() => {
-                            setConvWidth(v);
-                            try { localStorage.setItem("llmgw-rc-width", v); } catch {}
-                          }}
-                          class={`py-1.5 rounded-lg text-center font-medium transition-colors cursor-pointer ${
-                            convWidth() === v
-                              ? "bg-ink-800 text-ink-100"
-                              : "text-ink-500 hover:text-ink-300"
-                          }`}
-                        >
-                          {label}
-                        </button>
-                      )}
-                    </For>
-                  </div>
-                </div>
-              </div>
-            </Show>
+            {/* Footer: Save / Cancel (chatbot) */}
+            <div class="flex justify-end items-center gap-2 pt-1 sticky bottom-0 bg-ink-950/95 backdrop-blur py-2">
+              <button
+                onClick={cancelSettings}
+                class="px-4 py-2 rounded-xl text-xs font-medium text-ink-400 hover:text-ink-100 border border-line hover:bg-ink-900 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  saveDaemonConfig();
+                  setShowConfigModal(false);
+                  toast("Settings saved", "ok");
+                }}
+                class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
+              >
+                Save
+              </button>
+            </div>
           </div>
         </Modal>
     </div>

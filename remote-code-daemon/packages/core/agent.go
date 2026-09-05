@@ -637,6 +637,8 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			// nothing
 		case provider.EventTextDelta:
 			sink(EvTextDelta{Delta: e.Delta})
+		case provider.EventReasoningDelta:
+			sink(EvReasoningDelta{Delta: e.Delta})
 		case provider.EventToolStart:
 			sink(EvToolUseStart{ID: e.ID, Name: e.Name})
 		case provider.EventToolArgs:

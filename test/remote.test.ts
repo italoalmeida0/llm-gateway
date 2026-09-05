@@ -323,6 +323,142 @@ describe("Remote Code Relay and Pairing", () => {
     }
   }, 15000);
 
+  test("Real Go Daemon: pins, message edit/delete, projects, search, attachments", async () => {
+    const pairRes = await fetch(`${GW}/api/remote/pair`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const pairJson = (await pairRes.json()) as any;
+    expect(pairJson.success).toBe(true);
+
+    const daemonData = mkdtempSync(path.join(tmpdir(), "llmgw-daemon-test2-"));
+    const workDir = mkdtempSync(path.join(tmpdir(), "llmgw-daemon-work2-"));
+    const daemonBin = path.join(import.meta.dir, "../remote-code-daemon/bin/llmgw-daemon");
+    const daemonSubproc = Bun.spawn(
+      [daemonBin, "--connect", pairJson.connectUrl, "--data-dir", daemonData, "--name", "Feature Daemon"],
+      { stdout: "inherit", stderr: "inherit" },
+    );
+
+    try {
+      let featHostId = "";
+      const started = Date.now();
+      while (Date.now() - started < 10_000) {
+        const hRes = await fetch(`${GW}/api/remote/hosts`, {
+          headers: { Authorization: `Bearer ${userToken}` },
+        });
+        const hJson = (await hRes.json()) as any;
+        const found = hJson.hosts.find((h: any) => h.name === "Feature Daemon" && h.status === "online");
+        if (found) {
+          featHostId = found.id;
+          break;
+        }
+        await Bun.sleep(100);
+      }
+      expect(featHostId).not.toBeEmpty();
+
+      const clientWs = new WebSocket(`${GW_WS}/api/remote/client/ws?token=${userToken}`);
+      await new Promise<void>((resolve, reject) => {
+        clientWs.onopen = () => resolve();
+        clientWs.onerror = (e) => reject(e);
+      });
+
+      const waitFor = (pred: (m: any) => boolean, timeout = 5000): Promise<any> =>
+        new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            clientWs.onmessage = null;
+            reject(new Error("timed out waiting for daemon message"));
+          }, timeout);
+          clientWs.onmessage = (ev) => {
+            let msg: any;
+            try {
+              msg = JSON.parse(String(ev.data));
+            } catch {
+              return;
+            }
+            if (pred(msg)) {
+              clearTimeout(timer);
+              clientWs.onmessage = null;
+              resolve(msg);
+            }
+          };
+        });
+      const send = (obj: any) => clientWs.send(JSON.stringify({ hostId: featHostId, ...obj }));
+
+      // Session with blank title -> placeholder until auto-title
+      send({ type: "create_session", cwd: workDir, title: "", model: "gpt-4o" });
+      const created = await waitFor((m) => m.type === "session_created");
+      const sid = created.session.id;
+      expect(created.session.title).toBe("New conversation");
+
+      // Rename + pin round-trip
+      send({ type: "rename_session", sessionId: sid, title: "Renamed Session" });
+      const renamed = await waitFor((m) => m.type === "session_renamed");
+      expect(renamed.title).toBe("Renamed Session");
+      send({ type: "toggle_pin", sessionId: sid });
+      const pinned = await waitFor((m) => m.type === "session_pinned");
+      expect(pinned.pinned).toBe(true);
+
+      // Seed a transcript via slash-free edit path: use /help to create messages
+      send({ type: "prompt", sessionId: sid, text: "/help", model: "gpt-4o" });
+      await waitFor((m) => m.type === "session_content" && m.sessionId === sid);
+      send({ type: "list_sessions" });
+      const listed = await waitFor((m) => m.type === "sessions_list");
+      expect(listed.sessions.some((s: any) => s.id === sid && s.pinned === true)).toBe(true);
+
+      // Search finds seeded transcript terms (before we edit/delete them)
+      send({ type: "search", query: "Slash Commands" });
+      const hits = await waitFor((m) => m.type === "search_results");
+      expect(hits.results.some((r: any) => r.sessionId === sid)).toBe(true);
+
+      // Edit first message without regen, then delete it
+      send({ type: "edit_message", sessionId: sid, index: 0, text: "edited hello", regenerate: false });
+      const edited = await waitFor(
+        (m) => m.type === "session_content" && m.sessionId === sid && JSON.stringify(m.messages).includes("edited hello"),
+      );
+      expect(edited.messages.length).toBeGreaterThanOrEqual(1);
+      send({ type: "delete_message", sessionId: sid, index: 0 });
+      const afterDel = await waitFor(
+        (m) => m.type === "session_content" && m.sessionId === sid && !JSON.stringify(m.messages).includes("edited hello"),
+      );
+      expect(afterDel).toBeDefined();
+
+      // Projects CRUD (daemon-owned)
+      send({ type: "create_project", path: workDir });
+      const projCreated = await waitFor((m) => m.type === "project_created");
+      expect(projCreated.project.path).toBe(workDir);
+      send({ type: "list_projects" });
+      const projList = await waitFor((m) => m.type === "projects_list");
+      expect(projList.projects.some((p: any) => p.id === projCreated.project.id)).toBe(true);
+      send({ type: "delete_project", projectId: projCreated.project.id });
+      const projDel = await waitFor((m) => m.type === "project_deleted");
+      expect(projDel.projectId).toBe(projCreated.project.id);
+
+      // Attachment upload + fetch round-trip
+      const helloB64 = Buffer.from("hello attachment").toString("base64");
+      send({ type: "upload_attachment", sessionId: sid, name: "note.txt", mime: "text/plain", data: helloB64, requestId: "ua_test_1" });
+      const uploaded = await waitFor((m) => m.type === "attachment_uploaded");
+      expect(uploaded.attachment.name).toBe("note.txt");
+      send({ type: "get_attachment", sessionId: sid, attachmentId: uploaded.attachment.id });
+      const fetched = await waitFor((m) => m.type === "attachment_data");
+      expect(Buffer.from(fetched.attachment.data, "base64").toString()).toBe("hello attachment");
+
+      clientWs.close();
+      const delRes = await fetch(`${GW}/api/remote/hosts/${featHostId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${userToken}` },
+      });
+      expect(delRes.status).toBe(200);
+    } finally {
+      try {
+        daemonSubproc.kill();
+      } catch {}
+      try {
+        rmSync(daemonData, { recursive: true, force: true });
+        rmSync(workDir, { recursive: true, force: true });
+      } catch {}
+    }
+  }, 30000);
+
   test("DELETE /api/remote/hosts/:id removes host", async () => {
     const res = await fetch(`${GW}/api/remote/hosts/${hostId}`, {
       method: "DELETE",

@@ -35,6 +35,14 @@ type EvTextDelta struct {
 
 func (EvTextDelta) Type() string { return "text_delta" }
 
+// EvReasoningDelta is one live chunk of chain-of-thought. The full text is
+// also persisted in the final message as a ReasoningBlock.
+type EvReasoningDelta struct {
+	Delta string
+}
+
+func (EvReasoningDelta) Type() string { return "reasoning_delta" }
+
 type EvToolCall struct {
 	ID   string
 	Name string

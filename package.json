@@ -19,8 +19,11 @@
     "fclean": "rm -rf dist data node_modules"
   },
   "dependencies": {
+    "@bjorn3/browser_wasi_shim": "^0.4.2",
+    "@opendocsg/pdf2md": "^0.3.0",
     "ag-grid-community": "31.1.1",
     "highlight.js": "^11.12.0",
+    "magic-bytes.js": "^1.13.1",
     "marked": "^18.0.11",
     "nodemailer": "^9.0.5",
     "qrcode": "^1.5.4",

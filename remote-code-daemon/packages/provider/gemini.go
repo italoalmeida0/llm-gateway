@@ -722,6 +722,7 @@ func (c *geminiClient) runStream(ctx context.Context, resp *http.Response, req R
 					if part.Thought {
 						appendPartText("reasoning", part.Text, part.ThoughtSignature)
 						currentText = nil
+						out <- EventReasoningDelta{Delta: part.Text}
 						continue
 					}
 					if part.Text == "" {

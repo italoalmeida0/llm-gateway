@@ -53,6 +53,7 @@ type ZotSettings struct {
 	Reasoning            string  `json:"reasoning,omitempty"` // "off" | "low" | "medium" | "high"
 	Temperature          float32 `json:"temperature,omitempty"`
 	AutoCompactThreshold int     `json:"auto_compact_threshold"` // 0=off, 70, 80, 85, 90
+	NoAutoTitle          bool    `json:"no_auto_title,omitempty"` // disable LLM session titles
 	JailByDefault        bool    `json:"jail_by_default"`
 	AutoSwarmEnabled     bool    `json:"auto_swarm_enabled"`
 	ToolRender           string  `json:"tool_render,omitempty"` // "box" | "flat"
@@ -78,12 +79,15 @@ type DaemonConfig struct {
 
 // AttachmentRef is a file the user attached to a session. The bytes live on
 // the host (the daemon's disk) so transcripts stay replayable locally.
+// TextPath, when set, holds browser-extracted markdown (pdf/office) that is
+// inlined as context instead of the raw bytes.
 type AttachmentRef struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Mime      string `json:"mime"`
 	Size      int64  `json:"size"`
 	Path      string `json:"path"`
+	TextPath  string `json:"text_path,omitempty"`
 	TextChars int    `json:"text_chars,omitempty"` // chars inlined as context (0 = binary/image)
 }
 
@@ -104,6 +108,7 @@ type SessionRecord struct {
 	Title       string             `json:"title"`
 	Model       string             `json:"model"`
 	Status      string             `json:"status"` // "idle" | "running"
+	Pinned      bool               `json:"pinned,omitempty"`
 	CreatedAt   int64              `json:"created_at"`
 	UpdatedAt   int64              `json:"updated_at"`
 	Messages    []provider.Message `json:"messages"`
@@ -117,6 +122,7 @@ type SessionSummary struct {
 	Title        string `json:"title"`
 	Model        string `json:"model"`
 	Status       string `json:"status"`
+	Pinned       bool   `json:"pinned"`
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
 	MessageCount int    `json:"message_count"`
@@ -127,6 +133,7 @@ type SessionSummary struct {
 func sessionListItem(s SessionSummary) map[string]any {
 	return map[string]any{
 		"id": s.ID, "cwd": s.CWD, "title": s.Title, "model": s.Model, "status": s.Status,
+		"pinned": s.Pinned,
 		"created_at": s.CreatedAt, "updated_at": s.UpdatedAt, "message_count": s.MessageCount,
 		"createdAt": s.CreatedAt, "updatedAt": s.UpdatedAt, "messageCount": s.MessageCount,
 	}
@@ -136,6 +143,7 @@ func sessionListItem(s SessionSummary) map[string]any {
 func sessionPayload(rec *SessionRecord) map[string]any {
 	return map[string]any{
 		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
+		"pinned": rec.Pinned,
 		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": rec.Messages,
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
 	}
@@ -236,6 +244,9 @@ type ActiveSession struct {
 	agent        *core.Agent
 	cancel       context.CancelFunc
 	approvalReqs map[string]chan bool
+	// gen counts started turns; a stale turn's finalizer skips when it no
+	// longer matches, so edit/regenerate can't corrupt the new turn.
+	gen int
 }
 
 // DaemonServer coordinates WebSocket connection, relay commands, and local sessions.
@@ -424,12 +435,24 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		Title     string            `json:"title"`
 		Model     string            `json:"model"`
 		Status    string            `json:"status"`
+		Pinned    bool              `json:"pinned"`
 		CreatedAt int64             `json:"createdAt"`
 		UpdatedAt int64             `json:"updatedAt"`
+		CreatedAtSnake int64        `json:"created_at"`
+		UpdatedAtSnake int64        `json:"updated_at"`
 		Messages  []json.RawMessage `json:"messages"`
+		Attachments []AttachmentRef `json:"attachments"`
 	}
 	if err := json.Unmarshal(data, &rawRec); err != nil {
 		return nil, err
+	}
+	createdAt := rawRec.CreatedAt
+	if createdAt == 0 {
+		createdAt = rawRec.CreatedAtSnake
+	}
+	updatedAt := rawRec.UpdatedAt
+	if updatedAt == 0 {
+		updatedAt = rawRec.UpdatedAtSnake
 	}
 	rec := &SessionRecord{
 		ID:        rawRec.ID,
@@ -437,8 +460,10 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		Title:     rawRec.Title,
 		Model:     rawRec.Model,
 		Status:    rawRec.Status,
-		CreatedAt: rawRec.CreatedAt,
-		UpdatedAt: rawRec.UpdatedAt,
+		Pinned:    rawRec.Pinned,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+		Attachments: rawRec.Attachments,
 	}
 	for _, mBytes := range rawRec.Messages {
 		msg, err := core.HydrateMessageObject(mBytes)
@@ -472,6 +497,7 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 			Title:        rec.Title,
 			Model:        rec.Model,
 			Status:       rec.Status,
+			Pinned:       rec.Pinned,
 			CreatedAt:    rec.CreatedAt,
 			UpdatedAt:    rec.UpdatedAt,
 			MessageCount: len(rec.Messages),
@@ -503,6 +529,19 @@ func (d *DaemonServer) getOrCreateActiveSession(id string) (*ActiveSession, erro
 	}
 	d.sessions[id] = act
 	return act, nil
+}
+
+// sessionRunning reports whether the session has a turn in flight.
+func (d *DaemonServer) sessionRunning(id string) bool {
+	d.sessionsMu.RLock()
+	act, ok := d.sessions[id]
+	d.sessionsMu.RUnlock()
+	if !ok || act == nil {
+		return false
+	}
+	act.mu.Lock()
+	defer act.mu.Unlock()
+	return act.record.Status == "running"
 }
 
 // WebSocket Dispatcher
@@ -684,6 +723,206 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"projectId": req.ProjectID,
 		})
 
+	case "toggle_pin":
+		var req struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		if req.SessionID == "" {
+			return
+		}
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil {
+			return
+		}
+		rec.Pinned = !rec.Pinned
+		rec.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(rec)
+		d.sessionsMu.RLock()
+		if act, ok := d.sessions[req.SessionID]; ok {
+			act.mu.Lock()
+			act.record.Pinned = rec.Pinned
+			act.record.UpdatedAt = rec.UpdatedAt
+			act.mu.Unlock()
+		}
+		d.sessionsMu.RUnlock()
+		_ = d.sendWS(map[string]any{
+			"type":      "session_pinned",
+			"hostId":    d.config.HostID,
+			"sessionId": rec.ID,
+			"pinned":    rec.Pinned,
+		})
+
+	case "edit_message":
+		var req struct {
+			SessionID string   `json:"sessionId"`
+			Index     int      `json:"index"`
+			Text      string   `json:"text"`
+			Model     string   `json:"model"`
+			YOLO      bool     `json:"yolo"`
+			Regen     bool     `json:"regenerate"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil || req.Index < 0 || req.Index >= len(rec.Messages) {
+			return
+		}
+		if !req.Regen && d.sessionRunning(req.SessionID) {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID, "sessionId": req.SessionID,
+				"message": "Stop the current turn before editing",
+			})
+			return
+		}
+		msg := rec.Messages[req.Index]
+		replaced := false
+		for i, c := range msg.Content {
+			if tb, ok := c.(provider.TextBlock); ok {
+				msg.Content[i] = provider.TextBlock{Text: req.Text, ThoughtSignature: tb.ThoughtSignature}
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			return
+		}
+		rec.Messages[req.Index] = msg
+		rec.Messages = append([]provider.Message(nil), rec.Messages[:req.Index+1]...)
+		rec.Messages = provider.RepairOrphanedToolResults(rec.Messages)
+		rec.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(rec)
+		_ = d.sendWS(map[string]any{
+			"type":      "session_content",
+			"hostId":    d.config.HostID,
+			"sessionId": rec.ID,
+			"messages":  rec.Messages,
+		})
+		if req.Regen {
+			d.truncateAndRun(req.SessionID, req.Index+1, req.Text, req.Model, req.YOLO, nil)
+		} else {
+			d.sessionsMu.RLock()
+			if act, ok := d.sessions[req.SessionID]; ok {
+				act.mu.Lock()
+				act.record = rec
+				act.mu.Unlock()
+			}
+			d.sessionsMu.RUnlock()
+		}
+
+	case "regenerate":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Index     int    `json:"index"`
+			Model     string `json:"model"`
+			YOLO      bool   `json:"yolo"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil {
+			return
+		}
+		// Last user message at or before index; drop it and everything after,
+		// then re-run the turn with its text.
+		userIdx := -1
+		var userText string
+		upper := req.Index
+		if upper >= len(rec.Messages) {
+			upper = len(rec.Messages) - 1
+		}
+		for i := upper; i >= 0; i-- {
+			if rec.Messages[i].Role == provider.RoleUser {
+				for _, c := range rec.Messages[i].Content {
+					if tb, ok := c.(provider.TextBlock); ok && strings.TrimSpace(tb.Text) != "" {
+						userText = tb.Text
+						break
+					}
+				}
+				if userText != "" {
+					userIdx = i
+					break
+				}
+			}
+		}
+		if userIdx < 0 || userText == "" {
+			return
+		}
+		d.truncateAndRun(req.SessionID, userIdx+1, userText, req.Model, req.YOLO, nil)
+
+	case "delete_message":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Index     int    `json:"index"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil || req.Index < 0 || req.Index >= len(rec.Messages) {
+			return
+		}
+		if d.sessionRunning(req.SessionID) {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID, "sessionId": req.SessionID,
+				"message": "Stop the current turn before deleting",
+			})
+			return
+		}
+		rec.Messages = append(rec.Messages[:req.Index], rec.Messages[req.Index+1:]...)
+		rec.Messages = provider.RepairOrphanedToolResults(rec.Messages)
+		rec.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(rec)
+		d.sessionsMu.RLock()
+		if act, ok := d.sessions[req.SessionID]; ok {
+			act.mu.Lock()
+			act.record = rec
+			act.mu.Unlock()
+		}
+		d.sessionsMu.RUnlock()
+		_ = d.sendWS(map[string]any{
+			"type":      "session_content",
+			"hostId":    d.config.HostID,
+			"sessionId": rec.ID,
+			"messages":  rec.Messages,
+		})
+
+	case "get_attachment":
+		var req struct {
+			SessionID    string `json:"sessionId"`
+			AttachmentID string `json:"attachmentId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil {
+			return
+		}
+		for _, a := range rec.Attachments {
+			if a.ID != req.AttachmentID {
+				continue
+			}
+			data, err := os.ReadFile(a.Path)
+			if err != nil {
+				return
+			}
+			payload := map[string]any{
+				"id": a.ID, "name": a.Name, "mime": a.Mime, "size": a.Size,
+				"data": base64.StdEncoding.EncodeToString(data),
+			}
+			// Extracted text rides along (capped) so previews don't re-parse.
+			if a.TextPath != "" {
+				if tdata, err := os.ReadFile(a.TextPath); err == nil {
+					if len(tdata) > 256*1024 {
+						tdata = tdata[:256*1024]
+					}
+					payload["text"] = string(tdata)
+				}
+			}
+			_ = d.sendWS(map[string]any{
+				"type":      "attachment_data",
+				"hostId":    d.config.HostID,
+				"sessionId": rec.ID,
+				"attachment": payload,
+			})
+			return
+		}
+
 	case "upload_attachment":
 		var req struct {
 			RequestID string `json:"requestId"`
@@ -691,6 +930,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			Name      string `json:"name"`
 			Mime      string `json:"mime"`
 			Data      string `json:"data"` // base64
+			Text      string `json:"text,omitempty"` // browser-extracted markdown (pdf/office)
 		}
 		_ = json.Unmarshal(raw, &req)
 		if req.SessionID == "" || req.Name == "" || req.Data == "" {
@@ -757,6 +997,17 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			Mime: mime,
 			Size: int64(len(rawBytes)),
 			Path: filePath,
+		}
+		if strings.TrimSpace(req.Text) != "" {
+			extracted := req.Text
+			if len([]rune(extracted)) > 512*1024 {
+				extracted = string([]rune(extracted)[:512*1024])
+			}
+			textPath := filepath.Join(dir, attID+"_extracted.md")
+			if err := os.WriteFile(textPath, []byte(extracted), 0o600); err == nil {
+				ref.TextPath = textPath
+				ref.TextChars = len([]rune(extracted))
+			}
 		}
 		rec.Attachments = append(rec.Attachments, ref)
 		rec.UpdatedAt = time.Now().UnixMilli()
@@ -881,12 +1132,10 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		_ = os.MkdirAll(cwd, 0o755)
 
 		sessID := fmt.Sprintf("sess_%d", time.Now().UnixNano()/1000)
-		title := req.Title
+		title := strings.TrimSpace(req.Title)
 		if title == "" {
-			title = filepath.Base(cwd)
-			if title == "/" || title == "." {
-				title = "Session"
-			}
+			// Blank titles are auto-generated after the first exchange.
+			title = "New conversation"
 		}
 
 		now := time.Now().UnixMilli()
@@ -1400,6 +1649,53 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 
 // Agent Loop Runner for a Session
 
+// truncateAndRun replaces the transcript tail (keeping the first `keep`
+// messages) and starts a fresh turn. It powers edit & regenerate: any
+// in-flight turn is cancelled first and a generation counter keeps the old
+// turn's deferred finalizer from clobbering the new one.
+func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, model string, yolo bool, attachmentIDs []string) {
+	rec, err := d.loadSession(sessionID)
+	if err != nil {
+		return
+	}
+	d.sessionsMu.Lock()
+	act, ok := d.sessions[sessionID]
+	if !ok {
+		act = &ActiveSession{
+			record:       rec,
+			approvalReqs: make(map[string]chan bool),
+		}
+		d.sessions[sessionID] = act
+	}
+	act.mu.Lock()
+	if act.cancel != nil {
+		act.cancel()
+		act.cancel = nil
+	}
+	act.gen++
+	if keep < 0 {
+		keep = 0
+	}
+	if keep > len(rec.Messages) {
+		keep = len(rec.Messages)
+	}
+	rec.Messages = append([]provider.Message(nil), rec.Messages[:keep]...)
+	rec.Status = "idle"
+	rec.UpdatedAt = time.Now().UnixMilli()
+	_ = d.saveSession(rec)
+	act.record = rec
+	act.mu.Unlock()
+	d.sessionsMu.Unlock()
+
+	_ = d.sendWS(map[string]any{
+		"type":      "session_content",
+		"hostId":    d.config.HostID,
+		"sessionId": rec.ID,
+		"messages":  rec.Messages,
+	})
+	go d.runAgentTurn(act, promptText, model, yolo, attachmentIDs)
+}
+
 func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string) {
 	act.mu.Lock()
 	if act.record.Status == "running" {
@@ -1424,20 +1720,29 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 	ctx, cancel := context.WithCancel(context.Background())
 	act.cancel = cancel
+	act.gen++
+	myGen := act.gen
 	act.mu.Unlock()
 
 	defer func() {
 		act.mu.Lock()
-		act.record.Status = "idle"
-		act.record.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(act.record)
-		act.cancel = nil
+		stale := act.gen != myGen
+		if !stale {
+			act.record.Status = "idle"
+			act.record.UpdatedAt = time.Now().UnixMilli()
+			_ = d.saveSession(act.record)
+			act.cancel = nil
+		}
+		sid := act.record.ID
 		act.mu.Unlock()
 
+		if stale {
+			return
+		}
 		_ = d.sendWS(map[string]any{
 			"type":      "session_status",
 			"hostId":    d.config.HostID,
-			"sessionId": act.record.ID,
+			"sessionId": sid,
 			"status":    "idle",
 		})
 	}()
@@ -1550,6 +1855,8 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 			payload["event"] = map[string]any{"type": "turn_start", "step": e.Step}
 		case core.EvTextDelta:
 			payload["event"] = map[string]any{"type": "text_delta", "delta": e.Delta}
+		case core.EvReasoningDelta:
+			payload["event"] = map[string]any{"type": "reasoning_delta", "delta": e.Delta}
 		case core.EvToolUseStart:
 			payload["event"] = map[string]any{"type": "tool_use_start", "id": e.ID, "name": e.Name}
 		case core.EvToolUseArgs:
@@ -1629,6 +1936,23 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 				contextParts = append(contextParts, fmt.Sprintf("[Attached image: %s]", ref.Name))
 				continue
 			}
+			// Browser-extracted text (pdf/office) wins over raw bytes.
+			if ref.TextPath != "" {
+				if tdata, err := os.ReadFile(ref.TextPath); err == nil && utf8.Valid(tdata) {
+					text := string(tdata)
+					truncated := false
+					if len([]rune(text)) > maxInlineChars {
+						text = string([]rune(text)[:maxInlineChars])
+						truncated = true
+					}
+					note := ""
+					if truncated {
+						note = fmt.Sprintf(" (truncated to %d chars)", maxInlineChars)
+					}
+					contextParts = append(contextParts, fmt.Sprintf("[Attached file: %s%s]\n%s", ref.Name, note, text))
+					continue
+				}
+			}
 			if isTextMime(mime, ref.Name) && utf8.Valid(data) {
 				text := string(data)
 				truncated := false
@@ -1652,6 +1976,117 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 
 	_ = agent.Prompt(ctx, fullPrompt, images, sink)
+
+	// Auto-title the session after its first exchange (chatbot-style).
+	act.mu.Lock()
+	rec := act.record
+	gen := act.gen
+	act.mu.Unlock()
+	if gen == myGen {
+		d.maybeAutoTitle(rec, client, modelToUse)
+	}
+}
+
+// maybeAutoTitle generates a short LLM title for fresh sessions whose title
+// is still the "New conversation" placeholder.
+func (d *DaemonServer) maybeAutoTitle(rec *SessionRecord, client provider.Client, model string) {
+	if rec == nil || client == nil {
+		return
+	}
+	if d.config.Settings.NoAutoTitle {
+		return
+	}
+	if rec.Title != "" && rec.Title != "New conversation" {
+		return
+	}
+	var firstText string
+	for _, m := range rec.Messages {
+		if m.Role != provider.RoleUser {
+			continue
+		}
+		for _, c := range m.Content {
+			if tb, ok := c.(provider.TextBlock); ok && strings.TrimSpace(tb.Text) != "" {
+				firstText = tb.Text
+				break
+			}
+		}
+		if firstText != "" {
+			break
+		}
+	}
+	if strings.TrimSpace(firstText) == "" {
+		return
+	}
+	if runes := []rune(firstText); len(runes) > 2000 {
+		firstText = string(runes[:2000])
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	low := float32(0.1)
+	stream, err := client.Stream(ctx, provider.Request{
+		Model:     model,
+		System:    "Generate a short, appealing conversation title (max 5 words, Title Case, same language as the input). Output ONLY the title text, no quotes or punctuation at the end.",
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: firstText}}}},
+		MaxTokens: 32,
+		Temperature: &low,
+		Reasoning:   "low",
+	})
+	if err != nil {
+		return
+	}
+	var b strings.Builder
+	for ev := range stream {
+		switch e := ev.(type) {
+		case provider.EventTextDelta:
+			b.WriteString(e.Delta)
+		case provider.EventDone:
+			if e.Err == nil {
+				for _, c := range e.Message.Content {
+					if tb, ok := c.(provider.TextBlock); ok {
+						b.WriteString(tb.Text)
+					}
+				}
+			}
+		}
+	}
+	title := strings.TrimSpace(b.String())
+	title = strings.Trim(title, `"'`)
+	if i := strings.Index(title, "\n"); i >= 0 {
+		title = title[:i]
+	}
+	title = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(title, "Title:"), "title:"))
+	if r := []rune(title); len(r) > 40 {
+		title = strings.TrimSpace(string(r[:40]))
+	}
+	if title == "" {
+		return
+	}
+	fresh, err := d.loadSession(rec.ID)
+	if err != nil {
+		return
+	}
+	if fresh.Title != "" && fresh.Title != "New conversation" {
+		return
+	}
+	fresh.Title = title
+	fresh.UpdatedAt = time.Now().UnixMilli()
+	_ = d.saveSession(fresh)
+	d.sessionsMu.RLock()
+	if act, ok := d.sessions[rec.ID]; ok {
+		act.mu.Lock()
+		act.record.Title = title
+		act.record.UpdatedAt = fresh.UpdatedAt
+		act.mu.Unlock()
+	}
+	d.sessionsMu.RUnlock()
+	_ = d.sendWS(map[string]any{
+		"type":      "session_renamed",
+		"hostId":    d.config.HostID,
+		"sessionId": fresh.ID,
+		"title":     title,
+		"auto":      true,
+	})
 }
 
 func (d *DaemonServer) connectWebSocket() error {

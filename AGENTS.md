@@ -228,13 +228,25 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 
 ## Deploy (jupyter-vps)
 
+- **Instant path (primary)**: GitHub push webhook on `main` →
+  `https://llm.hezz.it/deploy-hook` (Caddy `handle` block →
+  `host.docker.internal:8099` → `~/deploy-hook-listener.py`, stdlib-only,
+  binds 0.0.0.0 because container networks can't reach 127.0.0.1 — safety
+  comes from the HMAC-SHA256 check against `~/.deploy-hook-secret`, never
+  from the bind). It validates, then fires the deploy script detached and
+  answers 202 (GitHub gives ~10s; the deploy takes minutes). A cron-per-
+  minute keepalive (`~/deploy-hook-ensure.sh`) restarts the listener.
+- **Polling fallback**: cron every 5min polls `main` via `git ls-remote`
+  (covers a missed webhook).
 - `~/deploy-llm-gateway.sh` (lives on the VPS, not in this repo — paths are
-  host-specific) + cron every 5min polls `main` via `git ls-remote`; on a new
-  SHA it runs `docker compose build --no-cache` + `up -d` for both gateway
-  services, waits for the image HEALTHCHECK, then records the SHA. Silent
-  no-op when already deployed; a failed build never touches the running
-  containers. `--no-cache` is required — the Dockerfile clones from GitHub
-  and a cached clone layer would freeze the source at the previous build.
+  host-specific) does the work for both paths: new SHA →
+  `docker compose build --no-cache` + `up -d` for both gateway services,
+  waits for the image HEALTHCHECK, then records the SHA. Silent no-op when
+  already deployed; a failed build never touches the running containers.
+  `--no-cache` is required — the Dockerfile clones from GitHub and a cached
+  clone layer would freeze the source at the previous build.
+- Log: `~/deploy-llm-gateway.log`. The webhook secret never leaves the VPS
+  (one copy is only in the GitHub repo settings).
 
 ## Gotchas learned (don't re-learn)
 

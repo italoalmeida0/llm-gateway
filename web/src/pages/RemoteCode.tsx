@@ -67,6 +67,7 @@ export interface ChatMessage {
   role: "user" | "assistant" | "tool";
   blocks: ContentBlock[];
   time?: number;
+  attachments?: string[];
 }
 
 export interface PendingApproval {
@@ -191,6 +192,23 @@ export default function RemoteCodePage() {
   function projectsKey(hostId: string) {
     return `llmgw-projects:${hostId}`;
   }
+  function wsOpen() {
+    try {
+      return !!ws && (ws as WebSocket).readyState === WebSocket.OPEN;
+    } catch {
+      return false;
+    }
+  }
+  function applyProjects(list: Project[]) {
+    setProjects(list);
+    persistProjects(list);
+    if (list.length > 0 && !list.some((p) => p.id === activeProjectId())) {
+      setActiveProjectId(list[0].id);
+    }
+    if (list.length === 0) setActiveProjectId("");
+  }
+  // Projects live on the daemon (source of truth); localStorage is only a
+  // cache so the list survives reconnects and host switches.
   function loadProjects(hostId: string) {
     if (!hostId) {
       setProjects([]);
@@ -199,17 +217,15 @@ export default function RemoteCodePage() {
     }
     try {
       const raw = localStorage.getItem(projectsKey(hostId));
-      const list: Project[] = raw ? JSON.parse(raw) : [];
-      const scoped = Array.isArray(list) ? list.filter((p) => p.hostId === hostId) : [];
-      setProjects(scoped);
-      if (scoped.length > 0 && !scoped.some((p) => p.id === activeProjectId())) {
-        setActiveProjectId(scoped[0].id);
+      const cached: Project[] = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(cached) && cached.length > 0) {
+        setProjects(cached.filter((p) => p.hostId === hostId));
+        if (!cached.some((p) => p.id === activeProjectId())) {
+          setActiveProjectId(cached[0].id);
+        }
       }
-      if (scoped.length === 0) setActiveProjectId("");
-    } catch {
-      setProjects([]);
-      setActiveProjectId("");
-    }
+    } catch {}
+    if (wsOpen()) sendWS({ type: "list_projects" });
   }
   function persistProjects(list: Project[]) {
     try {
@@ -294,6 +310,40 @@ export default function RemoteCodePage() {
   const [renamingId, setRenamingId] = createSignal<string | null>(null);
   const [renameText, setRenameText] = createSignal("");
   const [isAtBottom, setIsAtBottom] = createSignal(true);
+
+  // Attachments (chatbot-style): picked in the browser, stored on the daemon.
+  interface PendingAttachment {
+    key: string;
+    name: string;
+    mime: string;
+    size: number;
+    dataB64: string;
+    objectUrl?: string;
+    serverId?: string;
+    uploading?: boolean;
+    uploadKey?: string;
+  }
+  const [pendingAttachments, setPendingAttachments] = createSignal<PendingAttachment[]>([]);
+  const uploadWaiters = new Map<string, { ok: (id: string) => void; fail: (msg: string) => void }>();
+
+  // Advanced search (daemon full-text over local transcripts).
+  interface SearchHit {
+    sessionId: string;
+    title: string;
+    cwd: string;
+    updatedAt: number;
+    snippet: string;
+    matchCount: number;
+  }
+  const [searchResults, setSearchResults] = createSignal<SearchHit[]>([]);
+  let searchTimer: any = null;
+
+  // Large editor modal (chatbot LargeEditor).
+  const [largeEditorOpen, setLargeEditorOpen] = createSignal(false);
+  const [largeEditorText, setLargeEditorText] = createSignal("");
+  const [largeEditorSend, setLargeEditorSend] = createSignal(false);
+  // When a project is created, open the conversation modal on ack.
+  const [sessionAfterProject, setSessionAfterProject] = createSignal(false);
 
   // Agent Configuration & MCP Center
   const [showConfigModal, setShowConfigModal] = createSignal(false);
@@ -452,6 +502,7 @@ export default function RemoteCodePage() {
     ws.onopen = () => {
       sendWS({ type: "list_sessions", requestId: "init_" + Date.now() });
       sendWS({ type: "get_config", requestId: "cfg_" + Date.now() });
+      sendWS({ type: "list_projects", requestId: "proj_" + Date.now() });
 
       heartbeatTimer = setInterval(() => {
         sendWS({ type: "ping", ts: Date.now() });
@@ -669,6 +720,88 @@ export default function RemoteCodePage() {
         break;
       }
 
+      case "projects_list": {
+        const raw = Array.isArray(msg.projects) ? msg.projects : [];
+        const hid = activeHostId();
+        const mapped: Project[] = raw.map((p: any) => ({
+          id: p.id,
+          hostId: hid,
+          name: p.name || basename(p.path || ""),
+          path: p.path,
+          createdAt: p.createdAt ?? p.created_at ?? Date.now(),
+        }));
+        // Merge daemon truth with any offline-created cache entries.
+        const cached = projects();
+        const byId = new Map(mapped.map((p) => [p.id, p]));
+        for (const c of cached) {
+          if (!byId.has(c.id) && c.hostId === hid) byId.set(c.id, c);
+        }
+        applyProjects([...byId.values()].sort((a, b) => b.createdAt - a.createdAt));
+        break;
+      }
+
+      case "project_created": {
+        const p = msg.project;
+        if (!p?.id) break;
+        const entry: Project = {
+          id: p.id,
+          hostId: activeHostId(),
+          name: p.name || basename(p.path || ""),
+          path: p.path,
+          createdAt: p.createdAt ?? p.created_at ?? Date.now(),
+        };
+        if (!projects().some((x) => x.id === entry.id)) {
+          applyProjects([entry, ...projects()]);
+        }
+        setActiveProjectId(entry.id);
+        toast(`Project '${entry.name}' added`, "ok");
+        if (sessionAfterProject()) {
+          setSessionAfterProject(false);
+          openNewSessionModal();
+        }
+        break;
+      }
+
+      case "project_deleted": {
+        if (!msg.projectId) break;
+        applyProjects(projects().filter((p) => p.id !== msg.projectId));
+        break;
+      }
+
+      case "attachment_uploaded": {
+        const a = msg.attachment;
+        if (!a?.id) break;
+        setPendingAttachments((prev) =>
+          prev.map((p) =>
+            p.uploadKey === msg.requestId || (!p.serverId && p.name === a.name)
+              ? { ...p, serverId: a.id, uploading: false }
+              : p,
+          ),
+        );
+        const w = msg.requestId ? uploadWaiters.get(msg.requestId) : undefined;
+        if (w) {
+          uploadWaiters.delete(msg.requestId);
+          w.ok(a.id);
+        }
+        break;
+      }
+
+      case "search_results": {
+        if (typeof msg.query === "string" && msg.query.trim() !== sessionFilter().trim()) break;
+        const raw = Array.isArray(msg.results) ? msg.results : [];
+        setSearchResults(
+          raw.map((r: any) => ({
+            sessionId: r.sessionId || r.session_id,
+            title: r.title || "",
+            cwd: r.cwd || "",
+            updatedAt: r.updatedAt ?? r.updated_at ?? 0,
+            snippet: r.snippet || "",
+            matchCount: r.matchCount ?? r.match_count ?? 0,
+          })),
+        );
+        break;
+      }
+
       case "session_deleted": {
         setSessions((prev) => prev.filter((s) => s.id !== msg.sessionId));
         if (activeSessionId() === msg.sessionId) {
@@ -734,12 +867,31 @@ export default function RemoteCodePage() {
 
       case "config_data":
       case "config_updated": {
+        // The daemon speaks Go keys (auto_compact_threshold, jail_by_default,
+        // temperature omitted when 0). Normalize to the UI shape with safe
+        // defaults — a partial payload must never crash the Settings render.
         if (msg.settings) {
-          setDaemonSettings(msg.settings);
-          if (msg.settings.model) setActiveModel(msg.settings.model);
+          const s = msg.settings;
+          setDaemonSettings({
+            model: s.model || "gpt-4o",
+            reasoning: s.reasoning || "off",
+            temperature: typeof s.temperature === "number" ? s.temperature : 0.7,
+            autoCompactPercent:
+              s.autoCompactPercent ??
+              s.autoCompactThreshold ??
+              s.auto_compact_threshold ??
+              80,
+            jailByDefault: s.jailByDefault ?? s.jail_by_default ?? false,
+            autoSwarmEnabled: s.autoSwarmEnabled ?? s.auto_swarm_enabled ?? false,
+            insecureTls: s.insecureTls ?? s.insecure ?? false,
+            httpProxy: s.httpProxy ?? s.http_proxy ?? "",
+            maxExecutionTimeSec: s.maxExecutionTimeSec ?? 600,
+          });
+          if (s.model) setActiveModel(s.model);
         }
-        if (msg.mcpServers) setMcpServers(msg.mcpServers);
-        if (msg.skills) setSkills(msg.skills);
+        const mcp = msg.mcpServers ?? msg.mcp_servers;
+        if (mcp && typeof mcp === "object") setMcpServers(mcp);
+        if (msg.skills && typeof msg.skills === "object") setSkills(msg.skills);
         if (msg.type === "config_updated") {
           toast("Daemon configuration saved", "ok");
         }
@@ -808,6 +960,15 @@ export default function RemoteCodePage() {
       }
 
       case "error": {
+        if (msg.requestId && uploadWaiters.has(msg.requestId)) {
+          const w = uploadWaiters.get(msg.requestId)!;
+          uploadWaiters.delete(msg.requestId);
+          w.fail(msg.message || "Upload failed");
+          break;
+        }
+        if (typeof msg.message === "string" && msg.message.toLowerCase().includes("project")) {
+          setSessionAfterProject(false);
+        }
         toast(msg.message || "Daemon returned an error", "err");
         setSessionStatus("idle");
         setPendingApproval(null);
@@ -955,6 +1116,15 @@ export default function RemoteCodePage() {
   function selectSession(id: string) {
     setActiveSessionId(id);
     setPendingApproval(null);
+    setSearchResults([]);
+    for (const p of pendingAttachments()) {
+      if (p.objectUrl) {
+        try {
+          URL.revokeObjectURL(p.objectUrl);
+        } catch {}
+      }
+    }
+    setPendingAttachments([]);
     const s = sessions().find((x) => x.id === id);
     if (s) {
       setSessionStatus(s.status);
@@ -982,31 +1152,35 @@ export default function RemoteCodePage() {
       toast("Connect a host first", "err");
       return;
     }
-    const p: Project = {
-      id: `proj_${Date.now().toString(36)}`,
-      hostId: hid,
-      name: basename(rawPath),
-      path: rawPath,
-      createdAt: Date.now(),
-    };
-    const next = [p, ...projects()];
-    setProjects(next);
-    persistProjects(next);
-    setActiveProjectId(p.id);
-    setNewProjectPath("");
-    setShowNewProjectModal(false);
-    toast(`Project '${p.name}' added`, "ok");
-    // Já abre a criação de conversa dentro do projeto.
-    openNewSessionModal();
+    setSessionAfterProject(true);
+    if (wsOpen()) {
+      // Daemon is the source of truth; ack arrives as project_created.
+      sendWS({ type: "create_project", path: rawPath, requestId: "cp_" + Date.now() });
+      setNewProjectPath("");
+      setShowNewProjectModal(false);
+    } else {
+      // Offline fallback: local cache only, synced on next connect.
+      const p: Project = {
+        id: `proj_${Date.now().toString(36)}`,
+        hostId: hid,
+        name: basename(rawPath),
+        path: rawPath,
+        createdAt: Date.now(),
+      };
+      applyProjects([p, ...projects()]);
+      setActiveProjectId(p.id);
+      setNewProjectPath("");
+      setShowNewProjectModal(false);
+      openNewSessionModal();
+    }
   }
 
   function deleteProject(id: string, e: MouseEvent) {
     e.stopPropagation();
     if (!confirm("Remove this project from the list? Sessions on the host are kept.")) return;
+    if (wsOpen()) sendWS({ type: "delete_project", projectId: id });
     const next = projects().filter((p) => p.id !== id);
-    setProjects(next);
-    persistProjects(next);
-    if (activeProjectId() === id) setActiveProjectId(next[0]?.id || "");
+    applyProjects(next);
   }
 
   function quickStartProject() {
@@ -1016,20 +1190,23 @@ export default function RemoteCodePage() {
       toast("Connect a host first", "err");
       return;
     }
-    const p = {
-      id: `proj_${Date.now().toString(36)}`,
-      hostId: hid,
-      name: "Home",
-      path: "~",
-      createdAt: Date.now(),
-    };
-    const next = [p, ...projects()];
-    setProjects(next);
-    persistProjects(next);
-    setActiveProjectId(p.id);
-    setNewSessionCwd("~");
-    setNewSessionTitle("");
-    setShowNewSessionModal(true);
+    setSessionAfterProject(true);
+    if (wsOpen()) {
+      sendWS({ type: "create_project", path: "~", requestId: "cp_" + Date.now() });
+    } else {
+      const p = {
+        id: `proj_${Date.now().toString(36)}`,
+        hostId: hid,
+        name: "Home",
+        path: "~",
+        createdAt: Date.now(),
+      };
+      applyProjects([p, ...projects()]);
+      setActiveProjectId(p.id);
+      setNewSessionCwd("~");
+      setNewSessionTitle("");
+      setShowNewSessionModal(true);
+    }
   }
 
   function createNewSession() {
@@ -1067,6 +1244,112 @@ export default function RemoteCodePage() {
       .join("\n");
   }
 
+  // --- Attachments (chatbot-style; bytes live on the daemon) ---
+  const MAX_ATTACHMENTS = 5;
+  const MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;
+  const MAX_TEXT_BYTES = 512 * 1024;
+
+  function fileToB64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => {
+        const res = String(r.result || "");
+        const comma = res.indexOf(",");
+        resolve(comma >= 0 ? res.slice(comma + 1) : res);
+      };
+      r.onerror = () => reject(new Error("read failed"));
+      r.readAsDataURL(file);
+    });
+  }
+
+  async function handleFiles(files: FileList | File[]) {
+    const list = Array.from(files || []);
+    if (list.length === 0) return;
+    if (!activeSessionId()) {
+      toast("Start a conversation before attaching files", "err");
+      return;
+    }
+    const room = MAX_ATTACHMENTS - pendingAttachments().length;
+    if (room <= 0) {
+      toast(`Max ${MAX_ATTACHMENTS} attachments per message`, "err");
+      return;
+    }
+    for (const file of list.slice(0, room)) {
+      const isImage = file.type.startsWith("image/");
+      const cap = isImage ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES;
+      if (file.size > cap) {
+        toast(`'${file.name}' too large (max ${isImage ? "2.5MB" : "512KB"})`, "err");
+        continue;
+      }
+      try {
+        const dataB64 = await fileToB64(file);
+        setPendingAttachments((prev) => [
+          ...prev,
+          {
+            key: `pa_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
+            name: file.name,
+            mime: file.type || "application/octet-stream",
+            size: file.size,
+            dataB64,
+            objectUrl: isImage ? URL.createObjectURL(file) : undefined,
+          },
+        ]);
+      } catch {
+        toast(`Could not read '${file.name}'`, "err");
+      }
+    }
+  }
+
+  function removePendingAttachment(key: string) {
+    setPendingAttachments((prev) => {
+      const hit = prev.find((p) => p.key === key);
+      if (hit?.objectUrl) {
+        try {
+          URL.revokeObjectURL(hit.objectUrl);
+        } catch {}
+      }
+      return prev.filter((p) => p.key !== key);
+    });
+  }
+
+  function uploadOneAttachment(sid: string, a: PendingAttachment): Promise<string> {
+    if (a.serverId) return Promise.resolve(a.serverId);
+    const requestId = `ua_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`;
+    setPendingAttachments((prev) =>
+      prev.map((p) => (p.key === a.key ? { ...p, uploading: true, uploadKey: requestId } : p)),
+    );
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        uploadWaiters.delete(requestId);
+        setPendingAttachments((prev) =>
+          prev.map((p) => (p.key === a.key ? { ...p, uploading: false } : p)),
+        );
+        reject(new Error(`Upload timed out for '${a.name}'`));
+      }, 20000);
+      uploadWaiters.set(requestId, {
+        ok: (id: string) => {
+          clearTimeout(timer);
+          resolve(id);
+        },
+        fail: (m: string) => {
+          clearTimeout(timer);
+          setPendingAttachments((prev) =>
+            prev.map((p) => (p.key === a.key ? { ...p, uploading: false } : p)),
+          );
+          reject(new Error(m));
+        },
+      });
+      sendWS({
+        type: "upload_attachment",
+        requestId,
+        sessionId: sid,
+        name: a.name,
+        mime: a.mime,
+        data: a.dataB64,
+      });
+    });
+  }
+
   function copyMsg(id: string, text: string) {
     copyWithToast(text || "");
     setCopiedMsgId(id);
@@ -1089,12 +1372,10 @@ export default function RemoteCodePage() {
   }
 
   function editUserMsg(m: ChatMessage) {
-    // Load the text into the composer for review before re-sending.
-    setInputPrompt(messageText(m));
-    setIsAtBottom(true);
-    try {
-      document.querySelector<HTMLTextAreaElement>("#rc-composer")?.focus();
-    } catch {}
+    // Open the large editor (chatbot-style) instead of editing inline.
+    setLargeEditorText(messageText(m));
+    setLargeEditorSend(false);
+    setLargeEditorOpen(true);
   }
 
   function submitRename(id: string) {
@@ -1116,21 +1397,60 @@ export default function RemoteCodePage() {
     return arr;
   }
 
-  function sendPrompt() {
-    const text = inputPrompt().trim();
-    if (!text || !activeSessionId()) return;
+  // Debounced daemon full-text search (transcripts live on the host).
+  function queueDaemonSearch(q: string) {
+    clearTimeout(searchTimer);
+    const query = q.trim();
+    if (query.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+    searchTimer = setTimeout(() => {
+      if (wsOpen()) sendWS({ type: "search", query, limit: 30 });
+    }, 300);
+  }
 
+  async function sendPrompt() {
+    const text = inputPrompt().trim();
+    const sid = activeSessionId();
+    if ((!text && pendingAttachments().length === 0) || !sid) return;
+    if (sessionStatus() === "running") return;
+
+    // Upload pending attachments first so the daemon owns the bytes.
+    let attachmentIds: string[] = [];
+    const pending = pendingAttachments();
+    if (pending.length > 0) {
+      setSessionStatus("running");
+      try {
+        attachmentIds = await Promise.all(pending.map((a) => uploadOneAttachment(sid, a)));
+      } catch (e: any) {
+        setSessionStatus("idle");
+        toast(e?.message || "Attachment upload failed", "err");
+        return;
+      }
+    }
+    const attachmentNames = pending.map((a) => a.name);
+
+    const displayText = text || attachmentNames.map((n) => `[Attached ${n}]`).join("\n");
     const userMsg: ChatMessage = {
       id: `user_${Date.now()}`,
       role: "user",
-      blocks: [{ type: "text", text }],
+      blocks: [{ type: "text", text: displayText }],
       time: Date.now(),
+      attachments: attachmentNames.length > 0 ? attachmentNames : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
     setInputPrompt("");
+    for (const p of pending) {
+      if (p.objectUrl) {
+        try {
+          URL.revokeObjectURL(p.objectUrl);
+        } catch {}
+      }
+    }
+    setPendingAttachments([]);
     try {
-      const sid = activeSessionId();
-      if (sid) localStorage.removeItem(`llmgw-draft:${sid}`);
+      localStorage.removeItem(`llmgw-draft:${sid}`);
     } catch {}
     setSessionStatus("running");
     setIsAtBottom(true);
@@ -1138,10 +1458,11 @@ export default function RemoteCodePage() {
 
     sendWS({
       type: "prompt",
-      sessionId: activeSessionId(),
-      text,
+      sessionId: sid,
+      text: text || "(see attachments)",
       model: activeModel(),
       yolo: yoloMode(),
+      attachmentIds,
     });
   }
 
@@ -1191,12 +1512,22 @@ export default function RemoteCodePage() {
     }
   }
 
-  // Save Settings to Daemon
+  // Save Settings to Daemon (translate UI keys to the daemon's Go keys).
   function saveDaemonConfig() {
+    const s = daemonSettings();
     sendWS({
       type: "update_config",
       requestId: "upd_" + Date.now(),
-      settings: daemonSettings(),
+      settings: {
+        model: s.model,
+        reasoning: s.reasoning,
+        temperature: s.temperature,
+        auto_compact_threshold: s.autoCompactPercent,
+        jail_by_default: s.jailByDefault,
+        auto_swarm_enabled: s.autoSwarmEnabled,
+        insecure: s.insecureTls,
+        http_proxy: s.httpProxy,
+      },
       mcpServers: mcpServers(),
       skills: skills(),
     });
@@ -1291,6 +1622,16 @@ export default function RemoteCodePage() {
     if (hosts().length === 0) {
       generatePairingToken();
     }
+    // Ctrl+K / Cmd+K opens search, like the reference chatbot.
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setHistoryView(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
   createEffect(() => {
@@ -1352,282 +1693,6 @@ export default function RemoteCodePage() {
       class="fixed inset-0 w-screen h-screen flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50"
       onClick={closeMenus}
     >
-      {/* ========================================================================= */}
-      {/* Top Application Navigation Bar                                             */}
-      {/* ========================================================================= */}
-      <header class="h-12 border-b border-line/70 bg-ink-950/95 backdrop-blur flex items-center justify-between px-3 shrink-0 z-30">
-        {/* Left: Exit to Gateway & App Identifier */}
-        <div class="flex items-center gap-2 min-w-0">
-          <a
-            href="#/"
-            class="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-900 transition-colors text-xs font-medium"
-            title="Return to LLM Gateway Dashboard"
-          >
-            <Iconify icon="lucide:arrow-left" size={14} />
-            <span class="hidden sm:inline">LLM Gateway</span>
-          </a>
-
-          <div class="h-4 w-px bg-line/70" />
-
-          <div class="flex items-center gap-2 min-w-0">
-            <div class="w-6 h-6 rounded-md bg-ink-800 text-ink-200 flex items-center justify-center">
-              <Iconify icon="lucide:terminal" size={14} />
-            </div>
-            {/* Breadcrumb estilo Antigravity: projeto / conversa */}
-            <div class="flex items-center gap-1.5 text-[13px] min-w-0">
-              <span class="text-ink-400 truncate max-w-[140px]" title={activeProject()?.path || "No project"}>
-                {activeProject()?.name || "No project"}
-              </span>
-              <Show when={activeSession()}>
-                <span class="text-ink-600">/</span>
-                <span class="text-ink-200 truncate max-w-[220px] font-medium" title={activeSession()?.title}>
-                  {activeSession()?.title}
-                </span>
-              </Show>
-            </div>
-          </div>
-        </div>
-
-        {/* Center: Connected Daemon Host Switcher */}
-        <div class="flex items-center gap-2">
-          <Show
-            when={hosts().length > 0}
-            fallback={
-              <button
-                onClick={generatePairingToken}
-                class="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-ink-100 text-ink-950 font-medium hover:bg-white transition-colors cursor-pointer"
-              >
-                <Iconify icon="lucide:plus" size={14} />
-                <span>Connect Host</span>
-              </button>
-            }
-          >
-            <div class="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-ink-900/70 border border-line/70 text-xs">
-              <span
-                class={`w-1.5 h-1.5 rounded-full ${
-                  activeHost()?.status === "online"
-                    ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.7)] animate-pulse"
-                    : "bg-amber-500"
-                }`}
-              />
-              <select
-                class="bg-transparent text-ink-300 font-medium focus:outline-none cursor-pointer max-w-[160px]"
-                value={activeHostId()}
-                onChange={(e) => setActiveHostId(e.currentTarget.value)}
-              >
-                <For each={hosts()}>
-                  {(h) => (
-                    <option value={h.id} class="bg-ink-900 text-ink-100">
-                      {h.name || h.hostname || h.id} ({h.status || "offline"})
-                    </option>
-                  )}
-                </For>
-              </select>
-              <button
-                onClick={generatePairingToken}
-                class="text-ink-500 hover:text-ink-200 p-0.5 cursor-pointer"
-                title="Connect another host"
-              >
-                <Iconify icon="lucide:plus" size={13} />
-              </button>
-            </div>
-          </Show>
-        </div>
-
-        {/* Right: Model, Mode, Settings */}
-        <div class="flex items-center gap-1.5">
-          {/* Token badge (chatbot-style context counter) */}
-          <Show
-            when={activeSessionId() && sessionUsage()[activeSessionId()]}
-          >
-            {(u) => {
-              const total = () => u().inTok + u().outTok + u().cacheTok;
-              const fmt = () =>
-                total() > 999 ? `${(total() / 1000).toFixed(1)}k` : `${total()}`;
-              return (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setUsageOpen(!usageOpen());
-                    setModelMenuOpen(false);
-                  }}
-                  class="hidden sm:flex items-center gap-1 px-2 py-1 rounded-full bg-ink-900 border border-line/60 text-[11px] text-ink-400 hover:text-ink-200 cursor-pointer"
-                  title="Session token usage"
-                >
-                  <Iconify icon="lucide:hash" size={11} />
-                  <span>{fmt()}</span>
-                </button>
-              );
-            }}
-          </Show>
-
-          {/* Model Picker (Antigravity-style with effort + usage) */}
-          <div class="relative">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setModelMenuOpen(!modelMenuOpen());
-                setUsageOpen(false);
-                setAddContextOpen(false);
-              }}
-              class="flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-ink-900 text-xs text-ink-300 cursor-pointer"
-              title="Switch model"
-            >
-              <Iconify icon="lucide:sparkles" size={13} class="text-ink-500" />
-              <span class="max-w-[130px] truncate font-medium">
-                {activeModel().split("/").pop()}
-              </span>
-              <Iconify icon="lucide:chevron-down" size={11} />
-            </button>
-            <Show when={modelMenuOpen()}>
-              <div
-                onClick={(e) => e.stopPropagation()}
-                class="absolute right-0 top-full mt-1.5 w-64 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-50"
-              >
-                <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-                  Model
-                </div>
-                <div class="max-h-56 overflow-y-auto">
-                  <For each={gatewayModels()}>
-                    {(m) => (
-                      <button
-                        onClick={() => {
-                          const id = m.id;
-                          setActiveModel(id);
-                          setModelMenuOpen(false);
-                          if (activeSessionId()) {
-                            sendWS({
-                              type: "prompt",
-                              sessionId: activeSessionId(),
-                              text: `/model ${id}`,
-                            });
-                          }
-                        }}
-                        class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
-                          m.id === activeModel()
-                            ? "bg-ink-800 text-ink-100"
-                            : "text-ink-300 hover:bg-ink-800/60"
-                        }`}
-                      >
-                        <span class="truncate">{m.name || m.id}</span>
-                        <Show when={m.id === activeModel()}>
-                          <Iconify icon="lucide:check" size={13} />
-                        </Show>
-                      </button>
-                    )}
-                  </For>
-                </div>
-                <div class="mt-1.5 pt-1.5 border-t border-line/60">
-                  <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-                    Reasoning effort
-                  </div>
-                  <div class="grid grid-cols-4 gap-1 p-1 rounded-lg bg-ink-950 border border-line/50">
-                    <For each={["off", "low", "medium", "high"]}>
-                      {(lvl) => (
-                        <button
-                          onClick={() => {
-                            setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
-                            setModelMenuOpen(false);
-                            if (activeSessionId()) {
-                              sendWS({
-                                type: "prompt",
-                                sessionId: activeSessionId(),
-                                text: `/reasoning ${lvl}`,
-                              });
-                            }
-                          }}
-                          class={`py-1 rounded-md text-center text-[11px] font-medium capitalize cursor-pointer ${
-                            (daemonSettings().reasoning || "medium") === lvl
-                              ? "bg-ink-100 text-ink-950"
-                              : "text-ink-400 hover:text-ink-200"
-                          }`}
-                        >
-                          {lvl}
-                        </button>
-                      )}
-                    </For>
-                  </div>
-                </div>
-                <button
-                  onClick={() => {
-                    setModelMenuOpen(false);
-                    setUsageOpen(true);
-                  }}
-                  class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer"
-                >
-                  <Iconify icon="lucide:chart-column" size={13} />
-                  <span>View Usage</span>
-                </button>
-              </div>
-            </Show>
-            {/* Usage popover */}
-            <Show when={usageOpen()}>
-              <div
-                onClick={(e) => e.stopPropagation()}
-                class="absolute right-0 top-full mt-1.5 w-64 rounded-xl border border-line bg-ink-900 shadow-2xl p-3 z-50 text-xs"
-              >
-                <div class="font-semibold text-ink-200 mb-2">Session usage</div>
-                <Show
-                  when={activeSessionId() && sessionUsage()[activeSessionId()]}
-                  fallback={
-                    <p class="text-ink-500 text-[11px]">
-                      No usage reported yet. Run the agent to see input / cache / output tokens here.
-                    </p>
-                  }
-                >
-                  {(u) => (
-                    <div class="space-y-1.5 font-mono text-[11px]">
-                      <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}</span></div>
-                      <div class="flex justify-between"><span class="text-ink-500">Cache</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
-                      <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}</span></div>
-                      <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}</span></div>
-                      <Show when={u().costUsd > 0}>
-                        <div class="flex justify-between pt-1 border-t border-line/60"><span class="text-ink-500">Cost</span><span class="text-ink-200">${u().costUsd.toFixed(4)}</span></div>
-                      </Show>
-                    </div>
-                  )}
-                </Show>
-              </div>
-            </Show>
-          </div>
-
-          {/* Safe/YOLO Toggle */}
-          <button
-            onClick={() => {
-              const next = !yoloMode();
-              setYoloMode(next);
-              toast(
-                next
-                  ? "YOLO Mode: tools run autonomously"
-                  : "Safe Mode: approval required",
-                next ? "warn" : "info",
-              );
-            }}
-            class={`hidden sm:flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-colors ${
-              yoloMode()
-                ? "text-amber-300 hover:bg-amber-500/10"
-                : "text-ink-400 hover:bg-ink-900 hover:text-ink-200"
-            }`}
-            title="YOLO skips confirmation for file writes and shell"
-          >
-            <Iconify
-              icon={yoloMode() ? "lucide:zap" : "lucide:shield"}
-              size={13}
-            />
-          </button>
-
-          {/* Settings */}
-          <button
-            onClick={() => setShowConfigModal(true)}
-            class="p-1.5 rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-900 transition-colors cursor-pointer"
-            title="Agent Configuration, MCP Servers & Skills"
-          >
-            <Iconify icon="lucide:settings-2" size={15} />
-          </button>
-
-          <ThemeToggle />
-        </div>
-      </header>
 
       {/* ========================================================================= */}
       {/* Main Workspace Layout or Connect Host Onboarding                           */}
@@ -1698,7 +1763,7 @@ export default function RemoteCodePage() {
                       <button
                         onClick={() =>
                           copyWithToast(
-                            `./code-daemon -connect "${pairingData()?.connectUrl}"`,
+                            `./llmgw-daemon -connect "${pairingData()?.connectUrl}"`,
                           )
                         }
                         class="text-brand-400 hover:text-brand-300 flex items-center gap-1 text-[11px] cursor-pointer"
@@ -1708,7 +1773,7 @@ export default function RemoteCodePage() {
                       </button>
                     </div>
                     <div class="p-3 rounded-xl bg-ink-950 border border-line font-mono text-xs text-brand-300 break-all select-all">
-                      ./code-daemon -connect "{pairingData()?.connectUrl}"
+                      ./llmgw-daemon -connect "{pairingData()?.connectUrl}"
                     </div>
                   </div>
 
@@ -1788,7 +1853,7 @@ export default function RemoteCodePage() {
               onClick={() => setHistoryView(true)}
               class="w-full flex items-center gap-2 px-3 py-1.5 mt-1 rounded-lg text-xs text-ink-500 hover:text-ink-300 hover:bg-ink-900/60 transition-colors cursor-pointer"
             >
-              <Iconify icon="lucide:history" size={13} />
+              <Iconify icon="lucide:clock" size={13} />
               <span>Conversation History</span>
             </button>
           </div>
@@ -2045,16 +2110,48 @@ export default function RemoteCodePage() {
             </div>
           </div>
 
-          {/* Sidebar Footer: host estilo Antigravity */}
-          <div class="p-2 border-t border-line/70 flex items-center gap-2">
-            <span class={`w-1.5 h-1.5 rounded-full shrink-0 ${activeHost()?.status === "online" ? "bg-emerald-500" : "bg-amber-500"}`} />
-            <span class="text-xs text-ink-300 truncate flex-1 font-medium">{activeHost()?.name || activeHost()?.hostname || "No host"}</span>
+          {/* Sidebar Footer: host switcher + settings (Antigravity) */}
+          <div class="p-2 border-t border-line/70 space-y-1">
+            <div class="flex items-center gap-1.5 px-1">
+              <span class={`w-1.5 h-1.5 rounded-full shrink-0 ${activeHost()?.status === "online" ? "bg-emerald-500" : "bg-amber-500"}`} />
+              <select
+                class="flex-1 min-w-0 bg-transparent text-xs text-ink-300 font-medium focus:outline-none cursor-pointer truncate"
+                value={activeHostId()}
+                onChange={(e) => setActiveHostId(e.currentTarget.value)}
+                title="Switch host"
+              >
+                <For each={hosts()}>
+                  {(h) => (
+                    <option value={h.id} class="bg-ink-900 text-ink-100">
+                      {h.name || h.hostname || h.id} ({h.status || "offline"})
+                    </option>
+                  )}
+                </For>
+              </select>
+              <button
+                onClick={loadHosts}
+                class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer shrink-0"
+                title="Refresh hosts"
+              >
+                <Iconify icon="lucide:refresh-cw" size={12} />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  generatePairingToken();
+                }}
+                class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer shrink-0"
+                title="Connect another host"
+              >
+                <Iconify icon="lucide:plus" size={12} />
+              </button>
+            </div>
             <button
-              onClick={loadHosts}
-              class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
-              title="Refresh hosts"
+              onClick={() => setShowConfigModal(true)}
+              class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-ink-500 hover:text-ink-200 hover:bg-ink-900/60 transition-colors cursor-pointer"
             >
-              <Iconify icon="lucide:refresh-cw" size={12} />
+              <Iconify icon="lucide:settings" size={14} />
+              <span>Settings</span>
             </button>
           </div>
         </aside>
@@ -2087,18 +2184,25 @@ export default function RemoteCodePage() {
             </div>
           </Show>
 
-          {/* Collapsible Sidebar Toggle Ribbon */}
-          <div class="absolute top-2 left-2 z-20">
+          {/* Floating top-left: back + sidebar toggle (no topbar) */}
+          <div class="absolute top-2 left-2 z-20 flex items-center gap-1.5">
+            <a
+              href="#/"
+              class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line/70 text-ink-400 hover:text-ink-200 transition-colors shadow-sm"
+              title="Back to LLM Gateway"
+            >
+              <Iconify icon="lucide:arrow-left" size={14} />
+            </a>
             <button
               onClick={() => setSidebarOpen(!sidebarOpen())}
-              class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line text-ink-400 hover:text-ink-200 transition-colors shadow-sm cursor-pointer"
+              class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line/70 text-ink-400 hover:text-ink-200 transition-colors shadow-sm cursor-pointer"
               title={sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"}
             >
               <Iconify
                 icon={
                   sidebarOpen()
-                    ? "lucide:chevron-right"
-                    : "lucide:chevron-down"
+                    ? "lucide:panel-left-close"
+                    : "lucide:panel-left-open"
                 }
                 size={14}
               />
@@ -2125,11 +2229,46 @@ export default function RemoteCodePage() {
                     <Iconify icon="lucide:search" size={14} class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-600" />
                     <input
                       type="text"
-                      placeholder="Search conversations..."
+                      placeholder="Search conversations and messages... (Ctrl+K)"
                       class="w-full text-[13px] bg-ink-900 border border-line/70 rounded-xl pl-9 pr-3 py-2 text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
                       value={sessionFilter()}
-                      onInput={(e) => setSessionFilter(e.currentTarget.value)}
+                      onInput={(e) => {
+                        setSessionFilter(e.currentTarget.value);
+                        queueDaemonSearch(e.currentTarget.value);
+                      }}
+                      ref={(el) => setTimeout(() => el?.focus(), 50)}
                     />
+                  </div>
+                  {/* Daemon full-text hits (message content, host-local) */}
+                  <Show when={searchResults().length > 0}>
+                    <div class="px-1 pb-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                      Message matches
+                    </div>
+                    <div class="space-y-1 mb-4">
+                      <For each={searchResults()}>
+                        {(r) => (
+                          <button
+                            onClick={() => {
+                              setHistoryView(false);
+                              setSearchResults([]);
+                              selectSession(r.sessionId);
+                            }}
+                            class="w-full text-left px-3 py-2.5 rounded-xl border border-line/50 hover:bg-ink-900/70 transition-colors cursor-pointer"
+                          >
+                            <div class="flex items-center justify-between gap-3">
+                              <span class="text-[13px] text-ink-200 truncate font-medium">{r.title}</span>
+                              <span class="text-[11px] text-ink-600 shrink-0">
+                                {r.matchCount > 1 ? `${r.matchCount} hits · ` : ""}{timeAgo(r.updatedAt)}
+                              </span>
+                            </div>
+                            <p class="text-[11px] text-ink-500 mt-1 line-clamp-2 leading-relaxed">{r.snippet}</p>
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                  <div class="px-1 pb-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                    Conversations
                   </div>
                   <div class="space-y-1">
                     <For
@@ -2224,6 +2363,18 @@ export default function RemoteCodePage() {
                     {/* ===== USER ===== */}
                     <Show when={msg.role === "user"}>
                       <div class="flex flex-col items-end max-w-[90%] sm:max-w-[80%]">
+                        <Show when={msg.attachments && msg.attachments.length > 0}>
+                          <div class="flex flex-wrap gap-1.5 mb-1.5 justify-end">
+                            <For each={msg.attachments || []}>
+                              {(name) => (
+                                <span class="text-[11px] bg-ink-900 border border-line/70 px-2 py-1 rounded-lg text-ink-400 flex items-center gap-1.5">
+                                  <Iconify icon="lucide:paperclip" size={11} />
+                                  {name}
+                                </span>
+                              )}
+                            </For>
+                          </div>
+                        </Show>
                         <div class="bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md">
                           <p class="whitespace-pre-line text-sm leading-relaxed">{textOf()}</p>
                         </div>
@@ -2238,7 +2389,7 @@ export default function RemoteCodePage() {
                           <button
                             onClick={() => editUserMsg(msg)}
                             class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                            title="Edit in composer"
+                            title="Edit in large editor"
                           >
                             <Iconify icon="lucide:pencil" size={13} />
                           </button>
@@ -2516,7 +2667,7 @@ export default function RemoteCodePage() {
             </Show>
             {/* Slash Command Autocomplete Menu */}
             <Show when={slashMatches().length > 0}>
-              <div class="absolute bottom-full left-4 right-4 md:left-8 md:right-8 mb-2 rounded-xl border border-line bg-ink-900/95 shadow-2xl p-1.5 max-h-60 overflow-y-auto z-40 backdrop-blur">
+              <div class="absolute bottom-full left-4 right-4 md:left-8 md:right-8 mb-2 rounded-xl border border-line bg-ink-900/95 shadow-2xl p-1.5 max-h-60 overflow-y-auto z-[60] backdrop-blur">
                 <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-500 tracking-wider">
                   Slash Commands
                 </div>
@@ -2553,7 +2704,40 @@ export default function RemoteCodePage() {
                   </span>
                 </div>
               </Show>
-              <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors overflow-hidden relative">
+              {/* z-index: composer sits above the chat (z-30); popovers z-[60]
+                  escape via no overflow clipping on this box. */}
+              <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors relative">
+                {/* Attachment chips (chatbot-style) */}
+                <Show when={pendingAttachments().length > 0}>
+                  <div class="flex flex-wrap gap-1.5 px-3.5 pt-3">
+                    <For each={pendingAttachments()}>
+                      {(att) => (
+                        <div
+                          class="relative group flex items-center gap-1.5 bg-ink-950 rounded-lg border border-line/70 pl-1.5 pr-2 py-1 text-xs max-w-[180px]"
+                          title={`${att.name} (${Math.round(att.size / 1024)}KB)`}
+                        >
+                          <Show
+                            when={att.objectUrl}
+                            fallback={<Iconify icon="lucide:file-text" size={20} class="text-ink-500 shrink-0" />}
+                          >
+                            <img src={att.objectUrl} class="w-7 h-7 object-cover rounded shrink-0 border border-line/60" />
+                          </Show>
+                          <span class="truncate text-ink-300">{att.name}</span>
+                          <Show when={att.uploading}>
+                            <span class="w-3 h-3 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
+                          </Show>
+                          <button
+                            onClick={() => removePendingAttachment(att.key)}
+                            class="absolute -top-1.5 -right-1.5 bg-ink-700 hover:bg-rose-500 rounded-full p-0.5 transition-colors shadow cursor-pointer"
+                            title="Remove"
+                          >
+                            <Iconify icon="lucide:x" size={10} />
+                          </button>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </Show>
                 <textarea
                   id="rc-composer"
                   rows={1}
@@ -2571,6 +2755,32 @@ export default function RemoteCodePage() {
                     const el = e.currentTarget;
                     el.style.height = "auto";
                     el.style.height = Math.min(el.scrollHeight, 160) + "px";
+                  }}
+                  onPaste={(e) => {
+                    const files: File[] = [];
+                    try {
+                      const items = e.clipboardData?.items;
+                      if (items) {
+                        for (const it of items) {
+                          if (it.kind === "file") {
+                            const f = it.getAsFile();
+                            if (f) files.push(f);
+                          }
+                        }
+                      }
+                    } catch {}
+                    if (files.length > 0) {
+                      e.preventDefault();
+                      handleFiles(files);
+                    }
+                  }}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    try {
+                      const files = Array.from(e.dataTransfer?.files || []);
+                      if (files.length > 0) handleFiles(files);
+                    } catch {}
                   }}
                 onKeyDown={(e) => {
                   if (slashMatches().length > 0) {
@@ -2613,7 +2823,7 @@ export default function RemoteCodePage() {
               </Show>
 
               <div class="flex items-center justify-between px-3 pb-2.5 pt-1">
-                <div class="flex items-center gap-1 text-xs text-ink-400">
+                <div class="flex items-center gap-0.5 text-xs text-ink-400">
                   {/* Add Context (+) — Antigravity-style */}
                   <div class="relative">
                     <button
@@ -2630,11 +2840,21 @@ export default function RemoteCodePage() {
                     <Show when={addContextOpen()}>
                       <div
                         onClick={(e) => e.stopPropagation()}
-                        class="absolute left-0 bottom-full mb-1.5 w-48 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-50"
+                        class="absolute left-0 bottom-full mb-1.5 w-48 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-[60]"
                       >
                         <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
                           Add context
                         </div>
+                        <button
+                          onClick={() => {
+                            setAddContextOpen(false);
+                            document.querySelector<HTMLInputElement>("#rc-file-input")?.click();
+                          }}
+                          class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
+                        >
+                          <Iconify icon="lucide:paperclip" size={13} />
+                          <span>Attach files</span>
+                        </button>
                         <button
                           onClick={() => {
                             setAddContextOpen(false);
@@ -2661,31 +2881,146 @@ export default function RemoteCodePage() {
                           <Iconify icon="lucide:slash" size={13} />
                           <span>Actions</span>
                         </button>
-                        <button
-                          onClick={() => {
-                            setAddContextOpen(false);
-                            toast("File attachments are coming soon", "info");
-                          }}
-                          class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-600 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
-                        >
-                          <Iconify icon="lucide:image" size={13} />
-                          <span>Media (soon)</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            setAddContextOpen(false);
-                            toast("Browser context is coming soon", "info");
-                          }}
-                          class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-600 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
-                        >
-                          <Iconify icon="lucide:globe" size={13} />
-                          <span>Browser (soon)</span>
-                        </button>
                       </div>
                     </Show>
                   </div>
-                  <span class="font-medium">{activeModel().split("/").pop()}</span>
-                  <Iconify icon="lucide:chevron-down" size={11} />
+                  {/* Expand to fullscreen editor (chatbot LargeEditor) */}
+                  <button
+                    onClick={() => {
+                      setLargeEditorText(inputPrompt());
+                      setLargeEditorSend(false);
+                      setLargeEditorOpen(true);
+                    }}
+                    class="w-6 h-6 rounded-full hover:bg-ink-800 hidden sm:flex items-center justify-center cursor-pointer"
+                    title="Expand editor"
+                  >
+                    <Iconify icon="lucide:expand" size={13} />
+                  </button>
+                  {/* Model picker (moved from the removed topbar) */}
+                  <div class="relative">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setModelMenuOpen(!modelMenuOpen());
+                        setAddContextOpen(false);
+                        setUsageOpen(false);
+                      }}
+                      class="flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-ink-800 font-medium cursor-pointer"
+                      title="Switch model"
+                    >
+                      <span class="max-w-[130px] truncate">{activeModel().split("/").pop()}</span>
+                      <Iconify icon="lucide:chevron-down" size={11} />
+                    </button>
+                    <Show when={modelMenuOpen()}>
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        class="absolute left-0 bottom-full mb-1.5 w-64 rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 z-[60]"
+                      >
+                        <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                          Model
+                        </div>
+                        <div class="max-h-56 overflow-y-auto">
+                          <For each={gatewayModels()}>
+                            {(m) => (
+                              <button
+                                onClick={() => {
+                                  const id = m.id;
+                                  setActiveModel(id);
+                                  setModelMenuOpen(false);
+                                  if (activeSessionId()) {
+                                    sendWS({
+                                      type: "prompt",
+                                      sessionId: activeSessionId(),
+                                      text: `/model ${id}`,
+                                    });
+                                  }
+                                }}
+                                class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
+                                  m.id === activeModel()
+                                    ? "bg-ink-800 text-ink-100"
+                                    : "text-ink-300 hover:bg-ink-800/60"
+                                }`}
+                              >
+                                <span class="truncate">{m.name || m.id}</span>
+                                <Show when={m.id === activeModel()}>
+                                  <Iconify icon="lucide:check" size={13} />
+                                </Show>
+                              </button>
+                            )}
+                          </For>
+                        </div>
+                        <div class="mt-1.5 pt-1.5 border-t border-line/60">
+                          <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                            Reasoning effort
+                          </div>
+                          <div class="grid grid-cols-4 gap-1 p-1 rounded-lg bg-ink-950 border border-line/50">
+                            <For each={["off", "low", "medium", "high"]}>
+                              {(lvl) => (
+                                <button
+                                  onClick={() => {
+                                    setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
+                                    setModelMenuOpen(false);
+                                    if (activeSessionId()) {
+                                      sendWS({
+                                        type: "prompt",
+                                        sessionId: activeSessionId(),
+                                        text: `/reasoning ${lvl}`,
+                                      });
+                                    }
+                                  }}
+                                  class={`py-1 rounded-md text-center text-[11px] font-medium capitalize cursor-pointer ${
+                                    (daemonSettings().reasoning || "medium") === lvl
+                                      ? "bg-ink-100 text-ink-950"
+                                      : "text-ink-400 hover:text-ink-200"
+                                  }`}
+                                >
+                                  {lvl}
+                                </button>
+                              )}
+                            </For>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setModelMenuOpen(false);
+                            setUsageOpen(true);
+                          }}
+                          class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer"
+                        >
+                          <Iconify icon="lucide:chart-column" size={13} />
+                          <span>View Usage</span>
+                        </button>
+                      </div>
+                    </Show>
+                    <Show when={usageOpen()}>
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        class="absolute left-0 bottom-full mb-1.5 w-64 rounded-xl border border-line bg-ink-900 shadow-2xl p-3 z-[60] text-xs"
+                      >
+                        <div class="font-semibold text-ink-200 mb-2">Session usage</div>
+                        <Show
+                          when={activeSessionId() && sessionUsage()[activeSessionId()]}
+                          fallback={
+                            <p class="text-ink-500 text-[11px]">
+                              No usage reported yet. Run the agent to see input / cache / output tokens here.
+                            </p>
+                          }
+                        >
+                          {(u) => (
+                            <div class="space-y-1.5 font-mono text-[11px]">
+                              <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}</span></div>
+                              <div class="flex justify-between"><span class="text-ink-500">Cache</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
+                              <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}</span></div>
+                              <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}</span></div>
+                              <Show when={u().costUsd > 0}>
+                                <div class="flex justify-between pt-1 border-t border-line/60"><span class="text-ink-500">Cost</span><span class="text-ink-200">${u().costUsd.toFixed(4)}</span></div>
+                              </Show>
+                            </div>
+                          )}
+                        </Show>
+                      </div>
+                    </Show>
+                  </div>
                 </div>
 
                 <div class="flex items-center gap-2">
@@ -2705,7 +3040,9 @@ export default function RemoteCodePage() {
                       else sendPrompt();
                     }}
                     disabled={
-                      (!inputPrompt().trim() && !!activeSessionId()) ||
+                      (!inputPrompt().trim() &&
+                        pendingAttachments().length === 0 &&
+                        !!activeSessionId()) ||
                       sessionStatus() === "running"
                     }
                     class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
@@ -2715,19 +3052,16 @@ export default function RemoteCodePage() {
                   </button>
                 </div>
               </div>
-              <div class="flex items-center justify-between px-4 pb-2 text-[11px] text-ink-600">
-                <span class="flex items-center gap-1">
-                  <Iconify icon="lucide:hard-drive" size={11} />
-                  <span>{yoloMode() ? "YOLO" : "Local"}</span>
-                </span>
-                <button
-                  onClick={() => setYoloMode(!yoloMode())}
-                  class="hover:text-ink-300 cursor-pointer"
-                  title="Toggle Safe/YOLO"
-                >
-                  {yoloMode() ? "YOLO Agent" : "Main Agent"} ▾
-                </button>
-              </div>
+              <input
+                id="rc-file-input"
+                type="file"
+                class="hidden"
+                multiple
+                onChange={(e) => {
+                  handleFiles(e.currentTarget.files);
+                  e.currentTarget.value = "";
+                }}
+              />
             </div>
             </div>
           </div>
@@ -2830,6 +3164,58 @@ export default function RemoteCodePage() {
             </div>
           </div>
         </Modal>
+
+      {/* Modal: Large editor (chatbot FullscreenEditor) */}
+      <Modal
+        open={largeEditorOpen()}
+        onClose={() => setLargeEditorOpen(false)}
+        title="Edit message"
+        width="max-w-2xl"
+      >
+        <div class="space-y-3">
+          <textarea
+            class="w-full h-64 bg-ink-950 border border-line rounded-xl px-3.5 py-3 text-sm text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500 resize-y font-mono leading-relaxed"
+            placeholder="Type your message..."
+            value={largeEditorText()}
+            onInput={(e) => setLargeEditorText(e.currentTarget.value)}
+            ref={(el) => setTimeout(() => el?.focus(), 60)}
+          />
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] text-ink-600 font-mono">
+              {largeEditorText().length} chars
+            </span>
+            <div class="flex items-center gap-2">
+              <button
+                onClick={() => setLargeEditorOpen(false)}
+                class="px-4 py-2 rounded-xl text-xs text-ink-400 hover:text-ink-100 hover:bg-ink-800 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setInputPrompt(largeEditorText());
+                  setLargeEditorOpen(false);
+                }}
+                class="px-4 py-2 rounded-xl border border-line text-xs font-medium text-ink-200 hover:bg-ink-800 cursor-pointer"
+              >
+                Apply
+              </button>
+              <button
+                onClick={() => {
+                  const t = largeEditorText();
+                  setLargeEditorOpen(false);
+                  if (!t.trim()) return;
+                  setInputPrompt(t);
+                  setTimeout(() => sendPrompt(), 30);
+                }}
+                class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
+              >
+                Apply & Send
+              </button>
+            </div>
+          </div>
+        </div>
+      </Modal>
 
       {/* Modal: Pair Daemon Host */}
       <Modal
@@ -3018,7 +3404,7 @@ export default function RemoteCodePage() {
 
                   <div>
                     <label class="block font-semibold text-ink-200 mb-1">
-                      Temperature ({daemonSettings().temperature.toFixed(2)})
+                      Temperature ({(daemonSettings().temperature ?? 0.7).toFixed(2)})
                     </label>
                     <input
                       type="range"
@@ -3026,7 +3412,7 @@ export default function RemoteCodePage() {
                       max="1"
                       step="0.05"
                       class="w-full cursor-pointer accent-brand-500"
-                      value={daemonSettings().temperature}
+                      value={daemonSettings().temperature ?? 0.7}
                       onInput={(e) =>
                         setDaemonSettings({
                           ...daemonSettings(),
@@ -3038,10 +3424,36 @@ export default function RemoteCodePage() {
                 </div>
 
                 <div class="space-y-2 pt-2 border-t border-line/60">
+                  <label class="flex items-start gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={yoloMode()}
+                      onChange={(e) => {
+                        const next = e.currentTarget.checked;
+                        setYoloMode(next);
+                        toast(
+                          next
+                            ? "YOLO Mode: tools run without asking"
+                            : "Safe Mode: each tool asks for approval",
+                          next ? "warn" : "info",
+                        );
+                      }}
+                      class="rounded accent-amber-500 mt-0.5"
+                    />
+                    <span>
+                      <span class="text-ink-200 font-medium">
+                        Autonomous execution (YOLO)
+                      </span>
+                      <span class="block text-[11px] text-ink-500 font-normal">
+                        Off by default. When off, every file write and shell command asks for approval first.
+                      </span>
+                    </span>
+                  </label>
+
                   <label class="flex items-center gap-2 cursor-pointer select-none">
                     <input
                       type="checkbox"
-                      checked={daemonSettings().jailByDefault}
+                      checked={daemonSettings().jailByDefault ?? false}
                       onChange={(e) =>
                         setDaemonSettings({
                           ...daemonSettings(),
@@ -3058,7 +3470,7 @@ export default function RemoteCodePage() {
                   <label class="flex items-center gap-2 cursor-pointer select-none">
                     <input
                       type="checkbox"
-                      checked={daemonSettings().autoSwarmEnabled}
+                      checked={daemonSettings().autoSwarmEnabled ?? false}
                       onChange={(e) =>
                         setDaemonSettings({
                           ...daemonSettings(),
@@ -3312,6 +3724,15 @@ export default function RemoteCodePage() {
             {/* TAB 5: APPEARANCE (Antigravity Chat Settings) */}
             <Show when={configTab() === "appearance"}>
               <div class="space-y-3 text-xs">
+                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
+                  <div>
+                    <div class="font-semibold text-ink-200">Theme</div>
+                    <div class="text-[11px] text-ink-500 mt-0.5">
+                      White or dark interface.
+                    </div>
+                  </div>
+                  <ThemeToggle />
+                </div>
                 <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
                   <div>
                     <div class="font-semibold text-ink-200">Verbose Agent Chat</div>

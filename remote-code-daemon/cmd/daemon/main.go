@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/patriceckhart/zot/packages/agent/tools"
@@ -74,16 +76,38 @@ type DaemonConfig struct {
 	Skills      map[string]SkillConfig     `json:"skills,omitempty"`
 }
 
+// AttachmentRef is a file the user attached to a session. The bytes live on
+// the host (the daemon's disk) so transcripts stay replayable locally.
+type AttachmentRef struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Mime      string `json:"mime"`
+	Size      int64  `json:"size"`
+	Path      string `json:"path"`
+	TextChars int    `json:"text_chars,omitempty"` // chars inlined as context (0 = binary/image)
+}
+
+// ProjectEntry groups sessions by host folder. Stored in projects.json next
+// to the sessions dir — the daemon is the source of truth, the web client
+// only mirrors it as a cache.
+type ProjectEntry struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	CreatedAt int64  `json:"created_at"`
+}
+
 // SessionRecord is the on-disk format for each local session.
 type SessionRecord struct {
-	ID        string             `json:"id"`
-	CWD       string             `json:"cwd"`
-	Title     string             `json:"title"`
-	Model     string             `json:"model"`
-	Status    string             `json:"status"` // "idle" | "running"
-	CreatedAt int64              `json:"created_at"`
-	UpdatedAt int64              `json:"updated_at"`
-	Messages  []provider.Message `json:"messages"`
+	ID          string             `json:"id"`
+	CWD         string             `json:"cwd"`
+	Title       string             `json:"title"`
+	Model       string             `json:"model"`
+	Status      string             `json:"status"` // "idle" | "running"
+	CreatedAt   int64              `json:"created_at"`
+	UpdatedAt   int64              `json:"updated_at"`
+	Messages    []provider.Message `json:"messages"`
+	Attachments []AttachmentRef    `json:"attachments,omitempty"`
 }
 
 // SessionSummary is returned to the web client for listing.
@@ -113,8 +137,97 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 	return map[string]any{
 		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
 		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": rec.Messages,
-		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt,
+		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
 	}
+}
+
+func projectPayload(p ProjectEntry) map[string]any {
+	return map[string]any{
+		"id": p.ID, "name": p.Name, "path": p.Path,
+		"created_at": p.CreatedAt, "createdAt": p.CreatedAt,
+	}
+}
+
+func (d *DaemonServer) projectsFile() string {
+	return filepath.Join(d.dataDir, "projects.json")
+}
+
+func (d *DaemonServer) loadProjects() []ProjectEntry {
+	data, err := os.ReadFile(d.projectsFile())
+	if err != nil {
+		return nil
+	}
+	var list []ProjectEntry
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil
+	}
+	return list
+}
+
+func (d *DaemonServer) saveProjects(list []ProjectEntry) error {
+	if err := os.MkdirAll(d.dataDir, 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(d.projectsFile(), data, 0o600)
+}
+
+func safeFileName(name string) string {
+	base := filepath.Base(strings.TrimSpace(name))
+	if base == "" || base == "." || base == "/" {
+		base = "attachment"
+	}
+	var b strings.Builder
+	for _, r := range base {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if len(out) > 120 {
+		ext := filepath.Ext(out)
+		out = out[:120-len(ext)] + ext
+	}
+	return out
+}
+
+// indexRunes reports the rune offset of the first occurrence of sub in s,
+// or -1 when absent.
+func indexRunes(s, sub []rune) int {
+	if len(sub) == 0 {
+		return 0
+	}
+outer:
+	for i := 0; i+len(sub) <= len(s); i++ {
+		for j := range sub {
+			if s[i+j] != sub[j] {
+				continue outer
+			}
+		}
+		return i
+	}
+	return -1
+}
+
+func isTextMime(mime, name string) bool {	m := strings.ToLower(mime)
+	if strings.HasPrefix(m, "text/") {
+		return true
+	}
+	switch m {
+	case "application/json", "application/xml", "application/javascript", "application/typescript", "application/yaml", "application/toml":
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".md", ".mdx", ".txt", ".json", ".js", ".jsx", ".ts", ".tsx", ".go", ".py", ".rb", ".java", ".c", ".h", ".cpp", ".hpp", ".rs", ".css", ".html", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sh", ".sql", ".vue", ".svelte", ".log", ".csv", ".tsv":
+		return true
+	}
+	return false
 }
 // ActiveSession holds in-memory execution state for a session.
 type ActiveSession struct {
@@ -481,6 +594,274 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"title":     title,
 		})
 
+	case "list_projects":
+		list := d.loadProjects()
+		items := make([]map[string]any, 0, len(list))
+		for _, p := range list {
+			items = append(items, projectPayload(p))
+		}
+		_ = d.sendWS(map[string]any{
+			"type":     "projects_list",
+			"hostId":   d.config.HostID,
+			"projects": items,
+		})
+
+	case "create_project":
+		var req struct {
+			Path string `json:"path"`
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		path := strings.TrimSpace(req.Path)
+		if path == "" {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"message": "Project path cannot be empty",
+			})
+			return
+		}
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			trimmed := strings.TrimRight(path, "/")
+			if trimmed == "" || trimmed == "~" {
+				name = "Home"
+			} else {
+				name = filepath.Base(trimmed)
+			}
+		}
+		if len(name) > 80 {
+			name = name[:80]
+		}
+		list := d.loadProjects()
+		for _, p := range list {
+			if p.Path == path {
+				_ = d.sendWS(map[string]any{
+					"type": "error", "hostId": d.config.HostID,
+					"message": "Project already exists",
+				})
+				return
+			}
+		}
+		entry := ProjectEntry{
+			ID:        fmt.Sprintf("proj_%d", time.Now().UnixNano()/1000),
+			Name:      name,
+			Path:      path,
+			CreatedAt: time.Now().UnixMilli(),
+		}
+		list = append([]ProjectEntry{entry}, list...)
+		if err := d.saveProjects(list); err != nil {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"message": "Failed to save project: " + err.Error(),
+			})
+			return
+		}
+		_ = d.sendWS(map[string]any{
+			"type":    "project_created",
+			"hostId":  d.config.HostID,
+			"project": projectPayload(entry),
+		})
+
+	case "delete_project":
+		var req struct {
+			ProjectID string `json:"projectId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		if req.ProjectID == "" {
+			return
+		}
+		list := d.loadProjects()
+		next := make([]ProjectEntry, 0, len(list))
+		for _, p := range list {
+			if p.ID != req.ProjectID {
+				next = append(next, p)
+			}
+		}
+		_ = d.saveProjects(next)
+		_ = d.sendWS(map[string]any{
+			"type":      "project_deleted",
+			"hostId":    d.config.HostID,
+			"projectId": req.ProjectID,
+		})
+
+	case "upload_attachment":
+		var req struct {
+			RequestID string `json:"requestId"`
+			SessionID string `json:"sessionId"`
+			Name      string `json:"name"`
+			Mime      string `json:"mime"`
+			Data      string `json:"data"` // base64
+		}
+		_ = json.Unmarshal(raw, &req)
+		if req.SessionID == "" || req.Name == "" || req.Data == "" {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"requestId": req.RequestID, "sessionId": req.SessionID,
+				"message": "Attachment needs a session, name and data",
+			})
+			return
+		}
+		rawBytes, err := base64.StdEncoding.DecodeString(req.Data)
+		if err != nil {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"requestId": req.RequestID, "sessionId": req.SessionID,
+				"message": "Attachment data is not valid base64",
+			})
+			return
+		}
+		const maxAttachmentBytes = 4 << 20 // 4MB per file
+		if len(rawBytes) > maxAttachmentBytes {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"requestId": req.RequestID, "sessionId": req.SessionID,
+				"message": "Attachment too large (max 4MB)",
+			})
+			return
+		}
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"requestId": req.RequestID, "sessionId": req.SessionID,
+				"message": "Session not found",
+			})
+			return
+		}
+		dir := filepath.Join(d.sessionsDir(), rec.ID, "attachments")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"requestId": req.RequestID, "sessionId": req.SessionID,
+				"message": "Failed to store attachment: " + err.Error(),
+			})
+			return
+		}
+		attID := fmt.Sprintf("att_%d", time.Now().UnixNano()/1000)
+		filePath := filepath.Join(dir, attID+"_"+safeFileName(req.Name))
+		if err := os.WriteFile(filePath, rawBytes, 0o600); err != nil {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"requestId": req.RequestID, "sessionId": req.SessionID,
+				"message": "Failed to store attachment: " + err.Error(),
+			})
+			return
+		}
+		mime := req.Mime
+		if mime == "" {
+			mime = "application/octet-stream"
+		}
+		ref := AttachmentRef{
+			ID:   attID,
+			Name: filepath.Base(strings.TrimSpace(req.Name)),
+			Mime: mime,
+			Size: int64(len(rawBytes)),
+			Path: filePath,
+		}
+		rec.Attachments = append(rec.Attachments, ref)
+		rec.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(rec)
+		_ = d.sendWS(map[string]any{
+			"type":      "attachment_uploaded",
+			"hostId":    d.config.HostID,
+			"requestId": req.RequestID,
+			"sessionId": rec.ID,
+			"attachment": map[string]any{
+				"id": ref.ID, "name": ref.Name, "mime": ref.Mime, "size": ref.Size,
+			},
+		})
+
+	case "search":
+		var req struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		q := strings.TrimSpace(req.Query)
+		limit := req.Limit
+		if limit <= 0 || limit > 50 {
+			limit = 30
+		}
+		type hit struct {
+			SessionID  string `json:"sessionId"`
+			Title      string `json:"title"`
+			CWD        string `json:"cwd"`
+			UpdatedAt  int64  `json:"updatedAt"`
+			Snippet    string `json:"snippet"`
+			MatchCount int    `json:"matchCount"`
+		}
+		results := []hit{}
+		if len([]rune(q)) >= 2 {
+			lq := strings.ToLower(q)
+			for _, s := range d.listSessions() {
+				if len(results) >= limit {
+					break
+				}
+				matched := strings.Contains(strings.ToLower(s.Title), lq) ||
+					strings.Contains(strings.ToLower(s.CWD), lq)
+				snippet := ""
+				count := 0
+				rec, err := d.loadSession(s.ID)
+				if err == nil {
+					for _, m := range rec.Messages {
+						for _, c := range m.Content {
+							var txt string
+							switch v := c.(type) {
+							case provider.TextBlock:
+								txt = v.Text
+							case provider.ToolCallBlock:
+								txt = v.Name + " " + string(v.Arguments)
+							case provider.ReasoningBlock:
+								txt = v.Summary
+							}
+							if txt == "" {
+								continue
+							}
+							// Rune-level matching so multibyte text yields valid snippets.
+							runes := []rune(txt)
+							lowerRunes := []rune(strings.ToLower(txt))
+							qlen := len([]rune(lq))
+							off := 0
+							for {
+								rel := indexRunes(lowerRunes[off:], []rune(lq))
+								if rel < 0 {
+									break
+								}
+								count++
+								if snippet == "" {
+									start := off + rel - 60
+									if start < 0 {
+										start = 0
+									}
+									end := off + rel + qlen + 100
+									if end > len(runes) {
+										end = len(runes)
+									}
+									snippet = strings.TrimSpace(string(runes[start:end]))
+								}
+								off += rel + qlen
+							}
+						}
+					}
+				}
+				if matched || count > 0 {
+					if snippet == "" {
+						snippet = s.Title
+					}
+					results = append(results, hit{
+						SessionID: s.ID, Title: s.Title, CWD: s.CWD,
+						UpdatedAt: s.UpdatedAt, Snippet: snippet, MatchCount: count,
+					})
+				}
+			}
+		}
+		_ = d.sendWS(map[string]any{
+			"type":    "search_results",
+			"hostId":  d.config.HostID,
+			"query":   q,
+			"results": results,
+		})
+
 	case "create_session":
 		var req struct {
 			CWD   string `json:"cwd"`
@@ -817,12 +1198,13 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		_ = json.Unmarshal(raw, &req)
 		d.handleSlashCommand(req.SessionID, "/clear")
 
-	case "prompt":
+ 	case "prompt":
 		var req struct {
-			SessionID string `json:"sessionId"`
-			Text      string `json:"text"`
-			Model     string `json:"model"`
-			YOLO      bool   `json:"yolo"`
+			SessionID     string   `json:"sessionId"`
+			Text          string   `json:"text"`
+			Model         string   `json:"model"`
+			YOLO          bool     `json:"yolo"`
+			AttachmentIDs []string `json:"attachmentIds"`
 		}
 		_ = json.Unmarshal(raw, &req)
 
@@ -843,7 +1225,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			return
 		}
 
-		go d.runAgentTurn(act, req.Text, req.Model, req.YOLO)
+		go d.runAgentTurn(act, req.Text, req.Model, req.YOLO, req.AttachmentIDs)
 	}
 }
 
@@ -1018,7 +1400,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 
 // Agent Loop Runner for a Session
 
-func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool) {
+func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string) {
 	act.mu.Lock()
 	if act.record.Status == "running" {
 		act.mu.Unlock()
@@ -1219,7 +1601,57 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		_ = d.sendWS(payload)
 	}
 
-	_ = agent.Prompt(ctx, promptText, nil, sink)
+	// Resolve attachments: images ride as ImageBlocks, text files are inlined
+	// as context (capped), anything else becomes a short pointer note.
+	var images []provider.ImageBlock
+	var contextParts []string
+	if len(attachmentIDs) > 0 {
+		byID := map[string]AttachmentRef{}
+		act.mu.Lock()
+		for _, a := range act.record.Attachments {
+			byID[a.ID] = a
+		}
+		act.mu.Unlock()
+		const maxInlineChars = 48 * 1024
+		for _, id := range attachmentIDs {
+			ref, ok := byID[id]
+			if !ok {
+				continue
+			}
+			data, err := os.ReadFile(ref.Path)
+			if err != nil {
+				contextParts = append(contextParts, fmt.Sprintf("[Attachment %q could not be read: %s]", ref.Name, err.Error()))
+				continue
+			}
+			mime := ref.Mime
+			if strings.HasPrefix(strings.ToLower(mime), "image/") {
+				images = append(images, provider.ImageBlock{MimeType: mime, Data: data})
+				contextParts = append(contextParts, fmt.Sprintf("[Attached image: %s]", ref.Name))
+				continue
+			}
+			if isTextMime(mime, ref.Name) && utf8.Valid(data) {
+				text := string(data)
+				truncated := false
+				if len([]rune(text)) > maxInlineChars {
+					text = string([]rune(text)[:maxInlineChars])
+					truncated = true
+				}
+				note := ""
+				if truncated {
+					note = fmt.Sprintf(" (truncated to %d chars of %d bytes; full file at %s)", maxInlineChars, len(data), ref.Path)
+				}
+				contextParts = append(contextParts, fmt.Sprintf("[Attached file: %s%s]\n%s", ref.Name, note, text))
+				continue
+			}
+			contextParts = append(contextParts, fmt.Sprintf("[Attached binary file: %s (%d bytes, stored at %s) — use tools to inspect it]", ref.Name, len(data), ref.Path))
+		}
+	}
+	fullPrompt := promptText
+	if len(contextParts) > 0 {
+		fullPrompt = promptText + "\n\n" + strings.Join(contextParts, "\n\n")
+	}
+
+	_ = agent.Prompt(ctx, fullPrompt, images, sink)
 }
 
 func (d *DaemonServer) connectWebSocket() error {

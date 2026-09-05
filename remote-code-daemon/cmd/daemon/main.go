@@ -229,28 +229,31 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 		return fmt.Errorf("pairing unsuccessful: %s", result.Error)
 	}
 
-	d.config = &DaemonConfig{
-		GatewayURL:  result.GatewayURL,
-		DaemonToken: result.DaemonToken,
-		APIKey:      result.APIKey,
-		HostID:      result.HostID,
-		Name:        hostName,
-		Settings: ZotSettings{
-			AutoCompactThreshold: 85,
-			RespectGitignore:     true,
-			ToolRender:           "box",
-			Reasoning:            "medium",
-			Temperature:          0.7,
-		},
-		MCPServers: make(map[string]MCPServerConfig),
-		Skills:     make(map[string]SkillConfig),
+	if d.config == nil {
+		d.config = &DaemonConfig{
+			Settings: ZotSettings{
+				AutoCompactThreshold: 85,
+				RespectGitignore:     true,
+				ToolRender:           "box",
+				Reasoning:            "medium",
+				Temperature:          0.7,
+			},
+			MCPServers: make(map[string]MCPServerConfig),
+			Skills:     make(map[string]SkillConfig),
+		}
 	}
+
+	d.config.GatewayURL = result.GatewayURL
+	d.config.DaemonToken = result.DaemonToken
+	d.config.APIKey = result.APIKey
+	d.config.HostID = result.HostID
+	d.config.Name = hostName
 
 	if err := d.saveConfig(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Printf("\n[SUCCESS] Host paired successfully! Host ID: %s\n", result.HostID)
+	fmt.Printf("\n[SUCCESS] Host paired successfully! Host ID: %s (Gateway: %s)\n", result.HostID, result.GatewayURL)
 	return nil
 }
 
@@ -1207,22 +1210,28 @@ func main() {
 		sessions:   make(map[string]*ActiveSession),
 	}
 
-	// Try loading config
-	if err := server.loadConfig(); err != nil || server.config == nil {
-		pairURL := *connectFlag
-		if pairURL == "" {
-			fmt.Println("=========================================================")
-			fmt.Println("             LLM Gateway Remote Code Daemon              ")
-			fmt.Println("=========================================================")
-			fmt.Println("No existing pairing configuration found.")
-			fmt.Println("In your LLM Gateway dashboard (/#/code), click 'Connect Host'")
-			fmt.Println("and paste the generated connection URL below:")
-			fmt.Print("\nConnection URL: ")
+	// If -connect was explicitly passed, ALWAYS perform pairing to the new link (disconnects from old gateway)
+	if *connectFlag != "" {
+		_ = server.loadConfig()
+		fmt.Printf("[PAIRING] Connecting daemon to new gateway link: %s\n", *connectFlag)
+		if err := server.performPairing(*connectFlag, *nameFlag); err != nil {
+			fmt.Printf("Pairing failed: %v\n", err)
+			os.Exit(1)
+		}
+	} else if err := server.loadConfig(); err != nil || server.config == nil {
+		// No existing config and no -connect flag -> prompt interactively
+		fmt.Println("=========================================================")
+		fmt.Println("             LLM Gateway Remote Code Daemon              ")
+		fmt.Println("=========================================================")
+		fmt.Println("No existing pairing configuration found.")
+		fmt.Println("In your LLM Gateway dashboard (/#/code), click 'Connect Host'")
+		fmt.Println("and paste the generated connection URL below:")
+		fmt.Print("\nConnection URL: ")
 
-			scanner := bufio.NewScanner(os.Stdin)
-			if scanner.Scan() {
-				pairURL = strings.TrimSpace(scanner.Text())
-			}
+		var pairURL string
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			pairURL = strings.TrimSpace(scanner.Text())
 		}
 
 		if pairURL == "" {
@@ -1234,6 +1243,9 @@ func main() {
 			fmt.Printf("Pairing failed: %v\n", err)
 			os.Exit(1)
 		}
+	} else {
+		fmt.Printf("[INFO] Loaded configuration for host '%s' (Gateway: %s)\n", server.config.Name, server.config.GatewayURL)
+		fmt.Println("[INFO] Tip: To switch to another gateway link or user account, run: ./code-daemon -connect <new-url>")
 	}
 
 	// Graceful shutdown handling

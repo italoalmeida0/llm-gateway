@@ -93,12 +93,14 @@ type AttachmentRef struct {
 
 // ProjectEntry groups sessions by host folder. Stored in projects.json next
 // to the sessions dir — the daemon is the source of truth, the web client
-// only mirrors it as a cache.
+// only mirrors it as a cache. The default (home) project is protected: it
+// can never be deleted and the frontend hides its delete button.
 type ProjectEntry struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Path      string `json:"path"`
 	CreatedAt int64  `json:"created_at"`
+	Protected bool   `json:"protected,omitempty"`
 }
 
 // SessionRecord is the on-disk format for each local session.
@@ -153,6 +155,7 @@ func projectPayload(p ProjectEntry) map[string]any {
 	return map[string]any{
 		"id": p.ID, "name": p.Name, "path": p.Path,
 		"created_at": p.CreatedAt, "createdAt": p.CreatedAt,
+		"protected": p.Protected,
 	}
 }
 
@@ -226,7 +229,36 @@ outer:
 	return -1
 }
 
-func isTextMime(mime, name string) bool {	m := strings.ToLower(mime)
+// canonicalReasoning maps the UI's effort labels (plus the daemon's own
+// historic guesses) onto the canonical tier the provider layer clamps per
+// model. Mirrors NormalizeReasoning in packages/provider/reasoning.go minus
+// the per-model clamping step. Empty/allies-of-off come back as "" so the
+// call site can distinguish "unknown" from "disabled".
+func canonicalReasoning(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return ""
+	case "off", "none", "no", "false", "disabled":
+		return "none"
+	case "min", "minimal", "minimum":
+		return "minimum"
+	case "low":
+		return "low"
+	case "med", "medium":
+		return "medium"
+	case "hi", "high":
+		return "high"
+	case "xhigh", "maximum":
+		return "xhigh"
+	case "max":
+		return "max"
+	default:
+		return ""
+	}
+}
+
+func isTextMime(mime, name string) bool {
+	m := strings.ToLower(mime)
 	if strings.HasPrefix(m, "text/") {
 		return true
 	}
@@ -915,10 +947,11 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		_ = os.MkdirAll(path, 0o755)
 		name := strings.TrimSpace(req.Name)
+		trimmed := strings.TrimRight(path, "/")
+		home, _ := os.UserHomeDir()
+		isHome := trimmed == "" || trimmed == home
 		if name == "" {
-			trimmed := strings.TrimRight(path, "/")
-			home, _ := os.UserHomeDir()
-			if trimmed == "" || trimmed == home {
+			if isHome {
 				name = "Home"
 			} else {
 				name = filepath.Base(trimmed)
@@ -932,6 +965,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			if resolvePath(p.Path) == path {
 				// Idempotent "ensure": re-ack the existing entry so flows like
 				// Quick Start (~) just reopen the project instead of failing.
+				// The re-acked home project comes back protected even on
+				// hosts whose projects.json predates the protected flag.
+				if isHome && !p.Protected {
+					p.Protected = true
+					_ = d.saveProjects(list)
+				}
 				_ = d.sendWS(map[string]any{
 					"type":    "project_created",
 					"hostId":  d.config.HostID,
@@ -945,6 +984,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			Name:      name,
 			Path:      path,
 			CreatedAt: time.Now().UnixMilli(),
+			Protected: isHome,
 		}
 		list = append([]ProjectEntry{entry}, list...)
 		if err := d.saveProjects(list); err != nil {
@@ -978,6 +1018,15 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 				continue
 			}
 			next = append(next, p)
+		}
+		// The default (home) project is part of the furniture: frontend
+		// hides the button and the daemon refuses the delete too.
+		if doomed != nil && doomed.Protected {
+			_ = d.sendWS(map[string]any{
+				"type": "error", "hostId": d.config.HostID,
+				"message": "The default Home project cannot be deleted",
+			})
+			return
 		}
 		// Removing a project cascades: every conversation rooted inside the
 		// project folder is deleted 100% (transcript + attachments) so no
@@ -1744,9 +1793,8 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			Effort string `json:"effort"`
 		}
 		_ = json.Unmarshal(raw, &req)
-		switch strings.ToLower(strings.TrimSpace(req.Effort)) {
-		case "off", "low", "medium", "high":
-			d.config.Settings.Reasoning = strings.ToLower(strings.TrimSpace(req.Effort))
+		if lvl := canonicalReasoning(strings.TrimSpace(req.Effort)); lvl != "" {
+			d.config.Settings.Reasoning = lvl
 			_ = d.saveConfig()
 		}
 
@@ -1760,25 +1808,46 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		_ = json.Unmarshal(raw, &req)
 
-		cleanText := strings.TrimSpace(req.Text)
-		if strings.HasPrefix(cleanText, "/") {
-			d.handleSlashCommand(req.SessionID, cleanText)
-			return
-		}
-
-		act, err := d.getOrCreateActiveSession(req.SessionID)
-		if err != nil {
-			_ = d.sendWS(map[string]any{
-				"type":      "error",
-				"hostId":    d.config.HostID,
-				"sessionId": req.SessionID,
-				"message":   "Session not found: " + err.Error(),
-			})
-			return
-		}
-
-		go d.runAgentTurn(act, req.Text, req.Model, req.YOLO, req.AttachmentIDs)
+	cleanText := strings.TrimSpace(req.Text)
+	if strings.HasPrefix(cleanText, "/") {
+		d.handleSlashCommand(req.SessionID, cleanText)
+		return
 	}
+
+	act, err := d.getOrCreateActiveSession(req.SessionID)
+	if err != nil {
+		_ = d.sendWS(map[string]any{
+			"type":      "error",
+			"hostId":    d.config.HostID,
+			"sessionId": req.SessionID,
+			"message":   "Session not found: " + err.Error(),
+		})
+		return
+	}
+
+	// Instant provisional title from the prompt's own words (their first 6
+	// content words); the LLM-generated title replaces it later via
+	// rename. Instant feedback: the sidebar never shows five stale "New
+	// conversation" rows again.
+	act.mu.Lock()
+	if act.record.Title == "" || act.record.Title == "New conversation" {
+		if t := instantTitle(cleanText); t != "" {
+			act.record.Title = t
+			act.record.UpdatedAt = time.Now().UnixMilli()
+			_ = d.saveSession(act.record)
+			_ = d.sendWS(map[string]any{
+				"type":      "session_renamed",
+				"hostId":    d.config.HostID,
+				"sessionId": act.record.ID,
+				"title":     t,
+				"auto":      true,
+			})
+		}
+	}
+	act.mu.Unlock()
+
+	go d.runAgentTurn(act, req.Text, req.Model, req.YOLO, req.AttachmentIDs)
+}
 }
 
 func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
@@ -1895,9 +1964,14 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 
 	case "/reasoning":
 		if arg != "" {
-			d.config.Settings.Reasoning = arg
-			_ = d.saveConfig()
-			reply = fmt.Sprintf("🧠 Reasoning effort set to `%s`.", arg)
+			lvl := canonicalReasoning(arg)
+			if lvl == "" {
+				reply = fmt.Sprintf("🧠 Unknown effort `%s`. Use one of: none, minimum, low, medium, high, xhigh, max.", arg)
+			} else {
+				d.config.Settings.Reasoning = lvl
+				_ = d.saveConfig()
+				reply = fmt.Sprintf("🧠 Reasoning effort set to `%s`.", lvl)
+			}
 		} else {
 			reply = fmt.Sprintf("🧠 Current reasoning: `%s`", d.config.Settings.Reasoning)
 		}
@@ -1944,11 +2018,8 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 			"- `/jail` — Confine agent tools strictly to session directory\n" +
 			"- `/unjail` — Allow agent tools to read/write external paths\n" +
 			"- `/model <name>` — Switch the active model\n" +
-			"- `/reasoning <off|low|medium|high>` — Adjust reasoning effort\n" +
-			"- `/skills` — List available agent tools and custom skills\n" +
-			"- `/mcp` — List configured Model Context Protocol servers\n" +
-			"- `/help` — Show this command reference\n\n" +
-			"*You can also configure all agent settings directly in the Settings pane.*"
+			"- `/reasoning <none|minimum|low|medium|high|xhigh|max>` — Adjust reasoning effort\n\n" +
+			"*Model, effort, skills and MCP servers are also configurable in Settings.*"
 
 	default:
 		reply = fmt.Sprintf("❓ Unknown command `%s`. Type `/help` for available commands.", head)
@@ -2415,8 +2486,43 @@ func (d *DaemonServer) maybeAutoCompact(act *ActiveSession, agent *core.Agent) {
 	})
 }
 
+// instantTitle derives an immediate provisional title from the user's own
+// words (first 6 content words, ellipsis when truncated). The LLM-generated
+// title from maybeAutoTitle replaces it after the first exchange.
+func instantTitle(text string) string {
+	clean := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if r == '/' || r == '"' || r == '\'' || r == '`' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(text))
+	words := strings.Fields(clean)
+	if len(words) == 0 {
+		return ""
+	}
+	cut := false
+	if len(words) > 6 {
+		words = words[:6]
+		cut = true
+	}
+	out := strings.TrimSpace(strings.Join(words, " "))
+	if cut {
+		out += "…"
+	}
+	if r := []rune(out); len(r) > 60 {
+		out = strings.TrimSpace(string(r[:60])) + "…"
+	}
+	return out
+}
+
 // maybeAutoTitle generates a short LLM title for fresh sessions whose title
-// is still the "New conversation" placeholder.
+// is still the "New conversation" placeholder or the instant provisional
+// title (marked by the trailing "…" — instantTitle always appends it when
+// truncating and the LLM result never carries one). A hand-typed title is
+// never overwritten.
 func (d *DaemonServer) maybeAutoTitle(rec *SessionRecord, client provider.Client, model string) {
 	if rec == nil || client == nil {
 		return
@@ -2424,7 +2530,7 @@ func (d *DaemonServer) maybeAutoTitle(rec *SessionRecord, client provider.Client
 	if d.config.Settings.NoAutoTitle {
 		return
 	}
-	if rec.Title != "" && rec.Title != "New conversation" {
+	if rec.Title != "" && rec.Title != "New conversation" && !strings.HasSuffix(rec.Title, "…") {
 		return
 	}
 	var firstText string
@@ -2484,6 +2590,7 @@ func (d *DaemonServer) maybeAutoTitle(rec *SessionRecord, client provider.Client
 		title = title[:i]
 	}
 	title = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(title, "Title:"), "title:"))
+	title = strings.TrimRight(title, "…")
 	if r := []rune(title); len(r) > 40 {
 		title = strings.TrimSpace(string(r[:40]))
 	}
@@ -2494,7 +2601,7 @@ func (d *DaemonServer) maybeAutoTitle(rec *SessionRecord, client provider.Client
 	if err != nil {
 		return
 	}
-	if fresh.Title != "" && fresh.Title != "New conversation" {
+	if fresh.Title != "" && fresh.Title != "New conversation" && !strings.HasSuffix(fresh.Title, "…") {
 		return
 	}
 	fresh.Title = title

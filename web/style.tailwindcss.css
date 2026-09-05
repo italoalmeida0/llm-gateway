@@ -86,8 +86,64 @@ html[data-theme="light"] {
   --chart-soft: #b6bac3;
   --chart-brand: var(--brand-500);
 
+  /* Code token palette (light theme): highlight.js output is remapped to
+   * structural tok-* classes by RemoteCode.mapHljsClasses; values below are
+   * tuned per theme so white/dark flip for free. */
+  --code-base: #2b2e36;
+  --code-kw: #7a3faa;
+  --code-builtin: #4f6bd6;
+  --code-type: #0c7a70;
+  --code-lit: #8a5b00;
+  --code-num: #7a3faa;
+  --code-str: #32753f;
+  --code-regex: #b02a5b;
+  --code-com: #8b8e98;
+  --code-doc: #b02a5b;
+  --code-fn: #3358d6;
+  --code-class: #0c7a70;
+  --code-title: #2b2e36;
+  --code-params: #565963;
+  --code-var: #a03325;
+  --code-name: #3358d6;
+  --code-attr: #0c7a70;
+  --code-sel: #7a3faa;
+  --code-op: #565963;
+  --code-punct: #71747e;
+  --code-meta: #8b8e98;
+  --code-add: #32753f;
+  --code-del: #c03535;
+
   --glow-brand: color-mix(in oklab, var(--brand-500) 20%, transparent);
 }
+
+/* Plain-code carrier: highlight.js only colors spans it knows; the rest
+ * inherits the editor tone via the carrier class. */
+.tok {
+  color: var(--code-base);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.tok-kw { color: var(--code-kw); }
+.tok-builtin { color: var(--code-builtin); }
+.tok-type { color: var(--code-type); }
+.tok-lit { color: var(--code-lit); }
+.tok-num { color: var(--code-num); }
+.tok-str { color: var(--code-str); }
+.tok-regex { color: var(--code-regex); }
+.tok-com { color: var(--code-com); font-style: italic; }
+.tok-doc { color: var(--code-doc); }
+.tok-fn { color: var(--code-fn); }
+.tok-class { color: var(--code-class); }
+.tok-title { color: var(--code-title); }
+.tok-params { color: var(--code-params); }
+.tok-var { color: var(--code-var); }
+.tok-name { color: var(--code-name); }
+.tok-attr { color: var(--code-attr); }
+.tok-sel { color: var(--code-sel); }
+.tok-op { color: var(--code-op); }
+.tok-punct { color: var(--code-punct); }
+.tok-meta { color: var(--code-meta); }
+.tok-add { color: var(--code-add); }
+.tok-del { color: var(--code-del); }
 
 html[data-theme="dark"] {
   color-scheme: dark;
@@ -117,6 +173,31 @@ html[data-theme="dark"] {
   --chart-mid: #a9aab4;
   --chart-soft: #50505c;
   --chart-brand: var(--brand-300);
+
+  /* Code token palette (dark theme). */
+  --code-base: #d3d3da;
+  --code-kw: #c792ea;
+  --code-builtin: #7aa2f7;
+  --code-type: #2ac3b0;
+  --code-lit: #ff9e64;
+  --code-num: #c792ea;
+  --code-str: #9ece6a;
+  --code-regex: #f7768e;
+  --code-com: #5c5c6a;
+  --code-doc: #f7768e;
+  --code-fn: #7aa2f7;
+  --code-class: #2ac3b0;
+  --code-title: #d3d3da;
+  --code-params: #a9aab4;
+  --code-var: #e0af68;
+  --code-name: #7aa2f7;
+  --code-attr: #2ac3b0;
+  --code-sel: #c792ea;
+  --code-op: #a9aab4;
+  --code-punct: #8b8e98;
+  --code-meta: #5c5c6a;
+  --code-add: #9ece6a;
+  --code-del: #f7768e;
 
   --glow-brand: color-mix(in oklab, var(--brand-500) 20%, transparent);
 }

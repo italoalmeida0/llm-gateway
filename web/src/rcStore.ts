@@ -38,6 +38,8 @@ export interface RcProject {
   name: string;
   path: string;
   createdAt: number;
+  /** The default (home) project — present but never deletable. */
+  protected?: boolean;
 }
 
 /** Daemon configuration mirror (single doc per host). */
@@ -128,6 +130,7 @@ export function createDataLayer(opts: {
       name: p.name || (String(p.path || "").replace(/\/+$/, "").split("/").pop() ?? ""),
       path: p.path || "",
       createdAt: p.createdAt ?? p.created_at ?? Date.now(),
+      protected: !!p.protected,
     };
   }
 

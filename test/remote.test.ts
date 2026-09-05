@@ -457,9 +457,32 @@ describe("Remote Code Relay and Pairing", () => {
       send({ type: "create_project", path: workDir });
       const projCreated = await waitFor((m) => m.type === "project_created");
       expect(projCreated.project.path).toBe(workDir);
+      expect(projCreated.project.protected).toBe(false);
       send({ type: "pull", id: 4646, collection: "projects" });
       const pullProjects = await waitFor((m) => m.type === "pull-response" && m.collection === "projects" && m.id === 4646);
       expect(pullProjects.items.some((p: any) => p.id === projCreated.project.id)).toBe(true);
+
+      // Reasoning effort levels are canonicalized on write
+      send({ type: "set_reasoning", effort: "xhigh" });
+      send({ type: "pull", id: 4747, collection: "config" });
+      const pullReason = await waitFor((m) => m.type === "pull-response" && m.collection === "config" && m.id === 4747);
+      expect(pullReason.items[0].settings.reasoning).toBe("xhigh");
+      send({ type: "set_reasoning", effort: "off" });
+      send({ type: "pull", id: 4848, collection: "config" });
+      const pullReasonOff = await waitFor((m) => m.type === "pull-response" && m.collection === "config" && m.id === 4848);
+      expect(pullReasonOff.items[0].settings.reasoning).toBe("none");
+
+      // Protected Home project: cannot be deleted, neither directly nor by
+      // path-cycling (create with "~" re-acks the same entry)
+      send({ type: "create_project", path: "~" });
+      const homeCreated = await waitFor((m) => m.type === "project_created" && m.project.path !== workDir);
+      expect(homeCreated.project.protected).toBe(true);
+      send({ type: "delete_project", projectId: homeCreated.project.id });
+      const homeDelErr = await waitFor((m) => m.type === "error" && String(m.message).toLowerCase().includes("cannot be deleted"));
+      expect(homeDelErr).toBeDefined();
+      send({ type: "pull", id: 4949, collection: "projects" });
+      const afterHomeDel = await waitFor((m) => m.type === "pull-response" && m.collection === "projects" && m.id === 4949);
+      expect(afterHomeDel.items.some((p: any) => p.id === homeCreated.project.id)).toBe(true);
 
       // Nested session inside the project tree (cwd = <workDir>/sub)
       send({ type: "create_session", cwd: `${workDir}/sub`, title: "Nested", model: "gpt-4o" });

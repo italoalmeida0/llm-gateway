@@ -147,10 +147,19 @@ export interface SkillConfig {
 }
 
 /**
- * Slash command definitions for autocomplete palette
+ * Canonical reasoning effort levels offered by the UI. The daemon accepts
+ * these (and more aliases); providers clamp them internally (see
+ * remote-code-daemon/packages/provider/reasoning.go). "none" is an explicit
+ * off — NormalizeReasoning maps it to the disabled state.
  */
-// Only commands NOT already configurable somewhere in the UI are listed:
-// model + reasoning effort live in the composer picker / Settings modal.
+const REASONING_LEVELS = ["none", "minimum", "low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * Slash command definitions for autocomplete palette.
+ * Only commands NOT already configurable somewhere in the UI are listed:
+ * model + reasoning effort live in the composer picker / Settings modal,
+ * and help + protocols (mcp/skills) live in Settings (sec-* sections).
+ */
 const SLASH_COMMANDS = [
   {
     cmd: "/compact",
@@ -170,21 +179,6 @@ const SLASH_COMMANDS = [
   {
     cmd: "/unjail",
     desc: "Allow agent to access files outside session working directory",
-    args: "",
-  },
-  {
-    cmd: "/skills",
-    desc: "List built-in tools and active custom skills",
-    args: "",
-  },
-  {
-    cmd: "/mcp",
-    desc: "List active Model Context Protocol servers",
-    args: "",
-  },
-  {
-    cmd: "/help",
-    desc: "Show complete command reference",
     args: "",
   },
 ];
@@ -364,31 +358,375 @@ export function toolSummary(u: ToolUnit): ToolSummary {
   }
 }
 
-/** Renders a unified context diff (daemon edit results) red/green. */
-export function DiffView(props: { text: string; max?: number }) {
+/**
+ * Lightweight token highlighter on top of highlight.js (already a runtime
+ * dep — no new libs). `languageForPath` maps a file extension to an hljs
+ * language id; `highlightCode` returns HTML for <CodeBlock> (auto-detect
+ * for diffs and extension-less files). Theme-agnostic: keep classes
+ * structural (`tok-…`) and map them to CSS vars in the stylesheet so
+ * white/dark flip for free.
+ */
+export function languageForPath(name?: string): string | undefined {
+  if (!name) return undefined;
+  const base = String(name).replace(/\\/g, "/").split("/").pop() || "";
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return undefined;
+  const ext = base.slice(dot + 1).toLowerCase();
+  switch (ext) {
+    case "ts":
+    case "tsx":
+    case "mts":
+    case "cts":
+      return "typescript";
+    case "js":
+    case "jsx":
+    case "mjs":
+    case "cjs":
+      return "javascript";
+    case "json":
+    case "jsonc":
+      return "json";
+    case "py":
+    case "pyi":
+      return "python";
+    case "rs":
+      return "rust";
+    case "go":
+      return "go";
+    case "rb":
+      return "ruby";
+    case "java":
+    case "kt":
+    case "kts":
+      return "java";
+    case "c":
+    case "h":
+    case "cc":
+    case "cpp":
+    case "hpp":
+    case "cxx":
+      return "cpp";
+    case "cs":
+      return "csharp";
+    case "php":
+      return "php";
+    case "swift":
+      return "swift";
+    case "css":
+    case "scss":
+    case "less":
+      return "css";
+    case "html":
+    case "htm":
+    case "vue":
+    case "svelte":
+      return "xml";
+    case "md":
+    case "mdx":
+    case "markdown":
+      return "markdown";
+    case "yml":
+    case "yaml":
+      return "yaml";
+    case "toml":
+    case "ini":
+    case "cfg":
+    case "env":
+      return "ini";
+    case "sh":
+    case "bash":
+    case "zsh":
+      return "bash";
+    case "sql":
+      return "sql";
+    case "xml":
+    case "svg":
+    case "plist":
+      return "xml";
+    case "diff":
+    case "patch":
+      return "diff";
+    case "dockerfile":
+      return "dockerfile";
+    case "graphql":
+    case "gql":
+      return "graphql";
+    case "lua":
+      return "lua";
+    case "r":
+      return "r";
+    case "scala":
+      return "scala";
+    case "dart":
+      return "dart";
+    case "ex":
+    case "exs":
+      return "elixir";
+    case "hs":
+      return "haskell";
+    // "tf" → hcl: highlight.js has no hcl in the loaded bundle, so it
+    // falls through to auto-detect.
+    default:
+      return undefined;
+  }
+}
+
+/** hljs → our structural classes (mapped to theme vars in the stylesheet). */
+const HLJS_CLASS_MAP: Array<[RegExp, string]> = [
+  [/^hljs-keyword$/, "tok-kw"],
+  [/^hljs-built_in$/, "tok-builtin"],
+  [/^hljs-type$/, "tok-type"],
+  [/^hljs-literal$/, "tok-lit"],
+  [/^hljs-number$/, "tok-num"],
+  [/^hljs-string$/, "tok-str"],
+  [/^hljs-regexp$/, "tok-regex"],
+  [/^hljs-comment$/, "tok-com"],
+  [/^hljs-doctag$/, "tok-doc"],
+  [/^hljs-title function_$/, "tok-fn"],
+  [/^hljs-title class_$/, "tok-class"],
+  [/^hljs-title$/, "tok-title"],
+  [/^hljs-params$/, "tok-params"],
+  [/^hljs-variable$/, "tok-var"],
+  [/^hljs-name$/, "tok-name"],
+  [/^hljs-attr$/, "tok-attr"],
+  [/^hljs-attribute$/, "tok-attr"],
+  [/^hljs-selector-/, "tok-sel"],
+  [/^hljs-operator$/, "tok-op"],
+  [/^hljs-punctuation$/, "tok-punct"],
+  [/^hljs-meta/, "tok-meta"],
+  [/^hljs-addition$/, "tok-add"],
+  [/^hljs-deletion$/, "tok-del"],
+];
+
+let hljsLib: any = null;
+async function getHljs(): Promise<any> {
+  if (hljsLib) return hljsLib;
+  const coreMod: any = await import("highlight.js/lib/core");
+  const core = coreMod?.default ?? coreMod;
+  // Registered lazily so the base bundle stays small; languages load once
+  // with the first highlighted block (import map covers the ~40 most
+  // common file types the agent touches).
+  const langs: Array<[string, string]> = [
+    ["typescript", "highlight.js/lib/languages/typescript"],
+    ["javascript", "highlight.js/lib/languages/javascript"],
+    ["json", "highlight.js/lib/languages/json"],
+    ["python", "highlight.js/lib/languages/python"],
+    ["rust", "highlight.js/lib/languages/rust"],
+    ["go", "highlight.js/lib/languages/go"],
+    ["ruby", "highlight.js/lib/languages/ruby"],
+    ["java", "highlight.js/lib/languages/java"],
+    ["kotlin", "highlight.js/lib/languages/kotlin"],
+    ["cpp", "highlight.js/lib/languages/cpp"],
+    ["c", "highlight.js/lib/languages/c"],
+    ["csharp", "highlight.js/lib/languages/csharp"],
+    ["php", "highlight.js/lib/languages/php"],
+    ["swift", "highlight.js/lib/languages/swift"],
+    ["css", "highlight.js/lib/languages/css"],
+    ["xml", "highlight.js/lib/languages/xml"],
+    ["markdown", "highlight.js/lib/languages/markdown"],
+    ["yaml", "highlight.js/lib/languages/yaml"],
+    ["ini", "highlight.js/lib/languages/ini"],
+    ["bash", "highlight.js/lib/languages/bash"],
+    ["sql", "highlight.js/lib/languages/sql"],
+    ["diff", "highlight.js/lib/languages/diff"],
+    ["dockerfile", "highlight.js/lib/languages/dockerfile"],
+    ["graphql", "highlight.js/lib/languages/graphql"],
+    ["lua", "highlight.js/lib/languages/lua"],
+    ["r", "highlight.js/lib/languages/r"],
+    ["scala", "highlight.js/lib/languages/scala"],
+    ["dart", "highlight.js/lib/languages/dart"],
+    ["elixir", "highlight.js/lib/languages/elixir"],
+    ["haskell", "highlight.js/lib/languages/haskell"],
+  ];
+  await Promise.all(
+    langs.map(async ([id, path]) => {
+      try {
+        if (typeof core.getLanguage === "function" && core.getLanguage(id)) return;
+        const mod: any = await import(/* @vite-ignore */ path);
+        const def = mod?.default ?? mod;
+        if (typeof def === "function") core.registerLanguage(id, def);
+      } catch {}
+    }),
+  );
+  hljsLib = core;
+  return hljsLib;
+}
+
+function mapHljsClasses(html: string): string {
+  return html.replace(/class="([^"]*)"/g, (_m, cls: string) => {
+    const mapped = cls
+      .split(/\s+/)
+      .map((c) => {
+        if (c === "hljs") return "tok";
+        for (const [re, out] of HLJS_CLASS_MAP) {
+          if (re.test(cls) && c !== "hljs") {
+            if (re.source === "^hljs-title function_$" && c === "title") return "tok-fn";
+            if (re.source === "^hljs-title class_$" && c === "title") return "tok-class";
+            if (re.source === "^hljs-meta" && c === "meta") return "tok-meta";
+            if (re.source === "^hljs-title$" && c === "title") return out;
+            if (re.test(c)) return out;
+          }
+        }
+        return c;
+      })
+      .join(" ");
+    return `class="${mapped}"`;
+  });
+}
+
+export async function highlightCode(text: string, language?: string): Promise<string> {
+  const src = text || "";
+  const hljs = await getHljs();
+  let html: string;
+  if (language && typeof hljs.getLanguage === "function" && hljs.getLanguage(language)) {
+    html = hljs.highlight(src, { language, ignoreIllegals: true }).value;
+  } else if (typeof hljs.highlightAuto === "function") {
+    html = hljs.highlightAuto(src).value;
+  } else {
+    html = src
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+  return mapHljsClasses(html);
+}
+
+/** Display-only file preview payload with an optional highlight language. */
+export interface PreviewFile {
+  name: string;
+  mime: string;
+  text?: string;
+  dataUrl?: string;
+  dataB64?: string;
+  size?: number;
+  truncated?: boolean;
+  fullText?: string;
+  /** hljs language id (undefined = auto-detect). */
+  language?: string;
+}
+
+/**
+ * Escapes raw text to HTML. Used as a stopgap identity "highlight" so raw
+ * tool/file output renders identically until the async highlighter resolves.
+ */
+export function escapeHtml(src: string): string {
+  return (src || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
+ * Renders code/text with syntax highlighting (extension-detected or
+ * auto-detected for extension-less content like diffs). The highlighted
+ * HTML is re-computed reactively when text/language change via the
+ * hl-loaded singleton — escaped <pre> until the lib arrives (same paint as
+ * before, zero layout shift). innerHTML below only ever carries one of two
+ * safe payloads: highlight.js-generated spans (built from escaped text) or
+ * escapeHtml() output — never raw upstream strings.
+ */
+export function CodeBlock(props: {
+  text: string;
+  language?: string;
+  bare?: boolean;
+  maxH?: string;
+}) {
+  const [html, setHtml] = createSignal<string | null>(null);
+  createEffect(() => {
+    const text = props.text || "";
+    const lang = props.language;
+    setHtml(null);
+    let cancelled = false;
+    void highlightCode(text, lang).then((h) => {
+      if (!cancelled) setHtml(h);
+    });
+    onCleanup(() => {
+      cancelled = true;
+    });
+  });
+  return (
+    <pre
+      class={`px-3 py-2 text-[11px] text-ink-300 overflow-x-auto whitespace-pre-wrap ${
+        props.maxH || "max-h-56"
+      }`}
+    >
+      <Show
+        when={html() !== null}
+        // eslint-disable-next-line solid/no-innerhtml
+        fallback={<code class="tok" innerHTML={escapeHtml(props.text || "")} />}
+      >
+        {/* eslint-disable-next-line solid/no-innerhtml */}
+        <code class="tok" innerHTML={html() || ""} />
+      </Show>
+    </pre>
+  );
+}
+/**
+ * Renders a unified context diff (daemon edit results). Diff marker lines
+ * (+/-) keep their red/green lane so added/removed still jump out; the line
+ * BODY is syntax-highlighted per the file extension, and a truncate
+ * control caps long diffs exactly like the file preview.
+ */
+export function DiffView(props: { text: string; max?: number; name?: string }) {
   const [expanded, setExpanded] = createSignal(false);
+  const [html, setHtml] = createSignal<string | null>(null);
   const lines = () => (props.text || "").split("\n");
+  const max = () => props.max ?? 80;
   const shown = () => {
     const all = lines();
-    const max = props.max ?? 80;
-    return expanded() ? all : all.slice(0, max);
+    return expanded() ? all : all.slice(0, max());
   };
+  const shownText = () => shown().join("\n");
   const hidden = () => Math.max(0, lines().length - shown().length);
+  createEffect(() => {
+    const text = shownText();
+    const lang = languageForPath(props.name) || "diff";
+    setHtml(null);
+    let cancelled = false;
+    void highlightCode(text, lang).then((h) => {
+      if (!cancelled) setHtml(h);
+    });
+    onCleanup(() => {
+      cancelled = true;
+    });
+  });
+  // Keep one token per line so lane classes line up with the highlighted
+  // body (the hl spans are injected inside each lane row, never across;
+  // same safe-payload rule as CodeBlock applies). Newline splitting is
+  // correct: hljs emits no raw newlines inside its own tags, so each source
+  // line maps 1:1 to one rendered row (verified for diff + typescript).
+  const rows = () => (html() ?? "").split("\n");
   return (
     <div class="font-mono text-[11px] leading-relaxed overflow-x-auto">
-      <For each={shown()}>
-        {(ln) => {
-          const cls =
-            ln.startsWith("+") && !ln.startsWith("+++")
-              ? "bg-emerald-500/10 text-emerald-300"
-              : ln.startsWith("-") && !ln.startsWith("---")
-                ? "bg-rose-500/10 text-rose-300"
-                : ln === "..."
-                  ? "text-ink-600"
-                  : "text-ink-400";
-          return <div class={`px-3 whitespace-pre ${cls}`}>{ln || " "}</div>;
-        }}
-      </For>
+      <Show
+        when={html() !== null}
+        fallback={
+          <For each={shown()}>
+            {(ln) => (
+              // eslint-disable-next-line solid/no-innerhtml
+              <div class="px-3 whitespace-pre text-ink-400" innerHTML={escapeHtml(ln || " ")} />
+            )}
+          </For>
+        }
+      >
+        <For each={rows()}>
+          {(row) => {
+            const plain = row.replace(/<[^>]*>/g, "");
+            const cls =
+              plain.startsWith("+") && !plain.startsWith("+++")
+                ? "bg-emerald-500/10"
+                : plain.startsWith("-") && !plain.startsWith("---")
+                  ? "bg-rose-500/10"
+                  : "text-ink-600";
+            return (
+              <div class={`px-3 whitespace-pre ${cls}`}>
+                {/* eslint-disable-next-line solid/no-innerhtml */}
+                <code class="tok" innerHTML={row || " "} />
+              </div>
+            );
+          }}
+        </For>
+      </Show>
       <Show when={hidden() > 0}>
         <button
           onClick={() => setExpanded(true)}
@@ -567,6 +905,20 @@ export default function RemoteCodePage() {
   // Local popovers below use the module-level <FloatMenu> (same layer).
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [usageOpen, setUsageOpen] = createSignal(false);
+  const [modelFilter, setModelFilter] = createSignal("");
+  /** Fresh snapshot on every open: stale scroll position/filter never linger. */
+  createEffect(() => {
+    if (modelMenuOpen()) setModelFilter("");
+  });
+  const filteredGatewayModels = createMemo(() => {
+    const q = modelFilter().trim().toLowerCase();
+    const all = gatewayModels();
+    if (!q) return all;
+    return all.filter(
+      (m) =>
+        m.id.toLowerCase().includes(q) || (m.name || "").toLowerCase().includes(q),
+    );
+  });
   const [renamingId, setRenamingId] = createSignal<string | null>(null);
   const [renameText, setRenameText] = createSignal("");
   const [isAtBottom, setIsAtBottom] = createSignal(true);
@@ -689,16 +1041,7 @@ export default function RemoteCodePage() {
     Record<string, { name: string; mime: string; dataB64: string; text?: string }>
   >({});
   // File preview modal target.
-  const [previewFile, setPreviewFile] = createSignal<{
-    name: string;
-    mime: string;
-    text?: string;
-    dataUrl?: string;
-    dataB64?: string;
-    size?: number;
-    truncated?: boolean;
-    fullText?: string;
-  } | null>(null);
+  const [previewFile, setPreviewFile] = createSignal<PreviewFile | null>(null);
   const [previewCopied, setPreviewCopied] = createSignal(false);
   const [truncateTokens, setTruncateTokens] = createSignal(16000);
   const [showTruncateInput, setShowTruncateInput] = createSignal(false);
@@ -939,15 +1282,23 @@ export default function RemoteCodePage() {
       return String(v);
     }
   }
+  // Tool results in provider shape ({content:[...]}): text stays raw, image
+  // parts become a one-line placeholder (never dump base64 JSON into a
+  // row). The real image bytes ride the daemon's user-mirror message and
+  // are rendered as previews from there.
   function toolResultText(c: any): string {
     const content = c.content ?? c.result;
     if (typeof content === "string") return content;
+    const partText = (p: any): string => {
+      if (typeof p === "string") return p;
+      if (typeof p?.text === "string") return p.text;
+      if (p && typeof p.mime_type === "string") {
+        return `[image${p.mime_type ? ` ${p.mime_type}` : ""}]`;
+      }
+      return prettyArgs(p);
+    };
     if (Array.isArray(content)) {
-      return content
-        .map((p: any) =>
-          typeof p === "string" ? p : typeof p?.text === "string" ? p.text : prettyArgs(p),
-        )
-        .join("\n");
+      return content.map(partText).join("\n");
     }
     return prettyArgs(content);
   }
@@ -1099,15 +1450,16 @@ export default function RemoteCodePage() {
         if (b.type === "tool_result") ensureCarrier(idx).blocks.push(b);
         else rest.push(b);
       }
-      // Daemon's image mirror: caption + tool-run images, never a user bubble.
+      // Daemon's image mirror: the tool already shows a collapsible row with
+      // its output — the mirror carries the SAME bytes, so drop it (keeping
+      // a duplicate caption under the tool would just repeat the tool). The
+      // image blocks here and the ones folded from tool results both die
+      // together with their carrier row.
       if (
         rest.length > 0 &&
         rest[0].type === "text" &&
         (rest[0].text || "").trim().startsWith(TOOLS_IMAGE_MARKER)
       ) {
-        const c = ensureCarrier(idx);
-        c.blocks.push({ type: "text", text: `_${TOOLS_IMAGE_MARKER}_` });
-        c.blocks.push(...rest.slice(1));
         return;
       }
       if (role === "tool" || rest.length === 0) {
@@ -2175,6 +2527,7 @@ export default function RemoteCodePage() {
   async function sendPrompt() {
     const text = inputPrompt().trim();
     const sid = activeSessionId();
+    setPendingFirstText(null);
     // Slash fast-path: UI commands resolve locally, transcript ops go down.
     if (text.startsWith("/")) {
       setInputPrompt("");
@@ -2190,6 +2543,15 @@ export default function RemoteCodePage() {
     if (!text && pendingAttachments().length === 0) return;
     if (!sid) {
       beginConversationWith(text);
+      return;
+    }
+    // Abort guard: free the composer when a late sync proves the daemon
+    // already forgot the session (restored-from-cache ghost), otherwise a
+    // send to a dead session would hang the composer in running forever.
+    const live = wsOpen() && sessions().some((s) => s.id === sid);
+    if (!live) {
+      setSessionStatus("idle");
+      setActiveSessionId("");
       return;
     }
     if (sessionStatus() === "running") return;
@@ -2268,18 +2630,43 @@ export default function RemoteCodePage() {
     setPendingApproval(null);
   }
 
-  function executeSlashCommand(cmd: string) {
-    // Local-first routing: UI commands never pollute the transcript.
-    if (routeSlash(cmd)) return;
-    setInputPrompt("");
-    if (!activeSessionId()) return;
-    sendWS({
-      type: "prompt",
-      sessionId: activeSessionId(),
-      text: cmd,
-      model: activeModel(),
-      yolo: yoloMode(),
-    });
+  // (executeSlashCommand: dead since the palette/help runtimes were removed —
+  // the composer is the only entry point now, and it routes through routeSlash.)
+
+  // Normalizes UI-visible effort labels to the daemon's canonical guess.
+  // Matches NormalizeReasoning's aliases (off/min/med/hi/maximum) plus a
+  // grid-friendly "none". Unknown input passes through: the provider layer
+  // clamps it to the nearest supported level of the active model.
+  function normalizeEffort(raw: string): string {
+    const v = (raw || "").trim().toLowerCase();
+    switch (v) {
+      case "":
+        return "";
+      case "no":
+      case "false":
+      case "disabled":
+      case "none":
+      case "off":
+        return "none";
+      case "min":
+      case "minimum":
+        return "minimum";
+      case "low":
+        return "low";
+      case "med":
+      case "medium":
+        return "medium";
+      case "hi":
+      case "high":
+        return "high";
+      case "maximum":
+      case "xhigh":
+        return "xhigh";
+      case "max":
+        return "max";
+      default:
+        return v;
+    }
   }
 
   // Routes /commands: UI-backed ones are handled locally (modals, silent
@@ -2293,15 +2680,6 @@ export default function RemoteCodePage() {
     const arg = (sp < 0 ? "" : clean.slice(sp + 1)).trim();
     const sid = activeSessionId();
     switch (head) {
-      case "/skills":
-        openSettings("sec-skills");
-        return true;
-      case "/mcp":
-        openSettings("sec-mcp");
-        return true;
-      case "/help":
-        setHelpOpen(true);
-        return true;
       case "/model":
         if (!arg) {
           toast(`Current model: ${activeModel()}`, "ok");
@@ -2312,9 +2690,9 @@ export default function RemoteCodePage() {
         toast(`Model set to ${arg}`, "ok");
         return true;
       case "/reasoning": {
-        const lvl = arg.toLowerCase();
-        if (!["off", "low", "medium", "high"].includes(lvl)) {
-          toast(`Reasoning: ${daemonSettings().reasoning}`, "ok");
+        const lvl = normalizeEffort(arg);
+        if (!lvl || !(REASONING_LEVELS as readonly string[]).includes(lvl)) {
+          toast(`Reasoning: ${normalizeEffort(daemonSettings().reasoning)}`, "ok");
           return true;
         }
         setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
@@ -2343,7 +2721,6 @@ export default function RemoteCodePage() {
 
   // Settings revert snapshot (chatbot backupForRevert): Cancel restores.
   const [settingsSnapshot, setSettingsSnapshot] = createSignal<string | null>(null);
-  const [helpOpen, setHelpOpen] = createSignal(false);
   function openSettings(sectionId?: string) {
     try {
       setSettingsSnapshot(
@@ -2623,14 +3000,17 @@ export default function RemoteCodePage() {
   });
 
   // Daemon config mirror → local settings signals. Never clobbers an open
-  // Settings modal (that would fight the user's in-flight edits).
+  // Settings modal (that would fight the user's in-flight edits). `model`
+  // is only for the default — with a session open the composer shows the
+  // session's own model until the user changes it, so a config echo (e.g.
+  // after changing effort) can never snap it back to the default.
   createEffect(() => {
     const doc = configDoc();
     if (!doc || showConfigModal()) return;
     const s: any = doc.settings || {};
     setDaemonSettings({
       model: s.model || "gpt-4o",
-      reasoning: s.reasoning || "off",
+      reasoning: normalizeEffort(s.reasoning) || "none",
       temperature: typeof s.temperature === "number" ? s.temperature : 0.7,
       autoCompactPercent:
         s.autoCompactPercent ??
@@ -2644,7 +3024,7 @@ export default function RemoteCodePage() {
       httpProxy: s.httpProxy ?? s.http_proxy ?? "",
       maxExecutionTimeSec: s.maxExecutionTimeSec ?? 600,
     });
-    if (s.model) setActiveModel(s.model);
+    if (s.model && !activeSessionId()) setActiveModel(s.model);
     if (doc.mcpServers && typeof doc.mcpServers === "object") setMcpServers(doc.mcpServers);
     if (doc.skills && typeof doc.skills === "object") setSkills(doc.skills);
   });
@@ -2706,23 +3086,27 @@ export default function RemoteCodePage() {
   function openToolPreview(u: ToolUnit) {
     const name = u.call?.toolName || "tool";
     const args = tryParseArgs(u.call?.toolArgs);
+    const lang = languageForPath(String(args.path || ""));
     if (name === "read") {
       setPreviewFile({
         name: baseNameOf(args.path) || "file",
         mime: "text/plain",
         text: u.result?.toolResult || "(no output captured)",
+        language: lang,
       });
     } else if (name === "write") {
       setPreviewFile({
         name: baseNameOf(args.path) || "file",
         mime: "text/plain",
         text: String(args.content || u.result?.toolResult || "(empty)"),
+        language: lang,
       });
     } else if (name === "edit") {
       setPreviewFile({
         name: (baseNameOf(args.path) || "file") + " — diff",
         mime: "text/plain",
         text: u.result?.toolResult || "(no diff captured)",
+        language: lang || "diff",
       });
     } else {
       setPreviewFile({
@@ -2792,7 +3176,11 @@ export default function RemoteCodePage() {
           <div class="ml-5 mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 overflow-hidden">
             {/* Context body per tool kind */}
             <Show when={name === "edit" && u.result?.toolResult}>
-              <DiffView text={u.result?.toolResult || ""} max={40} />
+              <DiffView
+                text={u.result?.toolResult || ""}
+                max={40}
+                name={String(args.path || "")}
+              />
               <div class="flex items-center gap-2 px-3 py-1.5 border-t border-line/50">
                 <button
                   onClick={() => openToolPreview(u)}
@@ -2813,9 +3201,10 @@ export default function RemoteCodePage() {
                 when={u.result?.toolResult}
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Waiting for output…</div>}
               >
-                <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
-                  {(u.result?.toolResult || "").slice(0, 3000)}
-                </pre>
+                <CodeBlock
+                  text={(u.result?.toolResult || "").slice(0, 3000)}
+                  language={languageForPath(String(args.path || ""))}
+                />
                 <div class="px-3 py-1.5 border-t border-line/50">
                   <button
                     onClick={() => openToolPreview(u)}
@@ -2827,9 +3216,10 @@ export default function RemoteCodePage() {
               </Show>
             </Show>
             <Show when={name === "write"}>
-              <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
-                {String(args.content || u.result?.toolResult || "").slice(0, 3000)}
-              </pre>
+              <CodeBlock
+                text={String(args.content || u.result?.toolResult || "").slice(0, 3000)}
+                language={languageForPath(String(args.path || ""))}
+              />
               <div class="px-3 py-1.5 border-t border-line/50">
                 <button
                   onClick={() => openToolPreview(u)}
@@ -3387,13 +3777,15 @@ export default function RemoteCodePage() {
                               />
                               <Iconify icon="lucide:folder" size={14} class="shrink-0 text-ink-500" />
                               <span class="truncate flex-1 font-medium">{p.name}</span>
-                              <button
-                                onClick={(e) => deleteProject(p.id, e)}
-                                class="opacity-0 group-hover:opacity-100 p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer shrink-0"
-                                title="Remove project"
-                              >
-                                <Iconify icon="lucide:x" size={12} />
-                              </button>
+                              <Show when={!p.protected}>
+                                <button
+                                  onClick={(e) => deleteProject(p.id, e)}
+                                  class="opacity-0 group-hover:opacity-100 p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer shrink-0"
+                                  title="Remove project"
+                                >
+                                  <Iconify icon="lucide:x" size={12} />
+                                </button>
+                              </Show>
                             </div>
                             <Show when={isProjectExpanded(p)}>
                               <div class="ml-[13px] mt-0.5 space-y-0.5 border-l border-line/50 pl-1.5">
@@ -3495,23 +3887,23 @@ export default function RemoteCodePage() {
         <main class="flex-1 flex flex-col min-w-0 bg-ink-950 relative">
           {/* Offline Banner when selected host is offline */}
           <Show when={activeHost() && activeHost()?.status !== "online"}>
-            <div class="bg-amber-500/10 border-b border-amber-500/25 px-4 py-2.5 flex items-center justify-between text-xs text-amber-300 z-10">
-              <div class="flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                <span>
+            <div class="bg-amber-500/10 border-b border-amber-500/25 px-4 py-2.5 flex items-center justify-end text-xs text-amber-300 z-10">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                <span class="truncate">
                   Host <strong>{activeHost()?.name || activeHost()?.hostname || activeHost()?.id}</strong> is offline. Start the daemon on your machine: <code class="bg-amber-500/20 px-1 py-0.5 rounded font-mono">./llmgw-daemon</code>
                 </span>
-              </div>
-              <div class="flex items-center gap-2">
                 <button
                   onClick={loadHosts}
-                  class="text-[11px] underline hover:text-amber-100 cursor-pointer"
+                  class="text-[11px] underline hover:text-amber-100 cursor-pointer shrink-0"
+                  title="Refresh"
                 >
                   Refresh
                 </button>
                 <button
                   onClick={generatePairingToken}
-                  class="text-[11px] px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-200 cursor-pointer"
+                  class="text-[11px] px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-200 cursor-pointer shrink-0"
+                  title="Connect Another Host"
                 >
                   Connect Another Host
                 </button>
@@ -3643,7 +4035,7 @@ export default function RemoteCodePage() {
           <div
             ref={setChatContainerRef}
             onScroll={onChatScroll}
-            class="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 select-text scroll-smooth"
+            class="flex-1 overflow-y-auto px-4 md:px-8 pt-6 pb-16 space-y-6 select-text scroll-smooth"
           >
             {/* Empty state: subtle hint only — the real input is the
                 composer pinned at the bottom, never something mid-screen. */}
@@ -4553,7 +4945,7 @@ export default function RemoteCodePage() {
                       <span class="max-w-[130px] truncate">{activeModel().split("/").pop()}</span>
                       <Iconify icon="lucide:chevron-down" size={11} />
                     </button>
-                    <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="16rem">
+                    <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="18rem">
                         <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider flex items-center justify-between">
                           <span>Model</span>
                           <button
@@ -4567,8 +4959,28 @@ export default function RemoteCodePage() {
                             <Iconify icon="lucide:refresh-cw" size={11} />
                           </button>
                         </div>
+                        <div class="px-2 pb-1">
+                          <input
+                            type="text"
+                            placeholder="Search models..."
+                            class="w-full bg-ink-950 border border-line/60 rounded-lg px-2.5 py-1.5 text-[11px] text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
+                            value={modelFilter()}
+                            onInput={(e) => setModelFilter(e.currentTarget.value)}
+                            onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => e.stopPropagation()}
+                            ref={(el) => setTimeout(() => el?.focus(), 40)}
+                          />
+                        </div>
                         <div class="max-h-56 overflow-y-auto">
-                          <For each={gatewayModels()}>
+                          <For
+                            each={filteredGatewayModels()}
+                            fallback={
+                              <div class="px-2.5 py-2 text-[11px] text-ink-600">
+                                No models match.
+                              </div>
+                            }
+                          >
                             {(m) => (
                               <button
                                 onClick={() => {
@@ -4597,8 +5009,8 @@ export default function RemoteCodePage() {
                           <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
                             Reasoning effort
                           </div>
-                          <div class="grid grid-cols-4 gap-1 p-1 rounded-lg bg-ink-950 border border-line/50">
-                            <For each={["off", "low", "medium", "high"]}>
+                          <div class="grid grid-cols-7 gap-1 p-1 rounded-lg bg-ink-950 border border-line/50">
+                            <For each={REASONING_LEVELS}>
                               {(lvl) => (
                                 <button
                                   onClick={() => {
@@ -4606,8 +5018,8 @@ export default function RemoteCodePage() {
                                     setModelMenuOpen(false);
                                     if (wsOpen()) sendWS({ type: "set_reasoning", effort: lvl });
                                   }}
-                                  class={`py-1 rounded-md text-center text-[11px] font-medium capitalize cursor-pointer ${
-                                    (daemonSettings().reasoning || "medium") === lvl
+                                  class={`py-1 rounded-md text-center text-[11px] font-medium lowercase cursor-pointer ${
+                                    normalizeEffort(daemonSettings().reasoning || "none") === lvl
                                       ? "bg-ink-100 text-ink-950"
                                       : "text-ink-400 hover:text-ink-200"
                                   }`}
@@ -4677,9 +5089,22 @@ export default function RemoteCodePage() {
                         : !inputPrompt().trim() || !activeProject())
                     }
                     class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
-                    title={!activeSessionId() ? "Start conversation" : "Send"}
+                    title={
+                      sessionStatus() === "running"
+                        ? "Generating..."
+                        : !activeSessionId()
+                          ? "Start conversation"
+                          : "Send"
+                    }
                   >
-                    <Iconify icon="lucide:arrow-right" size={14} />
+                    <Show
+                      when={sessionStatus() !== "running"}
+                      fallback={
+                        <span class="w-3.5 h-3.5 border-2 border-ink-950/40 border-t-ink-950 rounded-full animate-spin" />
+                      }
+                    >
+                      <Iconify icon="lucide:arrow-right" size={14} />
+                    </Show>
                   </button>
                 </div>
               </div>
@@ -4897,7 +5322,12 @@ export default function RemoteCodePage() {
                 <Show
                   when={f().dataUrl}
                   fallback={
-                    <pre class="text-xs text-ink-200 font-mono whitespace-pre-wrap break-words leading-relaxed">{f().text || "(empty)"}</pre>
+                    <CodeBlock
+                      text={f().text || "(empty)"}
+                      language={f().language || languageForPath(f().name)}
+                      bare
+                      maxH="max-h-none"
+                    />
                   }
                 >
                   <div class="flex items-center justify-center">
@@ -4967,42 +5397,6 @@ export default function RemoteCodePage() {
           </div>
         )}
       </Show>
-
-      {/* Modal: Slash command reference */}
-      <Modal
-        open={helpOpen()}
-        onClose={() => setHelpOpen(false)}
-        title="Slash Commands"
-        width="max-w-lg"
-        fullOnMobile
-      >
-        <div class="space-y-1.5 max-h-[60vh] overflow-y-auto pr-0.5">
-          <For each={SLASH_COMMANDS}>
-            {(sc) => (
-              <div class="p-3 rounded-xl border border-line/70 bg-ink-900/50 flex items-center justify-between gap-3">
-                <div class="min-w-0">
-                  <div class="font-mono font-bold text-[13px] text-ink-100 flex items-center gap-2">
-                    <span>{sc.cmd}</span>
-                    <Show when={sc.args}>
-                      <span class="text-ink-500 font-normal text-[11px]">{sc.args}</span>
-                    </Show>
-                  </div>
-                  <div class="text-[11px] text-ink-500 mt-0.5">{sc.desc}</div>
-                </div>
-                <button
-                  onClick={() => {
-                    setHelpOpen(false);
-                    executeSlashCommand(sc.cmd + (sc.args ? " " : ""));
-                  }}
-                  class="px-3 py-1.5 rounded-lg bg-ink-800 hover:bg-ink-100 hover:text-ink-950 text-ink-300 text-xs font-medium transition-colors shrink-0 cursor-pointer"
-                >
-                  Run
-                </button>
-              </div>
-            )}
-          </For>
-        </div>
-      </Modal>
 
       {/* Modal: Pair Daemon Host */}
       <Modal
@@ -5171,8 +5565,8 @@ export default function RemoteCodePage() {
                     <label class="block font-semibold text-ink-200 mb-1">
                       Reasoning Effort
                     </label>
-                    <div class="grid grid-cols-4 gap-1 bg-ink-900 p-1 rounded-xl border border-line">
-                      <For each={["off", "low", "medium", "high"]}>
+                    <div class="grid grid-cols-7 gap-1 bg-ink-900 p-1 rounded-xl border border-line">
+                      <For each={REASONING_LEVELS}>
                         {(lvl) => (
                           <button
                             onClick={() =>
@@ -5181,8 +5575,8 @@ export default function RemoteCodePage() {
                                 reasoning: lvl,
                               })
                             }
-                            class={`py-1 rounded-lg text-center font-medium capitalize transition-colors ${
-                              daemonSettings().reasoning === lvl
+                            class={`py-1 rounded-lg text-center font-medium lowercase transition-colors ${
+                              normalizeEffort(daemonSettings().reasoning || "none") === lvl
                                 ? "bg-brand-500 text-white"
                                 : "text-ink-400 hover:text-ink-200"
                             }`}
@@ -5520,40 +5914,6 @@ export default function RemoteCodePage() {
                     )}
                   </For>
                 </div>
-              </div>
-            </div>
-
-            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
-              <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
-                <Iconify icon="lucide:slash" size={15} class="text-ink-500" />
-                <span>Slash Commands</span>
-
-              </h3>
-              <div class="space-y-2 text-xs">
-                <For each={SLASH_COMMANDS}>
-                  {(sc) => (
-                    <div class="p-2.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between">
-                      <div>
-                        <div class="font-mono font-bold text-brand-400 flex items-center gap-2">
-                          <span>{sc.cmd}</span>
-                          <span class="text-ink-500 font-normal">{sc.args}</span>
-                        </div>
-                        <div class="text-[11px] text-ink-400 mt-0.5">
-                          {sc.desc}
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => {
-                          setShowConfigModal(false);
-                          executeSlashCommand(sc.cmd);
-                        }}
-                        class="px-2.5 py-1 rounded-lg bg-ink-800 hover:bg-brand-500 hover:text-white text-ink-300 font-medium transition-colors"
-                      >
-                        Run
-                      </button>
-                    </div>
-                  )}
-                </For>
               </div>
             </div>
 

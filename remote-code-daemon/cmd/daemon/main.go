@@ -922,7 +922,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 			"- `/skills` — List available agent tools and custom skills\n" +
 			"- `/mcp` — List configured Model Context Protocol servers\n" +
 			"- `/help` — Show this command reference\n\n" +
-			"*You can also configure all Zot settings directly in the Settings pane.*"
+			"*You can also configure all agent settings directly in the Settings pane.*"
 
 	default:
 		reply = fmt.Sprintf("❓ Unknown command `%s`. Type `/help` for available commands.", head)

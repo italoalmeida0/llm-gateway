@@ -118,11 +118,24 @@ export async function handleRemoteRestRoute(
   // GET /api/remote/hosts
   if (path === "/api/remote/hosts" && req.method === "GET") {
     const { user } = await requireAuth(req);
-    const hosts = db
+    const rows = db
       .prepare<RemoteHostRow, [string]>(
         "SELECT id, user_id, name, hostname, os, arch, api_key_id, status, last_seen_at, created_at FROM remote_hosts WHERE user_id = ? ORDER BY created_at DESC",
       )
       .all(user.id);
+
+    const hosts = rows.map((r) => ({
+      id: r.id,
+      userId: r.user_id,
+      name: r.name,
+      hostname: r.hostname,
+      os: r.os,
+      arch: r.arch,
+      apiKeyId: r.api_key_id,
+      status: r.status,
+      lastSeenAt: r.last_seen_at,
+      createdAt: r.created_at,
+    }));
 
     return json({ success: true, hosts }, { req });
   }

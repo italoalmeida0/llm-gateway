@@ -8,5 +8,6 @@ data/
 tmp/
 .codegraph
 remote-code-daemon/bin/
+remote-code-daemon/code-daemon
 remote-code-ref/
 .cache/iconify/

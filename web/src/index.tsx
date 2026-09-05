@@ -71,7 +71,7 @@ interface NavItem {
 
 const USER_NAV: NavItem[] = [
   { path: "/", label: "Overview", icon: Icons.home },
-  { path: "/code", label: "Remote Code", icon: Icons.terminal },
+  { path: "/code", label: "Code Remote", icon: Icons.terminal },
   { path: "/keys", label: "API Keys", icon: Icons.key },
   { path: "/usage", label: "Usage", icon: Icons.chart },
   { path: "/settings", label: "Settings", icon: Icons.cog },

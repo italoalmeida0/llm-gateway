@@ -60,8 +60,8 @@ export async function handleRemoteUpgrade(
     return new Response("upgrade failed", { status: 400 });
   }
 
-  // Client Web WebSocket: /api/remote/client/ws?token=<jwtToken>
-  if (path === "/api/remote/client/ws") {
+  // Client Web WebSocket: /api/remote/client/ws?token=<jwtToken> or /api/remote/ws?token=<jwtToken>
+  if (path === "/api/remote/client/ws" || path === "/api/remote/ws") {
     let token = url.searchParams.get("token") || "";
     if (!token) {
       const authHeader = req.headers.get("authorization") || "";

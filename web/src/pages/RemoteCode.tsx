@@ -73,7 +73,7 @@ export interface PendingApproval {
   args: string;
 }
 
-export interface ZotSettings {
+export interface AgentSettings {
   model: string;
   reasoning: string;
   temperature: number;
@@ -181,12 +181,12 @@ export default function RemoteCodePage() {
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
   const [pendingApproval, setPendingApproval] = createSignal<PendingApproval | null>(null);
 
-  // Zot Configuration & MCP Center
+  // Agent Configuration & MCP Center
   const [showConfigModal, setShowConfigModal] = createSignal(false);
   const [configTab, setConfigTab] = createSignal<
     "settings" | "mcp" | "skills" | "slash"
   >("settings");
-  const [daemonSettings, setDaemonSettings] = createSignal<ZotSettings>({
+  const [daemonSettings, setDaemonSettings] = createSignal<AgentSettings>({
     model: "gpt-4o",
     reasoning: "off",
     temperature: 0.7,
@@ -212,6 +212,7 @@ export default function RemoteCodePage() {
 
   const activeHost = createMemo(() => {
     const list = hosts();
+    if (!Array.isArray(list) || list.length === 0) return null;
     return list.find((h) => h.id === activeHostId()) ?? list[0] ?? null;
   });
 
@@ -241,9 +242,10 @@ export default function RemoteCodePage() {
   async function loadGatewayModels() {
     try {
       const res = await api<{ models: Array<{ id: string; name: string }> }>(
+        "GET",
         "/api/me/models",
       );
-      if (res && res.models && res.models.length > 0) {
+      if (res && Array.isArray(res.models) && res.models.length > 0) {
         setGatewayModels(res.models);
         if (!res.models.some((m) => m.id === activeModel())) {
           setActiveModel(res.models[0].id);
@@ -266,14 +268,23 @@ export default function RemoteCodePage() {
   // --- Fetch Hosts ---
   async function loadHosts() {
     try {
-      const list = await api<RemoteHostDto[]>("/api/remote/hosts");
-      setHosts(list || []);
-      if (list && list.length > 0 && !activeHostId()) {
-        const online = list.find((h) => h.status === "online");
-        setActiveHostId(online ? online.id : list[0].id);
+      const res = await api<{ success: boolean; hosts: RemoteHostDto[] }>(
+        "GET",
+        "/api/remote/hosts",
+      );
+      const list = Array.isArray(res?.hosts) ? res.hosts : [];
+      setHosts(list);
+      if (list.length > 0) {
+        if (!activeHostId() || !list.some((h) => h.id === activeHostId())) {
+          const online = list.find((h) => h.status === "online");
+          setActiveHostId(online ? online.id : list[0].id);
+        }
+      } else {
+        setActiveHostId("");
       }
     } catch (e: any) {
-      toast("Failed to load remote hosts: " + e.message, "err");
+      console.warn("Failed to load remote hosts:", e);
+      toast("Failed to load remote hosts: " + (e?.message || e), "err");
     }
   }
 
@@ -324,6 +335,9 @@ export default function RemoteCodePage() {
 
   function sendWS(payload: any) {
     if (ws && ws.readyState === WebSocket.OPEN) {
+      if (!payload.hostId && activeHostId()) {
+        payload.hostId = activeHostId();
+      }
       ws.send(JSON.stringify(payload));
     }
   }
@@ -709,13 +723,11 @@ export default function RemoteCodePage() {
   async function generatePairingToken() {
     setPairingLoading(true);
     try {
-      const res = await api<RemotePairDto>("/api/remote/pair", {
-        method: "POST",
-      });
+      const res = await api<RemotePairDto>("POST", "/api/remote/pair");
       setPairingData(res);
       setShowPairModal(true);
     } catch (err: any) {
-      toast("Pairing request failed: " + err.message, "err");
+      toast("Pairing request failed: " + (err?.message || err), "err");
     } finally {
       setPairingLoading(false);
     }
@@ -817,8 +829,8 @@ export default function RemoteCodePage() {
   onMount(async () => {
     await loadGatewayModels();
     await loadHosts();
-    if (activeHostId()) {
-      connectWebSocket(activeHostId());
+    if (hosts().length === 0) {
+      generatePairingToken();
     }
   });
 
@@ -826,6 +838,16 @@ export default function RemoteCodePage() {
     const hid = activeHostId();
     if (hid) {
       connectWebSocket(hid);
+    }
+  });
+
+  // Auto-poll hosts while waiting for initial daemon pairing
+  createEffect(() => {
+    if (hosts().length === 0) {
+      const interval = setInterval(() => {
+        loadHosts();
+      }, 3000);
+      onCleanup(() => clearInterval(interval));
     }
   });
 
@@ -869,11 +891,11 @@ export default function RemoteCodePage() {
 
           <div class="flex items-center gap-2">
             <div class="w-7 h-7 rounded-lg bg-brand-500/20 text-brand-400 border border-brand-500/30 flex items-center justify-center font-bold text-xs">
-              <Iconify icon="lucide:bot" size={16} />
+              <Iconify icon="lucide:terminal" size={16} />
             </div>
             <div class="flex items-baseline gap-1.5">
               <span class="text-sm font-semibold tracking-tight text-ink-100">
-                Zot Remote
+                Code Remote
               </span>
               <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20 uppercase tracking-widest font-semibold">
                 Autonomous Agent
@@ -889,10 +911,10 @@ export default function RemoteCodePage() {
             fallback={
               <button
                 onClick={generatePairingToken}
-                class="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-brand-500 text-white font-medium hover:bg-brand-600 transition-colors shadow-sm"
+                class="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-brand-500 text-white font-medium hover:bg-brand-600 transition-colors shadow-sm cursor-pointer"
               >
                 <Iconify icon="lucide:plus" size={14} />
-                <span>Pair Daemon Host</span>
+                <span>Connect Host</span>
               </button>
             }
           >
@@ -901,7 +923,7 @@ export default function RemoteCodePage() {
                 class={`w-2 h-2 rounded-full ${
                   activeHost()?.status === "online"
                     ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.7)] animate-pulse"
-                    : "bg-ink-600"
+                    : "bg-amber-500"
                 }`}
               />
               <span class="text-ink-400 text-[11px]">Host:</span>
@@ -913,16 +935,15 @@ export default function RemoteCodePage() {
                 <For each={hosts()}>
                   {(h) => (
                     <option value={h.id} class="bg-ink-900 text-ink-100">
-                      {h.name || h.hostname || h.id} (
-                      {h.os ? `${h.os}/${h.arch}` : "online"})
+                      {h.name || h.hostname || h.id} ({h.status || (h.os ? `${h.os}/${h.arch}` : "offline")})
                     </option>
                   )}
                 </For>
               </select>
               <button
                 onClick={generatePairingToken}
-                class="text-ink-400 hover:text-ink-200 p-0.5"
-                title="Pair another host"
+                class="text-ink-400 hover:text-ink-200 p-0.5 cursor-pointer"
+                title="Connect another host"
               >
                 <Iconify icon="lucide:plus" size={13} />
               </button>
@@ -997,11 +1018,11 @@ export default function RemoteCodePage() {
             <span>{yoloMode() ? "YOLO Mode" : "Safe Mode"}</span>
           </button>
 
-          {/* Zot Settings & MCP Center Button */}
+          {/* Agent Settings & MCP Center Button */}
           <button
             onClick={() => setShowConfigModal(true)}
-            class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-ink-900 hover:bg-ink-800 border border-line text-xs font-medium text-ink-300 hover:text-ink-100 transition-colors"
-            title="Zot Agent Configuration, MCP Servers & Skills"
+            class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-ink-900 hover:bg-ink-800 border border-line text-xs font-medium text-ink-300 hover:text-ink-100 transition-colors cursor-pointer"
+            title="Agent Configuration, MCP Servers & Skills"
           >
             <Iconify icon="lucide:settings-2" size={14} />
             <span>Settings & MCP</span>
@@ -1015,9 +1036,142 @@ export default function RemoteCodePage() {
       </header>
 
       {/* ========================================================================= */}
-      {/* Main Workspace Layout: Sidebar (Sessions) + Conversation Stream            */}
+      {/* Main Workspace Layout or Connect Host Onboarding                           */}
       {/* ========================================================================= */}
-      <div class="flex-1 flex min-h-0 overflow-hidden relative">
+      <Show
+        when={hosts().length > 0}
+        fallback={
+          <div class="flex-1 flex flex-col items-center justify-center p-6 bg-ink-950 text-center overflow-y-auto">
+            <div class="max-w-xl w-full mx-auto space-y-6 my-auto py-8">
+              {/* Hero Icon */}
+              <div class="w-16 h-16 rounded-2xl bg-brand-500/10 border border-brand-500/20 text-brand-400 flex items-center justify-center mx-auto shadow-lg shadow-brand-500/10">
+                <Iconify icon="lucide:terminal" size={32} />
+              </div>
+
+              {/* Title & Subtitle */}
+              <div>
+                <div class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-medium mb-3">
+                  <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  <span>No Remote Daemon Connected</span>
+                </div>
+                <h1 class="text-2xl sm:text-3xl font-bold tracking-tight text-ink-100">
+                  Connect Code Remote
+                </h1>
+                <p class="text-sm text-ink-400 mt-2 max-w-md mx-auto leading-relaxed">
+                  Run autonomous coding agents directly on your machine. Sessions, files, and commands remain 100% local on your device while you control them from this interface.
+                </p>
+              </div>
+
+              {/* Action: Connect / Pair */}
+              <Show
+                when={pairingData()}
+                fallback={
+                  <div class="pt-2">
+                    <button
+                      onClick={generatePairingToken}
+                      disabled={pairingLoading()}
+                      class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-sm transition-all shadow-lg shadow-brand-500/20 hover:shadow-brand-500/30 cursor-pointer disabled:opacity-50"
+                    >
+                      <Show
+                        when={!pairingLoading()}
+                        fallback={<Iconify icon="lucide:refresh-cw" size={18} class="animate-spin" />}
+                      >
+                        <Iconify icon="lucide:plus" size={18} />
+                      </Show>
+                      <span>Connect Remote Machine</span>
+                    </button>
+                  </div>
+                }
+              >
+                {/* Pairing Card */}
+                <div class="p-6 rounded-2xl bg-ink-900 border border-line text-left space-y-5 shadow-2xl">
+                  <div class="flex items-center justify-between pb-3 border-b border-line">
+                    <div class="flex items-center gap-2">
+                      <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                      <span class="text-xs font-semibold uppercase tracking-wider text-ink-200">
+                        Pairing Credentials Ready
+                      </span>
+                    </div>
+                    <span class="text-[11px] font-mono text-ink-400">
+                      Valid for ~15m
+                    </span>
+                  </div>
+
+                  {/* Step 1: Run Command */}
+                  <div class="space-y-2">
+                    <div class="flex items-center justify-between text-xs font-medium text-ink-200">
+                      <span>1. Run the daemon on your machine:</span>
+                      <button
+                        onClick={() =>
+                          copyWithToast(
+                            `./code-daemon -connect "${pairingData()?.connectUrl}"`,
+                          )
+                        }
+                        class="text-brand-400 hover:text-brand-300 flex items-center gap-1 text-[11px] cursor-pointer"
+                      >
+                        <Iconify icon="lucide:copy" size={12} />
+                        <span>Copy Command</span>
+                      </button>
+                    </div>
+                    <div class="p-3 rounded-xl bg-ink-950 border border-line font-mono text-xs text-brand-300 break-all select-all">
+                      ./code-daemon -connect "{pairingData()?.connectUrl}"
+                    </div>
+                  </div>
+
+                  {/* Step 2: Connection URL */}
+                  <div class="space-y-2">
+                    <div class="flex items-center justify-between text-xs font-medium text-ink-200">
+                      <span>Or paste this Connection URL into the daemon:</span>
+                      <button
+                        onClick={() =>
+                          copyWithToast(pairingData()?.connectUrl || "")
+                        }
+                        class="text-brand-400 hover:text-brand-300 flex items-center gap-1 text-[11px] cursor-pointer"
+                      >
+                        <Iconify icon="lucide:copy" size={12} />
+                        <span>Copy URL</span>
+                      </button>
+                    </div>
+                    <div class="p-2.5 rounded-xl bg-ink-950 border border-line font-mono text-[11px] text-ink-300 break-all select-all">
+                      {pairingData()?.connectUrl}
+                    </div>
+                  </div>
+
+                  {/* Live Status */}
+                  <div class="p-4 rounded-xl bg-brand-500/5 border border-brand-500/20 flex items-center gap-3">
+                    <div class="w-8 h-8 rounded-lg bg-brand-500/10 flex items-center justify-center text-brand-400 shrink-0">
+                      <Iconify icon="lucide:refresh-cw" size={16} class="animate-spin" />
+                    </div>
+                    <div class="text-xs">
+                      <p class="font-medium text-ink-200">Waiting for daemon connection...</p>
+                      <p class="text-ink-400 text-[11px] mt-0.5">
+                        Run the command above in your terminal. This screen will connect automatically.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div class="flex items-center justify-end gap-2.5 pt-2 text-xs">
+                    <button
+                      onClick={loadHosts}
+                      class="px-3.5 py-1.5 rounded-lg border border-line text-ink-300 hover:text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer"
+                    >
+                      Check Connection
+                    </button>
+                    <button
+                      onClick={generatePairingToken}
+                      class="px-3.5 py-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 transition-colors cursor-pointer"
+                    >
+                      Regenerate Token
+                    </button>
+                  </div>
+                </div>
+              </Show>
+            </div>
+          </div>
+        }
+      >
+        <div class="flex-1 flex min-h-0 overflow-hidden relative">
         {/* --- Left Sidebar: Sessions --- */}
         <aside
           class={`border-r border-line bg-ink-950 flex flex-col shrink-0 transition-all duration-200 ${
@@ -1158,11 +1312,37 @@ export default function RemoteCodePage() {
 
         {/* --- Main Chat Stream Container --- */}
         <main class="flex-1 flex flex-col min-w-0 bg-ink-950 relative">
+          {/* Offline Banner when selected host is offline */}
+          <Show when={activeHost() && activeHost()?.status !== "online"}>
+            <div class="bg-amber-500/10 border-b border-amber-500/25 px-4 py-2.5 flex items-center justify-between text-xs text-amber-300 z-10">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                <span>
+                  Host <strong>{activeHost()?.name || activeHost()?.hostname || activeHost()?.id}</strong> is offline. Start the daemon on your machine: <code class="bg-amber-500/20 px-1 py-0.5 rounded font-mono">./code-daemon</code>
+                </span>
+              </div>
+              <div class="flex items-center gap-2">
+                <button
+                  onClick={loadHosts}
+                  class="text-[11px] underline hover:text-amber-100 cursor-pointer"
+                >
+                  Refresh
+                </button>
+                <button
+                  onClick={generatePairingToken}
+                  class="text-[11px] px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-200 cursor-pointer"
+                >
+                  Connect Another Host
+                </button>
+              </div>
+            </div>
+          </Show>
+
           {/* Collapsible Sidebar Toggle Ribbon */}
           <div class="absolute top-2 left-2 z-20">
             <button
               onClick={() => setSidebarOpen(!sidebarOpen())}
-              class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line text-ink-400 hover:text-ink-200 transition-colors shadow-sm"
+              class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line text-ink-400 hover:text-ink-200 transition-colors shadow-sm cursor-pointer"
               title={sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"}
             >
               <Iconify
@@ -1185,10 +1365,10 @@ export default function RemoteCodePage() {
             <Show when={messages().length === 0}>
               <div class="max-w-2xl mx-auto my-12 text-center">
                 <div class="w-14 h-14 rounded-2xl bg-brand-500/10 border border-brand-500/20 text-brand-400 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-brand-500/5">
-                  <Iconify icon="lucide:bot" size={32} />
+                  <Iconify icon="lucide:terminal" size={32} />
                 </div>
                 <h2 class="text-xl font-bold tracking-tight text-ink-100">
-                  Ready to code with Zot Agent
+                  Ready to code with Code Remote
                 </h2>
                 <p class="text-sm text-ink-400 mt-1 max-w-md mx-auto">
                   Autonomous agent connected directly to your machine. Type a prompt
@@ -1303,7 +1483,7 @@ export default function RemoteCodePage() {
                         />
                       </span>
                       <span class="text-xs font-medium text-ink-300">
-                        {msg.role === "user" ? "You" : "Zot Agent"}
+                        {msg.role === "user" ? "You" : "Agent"}
                       </span>
                     </div>
 
@@ -1590,6 +1770,7 @@ export default function RemoteCodePage() {
           </div>
         </main>
       </div>
+      </Show>
 
       {/* ========================================================================= */}
       {/* Modal: New Session                                                        */}
@@ -1663,25 +1844,42 @@ export default function RemoteCodePage() {
 
             <Show when={pairingData()}>
               {(p) => {
-                const cmd = `llmgw-daemon pair --url ${location.origin} --token ${p().token}`;
+                const cmd = `./code-daemon -connect "${p().connectUrl}"`;
                 return (
                   <div class="space-y-3">
-                    <div class="p-3 bg-ink-950 rounded-xl border border-line font-mono text-[11px] text-ink-200 flex items-center justify-between gap-2">
-                      <span class="truncate">{cmd}</span>
-                      <button
-                        onClick={() => copyWithToast(cmd)}
-                        class="p-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 shrink-0"
-                        title="Copy command"
-                      >
-                        <Iconify icon="lucide:copy" size={14} />
-                      </button>
+                    <div class="space-y-1">
+                      <div class="text-[11px] text-ink-300 font-medium">1. Run daemon with connection flag:</div>
+                      <div class="p-3 bg-ink-950 rounded-xl border border-line font-mono text-[11px] text-brand-300 flex items-center justify-between gap-2">
+                        <span class="truncate">{cmd}</span>
+                        <button
+                          onClick={() => copyWithToast(cmd)}
+                          class="p-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 shrink-0 cursor-pointer"
+                          title="Copy command"
+                        >
+                          <Iconify icon="lucide:copy" size={14} />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div class="space-y-1">
+                      <div class="text-[11px] text-ink-300 font-medium">Or paste Connection URL when prompted:</div>
+                      <div class="p-2.5 bg-ink-950 rounded-xl border border-line font-mono text-[11px] text-ink-200 flex items-center justify-between gap-2">
+                        <span class="truncate">{p().connectUrl}</span>
+                        <button
+                          onClick={() => copyWithToast(p().connectUrl)}
+                          class="p-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 shrink-0 cursor-pointer"
+                          title="Copy URL"
+                        >
+                          <Iconify icon="lucide:copy" size={14} />
+                        </button>
+                      </div>
                     </div>
 
                     <div class="p-3 rounded-xl bg-ink-900 border border-line/60 text-ink-400 space-y-1 text-[11px]">
                       <div class="font-semibold text-ink-200">Quick steps:</div>
-                      <div>1. Install daemon binary or build with Go.</div>
-                      <div>2. Run the pairing command above.</div>
-                      <div>3. The host will connect instantly via WebSocket.</div>
+                      <div>1. Run the command or paste the URL into your daemon.</div>
+                      <div>2. The daemon pairs with your account and obtains host credentials.</div>
+                      <div>3. The host connects via WebSocket and appears online immediately.</div>
                     </div>
                   </div>
                 );
@@ -1691,7 +1889,7 @@ export default function RemoteCodePage() {
             <div class="flex justify-end pt-2">
               <button
                 onClick={() => setShowPairModal(false)}
-                class="px-4 py-2 rounded-xl bg-brand-500 text-white text-xs font-semibold"
+                class="px-4 py-2 rounded-xl bg-brand-500 text-white text-xs font-semibold cursor-pointer"
               >
                 Done
               </button>
@@ -1701,11 +1899,11 @@ export default function RemoteCodePage() {
       </Show>
 
       {/* ========================================================================= */}
-      {/* Modal: Zot Configuration, MCP & Skills Center                              */}
+      {/* Modal: Code Remote Configuration, MCP & Skills Center                       */}
       {/* ========================================================================= */}
       <Show when={showConfigModal()}>
         <Modal
-          title="Zot Agent & Daemon Configuration Center"
+          title="Code Remote Configuration Center"
           onClose={() => setShowConfigModal(false)}
         >
           <div class="w-full max-w-2xl space-y-4">
@@ -1713,17 +1911,17 @@ export default function RemoteCodePage() {
             <div class="flex border-b border-line gap-1">
               <button
                 onClick={() => setConfigTab("settings")}
-                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors ${
+                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
                   configTab() === "settings"
                     ? "border-brand-500 text-brand-400"
                     : "border-transparent text-ink-400 hover:text-ink-200"
                 }`}
               >
-                Zot Settings
+                Agent Settings
               </button>
               <button
                 onClick={() => setConfigTab("mcp")}
-                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 ${
+                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer ${
                   configTab() === "mcp"
                     ? "border-brand-500 text-brand-400"
                     : "border-transparent text-ink-400 hover:text-ink-200"
@@ -1736,7 +1934,7 @@ export default function RemoteCodePage() {
               </button>
               <button
                 onClick={() => setConfigTab("skills")}
-                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 ${
+                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer ${
                   configTab() === "skills"
                     ? "border-brand-500 text-brand-400"
                     : "border-transparent text-ink-400 hover:text-ink-200"
@@ -1749,7 +1947,7 @@ export default function RemoteCodePage() {
               </button>
               <button
                 onClick={() => setConfigTab("slash")}
-                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors ${
+                class={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
                   configTab() === "slash"
                     ? "border-brand-500 text-brand-400"
                     : "border-transparent text-ink-400 hover:text-ink-200"
@@ -1759,7 +1957,7 @@ export default function RemoteCodePage() {
               </button>
             </div>
 
-            {/* TAB 1: ZOT SETTINGS */}
+            {/* TAB 1: AGENT SETTINGS */}
             <Show when={configTab() === "settings"}>
               <div class="space-y-4 text-xs">
                 <div>

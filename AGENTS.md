@@ -226,6 +226,16 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - `bun run seed` — mock usage data for the dev DB (`-- --days N`, `-- --keep`),
   seeds every existing key (replaces usage rows by default)
 
+## Deploy (jupyter-vps)
+
+- `~/deploy-llm-gateway.sh` (lives on the VPS, not in this repo — paths are
+  host-specific) + cron every 5min polls `main` via `git ls-remote`; on a new
+  SHA it runs `docker compose build --no-cache` + `up -d` for both gateway
+  services, waits for the image HEALTHCHECK, then records the SHA. Silent
+  no-op when already deployed; a failed build never touches the running
+  containers. `--no-cache` is required — the Dockerfile clones from GitHub
+  and a cached clone layer would freeze the source at the previous build.
+
 ## Gotchas learned (don't re-learn)
 
 - **Bun.serve `idleTimeout` applies to in-flight responses**: a paused SSE

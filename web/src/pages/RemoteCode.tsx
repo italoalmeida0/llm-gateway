@@ -1043,13 +1043,20 @@ export default function RemoteCodePage() {
   // Normalizes the raw daemon transcript for display. The daemon persists
   // tool results as separate "tool" (or Anthropic-style "user") messages;
   // rendered as-is they show up as disconnected rows or stray user bubbles.
-  // Here each tool_result is hoisted onto the preceding assistant message
-  // (its tool_call carrier) and hollow user/tool envelopes are dropped, so
-  // calls and outputs always render as one linked unit — the same shape the
-  // live streaming path builds incrementally.
+  //
+  // Display-only — the persisted provider payloads are never reordered:
+  // - Thinking position: assembleMsg persists ReasoningBlock LAST although
+  //   it streamed FIRST, so after every refresh the thinking would drop
+  //   below the balloon — reasoning is moved to the top of its message.
+  // - mirrorToolImagesAsUser (openai routing): a synthetic role:user message
+  //   carrying tool-run images plus the marker
+  //   "Tool output included the following image content:" — it would render
+  //   as the user's own balloon, so it is folded into the assistant carrier
+  //   as caption + image blocks instead.
   function applySessionContent(sessionId: string, rawMsgs: any[]) {
     const out: ChatMessage[] = [];
     let carrier: ChatMessage | null = null;
+    const TOOLS_IMAGE_MARKER = "Tool output included the following image content:";
     const ensureCarrier = (srcIdx: number): ChatMessage => {
       if (!carrier || carrier.role !== "assistant") {
         carrier = {
@@ -1071,10 +1078,13 @@ export default function RemoteCodePage() {
         firstText.startsWith("## Context Summary (compacted)");
       const role = m.role === "assistant" ? "assistant" : m.role === "tool" ? "tool" : "user";
       if (role === "assistant") {
+        const reason: ContentBlock[] = [];
+        const rest: ContentBlock[] = [];
+        for (const b of blocks) (b.type === "reasoning" ? reason : rest).push(b);
         const msg: ChatMessage = {
           id: `msg_${idx}`,
           role,
-          blocks,
+          blocks: [...reason, ...rest],
           time: Date.now(),
           system,
           srcIdx: idx,
@@ -1088,6 +1098,17 @@ export default function RemoteCodePage() {
       for (const b of blocks) {
         if (b.type === "tool_result") ensureCarrier(idx).blocks.push(b);
         else rest.push(b);
+      }
+      // Daemon's image mirror: caption + tool-run images, never a user bubble.
+      if (
+        rest.length > 0 &&
+        rest[0].type === "text" &&
+        (rest[0].text || "").trim().startsWith(TOOLS_IMAGE_MARKER)
+      ) {
+        const c = ensureCarrier(idx);
+        c.blocks.push({ type: "text", text: `_${TOOLS_IMAGE_MARKER}_` });
+        c.blocks.push(...rest.slice(1));
+        return;
       }
       if (role === "tool" || rest.length === 0) {
         // "tool" envelopes never become bubbles; a user envelope holding
@@ -1400,16 +1421,20 @@ export default function RemoteCodePage() {
       const last = prev[prev.length - 1];
       if (last && last.role === "assistant") {
         const blocks = [...last.blocks];
-        const lastBlock = blocks[blocks.length - 1];
-        if (lastBlock && lastBlock.type === "reasoning") {
-          blocks[blocks.length - 1] = {
-            ...lastBlock,
-            reasoning: (lastBlock.reasoning || "") + delta,
+        // Merge into the existing thinking panel; a fresh one goes in front
+        // so the live view already matches the normalized refresh (top).
+        const ri = blocks.findIndex((b) => b.type === "reasoning");
+        if (ri >= 0) {
+          blocks[ri] = {
+            ...blocks[ri],
+            reasoning: (blocks[ri].reasoning || "") + delta,
           };
-        } else {
-          blocks.push({ type: "reasoning", reasoning: delta });
+          return [...prev.slice(0, -1), { ...last, blocks }];
         }
-        return [...prev.slice(0, -1), { ...last, blocks }];
+        return [
+          ...prev.slice(0, -1),
+          { ...last, blocks: [{ type: "reasoning", reasoning: delta }, ...blocks] },
+        ];
       }
       return [
         ...prev,

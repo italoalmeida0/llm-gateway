@@ -231,6 +231,11 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 
 ## Commands
 
+- After implementation changes, always leave fresh local builds available for
+  the user to test: `bun run build` produces `dist/`, and from
+  `remote-code-daemon/`, `go build -o bin/llmgw-daemon ./cmd/daemon` produces
+  the daemon. Keep these generated artifacts locally (gitignored). The gateway
+  backend runs directly with `bun start`; it does not require a separate build.
 - `bun run dev` / `bun run dev:web` — backend :3000 / frontend dev :5700 (proxies /api,/v1)
 - `bun run build` — build SPA into `dist/`
 - `bun run lint` — ESLint 10 flat config (`eslint.config.js`: TS + eslint-plugin-solid); keep it at zero

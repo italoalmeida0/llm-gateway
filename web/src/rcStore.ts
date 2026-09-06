@@ -44,6 +44,7 @@ export interface RcProject {
 
 /** Daemon configuration mirror (single doc per host). */
 export interface RcConfig {
+  lastSelection?: { model: string; effort: string };
   id: string;
   hostId: string;
   settings?: Record<string, any>;
@@ -142,6 +143,7 @@ export function createDataLayer(opts: {
     return {
       id: c.id || "daemon",
       hostId,
+      lastSelection: c.lastSelection ?? c.last_selection,
       settings: c.settings && typeof c.settings === "object" ? c.settings : {},
       mcpServers: c.mcpServers ?? c.mcp_servers ?? {},
       skills: c.skills ?? {},

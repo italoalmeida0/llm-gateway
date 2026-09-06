@@ -67,14 +67,15 @@ type ZotSettings struct {
 
 // DaemonConfig holds credentials and gateway connection details.
 type DaemonConfig struct {
-	GatewayURL  string                     `json:"gateway_url"`
-	DaemonToken string                     `json:"daemon_token"`
-	APIKey      string                     `json:"api_key"`
-	HostID      string                     `json:"host_id"`
-	Name        string                     `json:"name"`
-	Settings    ZotSettings                `json:"settings"`
-	MCPServers  map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
-	Skills      map[string]SkillConfig     `json:"skills,omitempty"`
+	LastSelection *ModelSelection            `json:"last_selection,omitempty"`
+	GatewayURL    string                     `json:"gateway_url"`
+	DaemonToken   string                     `json:"daemon_token"`
+	APIKey        string                     `json:"api_key"`
+	HostID        string                     `json:"host_id"`
+	Name          string                     `json:"name"`
+	Settings      ZotSettings                `json:"settings"`
+	MCPServers    map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+	Skills        map[string]SkillConfig     `json:"skills,omitempty"`
 }
 
 // AttachmentRef is a file the user attached to a session. The bytes live on
@@ -105,6 +106,7 @@ type ProjectEntry struct {
 
 // SessionRecord is the on-disk format for each local session.
 type SessionRecord struct {
+	Options     SessionOptions     `json:"options"`
 	ID          string             `json:"id"`
 	CWD         string             `json:"cwd"`
 	Title       string             `json:"title"`
@@ -148,7 +150,7 @@ func sessionListItem(s SessionSummary) map[string]any {
 func sessionPayload(rec *SessionRecord) map[string]any {
 	return map[string]any{
 		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
-		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context,
+		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
 		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": rec.Messages,
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
 	}
@@ -292,6 +294,7 @@ type ActiveSession struct {
 
 // DaemonServer coordinates WebSocket connection, relay commands, and local sessions.
 type DaemonServer struct {
+	filesMu    sync.Mutex
 	configPath string
 	dataDir    string
 	config     *DaemonConfig
@@ -526,6 +529,7 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		return nil, err
 	}
 	var rawRec struct {
+		Options        SessionOptions    `json:"options"`
 		ID             string            `json:"id"`
 		CWD            string            `json:"cwd"`
 		Title          string            `json:"title"`
@@ -554,6 +558,7 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		updatedAt = rawRec.UpdatedAtSnake
 	}
 	rec := &SessionRecord{
+		Options:     rawRec.Options,
 		ID:          rawRec.ID,
 		CWD:         rawRec.CWD,
 		Title:       rawRec.Title,
@@ -821,6 +826,24 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"sessions": items,
 		})
 
+	case "get_changes":
+		d.handleReview(raw, false)
+	case "undo_changes":
+		d.handleReview(raw, true)
+	case "configure_session":
+		d.configureSession(raw)
+	case "browse_folders":
+		var req struct {
+			Path      string `json:"path"`
+			RequestID string `json:"requestId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		path, parent, folders, err := browseFolders(req.Path)
+		response := map[string]any{"type": "folders", "hostId": d.config.HostID, "requestId": req.RequestID, "path": path, "parent": parent, "folders": folders}
+		if err != nil {
+			response["error"] = err.Error()
+		}
+		_ = d.sendWS(response)
 	case "get_session":
 		var req struct {
 			SessionID string `json:"sessionId"`
@@ -928,11 +951,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			reply(items, "")
 		case "config":
 			reply([]map[string]any{{
-				"id":         "daemon",
-				"settings":   d.config.Settings,
-				"mcpServers": d.config.MCPServers,
-				"skills":     d.config.Skills,
-				"name":       d.config.Name,
+				"id":            "daemon",
+				"settings":      d.config.Settings,
+				"lastSelection": d.config.LastSelection,
+				"mcpServers":    d.config.MCPServers,
+				"skills":        d.config.Skills,
+				"name":          d.config.Name,
 			}}, "")
 		default:
 			reply(nil, "unknown collection")
@@ -940,14 +964,15 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 	case "create_project":
 		var req struct {
-			Path string `json:"path"`
-			Name string `json:"name"`
+			RequestID string `json:"requestId"`
+			Path      string `json:"path"`
+			Name      string `json:"name"`
 		}
 		_ = json.Unmarshal(raw, &req)
 		rawPath := strings.TrimSpace(req.Path)
 		if rawPath == "" {
 			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
+				"type": "error", "requestId": req.RequestID, "hostId": d.config.HostID,
 				"message": "Project path cannot be empty",
 			})
 			return
@@ -957,7 +982,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		path := resolvePath(rawPath)
 		if path == "" {
 			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
+				"type": "error", "requestId": req.RequestID, "hostId": d.config.HostID,
 				"message": "Project path cannot be resolved",
 			})
 			return
@@ -989,8 +1014,8 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 					_ = d.saveProjects(list)
 				}
 				_ = d.sendWS(map[string]any{
-					"type":    "project_created",
-					"hostId":  d.config.HostID,
+					"type":      "project_created",
+					"requestId": req.RequestID, "hostId": d.config.HostID,
 					"project": projectPayload(p),
 				})
 				return
@@ -1006,14 +1031,14 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		list = append([]ProjectEntry{entry}, list...)
 		if err := d.saveProjects(list); err != nil {
 			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
+				"type": "error", "requestId": req.RequestID, "hostId": d.config.HostID,
 				"message": "Failed to save project: " + err.Error(),
 			})
 			return
 		}
 		_ = d.sendWS(map[string]any{
-			"type":    "project_created",
-			"hostId":  d.config.HostID,
+			"type":      "project_created",
+			"requestId": req.RequestID, "hostId": d.config.HostID,
 			"project": projectPayload(entry),
 		})
 
@@ -1459,9 +1484,11 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 	case "create_session":
 		var req struct {
-			CWD   string `json:"cwd"`
-			Title string `json:"title"`
-			Model string `json:"model"`
+			Options   SessionOptions `json:"options"`
+			RequestID string         `json:"requestId"`
+			CWD       string         `json:"cwd"`
+			Title     string         `json:"title"`
+			Model     string         `json:"model"`
 		}
 		_ = json.Unmarshal(raw, &req)
 
@@ -1473,7 +1500,15 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			home, _ := os.UserHomeDir()
 			cwd = filepath.Join(home, cwd[2:])
 		}
-		_ = os.MkdirAll(cwd, 0o755)
+		cwd, err := filepath.Abs(cwd)
+		if err == nil {
+			err = os.MkdirAll(cwd, 0o755)
+		}
+		info, statErr := os.Stat(cwd)
+		if err != nil || statErr != nil || !info.IsDir() {
+			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "requestId": req.RequestID, "message": "Select an existing project folder before starting a conversation"})
+			return
+		}
 
 		sessID := fmt.Sprintf("sess_%d", time.Now().UnixNano()/1000)
 		title := strings.TrimSpace(req.Title)
@@ -1482,8 +1517,15 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			title = "New conversation"
 		}
 
+		if req.Options.Effort == "" && d.config.LastSelection != nil {
+			req.Options.Effort = d.config.LastSelection.Effort
+		}
+		if req.Model == "" && d.config.LastSelection != nil {
+			req.Model = d.config.LastSelection.Model
+		}
 		now := time.Now().UnixMilli()
 		rec := &SessionRecord{
+			Options:     normalizedOptions(req.Options),
 			ID:          sessID,
 			CWD:         cwd,
 			Title:       title,
@@ -1499,17 +1541,18 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		if err := d.saveSession(rec); err != nil {
 			_ = d.sendWS(map[string]any{
-				"type":    "error",
-				"hostId":  d.config.HostID,
-				"message": "Failed to create session: " + err.Error(),
+				"type":      "error",
+				"hostId":    d.config.HostID,
+				"requestId": req.RequestID, "message": "Failed to create session: " + err.Error(),
 			})
 			return
 		}
 
 		_ = d.sendWS(map[string]any{
-			"type":    "session_created",
-			"hostId":  d.config.HostID,
-			"session": sessionPayload(rec),
+			"type":      "session_created",
+			"requestId": req.RequestID,
+			"hostId":    d.config.HostID,
+			"session":   sessionPayload(rec),
 		})
 
 	case "delete_session":
@@ -1731,26 +1774,27 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		_ = json.Unmarshal(raw, &req)
 		_ = d.sendWS(map[string]any{
-			"type":       "config_data",
-			"hostId":     d.config.HostID,
-			"requestId":  req.RequestID,
-			"settings":   d.config.Settings,
-			"mcpServers": d.config.MCPServers,
-			"skills":     d.config.Skills,
-			"name":       d.config.Name,
-			"gatewayUrl": d.config.GatewayURL,
+			"type":          "config_data",
+			"hostId":        d.config.HostID,
+			"requestId":     req.RequestID,
+			"settings":      d.config.Settings,
+			"lastSelection": d.config.LastSelection,
+			"mcpServers":    d.config.MCPServers,
+			"skills":        d.config.Skills,
+			"name":          d.config.Name,
+			"gatewayUrl":    d.config.GatewayURL,
 		})
 
 	case "update_config":
 		var req struct {
 			RequestID  string                     `json:"requestId"`
-			Settings   *ZotSettings               `json:"settings,omitempty"`
+			Settings   json.RawMessage            `json:"settings,omitempty"`
 			MCPServers map[string]MCPServerConfig `json:"mcpServers,omitempty"`
 			Skills     map[string]SkillConfig     `json:"skills,omitempty"`
 		}
 		_ = json.Unmarshal(raw, &req)
 		if req.Settings != nil {
-			d.config.Settings = *req.Settings
+			_ = json.Unmarshal(req.Settings, &d.config.Settings)
 		}
 		if req.MCPServers != nil {
 			d.config.MCPServers = req.MCPServers
@@ -1760,12 +1804,13 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		_ = d.saveConfig()
 		_ = d.sendWS(map[string]any{
-			"type":       "config_updated",
-			"hostId":     d.config.HostID,
-			"requestId":  req.RequestID,
-			"settings":   d.config.Settings,
-			"mcpServers": d.config.MCPServers,
-			"skills":     d.config.Skills,
+			"type":          "config_updated",
+			"hostId":        d.config.HostID,
+			"requestId":     req.RequestID,
+			"settings":      d.config.Settings,
+			"lastSelection": d.config.LastSelection,
+			"mcpServers":    d.config.MCPServers,
+			"skills":        d.config.Skills,
 		})
 
 	case "compact_session":
@@ -1825,11 +1870,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 	case "prompt":
 		var req struct {
-			SessionID     string   `json:"sessionId"`
-			Text          string   `json:"text"`
-			Model         string   `json:"model"`
-			YOLO          bool     `json:"yolo"`
-			AttachmentIDs []string `json:"attachmentIds"`
+			Options       *SessionOptions `json:"options"`
+			SessionID     string          `json:"sessionId"`
+			Text          string          `json:"text"`
+			Model         string          `json:"model"`
+			YOLO          bool            `json:"yolo"`
+			AttachmentIDs []string        `json:"attachmentIds"`
 		}
 		_ = json.Unmarshal(raw, &req)
 
@@ -1855,6 +1901,10 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		// rename. Instant feedback: the sidebar never shows five stale "New
 		// conversation" rows again.
 		act.mu.Lock()
+		if req.Options != nil {
+			act.record.Options = normalizedOptions(*req.Options)
+			_ = d.saveSession(act.record)
+		}
 		if !d.config.Settings.NoAutoTitle && (act.record.Title == "" || act.record.Title == "New conversation") {
 			if t := instantTitle(cleanText); t != "" {
 				act.record.Title = t
@@ -2022,7 +2072,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 			"- `/unjail` — Allow agent tools to read/write external paths\n" +
 			"- `/model <name>` — Switch the active model\n" +
 			"- `/reasoning <none|minimum|low|medium|high|xhigh|max>` — Adjust reasoning effort\n\n" +
-			"*Model, effort, skills and MCP servers are also configurable in Settings.*"
+			"*Choose model, effort and skills in the composer. Manage custom skills and MCP servers in Settings.*"
 
 	default:
 		reply = fmt.Sprintf("❓ Unknown command `%s`. Type `/help` for available commands.", head)
@@ -2139,6 +2189,13 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	act.cancel = cancel
 	act.gen++
 	myGen := act.gen
+	options := normalizedOptions(act.record.Options)
+	if act.record.Options.Access != "" {
+		yolo = options.Access == "full"
+	}
+	if act.record.Options.Effort == "" && cfg.Settings.Reasoning != "" {
+		options.Effort = canonicalReasoning(cfg.Settings.Reasoning)
+	}
 	act.mu.Unlock()
 
 	defer func() {
@@ -2172,7 +2229,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	// Create OpenAI client pointing to Gateway's /v1 proxy endpoint
 	apiBase := strings.TrimRight(cfg.GatewayURL, "/") + "/v1"
 	modelInfo := gatewayModel(ctx, cfg.GatewayURL, cfg.DaemonToken, modelToUse)
-	if effort := canonicalReasoning(cfg.Settings.Reasoning); effort != "" && effort != "none" {
+	if effort := canonicalReasoning(options.Effort); effort != "" && effort != "none" {
 		modelInfo.Reasoning = true
 	}
 	client := provider.NewGatewayOpenAI(cfg.APIKey, apiBase, modelInfo)
@@ -2184,7 +2241,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 	// Setup local filesystem tools rooted at session's CWD
 	sb := tools.NewSandbox(sessionCWD)
-	if !yolo || cfg.Settings.JailByDefault {
+	if cfg.Settings.JailByDefault {
 		sb.Lock()
 	}
 
@@ -2196,17 +2253,27 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		&tools.GlobTool{CWD: sessionCWD, Sandbox: sb},
 	)
 
+	restrictModeTools(reg, options.Mode)
+	journal := newReviewJournal(d, act, myGen, sessionCWD, cfg.HostID, sessionID)
+	for _, name := range []string{"write", "edit", "bash"} {
+		if tool, ok := reg[name]; ok {
+			reg[name] = &reviewedTool{Tool: tool, journal: journal}
+		}
+	}
+
 	// Build rich system instructions with working directory, jail status, and active skills
 	var sysPrompt strings.Builder
 	sysPrompt.WriteString("You are an expert autonomous AI software engineering agent running directly on the user's machine.\n")
 	sysPrompt.WriteString(fmt.Sprintf("Working Directory: %s\n", sessionCWD))
+	sysPrompt.WriteString(modeInstructions(options.Mode) + "\n")
 	if cfg.Settings.JailByDefault {
 		sysPrompt.WriteString("Sandbox: Strict jail mode is active. Only access files inside the working directory.\n")
 	}
 	if len(cfg.Skills) > 0 {
 		sysPrompt.WriteString("\n### Active Skills & Custom Instructions:\n")
-		for name, sk := range cfg.Skills {
-			if sk.Enabled {
+		for _, name := range options.Skills {
+			sk, exists := cfg.Skills[name]
+			if exists && sk.Enabled {
 				sysPrompt.WriteString(fmt.Sprintf("#### Skill [%s]: %s\n%s\n\n", name, sk.Description, sk.Body))
 			}
 		}
@@ -2219,7 +2286,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 
 	agent := core.NewAgent(client, modelToUse, sysPrompt.String(), reg)
-	agent.Reasoning = cfg.Settings.Reasoning
+	agent.Reasoning = options.Effort
 	agent.Temperature = &cfg.Settings.Temperature
 	agent.MaxTokens = modelInfo.MaxOutput
 	act.mu.Lock()
@@ -2237,6 +2304,9 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	// Tool approval hook when YOLO is false
 	if !yolo {
 		agent.BeforeToolExecute = func(call provider.ToolCallBlock) (bool, string, json.RawMessage) {
+			if call.Name == "read" || call.Name == "glob" {
+				return true, "", nil
+			}
 			callID := call.ID
 			respChan := make(chan bool, 1)
 

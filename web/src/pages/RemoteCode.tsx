@@ -12,6 +12,7 @@ import {
 } from "solid-js";
 import { Portal } from "solid-js/web";
 import { createStore, reconcile } from "solid-js/store";
+import { FileIcon, RemoteHints } from "../rcPresentation";
 import { createTranscriptScroll } from "../rcScroll";
 import { compactTokens, contextDisplay, type GatewayModel, type SessionContext } from "../rcContext";
 import { Streamdown } from "streamdown-solid";
@@ -31,10 +32,8 @@ import {
   Modal,
   Btn,
   Tooltip,
-  Select,
   ThemeToggle,
   copyWithToast,
-  toast,
 } from "../ui";
 
 import { Icon as Iconify } from "../components/icon";
@@ -125,8 +124,6 @@ export interface PendingApproval {
 }
 
 export interface AgentSettings {
-  model: string;
-  reasoning: string;
   temperature: number;
   autoCompactPercent: number;
   noAutoTitle: boolean;
@@ -164,7 +161,7 @@ const REASONING_LEVELS = ["none", "minimum", "low", "medium", "high", "xhigh", "
 /**
  * Slash command definitions for autocomplete palette.
  * Only commands NOT already configurable somewhere in the UI are listed:
- * model + reasoning effort live in the composer picker / Settings modal,
+ * model + reasoning effort live in the composer picker,
  * and help + protocols (mcp/skills) live in Settings (sec-* sections).
  */
 const SLASH_COMMANDS = [
@@ -656,58 +653,10 @@ const HLJS_CLASS_MAP: Array<[RegExp, string]> = [
   [/^hljs-deletion$/, "tok-del"],
 ];
 
-let hljsLib: any = null;
+let hljsPromise: Promise<any> | null = null;
 async function getHljs(): Promise<any> {
-  if (hljsLib) return hljsLib;
-  const coreMod: any = await import("highlight.js/lib/core");
-  const core = coreMod?.default ?? coreMod;
-  // Registered lazily so the base bundle stays small; languages load once
-  // with the first highlighted block (import map covers the ~40 most
-  // common file types the agent touches).
-  const langs: Array<[string, string]> = [
-    ["typescript", "highlight.js/lib/languages/typescript"],
-    ["javascript", "highlight.js/lib/languages/javascript"],
-    ["json", "highlight.js/lib/languages/json"],
-    ["python", "highlight.js/lib/languages/python"],
-    ["rust", "highlight.js/lib/languages/rust"],
-    ["go", "highlight.js/lib/languages/go"],
-    ["ruby", "highlight.js/lib/languages/ruby"],
-    ["java", "highlight.js/lib/languages/java"],
-    ["kotlin", "highlight.js/lib/languages/kotlin"],
-    ["cpp", "highlight.js/lib/languages/cpp"],
-    ["c", "highlight.js/lib/languages/c"],
-    ["csharp", "highlight.js/lib/languages/csharp"],
-    ["php", "highlight.js/lib/languages/php"],
-    ["swift", "highlight.js/lib/languages/swift"],
-    ["css", "highlight.js/lib/languages/css"],
-    ["xml", "highlight.js/lib/languages/xml"],
-    ["markdown", "highlight.js/lib/languages/markdown"],
-    ["yaml", "highlight.js/lib/languages/yaml"],
-    ["ini", "highlight.js/lib/languages/ini"],
-    ["bash", "highlight.js/lib/languages/bash"],
-    ["sql", "highlight.js/lib/languages/sql"],
-    ["diff", "highlight.js/lib/languages/diff"],
-    ["dockerfile", "highlight.js/lib/languages/dockerfile"],
-    ["graphql", "highlight.js/lib/languages/graphql"],
-    ["lua", "highlight.js/lib/languages/lua"],
-    ["r", "highlight.js/lib/languages/r"],
-    ["scala", "highlight.js/lib/languages/scala"],
-    ["dart", "highlight.js/lib/languages/dart"],
-    ["elixir", "highlight.js/lib/languages/elixir"],
-    ["haskell", "highlight.js/lib/languages/haskell"],
-  ];
-  await Promise.all(
-    langs.map(async ([id, path]) => {
-      try {
-        if (typeof core.getLanguage === "function" && core.getLanguage(id)) return;
-        const mod: any = await import(/* @vite-ignore */ path);
-        const def = mod?.default ?? mod;
-        if (typeof def === "function") core.registerLanguage(id, def);
-      } catch {}
-    }),
-  );
-  hljsLib = core;
-  return hljsLib;
+  hljsPromise ??= import("highlight.js/lib/common").then((mod) => mod.default);
+  return hljsPromise;
 }
 
 function mapHljsClasses(html: string): string {
@@ -797,7 +746,7 @@ export function CodeBlock(props: {
     let cancelled = false;
     void highlightCode(text, lang).then((h) => {
       if (!cancelled) setHtml(h);
-    });
+    }).catch(() => { if (!cancelled) setHtml(escapeHtml(text)); });
     onCleanup(() => {
       cancelled = true;
     });
@@ -838,12 +787,14 @@ export function DiffView(props: { text: string; max?: number; name?: string }) {
   const hidden = () => Math.max(0, lines().length - shown().length);
   createEffect(() => {
     const text = shownText();
-    const lang = languageForPath(props.name) || "diff";
+    const lang = languageForPath(props.name);
     setHtml(null);
     let cancelled = false;
-    void highlightCode(text, lang).then((h) => {
-      if (!cancelled) setHtml(h);
-    });
+    void Promise.all(text.split("\n").map(async (line) => {
+      const marker = /^[ +-]/.test(line) ? line[0] : "";
+      return escapeHtml(marker) + await highlightCode(marker ? line.slice(1) : line, lang);
+    })).then((rows) => { if (!cancelled) setHtml(rows.join("\n")); })
+      .catch(() => { if (!cancelled) setHtml(escapeHtml(text)); });
     onCleanup(() => {
       cancelled = true;
     });
@@ -898,6 +849,73 @@ export function DiffView(props: { text: string; max?: number; name?: string }) {
 }
 
 export default function RemoteCodePage() {
+  const [appNotice, setAppNotice] = createSignal<{ message: string; kind: "ok" | "err" } | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function toast(message: string, kind: "ok" | "err" = "ok") {
+    clearTimeout(noticeTimer);
+    setAppNotice({ message, kind });
+    if (kind === "ok") noticeTimer = setTimeout(() => setAppNotice(null), 5000);
+  }
+  onCleanup(() => clearTimeout(noticeTimer));
+  const [draftMode, setDraftMode] = createSignal(true);
+  const [creatingSession, setCreatingSession] = createSignal(false);
+  let creationRequestId = "";
+  const [effort, setEffort] = createSignal("medium");
+  const [agentMode, setAgentMode] = createSignal("build");
+  const [selectedSkills, setSelectedSkills] = createSignal<string[]>([]);
+  const [modeMenuOpen, setModeMenuOpen] = createSignal(false);
+  const [accessMenuOpen, setAccessMenuOpen] = createSignal(false);
+  let modeBtn: HTMLButtonElement | undefined;
+  let accessBtn: HTMLButtonElement | undefined;
+  const [expandedSessionLists, setExpandedSessionLists] = createSignal<Record<string, boolean>>({});
+  const [folderEntries, setFolderEntries] = createSignal<{ name: string; path: string }[]>([]);
+  const [folderParent, setFolderParent] = createSignal("");
+  const [folderCurrent, setFolderCurrent] = createSignal("");
+  const [folderLoading, setFolderLoading] = createSignal(false);
+  const [folderError, setFolderError] = createSignal("");
+  let folderRequestId = "";
+  let projectCreationId = "";
+  const [pendingProjectId, setPendingProjectId] = createSignal("");
+  interface ReviewFile { canUndo?: boolean; truncated?: boolean; path: string; kind: string; before?: string; after?: string; binary?: boolean; }
+  interface Review { id: string; files: ReviewFile[]; notice?: string; }
+  const [taskReview, setTaskReview] = createSignal<Review | null>(null);
+  const [reviewOpen, setReviewOpen] = createSignal(false);
+  const [reviewLoading, setReviewLoading] = createSignal(false);
+  const [reviewError, setReviewError] = createSignal("");
+  let reviewRequestId = "";
+  function sessionOptions() { return { effort: effort(), mode: agentMode(), skills: selectedSkills(), access: yoloMode() ? "full" : "ask" }; }
+  function configureSession() {
+    if (wsOpen()) sendWS({ type: "configure_session", sessionId: activeSessionId(), model: activeModel(), options: sessionOptions() });
+  }
+  function applyOptions(options: any) {
+    setEffort(options?.effort || "medium");
+    setAgentMode(options?.mode || "build");
+    setSelectedSkills(Array.isArray(options?.skills) ? options.skills : []);
+    setYoloMode(options?.access !== "ask");
+  }
+  function requestFolders(path: string) {
+    setNewProjectPath(path);
+    if (!wsOpen() || activeHost()?.status !== "online") { setFolderError("Connect this host to browse its folders."); return; }
+    setFolderLoading(true); setFolderError("");
+    folderRequestId = crypto.randomUUID();
+    sendWS({ type: "browse_folders", path: path || "~", requestId: folderRequestId });
+  }
+  function requestReview(detail = false) {
+    if (!activeSessionId() || !wsOpen()) return;
+    if (detail) { setReviewOpen(true); setReviewLoading(true); setReviewError(""); }
+    reviewRequestId = crypto.randomUUID();
+    sendWS({ type: "get_changes", sessionId: activeSessionId(), detail, requestId: reviewRequestId });
+  }
+  async function undoChanges(path = "") {
+    const review = taskReview();
+    if (!review || sessionStatus() === "running" || !wsOpen()) return;
+    const yes = await showConfirm({ title: path ? "Undo this file?" : "Undo task changes?", message: "Restore the captured files to their state before the task. Files edited afterward will be preserved.", confirmText: "Undo changes" });
+    if (!yes) return;
+    setReviewLoading(true); setReviewError("");
+    reviewRequestId = crypto.randomUUID();
+    sendWS({ type: "undo_changes", sessionId: activeSessionId(), reviewId: review.id, path, detail: reviewOpen(), requestId: reviewRequestId });
+  }
+
   // Hosts & Pairing
   const [hosts, setHosts] = createSignal<RemoteHostDto[]>([]);
   const [activeHostId, setActiveHostId] = createSignal<string>("");
@@ -917,24 +935,20 @@ export default function RemoteCodePage() {
   // shows the very same truth.
   const [activeSessionId, setActiveSessionId] = createSignal<string>("");
   const [sessionFilter, setSessionFilter] = createSignal<string>("");
-  // (No "new conversation" modal — sessions are created directly in the
-  // active project so the composer at the bottom is the only input.)
+  // New conversations remain local drafts until their first message is sent.
 
   // Projects (Antigravity-style: pasta no host agrupa conversas)
   const [activeProjectId, setActiveProjectId] = createSignal<string>("");
   const [showNewProjectModal, setShowNewProjectModal] = createSignal(false);
   const [newProjectPath, setNewProjectPath] = createSignal("");
   const [projectMenuOpen, setProjectMenuOpen] = createSignal(false);
-  // First message queued while the auto-created session is being registered.
-  const [pendingFirstText, setPendingFirstText] = createSignal<string | null>(null);
 
   function pickProject(id: string) {
     setActiveProjectId(id);
   }
   function openNewProjectModal() {
-    // With zero projects the home folder is the sane default ("usa o ~").
-    setNewProjectPath(projects().length === 0 ? "~" : "");
     setShowNewProjectModal(true);
+    requestFolders(activeProject()?.path || "~");
   }
   function wsOpen() {
     try {
@@ -981,7 +995,7 @@ export default function RemoteCodePage() {
   // Chat Transcript & In-Flight State
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [inputPrompt, setInputPrompt] = createSignal("");
-  const [activeModel, setActiveModel] = createSignal("gpt-4o");
+  const [activeModel, setActiveModel] = createSignal("");
   const [yoloMode, setYoloMode] = createSignal(true);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
   const [pendingApproval, setPendingApproval] = createSignal<PendingApproval | null>(null);
@@ -1123,8 +1137,6 @@ export default function RemoteCodePage() {
   const [largeEditorOpen, setLargeEditorOpen] = createSignal(false);
   const [largeEditorText, setLargeEditorText] = createSignal("");
   const [, setLargeEditorSend] = createSignal(false);
-  // When a project is created, open the conversation modal on ack.
-  const [sessionAfterProject, setSessionAfterProject] = createSignal(false);
 
   // Promise-based confirm modal (chatbot showConfirm, no native confirm()).
   interface ConfirmState {
@@ -1218,8 +1230,6 @@ export default function RemoteCodePage() {
   // Agent Configuration & MCP Center
   const [showConfigModal, setShowConfigModal] = createSignal(false);
   const [daemonSettings, setDaemonSettings] = createSignal<AgentSettings>({
-    model: "gpt-4o",
-    reasoning: "off",
     temperature: 0.7,
     autoCompactPercent: 95,
     noAutoTitle: false,
@@ -1303,6 +1313,14 @@ export default function RemoteCodePage() {
     return cwd === norm || cwd.startsWith(norm + "/");
   }
 
+  function visibleSessions(key: string, list: SessionSummary[]) {
+    if (expandedSessionLists()[key] || sessionFilter().trim()) return list;
+    return sortedSessions([...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 10));
+  }
+  function sessionListToggle(key: string, count: number) {
+    return <Show when={count > 10 && !sessionFilter().trim()}><button class="px-3 py-2 text-xs text-ink-500 hover:text-ink-200 cursor-pointer" aria-expanded={!!expandedSessionLists()[key]}
+      onClick={() => setExpandedSessionLists((prev) => ({ ...prev, [key]: !prev[key] }))}>{expandedSessionLists()[key] ? "Show less" : `See all (${count})`}</button></Show>;
+  }
   function sessionsOfProject(projectPath: string) {
     return sessions().filter((s) => sessionInPath(s, projectPath));
   }
@@ -1371,8 +1389,8 @@ export default function RemoteCodePage() {
       if (disposed) return;
       const models = (res.models || []).filter((m) => m.proto !== "anthropic");
       setGatewayModels(models);
-      if (!activeSessionId() && models.length && !models.some((m) => m.id === activeModel())) {
-        setActiveModel(models[0].id);
+      if (!models.some((m) => m.id === activeModel())) {
+        setActiveModel(models[0]?.id || "");
       }
     } catch {
       toast("Could not refresh the gateway model catalog", "err");
@@ -1421,7 +1439,7 @@ export default function RemoteCodePage() {
       setConnectionState("connected");
       void loadGatewayModels();
       dataLayer.storeFor(hostId).syncAll();
-      if (activeSessionId()) sendWS({ type: "get_session", sessionId: activeSessionId() });
+      if (activeSessionId()) { sendWS({ type: "get_session", sessionId: activeSessionId() }); requestReview(reviewOpen()); }
       heartbeatTimer = setInterval(() => sendWS({ type: "ping", ts: Date.now() }), 15000);
     };
     socket.onmessage = (ev) => {
@@ -1433,6 +1451,9 @@ export default function RemoteCodePage() {
       if (socket !== ws || disposed) return;
       clearInterval(heartbeatTimer);
       setConnectionState("disconnected");
+      setCreatingSession(false);
+      setFolderLoading(false);
+      setReviewLoading(false);
       dataLayer.disconnect();
       stopThinkingTimer();
       const delay = Math.min(1000 * 2 ** reconnectAttempt++, 15000);
@@ -1561,40 +1582,6 @@ export default function RemoteCodePage() {
     }
     return blocks;
   }
-  function mapSummary(r: any): SessionSummary {
-    return {
-      id: r.id,
-      hostId: activeHostId(),
-      cwd: r.cwd,
-      title: r.title || r.cwd,
-      model: r.model || "gpt-4o",
-      status: r.status || "idle",
-      pinned: !!r.pinned,
-      createdAt: r.createdAt ?? r.created_at ?? Date.now(),
-      updatedAt: r.updatedAt ?? r.updated_at ?? Date.now(),
-      messageCount:
-        typeof r.messageCount === "number"
-          ? r.messageCount
-          : typeof r.message_count === "number"
-            ? r.message_count
-            : Array.isArray(r.messages)
-              ? r.messages.length
-              : 0,
-    };
-  }
-  // Normalizes the raw daemon transcript for display. The daemon persists
-  // tool results as separate "tool" (or Anthropic-style "user") messages;
-  // rendered as-is they show up as disconnected rows or stray user bubbles.
-  //
-  // Display-only — the persisted provider payloads are never reordered:
-  // - Thinking position: assembleMsg persists ReasoningBlock LAST although
-  //   it streamed FIRST, so after every refresh the thinking would drop
-  //   below the balloon — reasoning is moved to the top of its message.
-  // - mirrorToolImagesAsUser (openai routing): a synthetic role:user message
-  //   carrying tool-run images plus the marker
-  //   "Tool output included the following image content:" — it would render
-  //   as the user's own balloon, so it is folded into the assistant carrier
-  //   as caption + image blocks instead.
   function applySessionContent(sessionId: string, rawMsgs: any[]) {
     const out: ChatMessage[] = [];
     let carrier: ChatMessage | null = null;
@@ -1720,33 +1707,45 @@ export default function RemoteCodePage() {
       // The events below are action acks that drive local continuation.
 
       case "session_created": {
+        if (!creatingSession() || msg.requestId !== creationRequestId) break;
         const r = msg.session;
-        if (!r) break;
-        const s = mapSummary(r);
-        selectSession(s.id);
-        // A composer send with no active session auto-creates one and the
-        // typed text was held back — deliver it now.
-        const pending = pendingFirstText();
-        if (pending) {
-          setPendingFirstText(null);
-          sendTextToSession(s.id, pending);
-        }
+        if (!r?.id) break;
+        setCreatingSession(false);
+        setDraftMode(false);
+        const firstDraft = inputPrompt();
+        setActiveSessionId(r.id);
+        setInputPrompt(firstDraft);
+        try { localStorage.setItem(`llmgw-draft:${r.id}`, firstDraft); } catch {}
+        applyOptions(r.options);
+        // Attachments stay in the draft until upload succeeds on this new session.
+        void sendPrompt();
         break;
       }
-
       case "project_created": {
+        if (msg.requestId !== projectCreationId) break;
         const p = msg.project;
         if (!p?.id) break;
-        setActiveProjectId(p.id);
+        setShowNewProjectModal(false);
+        setPendingProjectId(p.id);
+        dataLayer.storeFor(activeHostId()).syncAll();
         toast(`Project '${p.name || "Project"}' added`, "ok");
-        // Project wizards lead straight into a conversation — the input
-        // stays at the bottom, nothing pops up in the middle.
-        if (sessionAfterProject()) {
-          setSessionAfterProject(false);
-          if (wsOpen()) {
-            sendWS({ type: "create_session", cwd: p.path, title: "", model: activeModel() });
-          }
-        }
+        break;
+      }
+      case "folders": {
+        if (msg.requestId !== folderRequestId) break;
+        setFolderLoading(false);
+        if (msg.error) { setFolderError(msg.error); break; }
+        setFolderEntries(msg.folders || []);
+        setFolderParent(msg.parent || "");
+        setFolderCurrent(msg.path || "");
+        setNewProjectPath(msg.path || "");
+        break;
+      }
+      case "session_changes": {
+        if (msg.sessionId !== activeSessionId() || (msg.requestId && msg.requestId !== reviewRequestId)) break;
+        setReviewLoading(false);
+        if (msg.error) { setReviewError(msg.error); if (!reviewOpen()) toast(msg.error, "err"); break; }
+        setTaskReview(msg.review || null);
         break;
       }
 
@@ -1832,6 +1831,8 @@ export default function RemoteCodePage() {
         }
         if (sid && sid === activeSessionId()) {
           setSessionStatus(r.status === "running" ? "running" : "idle");
+          if (r.model) setActiveModel(gatewayModels().some((m) => m.id === r.model) ? r.model : gatewayModels()[0]?.id || "");
+          applyOptions(r.options);
           if (r.usage) applyUsage(sid, r.usage, null);
           setSessionContexts((prev) => ({ ...prev, [sid]: r.context ?? null }));
           applySessionContent(sid, r.messages || r.Messages || []);
@@ -1851,6 +1852,7 @@ export default function RemoteCodePage() {
         if (msg.sessionId === activeSessionId()) {
           setSessionStatus(msg.status === "running" ? "running" : "idle");
           if (msg.status === "idle") {
+            requestReview(reviewOpen());
             setPendingApproval(null);
             setToolProgress({});
             if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
@@ -1967,6 +1969,9 @@ export default function RemoteCodePage() {
       }
 
       case "error": {
+        if (msg.requestId === creationRequestId) { setCreatingSession(false); }
+        if (msg.requestId === folderRequestId) { setFolderLoading(false); setFolderError(msg.message || "Could not browse folders"); break; }
+        if (msg.requestId === projectCreationId && showNewProjectModal()) { setFolderError(msg.message || "Could not create project"); break; }
         if (msg.sessionId && msg.sessionId !== activeSessionId()) break;
         if (msg.requestId && uploadWaiters.has(msg.requestId)) {
           const w = uploadWaiters.get(msg.requestId)!;
@@ -1974,11 +1979,16 @@ export default function RemoteCodePage() {
           w.fail(msg.message || "Upload failed");
           break;
         }
+        if (msg.replyTo === "create_session") setCreatingSession(false);
+        if (msg.replyTo === "get_changes" || msg.replyTo === "undo_changes") { setReviewLoading(false); setReviewError(msg.message || "Host unavailable"); }
+        if (msg.message === "Remote host is offline") {
+          setHosts((prev) => prev.map((h) => h.id === activeHostId() ? { ...h, status: "offline" } : h));
+          if (msg.replyTo === "browse_folders") { setFolderLoading(false); setFolderError("The host went offline. Reconnect to browse its folders."); }
+          break;
+        }
         // Sync pulls on an offline host are expected background noise.
         if (msg.replyTo === "pull") break;
-        if (typeof msg.message === "string" && msg.message.toLowerCase().includes("project")) {
-          setSessionAfterProject(false);
-        }
+
         toast(msg.message || "Daemon returned an error", "err");
         if (activeSessionId()) sendWS({ type: "get_session", sessionId: activeSessionId() });
         break;
@@ -2263,6 +2273,11 @@ export default function RemoteCodePage() {
   function onChatScroll() { transcriptScroll.measure(); }
 
   function selectSession(id: string) {
+    if (creatingSession()) return;
+    setDraftMode(false);
+    setTaskReview(null);
+    setReviewOpen(false);
+    setAppNotice(null);
     initialScrollSession = id;
     transcriptScroll.reset();
     setMessages([]);
@@ -2286,22 +2301,31 @@ export default function RemoteCodePage() {
       if (s.model) setActiveModel(s.model);
     }
     sendWS({ type: "get_session", sessionId: id });
+    requestReview();
   }
 
-  // "New Conversation" never pops a centered dialog: the daemon registers a
-  // blank session in the active project and the composer at the bottom is
-  // where typing happens. Without any project, ask for the folder instead.
-  function startNewConversation() {
-    const proj = activeProject();
-    if (!proj) {
-      openNewProjectModal();
-      return;
-    }
-    if (!wsOpen()) {
-      toast("Not connected to host yet — wait for online status", "err");
-      return;
-    }
-    sendWS({ type: "create_session", cwd: proj.path, title: "", model: activeModel() });
+  // Open a centered draft without creating a conversation on the host.
+  function startNewConversation(projectId?: string) {
+    if (creatingSession()) return;
+    setDraftMode(true);
+    setHistoryView(false);
+    setActiveSessionId("");
+    setMessages([]);
+    setInputPrompt("");
+    setSessionStatus("idle");
+    setPendingApproval(null);
+    setTaskReview(null);
+    setReviewOpen(false);
+    setAppNotice(null);
+    setAgentMode("build");
+    setSelectedSkills([]);
+    stopThinkingTimer();
+    transcriptScroll.reset();
+    for (const p of pendingAttachments()) if (p.objectUrl) URL.revokeObjectURL(p.objectUrl);
+    setPendingAttachments([]);
+    if (projectId) setActiveProjectId(projectId);
+    if (isMobile()) setSidebarOpen(false);
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#rc-composer")?.focus());
   }
 
   function createProject() {
@@ -2319,11 +2343,9 @@ export default function RemoteCodePage() {
       toast("Not connected to host yet — wait for online status", "err");
       return;
     }
-    setSessionAfterProject(true);
     // Daemon is the source of truth; ack arrives as project_created.
-    sendWS({ type: "create_project", path: rawPath, requestId: "cp_" + Date.now() });
-    setNewProjectPath("");
-    setShowNewProjectModal(false);
+    projectCreationId = crypto.randomUUID();
+    sendWS({ type: "create_project", path: rawPath, requestId: projectCreationId });
   }
 
   async function deleteProject(id: string, e: MouseEvent) {
@@ -2350,8 +2372,8 @@ export default function RemoteCodePage() {
       toast("Not connected to host yet — wait for online status", "err");
       return;
     }
-    setSessionAfterProject(true);
-    sendWS({ type: "create_project", path: "~", requestId: "cp_" + Date.now() });
+    projectCreationId = crypto.randomUUID();
+    sendWS({ type: "create_project", path: "~", requestId: projectCreationId });
   }
 
   async function deleteSession(id: string, e?: MouseEvent) {
@@ -2365,8 +2387,8 @@ export default function RemoteCodePage() {
     if (ok) sendWS({ type: "delete_session", sessionId: id });
   }
 
-  /** Composer model/effort picker; Settings edits a local default-model draft. */
-  function modelPickerBody(showUsage: boolean) {
+  /** Session choices, also remembered by the daemon for the next draft. */
+  function modelPickerBody() {
     return (
       <>
         <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider flex items-center justify-between">
@@ -2377,7 +2399,7 @@ export default function RemoteCodePage() {
               toast("Models refreshed", "ok");
             }}
             class="p-0.5 text-ink-600 hover:text-ink-200 cursor-pointer"
-            title="Refresh models"
+            data-rc-tip="Refresh models" aria-label="Refresh models"
           >
             <Iconify icon="lucide:refresh-cw" size={11} />
           </button>
@@ -2410,9 +2432,7 @@ export default function RemoteCodePage() {
                   const id = m.id;
                   setActiveModel(id);
                   setModelMenuOpen(false);
-                  if (activeSessionId() && wsOpen()) {
-                    sendWS({ type: "set_model", sessionId: activeSessionId(), model: id });
-                  }
+                  configureSession();
                 }}
                 class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
                   m.id === activeModel()
@@ -2437,12 +2457,13 @@ export default function RemoteCodePage() {
               {(lvl) => (
                 <button
                   onClick={() => {
-                    setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
+                    setEffort(lvl);
+                    configureSession();
                     setModelMenuOpen(false);
-                    if (wsOpen()) sendWS({ type: "set_reasoning", effort: lvl });
+
                   }}
                   class={`py-1 rounded-md text-center text-[11px] font-medium lowercase cursor-pointer ${
-                    normalizeEffort(daemonSettings().reasoning || "none") === lvl
+                    effort() === lvl
                       ? "bg-ink-100 text-ink-950"
                       : "text-ink-400 hover:text-ink-200"
                   }`}
@@ -2453,18 +2474,7 @@ export default function RemoteCodePage() {
             </For>
           </div>
         </div>
-        <Show when={showUsage}>
-          <button
-            onClick={() => {
-              setModelMenuOpen(false);
-              setUsageOpen(true);
-            }}
-            class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer"
-          >
-            <Iconify icon="lucide:chart-column" size={13} />
-            <span>View Usage</span>
-          </button>
-        </Show>
+
       </>
     );
   }
@@ -2483,10 +2493,7 @@ export default function RemoteCodePage() {
   async function handleFiles(files: FileList | File[]) {
     const list = Array.from(files || []);
     if (list.length === 0) return;
-    if (!activeSessionId()) {
-      toast("Start a conversation before attaching files", "err");
-      return;
-    }
+
     const room = MAX_ATTACHMENTS - pendingAttachments().length;
     if (room <= 0) {
       toast(`Max ${MAX_ATTACHMENTS} attachments per message`, "err");
@@ -2928,7 +2935,7 @@ export default function RemoteCodePage() {
 
   // No session is ever a dead end: typing + Enter auto-starts a
   // conversation inside the active project, then the text is delivered.
-  function beginConversationWith(firstText: string) {
+  function beginConversationWith() {
     const proj = activeProject();
     if (!proj) {
       toast("Create a project first", "err");
@@ -2938,30 +2945,10 @@ export default function RemoteCodePage() {
       toast("Not connected to host yet — wait for online status", "err");
       return;
     }
-    setPendingFirstText(firstText);
-    setInputPrompt("");
-    sendWS({ type: "create_session", cwd: proj.path, title: "", model: activeModel() });
-  }
-
-  function sendTextToSession(sid: string, text: string) {
-    const userMsg: ChatMessage = {
-      id: `user_${Date.now()}`,
-      role: "user",
-      blocks: [{ type: "text", text }],
-      time: Date.now(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
-    setSessionStatus("running");
-    setIsAtBottom(true);
-    scrollToBottom(true);
-    sendWS({
-      type: "prompt",
-      sessionId: sid,
-      text,
-      model: activeModel(),
-      yolo: yoloMode(),
-      attachmentIds: [],
-    });
+    if (creatingSession()) return;
+    setCreatingSession(true);
+    creationRequestId = crypto.randomUUID();
+    sendWS({ type: "create_session", requestId: creationRequestId, cwd: proj.path, title: "", model: activeModel(), options: sessionOptions() });
   }
 
   async function sendPrompt() {
@@ -2969,33 +2956,27 @@ export default function RemoteCodePage() {
       toast("Reconnect the host before sending a message", "err");
       return;
     }
+    if (creatingSession()) return;
+    if (!activeModel()) { toast("Configure a compatible model in the gateway first", "err"); return; }
     const text = inputPrompt().trim();
     const sid = activeSessionId();
-    setPendingFirstText(null);
+    const hostId = activeHostId();
+    const model = activeModel();
+    const options = sessionOptions();
     // Slash fast-path: UI commands resolve locally, transcript ops go down.
     if (text.startsWith("/")) {
-      setInputPrompt("");
       try {
         if (sid) localStorage.removeItem(`llmgw-draft:${sid}`);
       } catch {}
-      if (routeSlash(text)) return;
+      if (routeSlash(text)) { setInputPrompt(""); return; }
       if (!sid) {
-        beginConversationWith(text);
+        beginConversationWith();
         return;
       }
     }
     if (!text && pendingAttachments().length === 0) return;
     if (!sid) {
-      beginConversationWith(text);
-      return;
-    }
-    // Abort guard: free the composer when a late sync proves the daemon
-    // already forgot the session (restored-from-cache ghost), otherwise a
-    // send to a dead session would hang the composer in running forever.
-    const live = sessions().some((s) => s.id === sid);
-    if (!live) {
-      setSessionStatus("idle");
-      setActiveSessionId("");
+      beginConversationWith();
       return;
     }
     if (sessionStatus() === "running") return;
@@ -3012,11 +2993,14 @@ export default function RemoteCodePage() {
       try {
         attachmentIds = await Promise.all(pending.map((a) => uploadOneAttachment(sid, a)));
       } catch (e: any) {
-        setSessionStatus("idle");
-        toast(e?.message || "Attachment upload failed", "err");
+        if (activeHostId() === hostId && activeSessionId() === sid) {
+          setSessionStatus("idle");
+          toast(e?.message || "Attachment upload failed", "err");
+        }
         return;
       }
     }
+    if (disposed || activeHostId() !== hostId || activeSessionId() !== sid) return;
     const attachmentNames = pending.map((a) => a.name);
 
     const displayText = text || attachmentNames.map((n) => `[Attached ${n}]`).join("\n");
@@ -3048,8 +3032,9 @@ export default function RemoteCodePage() {
       type: "prompt",
       sessionId: sid,
       text: text || "(see attachments)",
-      model: activeModel(),
-      yolo: yoloMode(),
+      model,
+      yolo: options.access === "full",
+      options,
       attachmentIds,
     });
   }
@@ -3122,25 +3107,28 @@ export default function RemoteCodePage() {
     const sp = clean.indexOf(" ");
     const head = (sp < 0 ? clean : clean.slice(0, sp)).toLowerCase();
     const arg = (sp < 0 ? "" : clean.slice(sp + 1)).trim();
-    const sid = activeSessionId();
     switch (head) {
+      case "/clear":
+        startNewConversation();
+        return true;
       case "/model":
         if (!arg) {
           toast(`Current model: ${activeModel()}`, "ok");
           return true;
         }
         setActiveModel(arg);
-        if (sid && wsOpen()) sendWS({ type: "set_model", sessionId: sid, model: arg });
+        configureSession();
         toast(`Model set to ${arg}`, "ok");
         return true;
       case "/reasoning": {
         const lvl = normalizeEffort(arg);
         if (!lvl || !(REASONING_LEVELS as readonly string[]).includes(lvl)) {
-          toast(`Reasoning: ${normalizeEffort(daemonSettings().reasoning)}`, "ok");
+          toast(`Reasoning: ${effort()}`, "ok");
           return true;
         }
-        setDaemonSettings({ ...daemonSettings(), reasoning: lvl });
-        if (wsOpen()) sendWS({ type: "set_reasoning", effort: lvl });
+        setEffort(lvl);
+                    configureSession();
+
         toast(`Reasoning effort set to ${lvl}`, "ok");
         return true;
       }
@@ -3172,7 +3160,6 @@ export default function RemoteCodePage() {
           settings: daemonSettings(),
           mcp: mcpServers(),
           skills: skills(),
-          yolo: yoloMode(),
         }),
       );
     } catch {}
@@ -3193,7 +3180,7 @@ export default function RemoteCodePage() {
         if (s.settings) setDaemonSettings(s.settings);
         if (s.mcp) setMcpServers(s.mcp);
         if (s.skills) setSkills(s.skills);
-        if (typeof s.yolo === "boolean") setYoloMode(s.yolo);
+
 
       }
     } catch {}
@@ -3208,8 +3195,6 @@ export default function RemoteCodePage() {
       type: "update_config",
       requestId: "upd_" + Date.now(),
       settings: {
-        model: s.model,
-        reasoning: s.reasoning,
         temperature: s.temperature,
         auto_compact_threshold: s.autoCompactPercent,
         no_auto_title: s.noAutoTitle,
@@ -3271,6 +3256,7 @@ export default function RemoteCodePage() {
       toast("Skill name and instruction prompt body are required", "err");
       return;
     }
+    if (skills()[name]) { toast("A skill with this name already exists. Choose a different name.", "err"); return; }
     const current = { ...skills() };
     current[name] = {
       name,
@@ -3309,7 +3295,9 @@ export default function RemoteCodePage() {
     if (isMobile()) setSidebarOpen(false);
     const onResize = () => {
       try {
-        setIsMobile(window.innerWidth <= 768);
+        const mobile = window.innerWidth <= 768;
+        if (mobile && !isMobile()) setSidebarOpen(false);
+        setIsMobile(mobile);
       } catch {}
     };
     window.addEventListener("resize", onResize);
@@ -3369,10 +3357,15 @@ export default function RemoteCodePage() {
       // Switching hosts swaps the whole world: nothing from the previous
       // daemon may bleed through (frontend = dumb monitor).
       untrack(() => {
+        setDraftMode(true);
+        setCreatingSession(false);
+        creationRequestId = "";
+        setTaskReview(null);
+        setReviewOpen(false);
+        setAppNotice(null);
         setActiveSessionId("");
         setActiveProjectId("");
         setMessages([]);
-        setPendingFirstText(null);
         setSessionStatus("idle");
         setPendingApproval(null);
         setSessionUsage({});
@@ -3389,6 +3382,15 @@ export default function RemoteCodePage() {
         connectWebSocket(hid);
       });
     }
+  });
+
+  createEffect(() => {
+    const id = pendingProjectId();
+    if (id && projects().some((p) => p.id === id)) untrack(() => {
+      setPendingProjectId("");
+      if (draftMode()) setActiveProjectId(id);
+      else startNewConversation(id);
+    });
   });
 
   // Default project: the one holding the newest conversation (computed from
@@ -3433,6 +3435,7 @@ export default function RemoteCodePage() {
       if (cur.has(id)) continue;
       purgeSessionTrace(id);
       if (activeSessionId() === id) {
+        setDraftMode(true);
         setActiveSessionId("");
         setMessages([]);
         setSessionStatus("idle");
@@ -3451,7 +3454,7 @@ export default function RemoteCodePage() {
   // Default open conversation: the newest one inside the active project.
   // If the project has none, stay blank — typing in the composer starts one.
   createEffect(() => {
-    if (activeSessionId()) return;
+    if (draftMode() || activeSessionId()) return;
     if (!activeProjectId()) return;
     const ap = activeProject();
     if (!ap) return;
@@ -3460,17 +3463,13 @@ export default function RemoteCodePage() {
   });
 
   // Daemon config mirror → local settings signals. Never clobbers an open
-  // Settings modal (that would fight the user's in-flight edits). `model`
-  // is only for the default — with a session open the composer shows the
-  // session's own model until the user changes it, so a config echo (e.g.
-  // after changing effort) can never snap it back to the default.
+  // Settings modal (that would fight the user's in-flight edits). Model and
+  // effort are restored separately from each session's own options.
   createEffect(() => {
     const doc = configDoc();
     if (!doc || showConfigModal()) return;
     const s: any = doc.settings || {};
     setDaemonSettings({
-      model: s.model || "gpt-4o",
-      reasoning: normalizeEffort(s.reasoning) || "none",
       temperature: typeof s.temperature === "number" ? s.temperature : 0.7,
       autoCompactPercent:
         s.autoCompactPercent ??
@@ -3484,9 +3483,17 @@ export default function RemoteCodePage() {
       httpProxy: s.httpProxy ?? s.http_proxy ?? "",
       maxExecutionTimeSec: s.maxExecutionTimeSec ?? 600,
     });
-    if (s.model && !activeSessionId()) setActiveModel(s.model);
+
     if (doc.mcpServers && typeof doc.mcpServers === "object") setMcpServers(doc.mcpServers);
     if (doc.skills && typeof doc.skills === "object") setSkills(doc.skills);
+  });
+
+  createEffect(() => {
+    const catalog = gatewayModels();
+    const selection = configDoc()?.lastSelection;
+    if (activeSessionId()) return;
+    setActiveModel(catalog.find((m) => m.id === selection?.model)?.id || catalog[0]?.id || "");
+    setEffort(selection?.effort || "medium");
   });
 
   // Auto-poll hosts while waiting for initial daemon pairing
@@ -3519,6 +3526,8 @@ export default function RemoteCodePage() {
 
   // Close popover menus on outside click / Escape.
   function closeMenus() {
+    setModeMenuOpen(false);
+    setAccessMenuOpen(false);
     setHostMenuOpen(false);
     setDisplayMenuOpen(false);
     setNewProjectMenuOpen(false);
@@ -3552,7 +3561,7 @@ export default function RemoteCodePage() {
         <div
           onClick={() => toggleToolOpen(key())}
           class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
-          title={u.call?.toolArgs || name()}
+          data-rc-tip={u.call?.toolArgs || name()}
         >
           <Show
             when={!(running && !u.result)}
@@ -3567,6 +3576,7 @@ export default function RemoteCodePage() {
             />
           </Show>
           <span class="text-ink-500 shrink-0">{sum().verb}</span>
+          <Show when={args().path}><FileIcon path={String(args().path)} /></Show>
           <span class="truncate text-ink-200 font-medium min-w-0 flex-1">{sum().target}</span>
           <Show when={sum().statAdd != null || sum().statDel != null}>
             <span class="font-mono text-[11px] shrink-0">
@@ -3618,14 +3628,14 @@ export default function RemoteCodePage() {
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Waiting for output…</div>}
               >
                 <CodeBlock
-                  text={(u.result?.toolResult || "").slice(0, 3000)}
+                  text={u.result?.toolResult || ""}
                   language={languageForPath(String(args().path || ""))}
                 />
               </Show>
             </Show>
             <Show when={name() === "write"}>
               <CodeBlock
-                text={String(args().content || u.result?.toolResult || "").slice(0, 3000)}
+                text={String(args().content || u.result?.toolResult || "")}
                 language={languageForPath(String(args().path || ""))}
               />
             </Show>
@@ -3635,7 +3645,7 @@ export default function RemoteCodePage() {
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Waiting for output…</div>}
               >
                 <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
-                  {(u.result?.toolResult || "").slice(0, 3000)}
+                  {u.result?.toolResult || ""}
                 </pre>
               </Show>
             </Show>
@@ -3716,7 +3726,7 @@ export default function RemoteCodePage() {
             })
           }
           class="block rounded-lg overflow-hidden border border-line/60 hover:border-ink-500 transition-colors cursor-pointer"
-          title="Open preview"
+          data-rc-tip="Open preview" aria-label="Open preview"
         >
           <img src={src()} class="max-h-64 max-w-full object-contain" />
         </button>
@@ -3925,7 +3935,7 @@ export default function RemoteCodePage() {
               ? "bg-ink-900 text-ink-100 ring-1 ring-ink-500/50"
               : "text-ink-400 hover:bg-ink-900/60 hover:text-ink-200"
         }`}
-        title={`${s.title}\n${s.cwd}`}
+        data-rc-tip={`${s.title}\n${s.cwd}`}
       >
         <Show when={selectionMode()}>
           <button
@@ -3936,7 +3946,7 @@ export default function RemoteCodePage() {
             class={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
               selected() ? "bg-ink-100 border-ink-100" : "border-line bg-ink-950"
             }`}
-            title="Select"
+            data-rc-tip="Select" aria-label="Select"
           >
             <Show when={selected()}>
               <Iconify icon="lucide:check" size={11} class="text-ink-950" />
@@ -3960,14 +3970,14 @@ export default function RemoteCodePage() {
                   <button
                     onClick={(e) => togglePin(s.id, e)}
                     class="p-0.5 text-ink-600 hover:text-ink-200 cursor-pointer"
-                    title={s.pinned ? "Unpin" : "Pin"}
+                    data-rc-tip={s.pinned ? "Unpin" : "Pin"} aria-label={s.pinned ? "Unpin" : "Pin"}
                   >
                     <Iconify icon={s.pinned ? "lucide:pin-off" : "lucide:pin"} size={11} />
                   </button>
                   <button
                     onClick={(e) => deleteSession(s.id, e)}
                     class="p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
-                    title="Delete"
+                    data-rc-tip="Delete" aria-label="Delete"
                   >
                     <Iconify icon="lucide:trash-2" size={11} />
                   </button>
@@ -3998,6 +4008,7 @@ export default function RemoteCodePage() {
     <div
       class="fixed inset-0 w-full h-dvh flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50"
     >
+      <RemoteHints />
 
       {/* ========================================================================= */}
       {/* Main Workspace Layout or Connect Host Onboarding                           */}
@@ -4199,7 +4210,7 @@ export default function RemoteCodePage() {
                       else setSelectionMode(true);
                     }}
                     class={`p-1 rounded cursor-pointer ${selectionMode() ? "bg-ink-800 text-ink-100" : "text-ink-500 hover:text-ink-200 hover:bg-ink-900"}`}
-                    title={selectionMode() ? "Exit selection mode" : "Select conversations"}
+                    data-rc-tip={selectionMode() ? "Exit selection mode" : "Select conversations"} aria-label={selectionMode() ? "Exit selection mode" : "Select conversations"}
                   >
                     <Iconify icon={selectionMode() ? "lucide:x" : "lucide:list-todo"} size={13} />
                   </button>
@@ -4214,7 +4225,7 @@ export default function RemoteCodePage() {
                   setNewProjectMenuOpen(false);
                 }}
                 class="p-1.5 rounded-lg text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
-                title="Display options"
+                data-rc-tip="Display options" aria-label="Display options"
               >
                 <Iconify icon="lucide:list-filter" size={14} />
               </button>
@@ -4270,7 +4281,7 @@ export default function RemoteCodePage() {
                       setDisplayMenuOpen(false);
                     }}
                     class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
-                    title="Create new project"
+                    data-rc-tip="Create new project" aria-label="Create new project"
                   >
                     <Iconify icon="lucide:folder-plus" size={13} />
                   </button>
@@ -4316,7 +4327,7 @@ export default function RemoteCodePage() {
                   fallback={
                     <div class="space-y-0.5">
                       <For
-                        each={sortedSessions(sessions().filter(matchQuery))}
+                        each={visibleSessions("all", sortedSessions(sessions().filter(matchQuery)))}
                         fallback={
                           <div class="px-2.5 py-3 text-xs text-ink-600">
                             No conversations yet. Start one above.
@@ -4325,6 +4336,7 @@ export default function RemoteCodePage() {
                       >
                         {(s) => sessionRow(s)}
                       </For>
+                      {sessionListToggle("all", sessions().filter(matchQuery).length)}
                     </div>
                   }
                 >
@@ -4344,7 +4356,7 @@ export default function RemoteCodePage() {
                                   ? "text-ink-100"
                                   : "text-ink-400 hover:bg-ink-900/60 hover:text-ink-200"
                               }`}
-                              title={p.path}
+                              data-rc-tip={p.path}
                             >
                               <Iconify
                                 icon="lucide:chevron-right"
@@ -4353,11 +4365,13 @@ export default function RemoteCodePage() {
                               />
                               <Iconify icon="lucide:folder" size={14} class="shrink-0 text-ink-500" />
                               <span class="truncate flex-1 font-medium">{p.name}</span>
+                              <button aria-label={`New conversation in ${p.name}`} data-rc-tip="New conversation in this project" onClick={(e) => { e.stopPropagation(); startNewConversation(p.id); }}
+                                class="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 p-1 text-ink-500 hover:text-ink-100 cursor-pointer"><Iconify icon="lucide:plus" size={14} /></button>
                               <Show when={!p.protected}>
                                 <button
                                   onClick={(e) => deleteProject(p.id, e)}
-                                  class="opacity-0 group-hover:opacity-100 p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer shrink-0"
-                                  title="Remove project"
+                                  class="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer shrink-0"
+                                  data-rc-tip="Remove project" aria-label="Remove project"
                                 >
                                   <Iconify icon="lucide:x" size={12} />
                                 </button>
@@ -4365,9 +4379,10 @@ export default function RemoteCodePage() {
                             </div>
                             <Show when={isProjectExpanded(p)}>
                               <div class="ml-[13px] mt-0.5 space-y-0.5 border-l border-line/50 pl-1.5">
-                                <For each={list()}>
+                                <For each={visibleSessions(p.id, list())}>
                                   {(s) => sessionRow(s)}
                                 </For>
+                                {sessionListToggle(p.id, list().length)}
                               </div>
                             </Show>
                           </div>
@@ -4380,9 +4395,10 @@ export default function RemoteCodePage() {
                           Not in Project
                         </div>
                         <div class="space-y-0.5">
-                          <For each={looseSessions()}>
+                          <For each={visibleSessions("loose", looseSessions())}>
                             {(s) => sessionRow(s)}
                           </For>
+                          {sessionListToggle("loose", looseSessions().length)}
                         </div>
                       </div>
                     </Show>
@@ -4489,14 +4505,14 @@ export default function RemoteCodePage() {
                 <button
                   onClick={loadHosts}
                   class="text-[11px] underline hover:text-amber-100 cursor-pointer shrink-0"
-                  title="Refresh"
+                  data-rc-tip="Refresh" aria-label="Refresh"
                 >
                   Refresh
                 </button>
                 <button
                   onClick={generatePairingToken}
                   class="text-[11px] px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-200 cursor-pointer shrink-0"
-                  title="Connect Another Host"
+                  data-rc-tip="Connect Another Host" aria-label="Connect Another Host"
                 >
                   Connect Another Host
                 </button>
@@ -4509,14 +4525,14 @@ export default function RemoteCodePage() {
             <a
               href="#/"
               class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line/70 text-ink-400 hover:text-ink-200 transition-colors shadow-sm"
-              title="Back to LLM Gateway"
+              data-rc-tip="Back to LLM Gateway"
             >
               <Iconify icon="lucide:arrow-left" size={14} />
             </a>
             <button
               onClick={() => setSidebarOpen(!sidebarOpen())}
               class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line/70 text-ink-400 hover:text-ink-200 transition-colors shadow-sm cursor-pointer"
-              title={sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"}
+              data-rc-tip={sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"} aria-label={sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"}
             >
               <Iconify
                 icon={
@@ -4540,7 +4556,7 @@ export default function RemoteCodePage() {
                     <button
                       onClick={() => setHistoryView(false)}
                       class="p-1.5 rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-900 cursor-pointer"
-                      title="Back to chat"
+                      data-rc-tip="Back to chat" aria-label="Back to chat"
                     >
                       <Iconify icon="lucide:x" size={15} />
                     </button>
@@ -4625,6 +4641,7 @@ export default function RemoteCodePage() {
               </div>
             }
           >
+          <Show when={!draftMode()}>
           <div
             ref={setChatContainerRef}
             onScroll={onChatScroll}
@@ -4638,46 +4655,6 @@ export default function RemoteCodePage() {
           >
           <div ref={setChatContentRef} class="pt-6 pb-10 space-y-6"
           >
-            {/* Empty state: subtle hint only — the real input is the
-                composer pinned at the bottom, never something mid-screen. */}
-            <Show when={messages().length === 0 && !activeSessionId()}>
-              <div class="max-w-xl mx-auto my-16 text-center">
-                <Show
-                  when={activeProject()}
-                  fallback={
-                    <div class="space-y-3">
-                      <div class="text-sm text-ink-300 font-medium">No project yet</div>
-                      <p class="text-xs text-ink-500 max-w-sm mx-auto leading-relaxed">
-                        Projects are just folders on the host. Create one first — every conversation lives inside a project.
-                      </p>
-                      <div class="flex items-center justify-center gap-2 pt-1">
-                        <button
-                          onClick={openNewProjectModal}
-                          class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-[13px] font-medium hover:bg-accent-400 cursor-pointer"
-                        >
-                          <Iconify icon="lucide:folder-plus" size={14} />
-                          <span>Select project folder</span>
-                        </button>
-                        <button
-                          onClick={quickStartProject}
-                          class="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-line text-[13px] text-ink-300 hover:text-ink-100 hover:bg-ink-900 cursor-pointer"
-                          title="Use your home folder (~) as the project"
-                        >
-                          <Iconify icon="lucide:zap" size={14} />
-                          <span>Quick start (~)</span>
-                        </button>
-                      </div>
-                    </div>
-                  }
-                >
-                  <p class="text-xs text-ink-600">
-                    Type below to start a conversation in{" "}
-                    <span class="text-ink-300 font-mono">{activeProject()?.path}</span>
-                  </p>
-                </Show>
-              </div>
-            </Show>
-
             {/* Conversation Messages.
                 buildRenderBlocks fuses consecutive assistant messages that
                 are tool-only into one "series" block. Index bookkeeping
@@ -4761,7 +4738,7 @@ export default function RemoteCodePage() {
                                   setLargeEditorOpen(true);
                                 }}
                                 class="p-1.5 hover:bg-ink-800 rounded-lg text-ink-500 hover:text-ink-200 cursor-pointer"
-                                title="Expand editor"
+                                data-rc-tip="Expand editor" aria-label="Expand editor"
                               >
                                 <Iconify icon="lucide:expand" size={14} />
                               </button>
@@ -4787,28 +4764,28 @@ export default function RemoteCodePage() {
                             <button
                               onClick={() => copyMsg(msg.id, textOf())}
                               class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              title="Copy"
+                              data-rc-tip="Copy" aria-label="Copy"
                             >
                               <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={13} />
                             </button>
                             <button
                               onClick={() => startEditMsg(rawIdx(), msg)}
                               class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              title="Edit and resend"
+                              data-rc-tip="Edit and resend" aria-label="Edit and resend"
                             >
                               <Iconify icon="lucide:pencil" size={13} />
                             </button>
                             <button
                               onClick={() => editUserMsg(msg)}
                               class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              title="Edit in large editor"
+                              data-rc-tip="Edit in large editor" aria-label="Edit in large editor"
                             >
                               <Iconify icon="lucide:expand" size={13} />
                             </button>
                             <button
                               onClick={() => deleteMsg(rawIdx())}
                               class="p-1 rounded-md text-ink-500 hover:text-rose-400 hover:bg-ink-900 transition-colors cursor-pointer"
-                              title="Delete"
+                              data-rc-tip="Delete" aria-label="Delete"
                             >
                               <Iconify icon="lucide:trash-2" size={13} />
                             </button>
@@ -4885,28 +4862,28 @@ export default function RemoteCodePage() {
                             <button
                               onClick={() => copyMsg(msg.id, textOf())}
                               class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              title="Copy"
+                              data-rc-tip="Copy" aria-label="Copy"
                             >
                               <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={14} />
                             </button>
                             <button
                               onClick={() => regenerateMsg(rawIdx())}
                               class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              title="Regenerate response"
+                              data-rc-tip="Regenerate response" aria-label="Regenerate response"
                             >
                               <Iconify icon="lucide:rotate-cw" size={14} />
                             </button>
                             <button
                               onClick={() => startEditMsg(rawIdx(), msg)}
                               class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              title="Edit response"
+                              data-rc-tip="Edit response" aria-label="Edit response"
                             >
                               <Iconify icon="lucide:pencil" size={14} />
                             </button>
                             <button
                               onClick={() => deleteMsg(rawIdx())}
                               class="p-1.5 rounded-md text-ink-500 hover:text-rose-400 hover:bg-ink-900 transition-colors cursor-pointer"
-                              title="Delete"
+                              data-rc-tip="Delete" aria-label="Delete"
                             >
                               <Iconify icon="lucide:trash-2" size={14} />
                             </button>
@@ -5041,7 +5018,7 @@ export default function RemoteCodePage() {
                           respondApproval(true);
                         }}
                         class="px-3.5 py-1.5 rounded-xl bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 text-xs font-semibold transition-colors cursor-pointer"
-                        title="Approve and stop asking (YOLO)"
+                        data-rc-tip="Approve and stop asking (YOLO)" aria-label="Approve and stop asking (YOLO)"
                       >
                         Always allow
                       </button>
@@ -5053,41 +5030,12 @@ export default function RemoteCodePage() {
           </div>
           </div>
           </Show>
+          </Show>
 
           {/* Composer estilo Antigravity — hidden entirely until a project
               exists: without a project there is nothing to type into. */}
           <Show when={!historyView()}>
-          <Show
-            when={projects().length > 0}
-            fallback={
-              <div class="px-4 pb-4 pt-2 bg-ink-950 relative z-20">
-                <div class="max-w-2xl mx-auto rounded-2xl border border-dashed border-line/70 bg-ink-900/50 px-4 py-3.5 flex flex-wrap items-center justify-between gap-3">
-                  <p class="text-xs text-ink-400 leading-relaxed">
-                    <span class="text-ink-200 font-medium">Create a project first.</span>{" "}
-                    Conversations live inside a project folder on the host.
-                  </p>
-                  <div class="flex items-center gap-2">
-                    <button
-                      onClick={openNewProjectModal}
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-accent-400 cursor-pointer"
-                    >
-                      <Iconify icon="lucide:folder-plus" size={13} />
-                      <span>Select folder</span>
-                    </button>
-                    <button
-                      onClick={quickStartProject}
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-line text-xs text-ink-300 hover:text-ink-100 hover:bg-ink-900 cursor-pointer"
-                      title="Use your home folder (~) as the project"
-                    >
-                      <Iconify icon="lucide:zap" size={13} />
-                      <span>Quick start (~)</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            }
-          >
-          <div class="px-4 pb-4 pt-2 bg-ink-950 relative z-20">
+          <div class={draftMode() ? "flex-1 min-h-0 overflow-y-auto flex items-center justify-center px-4 py-10" : "px-4 pb-4 pt-2 bg-ink-950 relative z-20"}>
             {/* Floating scroll-to-bottom (chatbot FEAT-06) */}
             <Show when={!isAtBottom() && messages().length > 0}>
               <div class="flex justify-center pb-2">
@@ -5131,9 +5079,105 @@ export default function RemoteCodePage() {
               </div>
             </Show>
 
-            <div class="max-w-2xl mx-auto">
-              {/* z-index: composer sits above the chat (z-30); popovers z-[60]
-                  escape via no overflow clipping on this box. */}
+            <div class="w-full max-w-2xl mx-auto">
+              <Show when={draftMode()}>
+                <h1 class="mb-6 text-2xl sm:text-3xl font-semibold tracking-tight text-ink-100">What would you like to work on?</h1>
+                <div class="mb-3 flex justify-start" data-draft-project>
+                  {/* Project picker — where the next conversation starts.
+                      Default: project of the newest conversation (daemon). */}
+                  <div>
+                    <button
+                      ref={projBtn}
+                      data-menubtn
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setProjectMenuOpen(!projectMenuOpen());
+                        setModelMenuOpen(false);
+                        setAddContextOpen(false);
+                        setUsageOpen(false);
+                      }}
+                      class="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-elev border border-line text-sm text-ink-200 hover:bg-ink-800 font-medium cursor-pointer"
+                      data-rc-tip="Project (where new conversations start)" aria-label="Project (where new conversations start)"
+                    >
+                      <Iconify icon="lucide:folder" size={13} />
+                      <span class="max-w-[110px] truncate">
+                        {activeProject()?.name || "Select project"}
+                      </span>
+                      <Iconify icon="lucide:chevron-down" size={11} />
+                    </button>
+                    <FloatMenu anchor={() => projBtn} open={projectMenuOpen()} placement="bottom-start" width="18rem">
+                        <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
+                          Project
+                        </div>
+                        <div class="max-h-56 overflow-y-auto">
+                          <For
+                            each={projects()}
+                            fallback={
+                              <div class="px-2.5 py-2 text-[11px] text-ink-600">
+                                No projects yet.
+                              </div>
+                            }
+                          >
+                            {(p) => (
+                              <button
+                                onClick={() => {
+                                  pickProject(p.id);
+                                  setProjectMenuOpen(false);
+                                }}
+                                class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
+                                  p.id === activeProject()?.id
+                                    ? "bg-ink-800 text-ink-100"
+                                    : "text-ink-300 hover:bg-ink-800/60"
+                                }`}
+                                data-rc-tip={p.path} aria-label={p.path}
+                              >
+                                <span class="flex items-center gap-1.5 min-w-0">
+                                  <Iconify icon="lucide:folder" size={13} class="shrink-0 text-ink-500" />
+                                  <span class="truncate">{p.name}</span>
+                                </span>
+                                <Show when={p.id === activeProject()?.id}>
+                                  <Iconify icon="lucide:check" size={13} />
+                                </Show>
+                              </button>
+                            )}
+                          </For>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setProjectMenuOpen(false);
+                            openNewProjectModal();
+                          }}
+                          class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer border-t border-line/60"
+                        >
+                          <Iconify icon="lucide:folder-plus" size={13} />
+                          <span>New project…</span>
+                        </button>
+                    </FloatMenu>
+                  </div>
+                </div>
+              </Show>
+              <Show when={taskReview()?.files.length && activeSessionId()}>
+                <div class="mb-2 flex flex-wrap items-center justify-end gap-3 text-xs text-ink-400" data-task-changes>
+                  <span class="flex items-center gap-1.5"><Iconify icon="lucide:files" size={14} />{taskReview()?.files.length} file{taskReview()?.files.length === 1 ? "" : "s"} changed</span>
+                  <button onClick={() => undoChanges()} disabled={sessionStatus() === "running" || reviewLoading() || !wsOpen()} class="flex items-center gap-1 hover:text-ink-100 disabled:opacity-40 cursor-pointer"><Iconify icon="lucide:undo-2" size={13} />Undo</button>
+                  <button onClick={() => requestReview(true)} disabled={sessionStatus() === "running" || reviewLoading() || !wsOpen()} class="px-3 py-1.5 rounded-lg border border-line hover:bg-elev text-ink-200 disabled:opacity-40 cursor-pointer">Review</button>
+                </div>
+              </Show>
+              <Show when={appNotice()}>{(notice) =>
+                <div role={notice().kind === "err" ? "alert" : "status"} class={`mb-3 flex items-start gap-2 rounded-xl border px-3 py-2.5 text-xs ${notice().kind === "err" ? "border-brand-500/30 bg-brand-500/5 text-ink-200" : "border-line bg-elev text-ink-300"}`}>
+                  <Iconify icon={notice().kind === "err" ? "lucide:circle-alert" : "lucide:check"} size={15} class={notice().kind === "err" ? "text-brand-500" : "text-ink-400"} />
+                  <span class="min-w-0 flex-1 break-words">{notice().message}</span>
+                  <button aria-label="Dismiss notification" onClick={() => setAppNotice(null)} class="text-ink-500 hover:text-ink-100 cursor-pointer"><Iconify icon="lucide:x" size={13} /></button>
+                </div>
+              }</Show>
+              <Show when={activeHost() && (connectionState() !== "connected" || activeHost()?.status !== "online")}>
+                <div role="status" class="mb-3 rounded-xl border border-line bg-elev p-3 text-xs text-ink-300 flex items-start gap-2">
+                  <Iconify icon="lucide:unplug" size={15} class="text-ink-500" />
+                  <div class="flex-1"><p class="font-medium">{connectionState() !== "connected" ? "Reconnecting to the gateway…" : `${activeHost()?.name || "Host"} is offline`}</p><p class="mt-1 text-ink-500">Your draft is kept here. Start the daemon on this host to continue.</p></div>
+                  <button onClick={loadHosts} class="text-ink-200 hover:underline cursor-pointer">Retry</button>
+                </div>
+              </Show>
+              {/* Floating menus use the shared portal layer above the composer. */}
               <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors relative">
                 {/* Attachment chips (chatbot-style) */}
                 <Show when={pendingAttachments().length > 0}>
@@ -5143,7 +5187,7 @@ export default function RemoteCodePage() {
                         <div
                           onClick={() => previewPending(att)}
                           class="relative group flex items-center gap-1.5 bg-ink-950 rounded-lg border border-line/70 pl-1.5 pr-2 py-1 text-xs max-w-[180px] cursor-pointer hover:border-ink-500 transition-colors"
-                          title={`${att.name} (${Math.round(att.size / 1024)}KB) — click to preview`}
+                          data-rc-tip={`${att.name} (${Math.round(att.size / 1024)}KB) — click to preview`}
                         >
                           <Show
                             when={att.loading}
@@ -5168,7 +5212,7 @@ export default function RemoteCodePage() {
                               removePendingAttachment(att.key);
                             }}
                             class="absolute -top-1.5 -right-1.5 bg-ink-700 hover:bg-rose-500 rounded-full p-0.5 transition-colors shadow cursor-pointer"
-                            title="Remove"
+                            data-rc-tip="Remove" aria-label="Remove"
                           >
                             <Iconify icon="lucide:x" size={10} />
                           </button>
@@ -5179,6 +5223,7 @@ export default function RemoteCodePage() {
                 </Show>
                 <textarea
                   id="rc-composer"
+                    disabled={creatingSession()}
                   rows={1}
                   class="w-full bg-transparent text-base sm:text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto"
                   placeholder={
@@ -5251,14 +5296,14 @@ export default function RemoteCodePage() {
                 <button
                   onClick={() => setInputPrompt("")}
                   class="absolute top-2.5 right-2.5 p-1 rounded-md text-ink-600 hover:text-ink-300 hover:bg-ink-800 transition-colors cursor-pointer"
-                  title="Clear input"
+                  data-rc-tip="Clear input" aria-label="Clear input"
                 >
                   <Iconify icon="lucide:x" size={13} />
                 </button>
               </Show>
 
-              <div class="flex items-center justify-between px-3 pb-2.5 pt-1">
-                <div class="flex items-center gap-0.5 text-xs text-ink-400">
+              <div class="flex items-end justify-between gap-2 px-3 pb-2.5 pt-1">
+                <div class="flex flex-1 min-w-0 flex-wrap items-center gap-0.5 text-xs text-ink-400">
                   {/* Session files (stored on the daemon) */}
                   <Show when={(sessionFiles()[activeSessionId()] || []).length > 0}>
                     <div>
@@ -5272,7 +5317,7 @@ export default function RemoteCodePage() {
                           setModelMenuOpen(false);
                         }}
                         class="flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-ink-800 cursor-pointer"
-                        title="Session files"
+                        data-rc-tip="Session files" aria-label="Session files"
                       >
                         <Iconify icon="lucide:paperclip" size={13} />
                         <span>{(sessionFiles()[activeSessionId()] || []).length}</span>
@@ -5290,9 +5335,9 @@ export default function RemoteCodePage() {
                                     openStoredPreview(activeSessionId(), f.id);
                                   }}
                                   class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
-                                  title={`${f.name} (${Math.round(f.size / 1024)}KB)`}
+                                  data-rc-tip={`${f.name} (${Math.round(f.size / 1024)}KB)`} aria-label={`${f.name} (${Math.round(f.size / 1024)}KB)`}
                                 >
-                                  <Iconify icon="lucide:file-text" size={13} class="shrink-0 text-ink-500" />
+                                  <FileIcon path={f.name} size={13} />
                                   <span class="truncate flex-1">{f.name}</span>
                                   <span class="text-[10px] text-ink-600 shrink-0">{Math.round(f.size / 1024)}K</span>
                                 </button>
@@ -5313,7 +5358,7 @@ export default function RemoteCodePage() {
                         setModelMenuOpen(false);
                       }}
                       class="w-6 h-6 rounded-full hover:bg-ink-800 flex items-center justify-center cursor-pointer"
-                      title="Add context"
+                      data-rc-tip="Add context" aria-label="Add context"
                     >
                       <Iconify icon="lucide:plus" size={14} />
                     </button>
@@ -5367,79 +5412,48 @@ export default function RemoteCodePage() {
                       setLargeEditorOpen(true);
                     }}
                     class="w-6 h-6 rounded-full hover:bg-ink-800 hidden sm:flex items-center justify-center cursor-pointer"
-                    title="Expand editor"
+                    data-rc-tip="Expand editor" aria-label="Expand editor"
                   >
                     <Iconify icon="lucide:expand" size={13} />
                   </button>
-                  {/* Project picker — where the next conversation starts.
-                      Default: project of the newest conversation (daemon). */}
                   <div>
-                    <button
-                      ref={projBtn}
-                      data-menubtn
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setProjectMenuOpen(!projectMenuOpen());
-                        setModelMenuOpen(false);
-                        setAddContextOpen(false);
-                        setUsageOpen(false);
-                      }}
-                      class="flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-ink-800 font-medium cursor-pointer"
-                      title="Project (where new conversations start)"
-                    >
-                      <Iconify icon="lucide:folder" size={13} />
-                      <span class="max-w-[110px] truncate">
-                        {activeProject()?.name || "Select project"}
-                      </span>
+                    <button ref={modeBtn} data-menubtn aria-label="Agent mode and skills" aria-expanded={modeMenuOpen()}
+                      onClick={() => { const next = !modeMenuOpen(); closeMenus(); setModeMenuOpen(next); }}
+                      class="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs hover:bg-elev cursor-pointer">
+                      <Iconify icon={agentMode() === "plan" ? "lucide:list-checks" : agentMode() === "learning" ? "lucide:graduation-cap" : "lucide:hammer"} size={14} />
+                      <span class="capitalize">{agentMode()}</span><Show when={selectedSkills().length}><span class="text-ink-500">+{selectedSkills().length}</span></Show>
                       <Iconify icon="lucide:chevron-down" size={11} />
                     </button>
-                    <FloatMenu anchor={() => projBtn} open={projectMenuOpen()} placement="top-start" width="15rem">
-                        <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-                          Project
-                        </div>
-                        <div class="max-h-56 overflow-y-auto">
-                          <For
-                            each={projects()}
-                            fallback={
-                              <div class="px-2.5 py-2 text-[11px] text-ink-600">
-                                No projects yet.
-                              </div>
-                            }
-                          >
-                            {(p) => (
-                              <button
-                                onClick={() => {
-                                  pickProject(p.id);
-                                  setProjectMenuOpen(false);
-                                }}
-                                class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
-                                  p.id === activeProject()?.id
-                                    ? "bg-ink-800 text-ink-100"
-                                    : "text-ink-300 hover:bg-ink-800/60"
-                                }`}
-                                title={p.path}
-                              >
-                                <span class="flex items-center gap-1.5 min-w-0">
-                                  <Iconify icon="lucide:folder" size={13} class="shrink-0 text-ink-500" />
-                                  <span class="truncate">{p.name}</span>
-                                </span>
-                                <Show when={p.id === activeProject()?.id}>
-                                  <Iconify icon="lucide:check" size={13} />
-                                </Show>
-                              </button>
-                            )}
-                          </For>
-                        </div>
-                        <button
-                          onClick={() => {
-                            setProjectMenuOpen(false);
-                            openNewProjectModal();
-                          }}
-                          class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer border-t border-line/60"
-                        >
-                          <Iconify icon="lucide:folder-plus" size={13} />
-                          <span>New project…</span>
+                    <FloatMenu anchor={() => modeBtn} open={modeMenuOpen()} placement="top-start" width="20rem">
+                      <p class="px-2 py-1.5 font-medium text-ink-400">Mode</p><Show when={sessionStatus() === "running"}><p class="px-2 pb-2 text-[11px] text-ink-500">Changes apply to the next task.</p></Show>
+                      <For each={[{id:"build", label:"Build", description:"Implement and validate changes", icon:"lucide:hammer"}, {id:"plan", label:"Plan", description:"Explore and plan without editing files", icon:"lucide:list-checks"}, {id:"learning", label:"Learning", description:"Learn through hints and guiding questions", icon:"lucide:graduation-cap"}]}>{(mode) =>
+                        <button role="menuitemradio" aria-checked={agentMode() === mode.id} onClick={() => { setAgentMode(mode.id); configureSession(); }} class="w-full flex items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-elev cursor-pointer">
+                          <Iconify icon={mode.icon} size={16} /><span class="flex-1"><span class="font-medium text-ink-100">{mode.label}</span><span class="block text-[11px] text-ink-500 mt-0.5">{mode.description}</span></span><Show when={agentMode() === mode.id}><Iconify icon="lucide:check" size={14} /></Show>
                         </button>
+                      }</For>
+                      <div class="mt-1 border-t border-line pt-2"><p class="px-2 pb-1 font-medium text-ink-400">Additional skills</p>
+                        <For each={Object.entries(skills()).filter(([,skill]) => skill.enabled)} fallback={<p class="p-2 text-ink-500">Create custom skills in Settings.</p>}>{([name, skill]) =>
+                          <button role="menuitemcheckbox" aria-checked={selectedSkills().includes(name)} onClick={() => { setSelectedSkills((prev) => prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]); configureSession(); }} class="w-full rounded-lg px-2 py-2 flex items-center gap-2 text-left hover:bg-elev cursor-pointer">
+                            <Iconify icon="lucide:puzzle" size={14} /><span class="flex-1"><span class="text-ink-200">{name}</span><span class="block text-[11px] text-ink-500">{skill.description}</span></span><Show when={selectedSkills().includes(name)}><Iconify icon="lucide:check" size={14} /></Show>
+                          </button>
+                        }</For>
+                      </div>
+                    </FloatMenu>
+                  </div>
+                  <div>
+                    <button ref={accessBtn} data-menubtn aria-label="Agent permissions" aria-expanded={accessMenuOpen()}
+                      onClick={() => { const next = !accessMenuOpen(); closeMenus(); setAccessMenuOpen(next); }}
+                      class="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs hover:bg-elev cursor-pointer">
+                      <Iconify icon={yoloMode() ? "lucide:shield-alert" : "lucide:hand"} size={14} /><span class="hidden sm:inline">{yoloMode() ? "Full access" : "Ask for approval"}</span>
+                    </button>
+                    <FloatMenu anchor={() => accessBtn} open={accessMenuOpen()} placement="top-start" width="22rem">
+                      <p class="px-2 py-2 text-ink-400">How should actions be approved?</p>
+                      <For each={[{full:false, label:"Ask for approval", description:"Ask before file edits and shell commands.", icon:"lucide:hand"}, {full:true, label:"Full access", description:"Allow edits and commands without asking (YOLO).", icon:"lucide:shield-alert"}]}>{(access) =>
+                        <button role="menuitemradio" aria-checked={yoloMode() === access.full} onClick={() => { setYoloMode(access.full); configureSession(); setAccessMenuOpen(false); }} class="w-full flex items-center gap-3 px-2 py-3 text-left rounded-lg hover:bg-elev cursor-pointer">
+                          <Iconify icon={access.icon} size={19} /><span class="flex-1"><span class="font-medium text-ink-100">{access.label}</span><span class="block mt-1 text-[11px] text-ink-500">{access.description}</span></span><Show when={yoloMode() === access.full}><Iconify icon="lucide:check" size={14} /></Show>
+                        </button>
+                      }</For>
+                      <Show when={agentMode() !== "build"}><p class="px-2 py-2 text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan" : "Learning"} mode always keeps files read-only.</p></Show>
                     </FloatMenu>
                   </div>
                   {/* Model picker (moved from the removed topbar) */}
@@ -5455,13 +5469,13 @@ export default function RemoteCodePage() {
                         setUsageOpen(false);
                       }}
                       class="flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-ink-800 font-medium cursor-pointer"
-                      title="Switch model"
+                      data-rc-tip="Switch model" aria-label="Switch model"
                     >
-                      <span class="max-w-[130px] truncate">{activeModel().split("/").pop()}</span>
+                      <span class="max-w-[120px] sm:max-w-[150px] truncate">{activeModel().split("/").pop() || "Select model"} <span class="capitalize text-ink-500">{effort()}</span></span>
                       <Iconify icon="lucide:chevron-down" size={11} />
                     </button>
                     <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="32rem">
-                      <div>{modelPickerBody(true)}</div>
+                      <div>{modelPickerBody()}</div>
                     </FloatMenu>
                     <FloatMenu anchor={() => contextBtn} open={usageOpen()} placement="top-start" width="19rem">
                       <div class="p-1.5 text-xs">
@@ -5500,6 +5514,7 @@ export default function RemoteCodePage() {
                       </div>
                     </FloatMenu>
                   </div>
+                  <Show when={activeSessionId()}>
                   <Tooltip content="Conversation context and session usage">
                     <button ref={contextBtn} data-menubtn aria-label={`Conversation context: ${activeContext().label}`} aria-expanded={usageOpen()}
                       onClick={() => { const next = !usageOpen(); closeMenus(); setUsageOpen(next); }}
@@ -5507,14 +5522,15 @@ export default function RemoteCodePage() {
                       <Iconify icon="lucide:chart-pie" size={12} /><span>{activeContext().label}</span>
                     </button>
                   </Tooltip>
+                  </Show>
                 </div>
 
-                <div class="flex items-center gap-2">
+                <div class="flex shrink-0 items-center gap-2">
                   <Show when={sessionStatus() === "running"}>
                     <button
                       onClick={cancelCurrentTurn}
                       class="w-7 h-7 rounded-full bg-ink-700 text-ink-100 hover:bg-ink-600 flex items-center justify-center transition-colors cursor-pointer"
-                      title="Stop"
+                      data-rc-tip="Stop" aria-label="Stop"
                     >
                       <Iconify icon="lucide:square" size={13} />
                     </button>
@@ -5523,13 +5539,19 @@ export default function RemoteCodePage() {
                   <button
                     onClick={sendPrompt}
                     disabled={
-                      sessionStatus() === "running" ||
+                      creatingSession() || sessionStatus() === "running" || !activeModel() ||
                       (activeSessionId()
                         ? !inputPrompt().trim() && pendingAttachments().length === 0
-                        : !inputPrompt().trim() || !activeProject())
+                        : (!inputPrompt().trim() && pendingAttachments().length === 0) || !activeProject())
                     }
                     class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-accent-400 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
-                    title={
+                    data-rc-tip={
+                      sessionStatus() === "running"
+                        ? "Generating..."
+                        : !activeSessionId()
+                          ? "Start conversation"
+                          : "Send"
+                    } aria-label={
                       sessionStatus() === "running"
                         ? "Generating..."
                         : !activeSessionId()
@@ -5562,52 +5584,46 @@ export default function RemoteCodePage() {
             </div>
           </div>
           </Show>
-          </Show>
         </main>
       </div>
       </Show>
 
-      {/* Modal: New Project (pasta no host) */}
-      <Modal
-        open={showNewProjectModal()}
-        onClose={() => setShowNewProjectModal(false)}
-        title="Select project folder"
-        fullOnMobile
-      >
-        <div class="space-y-4">
-          <p class="text-xs text-ink-400 leading-relaxed">
-            A project is just a folder on the host <span class="font-mono text-ink-200">{activeHost()?.name || ""}</span>. Conversations created inside it share that root.
-          </p>
-          <div>
-            <label class="block text-xs font-medium text-ink-300 mb-1">
-              Folder path on host
-            </label>
-            <input
-              type="text"
-              class="w-full bg-ink-900 border border-line rounded-xl px-3 py-2 text-sm text-ink-100 focus:outline-none focus:border-ink-400 font-mono"
-              placeholder="/home/user/workspace/my-project"
-              value={newProjectPath()}
-              onInput={(e) => setNewProjectPath(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") createProject();
-              }}
-            />
-          </div>
-          <div class="flex justify-end gap-2 pt-1">
-            <button
-              onClick={() => setShowNewProjectModal(false)}
-              class="px-4 py-2 rounded-xl text-xs text-ink-400 hover:text-ink-100 hover:bg-ink-800 cursor-pointer"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={createProject}
-              class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-accent-400 cursor-pointer"
-            >
-              Add project
-            </button>
-          </div>
+      <Modal open={showNewProjectModal()} onClose={() => setShowNewProjectModal(false)} title="Select project folder" width="max-w-2xl" fullOnMobile>
+        <form class="flex items-center gap-2 mb-3" onSubmit={(e) => { e.preventDefault(); requestFolders(newProjectPath()); }}>
+          <input aria-label="Folder path on host" class="flex-1 min-w-0 rounded-lg border border-line bg-elev px-3 py-2.5 text-sm font-mono text-ink-100 outline-none focus:border-ink-400" value={newProjectPath()} onInput={(e) => setNewProjectPath(e.currentTarget.value)} />
+          <button type="submit" class="p-2 text-ink-400 hover:text-ink-100 cursor-pointer" aria-label="Navigate to folder"><Iconify icon="lucide:arrow-right" size={16} /></button>
+          <Btn type="button" disabled={folderLoading() || !folderCurrent() || newProjectPath() !== folderCurrent()} onClick={createProject}>OK</Btn>
+        </form>
+        <Show when={folderError()}><div role="alert" class="mb-3 p-3 rounded-lg border border-brand-500/30 text-sm text-ink-200">{folderError()}</div></Show>
+        <div role="group" aria-label="Host folders" class="h-[50vh] min-h-48 overflow-y-auto -mx-2 space-y-0.5">
+          <button disabled={folderLoading() || !folderParent() || folderParent() === folderCurrent()} onClick={() => requestFolders(folderParent())} class="flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-ink-300 hover:bg-elev disabled:opacity-40 cursor-pointer"><Iconify icon="lucide:arrow-up" size={17} /><span>..</span></button>
+          <Show when={!folderLoading()} fallback={<p class="px-3 py-5 text-sm text-ink-500">Loading folders…</p>}>
+            <For each={folderEntries()} fallback={<p class="px-3 py-5 text-sm text-ink-500">No subfolders. Select OK to use this folder.</p>}>{(folder) =>
+              <button aria-label={`Open ${folder.name}`} onClick={() => requestFolders(folder.path)} class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left text-sm text-ink-300 hover:bg-elev focus-visible:bg-elev outline-none cursor-pointer"><Iconify icon="lucide:folder" size={18} /><span class="truncate">{folder.name}</span></button>
+            }</For>
+          </Show>
         </div>
+      </Modal>
+
+      <Modal open={reviewOpen()} onClose={() => setReviewOpen(false)} title="Review task changes" description="Changes captured from the last task. Undo restores their previous contents while preserving later edits." width="max-w-5xl" fullOnMobile
+        footer={<><Btn variant="ghost" onClick={() => setReviewOpen(false)}>Close</Btn><Btn disabled={sessionStatus() === "running" || reviewLoading() || !taskReview()?.files.length || !wsOpen()} onClick={() => undoChanges()}>Undo all changes</Btn></>}>
+        <Show when={reviewError()}><div role="alert" class="mb-3 rounded-lg border border-brand-500/30 bg-brand-500/5 p-3 text-sm text-ink-200">{reviewError()}</div></Show>
+        <Show when={taskReview()?.notice}><p class="mb-3 text-xs text-ink-500">{taskReview()?.notice}</p></Show>
+        <Show when={!reviewLoading()} fallback={<p class="p-4 text-sm text-ink-500">Loading changes…</p>}>
+          <For each={taskReview()?.files || []} fallback={<p class="p-4 text-sm text-ink-500">No pending file changes from this task.</p>}>{(file) =>
+            <details open class="mb-3 rounded-xl border border-line overflow-hidden">
+              <summary class="flex items-center gap-2 px-4 py-3 bg-elev/50 text-xs text-ink-200 cursor-pointer"><FileIcon path={file.path} /><span class="flex-1 min-w-0 break-all font-mono">{file.path}</span><span class="text-ink-500 capitalize">{file.kind}</span></summary>
+              <Show when={file.truncated}><p class="px-3 py-2 text-xs text-ink-500">Preview truncated. Undo uses the complete backup.</p></Show>
+              <Show when={!file.binary} fallback={<p class="p-4 text-xs text-ink-500">Binary file changed.</p>}>
+                <div class="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-line">
+                  <div class="min-w-0"><p class="px-3 py-2 text-[11px] text-ink-500 border-b border-line">Before</p><CodeBlock text={file.before || ""} language={languageForPath(file.path)} maxH="max-h-96" /></div>
+                  <div class="min-w-0"><p class="px-3 py-2 text-[11px] text-ink-500 border-b border-line">After</p><CodeBlock text={file.after || ""} language={languageForPath(file.path)} maxH="max-h-96" /></div>
+                </div>
+              </Show>
+              <div class="flex justify-end border-t border-line px-3 py-2"><button disabled={file.canUndo === false || sessionStatus() === "running" || reviewLoading() || !wsOpen()} onClick={() => undoChanges(file.path)} class="text-xs text-ink-400 hover:text-ink-100 disabled:opacity-40 cursor-pointer">Undo file</button></div>
+            </details>
+          }</For>
+        </Show>
       </Modal>
 
       {/* Modal: Large editor (chatbot FullscreenEditor) */}
@@ -5694,7 +5710,7 @@ export default function RemoteCodePage() {
                   <button
                     onClick={() => setShowTruncateInput(!showTruncateInput())}
                     class="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border bg-ink-900 border-line text-ink-400 hover:text-ink-200 cursor-pointer"
-                    title="Truncate to reduce tokens"
+                    data-rc-tip="Truncate to reduce tokens" aria-label="Truncate to reduce tokens"
                   >
                     <Iconify icon="lucide:scissors" size={13} />
                     <span>Truncate</span>
@@ -5829,7 +5845,7 @@ export default function RemoteCodePage() {
                         <button
                           onClick={() => copyWithToast(cmd)}
                           class="p-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 shrink-0 cursor-pointer"
-                          title="Copy command"
+                          data-rc-tip="Copy command" aria-label="Copy command"
                         >
                           <Iconify icon="lucide:copy" size={14} />
                         </button>
@@ -5843,7 +5859,7 @@ export default function RemoteCodePage() {
                         <button
                           onClick={() => copyWithToast(p().connectUrl)}
                           class="p-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 shrink-0 cursor-pointer"
-                          title="Copy URL"
+                          data-rc-tip="Copy URL" aria-label="Copy URL"
                         >
                           <Iconify icon="lucide:copy" size={14} />
                         </button>
@@ -5885,6 +5901,7 @@ export default function RemoteCodePage() {
         }}>Save changes</Btn></>}
       >
           <div class="w-full space-y-6">
+            <Show when={appNotice()}>{(notice) => <div role={notice().kind === "err" ? "alert" : "status"} class="rounded-xl border border-line bg-elev px-3 py-2.5 text-xs text-ink-300">{notice().message}</div>}</Show>
             <div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
               <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
                 <Iconify icon="lucide:palette" size={15} class="text-ink-500" />
@@ -5961,48 +5978,7 @@ export default function RemoteCodePage() {
 
               </h3>
               <div class="space-y-4 text-xs">
-                <div>
-                  <label class="block font-semibold text-ink-200 mb-1">
-                    Default Model
-                  </label>
-                  <Select value={daemonSettings().model} options={gatewayModels().map((m) => ({ value: m.id, label: m.name }))}
-                    onChange={(model) => setDaemonSettings((prev) => ({ ...prev, model }))} />
-                  <div class="mt-3">
-                    <Select label="Reasoning effort" value={normalizeEffort(daemonSettings().reasoning)}
-                      options={REASONING_LEVELS.map((level) => ({ value: level, label: level === "none" ? "None" : level }))}
-                      onChange={(reasoning) => setDaemonSettings((prev) => ({ ...prev, reasoning }))} />
-                  </div>
-                </div>
-
-                <div class="space-y-2 pt-2 border-t border-line/60">
-                  <label class="flex items-start gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={yoloMode()}
-                      onChange={(e) => {
-                        const next = e.currentTarget.checked;
-                        setYoloMode(next);
-                        toast(
-                          next
-                            ? "YOLO Mode: tools run without asking"
-                            : "Safe Mode: each tool asks for approval",
-                          next ? "err" : "ok",
-                        );
-                      }}
-                      class="rounded accent-amber-500 mt-0.5"
-                    />
-                    <span>
-                      <span class="text-ink-200 font-medium">
-                        Autonomous execution (YOLO)
-                      </span>
-                      <span class="block text-[11px] text-ink-500 font-normal">
-                        On by default. When off, every file write and shell command asks for approval first.
-                      </span>
-                    </span>
-                  </label>
-
-
-
+                <div class="space-y-2">
                   <label class="flex items-center gap-2 cursor-pointer select-none">
                     <input
                       type="checkbox"
@@ -6143,7 +6119,7 @@ export default function RemoteCodePage() {
                   <div class="flex justify-end">
                     <button
                       onClick={handleAddMcpServer}
-                      class="px-4 py-1.5 rounded-lg bg-brand-500 text-white font-medium hover:bg-brand-600"
+                      class="px-4 py-1.5 rounded-lg bg-accent-500 text-accent-fg font-medium hover:bg-accent-600 cursor-pointer"
                     >
                       Add MCP Server
                     </button>

@@ -132,6 +132,26 @@ describe("Remote Code Relay and Pairing", () => {
     expect(json.hosts[0].status).toBe("offline");
   });
 
+  test("offline relay errors retain request correlation for inline recovery", async () => {
+    const ws = new WebSocket(`${GW_WS}/api/remote/ws?token=${encodeURIComponent(userToken)}`);
+    try {
+      const response = await new Promise<any>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("offline reply timed out")), 3000);
+        ws.onopen = () => ws.send(JSON.stringify({ type: "browse_folders", hostId, id: 456, requestId: "folder-request", sessionId: "session-reference", path: "~" }));
+        ws.onmessage = (event) => {
+          const message = JSON.parse(String(event.data));
+          if (message.type !== "error") return;
+          clearTimeout(timer);
+          resolve(message);
+        };
+      });
+      expect(response.replyTo).toBe("browse_folders");
+      expect(response.requestId).toBe("folder-request");
+      expect(response.sessionId).toBe("session-reference");
+      expect(response.id).toBe(456);
+    } finally { ws.close(); }
+  });
+
   test("daemon model metadata uses the gateway registry with auth and configured limits", async () => {
     const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ data: [] }) });
     const headers = { Authorization: `Bearer ${userToken}`, "Content-Type": "application/json" };
@@ -431,6 +451,19 @@ describe("Remote Code Relay and Pairing", () => {
       const created = await waitFor((m) => m.type === "session_created");
       const sid = created.session.id;
       expect(created.session.title).toBe("New conversation");
+
+      send({ type: "browse_folders", path: workDir, requestId: "browse-root" });
+      const folders = await waitFor((m) => m.type === "folders" && m.requestId === "browse-root");
+      expect(folders.path).toBe(workDir);
+      expect(folders.parent).toBe(path.dirname(workDir));
+      expect(Array.isArray(folders.folders)).toBe(true);
+
+      send({ type: "configure_session", sessionId: sid, model: "gpt-4o", options: { effort: "low", mode: "build", skills: [], access: "ask" } });
+      const configured = await waitFor((m) => m.type === "session_data" && m.session?.id === sid && m.session.options?.effort === "low");
+      expect(configured.session.options.access).toBe("ask");
+      send({ type: "pull", id: 1234, collection: "config" });
+      const preferences = await waitFor((m) => m.type === "pull-response" && m.id === 1234);
+      expect(preferences.items[0].lastSelection).toEqual({ model: "gpt-4o", effort: "low" });
 
       // Rename + pin round-trip
       send({ type: "rename_session", sessionId: sid, title: "Renamed Session" });

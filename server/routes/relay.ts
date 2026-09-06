@@ -158,6 +158,9 @@ export const remoteRelayWsHandlers = {
               hostId,
               message: "Remote host is offline",
               replyTo: parsed.type,
+              id: typeof parsed.id === "number" ? parsed.id : undefined,
+              requestId: typeof parsed.requestId === "string" ? parsed.requestId : undefined,
+              sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : undefined,
             }),
           );
         } catch {}

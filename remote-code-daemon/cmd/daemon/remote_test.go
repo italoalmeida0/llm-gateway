@@ -169,8 +169,12 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 		event := func(data any) { encoded, _ := json.Marshal(data); fmt.Fprintf(w, "data: %s\n\n", encoded) }
 		event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"reasoning": "Inspecting the workspace."}}}})
 		if step%2 == 1 {
+			event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "I will read the file now."}}}})
 			args, _ := json.Marshal(map[string]any{"path": "hello.txt"})
-			event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"index": 0, "id": fmt.Sprintf("read-%d", step), "type": "function", "function": map[string]any{"name": "read", "arguments": string(args)}}}}, "finish_reason": "tool_calls"}}})
+			event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{
+				map[string]any{"index": 0, "id": fmt.Sprintf("read-%d", step), "type": "function", "function": map[string]any{"name": "read", "arguments": string(args)}},
+				map[string]any{"index": 1, "id": fmt.Sprintf("todo-%d", step), "type": "function", "function": map[string]any{"name": "todo", "arguments": `{"items":[{"id":"read","text":"Read hello.txt","status":"completed"}]}`}},
+			}}, "finish_reason": "tool_calls"}}})
 		} else {
 			event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "The file is readable."}, "finish_reason": "stop"}}})
 		}
@@ -195,6 +199,9 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(stored.Todos) != 1 || stored.Todos[0].Status != "completed" {
+		t.Fatal("todo tool did not persist the visible checklist")
+	}
 	if stored.Usage.OutputTokens != 1000 || stored.Context.UsedTokens != 432500 || stored.Context.WindowTokens != 1024000 {
 		t.Fatalf("wrong persisted usage/context: %+v %+v", stored.Usage, stored.Context)
 	}
@@ -203,11 +210,17 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 		for _, b := range m.Content {
 			if r, ok := b.(provider.ReasoningBlock); ok && r.Summary != "" {
 				reasoning = true
+				if m.Meta["thinking_ms"] == "" {
+					t.Error("thinking duration not persisted")
+				}
 			}
 		}
 	}
 	if !reasoning {
 		t.Fatal("reasoning disappeared from persisted transcript")
+	}
+	if stored.Turn == nil || stored.Turn.Status != "completed" || stored.Turn.EndedAt < stored.Turn.StartedAt {
+		t.Fatal("turn timer did not survive persistence")
 	}
 	d.runAgentTurn(act, "Read it again", rec.Model, true, nil)
 	stored, err = d.loadSession(rec.ID)
@@ -234,12 +247,15 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	idle, starts, thinking := 0, 0, 0
+	idle, starts, thinking, assistantMessages := 0, 0, 0, 0
 	for _, msg := range wire {
 		if msg["type"] == "session_status" && msg["status"] == "idle" {
 			idle++
 		}
 		if ev, ok := msg["event"].(map[string]any); ok {
+			if ev["type"] == "assistant_message" {
+				assistantMessages++
+			}
 			if ev["type"] == "assistant_start" {
 				starts++
 			}
@@ -248,7 +264,7 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 			}
 		}
 	}
-	if idle != 2 || starts != 4 || thinking != 4 {
+	if idle != 2 || starts != 4 || thinking != 4 || assistantMessages != 4 {
 		t.Fatalf("wrong task/step lifecycle: idle=%d starts=%d thinking=%d", idle, starts, thinking)
 	}
 }
@@ -325,6 +341,7 @@ func TestLiveSnapshotReplaysReasoningAndIncompleteToolArguments(t *testing.T) {
 	trackLiveEvent(act, core.EvTextDelta{Delta: "Opening the file."})
 	trackLiveEvent(act, core.EvToolUseStart{ID: "call", Name: "read"})
 	trackLiveEvent(act, core.EvToolUseArgs{ID: "call", Delta: `{"path":"hel`})
+	trackLiveEvent(act, core.EvToolProgress{ID: "call", Text: "first line\n"})
 	snapshot := liveSessionPayload(act)
 	data, err := json.Marshal(snapshot)
 	if err != nil {
@@ -334,6 +351,10 @@ func TestLiveSnapshotReplaysReasoningAndIncompleteToolArguments(t *testing.T) {
 		t.Fatal("live content missing from reconnect snapshot")
 	}
 	trackLiveEvent(act, core.EvToolUseArgs{ID: "call", Delta: `lo.txt"}`})
+	trackLiveEvent(act, core.EvToolProgress{ID: "call", Text: "second line\n"})
+	if liveSessionPayload(act)["toolProgress"].(map[string]string)["call"] != "first line\nsecond line\n" {
+		t.Fatal("reconnect lost accumulated tool output")
+	}
 	older, _ := json.Marshal(snapshot)
 	if string(older) != string(data) {
 		t.Fatal("later deltas mutated the snapshot being sent")

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/patriceckhart/zot/packages/core"
 )
 
@@ -24,8 +26,28 @@ type liveAssistant struct {
 // a reconnect snapshot and subsequent deltas have one consistent ordering.
 func trackLiveEvent(act *ActiveSession, event core.AgentEvent) {
 	if _, ok := event.(core.EvAssistantStart); ok {
+		act.thinkingStartedAt = 0
 		act.live = &liveAssistant{Role: "assistant", Content: []liveBlock{}}
 		return
+	}
+	switch e := event.(type) {
+	case core.EvReasoningDelta:
+		if act.thinkingStartedAt == 0 {
+			act.thinkingStartedAt = time.Now().UnixMilli()
+		}
+	case core.EvTextDelta, core.EvToolUseStart, core.EvTurnEnd:
+		act.thinkingStartedAt = 0
+	case core.EvToolProgress:
+		if act.toolProgress == nil {
+			act.toolProgress = map[string]string{}
+		}
+		text := act.toolProgress[e.ID] + e.Text
+		if len(text) > 64*1024 {
+			text = text[len(text)-64*1024:]
+		}
+		act.toolProgress[e.ID] = text
+	case core.EvToolResult:
+		delete(act.toolProgress, e.ID)
 	}
 	if act.live == nil {
 		return
@@ -66,6 +88,13 @@ func trackLiveEvent(act *ActiveSession, event core.AgentEvent) {
 
 func liveSessionPayload(act *ActiveSession) map[string]any {
 	payload := sessionPayload(act.record)
+	payload["pendingApproval"] = act.pendingApproval
+	progress := map[string]string{}
+	for id, text := range act.toolProgress {
+		progress[id] = text
+	}
+	payload["toolProgress"] = progress
+	payload["thinkingStartedAt"] = act.thinkingStartedAt
 	if act.live == nil {
 		return payload
 	}

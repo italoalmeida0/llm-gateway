@@ -13,6 +13,7 @@ import {
 import { Portal } from "solid-js/web";
 import { createStore, reconcile } from "solid-js/store";
 import { FileIcon, RemoteHints } from "../rcPresentation";
+import { displayToolArgs } from "../rcLive";
 import { createTranscriptScroll } from "../rcScroll";
 import { compactTokens, contextDisplay, type GatewayModel, type SessionContext } from "../rcContext";
 import { Streamdown } from "streamdown-solid";
@@ -194,12 +195,7 @@ const SLASH_COMMANDS = [
  */
 
 export function tryParseArgs(a?: string): any {
-  if (!a) return {};
-  try {
-    return JSON.parse(a);
-  } catch {
-    return { _raw: a };
-  }
+  return displayToolArgs(a);
 }
 
 export function baseNameOf(p?: string): string {
@@ -876,13 +872,19 @@ export default function RemoteCodePage() {
   let folderRequestId = "";
   let projectCreationId = "";
   const [pendingProjectId, setPendingProjectId] = createSignal("");
-  interface ReviewFile { canUndo?: boolean; truncated?: boolean; path: string; kind: string; before?: string; after?: string; binary?: boolean; }
+  interface ReviewFile { canUndo?: boolean; truncated?: boolean; path: string; kind: string; diff?: string; binary?: boolean; }
   interface Review { id: string; files: ReviewFile[]; notice?: string; }
   const [taskReview, setTaskReview] = createSignal<Review | null>(null);
   const [reviewOpen, setReviewOpen] = createSignal(false);
   const [reviewLoading, setReviewLoading] = createSignal(false);
   const [reviewError, setReviewError] = createSignal("");
   let reviewRequestId = "";
+  let reviewRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(reviewRefreshTimer));
+  function refreshReview() {
+    clearTimeout(reviewRefreshTimer);
+    reviewRefreshTimer = setTimeout(() => requestReview(reviewOpen(), true), 100);
+  }
   function sessionOptions() { return { effort: effort(), mode: agentMode(), skills: selectedSkills(), access: yoloMode() ? "full" : "ask" }; }
   function configureSession() {
     if (wsOpen()) sendWS({ type: "configure_session", sessionId: activeSessionId(), model: activeModel(), options: sessionOptions() });
@@ -900,16 +902,23 @@ export default function RemoteCodePage() {
     folderRequestId = crypto.randomUUID();
     sendWS({ type: "browse_folders", path: path || "~", requestId: folderRequestId });
   }
-  function requestReview(detail = false) {
+  function requestReview(detail = false, background = false) {
     if (!activeSessionId() || !wsOpen()) return;
-    if (detail) { setReviewOpen(true); setReviewLoading(true); setReviewError(""); }
+    if (detail && !background) { setReviewOpen(true); setReviewLoading(true); setReviewError(""); }
     reviewRequestId = crypto.randomUUID();
     sendWS({ type: "get_changes", sessionId: activeSessionId(), detail, requestId: reviewRequestId });
+  }
+  function keepChanges() {
+    const review = taskReview();
+    if (!review || sessionStatus() === "running" || !wsOpen()) return;
+    setReviewLoading(true); setReviewError("");
+    reviewRequestId = crypto.randomUUID();
+    sendWS({type:"keep_changes", sessionId:activeSessionId(), reviewId:review.id, requestId:reviewRequestId});
   }
   async function undoChanges(path = "") {
     const review = taskReview();
     if (!review || sessionStatus() === "running" || !wsOpen()) return;
-    const yes = await showConfirm({ title: path ? "Undo this file?" : "Undo task changes?", message: "Restore the captured files to their state before the task. Files edited afterward will be preserved.", confirmText: "Undo changes" });
+    const yes = await showConfirm({ title: path ? "Undo this file?" : "Undo pending changes?", message: "Restore the captured files to their state before the pending changes. Later manual edits will be preserved.", confirmText: "Undo changes" });
     if (!yes) return;
     setReviewLoading(true); setReviewError("");
     reviewRequestId = crypto.randomUUID();
@@ -998,6 +1007,29 @@ export default function RemoteCodePage() {
   const [activeModel, setActiveModel] = createSignal("");
   const [yoloMode, setYoloMode] = createSignal(true);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
+  interface TurnActivity { startedAt: number; endedAt?: number; status: "running" | "cancelling" | "cancelled" | "completed" | "failed"; }
+  interface TodoItem { id: string; text: string; status: "pending" | "in_progress" | "completed"; }
+  const [turnActivity, setTurnActivity] = createSignal<TurnActivity | null>(null);
+  const [todos, setTodos] = createSignal<TodoItem[]>([]);
+  const [todosOpen, setTodosOpen] = createSignal(true);
+  const [turnClock, setTurnClock] = createSignal(Date.now());
+  createEffect(() => {
+    if (!turnActivity()?.startedAt || sessionStatus() !== "running") return;
+    setTurnClock(Date.now());
+    const timer = setInterval(() => setTurnClock(Date.now()), 1000);
+    onCleanup(() => clearInterval(timer));
+  });
+  function elapsedLabel(ms: number) {
+    const seconds = Math.max(0, Math.floor(ms / 1000));
+    return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  }
+  const turnLabel = () => {
+    const turn = turnActivity();
+    if (!turn) return "";
+    const elapsed = elapsedLabel((turn.endedAt || turnClock()) - turn.startedAt);
+    const label = turn.status === "running" && pendingApproval() ? "Waiting for approval" : {running:"Working", cancelling:"Stopping turn", cancelled:"Turn cancelled", completed:"Turn completed", failed:"Turn failed"}[turn.status];
+    return `${label} · ${elapsed}`;
+  };
   const [pendingApproval, setPendingApproval] = createSignal<PendingApproval | null>(null);
   // Live usage per session (from daemon usage/turn_end events).
   const [sessionUsage, setSessionUsage] = createSignal<Record<string, SessionUsage>>({});
@@ -1180,10 +1212,10 @@ export default function RemoteCodePage() {
   const [thinkingElapsed, setThinkingElapsed] = createSignal(0);
   const [thinkingIndex, setThinkingIndex] = createSignal(0);
   let thinkingTimer: any = null;
-  function startThinkingTimer() {
+  function startThinkingTimer(startedAt = Date.now()) {
     stopThinkingTimer();
-    setThinkingStart(Date.now());
-    setThinkingElapsed(0);
+    setThinkingStart(startedAt);
+    setThinkingElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
     thinkingTimer = setInterval(() => {
       const s = thinkingStart();
       if (s) setThinkingElapsed(Math.floor((Date.now() - s) / 1000));
@@ -1614,6 +1646,7 @@ export default function RemoteCodePage() {
           id: `msg_${idx}`,
           role,
           blocks: [...reason, ...rest],
+          thinkingDuration: Number(m.meta?.thinking_ms) > 0 ? Math.max(1, Math.ceil(Number(m.meta.thinking_ms)/1000)) : undefined,
           time: Date.now(),
           system,
           srcIdx: idx,
@@ -1743,9 +1776,14 @@ export default function RemoteCodePage() {
       }
       case "session_changes": {
         if (msg.sessionId !== activeSessionId() || (msg.requestId && msg.requestId !== reviewRequestId)) break;
-        setReviewLoading(false);
+        if (msg.requestId) setReviewLoading(false);
         if (msg.error) { setReviewError(msg.error); if (!reviewOpen()) toast(msg.error, "err"); break; }
+        if (reviewOpen() && !msg.detail && !msg.requestId) { refreshReview(); break; }
         setTaskReview(msg.review || null);
+        break;
+      }
+      case "changes_updated": {
+        if (msg.sessionId === activeSessionId()) refreshReview();
         break;
       }
 
@@ -1831,6 +1869,13 @@ export default function RemoteCodePage() {
         }
         if (sid && sid === activeSessionId()) {
           setSessionStatus(r.status === "running" ? "running" : "idle");
+          setTurnActivity(r.turn || null);
+          setTurnClock(Date.now());
+          setTodos(r.todos || []);
+          setToolProgress(r.toolProgress || {});
+          setPendingApproval(r.pendingApproval ? {...r.pendingApproval, args:prettyArgs(r.pendingApproval.args)} : null);
+          if (r.thinkingStartedAt && r.status === "running") startThinkingTimer(r.thinkingStartedAt);
+          else stopThinkingTimer();
           if (r.model) setActiveModel(gatewayModels().some((m) => m.id === r.model) ? r.model : gatewayModels()[0]?.id || "");
           applyOptions(r.options);
           if (r.usage) applyUsage(sid, r.usage, null);
@@ -1851,7 +1896,9 @@ export default function RemoteCodePage() {
         // get the same truth via the sessions change ping.
         if (msg.sessionId === activeSessionId()) {
           setSessionStatus(msg.status === "running" ? "running" : "idle");
+          if (msg.turn) setTurnActivity(msg.turn);
           if (msg.status === "idle") {
+            setTurnActivity((turn) => turn && !turn.endedAt ? {...turn, endedAt:Date.now(), status:turn.status === "cancelling" ? "cancelled" : turn.status === "running" ? "completed" : turn.status} : turn);
             requestReview(reviewOpen());
             setPendingApproval(null);
             setToolProgress({});
@@ -1904,6 +1951,20 @@ export default function RemoteCodePage() {
 
         if (ev.type === "turn_start") {
           setSessionStatus("running");
+          setTurnActivity((turn) => !turn || turn.endedAt ? {startedAt:Date.now(), status:"running"} : turn);
+        } else if (ev.type === "todo_update") {
+          setTodos(ev.items || []);
+        } else if (ev.type === "assistant_message") {
+          if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
+          const blocks = parseContentBlocks(ev.message);
+          const normalized = [...blocks.filter((b) => b.type === "reasoning"), ...blocks.filter((b) => b.type !== "reasoning")];
+          const duration = Number(ev.message?.meta?.thinking_ms);
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            const message: ChatMessage = {id:last?.role === "assistant" ? last.id : `msg_${ev.index}`, role:"assistant", blocks:normalized, time:Date.now(), srcIdx:ev.index,
+              thinkingDuration:duration > 0 ? Math.max(1, Math.ceil(duration/1000)) : last?.thinkingDuration};
+            return last?.role === "assistant" ? [...prev.slice(0,-1), message] : [...prev, message];
+          });
         } else if (ev.type === "assistant_start") {
           // Each model step gets its own carrier. Tool loops cannot merge new
           // thinking into the previous assistant response.
@@ -1928,7 +1989,7 @@ export default function RemoteCodePage() {
         } else if (ev.type === "tool_use_end") {
           // No-op: the final tool_call event carries the full block.
         } else if (ev.type === "tool_progress") {
-          setToolProgress((prev) => ({ ...prev, [ev.id]: ev.text }));
+          setToolProgress((prev) => ({ ...prev, [ev.id]: ((prev[ev.id] || "") + (ev.text || "")).slice(-65536) }));
         } else if (ev.type === "tool_call") {
           appendToolCall(ev.id, ev.name, ev.args);
         } else if (ev.type === "tool_result") {
@@ -1955,7 +2016,10 @@ export default function RemoteCodePage() {
             stampThinkingDuration(dur);
           }
           if (ev.usage || ev.cumulative) applyUsage(msg.sessionId, ev.usage, ev.cumulative);
-          if (ev.error) toast(ev.error, "err");
+          if (ev.cancelled || ev.stop === "aborted" || /context cancel(?:led|ed)/i.test(ev.error || "")) {
+            setTurnActivity((turn) => turn ? {...turn, status:"cancelled", endedAt:Date.now()} : null);
+            setPendingApproval(null);
+          } else if (ev.error) toast(ev.error, "err");
           // The daemon sends the final snapshot and idle status after the task.
         } else if (ev.type === "done") {
           // Compatibility with daemons that predate final session snapshots.
@@ -1980,7 +2044,7 @@ export default function RemoteCodePage() {
           break;
         }
         if (msg.replyTo === "create_session") setCreatingSession(false);
-        if (msg.replyTo === "get_changes" || msg.replyTo === "undo_changes") { setReviewLoading(false); setReviewError(msg.message || "Host unavailable"); }
+        if (["get_changes", "undo_changes", "keep_changes"].includes(msg.replyTo)) { setReviewLoading(false); setReviewError(msg.message || "Host unavailable"); }
         if (msg.message === "Remote host is offline") {
           setHosts((prev) => prev.map((h) => h.id === activeHostId() ? { ...h, status: "offline" } : h));
           if (msg.replyTo === "browse_folders") { setFolderLoading(false); setFolderError("The host went offline. Reconnect to browse its folders."); }
@@ -2275,6 +2339,7 @@ export default function RemoteCodePage() {
   function selectSession(id: string) {
     if (creatingSession()) return;
     setDraftMode(false);
+    setTurnActivity(null); setTodos([]); setToolProgress({});
     setTaskReview(null);
     setReviewOpen(false);
     setAppNotice(null);
@@ -2308,6 +2373,7 @@ export default function RemoteCodePage() {
   function startNewConversation(projectId?: string) {
     if (creatingSession()) return;
     setDraftMode(true);
+    setTurnActivity(null); setTodos([]); setToolProgress({});
     setHistoryView(false);
     setActiveSessionId("");
     setMessages([]);
@@ -2726,11 +2792,10 @@ export default function RemoteCodePage() {
   function renderThinkingBlock(
     msg: ChatMessage,
     block: ContentBlock,
-    isLast: boolean,
     nth: number,
   ) {
     const thinkKey = () => `${msg.id}:think:${nth}`;
-    const openNow = () => isLast && sessionStatus() === "running";
+    const openNow = () => messages().at(-1)?.id === msg.id && sessionStatus() === "running";
     const live = () =>
       openNow() && thinkingStart() !== null && thinkingIndex() === nth;
     const open = () => expandedThinking()[thinkKey()] ?? live();
@@ -2747,7 +2812,7 @@ export default function RemoteCodePage() {
           <span>
             {live()
               ? `Thinking ${thinkingElapsed()}s`
-              : msg.thinkingDuration
+              : msg.thinkingDuration !== undefined
                 ? `Thinking ${msg.thinkingDuration}s`
                 : open()
                   ? "Hide thinking"
@@ -3026,6 +3091,7 @@ export default function RemoteCodePage() {
     } catch {}
     setSessionStatus("running");
     setIsAtBottom(true);
+    setTurnActivity({startedAt:Date.now(), status:"running"});
     scrollToBottom(true);
 
     sendWS({
@@ -3042,12 +3108,12 @@ export default function RemoteCodePage() {
   function cancelCurrentTurn() {
     if (!activeSessionId()) return;
     sendWS({ type: "cancel", sessionId: activeSessionId() });
+    setTurnActivity((turn) => turn ? {...turn, status:"cancelling"} : null);
     stopThinkingTimer();
     transcriptScroll.detach();
-    toast("Stopping generation…", "ok");
   }
 
-  function respondApproval(approved: boolean) {
+  function respondApproval(approved: boolean, always = false) {
     const p = pendingApproval();
     if (!p || !activeSessionId()) return;
     sendWS({
@@ -3055,6 +3121,7 @@ export default function RemoteCodePage() {
       sessionId: activeSessionId(),
       callId: p.callId,
       approved,
+      always,
     });
     setPendingApproval(null);
   }
@@ -3362,6 +3429,7 @@ export default function RemoteCodePage() {
         creationRequestId = "";
         setTaskReview(null);
         setReviewOpen(false);
+        setTurnActivity(null); setTodos([]);
         setAppNotice(null);
         setActiveSessionId("");
         setActiveProjectId("");
@@ -3555,7 +3623,6 @@ export default function RemoteCodePage() {
     const prog = () => (u.call?.toolId ? toolProgress()[u.call.toolId] : undefined);
     const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
     const name = () => u.call?.toolName || "tool";
-    const failed = () => !!u.result?.isError;
     return (
       <div class="w-full">
         <div
@@ -3570,9 +3637,9 @@ export default function RemoteCodePage() {
             }
           >
             <Iconify
-              icon={failed() ? "lucide:x" : sum().icon}
+              icon={sum().icon}
               size={14}
-              class={`shrink-0 ${failed() ? "text-rose-400" : "text-ink-500"}`}
+              class="shrink-0 text-ink-500"
             />
           </Show>
           <span class="text-ink-500 shrink-0">{sum().verb}</span>
@@ -3593,9 +3660,6 @@ export default function RemoteCodePage() {
           </Show>
           <Show when={sum().stat && sum().statAdd == null}>
             <span class="text-[11px] text-ink-600 shrink-0">{sum().stat}</span>
-          </Show>
-          <Show when={prog()}>
-            <span class="font-mono text-[11px] text-ink-600 truncate max-w-[40%]">{prog()}</span>
           </Show>
           <Iconify
             icon="lucide:chevron-down"
@@ -3622,13 +3686,16 @@ export default function RemoteCodePage() {
                 </button>
               </div>
             </Show>
+            <Show when={name() === "edit" && !u.result}>
+              <For each={args().edits || []}>{(edit) => <DiffView text={`${String(edit.oldText || "").split("\n").map((s) => "-" + s).join("\n")}\n${String(edit.newText || "").split("\n").map((s) => "+" + s).join("\n")}`} name={String(args().path || "")} />}</For>
+            </Show>
             <Show when={name() === "read"}>
               <Show
-                when={u.result?.toolResult}
-                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Waiting for output…</div>}
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Reading file…</div>}
               >
                 <CodeBlock
-                  text={u.result?.toolResult || ""}
+                  text={u.result?.toolResult || prog() || ""}
                   language={languageForPath(String(args().path || ""))}
                 />
               </Show>
@@ -3641,11 +3708,11 @@ export default function RemoteCodePage() {
             </Show>
             <Show when={name() !== "edit" && name() !== "read" && name() !== "write"}>
               <Show
-                when={u.result?.toolResult}
-                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Waiting for output…</div>}
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
               >
                 <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
-                  {u.result?.toolResult || ""}
+                  {u.result?.toolResult || prog() || ""}
                 </pre>
               </Show>
             </Show>
@@ -3674,14 +3741,14 @@ export default function RemoteCodePage() {
   function specialTitle(units: ToolUnit[]): string {
     if (units.length === 0) return "Tools";
     const parts = units.map((u) => {
-      const sum = toolSummary(u);
-      return `${sum.verb} ${sum.target}`.trim();
+      const names: Record<string,string> = {bash:"run", write:"create", edit:"edit", read:"read", glob:"search", todo:"plan"};
+      return names[u.call?.toolName || ""] || u.call?.toolName || "tool";
     });
     const seen: string[] = [];
     for (const p of parts) {
       if (!seen.includes(p)) seen.push(p);
     }
-    if (units.length === 1) return seen[0] || "Tool call";
+    if (units.length === 1) return `1 tool call · ${seen[0] || "tool"}`;
     if (seen.length <= 3) return `${units.length} tool calls · ${seen.join(" · ")}`;
     return `${units.length} tool calls · ${seen.slice(0, 3).join(" · ")} +${seen.length - 3} more`;
   }
@@ -3748,7 +3815,7 @@ export default function RemoteCodePage() {
                 <Show when={verboseChat()}>
                   <div class="w-full space-y-2">
                     <For each={part.blocks}>
-                      {(block) => renderThinkingBlock(msg, block, isLast, thinkNth++)}
+                      {(block) => renderThinkingBlock(msg, block, thinkNth++)}
                     </For>
                   </div>
                 </Show>
@@ -3780,7 +3847,7 @@ export default function RemoteCodePage() {
    * message with the legacy per-bubble chrome (edit/copy/regenerate/delete
    * on its own rendered position).
    */
-  function renderSeriesLead(lead: ChatMessage, isLast: boolean) {
+  function renderSeriesLead(lead: ChatMessage) {
     let thinkNth = 0;
     return (
       <div class="w-full space-y-2.5">
@@ -3792,7 +3859,7 @@ export default function RemoteCodePage() {
                 <Show when={verboseChat()}>
                   <div class="w-full space-y-2">
                     <For each={part.blocks}>
-                      {(block) => renderThinkingBlock(lead, block, isLast, thinkNth++)}
+                      {(block) => renderThinkingBlock(lead, block, thinkNth++)}
                     </For>
                   </div>
                 </Show>
@@ -4707,7 +4774,7 @@ export default function RemoteCodePage() {
                             <For each={msg.attachments || []}>
                               {(name) => (
                                 <span class="text-[11px] bg-ink-900 border border-line/70 px-2 py-1 rounded-lg text-ink-400 flex items-center gap-1.5">
-                                  <Iconify icon="lucide:paperclip" size={11} />
+                                  <FileIcon path={name} size={13} />
                                   {name}
                                 </span>
                               )}
@@ -4818,7 +4885,7 @@ export default function RemoteCodePage() {
                           fallback={
                             block.kind === "series" ? (
                               <>
-                                {renderSeriesLead(msg, isLast())}
+                                {renderSeriesLead(msg)}
                                 {renderAssistantSpecial(
                                   msg.id,
                                   block.units,
@@ -4919,7 +4986,7 @@ export default function RemoteCodePage() {
                       </Show>
                       <Show when={name === "read"}>
                         <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
-                          <Iconify icon="lucide:file-text" size={14} class="text-ink-400 shrink-0" />
+                          <FileIcon path={String(args.path || "")} size={14} />
                           <span class="text-ink-500">Read</span>
                           <span class="font-mono text-ink-100 truncate">{String(args.path || "")}</span>
                           <Show when={args.limit || args.offset}>
@@ -4932,7 +4999,7 @@ export default function RemoteCodePage() {
                       <Show when={name === "write"}>
                         <div class="px-3.5 py-2.5 text-[13px]">
                           <div class="flex items-center gap-2">
-                            <Iconify icon="lucide:file-text" size={14} class="text-ink-400 shrink-0" />
+                            <FileIcon path={String(args.path || "")} size={14} />
                             <span class="text-ink-500">Create</span>
                             <span class="font-mono text-ink-100 truncate">{String(args.path || "")}</span>
                           </div>
@@ -4947,7 +5014,7 @@ export default function RemoteCodePage() {
                       <Show when={name === "edit"}>
                         <div class="px-3.5 py-2.5 text-[13px]">
                           <div class="flex items-center gap-2">
-                            <Iconify icon="lucide:pencil" size={14} class="text-ink-400 shrink-0" />
+                            <FileIcon path={String(args.path || "")} size={14} />
                             <span class="text-ink-500">Edit</span>
                             <span class="font-mono text-ink-100 truncate">{String(args.path || "")}</span>
                             <Show when={Array.isArray(args.edits)}>
@@ -4984,7 +5051,10 @@ export default function RemoteCodePage() {
                           <span class="font-mono text-ink-100 truncate">{String(args.pattern || "")}</span>
                         </div>
                       </Show>
-                      <Show when={!["bash", "read", "write", "edit", "glob"].includes(name)}>
+                      <Show when={name === "todo"}>
+                        <div class="px-3.5 py-2.5 text-xs"><p class="font-medium text-ink-200 mb-2">Update task plan</p><ul class="space-y-1 text-ink-400"><For each={args.items || []}>{(item) => <li class="flex gap-2"><span class="text-ink-500">{String(item.status).replaceAll("_", " ")}</span><span>{item.text}</span></li>}</For></ul></div>
+                      </Show>
+                      <Show when={!["bash", "read", "write", "edit", "glob", "todo"].includes(name)}>
                         <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
                           <Iconify icon="lucide:wrench" size={14} class="text-ink-400 shrink-0" />
                           <span class="font-mono text-ink-100">{name}</span>
@@ -5010,15 +5080,15 @@ export default function RemoteCodePage() {
                         onClick={() => respondApproval(true)}
                         class="px-4 py-1.5 rounded-xl bg-ink-100 text-ink-950 hover:bg-accent-400 text-xs font-semibold transition-colors cursor-pointer"
                       >
-                        Approve
+                        Allow once
                       </button>
                       <button
                         onClick={() => {
                           setYoloMode(true);
-                          respondApproval(true);
+                          respondApproval(true, true);
                         }}
                         class="px-3.5 py-1.5 rounded-xl bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 text-xs font-semibold transition-colors cursor-pointer"
-                        data-rc-tip="Approve and stop asking (YOLO)" aria-label="Approve and stop asking (YOLO)"
+                        data-rc-tip="Enable Full access and allow all tool calls" aria-label="Always allow — enable Full access"
                       >
                         Always allow
                       </button>
@@ -5156,11 +5226,34 @@ export default function RemoteCodePage() {
                   </div>
                 </div>
               </Show>
+              <Show when={activeSessionId() && turnActivity()}>
+                <div role="status" data-turn-status class="mb-2 flex items-center gap-2 text-xs text-ink-500">
+                  <Iconify icon={sessionStatus() === "running" ? "lucide:loader-circle" : "lucide:clock-3"} size={13} class={sessionStatus() === "running" ? "animate-spin" : ""} />
+                  <span>{turnLabel()}</span>
+                </div>
+              </Show>
+              <Show when={activeSessionId() && todos().length}>
+                <section aria-label="Task checklist" class="mb-3 rounded-xl border border-line bg-elev/40 text-xs">
+                  <button onClick={() => setTodosOpen(!todosOpen())} aria-expanded={todosOpen()} class="w-full px-3 py-2.5 flex items-center gap-2 text-ink-300 cursor-pointer">
+                    <Iconify icon="lucide:list-checks" size={15} /><span class="font-medium">Task plan</span>
+                    <span class="text-ink-500">{todos().filter((item) => item.status === "completed").length}/{todos().length}</span>
+                    <span class="flex-1 truncate text-left text-ink-500">{!todosOpen() ? todos().find((item) => item.status === "in_progress")?.text : ""}</span>
+                    <Iconify icon="lucide:chevron-down" size={13} class={todosOpen() ? "rotate-180" : ""} />
+                  </button>
+                  <Show when={todosOpen()}><ol class="px-3 pb-3 space-y-2 max-h-44 overflow-y-auto">
+                    <For each={todos()}>{(item) => <li class="flex items-start gap-2" data-todo-status={item.status}>
+                      <Iconify icon={item.status === "completed" ? "lucide:circle-check" : item.status === "in_progress" ? sessionStatus() === "running" ? "lucide:loader-circle" : "lucide:circle-dot" : "lucide:circle"} size={14} class={item.status === "in_progress" && sessionStatus() === "running" ? "animate-spin text-ink-200" : "text-ink-500"} />
+                      <span class={item.status === "completed" ? "text-ink-500 line-through" : "text-ink-200"}>{item.text}</span>
+                    </li>}</For>
+                  </ol></Show>
+                </section>
+              </Show>
               <Show when={taskReview()?.files.length && activeSessionId()}>
                 <div class="mb-2 flex flex-wrap items-center justify-end gap-3 text-xs text-ink-400" data-task-changes>
                   <span class="flex items-center gap-1.5"><Iconify icon="lucide:files" size={14} />{taskReview()?.files.length} file{taskReview()?.files.length === 1 ? "" : "s"} changed</span>
                   <button onClick={() => undoChanges()} disabled={sessionStatus() === "running" || reviewLoading() || !wsOpen()} class="flex items-center gap-1 hover:text-ink-100 disabled:opacity-40 cursor-pointer"><Iconify icon="lucide:undo-2" size={13} />Undo</button>
-                  <button onClick={() => requestReview(true)} disabled={sessionStatus() === "running" || reviewLoading() || !wsOpen()} class="px-3 py-1.5 rounded-lg border border-line hover:bg-elev text-ink-200 disabled:opacity-40 cursor-pointer">Review</button>
+                  <button onClick={keepChanges} disabled={sessionStatus() === "running" || reviewLoading() || !wsOpen()} class="hover:text-ink-100 disabled:opacity-40 cursor-pointer">Keep</button>
+                  <button onClick={() => requestReview(true)} disabled={reviewLoading() || !wsOpen()} class="px-3 py-1.5 rounded-lg border border-line hover:bg-elev text-ink-200 disabled:opacity-40 cursor-pointer">Review</button>
                 </div>
               </Show>
               <Show when={appNotice()}>{(notice) =>
@@ -5194,7 +5287,7 @@ export default function RemoteCodePage() {
                             fallback={
                               <Show
                                 when={att.objectUrl}
-                                fallback={<Iconify icon="lucide:file-text" size={20} class="text-ink-500 shrink-0" />}
+                                fallback={<FileIcon path={att.name} size={20} />}
                               >
                                 <img src={att.objectUrl} class="w-7 h-7 object-cover rounded shrink-0 border border-line/60" />
                               </Show>
@@ -5227,7 +5320,7 @@ export default function RemoteCodePage() {
                   rows={1}
                   class="w-full bg-transparent text-base sm:text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto"
                   placeholder={
-                    activeSession()
+                    isMobile() ? "Ask anything…" : activeSession()
                       ? `Ask anything, @ to mention, / for actions`
                       : `Start a conversation in ${activeProject()?.name || "project"}...`
                   }
@@ -5448,12 +5541,13 @@ export default function RemoteCodePage() {
                     </button>
                     <FloatMenu anchor={() => accessBtn} open={accessMenuOpen()} placement="top-start" width="22rem">
                       <p class="px-2 py-2 text-ink-400">How should actions be approved?</p>
-                      <For each={[{full:false, label:"Ask for approval", description:"Ask before file edits and shell commands.", icon:"lucide:hand"}, {full:true, label:"Full access", description:"Allow edits and commands without asking (YOLO).", icon:"lucide:shield-alert"}]}>{(access) =>
+                      <For each={[{full:false, label:"Ask for approval", description:"Ask before every tool call, including reads and commands.", icon:"lucide:hand"}, {full:true, label:"Full access", description:"Allow all tool calls without asking (YOLO).", icon:"lucide:shield-alert"}]}>{(access) =>
                         <button role="menuitemradio" aria-checked={yoloMode() === access.full} onClick={() => { setYoloMode(access.full); configureSession(); setAccessMenuOpen(false); }} class="w-full flex items-center gap-3 px-2 py-3 text-left rounded-lg hover:bg-elev cursor-pointer">
                           <Iconify icon={access.icon} size={19} /><span class="flex-1"><span class="font-medium text-ink-100">{access.label}</span><span class="block mt-1 text-[11px] text-ink-500">{access.description}</span></span><Show when={yoloMode() === access.full}><Iconify icon="lucide:check" size={14} /></Show>
                         </button>
                       }</For>
-                      <Show when={agentMode() !== "build"}><p class="px-2 py-2 text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan" : "Learning"} mode always keeps files read-only.</p></Show>
+                      <p class="px-2 py-2 text-[11px] text-ink-500">Changes apply immediately to pending and future tool calls.</p>
+                      <Show when={agentMode() !== "build"}><p class="px-2 py-2 text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan explores files without edits or shell commands." : "Learning can read files and run commands. Edit and create tools are disabled."}</p></Show>
                     </FloatMenu>
                   </div>
                   {/* Model picker (moved from the removed topbar) */}
@@ -5605,20 +5699,18 @@ export default function RemoteCodePage() {
         </div>
       </Modal>
 
-      <Modal open={reviewOpen()} onClose={() => setReviewOpen(false)} title="Review task changes" description="Changes captured from the last task. Undo restores their previous contents while preserving later edits." width="max-w-5xl" fullOnMobile
-        footer={<><Btn variant="ghost" onClick={() => setReviewOpen(false)}>Close</Btn><Btn disabled={sessionStatus() === "running" || reviewLoading() || !taskReview()?.files.length || !wsOpen()} onClick={() => undoChanges()}>Undo all changes</Btn></>}>
+      <Modal open={reviewOpen()} onClose={() => setReviewOpen(false)} title="Review changes" description="Pending changes accumulate across turns. Keep accepts them; Undo restores the captured originals while preserving later manual edits." width="max-w-5xl" fullOnMobile
+        footer={<><Btn variant="ghost" onClick={() => setReviewOpen(false)}>Close</Btn><Btn variant="ghost" disabled={sessionStatus() === "running" || reviewLoading() || !taskReview()?.files.length || !wsOpen()} onClick={() => undoChanges()}>Undo all changes</Btn><Btn disabled={sessionStatus() === "running" || reviewLoading() || !taskReview()?.files.length || !wsOpen()} onClick={keepChanges}>Keep changes</Btn></>}>
+        <Show when={sessionStatus() === "running"}><p class="mb-3 text-xs text-ink-500">Live preview · updates as tools finish. Keep and Undo are available when the turn stops.</p></Show>
         <Show when={reviewError()}><div role="alert" class="mb-3 rounded-lg border border-brand-500/30 bg-brand-500/5 p-3 text-sm text-ink-200">{reviewError()}</div></Show>
         <Show when={taskReview()?.notice}><p class="mb-3 text-xs text-ink-500">{taskReview()?.notice}</p></Show>
         <Show when={!reviewLoading()} fallback={<p class="p-4 text-sm text-ink-500">Loading changes…</p>}>
-          <For each={taskReview()?.files || []} fallback={<p class="p-4 text-sm text-ink-500">No pending file changes from this task.</p>}>{(file) =>
+          <For each={taskReview()?.files || []} fallback={<p class="p-4 text-sm text-ink-500">No pending changes.</p>}>{(file) =>
             <details open class="mb-3 rounded-xl border border-line overflow-hidden">
               <summary class="flex items-center gap-2 px-4 py-3 bg-elev/50 text-xs text-ink-200 cursor-pointer"><FileIcon path={file.path} /><span class="flex-1 min-w-0 break-all font-mono">{file.path}</span><span class="text-ink-500 capitalize">{file.kind}</span></summary>
               <Show when={file.truncated}><p class="px-3 py-2 text-xs text-ink-500">Preview truncated. Undo uses the complete backup.</p></Show>
               <Show when={!file.binary} fallback={<p class="p-4 text-xs text-ink-500">Binary file changed.</p>}>
-                <div class="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-line">
-                  <div class="min-w-0"><p class="px-3 py-2 text-[11px] text-ink-500 border-b border-line">Before</p><CodeBlock text={file.before || ""} language={languageForPath(file.path)} maxH="max-h-96" /></div>
-                  <div class="min-w-0"><p class="px-3 py-2 text-[11px] text-ink-500 border-b border-line">After</p><CodeBlock text={file.after || ""} language={languageForPath(file.path)} maxH="max-h-96" /></div>
-                </div>
+                <DiffView text={file.diff || "No text changes (file metadata changed)."} name={file.path} max={160} />
               </Show>
               <div class="flex justify-end border-t border-line px-3 py-2"><button disabled={file.canUndo === false || sessionStatus() === "running" || reviewLoading() || !wsOpen()} onClick={() => undoChanges(file.path)} class="text-xs text-ink-400 hover:text-ink-100 disabled:opacity-40 cursor-pointer">Undo file</button></div>
             </details>
@@ -6177,12 +6269,13 @@ export default function RemoteCodePage() {
                   <div class="font-semibold text-ink-300 mb-1">
                     Built-in Local Tools
                   </div>
-                  <div class="grid grid-cols-3 gap-2 text-[11px] text-ink-400 font-mono">
+                  <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] text-ink-400 font-mono">
                     <div>• read (view files)</div>
                     <div>• write (create files)</div>
                     <div>• edit (modify files)</div>
                     <div>• bash (shell runner)</div>
                     <div>• glob (file search)</div>
+                    <div>• todo (task checklist)</div>
                   </div>
                 </div>
 

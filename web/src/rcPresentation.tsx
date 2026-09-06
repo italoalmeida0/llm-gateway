@@ -3,23 +3,8 @@ import { Portal } from "solid-js/web";
 import { anchorFloat } from "./floating";
 import { Icon } from "./components/icon";
 
-export function fileIcon(path: string): { icon: string; class: string } {
-  const name = path.split(/[\\/]/).pop()?.toLowerCase() || "";
-  const ext = name.split(".").pop();
-  if (ext === "py" || ext === "pyi") return { icon: "mdi:language-python", class: "text-[var(--code-builtin)]" };
-  if (ext === "ts" || ext === "tsx") return { icon: "mdi:language-typescript", class: "text-[var(--code-type)]" };
-  if (ext === "js" || ext === "jsx" || ext === "mjs" || ext === "cjs") return { icon: "mdi:language-javascript", class: "text-[var(--code-num)]" };
-  if (ext === "go") return { icon: "mdi:language-go", class: "text-[var(--code-type)]" };
-  if (ext === "rs") return { icon: "mdi:language-rust", class: "text-[var(--code-meta)]" };
-  if (ext === "java") return { icon: "mdi:language-java", class: "text-[var(--code-meta)]" };
-  if (ext === "json" || ext === "yaml" || ext === "yml" || ext === "toml") return { icon: "lucide:braces", class: "text-[var(--code-num)]" };
-  if (ext === "md" || ext === "mdx") return { icon: "mdi:language-markdown", class: "text-[var(--code-type)]" };
-  if (ext === "html" || ext === "vue" || ext === "svelte") return { icon: "lucide:file-code", class: "text-[var(--code-meta)]" };
-  if (ext === "css" || ext === "scss") return { icon: "mdi:language-css3", class: "text-[var(--code-kw)]" };
-  if (ext === "sh" || name === "dockerfile" || name === "makefile") return { icon: "lucide:terminal", class: "text-[var(--code-str)]" };
-  if (/\.(png|jpe?g|gif|webp|svg|ico)$/.test(name)) return { icon: "lucide:image", class: "text-[var(--code-kw)]" };
-  return { icon: "lucide:file-text", class: "text-ink-400" };
-}
+import { fileIcon } from "./rcFiles";
+export { fileIcon } from "./rcFiles";
 
 export function FileIcon(props: { path: string; size?: number }) {
   return <Icon icon={fileIcon(props.path).icon} class={fileIcon(props.path).class} size={props.size ?? 15} />;

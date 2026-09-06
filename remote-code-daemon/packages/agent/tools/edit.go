@@ -190,6 +190,9 @@ const diffContextLines = 3
 // runs of unchanged content collapse into a single "..." row so
 // a one-line edit in a thousand-line file produces a short
 // transcript.
+// DiffText is shared by edit results and the host's pending-change review.
+func DiffText(a, b string) string { return unifiedDiff("", a, b) }
+
 func unifiedDiff(name, a, b string) string {
 	if a == b {
 		return ""
@@ -251,6 +254,31 @@ type diffOp struct {
 func diffLines(a, b []string) []diffOp {
 	// LCS table.
 	m, n := len(a), len(b)
+	// Bound memory for large rewrites. Retain common ends and display the
+	// changed middle as a replacement when a full LCS would be too expensive.
+	if int64(m)*int64(n) > 2_000_000 {
+		prefix, suffix := 0, 0
+		for prefix < m && prefix < n && a[prefix] == b[prefix] {
+			prefix++
+		}
+		for suffix < m-prefix && suffix < n-prefix && a[m-1-suffix] == b[n-1-suffix] {
+			suffix++
+		}
+		ops := make([]diffOp, 0, m+n)
+		for _, line := range a[:prefix] {
+			ops = append(ops, diffOp{' ', line})
+		}
+		for _, line := range a[prefix : m-suffix] {
+			ops = append(ops, diffOp{'-', line})
+		}
+		for _, line := range b[prefix : n-suffix] {
+			ops = append(ops, diffOp{'+', line})
+		}
+		for _, line := range a[m-suffix:] {
+			ops = append(ops, diffOp{' ', line})
+		}
+		return ops
+	}
 	dp := make([][]int, m+1)
 	for i := range dp {
 		dp[i] = make([]int, n+1)
@@ -271,24 +299,27 @@ func diffLines(a, b []string) []diffOp {
 	i, j := m, n
 	for i > 0 && j > 0 {
 		if a[i-1] == b[j-1] {
-			ops = append([]diffOp{{' ', a[i-1]}}, ops...)
+			ops = append(ops, diffOp{' ', a[i-1]})
 			i--
 			j--
 		} else if dp[i][j-1] >= dp[i-1][j] {
-			ops = append([]diffOp{{'+', b[j-1]}}, ops...)
+			ops = append(ops, diffOp{'+', b[j-1]})
 			j--
 		} else {
-			ops = append([]diffOp{{'-', a[i-1]}}, ops...)
+			ops = append(ops, diffOp{'-', a[i-1]})
 			i--
 		}
 	}
 	for i > 0 {
-		ops = append([]diffOp{{'-', a[i-1]}}, ops...)
+		ops = append(ops, diffOp{'-', a[i-1]})
 		i--
 	}
 	for j > 0 {
-		ops = append([]diffOp{{'+', b[j-1]}}, ops...)
+		ops = append(ops, diffOp{'+', b[j-1]})
 		j--
+	}
+	for i, j := 0, len(ops)-1; i < j; i, j = i+1, j-1 {
+		ops[i], ops[j] = ops[j], ops[i]
 	}
 	return ops
 }

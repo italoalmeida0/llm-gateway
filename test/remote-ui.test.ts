@@ -1,6 +1,26 @@
 import { describe, expect, test } from "bun:test";
 import { compactTokens, contextDisplay } from "../web/src/rcContext";
 import { createTranscriptScroll } from "../web/src/rcScroll";
+import { displayToolArgs } from "../web/src/rcLive";
+import { fileIcon } from "../web/src/rcFiles";
+
+describe("Remote Code file presentation", () => {
+  test("decodes partial tool content without leaking incomplete JSON escapes", () => {
+    expect(displayToolArgs('{"path":"src/example.py","content":"print(\\"hello\\")\\nnext\\u00').content).toBe('print("hello")\nnext');
+    expect(displayToolArgs('{"path":"src/example.py","content":"hello\\').content).toBe("hello");
+    expect(displayToolArgs('{"path":"example.py","edits":[{"oldText":"old","newText":"new').edits).toEqual([{oldText:"old",newText:"new"}]);
+    expect(displayToolArgs('null')).toEqual({});
+  });
+  test("supports language, document and project-specific filenames on both path styles", () => {
+    expect(fileIcon("C:\\project\\main.cpp").icon).toBe("mdi:language-cpp");
+    expect(fileIcon("component.tsx").icon).toBe("mdi:react");
+    expect(fileIcon("main.kt").icon).toBe("mdi:language-kotlin");
+    expect(fileIcon("report.pdf").icon).toBe("mdi:file-pdf-box");
+    expect(fileIcon("Dockerfile.dev").icon).toBe("mdi:docker");
+    expect(fileIcon(".env.local").icon).toBe("mdi:file-key");
+    expect(fileIcon("api.spec.ts").icon).toBe("mdi:test-tube");
+  });
+});
 
 describe("Remote Code context", () => {
   test("uses configured gateway limits and keeps context separate from cumulative usage", () => {

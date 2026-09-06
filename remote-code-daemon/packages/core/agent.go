@@ -630,16 +630,29 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		finalErr error
 		finalMsg provider.Message
 	)
+	var thinkingStart time.Time
+	var thinkingTime time.Duration
+	finishThinking := func() {
+		if !thinkingStart.IsZero() {
+			thinkingTime += time.Since(thinkingStart)
+			thinkingStart = time.Time{}
+		}
+	}
 
 	for ev := range stream {
 		switch e := ev.(type) {
 		case provider.EventStart:
 			// nothing
 		case provider.EventTextDelta:
+			finishThinking()
 			sink(EvTextDelta{Delta: e.Delta})
 		case provider.EventReasoningDelta:
+			if thinkingStart.IsZero() {
+				thinkingStart = time.Now()
+			}
 			sink(EvReasoningDelta{Delta: e.Delta})
 		case provider.EventToolStart:
+			finishThinking()
 			sink(EvToolUseStart{ID: e.ID, Name: e.Name})
 		case provider.EventToolArgs:
 			sink(EvToolUseArgs{ID: e.ID, Delta: e.Delta})
@@ -657,26 +670,29 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			finalMsg = e.Message
 		}
 	}
+	finishThinking()
+	if thinkingTime > 0 {
+		meta := map[string]string{}
+		for k, v := range finalMsg.Meta {
+			meta[k] = v
+		}
+		meta["thinking_ms"] = fmt.Sprintf("%d", max(1, thinkingTime.Milliseconds()))
+		finalMsg.Meta = meta
+	}
 
 	// Append assistant message to transcript. Aborted turns (Esc / Ctrl+C)
-	// produce partial content. When the partial message is text only we
-	// keep whatever was streamed up to the cancel so the user does not
-	// lose visible work (a cut-off summary is still useful). If the
-	// partial message already contained tool-call blocks we drop the
-	// whole thing, because an unmatched tool_use would fail the next
-	// turn with a tool_result mismatch error.
+	// produce partial content. Preserve visible text and reasoning, removing
+	// only unfinished calls so the next request has no unmatched tool_use.
 	keep := len(finalMsg.Content) > 0
 	if stop == provider.StopAborted && keep {
-		hasToolCall := false
+		content := []provider.Content{}
 		for _, c := range finalMsg.Content {
-			if _, ok := c.(provider.ToolCallBlock); ok {
-				hasToolCall = true
-				break
+			if _, ok := c.(provider.ToolCallBlock); !ok {
+				content = append(content, c)
 			}
 		}
-		if hasToolCall {
-			keep = false
-		}
+		finalMsg.Content = content
+		keep = len(content) > 0
 	}
 	if keep {
 		emit := finalMsg

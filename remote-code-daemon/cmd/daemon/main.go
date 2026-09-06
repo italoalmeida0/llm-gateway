@@ -106,6 +106,8 @@ type ProjectEntry struct {
 
 // SessionRecord is the on-disk format for each local session.
 type SessionRecord struct {
+	Turn        *TurnActivity      `json:"turn,omitempty"`
+	Todos       []tools.TodoItem   `json:"todos,omitempty"`
 	Options     SessionOptions     `json:"options"`
 	ID          string             `json:"id"`
 	CWD         string             `json:"cwd"`
@@ -151,6 +153,7 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 	return map[string]any{
 		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
 		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
+		"turn": rec.Turn, "todos": rec.Todos,
 		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": rec.Messages,
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
 	}
@@ -281,12 +284,15 @@ func isTextMime(mime, name string) bool {
 
 // ActiveSession holds in-memory execution state for a session.
 type ActiveSession struct {
-	live         *liveAssistant
-	mu           sync.Mutex
-	record       *SessionRecord
-	agent        *core.Agent
-	cancel       context.CancelFunc
-	approvalReqs map[string]chan bool
+	pendingApproval   *toolApproval
+	toolProgress      map[string]string
+	thinkingStartedAt int64
+	live              *liveAssistant
+	mu                sync.Mutex
+	record            *SessionRecord
+	agent             *core.Agent
+	cancel            context.CancelFunc
+	approvalReqs      map[string]chan bool
 	// gen counts started turns; a stale turn's finalizer skips when it no
 	// longer matches, so edit/regenerate can't corrupt the new turn.
 	gen int
@@ -529,6 +535,8 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		return nil, err
 	}
 	var rawRec struct {
+		Turn           *TurnActivity     `json:"turn"`
+		Todos          []tools.TodoItem  `json:"todos"`
 		Options        SessionOptions    `json:"options"`
 		ID             string            `json:"id"`
 		CWD            string            `json:"cwd"`
@@ -558,6 +566,7 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		updatedAt = rawRec.UpdatedAtSnake
 	}
 	rec := &SessionRecord{
+		Turn: rawRec.Turn, Todos: rawRec.Todos,
 		Options:     rawRec.Options,
 		ID:          rawRec.ID,
 		CWD:         rawRec.CWD,
@@ -759,6 +768,11 @@ func (d *DaemonServer) quiesceSessions() {
 		if act.cancel != nil {
 			act.cancel()
 		}
+		if act.record.Status == "running" {
+			finishTurnActivity(act, true)
+		}
+		act.pendingApproval = nil
+		act.toolProgress = nil
 		act.record.Status = "idle"
 		_ = d.saveSession(act.record)
 		act.mu.Unlock()
@@ -830,6 +844,8 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		d.handleReview(raw, false)
 	case "undo_changes":
 		d.handleReview(raw, true)
+	case "keep_changes":
+		d.handleKeepChanges(raw)
 	case "configure_session":
 		d.configureSession(raw)
 	case "browse_folders":
@@ -1582,6 +1598,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 	case "tool_approval_response":
 		var req struct {
+			Always    bool   `json:"always"`
 			SessionID string `json:"sessionId"`
 			CallID    string `json:"callId"`
 			Approved  bool   `json:"approved"`
@@ -1594,6 +1611,16 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 		if act != nil {
 			act.mu.Lock()
+			if _, pending := act.approvalReqs[req.CallID]; !pending {
+				act.mu.Unlock()
+				return
+			}
+			if req.Always && req.Approved {
+				act.record.Options.Access = "full"
+				d.allowPendingTools(act)
+				_ = d.saveSession(act.record)
+				_ = d.sendWS(map[string]any{"type": "session_data", "hostId": d.config.HostID, "session": liveSessionPayload(act)})
+			}
 			if ch, ok := act.approvalReqs[req.CallID]; ok {
 				ch <- req.Approved
 				delete(act.approvalReqs, req.CallID)
@@ -2171,6 +2198,15 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 
 	act.record.Status = "running"
+	act.record.Turn = &TurnActivity{StartedAt: time.Now().UnixMilli(), Status: "running"}
+	act.toolProgress = map[string]string{}
+	act.thinkingStartedAt = 0
+	if act.record.Options.Access == "" {
+		act.record.Options.Access = "ask"
+		if yolo {
+			act.record.Options.Access = "full"
+		}
+	}
 	if requestedModel != "" {
 		act.record.Model = requestedModel
 	}
@@ -2190,9 +2226,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	act.gen++
 	myGen := act.gen
 	options := normalizedOptions(act.record.Options)
-	if act.record.Options.Access != "" {
-		yolo = options.Access == "full"
-	}
+	turnStarted := *act.record.Turn
 	if act.record.Options.Effort == "" && cfg.Settings.Reasoning != "" {
 		options.Effort = canonicalReasoning(cfg.Settings.Reasoning)
 	}
@@ -2205,6 +2239,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 			return
 		}
 		act.record.Status = "idle"
+		finishTurnActivity(act, ctx.Err() != nil)
+		act.pendingApproval = nil
+		act.toolProgress = nil
+		act.thinkingStartedAt = 0
 		act.live = nil
 		act.record.UpdatedAt = time.Now().UnixMilli()
 		_ = d.saveSession(act.record)
@@ -2224,6 +2262,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		"hostId":    cfg.HostID,
 		"sessionId": sessionID,
 		"status":    "running",
+		"turn":      turnStarted,
 	})
 
 	// Create OpenAI client pointing to Gateway's /v1 proxy endpoint
@@ -2251,6 +2290,19 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		&tools.EditTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.BashTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.GlobTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.TodoTool{Update: func(items []tools.TodoItem) error {
+			act.mu.Lock()
+			defer act.mu.Unlock()
+			if act.gen != myGen || ctx.Err() != nil {
+				return context.Canceled
+			}
+			act.record.Todos = append([]tools.TodoItem{}, items...)
+			if err := d.saveSession(act.record); err != nil {
+				return err
+			}
+			_ = d.sendWS(map[string]any{"type": "agent_event", "hostId": cfg.HostID, "sessionId": sessionID, "event": map[string]any{"type": "todo_update", "items": items}})
+			return nil
+		}},
 	)
 
 	restrictModeTools(reg, options.Mode)
@@ -2266,6 +2318,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	sysPrompt.WriteString("You are an expert autonomous AI software engineering agent running directly on the user's machine.\n")
 	sysPrompt.WriteString(fmt.Sprintf("Working Directory: %s\n", sessionCWD))
 	sysPrompt.WriteString(modeInstructions(options.Mode) + "\n")
+	sysPrompt.WriteString("Use the todo tool to maintain a visible checklist for multi-step work. Update it as steps start and finish.\n")
 	if cfg.Settings.JailByDefault {
 		sysPrompt.WriteString("Sandbox: Strict jail mode is active. Only access files inside the working directory.\n")
 	}
@@ -2301,39 +2354,8 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	act.agent = agent
 	act.mu.Unlock()
 
-	// Tool approval hook when YOLO is false
-	if !yolo {
-		agent.BeforeToolExecute = func(call provider.ToolCallBlock) (bool, string, json.RawMessage) {
-			if call.Name == "read" || call.Name == "glob" {
-				return true, "", nil
-			}
-			callID := call.ID
-			respChan := make(chan bool, 1)
-
-			act.mu.Lock()
-			act.approvalReqs[callID] = respChan
-			act.mu.Unlock()
-
-			_ = d.sendWS(map[string]any{
-				"type":      "tool_approval_request",
-				"hostId":    cfg.HostID,
-				"sessionId": sessionID,
-				"callId":    callID,
-				"tool":      call.Name,
-				"args":      call.Arguments,
-			})
-
-			select {
-			case approved := <-respChan:
-				if !approved {
-					return false, "User rejected tool execution", nil
-				}
-				return true, "", nil
-			case <-ctx.Done():
-				return false, "Operation cancelled", nil
-			}
-		}
-	}
+	// Read the live session access policy before every tool, including reads.
+	agent.BeforeToolExecute = d.toolApprovalHook(ctx, act, myGen, cfg.HostID)
 
 	// Persistent transcript hook: whenever a message is added, record it
 	agent.OnMessageAppended = func(m provider.Message) {
@@ -2368,6 +2390,8 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		switch e := ev.(type) {
 		case core.EvTurnStart:
 			payload["event"] = map[string]any{"type": "turn_start", "step": e.Step}
+		case core.EvAssistantMessage:
+			payload["event"] = map[string]any{"type": "assistant_message", "message": e.Message, "index": len(act.record.Messages) - 1}
 		case core.EvAssistantStart:
 			payload["event"] = map[string]any{"type": "assistant_start"}
 		case core.EvTextDelta:
@@ -2406,7 +2430,9 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 			}
 		case core.EvTurnEnd:
 			evMap := map[string]any{"type": "turn_end", "stop": string(e.Stop)}
-			if e.Err != nil {
+			if ctx.Err() != nil {
+				evMap["cancelled"] = true
+			} else if e.Err != nil {
 				evMap["error"] = e.Err.Error()
 			}
 			if agent != nil {
@@ -2417,6 +2443,9 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		case core.EvDone:
 			return // Task completion is emitted only after compaction and persistence.
 		case core.EvError:
+			if ctx.Err() != nil {
+				return
+			}
 			msg := "agent error"
 			if e.Err != nil {
 				msg = e.Err.Error()
@@ -2497,6 +2526,11 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 
 	if err := agent.Prompt(ctx, fullPrompt, images, sink); err != nil && ctx.Err() == nil {
+		act.mu.Lock()
+		if act.gen == myGen {
+			act.record.Turn.Status = "failed"
+		}
+		act.mu.Unlock()
 		_ = d.sendWS(map[string]any{"type": "error", "hostId": cfg.HostID, "sessionId": sessionID, "message": err.Error()})
 	}
 

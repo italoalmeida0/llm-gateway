@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/patriceckhart/zot/packages/agent/tools"
 	"github.com/patriceckhart/zot/packages/core"
 )
 
@@ -76,6 +77,17 @@ func (j *reviewJournal) persist() {
 func newReviewJournal(d *DaemonServer, act *ActiveSession, gen int, cwd, hostID, sessionID string) *reviewJournal {
 	j := &reviewJournal{d: d, act: act, gen: gen, cwd: cwd, hostID: hostID, sessionID: sessionID,
 		review: taskReview{ID: fmt.Sprintf("review_%d", time.Now().UnixNano()), Files: map[string]*fileChange{}}}
+	if data, err := os.ReadFile(d.reviewPath(sessionID)); err == nil {
+		var pending taskReview
+		if json.Unmarshal(data, &pending) == nil && pending.Files != nil {
+			j.review = pending
+			for path, change := range j.review.Files {
+				if change.Undone {
+					delete(j.review.Files, path)
+				}
+			}
+		}
+	}
 	j.persist()
 	return j
 }
@@ -253,6 +265,7 @@ func (t *reviewedTool) Execute(ctx context.Context, args json.RawMessage, progre
 	if limited {
 		j.review.Notice = "Some files could not be captured (symlinks, unreadable files or backup size limits). Shell review covers the project folder, excluding dependency, build and cache folders."
 	}
+	j.review.ID = fmt.Sprintf("review_%d", time.Now().UnixNano())
 	j.persist()
 	return result, err
 }
@@ -278,14 +291,11 @@ func (r *taskReview) public(detail bool) map[string]any {
 		}
 		if detail {
 			if utf8.Valid(f.Before.Data) && utf8.Valid(f.After.Data) && !bytes.Contains(f.Before.Data, []byte{0}) && !bytes.Contains(f.After.Data, []byte{0}) {
-				const previewLimit = 32000
-				beforeSize := min(len(f.Before.Data), previewLimit, previewBudget)
-				previewBudget -= beforeSize
-				afterSize := min(len(f.After.Data), previewLimit, previewBudget)
-				previewBudget -= afterSize
-				entry["before"] = string(f.Before.Data[:beforeSize])
-				entry["after"] = string(f.After.Data[:afterSize])
-				entry["truncated"] = len(f.Before.Data) > beforeSize || len(f.After.Data) > afterSize
+				diff := tools.DiffText(string(f.Before.Data), string(f.After.Data))
+				size := min(len(diff), 64000, previewBudget)
+				previewBudget -= size
+				entry["diff"] = diff[:size]
+				entry["truncated"] = len(diff) > size
 			} else {
 				entry["binary"] = true
 			}
@@ -306,7 +316,7 @@ func (d *DaemonServer) handleReview(raw []byte, undo bool) {
 	if json.Unmarshal(raw, &req) != nil || filepath.Base(req.SessionID) != req.SessionID {
 		return
 	}
-	response := map[string]any{"type": "session_changes", "hostId": d.config.HostID, "sessionId": req.SessionID, "requestId": req.RequestID}
+	response := map[string]any{"type": "session_changes", "hostId": d.config.HostID, "sessionId": req.SessionID, "requestId": req.RequestID, "detail": req.Detail}
 	defer func() { _ = d.sendWS(response) }()
 	act, err := d.getOrCreateActiveSession(req.SessionID)
 	if err != nil {
@@ -378,6 +388,48 @@ func (d *DaemonServer) handleReview(raw []byte, undo bool) {
 		if data, err := json.Marshal(review); err == nil {
 			_ = os.WriteFile(d.reviewPath(req.SessionID), data, 0o600)
 		}
+		_ = d.sendWS(map[string]any{"type": "changes_updated", "hostId": d.config.HostID, "sessionId": req.SessionID})
 	}
 	response["review"] = review.public(req.Detail)
+}
+
+// Keep accepts the current checkpoint; it never changes working files.
+func (d *DaemonServer) handleKeepChanges(raw []byte) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+		RequestID string `json:"requestId"`
+		ReviewID  string `json:"reviewId"`
+	}
+	if json.Unmarshal(raw, &req) != nil || req.SessionID == "" || filepath.Base(req.SessionID) != req.SessionID {
+		return
+	}
+	response := map[string]any{"type": "session_changes", "hostId": d.config.HostID, "sessionId": req.SessionID, "requestId": req.RequestID, "detail": true}
+	defer func() { _ = d.sendWS(response) }()
+	act, err := d.getOrCreateActiveSession(req.SessionID)
+	if err != nil {
+		response["error"] = "Conversation unavailable"
+		return
+	}
+	act.mu.Lock()
+	defer act.mu.Unlock()
+	if act.record.Status == "running" {
+		response["error"] = "Wait for the turn to finish before keeping changes"
+		return
+	}
+	data, err := os.ReadFile(d.reviewPath(req.SessionID))
+	var review taskReview
+	if err != nil || json.Unmarshal(data, &review) != nil {
+		response["error"] = "No pending changes"
+		return
+	}
+	if req.ReviewID == "" || review.ID != req.ReviewID {
+		response["error"] = "Changes were updated. Review them again before keeping."
+		return
+	}
+	if err := os.Remove(d.reviewPath(req.SessionID)); err != nil {
+		response["error"] = err.Error()
+		return
+	}
+	response["review"] = map[string]any{"files": []any{}}
+	_ = d.sendWS(map[string]any{"type": "changes_updated", "hostId": d.config.HostID, "sessionId": req.SessionID})
 }

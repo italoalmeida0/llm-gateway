@@ -169,7 +169,11 @@ func (t *GlobTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 			}
 
 			if matched {
-				matches = append(matches, t.globDisplayPath(givenSearchDir, a.Path, relSlash))
+				match := t.globDisplayPath(givenSearchDir, a.Path, relSlash)
+				matches = append(matches, match)
+				if progress != nil {
+					progress(match + "\n")
+				}
 				if len(matches) >= maxGlobMatches {
 					truncated = true
 					return filepath.SkipAll

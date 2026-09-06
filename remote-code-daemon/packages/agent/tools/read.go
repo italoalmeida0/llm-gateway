@@ -154,6 +154,9 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	if truncBytes {
 		sb.WriteString(fmt.Sprintf("... [truncated at %d bytes]\n", maxReadBytes))
 	}
+	if progress != nil {
+		progress(sb.String())
+	}
 
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: sb.String()}},

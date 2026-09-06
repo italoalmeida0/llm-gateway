@@ -89,6 +89,7 @@ func trackLiveEvent(act *ActiveSession, event core.AgentEvent) {
 func liveSessionPayload(act *ActiveSession) map[string]any {
 	payload := sessionPayload(act.record)
 	payload["pendingApproval"] = act.pendingApproval
+	payload["question"] = act.question
 	progress := map[string]string{}
 	for id, text := range act.toolProgress {
 		progress[id] = text

@@ -40,7 +40,9 @@ func (d *DaemonServer) toolApprovalHook(ctx context.Context, act *ActiveSession,
 			act.mu.Unlock()
 			return false, "Turn cancelled", nil
 		}
-		if act.record.Options.Access == "full" {
+		// The questionnaire is itself an explicit user interaction. Avoid an
+		// extra permission prompt before asking the actual questions.
+		if act.record.Options.Access == "full" || call.Name == "question" {
 			act.mu.Unlock()
 			return true, "", nil
 		}

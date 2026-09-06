@@ -144,6 +144,11 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 				mu.Lock()
 				wire = append(wire, msg)
 				mu.Unlock()
+				if msg["type"] == "question_request" {
+					question := msg["question"].(map[string]any)
+					reply, _ := json.Marshal(map[string]any{"type": "question_response", "sessionId": msg["sessionId"], "questionId": question["id"], "answers": [][]string{{"Continue"}}})
+					d.handleMessage(reply)
+				}
 			}
 		}
 		if r.URL.Path == "/api/remote/models" {
@@ -174,6 +179,7 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 			event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{
 				map[string]any{"index": 0, "id": fmt.Sprintf("read-%d", step), "type": "function", "function": map[string]any{"name": "read", "arguments": string(args)}},
 				map[string]any{"index": 1, "id": fmt.Sprintf("todo-%d", step), "type": "function", "function": map[string]any{"name": "todo", "arguments": `{"items":[{"id":"read","text":"Read hello.txt","status":"completed"}]}`}},
+				map[string]any{"index": 2, "id": fmt.Sprintf("question-%d", step), "type": "function", "function": map[string]any{"name": "question", "arguments": `{"questions":[{"header":"Next step","question":"How should I proceed?","options":[{"label":"Continue"}]}]}`}},
 			}}, "finish_reason": "tool_calls"}}})
 		} else {
 			event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "The file is readable."}, "finish_reason": "stop"}}})
@@ -201,6 +207,17 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 	}
 	if len(stored.Todos) != 1 || stored.Todos[0].Status != "completed" {
 		t.Fatal("todo tool did not persist the visible checklist")
+	}
+	answered := false
+	for _, message := range stored.Messages {
+		for _, block := range message.Content {
+			if result, ok := block.(provider.ToolResultBlock); ok && result.CallID == "question-1" {
+				answered = !result.IsError && len(result.Content) == 1 && result.Content[0].(provider.TextBlock).Text == `{"answers":[["Continue"]]}`
+			}
+		}
+	}
+	if !answered {
+		t.Fatal("question answers did not persist in the model's transcript")
 	}
 	if stored.Usage.OutputTokens != 1000 || stored.Context.UsedTokens != 432500 || stored.Context.WindowTokens != 1024000 {
 		t.Fatalf("wrong persisted usage/context: %+v %+v", stored.Usage, stored.Context)

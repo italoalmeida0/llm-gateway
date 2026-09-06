@@ -77,13 +77,13 @@ func TestBrowseFoldersNavigatesWithoutCreatingPaths(t *testing.T) {
 
 func TestModesExposeTheirIntendedTools(t *testing.T) {
 	for _, mode := range []string{"plan", "learning"} {
-		reg := core.NewRegistry(&tools.ReadTool{}, &tools.GlobTool{}, &tools.BashTool{}, &tools.WriteTool{}, &tools.EditTool{}, &tools.TodoTool{})
+		reg := core.NewRegistry(&tools.ReadTool{}, &tools.GlobTool{}, &tools.BashTool{}, &tools.WriteTool{}, &tools.EditTool{}, &tools.TodoTool{}, &tools.QuestionTool{})
 		restrictModeTools(reg, mode)
 		if reg["write"] != nil || reg["edit"] != nil || reg["read"] == nil || reg["glob"] == nil || reg["todo"] == nil {
 			t.Fatal("mode exposed the wrong file tools or lost the checklist")
 		}
-		if (reg["bash"] != nil) != (mode == "learning") {
-			t.Fatal("Learning must retain the shell; Plan must not")
+		if reg["bash"] == nil || reg["question"] == nil {
+			t.Fatal("Plan and Learning must retain shell commands and questions")
 		}
 		if modeInstructions(mode) == "" {
 			t.Fatal("missing mode instructions")

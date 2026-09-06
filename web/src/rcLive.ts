@@ -1,3 +1,5 @@
+import type { ChatMessage } from "./pages/RemoteCode";
+
 // Read complete characters from a streamed JSON string without guessing a
 // missing escape or displaying the raw JSON around the tool's file content.
 function partialString(raw: string, field: string): string | undefined {
@@ -26,4 +28,14 @@ export function displayToolArgs(raw?: string): Record<string, any> {
   }
   if (values.oldText !== undefined || values.newText !== undefined) values.edits = [{oldText:values.oldText || "", newText:values.newText || ""}];
   return values;
+}
+/** Keep canonical messages untouched; the checklist has its own live panel. */
+export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
+  const ids = new Set(messages.flatMap((m) => m.blocks.filter((b) => b.type === "tool_call" && b.toolName === "todo").map((b) => b.toolId)));
+  return messages.flatMap((message) => {
+    const blocks = message.blocks.filter((b) => !((b.type === "tool_call" || b.type === "tool_result") && (b.toolName === "todo" || (b.toolId && ids.has(b.toolId)))));
+    if (blocks.length === message.blocks.length) return [message];
+    if (blocks.every((b) => b.type === "text" && !b.text?.trim())) return [];
+    return [{...message, blocks}];
+  });
 }

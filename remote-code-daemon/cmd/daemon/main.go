@@ -284,6 +284,7 @@ func isTextMime(mime, name string) bool {
 
 // ActiveSession holds in-memory execution state for a session.
 type ActiveSession struct {
+	question          *pendingQuestion
 	pendingApproval   *toolApproval
 	toolProgress      map[string]string
 	thinkingStartedAt int64
@@ -772,6 +773,7 @@ func (d *DaemonServer) quiesceSessions() {
 			finishTurnActivity(act, true)
 		}
 		act.pendingApproval = nil
+		act.question = nil
 		act.toolProgress = nil
 		act.record.Status = "idle"
 		_ = d.saveSession(act.record)
@@ -846,6 +848,8 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		d.handleReview(raw, true)
 	case "keep_changes":
 		d.handleKeepChanges(raw)
+	case "question_response":
+		d.answerQuestions(raw)
 	case "configure_session":
 		d.configureSession(raw)
 	case "browse_folders":
@@ -1086,15 +1090,14 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			})
 			return
 		}
-		// Removing a project cascades: every conversation rooted inside the
-		// project folder is deleted 100% (transcript + attachments) so no
-		// trace is left on the host. The filesystem root is never cascaded.
+		// Cascade only this project's conversations. A nested project owns
+		// its own sessions, matching the sidebar's deepest-folder grouping.
 		if doomed != nil {
 			target := strings.TrimRight(resolvePath(doomed.Path), "/")
 			if len(target) > 1 {
 				for _, s := range d.listSessionSummaries() {
-					cwd := strings.TrimRight(s.CWD, "/")
-					if cwd != target && !strings.HasPrefix(cwd, target+"/") {
+					owner := projectForDirectory(s.CWD, list)
+					if owner == nil || owner.ID != doomed.ID {
 						continue
 					}
 					d.purgeSession(s.ID)
@@ -2198,6 +2201,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 
 	act.record.Status = "running"
+	act.question = nil
 	act.record.Turn = &TurnActivity{StartedAt: time.Now().UnixMilli(), Status: "running"}
 	act.toolProgress = map[string]string{}
 	act.thinkingStartedAt = 0
@@ -2241,6 +2245,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		act.record.Status = "idle"
 		finishTurnActivity(act, ctx.Err() != nil)
 		act.pendingApproval = nil
+		act.question = nil
 		act.toolProgress = nil
 		act.thinkingStartedAt = 0
 		act.live = nil
@@ -2290,6 +2295,9 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		&tools.EditTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.BashTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.GlobTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.QuestionTool{Ask: func(ctx context.Context, req tools.QuestionRequest) ([][]string, error) {
+			return d.askQuestions(ctx, act, myGen, cfg.HostID, req)
+		}},
 		&tools.TodoTool{Update: func(items []tools.TodoItem) error {
 			act.mu.Lock()
 			defer act.mu.Unlock()
@@ -2319,6 +2327,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	sysPrompt.WriteString(fmt.Sprintf("Working Directory: %s\n", sessionCWD))
 	sysPrompt.WriteString(modeInstructions(options.Mode) + "\n")
 	sysPrompt.WriteString("Use the todo tool to maintain a visible checklist for multi-step work. Update it as steps start and finish.\n")
+	sysPrompt.WriteString("Use the question tool when you need user preferences, clarification or implementation decisions. It waits for explicit answers, including in Full access mode.\n")
 	if cfg.Settings.JailByDefault {
 		sysPrompt.WriteString("Sandbox: Strict jail mode is active. Only access files inside the working directory.\n")
 	}

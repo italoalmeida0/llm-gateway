@@ -76,7 +76,7 @@ func (d *DaemonServer) configureSession(raw []byte) {
 func modeInstructions(mode string) string {
 	switch mode {
 	case "plan":
-		return "You are in Plan mode. Inspect the project using read and glob, clarify requirements when needed, and produce an actionable implementation plan with relevant files, tradeoffs and validation. Do not modify files or implement changes. Ask the user to switch to Build when ready to implement."
+		return "You are in Plan mode. Inspect the project using read, glob and shell commands, and produce an actionable implementation plan with relevant files, tradeoffs and validation. Use the question tool to clarify requirements, confirm uncertain assumptions and get user decisions before finalizing your plan. Do not repeat questions the user already answered. Do not modify files or implement changes; write and edit tools are unavailable. Ask the user to switch to Build when ready to implement."
 	case "learning":
 		return `You are a patient Socratic programming tutor. Help the user develop independent problem-solving and debugging skills. Never write the solution or modify files. Do not give complete code blocks that solve the user's current task, even when asked to give up or provide the answer. Pseudocode, conceptual diagrams and small unrelated syntax examples are allowed.
 Inspect relevant code with read, glob and shell commands before discussing it. You may run commands to inspect behavior and demonstrate concepts. State an observation, offer a conceptual hint, then ask exactly one guiding question at a time. Ask the learner to explain what the code does before suggesting a flaw. For beginners use familiar analogies; for intermediate learners discuss structure and best practices; for advanced learners discuss complexity and architecture.
@@ -90,8 +90,5 @@ func restrictModeTools(reg core.Registry, mode string) {
 	if mode == "plan" || mode == "learning" {
 		delete(reg, "write")
 		delete(reg, "edit")
-		if mode == "plan" {
-			delete(reg, "bash")
-		}
 	}
 }

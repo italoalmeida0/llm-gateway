@@ -13,7 +13,9 @@ import {
 import { Portal } from "solid-js/web";
 import { createStore, reconcile } from "solid-js/store";
 import { FileIcon, RemoteHints } from "../rcPresentation";
-import { displayToolArgs } from "../rcLive";
+import { displayToolArgs, withoutTodoActivity } from "../rcLive";
+import { absoluteRemotePath, projectForDirectory } from "../rcPaths";
+import { QuestionPanel, type PendingQuestion } from "../rcQuestion";
 import { createTranscriptScroll } from "../rcScroll";
 import { compactTokens, contextDisplay, type GatewayModel, type SessionContext } from "../rcContext";
 import { Streamdown } from "streamdown-solid";
@@ -419,6 +421,7 @@ export function collectSeriesUnits(
 }
 
 export function buildRenderBlocks(list: ChatMessage[]): RenderBlock[] {
+  list = withoutTodoActivity(list);
   const out: RenderBlock[] = [];
   let i = 0;
   while (i < list.length) {
@@ -456,6 +459,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
   const args = tryParseArgs(u.call?.toolArgs);
   const res = u.result?.toolResult || "";
   switch (name) {
+    case "question": return {icon:"lucide:message-circle", verb:u.result ? "Asked" : "Asking", target:(args.questions || []).map((q: {header?:string}) => q.header).filter(Boolean).join(" · ") || "Questions"};
     case "read": {
       const off = Number(args.offset || 0);
       const lines = res ? res.split("\n").length : 0;
@@ -1027,10 +1031,25 @@ export default function RemoteCodePage() {
     const turn = turnActivity();
     if (!turn) return "";
     const elapsed = elapsedLabel((turn.endedAt || turnClock()) - turn.startedAt);
-    const label = turn.status === "running" && pendingApproval() ? "Waiting for approval" : {running:"Working", cancelling:"Stopping turn", cancelled:"Turn cancelled", completed:"Turn completed", failed:"Turn failed"}[turn.status];
+    const label = turn.status === "running" && pendingQuestion() ? "Waiting for your answers" : turn.status === "running" && pendingApproval() ? "Waiting for approval" : {running:"Working", cancelling:"Stopping turn", cancelled:"Turn cancelled", completed:"Turn completed", failed:"Turn failed"}[turn.status];
     return `${label} · ${elapsed}`;
   };
   const [pendingApproval, setPendingApproval] = createSignal<PendingApproval | null>(null);
+  const [pendingQuestion, setPendingQuestion] = createSignal<PendingQuestion | null>(null);
+  const [questionSubmitting, setQuestionSubmitting] = createSignal(false);
+  const [questionError, setQuestionError] = createSignal("");
+  function showQuestion(question: PendingQuestion | null) {
+    setPendingQuestion(question);
+    setQuestionSubmitting(false);
+    setQuestionError("");
+  }
+  function answerQuestion(answers: string[][]) {
+    const question = pendingQuestion();
+    if (!question || !wsOpen() || questionSubmitting()) return;
+    setQuestionSubmitting(true);
+    setQuestionError("");
+    sendWS({type:"question_response", sessionId:activeSessionId(), questionId:question.id, answers});
+  }
   // Live usage per session (from daemon usage/turn_end events).
   const [sessionUsage, setSessionUsage] = createSignal<Record<string, SessionUsage>>({});
   /** Usage of the active session, or null — keeps "" session ids out of the union. */
@@ -1339,12 +1358,6 @@ export default function RemoteCodePage() {
     return list.find((p) => p.id === activeProjectId()) ?? list[0] ?? null;
   });
 
-  function sessionInPath(s: SessionSummary, path: string) {
-    const norm = path.replace(/\/+$/, "");
-    const cwd = (s.cwd || "").replace(/\/+$/, "");
-    return cwd === norm || cwd.startsWith(norm + "/");
-  }
-
   function visibleSessions(key: string, list: SessionSummary[]) {
     if (expandedSessionLists()[key] || sessionFilter().trim()) return list;
     return sortedSessions([...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 10));
@@ -1353,8 +1366,8 @@ export default function RemoteCodePage() {
     return <Show when={count > 10 && !sessionFilter().trim()}><button class="px-3 py-2 text-xs text-ink-500 hover:text-ink-200 cursor-pointer" aria-expanded={!!expandedSessionLists()[key]}
       onClick={() => setExpandedSessionLists((prev) => ({ ...prev, [key]: !prev[key] }))}>{expandedSessionLists()[key] ? "Show less" : `See all (${count})`}</button></Show>;
   }
-  function sessionsOfProject(projectPath: string) {
-    return sessions().filter((s) => sessionInPath(s, projectPath));
+  function sessionsOfProject(projectId: string) {
+    return sessions().filter((s) => projectForDirectory(s.cwd, projects())?.id === projectId);
   }
 
   /** Removes local leftovers of a session that vanished from the mirror. */
@@ -1872,6 +1885,7 @@ export default function RemoteCodePage() {
           setTurnActivity(r.turn || null);
           setTurnClock(Date.now());
           setTodos(r.todos || []);
+          showQuestion(r.question || null);
           setToolProgress(r.toolProgress || {});
           setPendingApproval(r.pendingApproval ? {...r.pendingApproval, args:prettyArgs(r.pendingApproval.args)} : null);
           if (r.thinkingStartedAt && r.status === "running") startThinkingTimer(r.thinkingStartedAt);
@@ -1898,6 +1912,7 @@ export default function RemoteCodePage() {
           setSessionStatus(msg.status === "running" ? "running" : "idle");
           if (msg.turn) setTurnActivity(msg.turn);
           if (msg.status === "idle") {
+            showQuestion(null);
             setTurnActivity((turn) => turn && !turn.endedAt ? {...turn, endedAt:Date.now(), status:turn.status === "cancelling" ? "cancelled" : turn.status === "running" ? "completed" : turn.status} : turn);
             requestReview(reviewOpen());
             setPendingApproval(null);
@@ -1930,6 +1945,21 @@ export default function RemoteCodePage() {
         break;
       }
 
+      case "question_request": {
+        if (msg.sessionId === activeSessionId()) showQuestion(msg.question);
+        break;
+      }
+      case "question_resolved": {
+        if (msg.sessionId === activeSessionId() && pendingQuestion()?.id === msg.questionId) showQuestion(null);
+        break;
+      }
+      case "question_error": {
+        if (msg.sessionId === activeSessionId() && pendingQuestion()?.id === msg.questionId) {
+          setQuestionSubmitting(false);
+          setQuestionError(msg.message || "Could not submit answers");
+        }
+        break;
+      }
       case "tool_approval_request": {
         if (msg.sessionId === activeSessionId()) {
           setPendingApproval({
@@ -2017,6 +2047,7 @@ export default function RemoteCodePage() {
           }
           if (ev.usage || ev.cumulative) applyUsage(msg.sessionId, ev.usage, ev.cumulative);
           if (ev.cancelled || ev.stop === "aborted" || /context cancel(?:led|ed)/i.test(ev.error || "")) {
+            showQuestion(null);
             setTurnActivity((turn) => turn ? {...turn, status:"cancelled", endedAt:Date.now()} : null);
             setPendingApproval(null);
           } else if (ev.error) toast(ev.error, "err");
@@ -2338,6 +2369,7 @@ export default function RemoteCodePage() {
 
   function selectSession(id: string) {
     if (creatingSession()) return;
+    showQuestion(null);
     setDraftMode(false);
     setTurnActivity(null); setTodos([]); setToolProgress({});
     setTaskReview(null);
@@ -2372,6 +2404,7 @@ export default function RemoteCodePage() {
   // Open a centered draft without creating a conversation on the host.
   function startNewConversation(projectId?: string) {
     if (creatingSession()) return;
+    showQuestion(null);
     setDraftMode(true);
     setTurnActivity(null); setTodos([]); setToolProgress({});
     setHistoryView(false);
@@ -2908,21 +2941,11 @@ export default function RemoteCodePage() {
       s.model.toLowerCase().includes(q)
     );
   }
-  function projectSessions(path: string) {
-    return sortedSessions(sessionsOfProject(path).filter(matchQuery));
+  function projectSessions(projectId: string) {
+    return sortedSessions(sessionsOfProject(projectId).filter(matchQuery));
   }
   function looseSessions() {
-    const norm = (p: string) => p.replace(/\/+$/, "");
-    return sortedSessions(
-      sessions().filter((s) => {
-        if (!matchQuery(s)) return false;
-        const cwd = norm(s.cwd || "");
-        return !projects().some((p) => {
-          const pp = norm(p.path);
-          return cwd === pp || cwd.startsWith(pp + "/");
-        });
-      }),
-    );
+    return sortedSessions(sessions().filter((s) => matchQuery(s) && !projectForDirectory(s.cwd, projects())));
   }
 
   function closeSidebarOnMobile() {
@@ -3430,6 +3453,7 @@ export default function RemoteCodePage() {
         setTaskReview(null);
         setReviewOpen(false);
         setTurnActivity(null); setTodos([]);
+        showQuestion(null);
         setAppNotice(null);
         setActiveSessionId("");
         setActiveProjectId("");
@@ -3469,17 +3493,7 @@ export default function RemoteCodePage() {
       if (!best || s.createdAt > best.createdAt) best = s;
     }
     if (!best) return "";
-    let bestId = "";
-    let bestLen = -1;
-    for (const p of projects()) {
-      const pp = p.path.replace(/\/+$/, "");
-      if (pp.length < 2) continue;
-      if (sessionInPath(best, p.path) && pp.length > bestLen) {
-        bestLen = pp.length;
-        bestId = p.id;
-      }
-    }
-    return bestId;
+    return projectForDirectory(best.cwd, projects())?.id || "";
   });
   createEffect(() => {
     const list = projects();
@@ -3526,7 +3540,7 @@ export default function RemoteCodePage() {
     if (!activeProjectId()) return;
     const ap = activeProject();
     if (!ap) return;
-    const fresh = sessionsOfProject(ap.path)[0];
+    const fresh = sessionsOfProject(ap.id)[0];
     if (fresh) selectSession(fresh.id);
   });
 
@@ -3628,7 +3642,6 @@ export default function RemoteCodePage() {
         <div
           onClick={() => toggleToolOpen(key())}
           class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
-          data-rc-tip={u.call?.toolArgs || name()}
         >
           <Show
             when={!(running && !u.result)}
@@ -3643,8 +3656,12 @@ export default function RemoteCodePage() {
             />
           </Show>
           <span class="text-ink-500 shrink-0">{sum().verb}</span>
-          <Show when={args().path}><FileIcon path={String(args().path)} /></Show>
-          <span class="truncate text-ink-200 font-medium min-w-0 flex-1">{sum().target}</span>
+          <span class="flex items-center gap-2 min-w-0 flex-1">
+            <span class="inline-flex items-center gap-2 min-w-0" data-rc-tip={args().path ? absoluteRemotePath(String(args().path), activeSession()?.cwd || "", projects().find((p) => p.protected)?.path) : undefined}>
+              <Show when={args().path}><FileIcon path={String(args().path)} /></Show>
+              <span class="truncate text-ink-200 font-medium min-w-0">{sum().target}</span>
+            </span>
+          </span>
           <Show when={sum().statAdd != null || sum().statDel != null}>
             <span class="font-mono text-[11px] shrink-0">
               <Show when={(sum().statAdd || 0) > 0}>
@@ -3709,7 +3726,7 @@ export default function RemoteCodePage() {
             <Show when={name() !== "edit" && name() !== "read" && name() !== "write"}>
               <Show
                 when={u.result?.toolResult || prog()}
-                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{name() === "question" ? "Waiting for your answers…" : pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
               >
                 <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
                   {u.result?.toolResult || prog() || ""}
@@ -4410,7 +4427,7 @@ export default function RemoteCodePage() {
                   <div class="space-y-2">
                     <For each={projects()}>
                       {(p) => {
-                        const list = () => projectSessions(p.path);
+                        const list = () => projectSessions(p.id);
                         return (
                           <div>
                             <div
@@ -5232,7 +5249,10 @@ export default function RemoteCodePage() {
                   <span>{turnLabel()}</span>
                 </div>
               </Show>
-              <Show when={activeSessionId() && todos().length}>
+              <Show when={activeSessionId() && pendingQuestion()?.id} keyed>{(id) =>
+                <QuestionPanel request={{...pendingQuestion()!, id}} connected={connectionState() === "connected" && activeHost()?.status === "online"} submitting={questionSubmitting()} error={questionError()} onSubmit={answerQuestion} />
+              }</Show>
+              <Show when={activeSessionId() && todos().length && !pendingQuestion()}>
                 <section aria-label="Task checklist" class="mb-3 rounded-xl border border-line bg-elev/40 text-xs">
                   <button onClick={() => setTodosOpen(!todosOpen())} aria-expanded={todosOpen()} class="w-full px-3 py-2.5 flex items-center gap-2 text-ink-300 cursor-pointer">
                     <Iconify icon="lucide:list-checks" size={15} /><span class="font-medium">Task plan</span>
@@ -5547,7 +5567,7 @@ export default function RemoteCodePage() {
                         </button>
                       }</For>
                       <p class="px-2 py-2 text-[11px] text-ink-500">Changes apply immediately to pending and future tool calls.</p>
-                      <Show when={agentMode() !== "build"}><p class="px-2 py-2 text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan explores files without edits or shell commands." : "Learning can read files and run commands. Edit and create tools are disabled."}</p></Show>
+                      <Show when={agentMode() !== "build"}><p class="px-2 py-2 text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan can read files, run commands and ask questions. Edit and create tools are disabled." : "Learning can read files and run commands. Edit and create tools are disabled."}</p></Show>
                     </FloatMenu>
                   </div>
                   {/* Model picker (moved from the removed topbar) */}
@@ -6276,6 +6296,7 @@ export default function RemoteCodePage() {
                     <div>• bash (shell runner)</div>
                     <div>• glob (file search)</div>
                     <div>• todo (task checklist)</div>
+                    <div>• question (ask user)</div>
                   </div>
                 </div>
 

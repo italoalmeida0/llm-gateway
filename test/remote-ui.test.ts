@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { compactTokens, contextDisplay } from "../web/src/rcContext";
 import { createTranscriptScroll } from "../web/src/rcScroll";
-import { displayToolArgs } from "../web/src/rcLive";
+import { displayToolArgs, withoutTodoActivity } from "../web/src/rcLive";
+import { absoluteRemotePath, projectForDirectory } from "../web/src/rcPaths";
+import type { ChatMessage } from "../web/src/pages/RemoteCode";
 import { fileIcon } from "../web/src/rcFiles";
 
 describe("Remote Code file presentation", () => {
+  test("shows absolute tool paths resolved against the remote working directory", () => {
+    expect(absoluteRemotePath("src/../main.ts", "/home/user/TAP")).toBe("/home/user/TAP/main.ts");
+    expect(absoluteRemotePath("/etc/config", "/home/user/TAP")).toBe("/etc/config");
+    expect(absoluteRemotePath("src\\main.ts", "C:\\work\\TAP")).toBe("C:\\work\\TAP\\src\\main.ts");
+    expect(absoluteRemotePath("../../config", "C:\\work")).toBe("C:\\config");
+  });
   test("decodes partial tool content without leaking incomplete JSON escapes", () => {
     expect(displayToolArgs('{"path":"src/example.py","content":"print(\\"hello\\")\\nnext\\u00').content).toBe('print("hello")\nnext');
     expect(displayToolArgs('{"path":"src/example.py","content":"hello\\').content).toBe("hello");
@@ -20,6 +28,30 @@ describe("Remote Code file presentation", () => {
     expect(fileIcon(".env.local").icon).toBe("mdi:file-key");
     expect(fileIcon("api.spec.ts").icon).toBe("mdi:test-tube");
   });
+});
+
+test("nested projects own their sessions exclusively, with path boundaries", () => {
+  const projects = [{id:"home",path:"/home/user/"}, {id:"tap",path:"/home/user/TAP"}];
+  expect(projectForDirectory("/home/user/TAP/src", projects)?.id).toBe("tap");
+  expect(projectForDirectory("/home/user/TAP-other", projects)?.id).toBe("home");
+  expect(projectForDirectory("/home/user", projects)?.id).toBe("home");
+  expect(projectForDirectory("/tmp/work", projects)).toBeUndefined();
+  expect(projectForDirectory("/tmp", [{id:"root",path:"/"}])?.id).toBe("root");
+  expect(projectForDirectory("C:\\work\\TAP\\src", [{id:"windows",path:"c:/work/tap/"}])?.id).toBe("windows");
+});
+
+test("hides checklist calls and results while preserving text, other tools and source indices", () => {
+  const messages: ChatMessage[] = [
+    {id:"mixed",role:"assistant",srcIdx:1,blocks:[{type:"text",text:"Progress"},{type:"tool_call",toolId:"todo1",toolName:"todo"},{type:"tool_call",toolId:"read",toolName:"read"}]},
+    {id:"results",role:"tool",srcIdx:2,blocks:[{type:"tool_result",toolId:"todo1",toolResult:"[]"},{type:"tool_result",toolId:"read",toolResult:"content"}]},
+    {id:"hidden",role:"assistant",srcIdx:3,blocks:[{type:"tool_call",toolId:"todo2",toolName:"todo"},{type:"tool_result",toolId:"todo2"}]},
+    {id:"loading",role:"assistant",srcIdx:4,blocks:[]},
+  ];
+  const visible = withoutTodoActivity(messages);
+  expect(visible.map((m) => m.srcIdx)).toEqual([1,2,4]);
+  expect(visible[0].blocks.map((b) => b.type)).toEqual(["text","tool_call"]);
+  expect(visible[1].blocks[0].toolId).toBe("read");
+  expect(messages[0].blocks).toHaveLength(3);
 });
 
 describe("Remote Code context", () => {

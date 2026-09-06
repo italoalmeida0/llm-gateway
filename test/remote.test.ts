@@ -132,6 +132,45 @@ describe("Remote Code Relay and Pairing", () => {
     expect(json.hosts[0].status).toBe("offline");
   });
 
+  test("daemon model metadata uses the gateway registry with auth and configured limits", async () => {
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ data: [] }) });
+    const headers = { Authorization: `Bearer ${userToken}`, "Content-Type": "application/json" };
+    let providerId = "";
+    const id = "remote/custom-alias";
+    try {
+      const providerRes = await fetch(`${GW}/api/admin/providers`, {
+        method: "POST", headers,
+        body: JSON.stringify({ name: "remote-metadata", openaiBaseUrl: `http://127.0.0.1:${upstream.port}/v1`, apiKey: "test-upstream-key" }),
+      });
+      expect(providerRes.status).toBe(200);
+      providerId = ((await providerRes.json()) as any).provider.id;
+      const created = await fetch(`${GW}/api/admin/models`, {
+        method: "POST", headers,
+        body: JSON.stringify({ id, providerId, contextLength: 1024000, maxOutputLength: 16384, reasoningEfforts: ["low", "high"] }),
+      });
+      expect(created.status).toBe(200);
+      expect((await fetch(`${GW}/api/remote/models`)).status).toBe(401);
+      expect((await fetch(`${GW}/api/remote/models`, { headers })).status).toBe(401);
+      const daemonHeaders = { Authorization: `Bearer ${daemonToken}` };
+      const read = async () => (await (await fetch(`${GW}/api/remote/models`, { headers: daemonHeaders })).json()) as any;
+      const catalog = await read();
+      expect(catalog.models.find((m: any) => m.id === id).limit).toEqual({ context: 1024000, output: 16384 });
+      const dashboard = (await (await fetch(`${GW}/api/me/models`, { headers })).json()) as any;
+      expect(dashboard.models.find((m: any) => m.id === id).limit.context).toBe(1024000);
+      const patched = await fetch(`${GW}/api/admin/models/${encodeURIComponent(id)}`, {
+        method: "PATCH", headers, body: JSON.stringify({ contextLength: null, maxOutputLength: null }),
+      });
+      expect(patched.status).toBe(200);
+      expect((await read()).models.find((m: any) => m.id === id).limit).toEqual({});
+      await fetch(`${GW}/api/admin/models/${encodeURIComponent(id)}`, { method: "PATCH", headers, body: JSON.stringify({ enabled: false }) });
+      expect((await read()).models).toEqual([]);
+    } finally {
+      await fetch(`${GW}/api/admin/models/${encodeURIComponent(id)}`, { method: "DELETE", headers });
+      if (providerId) await fetch(`${GW}/api/admin/providers/${providerId}`, { method: "DELETE", headers });
+      upstream.stop();
+    }
+  });
+
   test("WebSocket relay: Daemon connects and Web Client exchanges messages", async () => {
     // 1. Connect Daemon WebSocket
     const daemonWs = new WebSocket(`${GW_WS}/api/remote/daemon/ws?token=${daemonToken}`);
@@ -549,4 +588,3 @@ describe("Remote Code Relay and Pairing", () => {
     expect(json.hosts.length).toBe(0);
   });
 });
-

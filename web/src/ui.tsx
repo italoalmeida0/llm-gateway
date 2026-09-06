@@ -1,5 +1,6 @@
 import {
   createSignal,
+  createUniqueId,
   createEffect,
   For,
   onCleanup,
@@ -729,56 +730,80 @@ export function Badge(props: {
   );
 }
 
+const modalStack: HTMLElement[] = [];
+let previousBodyOverflow = "";
+
 export function Modal(props: {
   open: boolean;
   onClose: () => void;
   title: string;
+  description?: string;
   width?: string;
-  /** Fullscreen sheet on small screens (mobile-first modals). */
   fullOnMobile?: boolean;
+  footer?: JSX.Element;
   children: JSX.Element;
 }) {
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && props.open) props.onClose();
+  const titleId = createUniqueId();
+  const descriptionId = createUniqueId();
+  const setupDialog = (panel: HTMLDivElement) => {
+    const previousFocus = document.activeElement as HTMLElement | null;
+    if (modalStack.length === 0) {
+      previousBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    }
+    modalStack.push(panel);
+    const focusable = () => Array.from(panel.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex="0"]',
+    )).filter((el) => el.getClientRects().length > 0);
+    const raf = requestAnimationFrame(() => {
+      if (modalStack.at(-1) === panel) (panel.querySelector<HTMLElement>("[autofocus]") || focusable()[0] || panel).focus();
+    });
+    const onKey = (e: KeyboardEvent) => {
+      if (modalStack.at(-1) !== panel || e.defaultPrevented) return;
+      // Floating menus own Escape before the dialog beneath them.
+      if (document.querySelector("[data-floatmenu], [role=listbox]")) return;
+      if (e.key === "Escape") { e.preventDefault(); props.onClose(); }
+      if (e.key !== "Tab") return;
+      const items = focusable();
+      const first = items[0] || panel;
+      const last = items.at(-1) || panel;
+      if (!panel.contains(document.activeElement) || (e.shiftKey && document.activeElement === first)) {
+        e.preventDefault(); (e.shiftKey ? last : first).focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault(); first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    onCleanup(() => {
+      cancelAnimationFrame(raf);
+      document.removeEventListener("keydown", onKey);
+      const wasTop = modalStack.at(-1) === panel;
+      const index = modalStack.indexOf(panel);
+      if (index >= 0) modalStack.splice(index, 1);
+      if (modalStack.length === 0) document.body.style.overflow = previousBodyOverflow;
+      if (wasTop && previousFocus?.isConnected) previousFocus.focus();
+    });
   };
-  onMount(() => document.addEventListener("keydown", onKey));
-  onCleanup(() => document.removeEventListener("keydown", onKey));
-
   return (
     <Show when={props.open}>
-      {/* Portal: keeps position:fixed relative to the viewport even if an
-          ancestor has a transform/filter (which would create a containing
-          block and fling the modal off-screen). CSS animation only — never
-          data-usal here (retained transforms/filters break fixed layouts). */}
       <Portal>
-        <div
-          class="fixed inset-0 overflow-y-auto bg-black/55 backdrop-blur-sm"
-          style={{ "z-index": Z.modal }}
-          onMouseDown={() => props.onClose()}
-          role="dialog"
-          aria-modal="true"
-        >
-          <div class="min-h-full flex items-center justify-center p-4">
-            <div
-              class={`anim-pop-in w-full ${props.width ?? "max-w-md"} rounded-xl border border-line bg-card shadow-2xl shadow-black/30 ${
-                props.fullOnMobile
-                  ? "max-sm:min-h-[100dvh] max-sm:max-w-full max-sm:rounded-none max-sm:border-0"
-                  : ""
-              }`}
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div class="flex items-center justify-between px-5 py-3 border-b border-line">
-                <h3 class="text-sm font-semibold">{props.title}</h3>
-                <button
-                  onClick={props.onClose}
-                  class="rounded-lg p-1 text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 transition-colors cursor-pointer"
-                  aria-label="Close"
-                >
+        <div class="fixed inset-0 overflow-hidden bg-black/50 backdrop-blur-sm" style={{ "z-index": Z.modal }}
+          onMouseDown={props.onClose}>
+          <div class={`h-full flex items-center justify-center p-4 sm:p-6 ${props.fullOnMobile ? "max-sm:p-0" : ""}`}>
+            <div ref={setupDialog} role="dialog" aria-modal="true" aria-labelledby={titleId}
+              aria-describedby={props.description ? descriptionId : undefined} tabindex="-1"
+              class={`anim-pop-in flex max-h-full min-h-0 w-full flex-col ${props.width ?? "max-w-md"} rounded-2xl border border-line bg-card shadow-2xl outline-none ${props.fullOnMobile ? "max-sm:h-full max-sm:max-w-full max-sm:rounded-none max-sm:border-0" : ""}`}
+              onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+              <div class="flex shrink-0 items-start justify-between gap-4 px-5 py-4 sm:px-6 border-b border-line">
+                <div class="min-w-0"><h3 id={titleId} class="text-sm font-semibold text-ink-100 break-words">{props.title}</h3>
+                  <Show when={props.description}><p id={descriptionId} class="mt-1 text-xs leading-relaxed text-ink-400">{props.description}</p></Show>
+                </div>
+                <button onClick={props.onClose} class="shrink-0 rounded-lg p-1 text-ink-400 hover:text-ink-100 hover:bg-elev focus-visible:ring-2 focus-visible:ring-accent-500 transition-colors cursor-pointer" aria-label="Close">
                   <Icon name={Icons.x} />
                 </button>
               </div>
-              <div class="px-5 py-4">{props.children}</div>
+              <div class="min-h-0 overflow-y-auto overscroll-contain px-5 py-5 sm:px-6">{props.children}</div>
+              <Show when={props.footer}><div class="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-line bg-elev/40 px-5 py-3 sm:px-6 rounded-b-2xl">{props.footer}</div></Show>
             </div>
           </div>
         </div>

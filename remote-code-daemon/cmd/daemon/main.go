@@ -52,7 +52,7 @@ type ZotSettings struct {
 	Model                string  `json:"model,omitempty"`
 	Reasoning            string  `json:"reasoning,omitempty"` // "off" | "low" | "medium" | "high"
 	Temperature          float32 `json:"temperature,omitempty"`
-	AutoCompactThreshold int     `json:"auto_compact_threshold"` // 0=off, 70, 80, 85, 90
+	AutoCompactThreshold int     `json:"auto_compact_threshold"`  // 0=off, 70, 80, 85, 90
 	NoAutoTitle          bool    `json:"no_auto_title,omitempty"` // disable LLM session titles
 	JailByDefault        bool    `json:"jail_by_default"`
 	AutoSwarmEnabled     bool    `json:"auto_swarm_enabled"`
@@ -108,6 +108,9 @@ type SessionRecord struct {
 	ID          string             `json:"id"`
 	CWD         string             `json:"cwd"`
 	Title       string             `json:"title"`
+	TitleSource string             `json:"title_source,omitempty"`
+	Usage       provider.Usage     `json:"usage"`
+	Context     *SessionContext    `json:"context,omitempty"`
 	Model       string             `json:"model"`
 	Status      string             `json:"status"` // "idle" | "running"
 	Pinned      bool               `json:"pinned,omitempty"`
@@ -135,7 +138,7 @@ type SessionSummary struct {
 func sessionListItem(s SessionSummary) map[string]any {
 	return map[string]any{
 		"id": s.ID, "cwd": s.CWD, "title": s.Title, "model": s.Model, "status": s.Status,
-		"pinned": s.Pinned,
+		"pinned":     s.Pinned,
 		"created_at": s.CreatedAt, "updated_at": s.UpdatedAt, "message_count": s.MessageCount,
 		"createdAt": s.CreatedAt, "updatedAt": s.UpdatedAt, "messageCount": s.MessageCount,
 	}
@@ -145,7 +148,7 @@ func sessionListItem(s SessionSummary) map[string]any {
 func sessionPayload(rec *SessionRecord) map[string]any {
 	return map[string]any{
 		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
-		"pinned": rec.Pinned,
+		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context,
 		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": rec.Messages,
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
 	}
@@ -273,8 +276,10 @@ func isTextMime(mime, name string) bool {
 	}
 	return false
 }
+
 // ActiveSession holds in-memory execution state for a session.
 type ActiveSession struct {
+	live         *liveAssistant
 	mu           sync.Mutex
 	record       *SessionRecord
 	agent        *core.Agent
@@ -290,6 +295,7 @@ type DaemonServer struct {
 	configPath string
 	dataDir    string
 	config     *DaemonConfig
+	configMu   sync.RWMutex
 	wsConn     *websocket.Conn
 	wsMu       sync.Mutex
 
@@ -494,7 +500,19 @@ func (d *DaemonServer) saveSession(rec *SessionRecord) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filePath, data, 0o600); err != nil {
+	tmp, err := os.CreateTemp(dir, ".session-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err = tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp.Name(), filePath); err != nil {
 		return err
 	}
 	d.notifyChange("sessions")
@@ -508,18 +526,21 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		return nil, err
 	}
 	var rawRec struct {
-		ID        string            `json:"id"`
-		CWD       string            `json:"cwd"`
-		Title     string            `json:"title"`
-		Model     string            `json:"model"`
-		Status    string            `json:"status"`
-		Pinned    bool              `json:"pinned"`
-		CreatedAt int64             `json:"createdAt"`
-		UpdatedAt int64             `json:"updatedAt"`
-		CreatedAtSnake int64        `json:"created_at"`
-		UpdatedAtSnake int64        `json:"updated_at"`
-		Messages  []json.RawMessage `json:"messages"`
-		Attachments []AttachmentRef `json:"attachments"`
+		ID             string            `json:"id"`
+		CWD            string            `json:"cwd"`
+		Title          string            `json:"title"`
+		TitleSource    string            `json:"title_source"`
+		Usage          provider.Usage    `json:"usage"`
+		Context        *SessionContext   `json:"context"`
+		Model          string            `json:"model"`
+		Status         string            `json:"status"`
+		Pinned         bool              `json:"pinned"`
+		CreatedAt      int64             `json:"createdAt"`
+		UpdatedAt      int64             `json:"updatedAt"`
+		CreatedAtSnake int64             `json:"created_at"`
+		UpdatedAtSnake int64             `json:"updated_at"`
+		Messages       []json.RawMessage `json:"messages"`
+		Attachments    []AttachmentRef   `json:"attachments"`
 	}
 	if err := json.Unmarshal(data, &rawRec); err != nil {
 		return nil, err
@@ -533,14 +554,15 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		updatedAt = rawRec.UpdatedAtSnake
 	}
 	rec := &SessionRecord{
-		ID:        rawRec.ID,
-		CWD:       rawRec.CWD,
-		Title:     rawRec.Title,
-		Model:     rawRec.Model,
-		Status:    rawRec.Status,
-		Pinned:    rawRec.Pinned,
-		CreatedAt: createdAt,
-		UpdatedAt: updatedAt,
+		ID:          rawRec.ID,
+		CWD:         rawRec.CWD,
+		Title:       rawRec.Title,
+		TitleSource: rawRec.TitleSource, Usage: rawRec.Usage, Context: rawRec.Context,
+		Model:       rawRec.Model,
+		Status:      rawRec.Status,
+		Pinned:      rawRec.Pinned,
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
 		Attachments: rawRec.Attachments,
 	}
 	for _, mBytes := range rawRec.Messages {
@@ -617,18 +639,18 @@ func (d *DaemonServer) purgeSession(id string) {
 // sessionRaw mirrors the on-disk record without hydrating message content —
 // pull/list sweeps must stay cheap even with fat transcripts on disk.
 type sessionRaw struct {
-	ID          string            `json:"id"`
-	CWD         string            `json:"cwd"`
-	Title       string            `json:"title"`
-	Model       string            `json:"model"`
-	Status      string            `json:"status"`
-	Pinned      bool              `json:"pinned"`
-	CreatedAt   int64             `json:"createdAt"`
-	UpdatedAt   int64             `json:"updatedAt"`
-	CreatedAtSnake int64          `json:"created_at"`
-	UpdatedAtSnake int64          `json:"updated_at"`
-	Messages    []json.RawMessage `json:"messages"`
-	Attachments []AttachmentRef   `json:"attachments"`
+	ID             string            `json:"id"`
+	CWD            string            `json:"cwd"`
+	Title          string            `json:"title"`
+	Model          string            `json:"model"`
+	Status         string            `json:"status"`
+	Pinned         bool              `json:"pinned"`
+	CreatedAt      int64             `json:"createdAt"`
+	UpdatedAt      int64             `json:"updatedAt"`
+	CreatedAtSnake int64             `json:"created_at"`
+	UpdatedAtSnake int64             `json:"updated_at"`
+	Messages       []json.RawMessage `json:"messages"`
+	Attachments    []AttachmentRef   `json:"attachments"`
 }
 
 func (r *sessionRaw) created() int64 {
@@ -775,6 +797,8 @@ func (d *DaemonServer) sessionRunning(id string) bool {
 // WebSocket Dispatcher
 
 func (d *DaemonServer) handleMessage(raw []byte) {
+	d.configMu.Lock()
+	defer d.configMu.Unlock()
 	var base struct {
 		Type      string `json:"type"`
 		HostID    string `json:"hostId"`
@@ -800,31 +824,28 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 	case "get_session":
 		var req struct {
 			SessionID string `json:"sessionId"`
+			RequestID string `json:"requestId"`
 		}
 		_ = json.Unmarshal(raw, &req)
-		rec, err := d.loadSession(req.SessionID)
-		if err != nil {
-			_ = d.sendWS(map[string]any{
-				"type":      "error",
-				"hostId":    d.config.HostID,
-				"sessionId": req.SessionID,
-				"message":   "Session not found",
-			})
+		reply := func(payload map[string]any) {
+			_ = d.sendWS(map[string]any{"type": "session_data", "requestId": req.RequestID, "hostId": d.config.HostID, "session": payload})
+		}
+		d.sessionsMu.RLock()
+		act := d.sessions[req.SessionID]
+		d.sessionsMu.RUnlock()
+		if act != nil {
+			act.mu.Lock()
+			reply(liveSessionPayload(act))
+			act.mu.Unlock()
 			return
 		}
-		// session_data: historic full-record shape; session_content: what the
-		// web client renders (id + messages array).
-		_ = d.sendWS(map[string]any{
-			"type":    "session_data",
-			"hostId":  d.config.HostID,
-			"session": sessionPayload(rec),
-		})
-		_ = d.sendWS(map[string]any{
-			"type":      "session_content",
-			"hostId":    d.config.HostID,
-			"sessionId": rec.ID,
-			"messages":  rec.Messages,
-		})
+		// Reading history must not keep every opened transcript in memory.
+		rec, err := d.loadSession(req.SessionID)
+		if err != nil {
+			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "sessionId": req.SessionID, "message": "Session not found"})
+			return
+		}
+		reply(sessionPayload(rec))
 
 	case "rename_session":
 		var req struct {
@@ -836,28 +857,24 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		if req.SessionID == "" || title == "" {
 			return
 		}
-		if len(title) > 120 {
-			title = title[:120]
+		if runes := []rune(title); len(runes) > 120 {
+			title = string(runes[:120])
 		}
-		rec, err := d.loadSession(req.SessionID)
+		act, err := d.getOrCreateActiveSession(req.SessionID)
 		if err != nil {
 			return
 		}
-		rec.Title = title
-		rec.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(rec)
-		d.sessionsMu.RLock()
-		if act, ok := d.sessions[req.SessionID]; ok {
-			act.mu.Lock()
-			act.record.Title = title
-			act.record.UpdatedAt = rec.UpdatedAt
-			act.mu.Unlock()
-		}
-		d.sessionsMu.RUnlock()
+		act.mu.Lock()
+		act.record.Title = title
+		act.record.TitleSource = "manual"
+		act.record.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(act.record)
+		sid := act.record.ID
+		act.mu.Unlock()
 		_ = d.sendWS(map[string]any{
 			"type":      "session_renamed",
 			"hostId":    d.config.HostID,
-			"sessionId": rec.ID,
+			"sessionId": sid,
 			"title":     title,
 		})
 
@@ -1082,12 +1099,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 	case "edit_message":
 		var req struct {
-			SessionID string   `json:"sessionId"`
-			Index     int      `json:"index"`
-			Text      string   `json:"text"`
-			Model     string   `json:"model"`
-			YOLO      bool     `json:"yolo"`
-			Regen     bool     `json:"regenerate"`
+			SessionID string `json:"sessionId"`
+			Index     int    `json:"index"`
+			Text      string `json:"text"`
+			Model     string `json:"model"`
+			YOLO      bool   `json:"yolo"`
+			Regen     bool   `json:"regenerate"`
 		}
 		_ = json.Unmarshal(raw, &req)
 		rec, err := d.loadSession(req.SessionID)
@@ -1242,9 +1259,9 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 				}
 			}
 			_ = d.sendWS(map[string]any{
-				"type":      "attachment_data",
-				"hostId":    d.config.HostID,
-				"sessionId": rec.ID,
+				"type":       "attachment_data",
+				"hostId":     d.config.HostID,
+				"sessionId":  rec.ID,
 				"attachment": payload,
 			})
 			return
@@ -1256,7 +1273,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			SessionID string `json:"sessionId"`
 			Name      string `json:"name"`
 			Mime      string `json:"mime"`
-			Data      string `json:"data"` // base64
+			Data      string `json:"data"`           // base64
 			Text      string `json:"text,omitempty"` // browser-extracted markdown (pdf/office)
 		}
 		_ = json.Unmarshal(raw, &req)
@@ -1467,14 +1484,18 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 		now := time.Now().UnixMilli()
 		rec := &SessionRecord{
-			ID:        sessID,
-			CWD:       cwd,
-			Title:     title,
-			Model:     req.Model,
-			Status:    "idle",
-			CreatedAt: now,
-			UpdatedAt: now,
-			Messages:  nil,
+			ID:          sessID,
+			CWD:         cwd,
+			Title:       title,
+			TitleSource: "pending",
+			Model:       req.Model,
+			Status:      "idle",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			Messages:    nil,
+		}
+		if strings.TrimSpace(req.Title) != "" {
+			rec.TitleSource = "manual"
 		}
 		if err := d.saveSession(rec); err != nil {
 			_ = d.sendWS(map[string]any{
@@ -1508,8 +1529,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		act := d.sessions[req.SessionID]
 		d.sessionsMu.RUnlock()
 
-		if act != nil && act.cancel != nil {
-			act.cancel()
+		if act != nil {
+			act.mu.Lock()
+			if act.cancel != nil {
+				act.cancel()
+			}
+			act.mu.Unlock()
 		}
 
 	case "tool_approval_response":
@@ -1808,46 +1833,47 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		_ = json.Unmarshal(raw, &req)
 
-	cleanText := strings.TrimSpace(req.Text)
-	if strings.HasPrefix(cleanText, "/") {
-		d.handleSlashCommand(req.SessionID, cleanText)
-		return
-	}
-
-	act, err := d.getOrCreateActiveSession(req.SessionID)
-	if err != nil {
-		_ = d.sendWS(map[string]any{
-			"type":      "error",
-			"hostId":    d.config.HostID,
-			"sessionId": req.SessionID,
-			"message":   "Session not found: " + err.Error(),
-		})
-		return
-	}
-
-	// Instant provisional title from the prompt's own words (their first 6
-	// content words); the LLM-generated title replaces it later via
-	// rename. Instant feedback: the sidebar never shows five stale "New
-	// conversation" rows again.
-	act.mu.Lock()
-	if act.record.Title == "" || act.record.Title == "New conversation" {
-		if t := instantTitle(cleanText); t != "" {
-			act.record.Title = t
-			act.record.UpdatedAt = time.Now().UnixMilli()
-			_ = d.saveSession(act.record)
-			_ = d.sendWS(map[string]any{
-				"type":      "session_renamed",
-				"hostId":    d.config.HostID,
-				"sessionId": act.record.ID,
-				"title":     t,
-				"auto":      true,
-			})
+		cleanText := strings.TrimSpace(req.Text)
+		if strings.HasPrefix(cleanText, "/") {
+			d.handleSlashCommand(req.SessionID, cleanText)
+			return
 		}
-	}
-	act.mu.Unlock()
 
-	go d.runAgentTurn(act, req.Text, req.Model, req.YOLO, req.AttachmentIDs)
-}
+		act, err := d.getOrCreateActiveSession(req.SessionID)
+		if err != nil {
+			_ = d.sendWS(map[string]any{
+				"type":      "error",
+				"hostId":    d.config.HostID,
+				"sessionId": req.SessionID,
+				"message":   "Session not found: " + err.Error(),
+			})
+			return
+		}
+
+		// Instant provisional title from the prompt's own words (their first 6
+		// content words); the LLM-generated title replaces it later via
+		// rename. Instant feedback: the sidebar never shows five stale "New
+		// conversation" rows again.
+		act.mu.Lock()
+		if !d.config.Settings.NoAutoTitle && (act.record.Title == "" || act.record.Title == "New conversation") {
+			if t := instantTitle(cleanText); t != "" {
+				act.record.Title = t
+				act.record.TitleSource = "pending"
+				act.record.UpdatedAt = time.Now().UnixMilli()
+				_ = d.saveSession(act.record)
+				_ = d.sendWS(map[string]any{
+					"type":      "session_renamed",
+					"hostId":    d.config.HostID,
+					"sessionId": act.record.ID,
+					"title":     t,
+					"auto":      true,
+				})
+			}
+		}
+		act.mu.Unlock()
+
+		go d.runAgentTurn(act, req.Text, req.Model, req.YOLO, req.AttachmentIDs)
+	}
 }
 
 func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
@@ -1903,30 +1929,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 		return
 
 	case "/compact":
-		count := len(act.record.Messages)
-		if count > 2 {
-			summaryText := fmt.Sprintf("📦 **Transcript compacted.** Archived %d messages. Context freed.", count-2)
-			recent := act.record.Messages[count-2:]
-			compactedMsg := provider.Message{
-				Role:    provider.RoleAssistant,
-				Content: []provider.Content{provider.TextBlock{Text: summaryText}},
-			}
-			act.record.Messages = append([]provider.Message{compactedMsg}, recent...)
-		} else {
-			compactedMsg := provider.Message{
-				Role:    provider.RoleAssistant,
-				Content: []provider.Content{provider.TextBlock{Text: "📦 Transcript is already compact."}},
-			}
-			act.record.Messages = append(act.record.Messages, compactedMsg)
-		}
-		act.record.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(act.record)
-		_ = d.sendWS(map[string]any{
-			"type":      "session_compacted",
-			"hostId":    d.config.HostID,
-			"sessionId": act.record.ID,
-			"messages":  act.record.Messages,
-		})
+		go d.compactSession(act)
 		return
 
 	case "/jail":
@@ -2095,12 +2098,22 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 }
 
 func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string) {
+	d.configMu.RLock()
+	cfg := *d.config
+	d.configMu.RUnlock()
+	d.sessionsMu.RLock()
 	act.mu.Lock()
+	if d.sessions[act.record.ID] != act {
+		act.mu.Unlock()
+		d.sessionsMu.RUnlock()
+		return
+	}
+	d.sessionsMu.RUnlock()
 	if act.record.Status == "running" {
 		act.mu.Unlock()
 		_ = d.sendWS(map[string]any{
 			"type":      "error",
-			"hostId":    d.config.HostID,
+			"hostId":    cfg.HostID,
 			"sessionId": act.record.ID,
 			"message":   "Turn already in flight",
 		})
@@ -2115,12 +2128,14 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	// Persist the running flip right away (not only in the finalizer) so
 	// synced clients on every device see live session status.
 	_ = d.saveSession(act.record)
+	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
 	if modelToUse == "" {
 		modelToUse = "gpt-4o"
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	act.cancel = cancel
 	act.gen++
 	myGen := act.gen
@@ -2128,79 +2143,94 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 	defer func() {
 		act.mu.Lock()
-		stale := act.gen != myGen
-		if !stale {
-			act.record.Status = "idle"
-			act.record.UpdatedAt = time.Now().UnixMilli()
-			_ = d.saveSession(act.record)
-			act.cancel = nil
-		}
-		sid := act.record.ID
-		act.mu.Unlock()
-
-		if stale {
+		defer act.mu.Unlock()
+		if act.gen != myGen {
 			return
 		}
+		act.record.Status = "idle"
+		act.live = nil
+		act.record.UpdatedAt = time.Now().UnixMilli()
+		_ = d.saveSession(act.record)
+		act.cancel = nil
+		// Publish completion before a new turn can acquire this session.
+		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": sessionPayload(act.record)})
 		_ = d.sendWS(map[string]any{
 			"type":      "session_status",
-			"hostId":    d.config.HostID,
-			"sessionId": sid,
+			"hostId":    cfg.HostID,
+			"sessionId": sessionID,
 			"status":    "idle",
 		})
 	}()
 
 	_ = d.sendWS(map[string]any{
 		"type":      "session_status",
-		"hostId":    d.config.HostID,
-		"sessionId": act.record.ID,
+		"hostId":    cfg.HostID,
+		"sessionId": sessionID,
 		"status":    "running",
 	})
 
 	// Create OpenAI client pointing to Gateway's /v1 proxy endpoint
-	apiBase := strings.TrimRight(d.config.GatewayURL, "/") + "/v1"
-	client := provider.NewOpenAI(d.config.APIKey, apiBase)
+	apiBase := strings.TrimRight(cfg.GatewayURL, "/") + "/v1"
+	modelInfo := gatewayModel(ctx, cfg.GatewayURL, cfg.DaemonToken, modelToUse)
+	if effort := canonicalReasoning(cfg.Settings.Reasoning); effort != "" && effort != "none" {
+		modelInfo.Reasoning = true
+	}
+	client := provider.NewGatewayOpenAI(cfg.APIKey, apiBase, modelInfo)
+	defer func() {
+		if !cfg.Settings.NoAutoTitle && ctx.Err() == nil {
+			go d.maybeAutoTitle(act, myGen, client, modelToUse)
+		}
+	}()
 
 	// Setup local filesystem tools rooted at session's CWD
-	sb := tools.NewSandbox(act.record.CWD)
-	if !yolo {
+	sb := tools.NewSandbox(sessionCWD)
+	if !yolo || cfg.Settings.JailByDefault {
 		sb.Lock()
 	}
 
 	reg := core.NewRegistry(
-		&tools.ReadTool{CWD: act.record.CWD, Sandbox: sb},
-		&tools.WriteTool{CWD: act.record.CWD, Sandbox: sb},
-		&tools.EditTool{CWD: act.record.CWD, Sandbox: sb},
-		&tools.BashTool{CWD: act.record.CWD, Sandbox: sb},
-		&tools.GlobTool{CWD: act.record.CWD, Sandbox: sb},
+		&tools.ReadTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.WriteTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.EditTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.BashTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.GlobTool{CWD: sessionCWD, Sandbox: sb},
 	)
 
 	// Build rich system instructions with working directory, jail status, and active skills
 	var sysPrompt strings.Builder
 	sysPrompt.WriteString("You are an expert autonomous AI software engineering agent running directly on the user's machine.\n")
-	sysPrompt.WriteString(fmt.Sprintf("Working Directory: %s\n", act.record.CWD))
-	if d.config.Settings.JailByDefault {
+	sysPrompt.WriteString(fmt.Sprintf("Working Directory: %s\n", sessionCWD))
+	if cfg.Settings.JailByDefault {
 		sysPrompt.WriteString("Sandbox: Strict jail mode is active. Only access files inside the working directory.\n")
 	}
-	if len(d.config.Skills) > 0 {
+	if len(cfg.Skills) > 0 {
 		sysPrompt.WriteString("\n### Active Skills & Custom Instructions:\n")
-		for name, sk := range d.config.Skills {
+		for name, sk := range cfg.Skills {
 			if sk.Enabled {
 				sysPrompt.WriteString(fmt.Sprintf("#### Skill [%s]: %s\n%s\n\n", name, sk.Description, sk.Body))
 			}
 		}
 	}
-	if len(d.config.MCPServers) > 0 {
+	if len(cfg.MCPServers) > 0 {
 		sysPrompt.WriteString("\n### Configured MCP Servers:\n")
-		for name, mcp := range d.config.MCPServers {
+		for name, mcp := range cfg.MCPServers {
 			sysPrompt.WriteString(fmt.Sprintf("- %s (%s): %s %s\n", name, mcp.Transport, mcp.Command, strings.Join(mcp.Args, " ")))
 		}
 	}
 
 	agent := core.NewAgent(client, modelToUse, sysPrompt.String(), reg)
+	agent.Reasoning = cfg.Settings.Reasoning
+	agent.Temperature = &cfg.Settings.Temperature
+	agent.MaxTokens = modelInfo.MaxOutput
 	act.mu.Lock()
+	if act.gen != myGen || ctx.Err() != nil {
+		act.mu.Unlock()
+		return
+	}
 	if len(act.record.Messages) > 0 {
 		agent.SetMessages(act.record.Messages)
 	}
+	agent.SeedCost(act.record.Usage)
 	act.agent = agent
 	act.mu.Unlock()
 
@@ -2216,8 +2246,8 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 			_ = d.sendWS(map[string]any{
 				"type":      "tool_approval_request",
-				"hostId":    d.config.HostID,
-				"sessionId": act.record.ID,
+				"hostId":    cfg.HostID,
+				"sessionId": sessionID,
 				"callId":    callID,
 				"tool":      call.Name,
 				"args":      call.Arguments,
@@ -2238,6 +2268,13 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	// Persistent transcript hook: whenever a message is added, record it
 	agent.OnMessageAppended = func(m provider.Message) {
 		act.mu.Lock()
+		if act.gen != myGen {
+			act.mu.Unlock()
+			return
+		}
+		if m.Role == provider.RoleAssistant {
+			act.live = nil
+		}
 		act.record.Messages = append(act.record.Messages, m)
 		act.record.UpdatedAt = time.Now().UnixMilli()
 		_ = d.saveSession(act.record)
@@ -2246,15 +2283,23 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 	// Stream events to WebSocket
 	sink := func(ev core.AgentEvent) {
+		act.mu.Lock()
+		defer act.mu.Unlock()
+		if act.gen != myGen {
+			return
+		}
+		trackLiveEvent(act, ev)
 		payload := map[string]any{
 			"type":      "agent_event",
-			"hostId":    d.config.HostID,
-			"sessionId": act.record.ID,
+			"hostId":    cfg.HostID,
+			"sessionId": sessionID,
 		}
 
 		switch e := ev.(type) {
 		case core.EvTurnStart:
 			payload["event"] = map[string]any{"type": "turn_start", "step": e.Step}
+		case core.EvAssistantStart:
+			payload["event"] = map[string]any{"type": "assistant_start"}
 		case core.EvTextDelta:
 			payload["event"] = map[string]any{"type": "text_delta", "delta": e.Delta}
 		case core.EvReasoningDelta:
@@ -2282,21 +2327,25 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 				"type": "tool_result", "id": e.ID, "content": contentStr.String(), "isError": e.Result.IsError,
 			}
 		case core.EvUsage:
+			contextUsage := contextFromUsage(e.Usage, modelInfo)
+			act.record.Usage = e.Cumulative
+			act.record.Context = contextUsage
+			_ = d.saveSession(act.record)
 			payload["event"] = map[string]any{
-				"type": "usage", "usage": e.Usage, "cumulative": e.Cumulative,
+				"type": "usage", "usage": e.Usage, "cumulative": e.Cumulative, "context": contextUsage,
 			}
 		case core.EvTurnEnd:
 			evMap := map[string]any{"type": "turn_end", "stop": string(e.Stop)}
 			if e.Err != nil {
 				evMap["error"] = e.Err.Error()
 			}
-			if act.agent != nil {
-				evMap["usage"] = act.agent.LastTurnUsage()
-				evMap["cumulative"] = act.agent.Cost()
+			if agent != nil {
+				evMap["usage"] = agent.LastTurnUsage()
+				evMap["cumulative"] = agent.Cost()
 			}
 			payload["event"] = evMap
 		case core.EvDone:
-			payload["event"] = map[string]any{"type": "done"}
+			return // Task completion is emitted only after compaction and persistence.
 		case core.EvError:
 			msg := "agent error"
 			if e.Err != nil {
@@ -2377,66 +2426,37 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		fullPrompt = promptText + "\n\n" + strings.Join(contextParts, "\n\n")
 	}
 
-	_ = agent.Prompt(ctx, fullPrompt, images, sink)
+	if err := agent.Prompt(ctx, fullPrompt, images, sink); err != nil && ctx.Err() == nil {
+		_ = d.sendWS(map[string]any{"type": "error", "hostId": cfg.HostID, "sessionId": sessionID, "message": err.Error()})
+	}
 
 	// Sliding-window auto-compact: near the context ceiling, summarize the
 	// oldest ~30% so ~70% of recent context is preserved (feels infinite).
-	d.maybeAutoCompact(act, agent)
-
-	// Auto-title the session after its first exchange (chatbot-style).
-	act.mu.Lock()
-	rec := act.record
-	gen := act.gen
-	act.mu.Unlock()
-	if gen == myGen {
-		d.maybeAutoTitle(rec, client, modelToUse)
+	if ctx.Err() == nil {
+		d.maybeAutoCompact(ctx, act, agent, modelInfo, cfg.Settings.AutoCompactThreshold, myGen)
 	}
-}
 
-// contextWindowForModel estimates the model's context window in tokens.
-// Heuristic table; unknown models fall back to 200k.
-func contextWindowForModel(model string) int {
-	m := strings.ToLower(strings.TrimSpace(model))
-	switch {
-	case strings.Contains(m, "gpt-4.1"), strings.Contains(m, "gemini-2"), strings.Contains(m, "gemini-1.5-flash"):
-		return 1000000
-	case strings.Contains(m, "gemini-1.5-pro"):
-		return 2000000
-	case strings.Contains(m, "gpt-5"):
-		return 400000
-	case strings.Contains(m, "gpt-4o"), strings.Contains(m, "gpt-4-turbo"), strings.Contains(m, "gpt-4"):
-		return 128000
-	case strings.Contains(m, "o1"), strings.Contains(m, "o3"), strings.Contains(m, "o4"):
-		return 200000
-	case strings.Contains(m, "claude"), strings.Contains(m, "anthropic"):
-		return 200000
-	case strings.Contains(m, "deepseek"), strings.Contains(m, "llama"), strings.Contains(m, "mistral"),
-		strings.Contains(m, "qwen"), strings.Contains(m, "kimi"), strings.Contains(m, "moonshot"),
-		strings.Contains(m, "grok"), strings.Contains(m, "grok-"), strings.Contains(m, "gpt-oss"):
-		return 128000
-	default:
-		return 200000
-	}
 }
 
 // maybeAutoCompact triggers an LLM compaction of the oldest ~30% of the
 // transcript once input usage passes the configured threshold percent of
 // the model's context window.
-func (d *DaemonServer) maybeAutoCompact(act *ActiveSession, agent *core.Agent) {
-	threshold := d.config.Settings.AutoCompactThreshold
+func (d *DaemonServer) maybeAutoCompact(ctx context.Context, act *ActiveSession, agent *core.Agent, model provider.Model, threshold, gen int) {
 	if threshold <= 0 || agent == nil {
 		return
 	}
 	act.mu.Lock()
-	model := act.record.Model
+	if act.gen != gen {
+		act.mu.Unlock()
+		return
+	}
 	n := len(act.record.Messages)
 	act.mu.Unlock()
 	if n <= 6 {
 		return
 	}
-	cum := agent.Cost()
-	used := cum.InputTokens + cum.CacheReadTokens + cum.CacheWriteTokens
-	window := contextWindowForModel(model)
+	used := contextFromUsage(agent.LastTurnUsage(), model).UsedTokens
+	window := model.ContextWindow
 	if window <= 0 || used*100 < threshold*window {
 		return
 	}
@@ -2453,7 +2473,7 @@ func (d *DaemonServer) maybeAutoCompact(act *ActiveSession, agent *core.Agent) {
 		"sessionId": act.record.ID,
 		"event":     map[string]any{"type": "compact_progress", "text": "Compacting older context…"},
 	})
-	cctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
 	summary, err := agent.Compact(cctx, keepTail, func(delta string) {
 		_ = d.sendWS(map[string]any{
@@ -2467,21 +2487,25 @@ func (d *DaemonServer) maybeAutoCompact(act *ActiveSession, agent *core.Agent) {
 	if err != nil {
 		return
 	}
-	// Compact() rewrote the agent transcript; mirror it to disk + UI and
-	// reset the local usage baseline (gateway billing is unaffected).
+	// Compact() rewrote the agent transcript; persist it and update context
+	// occupancy while preserving accumulated usage.
 	act.mu.Lock()
+	if act.gen != gen {
+		act.mu.Unlock()
+		return
+	}
 	act.record.Messages = append([]provider.Message(nil), agent.Messages()...)
 	act.record.UpdatedAt = time.Now().UnixMilli()
-	agent.SeedCost(provider.Usage{})
-	agent.SeedLastTurnUsage(provider.Usage{})
-	rec := act.record
+	act.record.Context = estimateContext(agent, model)
+	rec := *act.record
+	_ = d.saveSession(act.record)
 	act.mu.Unlock()
-	_ = d.saveSession(rec)
 	_ = d.sendWS(map[string]any{
 		"type":      "session_compacted",
 		"hostId":    d.config.HostID,
 		"sessionId": rec.ID,
 		"messages":  rec.Messages,
+		"context":   rec.Context,
 		"auto":      true,
 	})
 }
@@ -2516,112 +2540,6 @@ func instantTitle(text string) string {
 		out = strings.TrimSpace(string(r[:60])) + "…"
 	}
 	return out
-}
-
-// maybeAutoTitle generates a short LLM title for fresh sessions whose title
-// is still the "New conversation" placeholder or the instant provisional
-// title (marked by the trailing "…" — instantTitle always appends it when
-// truncating and the LLM result never carries one). A hand-typed title is
-// never overwritten.
-func (d *DaemonServer) maybeAutoTitle(rec *SessionRecord, client provider.Client, model string) {
-	if rec == nil || client == nil {
-		return
-	}
-	if d.config.Settings.NoAutoTitle {
-		return
-	}
-	if rec.Title != "" && rec.Title != "New conversation" && !strings.HasSuffix(rec.Title, "…") {
-		return
-	}
-	var firstText string
-	for _, m := range rec.Messages {
-		if m.Role != provider.RoleUser {
-			continue
-		}
-		for _, c := range m.Content {
-			if tb, ok := c.(provider.TextBlock); ok && strings.TrimSpace(tb.Text) != "" {
-				firstText = tb.Text
-				break
-			}
-		}
-		if firstText != "" {
-			break
-		}
-	}
-	if strings.TrimSpace(firstText) == "" {
-		return
-	}
-	if runes := []rune(firstText); len(runes) > 2000 {
-		firstText = string(runes[:2000])
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	low := float32(0.1)
-	stream, err := client.Stream(ctx, provider.Request{
-		Model:     model,
-		System:    "Generate a short, appealing conversation title (max 5 words, Title Case, same language as the input). Output ONLY the title text, no quotes or punctuation at the end.",
-		Messages:  []provider.Message{{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: firstText}}}},
-		MaxTokens: 32,
-		Temperature: &low,
-		Reasoning:   "low",
-	})
-	if err != nil {
-		return
-	}
-	var b strings.Builder
-	for ev := range stream {
-		switch e := ev.(type) {
-		case provider.EventTextDelta:
-			b.WriteString(e.Delta)
-		case provider.EventDone:
-			if e.Err == nil {
-				for _, c := range e.Message.Content {
-					if tb, ok := c.(provider.TextBlock); ok {
-						b.WriteString(tb.Text)
-					}
-				}
-			}
-		}
-	}
-	title := strings.TrimSpace(b.String())
-	title = strings.Trim(title, `"'`)
-	if i := strings.Index(title, "\n"); i >= 0 {
-		title = title[:i]
-	}
-	title = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(title, "Title:"), "title:"))
-	title = strings.TrimRight(title, "…")
-	if r := []rune(title); len(r) > 40 {
-		title = strings.TrimSpace(string(r[:40]))
-	}
-	if title == "" {
-		return
-	}
-	fresh, err := d.loadSession(rec.ID)
-	if err != nil {
-		return
-	}
-	if fresh.Title != "" && fresh.Title != "New conversation" && !strings.HasSuffix(fresh.Title, "…") {
-		return
-	}
-	fresh.Title = title
-	fresh.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(fresh)
-	d.sessionsMu.RLock()
-	if act, ok := d.sessions[rec.ID]; ok {
-		act.mu.Lock()
-		act.record.Title = title
-		act.record.UpdatedAt = fresh.UpdatedAt
-		act.mu.Unlock()
-	}
-	d.sessionsMu.RUnlock()
-	_ = d.sendWS(map[string]any{
-		"type":      "session_renamed",
-		"hostId":    d.config.HostID,
-		"sessionId": fresh.ID,
-		"title":     title,
-		"auto":      true,
-	})
 }
 
 func (d *DaemonServer) connectWebSocket() error {

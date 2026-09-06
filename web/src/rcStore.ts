@@ -62,6 +62,7 @@ export interface RcHostStore {
 
 export interface RcDataLayer {
   storeFor: (hostId: string) => RcHostStore;
+  disconnect: () => void;
   /**
    * Routes an incoming relay message. Returns true when the message belongs
    * to the sync protocol (pull responses / change pings) and was consumed.
@@ -70,6 +71,7 @@ export interface RcDataLayer {
 }
 
 interface PendingReq {
+  hostId: string;
   resolve: (msg: any) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -84,7 +86,9 @@ export function createDataLayer(opts: {
   isOpen: () => boolean;
 }): RcDataLayer {
   const pending = new Map<number, PendingReq>();
-  let nextReqId = 1;
+  // Replies are broadcast to every browser. Per-page namespaces prevent one
+  // tab's pull from resolving another tab's request with the same counter.
+  let nextReqId = crypto.getRandomValues(new Uint32Array(1))[0] * 1_000_000;
   const changeListeners = new Map<string, Set<() => void>>();
   const stores = new Map<string, RcHostStore>();
 
@@ -96,7 +100,7 @@ export function createDataLayer(opts: {
         pending.delete(id);
         reject(new Error(`pull '${payload.collection}' timed out`));
       }, 12000);
-      pending.set(id, { resolve, reject, timer });
+      pending.set(id, { hostId, resolve, reject, timer });
       opts.send({ ...payload, hostId, id });
     });
   }
@@ -212,6 +216,13 @@ export function createDataLayer(opts: {
   }
 
   return {
+    disconnect() {
+      for (const request of pending.values()) {
+        clearTimeout(request.timer);
+        request.reject(new Error("daemon socket disconnected"));
+      }
+      pending.clear();
+    },
     storeFor(hostId: string) {
       let store = stores.get(hostId);
       if (!store) {
@@ -224,6 +235,7 @@ export function createDataLayer(opts: {
       // pull responses resolve their pending request by numeric id.
       if (typeof msg?.id === "number" && pending.has(msg.id)) {
         const p = pending.get(msg.id)!;
+        if (msg.hostId !== p.hostId) return true;
         pending.delete(msg.id);
         clearTimeout(p.timer);
         if (typeof msg.error === "string" && msg.error) p.reject(new Error(msg.error));

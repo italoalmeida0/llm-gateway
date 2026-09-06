@@ -400,17 +400,24 @@ function modelPricing(m: ModelRow): Record<string, number> | null {
   return Object.keys(pricing).length ? pricing : null;
 }
 
+/** Shared public metadata; unknown limits stay absent rather than guessed. */
+export function publicModelSummary(m: ModelRow) {
+  const limit: { context?: number; output?: number } = {};
+  if (m.context_length != null) limit.context = m.context_length;
+  if (m.max_output_length != null) limit.output = m.max_output_length;
+  return { id: m.id, name: m.name || m.id, proto: m.proto, limit };
+}
+
 /** The rich registry entry shape served by /v1/models in router mode. */
 export function publicModelEntry(m: ModelRow, providerName: string): Record<string, unknown> {
   const efforts = jsonArr(m.reasoning_efforts);
   const pricing = modelPricing(m);
   const datacenters = jsonArr(m.datacenters);
   const entry: Record<string, unknown> = {
+    ...publicModelSummary(m),
     provider: providerName,
     always_on: !!m.always_on,
-    id: m.id,
     hugging_face_id: m.hugging_face_id,
-    name: m.name || m.id,
   };
   if (efforts.length) entry.reasoning_parameters = { efforts };
   entry.description = m.description;

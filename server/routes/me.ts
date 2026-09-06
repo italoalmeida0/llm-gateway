@@ -20,7 +20,7 @@ import { verifyGoogleIdToken } from "../google";
 import { sendSecurityAlert } from "../email";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { bruteforceClear, bruteforceFail, bruteforceLocked, consumeTotpCode } from "../ratelimit";
-import { routerSnapshot } from "../models";
+import { publicModelSummary, routerSnapshot } from "../models";
 
 /**
  * /api/me/* — profile, password, TOTP, Google linking, session management.
@@ -215,20 +215,7 @@ export async function handleMeRoute(path: string, req: Request): Promise<Respons
     const snap = await routerSnapshot();
     const models = Array.from(snap.models.values())
       .filter((m) => m.enabled)
-      .map((m) => ({ id: m.id, name: m.name || m.id }));
-
-    if (models.length === 0) {
-      // In passthrough mode or when models table is empty, collect from targets or providers
-      const seen = new Set<string>();
-      for (const targets of snap.targets.values()) {
-        for (const t of targets) {
-          if (!seen.has(t.upstream_model)) {
-            seen.add(t.upstream_model);
-            models.push({ id: t.upstream_model, name: t.upstream_model });
-          }
-        }
-      }
-    }
+      .map(publicModelSummary);
 
     return ok({ models }, req);
   }

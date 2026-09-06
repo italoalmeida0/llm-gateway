@@ -59,6 +59,15 @@ type openaiClient struct {
 	oauth               bool // when true, apiKey actually holds an OAuth access token
 	headers             map[string]string
 	http                *http.Client
+	modelOverride       *Model // gateway registry metadata, scoped to this client
+}
+
+// NewGatewayOpenAI uses the gateway's model configuration exclusively. Public
+// aliases must never inherit limits or reasoning support from the built-in catalog.
+func NewGatewayOpenAI(apiKey, baseURL string, model Model) Client {
+	c := NewOpenAI(apiKey, baseURL).(*openaiClient)
+	c.modelOverride = &model
+	return c
 }
 
 // NewOpenAI creates an OpenAI client using an API key. baseURL may be empty.
@@ -217,6 +226,9 @@ func (c *openaiClient) buildRequest(req Request) (*oaiRequest, error) {
 			ContextWindow: 32768,
 			MaxOutput:     8192,
 		}
+	}
+	if c.modelOverride != nil {
+		m = *c.modelOverride
 	}
 	reasoning := ClampReasoningForModel(m, req.Reasoning)
 	out := &oaiRequest{
@@ -583,6 +595,9 @@ func (c *openaiClient) runStream(ctx context.Context, resp *http.Response, req R
 	defer resp.Body.Close()
 
 	model, _ := FindModel("", req.Model)
+	if c.modelOverride != nil {
+		model = *c.modelOverride
+	}
 	out <- EventStart{Model: req.Model, Provider: c.Name()}
 
 	raw := make(chan sseEvent, 16)
@@ -685,6 +700,7 @@ func (c *openaiClient) runStream(ctx context.Context, resp *http.Response, req R
 					Delta struct {
 						Content          string `json:"content"`
 						ReasoningContent string `json:"reasoning_content"`
+						Reasoning        string `json:"reasoning"`
 						ToolCalls        []struct {
 							Index     int             `json:"index"`
 							ID        string          `json:"id"`
@@ -736,9 +752,13 @@ func (c *openaiClient) runStream(ctx context.Context, resp *http.Response, req R
 				}
 			}
 			for _, ch := range chunk.Choices {
-				if ch.Delta.ReasoningContent != "" {
-					reasoningBuf.WriteString(ch.Delta.ReasoningContent)
-					out <- EventReasoningDelta{Delta: ch.Delta.ReasoningContent}
+				reasoning := ch.Delta.ReasoningContent
+				if reasoning == "" {
+					reasoning = ch.Delta.Reasoning
+				}
+				if reasoning != "" {
+					reasoningBuf.WriteString(reasoning)
+					out <- EventReasoningDelta{Delta: reasoning}
 				}
 				if ch.Delta.Content != "" {
 					appendText(ch.Delta.Content)

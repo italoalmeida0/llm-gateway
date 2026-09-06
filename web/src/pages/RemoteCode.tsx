@@ -2,6 +2,8 @@ import {
   createSignal,
   createEffect,
   createMemo,
+  batch,
+  untrack,
   onMount,
   onCleanup,
   For,
@@ -9,6 +11,9 @@ import {
   type JSX,
 } from "solid-js";
 import { Portal } from "solid-js/web";
+import { createStore, reconcile } from "solid-js/store";
+import { createTranscriptScroll } from "../rcScroll";
+import { compactTokens, contextDisplay, type GatewayModel, type SessionContext } from "../rcContext";
 import { Streamdown } from "streamdown-solid";
 import type { Placement } from "@floating-ui/dom";
 import {
@@ -24,6 +29,8 @@ import {
 } from "../rcStore";
 import {
   Modal,
+  Btn,
+  Tooltip,
   Select,
   ThemeToggle,
   copyWithToast,
@@ -48,10 +55,10 @@ function FloatMenu(props: {
           ref={(el) => {
             const a = props.anchor();
             if (!a) return;
-            onCleanup(anchorFloat(a, el, { placement: props.placement ?? "bottom-start" }));
+            onCleanup(anchorFloat(a, el, { placement: props.placement ?? "bottom-start", maxHeight: 520 }));
           }}
           data-floatmenu
-          class="anim-float-in rounded-xl border border-line bg-ink-900 shadow-2xl p-1.5 text-xs"
+          class="anim-float-in max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-line bg-card shadow-xl p-1.5 text-xs"
           style={props.width ? { width: props.width } : undefined}
           onClick={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}
@@ -900,7 +907,7 @@ export default function RemoteCodePage() {
 
   // Gateway Models (Fetched live from /api/me/models)
   const [gatewayModels, setGatewayModels] = createSignal<
-    Array<{ id: string; name: string }>
+    GatewayModel[]
   >([]);
 
   // UI-only state. Projects / sessions / config are NOT signals here: they
@@ -985,6 +992,11 @@ export default function RemoteCodePage() {
     const id = activeSessionId();
     return id ? (sessionUsage()[id] ?? null) : null;
   });
+  const [sessionContexts, setSessionContexts] = createSignal<Record<string, SessionContext | null>>({});
+  const activeContext = createMemo(() => contextDisplay(
+    sessionContexts()[activeSessionId()] ?? null,
+    gatewayModels().find((model) => model.id === activeModel()),
+  ));
   // Live tool progress text per tool call id (cleared on result/turn_end).
   const [toolProgress, setToolProgress] = createSignal<Record<string, string>>({});
   // Expanded tool rows / groups (Antigravity chevrons).
@@ -1228,6 +1240,38 @@ export default function RemoteCodePage() {
   const [chatContainerRef, setChatContainerRef] = createSignal<HTMLDivElement | null>(null);
 
   let ws: WebSocket | null = null;
+  const [connectionState, setConnectionState] = createSignal<"connecting" | "connected" | "disconnected">("disconnected");
+  const [hostMenuOpen, setHostMenuOpen] = createSignal(false);
+  let hostBtn: HTMLButtonElement | undefined;
+  let contextBtn: HTMLButtonElement | undefined;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconnectAttempt = 0;
+  let disposed = false;
+  let initialScrollSession = "";
+  let transcriptRequestId = "";
+  const [chatContentRef, setChatContentRef] = createSignal<HTMLDivElement | null>(null);
+  const transcriptScroll = createTranscriptScroll({
+    element: chatContainerRef,
+    running: () => sessionStatus() === "running",
+    atBottom: setIsAtBottom,
+  });
+  createEffect(() => {
+    const content = chatContentRef();
+    if (!content) return;
+    const observer = new ResizeObserver(() => transcriptScroll.schedule());
+    observer.observe(content);
+    onCleanup(() => observer.disconnect());
+  });
+  onCleanup(() => {
+    disposed = true;
+    clearTimeout(reconnectTimer);
+    clearInterval(heartbeatTimer);
+    stopThinkingTimer();
+    transcriptScroll.dispose();
+    dataLayer.disconnect();
+    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    confirmState()?.resolve(false);
+  });
   // Anchor refs for floating menus (floating-ui positions them in a Portal).
   let displayBtn: HTMLButtonElement | undefined;
   let newProjBtn: HTMLButtonElement | undefined;
@@ -1323,27 +1367,15 @@ export default function RemoteCodePage() {
   // --- Fetch Gateway Models ---
   async function loadGatewayModels() {
     try {
-      const res = await api<{ models: Array<{ id: string; name: string }> }>(
-        "GET",
-        "/api/me/models",
-      );
-      if (res && Array.isArray(res.models) && res.models.length > 0) {
-        setGatewayModels(res.models);
-        if (!res.models.some((m) => m.id === activeModel())) {
-          setActiveModel(res.models[0].id);
-        }
-      } else {
-        setGatewayModels([
-          { id: "gpt-4o", name: "GPT-4o (OpenAI)" },
-          { id: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet (Anthropic)" },
-          { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro (Google)" },
-        ]);
+      const res = await api<{ models: GatewayModel[] }>("GET", "/api/me/models");
+      if (disposed) return;
+      const models = (res.models || []).filter((m) => m.proto !== "anthropic");
+      setGatewayModels(models);
+      if (!activeSessionId() && models.length && !models.some((m) => m.id === activeModel())) {
+        setActiveModel(models[0].id);
       }
     } catch {
-      setGatewayModels([
-        { id: "gpt-4o", name: "GPT-4o" },
-        { id: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet" },
-      ]);
+      toast("Could not refresh the gateway model catalog", "err");
     }
   }
 
@@ -1372,47 +1404,43 @@ export default function RemoteCodePage() {
 
   // --- WebSocket Connection ---
   function connectWebSocket(hostId: string) {
-    if (ws) {
-      try {
-        ws.close();
-      } catch {}
-      ws = null;
-    }
+    clearTimeout(reconnectTimer);
     clearInterval(heartbeatTimer);
-
-    const s = currentSession();
-    if (!s || !hostId) return;
-
+    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    dataLayer.disconnect();
+    if (disposed || !hostId) { setConnectionState("disconnected"); return; }
+    const session = currentSession();
+    if (!session) return;
+    setConnectionState("connecting");
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${location.host}/api/remote/ws?token=${s.accessToken}&hostId=${hostId}`;
-
-    ws = new WebSocket(url);
-
-    ws.onopen = () => {
-      // SignalDB sync paints IndexedDB state instantly; this reconciles it
-      // with the daemon truth (and picks up anything missed while offline).
+    const socket = new WebSocket(`${proto}//${location.host}/api/remote/ws?token=${encodeURIComponent(session.accessToken)}`);
+    ws = socket;
+    socket.onopen = () => {
+      if (socket !== ws || disposed) return;
+      reconnectAttempt = 0;
+      setConnectionState("connected");
+      void loadGatewayModels();
       dataLayer.storeFor(hostId).syncAll();
-
-      heartbeatTimer = setInterval(() => {
-        sendWS({ type: "ping", ts: Date.now() });
-      }, 15000);
+      if (activeSessionId()) sendWS({ type: "get_session", sessionId: activeSessionId() });
+      heartbeatTimer = setInterval(() => sendWS({ type: "ping", ts: Date.now() }), 15000);
     };
-
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        handleIncomingMessage(msg);
-      } catch (err) {
-        console.error("WS parse error:", err);
-      }
+    socket.onmessage = (ev) => {
+      if (socket !== ws || disposed) return;
+      try { batch(() => handleIncomingMessage(JSON.parse(ev.data))); }
+      catch (err) { console.error("Remote Code message error:", err); }
     };
-
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (socket !== ws || disposed) return;
       clearInterval(heartbeatTimer);
-    };
-
-    ws.onerror = (e) => {
-      console.warn("WebSocket error:", e);
+      setConnectionState("disconnected");
+      dataLayer.disconnect();
+      stopThinkingTimer();
+      const delay = Math.min(1000 * 2 ** reconnectAttempt++, 15000);
+      reconnectTimer = setTimeout(async () => {
+        // An authenticated request refreshes an expired dashboard token first.
+        await loadHosts();
+        if (!disposed && activeHostId() === hostId) connectWebSocket(hostId);
+      }, delay);
     };
   }
 
@@ -1420,6 +1448,10 @@ export default function RemoteCodePage() {
     if (ws && ws.readyState === WebSocket.OPEN) {
       if (!payload.hostId && activeHostId()) {
         payload.hostId = activeHostId();
+      }
+      if (payload.type === "get_session") {
+        transcriptRequestId = crypto.randomUUID();
+        payload.requestId = transcriptRequestId;
       }
       ws.send(JSON.stringify(payload));
     }
@@ -1475,7 +1507,7 @@ export default function RemoteCodePage() {
         typeof c.reasoning_id === "string" ||
         typeof c.encrypted_content === "string"
       ) {
-        const txt = c.summary || c.text || "";
+        const txt = c.summary || c.thinking || c.reasoning || c.text || "";
         if (txt || typeof c.reasoning_id === "string" || typeof c.encrypted_content === "string") {
           blocks.push({ type: "reasoning", reasoning: txt });
         }
@@ -1639,8 +1671,12 @@ export default function RemoteCodePage() {
       carrier = msg;
     });
     setMessages(out);
-    setIsAtBottom(true);
-    scrollToBottom(true);
+    if (initialScrollSession === sessionId) {
+      initialScrollSession = "";
+      scrollToBottom(true);
+    } else {
+      scrollToBottom();
+    }
   }
   function applyUsage(sessionId: string, u: any, cum: any) {
     if (!sessionId) return;
@@ -1651,9 +1687,7 @@ export default function RemoteCodePage() {
         inTok: src.input_tokens ?? src.inTok ?? prev[sessionId]?.inTok ?? 0,
         outTok: src.output_tokens ?? src.outTok ?? prev[sessionId]?.outTok ?? 0,
         cacheTok:
-          (src.cache_read_tokens ?? 0) + (src.cache_write_tokens ?? src.cache_creation_tokens ?? 0) ||
-          prev[sessionId]?.cacheTok ||
-          0,
+          (src.cache_read_tokens ?? 0) + (src.cache_write_tokens ?? src.cache_creation_tokens ?? 0),
         reasoningTok: src.reasoning_tokens ?? prev[sessionId]?.reasoningTok ?? 0,
         costUsd: src.cost_usd ?? prev[sessionId]?.costUsd ?? 0,
       },
@@ -1663,10 +1697,16 @@ export default function RemoteCodePage() {
     // SignalDB sync protocol messages (pull responses / change pings) are
     // owned by the data layer; everything else is event-driven below.
     if (dataLayer.handleMessage(msg)) return;
+    // The relay fans out every host; foreground events belong to the selected host only.
+    if (msg.type !== "host_status" && msg.hostId && msg.hostId !== activeHostId()) return;
     switch (msg.type) {
       case "relay_connected":
         break;
       case "host_status": {
+        if (msg.hostId === activeHostId() && msg.status === "online") {
+          dataLayer.storeFor(msg.hostId).syncAll();
+          if (activeSessionId()) sendWS({ type: "get_session", sessionId: activeSessionId() });
+        }
         if (msg.hostId && msg.status) {
           setHosts((prev) =>
             prev.map((h) => (h.id === msg.hostId ? { ...h, status: msg.status } : h)),
@@ -1771,6 +1811,7 @@ export default function RemoteCodePage() {
       }
 
       case "session_data": {
+        if (msg.requestId && msg.requestId !== transcriptRequestId) break;
         // Historic full-record shape; render it like session_content.
         const r = msg.session;
         if (!r) break;
@@ -1790,6 +1831,9 @@ export default function RemoteCodePage() {
           }
         }
         if (sid && sid === activeSessionId()) {
+          setSessionStatus(r.status === "running" ? "running" : "idle");
+          if (r.usage) applyUsage(sid, r.usage, null);
+          setSessionContexts((prev) => ({ ...prev, [sid]: r.context ?? null }));
           applySessionContent(sid, r.messages || r.Messages || []);
         }
         break;
@@ -1805,7 +1849,12 @@ export default function RemoteCodePage() {
         // Composer responsiveness only (stop button state) — the collections
         // get the same truth via the sessions change ping.
         if (msg.sessionId === activeSessionId()) {
-          setSessionStatus(msg.status);
+          setSessionStatus(msg.status === "running" ? "running" : "idle");
+          if (msg.status === "idle") {
+            setPendingApproval(null);
+            setToolProgress({});
+            if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
+          }
         }
         break;
       }
@@ -1820,6 +1869,7 @@ export default function RemoteCodePage() {
 
       case "session_compacted": {
         if (msg.sessionId === activeSessionId()) {
+          setSessionContexts((prev) => ({ ...prev, [msg.sessionId]: msg.context ?? null }));
           applySessionContent(msg.sessionId, msg.messages || []);
           toast(
             msg.auto
@@ -1852,6 +1902,12 @@ export default function RemoteCodePage() {
 
         if (ev.type === "turn_start") {
           setSessionStatus("running");
+        } else if (ev.type === "assistant_start") {
+          // Each model step gets its own carrier. Tool loops cannot merge new
+          // thinking into the previous assistant response.
+          setMessages((prev) => [...prev, {
+            id: `asst_${crypto.randomUUID()}`, role: "assistant", blocks: [], time: Date.now(),
+          }]);
         } else if (ev.type === "text_delta") {
           // First content chunk freezes the thinking clock (chatbot-style).
           if (thinkingStart() !== null) {
@@ -1862,6 +1918,7 @@ export default function RemoteCodePage() {
         } else if (ev.type === "reasoning_delta") {
           appendReasoningDelta(ev.delta || "");
         } else if (ev.type === "tool_use_start") {
+          if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
           // Pre-render a live "composing call" card while args stream in.
           appendToolCall(ev.id, ev.name, "");
         } else if (ev.type === "tool_use_args") {
@@ -1882,20 +1939,24 @@ export default function RemoteCodePage() {
           appendToolResult(ev.id, ev.result ?? ev.content, ev.isError);
         } else if (ev.type === "usage") {
           applyUsage(msg.sessionId, ev.usage, ev.cumulative);
+          if (ev.context) {
+            setSessionContexts((prev) => ({ ...prev, [msg.sessionId]: ev.context }));
+            const configured = gatewayModels().find((m) => m.id === ev.context.model)?.limit?.context ?? 0;
+            if (configured !== ev.context.windowTokens) void loadGatewayModels();
+          }
         } else if (ev.type === "compact_progress") {
           if (ev.text === "Compacting older context…") toast(ev.text, "ok");
         } else if (ev.type === "turn_end") {
-          setSessionStatus("idle");
-          setPendingApproval(null);
-          setToolProgress({});
+          // This ends one model call; tools and subsequent steps may still run.
           if (thinkingStart() !== null) {
             const dur = stopThinkingTimer();
             stampThinkingDuration(dur);
           }
           if (ev.usage || ev.cumulative) applyUsage(msg.sessionId, ev.usage, ev.cumulative);
           if (ev.error) toast(ev.error, "err");
-          // Refresh the transcript so tool blocks persisted by the daemon
-          // (with full args/results) replace the streamed approximations.
+          // The daemon sends the final snapshot and idle status after the task.
+        } else if (ev.type === "done") {
+          // Compatibility with daemons that predate final session snapshots.
           sendWS({ type: "get_session", sessionId: msg.sessionId });
         } else if (ev.type === "error") {
           toast(ev.message || "Agent error", "err");
@@ -1906,6 +1967,7 @@ export default function RemoteCodePage() {
       }
 
       case "error": {
+        if (msg.sessionId && msg.sessionId !== activeSessionId()) break;
         if (msg.requestId && uploadWaiters.has(msg.requestId)) {
           const w = uploadWaiters.get(msg.requestId)!;
           uploadWaiters.delete(msg.requestId);
@@ -1918,8 +1980,7 @@ export default function RemoteCodePage() {
           setSessionAfterProject(false);
         }
         toast(msg.message || "Daemon returned an error", "err");
-        setSessionStatus("idle");
-        setPendingApproval(null);
+        if (activeSessionId()) sendWS({ type: "get_session", sessionId: activeSessionId() });
         break;
       }
     }
@@ -2198,21 +2259,14 @@ export default function RemoteCodePage() {
     });
   }
 
-  function scrollToBottom(force = false) {
-    if (!force && !isAtBottom()) return;
-    setTimeout(() => {
-      const el = chatContainerRef();
-      if (el) el.scrollTop = el.scrollHeight;
-    }, 40);
-  }
-
-  function onChatScroll() {
-    const el = chatContainerRef();
-    if (!el) return;
-    setIsAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 100);
-  }
+  function scrollToBottom(force = false) { transcriptScroll.schedule(force); }
+  function onChatScroll() { transcriptScroll.measure(); }
 
   function selectSession(id: string) {
+    initialScrollSession = id;
+    transcriptScroll.reset();
+    setMessages([]);
+    setSessionStatus("idle");
     setActiveSessionId(id);
     setPendingApproval(null);
     setSearchResults([]);
@@ -2311,16 +2365,7 @@ export default function RemoteCodePage() {
     if (ok) sendWS({ type: "delete_session", sessionId: id });
   }
 
-  // (Default Model editor lives in the composer-adjacent model picker —
-  //  Settings reads the same daemon signal, no duplicate UI here.)
-
-  /**
-   * One shared Model+Effort editor used by the composer picker AND by the
-   * Settings "Default Model" field. Same daemon truth (activeModel and
-   * daemonSettings signals, set_model/set_reasoning commands), same model
-   * list + search box, same effort grid. `showUsage` only makes sense in
-   * the composer popover (Settings has no session).
-   */
+  /** Composer model/effort picker; Settings edits a local default-model draft. */
   function modelPickerBody(showUsage: boolean) {
     return (
       <>
@@ -2355,7 +2400,7 @@ export default function RemoteCodePage() {
             each={filteredGatewayModels()}
             fallback={
               <div class="px-2.5 py-2 text-[11px] text-ink-600">
-                No models match.
+                {gatewayModels().length ? "No models match." : "No compatible models configured in the gateway."}
               </div>
             }
           >
@@ -2681,10 +2726,11 @@ export default function RemoteCodePage() {
     const openNow = () => isLast && sessionStatus() === "running";
     const live = () =>
       openNow() && thinkingStart() !== null && thinkingIndex() === nth;
-    const open = () => expandedThinking()[thinkKey()] ?? openNow();
+    const open = () => expandedThinking()[thinkKey()] ?? live();
     return (
       <div class="w-full">
         <button
+          aria-expanded={open()}
           onClick={() => setExpandedThinking((prev) => ({ ...prev, [thinkKey()]: !open() }))}
           class={`flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
             openNow() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
@@ -2714,7 +2760,7 @@ export default function RemoteCodePage() {
           />
         </button>
         <Show when={open()}>
-          <div class="mt-1.5 pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap text-xs leading-relaxed">
+          <div class="mt-2 max-h-64 overflow-y-auto pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap break-words text-xs leading-relaxed">
             {block.reasoning || "(thinking…)"}
           </div>
         </Show>
@@ -2736,8 +2782,8 @@ export default function RemoteCodePage() {
     isLast: boolean,
     extraSrcIds: number[] = [],
   ) {
-    const running = isLast && sessionStatus() === "running";
-    const summary = specialTitle(units);
+    const running = createMemo(() => isLast && sessionStatus() === "running");
+    const summary = createMemo(() => specialTitle(units));
     const key = `${msgId}:special:${extraSrcIds.join(",")}`;
     const open = () => toolGroupOpen()[key] ?? true;
     return (
@@ -2748,7 +2794,7 @@ export default function RemoteCodePage() {
             class="w-full flex items-center gap-2 px-3 py-2 hover:bg-ink-900/60 transition-colors cursor-pointer text-left"
           >
             <Show
-              when={!running}
+              when={!running()}
               fallback={
                 <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
               }
@@ -2756,7 +2802,7 @@ export default function RemoteCodePage() {
               <Iconify icon="lucide:bot" size={14} class="shrink-0 text-ink-500" />
             </Show>
             <span class="text-[13px] font-medium text-ink-300 truncate flex-1 min-w-0">
-              {summary}
+              {summary()}
             </span>
             <Show when={specialProgress(units)}>
               {(t) => (
@@ -2773,7 +2819,7 @@ export default function RemoteCodePage() {
           </button>
           <Show when={open()}>
             <div class="border-t border-line/60 px-2 py-1.5 space-y-0.5">
-              {renderToolSegs(msgId, extraSrcIds.join(",") || "lead", units, running)}
+              {renderToolSegs(msgId, extraSrcIds.join(",") || "lead", units, running())}
             </div>
           </Show>
         </div>
@@ -2919,6 +2965,10 @@ export default function RemoteCodePage() {
   }
 
   async function sendPrompt() {
+    if (!wsOpen() || activeHost()?.status !== "online") {
+      toast("Reconnect the host before sending a message", "err");
+      return;
+    }
     const text = inputPrompt().trim();
     const sid = activeSessionId();
     setPendingFirstText(null);
@@ -2942,7 +2992,7 @@ export default function RemoteCodePage() {
     // Abort guard: free the composer when a late sync proves the daemon
     // already forgot the session (restored-from-cache ghost), otherwise a
     // send to a dead session would hang the composer in running forever.
-    const live = wsOpen() && sessions().some((s) => s.id === sid);
+    const live = sessions().some((s) => s.id === sid);
     if (!live) {
       setSessionStatus("idle");
       setActiveSessionId("");
@@ -3007,9 +3057,9 @@ export default function RemoteCodePage() {
   function cancelCurrentTurn() {
     if (!activeSessionId()) return;
     sendWS({ type: "cancel", sessionId: activeSessionId() });
-    setSessionStatus("idle");
-    setPendingApproval(null);
-    toast("Generation stopped", "ok");
+    stopThinkingTimer();
+    transcriptScroll.detach();
+    toast("Stopping generation…", "ok");
   }
 
   function respondApproval(approved: boolean) {
@@ -3144,8 +3194,7 @@ export default function RemoteCodePage() {
         if (s.mcp) setMcpServers(s.mcp);
         if (s.skills) setSkills(s.skills);
         if (typeof s.yolo === "boolean") setYoloMode(s.yolo);
-        // Push the reverted state back so per-action saves don't linger.
-        setTimeout(() => saveDaemonConfig(), 30);
+
       }
     } catch {}
     setShowConfigModal(false);
@@ -3153,6 +3202,7 @@ export default function RemoteCodePage() {
 
   // Save Settings to Daemon (translate UI keys to the daemon's Go keys).
   function saveDaemonConfig() {
+    if (!wsOpen() || activeHost()?.status !== "online") { toast("Reconnect the host before saving settings", "err"); return false; }
     const s = daemonSettings();
     sendWS({
       type: "update_config",
@@ -3171,6 +3221,7 @@ export default function RemoteCodePage() {
       mcpServers: mcpServers(),
       skills: skills(),
     });
+    return true;
   }
 
   // Add MCP Server
@@ -3250,12 +3301,10 @@ export default function RemoteCodePage() {
   }
 
   // Mount logic
-  onMount(async () => {
-    await loadGatewayModels();
-    await loadHosts();
-    if (hosts().length === 0) {
-      generatePairingToken();
-    }
+  onMount(() => {
+    void Promise.allSettled([loadGatewayModels(), loadHosts()]).then(() => {
+      if (!disposed && hosts().length === 0) generatePairingToken();
+    });
     // Sidebar starts closed on mobile (chatbot useMobile).
     if (isMobile()) setSidebarOpen(false);
     const onResize = () => {
@@ -3280,6 +3329,7 @@ export default function RemoteCodePage() {
         return;
       }
       if (e.key === "Escape") {
+        if (document.querySelector("[role=dialog]")) return;
         if (confirmState()) {
           confirmState()?.resolve(false);
           setConfirmState(null);
@@ -3315,13 +3365,29 @@ export default function RemoteCodePage() {
 
   createEffect(() => {
     const hid = activeHostId();
-    if (hid) {
+    {
       // Switching hosts swaps the whole world: nothing from the previous
       // daemon may bleed through (frontend = dumb monitor).
-      setActiveSessionId("");
-      setMessages([]);
-      setPendingFirstText(null);
-      connectWebSocket(hid);
+      untrack(() => {
+        setActiveSessionId("");
+        setActiveProjectId("");
+        setMessages([]);
+        setPendingFirstText(null);
+        setSessionStatus("idle");
+        setPendingApproval(null);
+        setSessionUsage({});
+        setSessionContexts({});
+        setToolProgress({});
+        for (const attachment of pendingAttachments()) {
+          if (attachment.objectUrl) URL.revokeObjectURL(attachment.objectUrl);
+        }
+        setPendingAttachments([]);
+        setInputPrompt("");
+        stopThinkingTimer();
+        transcriptScroll.reset();
+        reconnectAttempt = 0;
+        connectWebSocket(hid);
+      });
     }
   });
 
@@ -3425,7 +3491,7 @@ export default function RemoteCodePage() {
 
   // Auto-poll hosts while waiting for initial daemon pairing
   createEffect(() => {
-    if (hosts().length === 0) {
+    if (hosts().length === 0 || showPairModal()) {
       const interval = setInterval(() => {
         loadHosts();
       }, 3000);
@@ -3453,6 +3519,7 @@ export default function RemoteCodePage() {
 
   // Close popover menus on outside click / Escape.
   function closeMenus() {
+    setHostMenuOpen(false);
     setDisplayMenuOpen(false);
     setNewProjectMenuOpen(false);
     setAddContextOpen(false);
@@ -3462,14 +3529,6 @@ export default function RemoteCodePage() {
     setUsageOpen(false);
   }
 
-  onCleanup(() => {
-    if (ws) {
-      try {
-        ws.close();
-      } catch {}
-    }
-    clearInterval(heartbeatTimer);
-  });
 
   // Antigravity-style tool rows: one line per call, expandable output,
   // clickable files, inline diffs for edits.
@@ -3483,17 +3542,17 @@ export default function RemoteCodePage() {
   function renderToolUnit(msgId: string, u: ToolUnit, ui: number, running: boolean) {
     const key = () => toolRowKey(msgId, u, ui);
     const open = () => toolOpen()[key()] ?? (running && !u.result);
-    const sum = toolSummary(u);
+    const sum = createMemo(() => toolSummary(u));
     const prog = () => (u.call?.toolId ? toolProgress()[u.call.toolId] : undefined);
-    const args = tryParseArgs(u.call?.toolArgs);
-    const name = u.call?.toolName || "tool";
-    const failed = !!u.result?.isError;
+    const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
+    const name = () => u.call?.toolName || "tool";
+    const failed = () => !!u.result?.isError;
     return (
       <div class="w-full">
         <div
           onClick={() => toggleToolOpen(key())}
           class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
-          title={u.call?.toolArgs || name}
+          title={u.call?.toolArgs || name()}
         >
           <Show
             when={!(running && !u.result)}
@@ -3502,28 +3561,28 @@ export default function RemoteCodePage() {
             }
           >
             <Iconify
-              icon={failed ? "lucide:x" : sum.icon}
+              icon={failed() ? "lucide:x" : sum().icon}
               size={14}
-              class={`shrink-0 ${failed ? "text-rose-400" : "text-ink-500"}`}
+              class={`shrink-0 ${failed() ? "text-rose-400" : "text-ink-500"}`}
             />
           </Show>
-          <span class="text-ink-500 shrink-0">{sum.verb}</span>
-          <span class="truncate text-ink-200 font-medium min-w-0 flex-1">{sum.target}</span>
-          <Show when={sum.statAdd != null || sum.statDel != null}>
+          <span class="text-ink-500 shrink-0">{sum().verb}</span>
+          <span class="truncate text-ink-200 font-medium min-w-0 flex-1">{sum().target}</span>
+          <Show when={sum().statAdd != null || sum().statDel != null}>
             <span class="font-mono text-[11px] shrink-0">
-              <Show when={(sum.statAdd || 0) > 0}>
-                <span class="text-emerald-400">+{sum.statAdd}</span>
+              <Show when={(sum().statAdd || 0) > 0}>
+                <span class="text-emerald-400">+{sum().statAdd}</span>
               </Show>
-              <Show when={(sum.statAdd || 0) > 0 && (sum.statDel || 0) > 0}>
+              <Show when={(sum().statAdd || 0) > 0 && (sum().statDel || 0) > 0}>
                 <span class="text-ink-600"> </span>
               </Show>
-              <Show when={(sum.statDel || 0) > 0}>
-                <span class="text-rose-400">-{sum.statDel}</span>
+              <Show when={(sum().statDel || 0) > 0}>
+                <span class="text-rose-400">-{sum().statDel}</span>
               </Show>
             </span>
           </Show>
-          <Show when={sum.stat && sum.statAdd == null}>
-            <span class="text-[11px] text-ink-600 shrink-0">{sum.stat}</span>
+          <Show when={sum().stat && sum().statAdd == null}>
+            <span class="text-[11px] text-ink-600 shrink-0">{sum().stat}</span>
           </Show>
           <Show when={prog()}>
             <span class="font-mono text-[11px] text-ink-600 truncate max-w-[40%]">{prog()}</span>
@@ -3538,11 +3597,11 @@ export default function RemoteCodePage() {
           <div class="ml-5 mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 overflow-hidden">
             {/* Context body per tool kind (scrollable, always inline — the
                 collapsible rows already are the "open file/diff" view). */}
-            <Show when={name === "edit" && u.result?.toolResult}>
+            <Show when={name() === "edit" && u.result?.toolResult}>
               <DiffView
                 text={u.result?.toolResult || ""}
                 max={40}
-                name={String(args.path || "")}
+                name={String(args().path || "")}
               />
               <div class="flex items-center gap-2 px-3 py-1.5 border-t border-line/50">
                 <button
@@ -3553,24 +3612,24 @@ export default function RemoteCodePage() {
                 </button>
               </div>
             </Show>
-            <Show when={name === "read"}>
+            <Show when={name() === "read"}>
               <Show
                 when={u.result?.toolResult}
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Waiting for output…</div>}
               >
                 <CodeBlock
                   text={(u.result?.toolResult || "").slice(0, 3000)}
-                  language={languageForPath(String(args.path || ""))}
+                  language={languageForPath(String(args().path || ""))}
                 />
               </Show>
             </Show>
-            <Show when={name === "write"}>
+            <Show when={name() === "write"}>
               <CodeBlock
-                text={String(args.content || u.result?.toolResult || "").slice(0, 3000)}
-                language={languageForPath(String(args.path || ""))}
+                text={String(args().content || u.result?.toolResult || "").slice(0, 3000)}
+                language={languageForPath(String(args().path || ""))}
               />
             </Show>
-            <Show when={name !== "edit" && name !== "read" && name !== "write"}>
+            <Show when={name() !== "edit" && name() !== "read" && name() !== "write"}>
               <Show
                 when={u.result?.toolResult}
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Waiting for output…</div>}
@@ -3827,11 +3886,18 @@ export default function RemoteCodePage() {
    * changes). Series fusing is visual only: every block keeps its lead's
    * raw index (blockRawIdx) for per-message ops.
    */
-  const renderBlocks = createMemo<RenderBlock[]>(() => buildRenderBlocks(messages()));
+  // Preserve DOM/component identity across deltas. Rebuilding <For> entries
+  // on every token remounted Markdown and collapsed its height before repaint.
+  const [renderState, setRenderState] = createStore<{ blocks: (RenderBlock & { id: string })[] }>({ blocks: [] });
+  createEffect(() => {
+    const blocks = buildRenderBlocks(messages()).map((block) => ({ ...block, id: block.msg.id }));
+    setRenderState("blocks", reconcile(blocks));
+  });
+  const renderBlocks = () => renderState.blocks;
 
   /** Raw daemon index of a render block's lead message. */
   function blockRawIdx(block: RenderBlock): number {
-    const i = messages().indexOf(block.msg);
+    const i = messages().findIndex((msg) => msg.id === block.msg.id);
     return i >= 0 ? i : 0;
   }
   function sessionRow(s: SessionSummary) {    const isActive = () => s.id === activeSessionId();
@@ -3930,8 +3996,7 @@ export default function RemoteCodePage() {
 
   return (
     <div
-      class="fixed inset-0 w-screen h-screen flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50"
-      onClick={closeMenus}
+      class="fixed inset-0 w-full h-dvh flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50"
     >
 
       {/* ========================================================================= */}
@@ -4352,36 +4417,48 @@ export default function RemoteCodePage() {
 
           {/* Sidebar Footer: host switcher + settings (Antigravity) */}
           <div class="p-2 border-t border-line/70 space-y-1">
-            <div class="flex items-center gap-1.5 px-1">
-              <span class={`w-1.5 h-1.5 rounded-full shrink-0 ${activeHost()?.status === "online" ? "bg-emerald-500" : "bg-amber-500"}`} />
-              <div class="flex-1 min-w-0">
-                <Select
-                  value={activeHostId()}
-                  onChange={(v) => setActiveHostId(v)}
-                  options={hosts().map((h) => ({
-                    value: h.id,
-                    label: `${h.name || h.hostname || h.id} (${h.status || "offline"})`,
-                  }))}
-                />
+            <button
+              ref={hostBtn}
+              data-menubtn
+              aria-label="Select host"
+              aria-haspopup="menu"
+              aria-expanded={hostMenuOpen()}
+              onClick={() => { const next = !hostMenuOpen(); closeMenus(); setHostMenuOpen(next); }}
+              class="w-full flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-left hover:bg-elev transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 cursor-pointer"
+            >
+              <span class="flex h-8 w-8 items-center justify-center rounded-lg border border-line bg-card text-ink-400 shrink-0">
+                <Iconify icon="lucide:monitor" size={16} />
+              </span>
+              <span class="flex-1 min-w-0">
+                <span class="block truncate text-xs font-medium text-ink-200">{activeHost()?.name || activeHost()?.hostname || "Select host"}</span>
+                <span class="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-500">
+                  <span class={`h-1.5 w-1.5 rounded-full ${connectionState() === "connected" && activeHost()?.status === "online" ? "bg-accent-500" : "bg-ink-600"}`} />
+                  {connectionState() !== "connected" ? "Reconnecting…" : activeHost()?.status === "online" ? "Connected" : "Offline"}
+                </span>
+              </span>
+              <Iconify icon="lucide:chevrons-up-down" size={13} class="text-ink-500 shrink-0" />
+            </button>
+            <FloatMenu anchor={() => hostBtn} open={hostMenuOpen()} placement="top-start" width="18rem">
+              <div class="px-2.5 py-2 text-[10px] uppercase tracking-wider font-semibold text-ink-500">Your hosts</div>
+              <div role="menu" aria-label="Hosts" class="space-y-0.5">
+                <For each={hosts()}>{(host) => (
+                  <button role="menuitemradio" aria-checked={host.id === activeHostId()}
+                    class="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-elev focus-visible:bg-elev cursor-pointer"
+                    onClick={() => { setHostMenuOpen(false); setActiveHostId(host.id); }}>
+                    <Iconify icon="lucide:monitor" size={15} class="text-ink-500 shrink-0" />
+                    <span class="flex-1 min-w-0"><span class="block truncate text-xs text-ink-200">{host.name || host.hostname || host.id}</span>
+                      <span class="block text-[11px] text-ink-500">{host.status === "online" ? "Online" : "Offline"}{host.os ? ` · ${host.os}` : ""}</span></span>
+                    <Show when={host.id === activeHostId()}><Iconify icon="lucide:check" size={14} /></Show>
+                  </button>
+                )}</For>
               </div>
-              <button
-                onClick={loadHosts}
-                class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer shrink-0"
-                title="Refresh hosts"
-              >
-                <Iconify icon="lucide:refresh-cw" size={12} />
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  generatePairingToken();
-                }}
-                class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer shrink-0"
-                title="Connect another host"
-              >
-                <Iconify icon="lucide:plus" size={12} />
-              </button>
-            </div>
+              <div class="mt-1 border-t border-line pt-1 space-y-0.5">
+                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-ink-400 hover:bg-elev cursor-pointer"
+                  onClick={() => { setHostMenuOpen(false); void loadHosts(); }}><Iconify icon="lucide:refresh-cw" size={13} />Refresh hosts</button>
+                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-ink-200 hover:bg-elev cursor-pointer"
+                  onClick={() => { setHostMenuOpen(false); void generatePairingToken(); }}><Iconify icon="lucide:plus" size={13} />Connect another host</button>
+              </div>
+            </FloatMenu>
             {/* () => … — openSettings takes an optional section id; passing it
                 directly would feed the MouseEvent in as the section. */}
             <button
@@ -4396,6 +4473,11 @@ export default function RemoteCodePage() {
 
         {/* --- Main Chat Stream Container --- */}
         <main class="flex-1 flex flex-col min-w-0 bg-ink-950 relative">
+          <Show when={activeHost() && connectionState() !== "connected"}>
+            <div role="status" class="border-b border-line bg-elev px-4 py-2 text-center text-xs text-ink-400">
+              Connection interrupted. Reconnecting to your host…
+            </div>
+          </Show>
           {/* Offline Banner when selected host is offline */}
           <Show when={activeHost() && activeHost()?.status !== "online"}>
             <div class="bg-amber-500/10 border-b border-amber-500/25 px-4 py-2.5 flex items-center justify-end text-xs text-amber-300 z-10">
@@ -4546,7 +4628,15 @@ export default function RemoteCodePage() {
           <div
             ref={setChatContainerRef}
             onScroll={onChatScroll}
-            class="flex-1 overflow-y-auto px-4 md:px-8 pt-6 pb-16 space-y-6 select-text scroll-smooth"
+            onWheel={(e) => { if (e.deltaY < 0) transcriptScroll.detach(); }}
+            onPointerDown={() => transcriptScroll.detach()}
+            onTouchMove={() => transcriptScroll.detach()}
+            onKeyDown={(e) => { if (["ArrowUp", "PageUp", "Home"].includes(e.key)) transcriptScroll.detach(); }}
+            tabindex="0"
+            aria-label="Conversation"
+            class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 md:px-8 select-text [overflow-anchor:none]"
+          >
+          <div ref={setChatContentRef} class="pt-6 pb-10 space-y-6"
           >
             {/* Empty state: subtle hint only — the real input is the
                 composer pinned at the bottom, never something mid-screen. */}
@@ -4563,7 +4653,7 @@ export default function RemoteCodePage() {
                       <div class="flex items-center justify-center gap-2 pt-1">
                         <button
                           onClick={openNewProjectModal}
-                          class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-[13px] font-medium hover:bg-white cursor-pointer"
+                          class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-[13px] font-medium hover:bg-accent-400 cursor-pointer"
                         >
                           <Iconify icon="lucide:folder-plus" size={14} />
                           <span>Select project folder</span>
@@ -4684,7 +4774,7 @@ export default function RemoteCodePage() {
                                 </button>
                                 <button
                                   onClick={() => saveEditMsg(rawIdx(), msg)}
-                                  class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-white font-medium cursor-pointer"
+                                  class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-accent-400 font-medium cursor-pointer"
                                 >
                                   Save and Send
                                 </button>
@@ -4781,7 +4871,7 @@ export default function RemoteCodePage() {
                               </button>
                               <button
                                 onClick={() => saveEditMsg(rawIdx(), msg)}
-                                class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-white font-medium cursor-pointer"
+                                class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-accent-400 font-medium cursor-pointer"
                               >
                                 Save
                               </button>
@@ -4790,7 +4880,7 @@ export default function RemoteCodePage() {
                         </Show>
 
                         {/* Hover actions (chatbot-style) */}
-                        <Show when={(!sessionStatus() || !isLast()) && !isEditing()}>
+                        <Show when={(sessionStatus() !== "running" || !isLast()) && !isEditing()}>
                           <div class="flex items-center gap-0.5 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
                             <button
                               onClick={() => copyMsg(msg.id, textOf())}
@@ -4941,7 +5031,7 @@ export default function RemoteCodePage() {
                       </button>
                       <button
                         onClick={() => respondApproval(true)}
-                        class="px-4 py-1.5 rounded-xl bg-ink-100 text-ink-950 hover:bg-white text-xs font-semibold transition-colors cursor-pointer"
+                        class="px-4 py-1.5 rounded-xl bg-ink-100 text-ink-950 hover:bg-accent-400 text-xs font-semibold transition-colors cursor-pointer"
                       >
                         Approve
                       </button>
@@ -4961,6 +5051,7 @@ export default function RemoteCodePage() {
               }}
             </Show>
           </div>
+          </div>
           </Show>
 
           {/* Composer estilo Antigravity — hidden entirely until a project
@@ -4978,7 +5069,7 @@ export default function RemoteCodePage() {
                   <div class="flex items-center gap-2">
                     <button
                       onClick={openNewProjectModal}
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-accent-400 cursor-pointer"
                     >
                       <Iconify icon="lucide:folder-plus" size={13} />
                       <span>Select folder</span>
@@ -5372,9 +5463,20 @@ export default function RemoteCodePage() {
                     <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="32rem">
                       <div>{modelPickerBody(true)}</div>
                     </FloatMenu>
-                    <FloatMenu anchor={() => modelBtn} open={usageOpen()} placement="top-start" width="16rem">
+                    <FloatMenu anchor={() => contextBtn} open={usageOpen()} placement="top-start" width="19rem">
                       <div class="p-1.5 text-xs">
-                        <div class="font-semibold text-ink-200 mb-2">Session usage</div>
+                        <div class="font-semibold text-ink-200 mb-3">Conversation context</div>
+                        <div class="text-lg font-medium text-ink-100 tabular-nums">{activeContext().label}</div>
+                        <p class="text-[11px] text-ink-500 mt-1 leading-relaxed">
+                          {activeContext().window > 0 ? `${compactTokens(activeContext().window)} tokens configured in the gateway.` : "Context limit not configured in the gateway."}
+                          {" "}Measured from the latest model request and its response.
+                        </p>
+                        <Show when={activeContext().percent !== null}>
+                          <div class="h-1.5 rounded-full bg-elev overflow-hidden mt-3" role="progressbar" aria-label="Context used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, activeContext().percent ?? 0)}>
+                            <div class="h-full rounded-full bg-accent-500" style={{ width: `${Math.min(100, activeContext().percent ?? 0)}%` }} />
+                          </div>
+                        </Show>
+                        <div class="font-semibold text-ink-200 mb-2 mt-4 pt-3 border-t border-line">Session usage</div>
                         <Show
                           when={activeUsage()}
                           fallback={
@@ -5398,6 +5500,13 @@ export default function RemoteCodePage() {
                       </div>
                     </FloatMenu>
                   </div>
+                  <Tooltip content="Conversation context and session usage">
+                    <button ref={contextBtn} data-menubtn aria-label={`Conversation context: ${activeContext().label}`} aria-expanded={usageOpen()}
+                      onClick={() => { const next = !usageOpen(); closeMenus(); setUsageOpen(next); }}
+                      class="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] tabular-nums text-ink-400 hover:bg-elev hover:text-ink-200 cursor-pointer">
+                      <Iconify icon="lucide:chart-pie" size={12} /><span>{activeContext().label}</span>
+                    </button>
+                  </Tooltip>
                 </div>
 
                 <div class="flex items-center gap-2">
@@ -5419,7 +5528,7 @@ export default function RemoteCodePage() {
                         ? !inputPrompt().trim() && pendingAttachments().length === 0
                         : !inputPrompt().trim() || !activeProject())
                     }
-                    class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
+                    class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-accent-400 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
                     title={
                       sessionStatus() === "running"
                         ? "Generating..."
@@ -5493,7 +5602,7 @@ export default function RemoteCodePage() {
             </button>
             <button
               onClick={createProject}
-              class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
+              class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-accent-400 cursor-pointer"
             >
               Add project
             </button>
@@ -5545,7 +5654,7 @@ export default function RemoteCodePage() {
                   setInputPrompt(t);
                   setTimeout(() => sendPrompt(), 30);
                 }}
-                class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
+                class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-accent-400 cursor-pointer"
               >
                 Apply & Send
               </button>
@@ -5641,7 +5750,7 @@ export default function RemoteCodePage() {
                         truncatePreviewFile();
                         setShowTruncateInput(false);
                       }}
-                      class="px-3 py-1.5 text-xs font-medium bg-ink-100 text-ink-950 rounded-lg hover:bg-white cursor-pointer"
+                      class="px-3 py-1.5 text-xs font-medium bg-ink-100 text-ink-950 rounded-lg hover:bg-accent-400 cursor-pointer"
                     >
                       Apply
                     </button>
@@ -5687,47 +5796,14 @@ export default function RemoteCodePage() {
         </Show>
       </Modal>
 
-      {/* Confirm dialog (chatbot showConfirm, promise-based) */}
-      <Show when={confirmState()}>
-        {(c) => (
-          <div class="fixed inset-0 z-[70] overflow-y-auto bg-black/55 backdrop-blur-sm">
-            <div class="min-h-full flex items-center justify-center p-4">
-              <div class="anim-pop-in w-full max-w-sm rounded-2xl border border-line bg-ink-900 shadow-2xl">
-                <div class="px-5 pt-5 pb-3">
-                  <h3 class="text-sm font-semibold text-ink-100">{c().title}</h3>
-                  <p class="text-xs text-ink-400 mt-1.5 whitespace-pre-line leading-relaxed">
-                    {c().message}
-                  </p>
-                </div>
-                <div class="flex justify-end gap-2 px-5 pb-5">
-                  <button
-                    onClick={() => {
-                      c().resolve(false);
-                      setConfirmState(null);
-                    }}
-                    class="px-4 py-2 rounded-xl text-xs font-medium text-ink-300 hover:text-ink-100 border border-line hover:bg-ink-800 transition-colors cursor-pointer"
-                  >
-                    {c().cancelText}
-                  </button>
-                  <button
-                    onClick={() => {
-                      c().resolve(true);
-                      setConfirmState(null);
-                    }}
-                    class={`px-4 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
-                      c().danger
-                        ? "bg-rose-500/90 text-white hover:bg-rose-500"
-                        : "bg-ink-100 text-ink-950 hover:bg-white"
-                    }`}
-                  >
-                    {c().confirmText}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </Show>
+      <Modal open={!!confirmState()} title={confirmState()?.title || "Confirm"}
+        onClose={() => { confirmState()?.resolve(false); setConfirmState(null); }}
+        footer={<>
+          <Btn variant="ghost" onClick={() => { confirmState()?.resolve(false); setConfirmState(null); }}>{confirmState()?.cancelText || "Cancel"}</Btn>
+          <Btn variant={confirmState()?.danger ? "danger" : "primary"} onClick={() => { confirmState()?.resolve(true); setConfirmState(null); }}>{confirmState()?.confirmText || "Confirm"}</Btn>
+        </>}>
+        <p class="text-sm text-ink-400 whitespace-pre-line leading-relaxed">{confirmState()?.message}</p>
+      </Modal>
 
       {/* Modal: Pair Daemon Host */}
       <Modal
@@ -5788,7 +5864,7 @@ export default function RemoteCodePage() {
             <div class="flex justify-end pt-2">
               <button
                 onClick={() => setShowPairModal(false)}
-                class="px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
+                class="px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-accent-400 cursor-pointer"
               >
                 Done
               </button>
@@ -5803,16 +5879,20 @@ export default function RemoteCodePage() {
         width="max-w-2xl"
         fullOnMobile
         onClose={cancelSettings}
+        description="Appearance and agent preferences for this host."
+        footer={<><Btn variant="ghost" onClick={cancelSettings}>Cancel</Btn><Btn onClick={() => {
+          if (saveDaemonConfig()) { setShowConfigModal(false); toast("Settings sent to host", "ok"); }
+        }}>Save changes</Btn></>}
       >
-          <div class="w-full space-y-4 max-h-[70vh] overflow-y-auto pr-0.5">
-            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+          <div class="w-full space-y-6">
+            <div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
               <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
                 <Iconify icon="lucide:palette" size={15} class="text-ink-500" />
                 <span>Appearance</span>
 
               </h3>
               <div class="space-y-3 text-xs">
-                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
+                <div class="py-2 flex items-center justify-between gap-4">
                   <div>
                     <div class="font-semibold text-ink-200">Theme</div>
                     <div class="text-[11px] text-ink-500 mt-0.5">
@@ -5821,7 +5901,7 @@ export default function RemoteCodePage() {
                   </div>
                   <ThemeToggle />
                 </div>
-                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60 flex items-center justify-between gap-3">
+                <div class="py-2 flex items-center justify-between gap-4">
                   <div>
                     <div class="font-semibold text-ink-200">Verbose Agent Chat</div>
                     <div class="text-[11px] text-ink-500 mt-0.5">
@@ -5834,17 +5914,19 @@ export default function RemoteCodePage() {
                       setVerboseChat(v);
                       try { localStorage.setItem("llmgw-rc-verbose", v ? "1" : "0"); } catch {}
                     }}
-                    class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${verboseChat() ? "bg-sky-500" : "bg-ink-700"}`}
+                    class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${verboseChat() ? "bg-accent-500" : "bg-ink-700"}`}
                     style={{ height: "22px" }}
-                    title="Toggle verbose agent chat"
+                    role="switch"
+                    aria-checked={verboseChat()}
+                    aria-label="Verbose agent chat"
                   >
                     <span
-                      class={`block w-4 h-4 rounded-full bg-white transition-transform ${verboseChat() ? "translate-x-[18px]" : "translate-x-0"}`}
+                      class={`block w-4 h-4 rounded-full bg-accent-fg transition-transform ${verboseChat() ? "translate-x-[18px]" : "translate-x-0"}`}
                       style={{ height: "16px", width: "16px" }}
                     />
                   </button>
                 </div>
-                <div class="p-3.5 rounded-xl border border-line bg-ink-900/60">
+                <div class="py-2">
                   <div class="font-semibold text-ink-200">Conversation Width</div>
                   <div class="text-[11px] text-ink-500 mt-0.5 mb-2">
                     Maximum width of the conversation panel.
@@ -5872,7 +5954,7 @@ export default function RemoteCodePage() {
               </div>
             </div>
 
-            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+            <div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
               <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
                 <Iconify icon="lucide:bot" size={15} class="text-ink-500" />
                 <span>Agent</span>
@@ -5883,23 +5965,13 @@ export default function RemoteCodePage() {
                   <label class="block font-semibold text-ink-200 mb-1">
                     Default Model
                   </label>
-                  <button
-                    onClick={() => {
-                      setShowConfigModal(false);
-                      setModelMenuOpen(true);
-                    }}
-                    class="w-full text-left px-3 py-2 rounded-xl bg-ink-900 border border-line text-sm text-ink-100 hover:border-ink-500 transition-colors cursor-pointer flex items-center justify-between gap-2"
-                    title={daemonSettings().model}
-                  >
-                    <span class="truncate">{daemonSettings().model || "gpt-4o"}</span>
-                    <span class="font-mono text-[11px] text-ink-500 shrink-0">
-                      {normalizeEffort(daemonSettings().reasoning || "none")}
-                    </span>
-                  </button>
-                  <p class="text-[11px] text-ink-500 mt-1">
-                    Tap to open the model + effort picker (same one as the
-                    composer, no usage card here).
-                  </p>
+                  <Select value={daemonSettings().model} options={gatewayModels().map((m) => ({ value: m.id, label: m.name }))}
+                    onChange={(model) => setDaemonSettings((prev) => ({ ...prev, model }))} />
+                  <div class="mt-3">
+                    <Select label="Reasoning effort" value={normalizeEffort(daemonSettings().reasoning)}
+                      options={REASONING_LEVELS.map((level) => ({ value: level, label: level === "none" ? "None" : level }))}
+                      onChange={(reasoning) => setDaemonSettings((prev) => ({ ...prev, reasoning }))} />
+                  </div>
                 </div>
 
                 <div class="space-y-2 pt-2 border-t border-line/60">
@@ -5951,7 +6023,7 @@ export default function RemoteCodePage() {
               </div>
             </div>
 
-            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+            <div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
               <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
                 <Iconify icon="lucide:sliders-horizontal" size={15} class="text-ink-500" />
                 <span>Advanced</span>
@@ -5986,7 +6058,7 @@ export default function RemoteCodePage() {
               </div>
             </div>
 
-            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+            <div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
               <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
                 <Iconify icon="lucide:type" size={15} class="text-ink-500" />
                 <span>Title Generator</span>
@@ -6009,7 +6081,7 @@ export default function RemoteCodePage() {
               </label>
             </div>
 
-            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+            <div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
               <h3 id="sec-mcp" class="text-sm font-semibold text-ink-100 flex items-center gap-2 scroll-mt-2">
                 <Iconify icon="lucide:cpu" size={15} class="text-ink-500" />
                 <span>MCP Servers</span>
@@ -6117,7 +6189,7 @@ export default function RemoteCodePage() {
               </div>
             </div>
 
-            <div class="rounded-2xl border border-line/70 bg-ink-900/40 p-4 space-y-3">
+            <div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
               <h3 id="sec-skills" class="text-sm font-semibold text-ink-100 flex items-center gap-2 scroll-mt-2">
                 <Iconify icon="lucide:puzzle" size={15} class="text-ink-500" />
                 <span>Skills</span>
@@ -6228,25 +6300,6 @@ export default function RemoteCodePage() {
               </div>
             </div>
 
-            {/* Footer: Save / Cancel (chatbot) */}
-            <div class="flex justify-end items-center gap-2 pt-1 sticky bottom-0 bg-ink-950/95 backdrop-blur py-2">
-              <button
-                onClick={cancelSettings}
-                class="px-4 py-2 rounded-xl text-xs font-medium text-ink-400 hover:text-ink-100 border border-line hover:bg-ink-900 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  saveDaemonConfig();
-                  setShowConfigModal(false);
-                  toast("Settings saved", "ok");
-                }}
-                class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-white cursor-pointer"
-              >
-                Save
-              </button>
-            </div>
           </div>
         </Modal>
     </div>

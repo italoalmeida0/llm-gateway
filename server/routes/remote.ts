@@ -5,9 +5,11 @@ import { randomToken, sha256Hex } from "../crypto";
 import { err, json, readJsonBody } from "../http";
 import { PUBLIC_URL } from "../config";
 import { closeDaemonSocket } from "./relay";
+import { publicModelEntry, routerSnapshot } from "../models";
 
 /**
  * Remote Code REST endpoints:
+ *  - GET    /api/remote/models         -> gateway model metadata (daemon token)
  *  - POST   /api/remote/pair           -> generate a temporary pairing token + connect URL
  *  - POST   /api/remote/connect/:token -> daemon handshake (exchanges pairing token for persistent host credentials + API key)
  *  - GET    /api/remote/hosts          -> list user's registered remote hosts
@@ -19,6 +21,22 @@ export async function handleRemoteRestRoute(
   req: Request,
   _url: URL,
 ): Promise<Response | null> {
+  // The daemon reads the configured registry even in passthrough mode.
+  // /v1/models may proxy an upstream catalog with different limits.
+  if (path === "/api/remote/models" && req.method === "GET") {
+    const token = req.headers.get("authorization")?.replace(/^Bearer /, "") || "";
+    const host = db.prepare<{ id: string }, [string]>(
+      `SELECT h.id FROM remote_hosts h JOIN users u ON u.id = h.user_id
+       WHERE h.daemon_token_hash = ? AND u.status = 'active'`,
+    ).get(sha256Hex(token));
+    if (!host) return err(401, "unauthorized daemon token", req);
+    const snap = await routerSnapshot();
+    const models = Array.from(snap.models.values())
+      .filter((m) => m.enabled && m.proto !== "anthropic")
+      .map((m) => publicModelEntry(m, "gateway"));
+    return json({ success: true, models }, { req });
+  }
+
   // POST /api/remote/pair
   if (path === "/api/remote/pair" && req.method === "POST") {
     const { user } = await requireAuth(req);

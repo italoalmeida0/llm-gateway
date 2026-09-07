@@ -38,6 +38,8 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
       const reason: ContentBlock[] = [];
       const rest: ContentBlock[] = [];
       for (const b of blocks) (b.type === "reasoning" ? reason : rest).push(b);
+      // Thinkings mais novos primeiro: o último reasoning do turno fica no topo.
+      reason.reverse();
       const msg: ChatMessage = {
         id: `msg_${idx}`,
         role,
@@ -289,10 +291,11 @@ export function cutTail(prev: ChatMessage[], keepRawIdx: number): ChatMessage[] 
 }
 
 /** Merge de assistant_message: funde no último assistant ou abre bolha
- * (reasoning primeiro, duração do thinking preservada). */
+ * (reasoning primeiro — mais novo no topo —, duração do thinking preservada). */
 export function mergeAssistantMessage(prev: ChatMessage[], ev: any): ChatMessage[] {
   const blocks = parseContentBlocks(ev.message);
-  const normalized = [...blocks.filter((b) => b.type === "reasoning"), ...blocks.filter((b) => b.type !== "reasoning")];
+  const reason = blocks.filter((b) => b.type === "reasoning").reverse();
+  const normalized = [...reason, ...blocks.filter((b) => b.type !== "reasoning")];
   const duration = Number(ev.message?.meta?.thinking_ms);
   const last = prev[prev.length - 1];
   const message: ChatMessage = {

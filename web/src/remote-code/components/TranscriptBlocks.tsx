@@ -4,6 +4,7 @@ import { Icon as Iconify } from "../../components/icon";
 import type { ChatMessage, ContentBlock, RenderBlock, RenderBlockSeries, ToolUnit } from "../types";
 import { splitToolRuns } from "../utils/tools";
 import { partitionToolSegs } from "../utils/toolSegs";
+import type { ToolSeg } from "../utils/toolSegs";
 import { groupTitle, specialTitle } from "../utils/titles";
 import { useToolUnitModel } from "./tool/toolUnitModel";
 import { ToolUnitHeader } from "./tool/ToolUnitHeader";
@@ -276,15 +277,27 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
   // Partition consecutive explore/command runs into collapsible groups
   // (pure helper — algorithm lives in utils/toolSegs, covered by tests).
   const segs = partitionToolSegs(units);
+  // Chaves estáveis por identidade (não por posição): quando uma tool nova
+  // entra no fim do grupo, as chaves das anteriores não mudam e o Solid
+  // reutiliza o DOM — sem remount, sem scroll jump, sem re-abrir colapsado.
+  const segKey = (seg: ToolSeg) =>
+    seg.kind === "unit"
+      ? `u:${seg.unit.call?.toolId || seg.unit.result?.toolId || "i" + seg.idx}`
+      : `g:${seg.cat}:${seg.units.map((u) => u.call?.toolId || u.result?.toolId || "?").join(",")}`;
   return (
-    <div class="w-full space-y-0.5">
+    <div class="w-full space-y-0.5" style={{ "overflow-anchor": "none" }}>
       <For each={segs}>
-        {(seg, si) => {
-          if (seg.kind === "unit") return renderToolUnit(ctx, msgId, seg.unit, seg.idx, running);
-          const gkey = `${msgId}:${keySalt}:g${si()}`;
+        {(seg) => {
+          if (seg.kind === "unit")
+            return (
+              <div data-toolseg={segKey(seg)} style={{ "overflow-anchor": "none" }}>
+                {renderToolUnit(ctx, msgId, seg.unit, seg.idx, running)}
+              </div>
+            );
+          const gkey = `${msgId}:${keySalt}:${segKey(seg)}`;
           const open = () => ctx.toolGroupOpen()[gkey] ?? true;
           return (
-            <div class="w-full">
+            <div class="w-full" data-toolseg={segKey(seg)} style={{ "overflow-anchor": "none" }}>
               <button
                 onClick={() => ctx.toggleToolGroup(gkey)}
                 class="w-full flex items-center gap-1.5 pl-1 pr-1.5 py-1 rounded-lg hover:bg-ink-900/70 text-[13px] text-ink-400 hover:text-ink-200 cursor-pointer"
@@ -297,9 +310,15 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
                 />
               </button>
               <Show when={open()}>
-                <div class="ml-3 border-l border-line/40 pl-1.5 space-y-0.5">
+                <div class="ml-3 border-l border-line/40 pl-1.5 space-y-0.5" style={{ "overflow-anchor": "none" }}>
                   <For each={seg.units}>
-                    {(u, ui) => renderToolUnit(ctx, msgId, u, ui() + si() * 100, running)}
+                    {(u) => {
+                      // Índice global estável: posição da unit na lista completa,
+                      // não no grupo — a chave da row (toolRowKey) não muda
+                      // quando o grupo cresce.
+                      const gi = units.indexOf(u);
+                      return renderToolUnit(ctx, msgId, u, gi >= 0 ? gi : 0, running);
+                    }}
                   </For>
                 </div>
               </Show>

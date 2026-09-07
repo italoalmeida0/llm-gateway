@@ -2833,7 +2833,7 @@ export default function RemoteCodePage() {
     return (
       <Show when={verboseChat()}>
         <Show when={units.every((u) => u.call?.toolName === "question")} fallback={
-        <div class="w-full rounded-xl border border-line/60 bg-ink-900/40 overflow-hidden">
+        <div class="w-full rounded-xl border border-line/60 bg-ink-900/40 overflow-hidden mt-1">
           <button
             onClick={() => toggleToolGroup(key)}
             class="w-full flex items-center gap-2 px-3 py-2 hover:bg-ink-900/60 transition-colors cursor-pointer text-left"

@@ -152,6 +152,45 @@ func TestGitTrackerKeepDeletesRepo(t *testing.T) {
 	}
 }
 
+func TestGitTrackerReattachAfterRestartKeepsChanges(t *testing.T) {
+	d := testDaemon(t)
+	cwd := t.TempDir()
+	sessionID := "sess-git-restart"
+	if err := os.WriteFile(filepath.Join(cwd, "r.txt"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tracker := gitTestTracker(t, d, sessionID, cwd)
+	if err := os.WriteFile(filepath.Join(cwd, "r.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if files := collectPaths(t, tracker, false); findChange(files, "r.txt") == nil {
+		t.Fatalf("expected r.txt pending before restart, got %+v", files)
+	}
+	// Simulate daemon restart: drop the in-memory tracker (and the whole
+	// session), keeping only the temp repo on disk.
+	d.sessionsMu.Lock()
+	delete(d.sessions, sessionID)
+	d.sessionsMu.Unlock()
+	act := &ActiveSession{record: &SessionRecord{ID: sessionID, CWD: cwd}}
+	d.sessionsMu.Lock()
+	d.sessions[sessionID] = act
+	d.sessionsMu.Unlock()
+	tracker2 := d.ensureGitTracker(act, sessionID, cwd)
+	if tracker2 == nil {
+		t.Fatal("ensureGitTracker must reattach to the existing temp repo")
+	}
+	after := collectPaths(t, tracker2, true)
+	got := findChange(after, "r.txt")
+	if got == nil || got.Kind != "modified" || got.Diff == "" {
+		t.Fatalf("pending change must survive restart, got %+v", after)
+	}
+	// And a clean restart (no pending changes) re-baselines without error.
+	d.handleMessage([]byte(`{"type":"undo_changes","sessionId":"` + sessionID + `","reviewId":"` + reviewIDFor(after) + `"}`))
+	if _, err := os.Stat(filepath.Join(tracker2.gitDir, "HEAD")); !os.IsNotExist(err) {
+		t.Fatal("undo-all must delete the temp repo")
+	}
+}
+
 func TestGitTrackerIgnoresTempDirs(t *testing.T) {
 	d := testDaemon(t)
 	cwd := t.TempDir()

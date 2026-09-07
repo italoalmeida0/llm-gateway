@@ -156,8 +156,10 @@ func (d *DaemonServer) trackerFor(sessionID string) *gitReviewTracker {
 // temp repo on first use, refreshes info/exclude, and records a baseline
 // commit capturing everything currently on disk — but ONLY when the repo is
 // clean. If changes are still pending (dirty), the old baseline is kept so
-// pending changes accumulate across turns until keep/undo-all. It returns
-// nil (disabled, no error) when git is unavailable.
+// pending changes accumulate across turns until keep/undo-all. A pre-existing
+// temp repo (e.g. daemon restart with pending changes) is reattached, never
+// re-baselined blindly. It returns nil (disabled, no error) when git is
+// unavailable.
 func (d *DaemonServer) ensureGitTracker(act *ActiveSession, sessionID, cwd string) *gitReviewTracker {
 	act.mu.Lock()
 	if act.gitTracker != nil {
@@ -174,11 +176,22 @@ func (d *DaemonServer) ensureGitTracker(act *ActiveSession, sessionID, cwd strin
 		return nil
 	}
 	gitDir := d.gitDirForSession(sessionID)
+	reattaching := false
+	if _, err := os.Stat(filepath.Join(gitDir, "HEAD")); err == nil {
+		reattaching = true
+	}
 	t := &gitReviewTracker{d: d, act: act, cwd: cwd, hostID: d.config.HostID, sessionID: sessionID, gitDir: gitDir}
 	if err := t.init(); err != nil {
 		return nil
 	}
-	if err := t.baselineNow("session start"); err != nil {
+	if reattaching {
+		// Daemon restart (or any new in-memory tracker) over an existing temp
+		// repo: keep the old baseline so pending changes stay visible.
+		// Only commit when clean (nothing pending).
+		if err := t.maybeBaseline("reattach"); err != nil {
+			return nil
+		}
+	} else if err := t.baselineNow("session start"); err != nil {
 		return nil
 	}
 	act.mu.Lock()

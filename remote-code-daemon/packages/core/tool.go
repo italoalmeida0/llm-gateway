@@ -34,6 +34,8 @@ type ToolPreviewer interface {
 
 // ToolResult is the outcome of Tool.Execute.
 type ToolResult struct {
+	StartedAt  int64
+	DurationMs int64
 	// Content is sent back to the LLM (text and/or images).
 	Content []provider.Content
 	// IsError marks this result as an error to the LLM.

@@ -209,8 +209,12 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 		t.Fatal("todo tool did not persist the visible checklist")
 	}
 	answered := false
+	timed := false
 	for _, message := range stored.Messages {
 		for _, block := range message.Content {
+			if result, ok := block.(provider.ToolResultBlock); ok && result.CallID == "read-1" {
+				timed = result.StartedAt > 0 && result.DurationMs >= 0
+			}
 			if result, ok := block.(provider.ToolResultBlock); ok && result.CallID == "question-1" {
 				answered = !result.IsError && len(result.Content) == 1 && result.Content[0].(provider.TextBlock).Text == `{"answers":[["Continue"]]}`
 			}
@@ -218,6 +222,9 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 	}
 	if !answered {
 		t.Fatal("question answers did not persist in the model's transcript")
+	}
+	if !timed {
+		t.Fatal("tool timing did not survive persistence and hydration")
 	}
 	if stored.Usage.OutputTokens != 1000 || stored.Context.UsedTokens != 432500 || stored.Context.WindowTokens != 1024000 {
 		t.Fatalf("wrong persisted usage/context: %+v %+v", stored.Usage, stored.Context)

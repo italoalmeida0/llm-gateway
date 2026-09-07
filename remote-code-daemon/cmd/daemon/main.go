@@ -154,6 +154,7 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
 		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
 		"turn": rec.Turn, "todos": rec.Todos,
+		"workspace":  inspectWorkspace(rec.CWD),
 		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": rec.Messages,
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
 	}
@@ -163,7 +164,8 @@ func projectPayload(p ProjectEntry) map[string]any {
 	return map[string]any{
 		"id": p.ID, "name": p.Name, "path": p.Path,
 		"created_at": p.CreatedAt, "createdAt": p.CreatedAt,
-		"protected": p.Protected,
+		"protected":    p.Protected,
+		"folderStatus": inspectWorkspace(p.Path).Status,
 	}
 }
 
@@ -284,6 +286,7 @@ func isTextMime(mime, name string) bool {
 
 // ActiveSession holds in-memory execution state for a session.
 type ActiveSession struct {
+	toolStarts        map[string]int64
 	question          *pendingQuestion
 	pendingApproval   *toolApproval
 	toolProgress      map[string]string
@@ -775,6 +778,7 @@ func (d *DaemonServer) quiesceSessions() {
 		act.pendingApproval = nil
 		act.question = nil
 		act.toolProgress = nil
+		act.toolStarts = nil
 		act.record.Status = "idle"
 		_ = d.saveSession(act.record)
 		act.mu.Unlock()
@@ -850,6 +854,8 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		d.handleKeepChanges(raw)
 	case "question_response":
 		d.answerQuestions(raw)
+	case "check_workspace":
+		d.checkWorkspace(raw)
 	case "configure_session":
 		d.configureSession(raw)
 	case "browse_folders":
@@ -1163,6 +1169,9 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			return
 		}
 		msg := rec.Messages[req.Index]
+		if msg.Role != provider.RoleUser {
+			return
+		}
 		replaced := false
 		for i, c := range msg.Content {
 			if tb, ok := c.(provider.TextBlock); ok {
@@ -1244,6 +1253,9 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		_ = json.Unmarshal(raw, &req)
 		rec, err := d.loadSession(req.SessionID)
 		if err != nil || req.Index < 0 || req.Index >= len(rec.Messages) {
+			return
+		}
+		if rec.Messages[req.Index].Role != provider.RoleUser {
 			return
 		}
 		if d.sessionRunning(req.SessionID) {
@@ -2200,10 +2212,16 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		return
 	}
 
+	if act.record.CWD != "" && inspectWorkspace(act.record.CWD).Status != "available" {
+		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": sessionPayload(act.record)})
+		act.mu.Unlock()
+		return
+	}
 	act.record.Status = "running"
 	act.question = nil
 	act.record.Turn = &TurnActivity{StartedAt: time.Now().UnixMilli(), Status: "running"}
 	act.toolProgress = map[string]string{}
+	act.toolStarts = map[string]int64{}
 	act.thinkingStartedAt = 0
 	if act.record.Options.Access == "" {
 		act.record.Options.Access = "ask"
@@ -2236,7 +2254,11 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 	act.mu.Unlock()
 
+	var journal *reviewJournal
 	defer func() {
+		if journal != nil {
+			journal.finalize()
+		}
 		act.mu.Lock()
 		defer act.mu.Unlock()
 		if act.gen != myGen {
@@ -2247,6 +2269,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		act.pendingApproval = nil
 		act.question = nil
 		act.toolProgress = nil
+		act.toolStarts = nil
 		act.thinkingStartedAt = 0
 		act.live = nil
 		act.record.UpdatedAt = time.Now().UnixMilli()
@@ -2314,7 +2337,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	)
 
 	restrictModeTools(reg, options.Mode)
-	journal := newReviewJournal(d, act, myGen, sessionCWD, cfg.HostID, sessionID)
+	journal = newReviewJournal(d, act, myGen, sessionCWD, cfg.HostID, sessionID)
 	for _, name := range []string{"write", "edit", "bash"} {
 		if tool, ok := reg[name]; ok {
 			reg[name] = &reviewedTool{Tool: tool, journal: journal}
@@ -2427,8 +2450,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 				}
 			}
 			payload["event"] = map[string]any{
-				"type": "tool_result", "id": e.ID, "content": contentStr.String(), "isError": e.Result.IsError,
+				"type": "tool_result", "id": e.ID, "content": contentStr.String(), "isError": e.Result.IsError, "startedAt": e.Result.StartedAt, "durationMs": e.Result.DurationMs,
 			}
+		case core.EvToolExecutionStart:
+			payload["event"] = map[string]any{"type": "tool_execution_start", "id": e.ID, "startedAt": e.StartedAt}
 		case core.EvUsage:
 			contextUsage := contextFromUsage(e.Usage, modelInfo)
 			act.record.Usage = e.Cumulative

@@ -90,6 +90,14 @@ type EvToolProgress struct {
 	Text string
 }
 
+// Execution starts after approval, independently of streamed call arguments.
+type EvToolExecutionStart struct {
+	ID        string
+	StartedAt int64
+}
+
+func (EvToolExecutionStart) Type() string { return "tool_execution_start" }
+
 func (EvToolProgress) Type() string { return "tool_progress" }
 
 type EvToolResult struct {

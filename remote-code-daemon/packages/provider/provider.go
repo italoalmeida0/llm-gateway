@@ -60,9 +60,11 @@ func (ToolCallBlock) isContent() {}
 // ToolResultBlock is the result of a tool execution, attached to a
 // Message with Role == RoleTool.
 type ToolResultBlock struct {
-	CallID  string    `json:"call_id"`
-	Content []Content `json:"content"`
-	IsError bool      `json:"is_error"`
+	StartedAt  int64     `json:"started_at,omitempty"`
+	DurationMs int64     `json:"duration_ms,omitempty"`
+	CallID     string    `json:"call_id"`
+	Content    []Content `json:"content"`
+	IsError    bool      `json:"is_error"`
 }
 
 func (ToolResultBlock) isContent() {}

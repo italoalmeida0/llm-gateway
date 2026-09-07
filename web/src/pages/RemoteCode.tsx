@@ -13,8 +13,10 @@ import {
 import { Portal } from "solid-js/web";
 import { createStore, reconcile } from "solid-js/store";
 import { FileIcon, RemoteHints } from "../rcPresentation";
-import { displayToolArgs, withoutTodoActivity } from "../rcLive";
-import { absoluteRemotePath, projectForDirectory } from "../rcPaths";
+import { displayToolArgs } from "../rcLive";
+import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../rcPaths";
+import { buildRenderBlocks, terminalPresentation } from "../rcTranscript";
+export { buildRenderBlocks } from "../rcTranscript";
 import { QuestionPanel, type PendingQuestion } from "../rcQuestion";
 import { createTranscriptScroll } from "../rcScroll";
 import { compactTokens, contextDisplay, type GatewayModel, type SessionContext } from "../rcContext";
@@ -88,6 +90,8 @@ export interface ContentBlock {
   toolArgs?: string;
   toolResult?: string;
   toolProgress?: string;
+  toolStartedAt?: number;
+  toolDurationMs?: number;
   isError?: boolean;
   reasoning?: string;
   imageMime?: string;
@@ -375,74 +379,6 @@ export interface RenderBlockSeries extends RenderBlockBase {
 }
 
 export type RenderBlock = RenderBlockSingle | RenderBlockSeries;
-
-/** A rendered assistant message is series-fusible when it shows tools and
- * nothing else of its own (empty loading shells never fuse). */
-function fusableAssistant(m: ChatMessage): boolean {
-  if (m.role === "user" || m.system || msgIsEmpty(m)) return false;
-  if (!msgHasTools(m)) return false;
-  return (m.blocks || []).every(
-    (b) =>
-      b.type === "tool_call" ||
-      b.type === "tool_result" ||
-      (b.type === "text" && !(b.text || "").trim()) ||
-      (b.type === "reasoning" && !(b.reasoning || "").trim()) ||
-      b.type === "image",
-  );
-}
-
-export function collectSeriesUnits(
-  head: ChatMessage,
-  tail: ChatMessage[],
-): { units: ToolUnit[]; consumed: number } {
-  const units: ToolUnit[] = [];
-  const byId = new Map<string, ToolUnit>();
-  const absorb = (m: ChatMessage) => {
-    for (const b of m.blocks || []) {
-      if (b.type === "tool_call") {
-        const u: ToolUnit = { call: b };
-        units.push(u);
-        if (b.toolId) byId.set(b.toolId, u);
-      } else if (b.type === "tool_result") {
-        const u = (b.toolId && byId.get(b.toolId)) || null;
-        if (u && !u.result) u.result = b;
-        else units.push({ result: b });
-      }
-    }
-  };
-  absorb(head);
-  let consumed = 0;
-  for (const m of tail) {
-    if (!fusableAssistant(m)) break;
-    absorb(m);
-    consumed++;
-  }
-  return { units, consumed };
-}
-
-export function buildRenderBlocks(list: ChatMessage[]): RenderBlock[] {
-  list = withoutTodoActivity(list);
-  const out: RenderBlock[] = [];
-  let i = 0;
-  while (i < list.length) {
-    const m = list[i];
-    if (fusableAssistant(m)) {
-      const tail = list.slice(i + 1);
-      const { units, consumed } = collectSeriesUnits(m, tail);
-      out.push({
-        kind: "series",
-        msg: m,
-        extras: tail.slice(0, consumed),
-        units,
-      });
-      i += 1 + consumed;
-      continue;
-    }
-    out.push({ kind: "single", msg: m });
-    i++;
-  }
-  return out;
-}
 
 export interface ToolSummary {
   icon: string;
@@ -876,8 +812,8 @@ export default function RemoteCodePage() {
   let folderRequestId = "";
   let projectCreationId = "";
   const [pendingProjectId, setPendingProjectId] = createSignal("");
-  interface ReviewFile { canUndo?: boolean; truncated?: boolean; path: string; kind: string; diff?: string; binary?: boolean; }
-  interface Review { id: string; files: ReviewFile[]; notice?: string; }
+  interface ReviewFile { state?: "exists" | "deleted" | "unavailable"; canUndo?: boolean; truncated?: boolean; path: string; kind: string; diff?: string; binary?: boolean; }
+  interface Review { checkedAt?:number; id: string; files: ReviewFile[]; notice?: string; }
   const [taskReview, setTaskReview] = createSignal<Review | null>(null);
   const [reviewOpen, setReviewOpen] = createSignal(false);
   const [reviewLoading, setReviewLoading] = createSignal(false);
@@ -979,16 +915,6 @@ export default function RemoteCodePage() {
     const hid = activeHostId();
     return hid ? dataLayer.storeFor(hid) : null;
   });
-  const projects = createMemo<Project[]>(() => {
-    const st = store();
-    if (!st) return [];
-    const hid = activeHostId();
-    return st.projects
-      .find({ hostId: hid })
-      .fetch()
-      .slice()
-      .sort((a, b) => b.createdAt - a.createdAt);
-  });
   const sessions = createMemo<SessionSummary[]>(() => {
     const st = store();
     if (!st) return [];
@@ -998,6 +924,12 @@ export default function RemoteCodePage() {
       .fetch()
       .slice()
       .sort((a, b) => b.updatedAt - a.updatedAt);
+  });
+  const projects = createMemo<Project[]>(() => {
+    const st = store();
+    if (!st) return [];
+    const hid = activeHostId();
+    return projectsByActivity(st.projects.find({ hostId: hid }).fetch(), sessions());
   });
   const configDoc = createMemo(() => {
     const st = store();
@@ -1063,6 +995,7 @@ export default function RemoteCodePage() {
     gatewayModels().find((model) => model.id === activeModel()),
   ));
   // Live tool progress text per tool call id (cleared on result/turn_end).
+  const [toolStarts, setToolStarts] = createSignal<Record<string, number>>({});
   const [toolProgress, setToolProgress] = createSignal<Record<string, string>>({});
   // Expanded tool rows / groups (Antigravity chevrons).
   const [toolOpen, setToolOpen] = createSignal<Record<string, boolean>>({});
@@ -1106,27 +1039,7 @@ export default function RemoteCodePage() {
     return "max-w-3xl";
   });
 
-  // Sidebar display options (Antigravity Display Options menu).
-  const [groupBy, setGroupBy] = createSignal<"project" | "none">(
-    (() => {
-      try {
-        return (localStorage.getItem("llmgw-rc-groupby") as any) || "project";
-      } catch {
-        return "project";
-      }
-    })(),
-  );
-  const [sortBy, setSortBy] = createSignal<"updated" | "added" | "alpha">(
-    (() => {
-      try {
-        return (localStorage.getItem("llmgw-rc-sort") as any) || "updated";
-      } catch {
-        return "updated";
-      }
-    })(),
-  );
   const [historyView, setHistoryView] = createSignal(false);
-  const [displayMenuOpen, setDisplayMenuOpen] = createSignal(false);
   const [newProjectMenuOpen, setNewProjectMenuOpen] = createSignal(false);
   const [addContextOpen, setAddContextOpen] = createSignal(false);
   const [filesMenuOpen, setFilesMenuOpen] = createSignal(false);
@@ -1334,7 +1247,6 @@ export default function RemoteCodePage() {
     confirmState()?.resolve(false);
   });
   // Anchor refs for floating menus (floating-ui positions them in a Portal).
-  let displayBtn: HTMLButtonElement | undefined;
   let newProjBtn: HTMLButtonElement | undefined;
   let modelBtn: HTMLButtonElement | undefined;
   let projBtn: HTMLButtonElement | undefined;
@@ -1358,12 +1270,34 @@ export default function RemoteCodePage() {
     return list.find((p) => p.id === activeProjectId()) ?? list[0] ?? null;
   });
 
+  const currentProject = createMemo(() => activeSessionId() ? projectForDirectory(activeSession()?.cwd || "", projects()) : activeProject());
+  interface WorkspaceStatus { path:string; status:"available" | "missing" | "unavailable"; }
+  const [workspace, setWorkspace] = createSignal<WorkspaceStatus | null>(null);
+  const workspacePath = createMemo(() => activeSessionId() ? activeSession()?.cwd || "" : currentProject()?.path || "");
+  const workspaceState = () => workspace()?.path === workspacePath() ? workspace()?.status : currentProject()?.folderStatus;
+  const workspaceBlocked = () => workspaceState() === "missing" || workspaceState() === "unavailable";
+  let workspaceRequest = "";
+  function checkWorkspace() {
+    if (!wsOpen() || !workspacePath()) return;
+    workspaceRequest = crypto.randomUUID();
+    sendWS({type:"check_workspace", requestId:workspaceRequest, sessionId:activeSessionId(), projectId:currentProject()?.id});
+  }
+  createEffect(() => {
+    workspacePath(); activeHostId(); connectionState();
+    setWorkspace(null);
+    untrack(checkWorkspace);
+    const timer = setInterval(checkWorkspace, 15000);
+    const focus = () => checkWorkspace();
+    window.addEventListener("focus", focus);
+    onCleanup(() => { clearInterval(timer); window.removeEventListener("focus", focus); });
+  });
+
   function visibleSessions(key: string, list: SessionSummary[]) {
-    if (expandedSessionLists()[key] || sessionFilter().trim()) return list;
+    if (expandedSessionLists()[key]) return list;
     return sortedSessions([...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 10));
   }
   function sessionListToggle(key: string, count: number) {
-    return <Show when={count > 10 && !sessionFilter().trim()}><button class="px-3 py-2 text-xs text-ink-500 hover:text-ink-200 cursor-pointer" aria-expanded={!!expandedSessionLists()[key]}
+    return <Show when={count > 10}><button class="px-3 py-2 text-xs text-ink-500 hover:text-ink-200 cursor-pointer" aria-expanded={!!expandedSessionLists()[key]}
       onClick={() => setExpandedSessionLists((prev) => ({ ...prev, [key]: !prev[key] }))}>{expandedSessionLists()[key] ? "Show less" : `See all (${count})`}</button></Show>;
   }
   function sessionsOfProject(projectId: string) {
@@ -1600,6 +1534,7 @@ export default function RemoteCodePage() {
           type: "tool_result",
           toolId: c.tool_use_id || c.call_id || c.id,
           toolResult: toolResultText(c),
+          toolStartedAt:c.started_at, toolDurationMs:c.started_at ? (c.duration_ms || 0) : undefined,
           isError: !!(c.is_error ?? c.isError ?? c.is_error === true),
         });
         return;
@@ -1881,12 +1816,14 @@ export default function RemoteCodePage() {
           }
         }
         if (sid && sid === activeSessionId()) {
+          if (r.workspace) setWorkspace(r.workspace);
           setSessionStatus(r.status === "running" ? "running" : "idle");
           setTurnActivity(r.turn || null);
           setTurnClock(Date.now());
           setTodos(r.todos || []);
           showQuestion(r.question || null);
           setToolProgress(r.toolProgress || {});
+          setToolStarts(r.toolStarts || {});
           setPendingApproval(r.pendingApproval ? {...r.pendingApproval, args:prettyArgs(r.pendingApproval.args)} : null);
           if (r.thinkingStartedAt && r.status === "running") startThinkingTimer(r.thinkingStartedAt);
           else stopThinkingTimer();
@@ -1916,7 +1853,7 @@ export default function RemoteCodePage() {
             setTurnActivity((turn) => turn && !turn.endedAt ? {...turn, endedAt:Date.now(), status:turn.status === "cancelling" ? "cancelled" : turn.status === "running" ? "completed" : turn.status} : turn);
             requestReview(reviewOpen());
             setPendingApproval(null);
-            setToolProgress({});
+            setToolProgress({}); setToolStarts({});
             if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
           }
         }
@@ -1945,6 +1882,10 @@ export default function RemoteCodePage() {
         break;
       }
 
+      case "workspace_status": {
+        if (msg.requestId === workspaceRequest && msg.workspace?.path === workspacePath()) setWorkspace(msg.workspace);
+        break;
+      }
       case "question_request": {
         if (msg.sessionId === activeSessionId()) showQuestion(msg.question);
         break;
@@ -2018,6 +1959,8 @@ export default function RemoteCodePage() {
           appendToolArgsDelta(ev.id, ev.delta);
         } else if (ev.type === "tool_use_end") {
           // No-op: the final tool_call event carries the full block.
+        } else if (ev.type === "tool_execution_start") {
+          setToolStarts((prev) => ({...prev, [ev.id]:ev.startedAt}));
         } else if (ev.type === "tool_progress") {
           setToolProgress((prev) => ({ ...prev, [ev.id]: ((prev[ev.id] || "") + (ev.text || "")).slice(-65536) }));
         } else if (ev.type === "tool_call") {
@@ -2029,7 +1972,8 @@ export default function RemoteCodePage() {
             delete next[ev.id];
             return next;
           });
-          appendToolResult(ev.id, ev.result ?? ev.content, ev.isError);
+          appendToolResult(ev.id, ev.result ?? ev.content, ev.isError, ev.startedAt, ev.durationMs);
+          setToolStarts((prev) => { const next = {...prev}; delete next[ev.id]; return next; });
         } else if (ev.type === "usage") {
           applyUsage(msg.sessionId, ev.usage, ev.cumulative);
           if (ev.context) {
@@ -2335,13 +2279,14 @@ export default function RemoteCodePage() {
     });
   }
 
-  function appendToolResult(callId: string, result: string, isError?: boolean) {
+  function appendToolResult(callId: string, result: string, isError?: boolean, startedAt?:number, durationMs?:number) {
     setMessages((prev) => {
       const last = prev[prev.length - 1];
       const resBlock: ContentBlock = {
         type: "tool_result",
         toolId: callId,
         toolResult: result,
+        toolStartedAt:startedAt, toolDurationMs:startedAt ? durationMs || 0 : undefined,
         isError: !!isError,
       };
 
@@ -2371,7 +2316,7 @@ export default function RemoteCodePage() {
     if (creatingSession()) return;
     showQuestion(null);
     setDraftMode(false);
-    setTurnActivity(null); setTodos([]); setToolProgress({});
+    setTurnActivity(null); setTodos([]); setToolProgress({}); setToolStarts({});
     setTaskReview(null);
     setReviewOpen(false);
     setAppNotice(null);
@@ -2406,7 +2351,7 @@ export default function RemoteCodePage() {
     if (creatingSession()) return;
     showQuestion(null);
     setDraftMode(true);
-    setTurnActivity(null); setTodos([]); setToolProgress({});
+    setTurnActivity(null); setTodos([]); setToolProgress({}); setToolStarts({});
     setHistoryView(false);
     setActiveSessionId("");
     setMessages([]);
@@ -2884,15 +2829,16 @@ export default function RemoteCodePage() {
   function renderAssistantSpecial(
     msgId: string,
     units: ToolUnit[],
-    isLast: boolean,
+    _isLast: boolean,
     extraSrcIds: number[] = [],
   ) {
-    const running = createMemo(() => isLast && sessionStatus() === "running");
+    const running = createMemo(() => renderBlocks().at(-1)?.msg.id === msgId && sessionStatus() === "running");
     const summary = createMemo(() => specialTitle(units));
-    const key = `${msgId}:special:${extraSrcIds.join(",")}`;
+    const key = `${msgId}:special`;
     const open = () => toolGroupOpen()[key] ?? true;
     return (
       <Show when={verboseChat()}>
+        <Show when={units.every((u) => u.call?.toolName === "question")} fallback={
         <div class="w-full rounded-xl border border-line/60 bg-ink-900/40 overflow-hidden">
           <button
             onClick={() => toggleToolGroup(key)}
@@ -2928,6 +2874,7 @@ export default function RemoteCodePage() {
             </div>
           </Show>
         </div>
+        }><For each={units}>{(unit, index) => renderToolUnit(msgId, unit, index(), running())}</For></Show>
       </Show>
     );
   }
@@ -2942,10 +2889,10 @@ export default function RemoteCodePage() {
     );
   }
   function projectSessions(projectId: string) {
-    return sortedSessions(sessionsOfProject(projectId).filter(matchQuery));
+    return sortedSessions(sessionsOfProject(projectId));
   }
   function looseSessions() {
-    return sortedSessions(sessions().filter((s) => matchQuery(s) && !projectForDirectory(s.cwd, projects())));
+    return sortedSessions(sessions().filter((s) => !projectForDirectory(s.cwd, projects())));
   }
 
   function closeSidebarOnMobile() {
@@ -2998,13 +2945,7 @@ export default function RemoteCodePage() {
 
   function sortedSessions(list: SessionSummary[]) {
     const arr = [...list];
-    // Pinned first (chatbot sortedThreads), then the chosen order.
-    arr.sort((a, b) => {
-      if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
-      if (sortBy() === "alpha") return a.title.localeCompare(b.title);
-      if (sortBy() === "added") return a.createdAt - b.createdAt;
-      return b.updatedAt - a.updatedAt;
-    });
+    arr.sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
     return arr;
   }
 
@@ -3040,6 +2981,7 @@ export default function RemoteCodePage() {
   }
 
   async function sendPrompt() {
+    if (workspaceBlocked()) { checkWorkspace(); return; }
     if (!wsOpen() || activeHost()?.status !== "online") {
       toast("Reconnect the host before sending a message", "err");
       return;
@@ -3462,7 +3404,7 @@ export default function RemoteCodePage() {
         setPendingApproval(null);
         setSessionUsage({});
         setSessionContexts({});
-        setToolProgress({});
+        setToolProgress({}); setToolStarts({});
         for (const attachment of pendingAttachments()) {
           if (attachment.objectUrl) URL.revokeObjectURL(attachment.objectUrl);
         }
@@ -3611,7 +3553,6 @@ export default function RemoteCodePage() {
     setModeMenuOpen(false);
     setAccessMenuOpen(false);
     setHostMenuOpen(false);
-    setDisplayMenuOpen(false);
     setNewProjectMenuOpen(false);
     setAddContextOpen(false);
     setFilesMenuOpen(false);
@@ -3637,6 +3578,15 @@ export default function RemoteCodePage() {
     const prog = () => (u.call?.toolId ? toolProgress()[u.call.toolId] : undefined);
     const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
     const name = () => u.call?.toolName || "tool";
+    const terminal = createMemo(() => terminalPresentation(u.result?.toolResult || ""));
+    const elapsed = () => {
+      if (name() !== "bash") return "";
+      const duration = u.result?.toolDurationMs ?? terminal().durationMs;
+      if (duration !== undefined) return elapsedLabel(duration);
+      const start = toolStarts()[u.call?.toolId || ""];
+      return start ? elapsedLabel(turnClock() - start) : "";
+    };
+    if (name() === "question") return <div class="flex items-center gap-2 pl-1 py-1 text-[13px]" data-question-summary><Iconify icon="lucide:message-circle" size={14} class="text-ink-500 shrink-0" /><span class="text-ink-500">{sum().verb}</span><span class="text-ink-200 truncate">{sum().target}</span></div>;
     return (
       <div class="w-full">
         <div
@@ -3678,6 +3628,7 @@ export default function RemoteCodePage() {
           <Show when={sum().stat && sum().statAdd == null}>
             <span class="text-[11px] text-ink-600 shrink-0">{sum().stat}</span>
           </Show>
+          <Show when={elapsed()}><span data-tool-duration class="text-[11px] text-ink-500 tabular-nums shrink-0">{elapsed()}</span></Show>
           <Iconify
             icon="lucide:chevron-down"
             size={12}
@@ -3729,7 +3680,7 @@ export default function RemoteCodePage() {
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{name() === "question" ? "Waiting for your answers…" : pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
               >
                 <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
-                  {u.result?.toolResult || prog() || ""}
+                  {name() === "bash" && u.result ? terminal().output || "No output" : u.result?.toolResult || prog() || ""}
                 </pre>
               </Show>
             </Show>
@@ -3864,43 +3815,30 @@ export default function RemoteCodePage() {
    * message with the legacy per-bubble chrome (edit/copy/regenerate/delete
    * on its own rendered position).
    */
-  function renderSeriesLead(lead: ChatMessage) {
-    let thinkNth = 0;
-    return (
-      <div class="w-full space-y-2.5">
-        <For each={splitToolRuns(lead.blocks)}>
-          {(part) => {
-            if (part.kind === "tools") return null;
-            if (part.kind === "thinking") {
-              return (
-                <Show when={verboseChat()}>
-                  <div class="w-full space-y-2">
-                    <For each={part.blocks}>
-                      {(block) => renderThinkingBlock(lead, block, thinkNth++)}
-                    </For>
-                  </div>
-                </Show>
-              );
-            }
-            return (
-              <For each={part.blocks}>
-                {(block) => {
-                  if (block.type === "text" && block.text) {
-                    return (
-                      <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
-                        <Streamdown>{block.text}</Streamdown>
-                      </div>
-                    );
-                  }
-                  if (block.type === "image") return renderImageBlock(block);
-                  return null;
-                }}
-              </For>
-            );
-          }}
-        </For>
-      </div>
-    );
+  function renderSeriesLead(series: RenderBlockSeries) {
+    const all = () => [series.msg, ...series.extras];
+    const thoughts = createMemo(() => all().flatMap((msg) => msg.blocks.filter((b) => b.type === "reasoning" && !!b.reasoning?.trim()).map((block, nth) => ({msg, block, nth}))));
+    const live = () => thoughts().some((entry) => entry.msg.id === messages().at(-1)?.id && thinkingStart() !== null && sessionStatus() === "running");
+    const key = `${series.msg.id}:group-thinking`;
+    const open = () => expandedThinking()[key] ?? live();
+    return <div class="w-full space-y-2.5">
+      <Show when={verboseChat() && thoughts().length}>
+        <Show when={thoughts().length > 1} fallback={<For each={thoughts()}>{(entry) => renderThinkingBlock(entry.msg, entry.block, entry.nth)}</For>}>
+          <div class="w-full" data-grouped-thinking>
+            <button aria-expanded={open()} onClick={() => setExpandedThinking((prev) => ({...prev, [key]:!open()}))} class="flex items-center gap-1.5 text-xs text-ink-500 hover:text-ink-300 cursor-pointer">
+              <Iconify icon="lucide:bot" size={14} /><span>Thinking</span><Iconify icon="lucide:chevron-down" size={12} class={open() ? "rotate-180" : ""} />
+            </button>
+            <Show when={open()}><ol class="mt-2 max-h-64 overflow-y-auto space-y-3 text-xs text-ink-400 leading-relaxed">
+              <For each={thoughts()}>{(entry) => <li class="flex gap-3 items-start">
+                <span class="shrink-0 tabular-nums text-ink-500">{entry.msg.id === messages().at(-1)?.id && thinkingStart() !== null ? `${thinkingElapsed()}s` : entry.msg.thinkingDuration !== undefined ? `${entry.msg.thinkingDuration}s` : "—"}</span>
+                <span class="pl-3 border-l border-line whitespace-pre-wrap break-words min-w-0">{entry.block.reasoning}</span>
+              </li>}</For>
+            </ol></Show>
+          </div>
+        </Show>
+      </Show>
+      <For each={all()}>{(message) => <For each={message.blocks.filter((b) => b.type === "image" || b.type === "text" && !!b.text?.trim())}>{(block) => block.type === "image" ? renderImageBlock(block) : <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto"><Streamdown>{block.text}</Streamdown></div>}</For>}</For>
+    </div>;
   }
   /**
    * Per-series collapsible sub-groups (explore/command runs) inside the
@@ -4298,62 +4236,6 @@ export default function RemoteCodePage() {
                   >
                     <Iconify icon={selectionMode() ? "lucide:x" : "lucide:list-todo"} size={13} />
                   </button>
-                  {/* Display Options */}
-            <div class="shrink-0">
-              <button
-                ref={displayBtn}
-                data-menubtn
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setDisplayMenuOpen(!displayMenuOpen());
-                  setNewProjectMenuOpen(false);
-                }}
-                class="p-1.5 rounded-lg text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
-                data-rc-tip="Display options" aria-label="Display options"
-              >
-                <Iconify icon="lucide:list-filter" size={14} />
-              </button>
-              <FloatMenu anchor={() => displayBtn} open={displayMenuOpen()} placement="bottom-start" width="13rem">
-                  <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-                    Group by
-                  </div>
-                  <For each={[["project", "Project"], ["none", "None"]] as const}>
-                    {([v, label]) => (
-                      <button
-                        onClick={() => {
-                          setGroupBy(v);
-                          try { localStorage.setItem("llmgw-rc-groupby", v); } catch {}
-                        }}
-                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-ink-300 hover:bg-ink-800/60 flex items-center justify-between cursor-pointer"
-                      >
-                        <span>{label}</span>
-                        <Show when={groupBy() === v}>
-                          <Iconify icon="lucide:check" size={13} />
-                        </Show>
-                      </button>
-                    )}
-                  </For>
-                  <div class="mt-1 pt-1 border-t border-line/60 px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-                    Sort conversations
-                  </div>
-                  <For each={[["updated", "Last updated"], ["added", "Date added"], ["alpha", "Alphabetical (A-Z)"]] as const}>
-                    {([v, label]) => (
-                      <button
-                        onClick={() => {
-                          setSortBy(v);
-                          try { localStorage.setItem("llmgw-rc-sort", v); } catch {}
-                        }}
-                        class="w-full text-left px-2.5 py-1.5 rounded-lg text-ink-300 hover:bg-ink-800/60 flex items-center justify-between cursor-pointer"
-                      >
-                        <span>{label}</span>
-                        <Show when={sortBy() === v}>
-                          <Iconify icon="lucide:check" size={13} />
-                        </Show>
-                      </button>
-                    )}
-                  </For>
-              </FloatMenu>
-            </div>
                   {/* New Project split button (Antigravity: New Project / Quick Start) */}
                 <div>
                   <button
@@ -4362,7 +4244,6 @@ export default function RemoteCodePage() {
                     onClick={(e) => {
                       e.stopPropagation();
                       setNewProjectMenuOpen(!newProjectMenuOpen());
-                      setDisplayMenuOpen(false);
                     }}
                     class="p-1 rounded text-ink-500 hover:text-ink-200 hover:bg-ink-900 cursor-pointer"
                     data-rc-tip="Create new project" aria-label="Create new project"
@@ -4406,24 +4287,6 @@ export default function RemoteCodePage() {
                 }
               >
                 {/* Nested view (Antigravity): sessions live under their project */}
-                <Show
-                  when={groupBy() === "project"}
-                  fallback={
-                    <div class="space-y-0.5">
-                      <For
-                        each={visibleSessions("all", sortedSessions(sessions().filter(matchQuery)))}
-                        fallback={
-                          <div class="px-2.5 py-3 text-xs text-ink-600">
-                            No conversations yet. Start one above.
-                          </div>
-                        }
-                      >
-                        {(s) => sessionRow(s)}
-                      </For>
-                      {sessionListToggle("all", sessions().filter(matchQuery).length)}
-                    </div>
-                  }
-                >
                   <div class="space-y-2">
                     <For each={projects()}>
                       {(p) => {
@@ -4487,7 +4350,6 @@ export default function RemoteCodePage() {
                       </div>
                     </Show>
                   </div>
-                </Show>
               </Show>
             </div>
           {/* Batch bar (chatbot selection mode) */}
@@ -4896,49 +4758,10 @@ export default function RemoteCodePage() {
                           </div>
                         </Show>
 
-                        {/* Inline edit mode for assistant text (chatbot) */}
-                        <Show
-                          when={isEditing()}
-                          fallback={
-                            block.kind === "series" ? (
-                              <>
-                                {renderSeriesLead(msg)}
-                                {renderAssistantSpecial(
-                                  msg.id,
-                                  block.units,
-                                  isLast(),
-                                  block.extras.map((e) => e.srcIdx ?? 0),
-                                )}
-                              </>
-                            ) : (
-                              renderMessageContent(msg, isLast())
-                            )
-                          }
-                        >
-                          <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60">
-                            <textarea
-                              value={editingMsgText()}
-                              onInput={(e) => setEditingMsgText(e.currentTarget.value)}
-                              class="w-full bg-transparent text-ink-200 text-sm outline-none resize-none"
-                              rows={8}
-                              ref={(el) => setTimeout(() => el?.focus(), 40)}
-                            />
-                            <div class="flex justify-end gap-2 mt-2">
-                              <button
-                                onClick={cancelEditMsg}
-                                class="text-xs text-ink-400 hover:text-ink-100 px-2 py-1 cursor-pointer"
-                              >
-                                Cancel
-                              </button>
-                              <button
-                                onClick={() => saveEditMsg(rawIdx(), msg)}
-                                class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-accent-400 font-medium cursor-pointer"
-                              >
-                                Save
-                              </button>
-                            </div>
-                          </div>
-                        </Show>
+                        {block.kind === "series" ? <>
+                          {renderSeriesLead(block)}
+                          <Show when={block.units.length}>{renderAssistantSpecial(msg.id, block.units, isLast(), block.extras.map((e) => e.srcIdx ?? 0))}</Show>
+                        </> : renderMessageContent(msg, isLast())}
 
                         {/* Hover actions (chatbot-style) */}
                         <Show when={(sessionStatus() !== "running" || !isLast()) && !isEditing()}>
@@ -4956,20 +4779,6 @@ export default function RemoteCodePage() {
                               data-rc-tip="Regenerate response" aria-label="Regenerate response"
                             >
                               <Iconify icon="lucide:rotate-cw" size={14} />
-                            </button>
-                            <button
-                              onClick={() => startEditMsg(rawIdx(), msg)}
-                              class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              data-rc-tip="Edit response" aria-label="Edit response"
-                            >
-                              <Iconify icon="lucide:pencil" size={14} />
-                            </button>
-                            <button
-                              onClick={() => deleteMsg(rawIdx())}
-                              class="p-1.5 rounded-md text-ink-500 hover:text-rose-400 hover:bg-ink-900 transition-colors cursor-pointer"
-                              data-rc-tip="Delete" aria-label="Delete"
-                            >
-                              <Iconify icon="lucide:trash-2" size={14} />
                             </button>
                           </div>
                         </Show>
@@ -5291,6 +5100,14 @@ export default function RemoteCodePage() {
                 </div>
               </Show>
               {/* Floating menus use the shared portal layer above the composer. */}
+              <Show when={!workspaceBlocked()} fallback={
+                <div role="status" class="rounded-2xl border border-line bg-elev px-4 py-4 text-sm text-ink-300" data-workspace-unavailable>
+                  <div class="flex items-center gap-2 font-medium text-ink-100"><Iconify icon="lucide:folder-x" size={17} />{workspaceState() === "missing" ? "The project folder was deleted" : "The project folder is unavailable"}</div>
+                  <p class="mt-2 text-xs text-ink-500">{workspaceState() === "missing" ? "Recreate this folder on the host to continue this conversation." : "Restore access to this folder on the host to continue."}</p>
+                  <p class="mt-2 font-mono text-xs break-all">{workspacePath()}</p>
+                  <div class="mt-3 flex gap-3"><button onClick={checkWorkspace} class="text-xs text-ink-200 hover:underline cursor-pointer">Check again</button><Show when={sessionStatus() === "running"}><button onClick={cancelCurrentTurn} class="text-xs text-ink-200 hover:underline cursor-pointer">Stop turn</button></Show></div>
+                </div>
+              }>
               <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors relative">
                 {/* Attachment chips (chatbot-style) */}
                 <Show when={pendingAttachments().length > 0}>
@@ -5591,52 +5408,9 @@ export default function RemoteCodePage() {
                     <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="32rem">
                       <div>{modelPickerBody()}</div>
                     </FloatMenu>
-                    <FloatMenu anchor={() => contextBtn} open={usageOpen()} placement="top-start" width="19rem">
-                      <div class="p-1.5 text-xs">
-                        <div class="font-semibold text-ink-200 mb-3">Conversation context</div>
-                        <div class="text-lg font-medium text-ink-100 tabular-nums">{activeContext().label}</div>
-                        <p class="text-[11px] text-ink-500 mt-1 leading-relaxed">
-                          {activeContext().window > 0 ? `${compactTokens(activeContext().window)} tokens configured in the gateway.` : "Context limit not configured in the gateway."}
-                          {" "}Measured from the latest model request and its response.
-                        </p>
-                        <Show when={activeContext().percent !== null}>
-                          <div class="h-1.5 rounded-full bg-elev overflow-hidden mt-3" role="progressbar" aria-label="Context used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, activeContext().percent ?? 0)}>
-                            <div class="h-full rounded-full bg-accent-500" style={{ width: `${Math.min(100, activeContext().percent ?? 0)}%` }} />
-                          </div>
-                        </Show>
-                        <div class="font-semibold text-ink-200 mb-2 mt-4 pt-3 border-t border-line">Session usage</div>
-                        <Show
-                          when={activeUsage()}
-                          fallback={
-                            <p class="text-ink-500 text-[11px]">
-                              No usage reported yet. Run the agent to see input / cache / output tokens here.
-                            </p>
-                          }
-                        >
-                          {(u) => (
-                            <div class="space-y-1.5 font-mono text-[11px]">
-                              <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}</span></div>
-                              <div class="flex justify-between"><span class="text-ink-500">Cache</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
-                              <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}</span></div>
-                              <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}</span></div>
-                              <Show when={u().costUsd > 0}>
-                                <div class="flex justify-between pt-1 border-t border-line/60"><span class="text-ink-500">Cost</span><span class="text-ink-200">${u().costUsd.toFixed(4)}</span></div>
-                              </Show>
-                            </div>
-                          )}
-                        </Show>
-                      </div>
-                    </FloatMenu>
+
                   </div>
-                  <Show when={activeSessionId()}>
-                  <Tooltip content="Conversation context and session usage">
-                    <button ref={contextBtn} data-menubtn aria-label={`Conversation context: ${activeContext().label}`} aria-expanded={usageOpen()}
-                      onClick={() => { const next = !usageOpen(); closeMenus(); setUsageOpen(next); }}
-                      class="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] tabular-nums text-ink-400 hover:bg-elev hover:text-ink-200 cursor-pointer">
-                      <Iconify icon="lucide:chart-pie" size={12} /><span>{activeContext().label}</span>
-                    </button>
-                  </Tooltip>
-                  </Show>
+
                 </div>
 
                 <div class="flex shrink-0 items-center gap-2">
@@ -5695,6 +5469,55 @@ export default function RemoteCodePage() {
                 }}
                />
             </div>
+              </Show>
+              <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-ink-500" data-composer-footer>
+                <span class="flex items-center gap-1.5 min-w-0" data-rc-tip={currentProject()?.path}><Iconify icon="lucide:folder" size={13} /><span class="truncate">{currentProject()?.name || baseNameOf(activeSession()?.cwd) || "Project"}</span></span>
+                  <Show when={activeSessionId()}>
+                    <FloatMenu anchor={() => contextBtn} open={usageOpen()} placement="top-end" width="19rem">
+                      <div class="p-1.5 text-xs">
+                        <div class="font-semibold text-ink-200 mb-3">Conversation context</div>
+                        <div class="text-lg font-medium text-ink-100 tabular-nums">{activeContext().label}</div>
+                        <p class="text-[11px] text-ink-500 mt-1 leading-relaxed">
+                          {activeContext().window > 0 ? `${compactTokens(activeContext().window)} tokens configured in the gateway.` : "Context limit not configured in the gateway."}
+                          {" "}Measured from the latest model request and its response.
+                        </p>
+                        <Show when={activeContext().percent !== null}>
+                          <div class="h-1.5 rounded-full bg-elev overflow-hidden mt-3" role="progressbar" aria-label="Context used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, activeContext().percent ?? 0)}>
+                            <div class="h-full rounded-full bg-accent-500" style={{ width: `${Math.min(100, activeContext().percent ?? 0)}%` }} />
+                          </div>
+                        </Show>
+                        <div class="font-semibold text-ink-200 mb-2 mt-4 pt-3 border-t border-line">Session usage</div>
+                        <Show
+                          when={activeUsage()}
+                          fallback={
+                            <p class="text-ink-500 text-[11px]">
+                              No usage reported yet. Run the agent to see input / cache / output tokens here.
+                            </p>
+                          }
+                        >
+                          {(u) => (
+                            <div class="space-y-1.5 font-mono text-[11px]">
+                              <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}</span></div>
+                              <div class="flex justify-between"><span class="text-ink-500">Cache</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
+                              <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}</span></div>
+                              <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}</span></div>
+                              <Show when={u().costUsd > 0}>
+                                <div class="flex justify-between pt-1 border-t border-line/60"><span class="text-ink-500">Cost</span><span class="text-ink-200">${u().costUsd.toFixed(4)}</span></div>
+                              </Show>
+                            </div>
+                          )}
+                        </Show>
+                      </div>
+                    </FloatMenu>
+                  <Tooltip content="Conversation context and session usage">
+                    <button ref={contextBtn} data-menubtn aria-label={`Conversation context: ${activeContext().label}`} aria-expanded={usageOpen()}
+                      onClick={() => { const next = !usageOpen(); closeMenus(); setUsageOpen(next); }}
+                      class="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] tabular-nums text-ink-400 hover:bg-elev hover:text-ink-200 cursor-pointer">
+                      <Iconify icon="lucide:chart-pie" size={12} /><span>{activeContext().label}</span>
+                    </button>
+                  </Tooltip>
+                  </Show>
+              </div>
             </div>
           </div>
           </Show>
@@ -5722,15 +5545,16 @@ export default function RemoteCodePage() {
       <Modal open={reviewOpen()} onClose={() => setReviewOpen(false)} title="Review changes" description="Pending changes accumulate across turns. Keep accepts them; Undo restores the captured originals while preserving later manual edits." width="max-w-5xl" fullOnMobile
         footer={<><Btn variant="ghost" onClick={() => setReviewOpen(false)}>Close</Btn><Btn variant="ghost" disabled={sessionStatus() === "running" || reviewLoading() || !taskReview()?.files.length || !wsOpen()} onClick={() => undoChanges()}>Undo all changes</Btn><Btn disabled={sessionStatus() === "running" || reviewLoading() || !taskReview()?.files.length || !wsOpen()} onClick={keepChanges}>Keep changes</Btn></>}>
         <Show when={sessionStatus() === "running"}><p class="mb-3 text-xs text-ink-500">Live preview · updates as tools finish. Keep and Undo are available when the turn stops.</p></Show>
+        <Show when={taskReview()?.checkedAt && sessionStatus() !== "running"}><p class="mb-3 text-xs text-ink-500">Files checked after the turn. Their current state is shown below.</p></Show>
         <Show when={reviewError()}><div role="alert" class="mb-3 rounded-lg border border-brand-500/30 bg-brand-500/5 p-3 text-sm text-ink-200">{reviewError()}</div></Show>
         <Show when={taskReview()?.notice}><p class="mb-3 text-xs text-ink-500">{taskReview()?.notice}</p></Show>
         <Show when={!reviewLoading()} fallback={<p class="p-4 text-sm text-ink-500">Loading changes…</p>}>
           <For each={taskReview()?.files || []} fallback={<p class="p-4 text-sm text-ink-500">No pending changes.</p>}>{(file) =>
             <details open class="mb-3 rounded-xl border border-line overflow-hidden">
-              <summary class="flex items-center gap-2 px-4 py-3 bg-elev/50 text-xs text-ink-200 cursor-pointer"><FileIcon path={file.path} /><span class="flex-1 min-w-0 break-all font-mono">{file.path}</span><span class="text-ink-500 capitalize">{file.kind}</span></summary>
+              <summary class="flex flex-wrap items-center gap-2 px-4 py-3 bg-elev/50 text-xs text-ink-200 cursor-pointer"><FileIcon path={file.path} /><span class="flex-1 min-w-0 break-all font-mono">{file.path}</span><span class="text-ink-500 capitalize">{file.kind}</span><Show when={file.state}><span class="rounded-md border border-line px-2 py-0.5 text-ink-400">{file.state === "exists" ? "On disk" : file.state === "deleted" ? "No longer on disk" : "Could not verify"}</span></Show></summary>
               <Show when={file.truncated}><p class="px-3 py-2 text-xs text-ink-500">Preview truncated. Undo uses the complete backup.</p></Show>
               <Show when={!file.binary} fallback={<p class="p-4 text-xs text-ink-500">Binary file changed.</p>}>
-                <DiffView text={file.diff || "No text changes (file metadata changed)."} name={file.path} max={160} />
+                <Show when={file.diff} fallback={<p class="p-4 text-xs text-ink-500">{file.kind === "created then deleted" ? "This file was created and removed. Nothing remains on disk." : file.kind === "restored to original" ? "This file is back to its original contents." : "No text changes (file metadata changed)."}</p>}><DiffView text={file.diff!} name={file.path} max={160} /></Show>
               </Show>
               <div class="flex justify-end border-t border-line px-3 py-2"><button disabled={file.canUndo === false || sessionStatus() === "running" || reviewLoading() || !wsOpen()} onClick={() => undoChanges(file.path)} class="text-xs text-ink-400 hover:text-ink-100 disabled:opacity-40 cursor-pointer">Undo file</button></div>
             </details>

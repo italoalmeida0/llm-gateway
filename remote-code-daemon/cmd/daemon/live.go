@@ -31,6 +31,11 @@ func trackLiveEvent(act *ActiveSession, event core.AgentEvent) {
 		return
 	}
 	switch e := event.(type) {
+	case core.EvToolExecutionStart:
+		if act.toolStarts == nil {
+			act.toolStarts = map[string]int64{}
+		}
+		act.toolStarts[e.ID] = e.StartedAt
 	case core.EvReasoningDelta:
 		if act.thinkingStartedAt == 0 {
 			act.thinkingStartedAt = time.Now().UnixMilli()
@@ -48,6 +53,7 @@ func trackLiveEvent(act *ActiveSession, event core.AgentEvent) {
 		act.toolProgress[e.ID] = text
 	case core.EvToolResult:
 		delete(act.toolProgress, e.ID)
+		delete(act.toolStarts, e.ID)
 	}
 	if act.live == nil {
 		return
@@ -90,6 +96,11 @@ func liveSessionPayload(act *ActiveSession) map[string]any {
 	payload := sessionPayload(act.record)
 	payload["pendingApproval"] = act.pendingApproval
 	payload["question"] = act.question
+	starts := map[string]int64{}
+	for id, startedAt := range act.toolStarts {
+		starts[id] = startedAt
+	}
+	payload["toolStarts"] = starts
 	progress := map[string]string{}
 	for id, text := range act.toolProgress {
 		progress[id] = text

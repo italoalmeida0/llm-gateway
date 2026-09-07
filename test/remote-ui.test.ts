@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { compactTokens, contextDisplay } from "../web/src/rcContext";
 import { createTranscriptScroll } from "../web/src/rcScroll";
 import { displayToolArgs, withoutTodoActivity } from "../web/src/rcLive";
-import { absoluteRemotePath, projectForDirectory } from "../web/src/rcPaths";
+import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/rcPaths";
+import { buildRenderBlocks, terminalPresentation } from "../web/src/rcTranscript";
 import type { ChatMessage } from "../web/src/pages/RemoteCode";
 import { fileIcon } from "../web/src/rcFiles";
 
@@ -38,6 +39,33 @@ test("nested projects own their sessions exclusively, with path boundaries", () 
   expect(projectForDirectory("/tmp/work", projects)).toBeUndefined();
   expect(projectForDirectory("/tmp", [{id:"root",path:"/"}])?.id).toBe("root");
   expect(projectForDirectory("C:\\work\\TAP\\src", [{id:"windows",path:"c:/work/tap/"}])?.id).toBe("windows");
+});
+
+test("orders projects by their own conversations' most recent activity", () => {
+  const projects = [{id:"home",path:"/home",createdAt:1},{id:"first",path:"/home/first",createdAt:10},{id:"second",path:"/home/second",createdAt:20}];
+  const ordered = projectsByActivity(projects,[{cwd:"/home/first",updatedAt:300},{cwd:"/home/second",updatedAt:100}]);
+  expect(ordered.map((p) => p.id)).toEqual(["first","second","home"]);
+});
+
+test("groups tools and thinking until non-whitespace assistant text intervenes", () => {
+  const list:ChatMessage[] = [
+    {id:"one",role:"assistant",srcIdx:1,thinkingDuration:3,blocks:[{type:"reasoning",reasoning:"Inspect"},{type:"tool_call",toolId:"a",toolName:"read"}]},
+    {id:"two",role:"assistant",srcIdx:3,thinkingDuration:1,blocks:[{type:"text",text:" \n "},{type:"reasoning",reasoning:"Verify"},{type:"tool_call",toolId:"b",toolName:"bash"}]},
+    {id:"three",role:"assistant",srcIdx:5,blocks:[{type:"text",text:"I found an issue."},{type:"tool_call",toolId:"c",toolName:"edit"}]},
+    {id:"four",role:"assistant",srcIdx:7,blocks:[{type:"reasoning",reasoning:"Testing"},{type:"tool_call",toolId:"d",toolName:"bash"}]},
+  ];
+  const blocks = buildRenderBlocks(list);
+  expect(blocks).toHaveLength(2);
+  expect(blocks[0].kind === "series" && blocks[0].units.map((u) => u.call?.toolId)).toEqual(["a","b"]);
+  expect(blocks[1].kind === "series" && blocks[1].extras[0].thinkingDuration).toBeUndefined();
+  expect(blocks[1].msg.srcIdx).toBe(5);
+  expect(list[1].blocks).toHaveLength(3);
+});
+
+test("terminal footer becomes a duration without removing real output", () => {
+  expect(terminalPresentation("$ printf hello\n\nhello\n\n[exit 0]  Took 2.5s")).toEqual({output:"$ printf hello\n\nhello",durationMs:2500});
+  expect(terminalPresentation("output\n[exit 1] (full output: /tmp/output.log)  Took 1h2m")).toEqual({output:"output\n\nFull output: /tmp/output.log",durationMs:3720000});
+  expect(terminalPresentation("The command printed [exit 0] as its output").output).toBe("The command printed [exit 0] as its output");
 });
 
 test("hides checklist calls and results while preserving text, other tools and source indices", () => {

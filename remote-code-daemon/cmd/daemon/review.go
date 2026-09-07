@@ -27,16 +27,18 @@ type fileVersion struct {
 	Unavailable bool        `json:"unavailable,omitempty"`
 }
 type fileChange struct {
-	Conflict bool        `json:"conflict,omitempty"`
-	Path     string      `json:"path"`
-	Before   fileVersion `json:"before"`
-	After    fileVersion `json:"after"`
-	Undone   bool        `json:"undone,omitempty"`
+	CurrentState string      `json:"currentState,omitempty"`
+	Conflict     bool        `json:"conflict,omitempty"`
+	Path         string      `json:"path"`
+	Before       fileVersion `json:"before"`
+	After        fileVersion `json:"after"`
+	Undone       bool        `json:"undone,omitempty"`
 }
 type taskReview struct {
-	ID     string                 `json:"id"`
-	Files  map[string]*fileChange `json:"files"`
-	Notice string                 `json:"notice,omitempty"`
+	CheckedAt int64                  `json:"checkedAt,omitempty"`
+	ID        string                 `json:"id"`
+	Files     map[string]*fileChange `json:"files"`
+	Notice    string                 `json:"notice,omitempty"`
 }
 type reviewJournal struct {
 	mu                     sync.Mutex
@@ -258,9 +260,7 @@ func (t *reviewedTool) Execute(ctx context.Context, args json.RawMessage, progre
 			change.Conflict = true
 		}
 		change.After = b
-		if sameVersion(change.Before, b) {
-			delete(j.review.Files, p)
-		}
+		change.CurrentState = ""
 	}
 	if limited {
 		j.review.Notice = "Some files could not be captured (symlinks, unreadable files or backup size limits). Shell review covers the project folder, excluding dependency, build and cache folders."
@@ -283,8 +283,20 @@ func (r *taskReview) public(detail bool) map[string]any {
 		if f.Undone {
 			continue
 		}
-		entry := map[string]any{"path": p, "kind": "modified", "canUndo": !f.Conflict}
-		if !f.Before.Exists {
+		state := f.CurrentState
+		if state == "" {
+			if f.After.Exists {
+				state = "exists"
+			} else {
+				state = "deleted"
+			}
+		}
+		entry := map[string]any{"path": p, "kind": "modified", "state": state, "canUndo": !f.Conflict && !sameVersion(f.Before, f.After)}
+		if !f.Before.Exists && !f.After.Exists {
+			entry["kind"] = "created then deleted"
+		} else if sameVersion(f.Before, f.After) {
+			entry["kind"] = "restored to original"
+		} else if !f.Before.Exists {
 			entry["kind"] = "added"
 		} else if !f.After.Exists {
 			entry["kind"] = "deleted"
@@ -302,7 +314,59 @@ func (r *taskReview) public(detail bool) map[string]any {
 		}
 		files = append(files, entry)
 	}
-	return map[string]any{"id": r.ID, "files": files, "notice": r.Notice}
+	return map[string]any{"id": r.ID, "files": files, "notice": r.Notice, "checkedAt": r.CheckedAt}
+}
+
+// Recheck captured paths at the task boundary, including Stop. Unexpected
+// changes remain visible but are never made eligible for Undo.
+func (r *taskReview) refreshFiles() bool {
+	changed := false
+	total := 0
+	for _, f := range r.Files {
+		total += len(f.Before.Data) + len(f.After.Data)
+	}
+	for _, f := range r.Files {
+		if f.Undone {
+			continue
+		}
+		current := readVersion(f.Path)
+		state := "deleted"
+		if current.Exists {
+			state = "exists"
+		}
+		if current.Unavailable {
+			state = "unavailable"
+		}
+		if f.CurrentState != state {
+			f.CurrentState = state
+			changed = true
+		}
+		if !(current.Unavailable && f.After.Unavailable) && !sameVersion(current, f.After) {
+			f.Conflict = true
+			total -= len(f.After.Data)
+			if total+len(current.Data) > reviewTotalLimit {
+				current.Data = nil
+				current.Unavailable = true
+				f.CurrentState = "unavailable"
+			}
+			total += len(current.Data)
+			f.After = current
+			changed = true
+		}
+	}
+	r.CheckedAt = time.Now().UnixMilli()
+	if changed {
+		r.ID = fmt.Sprintf("review_%d", time.Now().UnixNano())
+	}
+	return changed
+}
+
+func (j *reviewJournal) finalize() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.review.refreshFiles()
+	j.persist()
+	j.d.notifyChange("projects")
 }
 
 func (d *DaemonServer) handleReview(raw []byte, undo bool) {
@@ -345,6 +409,12 @@ func (d *DaemonServer) handleReview(raw []byte, undo bool) {
 		response["review"] = map[string]any{"files": []any{}}
 		return
 	}
+	if !undo && act.record.Status != "running" {
+		review.refreshFiles()
+		if data, err := json.Marshal(review); err == nil {
+			_ = os.WriteFile(d.reviewPath(req.SessionID), data, 0o600)
+		}
+	}
 	if undo {
 		if act.record.Status == "running" {
 			response["error"] = "Wait for the task to finish before undoing changes"
@@ -362,12 +432,19 @@ func (d *DaemonServer) handleReview(raw []byte, undo bool) {
 		}
 		// Preflight every target before changing any file. Preserve later edits.
 		for _, f := range selected {
+			if sameVersion(f.Before, f.After) {
+				continue
+			}
 			if f.Conflict || !sameVersion(readVersion(f.Path), f.After) {
 				response["error"] = "Cannot undo: " + f.Path + " changed after this task. Your current edits were preserved."
 				return
 			}
 		}
 		for _, f := range selected {
+			if sameVersion(f.Before, f.After) {
+				f.Undone = true
+				continue
+			}
 			if f.Before.Exists {
 				err = os.MkdirAll(filepath.Dir(f.Path), 0o755)
 				if err == nil {

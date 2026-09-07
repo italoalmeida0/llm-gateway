@@ -751,6 +751,7 @@ func (a *Agent) executeTools(ctx context.Context, msg provider.Message, sink fun
 			hadError = true
 		}
 		results = append(results, provider.ToolResultBlock{
+			StartedAt: res.StartedAt, DurationMs: res.DurationMs,
 			CallID:  tc.ID,
 			Content: res.Content,
 			IsError: res.IsError,
@@ -809,6 +810,8 @@ func (a *Agent) runOneTool(ctx context.Context, tc provider.ToolCallBlock, sink 
 	}
 
 	// Recover panics so a buggy tool does not crash the agent.
+	started := time.Now()
+	sink(EvToolExecutionStart{ID: tc.ID, StartedAt: started.UnixMilli()})
 	var res ToolResult
 	func() {
 		defer func() {
@@ -838,6 +841,8 @@ func (a *Agent) runOneTool(ctx context.Context, tc provider.ToolCallBlock, sink 
 		}
 		res = out
 	}()
+	res.StartedAt = started.UnixMilli()
+	res.DurationMs = time.Since(started).Milliseconds()
 	return res
 }
 

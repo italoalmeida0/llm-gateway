@@ -63,7 +63,7 @@ export function RemoteHints() {
   });
   return <Show when={target()} keyed>{(el) => <Portal>
     <div id={id} role="tooltip" ref={(node) => onCleanup(anchorFloat(el, node, { placement: "top", gap: 8 }))}
-      class="anim-float-in pointer-events-none max-w-60 break-words rounded-lg border border-line bg-elev px-2.5 py-1.5 text-xs font-medium text-ink-100 shadow-xl shadow-black/10">
+      class="anim-float-in pointer-events-none w-max max-w-[calc(100vw-1rem)] whitespace-pre-wrap break-words rounded-lg border border-line bg-elev px-2.5 py-1.5 text-xs font-medium text-ink-100 shadow-xl shadow-black/10">
       {el.getAttribute("data-rc-tip")}
     </div>
   </Portal>}</Show>;

@@ -623,6 +623,9 @@ html[data-theme="dark"] .ag-theme-quartz-dark {
   border: 1px solid var(--line); padding: 0.35rem 0.6rem; text-align: left;
 }
 .rc-markdown th { background: var(--ink-900); color: var(--ink-100); font-weight: 600; }
+.rc-markdown th[align="center"], .rc-markdown td[align="center"] { text-align: center; }
+.rc-markdown th[align="right"], .rc-markdown td[align="right"] { text-align: right; }
+.rc-markdown td { vertical-align: top; min-width: 5rem; overflow-wrap: anywhere; }
 .rc-markdown img { max-width: 100%; border-radius: 0.6rem; }
 .rc-markdown hr { border: none; border-top: 1px solid var(--line); margin: 0.9rem 0; }
 .hljs-comment, .hljs-quote { color: var(--ink-500); font-style: italic; }
@@ -640,4 +643,3 @@ html[data-theme="dark"] .ag-theme-quartz-dark {
 .hljs-addition { color: #4ade80; background: rgba(74, 222, 128, 0.1); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: bold; }
-

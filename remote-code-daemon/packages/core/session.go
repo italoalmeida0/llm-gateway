@@ -864,12 +864,14 @@ func HydrateMessageObject(rawMessage []byte) (provider.Message, error) {
 			})
 		case head.CallID != "":
 			var tr struct {
-				CallID  string            `json:"call_id"`
-				Content []json.RawMessage `json:"content"`
-				IsError bool              `json:"is_error"`
+				StartedAt  int64             `json:"started_at"`
+				DurationMs int64             `json:"duration_ms"`
+				CallID     string            `json:"call_id"`
+				Content    []json.RawMessage `json:"content"`
+				IsError    bool              `json:"is_error"`
 			}
 			_ = json.Unmarshal(raw, &tr)
-			block := provider.ToolResultBlock{CallID: tr.CallID, IsError: tr.IsError}
+			block := provider.ToolResultBlock{CallID: tr.CallID, IsError: tr.IsError, StartedAt: tr.StartedAt, DurationMs: tr.DurationMs}
 			for _, c := range tr.Content {
 				var inner struct {
 					Text     string `json:"text"`

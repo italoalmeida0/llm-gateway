@@ -33,6 +33,7 @@ export interface RcSession {
 
 /** One mirrored project (host folder grouping conversations). */
 export interface RcProject {
+  folderStatus?: "available" | "missing" | "unavailable";
   id: string;
   hostId: string;
   name: string;
@@ -136,6 +137,7 @@ export function createDataLayer(opts: {
       path: p.path || "",
       createdAt: p.createdAt ?? p.created_at ?? Date.now(),
       protected: !!p.protected,
+      folderStatus:p.folderStatus,
     };
   }
 

@@ -699,7 +699,7 @@ export function Tooltip(props: {
               );
             }}
             role="tooltip"
-            class="anim-float-in pointer-events-none max-w-60 rounded-lg border border-line bg-elev px-2.5 py-1.5 text-xs font-medium text-ink-100 shadow-xl shadow-black/10"
+            class="anim-float-in pointer-events-none w-max max-w-[calc(100vw-1rem)] whitespace-pre-wrap break-words rounded-lg border border-line bg-elev px-2.5 py-1.5 text-xs font-medium text-ink-100 shadow-xl shadow-black/10"
           >
             {props.content}
           </div>

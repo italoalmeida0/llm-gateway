@@ -39,3 +39,12 @@ export function absoluteRemotePath(path: string, cwd: string, home = ""): string
   const value = normalized(/^(?:[a-z]:[\\/]|[\\/])/i.test(path) ? path : `${cwd}/${path}`);
   return /^[a-z]:[\\/]/i.test(cwd) || cwd.startsWith("\\\\") ? value.replace(/\//g, "\\") : value;
 }
+
+export function projectsByActivity<T extends {id:string; path:string; createdAt:number}>(projects:T[], sessions:{cwd:string; updatedAt:number}[]): T[] {
+  const activity = new Map(projects.map((p) => [p.id, p.createdAt]));
+  for (const session of sessions) {
+    const project = projectForDirectory(session.cwd, projects);
+    if (project) activity.set(project.id, Math.max(activity.get(project.id) || 0, session.updatedAt));
+  }
+  return [...projects].sort((a,b) => (activity.get(b.id) || 0) - (activity.get(a.id) || 0) || a.id.localeCompare(b.id));
+}

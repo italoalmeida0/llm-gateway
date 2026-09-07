@@ -5373,14 +5373,16 @@ export default function RemoteCodePage() {
                   <div>
                     <button ref={accessBtn} data-menubtn aria-label="Agent permissions" aria-expanded={accessMenuOpen()}
                       onClick={() => { const next = !accessMenuOpen(); closeMenus(); setAccessMenuOpen(next); }}
-                      class="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs hover:bg-elev cursor-pointer">
-                      <Iconify icon={yoloMode() ? "lucide:shield-alert" : "lucide:hand"} size={14} /><span class="hidden sm:inline">{yoloMode() ? "Full access" : "Ask for approval"}</span>
+                      class={`flex items-center gap-1.5 rounded-full px-2 py-1 text-xs hover:bg-elev cursor-pointer transition-colors ${
+                        yoloMode() ? "text-amber-800 dark:text-amber-200" : ""
+                      }`}>
+                      <Iconify icon={yoloMode() ? "lucide:shield-alert" : "lucide:hand"} size={14} class={yoloMode() ? "text-amber-800 dark:text-amber-200" : ""} /><span class={`hidden sm:inline ${yoloMode() ? "text-amber-800 dark:text-amber-200 font-medium" : ""}`}>{yoloMode() ? "Full access" : "Ask for approval"}</span>
                     </button>
                     <FloatMenu anchor={() => accessBtn} open={accessMenuOpen()} placement="top-start" width="22rem">
                       <p class="px-2 py-2 text-ink-400">How should actions be approved?</p>
                       <For each={[{full:false, label:"Ask for approval", description:"Ask before every tool call, including reads and commands.", icon:"lucide:hand"}, {full:true, label:"Full access", description:"Allow all tool calls without asking (YOLO).", icon:"lucide:shield-alert"}]}>{(access) =>
                         <button role="menuitemradio" aria-checked={yoloMode() === access.full} onClick={() => { setYoloMode(access.full); configureSession(); setAccessMenuOpen(false); }} class="w-full flex items-center gap-3 px-2 py-3 text-left rounded-lg hover:bg-elev cursor-pointer">
-                          <Iconify icon={access.icon} size={19} /><span class="flex-1"><span class="font-medium text-ink-100">{access.label}</span><span class="block mt-1 text-[11px] text-ink-500">{access.description}</span></span><Show when={yoloMode() === access.full}><Iconify icon="lucide:check" size={14} /></Show>
+                          <Iconify icon={access.icon} size={19} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /><span class="flex-1"><span class={`font-medium ${access.full ? "text-amber-800 dark:text-amber-200" : "text-ink-100"}`}>{access.label}</span><span class={`block mt-1 text-[11px] ${access.full ? "text-amber-800/80 dark:text-amber-200/80" : "text-ink-500"}`}>{access.description}</span></span><Show when={yoloMode() === access.full}><Iconify icon="lucide:check" size={14} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /></Show>
                         </button>
                       }</For>
                       <p class="px-2 py-2 text-[11px] text-ink-500">Changes apply immediately to pending and future tool calls.</p>

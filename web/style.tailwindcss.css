@@ -6,6 +6,7 @@
 @source "../node_modules/streamdown-solid/dist";
 
 @custom-variant hover (&:hover);
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /*
  * Theme system: two themes (white / dark) driven by [data-theme] on <html>.

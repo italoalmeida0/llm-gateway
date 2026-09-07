@@ -55,10 +55,10 @@ func (t *WriteTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 	if len(lines) > 0 && lines[len(lines)-1] == "" && strings.HasSuffix(a.Content, "\n") {
 		lines = lines[:len(lines)-1]
 	}
-	var aiSb strings.Builder
-	aiSb.WriteString(LinePrefixNotice)
+	var sb strings.Builder
+	sb.WriteString(LinePrefixNotice)
 	for i, line := range lines {
-		fmt.Fprintf(&aiSb, "%d:%s\n", i+1, line)
+		fmt.Fprintf(&sb, "%d:%s\n", i+1, line)
 	}
 
 	totalLines := strings.Count(a.Content, "\n")
@@ -66,8 +66,7 @@ func (t *WriteTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 		totalLines++ // count the last unterminated line
 	}
 	return core.ToolResult{
-		Content:   []provider.Content{provider.TextBlock{Text: aiSb.String()}},
-		UIContent: a.Content,
+		Content: []provider.Content{provider.TextBlock{Text: sb.String()}},
 		Details: map[string]any{
 			"path":        path,
 			"bytes":       len(a.Content),

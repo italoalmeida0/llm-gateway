@@ -51,8 +51,9 @@ export function diffStat(text: string): { add: number; del: number } {
   let add = 0;
   let del = 0;
   for (const ln of (text || "").split("\n")) {
-    if (ln.startsWith("+") && !ln.startsWith("+++")) add++;
-    else if (ln.startsWith("-") && !ln.startsWith("---")) del++;
+    const clean = ln.replace(/^\d+:/, "");
+    if (clean.startsWith("+") && !clean.startsWith("+++")) add++;
+    else if (clean.startsWith("-") && !clean.startsWith("---")) del++;
   }
   return { add, del };
 }

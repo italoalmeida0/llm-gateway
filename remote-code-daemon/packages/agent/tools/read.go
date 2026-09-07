@@ -135,36 +135,27 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		truncLines = true
 	}
 
-	var rawSb strings.Builder
-	var aiSb strings.Builder
-	aiSb.WriteString(LinePrefixNotice)
+	var sb strings.Builder
+	sb.WriteString(LinePrefixNotice)
 	for i, line := range selected {
 		lineNum := start + i + 1
-		fmt.Fprintf(&aiSb, "%d:%s\n", lineNum, line)
-		rawSb.WriteString(line)
-		rawSb.WriteByte('\n')
+		fmt.Fprintf(&sb, "%d:%s\n", lineNum, line)
 	}
 	if truncLines || truncBytes {
-		aiSb.WriteString("\n")
-		rawSb.WriteString("\n")
+		sb.WriteString("\n")
 	}
 	if truncLines {
-		msg := fmt.Sprintf("... [truncated at %d lines]\n", maxReadLines)
-		aiSb.WriteString(msg)
-		rawSb.WriteString(msg)
+		fmt.Fprintf(&sb, "... [truncated at %d lines]\n", maxReadLines)
 	}
 	if truncBytes {
-		msg := fmt.Sprintf("... [truncated at %d bytes]\n", maxReadBytes)
-		aiSb.WriteString(msg)
-		rawSb.WriteString(msg)
+		fmt.Fprintf(&sb, "... [truncated at %d bytes]\n", maxReadBytes)
 	}
 	if progress != nil {
-		progress(rawSb.String())
+		progress(sb.String())
 	}
 
 	return core.ToolResult{
-		Content:   []provider.Content{provider.TextBlock{Text: aiSb.String()}},
-		UIContent: rawSb.String(),
+		Content: []provider.Content{provider.TextBlock{Text: sb.String()}},
 		Details: map[string]any{
 			"path":            path,
 			"start_line":      start + 1, // 1-indexed; TUI draws the gutter

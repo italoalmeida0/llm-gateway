@@ -2573,16 +2573,13 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 				"type": "tool_call", "id": e.ID, "name": e.Name, "args": e.Args,
 			}
 		case core.EvToolResult:
-			contentStr := e.Result.UIContent
-			if contentStr == "" {
-				var sb strings.Builder
-				for _, c := range e.Result.Content {
-					if tb, ok := c.(provider.TextBlock); ok {
-						sb.WriteString(tb.Text)
-					}
+			var sb strings.Builder
+			for _, c := range e.Result.Content {
+				if tb, ok := c.(provider.TextBlock); ok {
+					sb.WriteString(tb.Text)
 				}
-				contentStr = strings.ReplaceAll(sb.String(), tools.LinePrefixNotice, "")
 			}
+			contentStr := strings.ReplaceAll(sb.String(), tools.LinePrefixNotice, "")
 			ev := map[string]any{
 				"type": "tool_result", "id": e.ID, "content": contentStr, "isError": e.Result.IsError, "startedAt": e.Result.StartedAt, "durationMs": e.Result.DurationMs,
 			}

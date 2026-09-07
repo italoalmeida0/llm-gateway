@@ -1,36 +1,221 @@
-import { Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import { copyWithToast } from "../../../ui";
 import { Icon as Iconify } from "../../../components/icon";
 import { CodeBlock, DiffView } from "../CodeBlock";
 import { FileIcon } from "../../presentation";
 import { languageForPath } from "../../utils/lang";
+import { diffStat } from "../../transcript";
 import type { ToolPartProps } from "./toolUnitModel";
 
-export function ToolEditBodies(props: ToolPartProps) {
+export interface FileEditSection {
+  file: string;
+  status: "applied" | "dry_run" | "error";
+  matches?: number;
+  error?: string;
+  diff: string;
+}
+
+export function parseEditResults(raw: string, defaultPath?: string): FileEditSection[] {
+  let text = (raw || "").trim();
+  if (!text) return [];
+
+  text = text
+    .replace(
+      /^\[Note: The line prefix "[^"]+" is for line identification only and is not part of the file content\.\]\n?/,
+      "",
+    )
+    .trim();
+
+  const lines = text.split("\n");
+  const sections: FileEditSection[] = [];
+  let current: FileEditSection | null = null;
+  const diffLines: string[] = [];
+
+  const flush = () => {
+    if (current) {
+      current.diff = diffLines.join("\n").trim();
+      sections.push(current);
+      diffLines.length = 0;
+      current = null;
+    }
+  };
+
+  const headerRegex = /^([✓○✗])\s+(.+?)(?:\s+\((\d+)\s+match(?:es)?\)|:\s*(.*))?$/;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "APPLIED." || trimmed.startsWith("DRY RUN —")) {
+      continue;
+    }
+    const m = line.match(headerRegex);
+    if (m) {
+      flush();
+      const mark = m[1];
+      const file = m[2].trim();
+      const matchesStr = m[3];
+      const errStr = m[4];
+      const status: "applied" | "dry_run" | "error" =
+        mark === "✗" ? "error" : mark === "○" ? "dry_run" : "applied";
+      current = {
+        file,
+        status,
+        matches: matchesStr ? parseInt(matchesStr, 10) : undefined,
+        error: errStr?.trim() || undefined,
+        diff: "",
+      };
+    } else if (current) {
+      diffLines.push(line);
+    } else if (trimmed) {
+      diffLines.push(line);
+    }
+  }
+  flush();
+
+  if (sections.length === 0 && diffLines.length > 0) {
+    const rawDiff = diffLines.join("\n").trim();
+    if (rawDiff) {
+      const isErr = /^(?:edit \d+:|error:|failed)/i.test(rawDiff);
+      sections.push({
+        file: defaultPath || "",
+        status: isErr ? "error" : "applied",
+        error: isErr ? rawDiff : undefined,
+        diff: isErr ? "" : rawDiff,
+      });
+    }
+  }
+
+  return sections;
+}
+
+function FileEditCard(props: { sec: FileEditSection }) {
+  const [open, setOpen] = createSignal(true);
+  const stat = () => diffStat(props.sec.diff);
+
   return (
-<>
-        {/* Context body per tool kind (scrollable, always inline — the
-            collapsible rows already are the "open file/diff" view). */}
-        <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && props.u.result?.toolResult}>
-          <Show when={props.m.args().dryRun === true}>
-            <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
-              <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
-            </div>
+    <div class="border-b border-line/40 last:border-b-0">
+      <div
+        onClick={() => setOpen(!open())}
+        class="group/file flex items-center justify-between gap-2 px-3 py-1.5 bg-ink-900/40 hover:bg-ink-900/70 text-[12px] cursor-pointer transition-colors select-none"
+      >
+        <div class="flex items-center gap-2 min-w-0 flex-1">
+          <FileIcon path={props.sec.file} size={14} />
+          <span class="font-mono font-medium text-ink-200 truncate">{props.sec.file || "edit"}</span>
+          <Show when={props.sec.status === "error"}>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 font-mono">
+              failed
+            </span>
           </Show>
-          <DiffView
-            text={props.u.result?.toolResult || ""}
-            max={60}
-            name={String(props.m.args().path || props.m.args().file || "")}
-          />
-          <div class="flex items-center gap-2 px-3 py-1.5 border-t border-line/50">
+          <Show when={props.sec.status === "dry_run"}>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">
+              preview
+            </span>
+          </Show>
+          <Show when={stat().add > 0 || stat().del > 0}>
+            <span class="font-mono text-[10.5px] shrink-0">
+              <Show when={stat().add > 0}>
+                <span class="text-emerald-400">+{stat().add}</span>
+              </Show>
+              <Show when={stat().add > 0 && stat().del > 0}>
+                <span class="text-ink-600"> </span>
+              </Show>
+              <Show when={stat().del > 0}>
+                <span class="text-rose-400">-{stat().del}</span>
+              </Show>
+            </span>
+          </Show>
+          <Show when={props.sec.matches !== undefined && stat().add === 0 && stat().del === 0}>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-ink-800 text-ink-400 font-mono">
+              {props.sec.matches} {props.sec.matches === 1 ? "match" : "matches"}
+            </span>
+          </Show>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <Show when={props.sec.diff}>
             <button
-              onClick={() => copyWithToast(props.u.result?.toolResult || "")}
-              class="text-[11px] text-ink-600 hover:text-ink-300 cursor-pointer"
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                copyWithToast(props.sec.diff);
+              }}
+              class="text-[11px] text-ink-500 hover:text-ink-200 transition-colors cursor-pointer px-1.5 py-0.5 rounded hover:bg-ink-800/50"
             >
               Copy
             </button>
+          </Show>
+          <Iconify
+            icon="lucide:chevron-down"
+            size={12}
+            class={`text-ink-500 transition-transform ${open() ? "rotate-180" : ""}`}
+          />
+        </div>
+      </div>
+      <Show when={open()}>
+        <Show when={props.sec.error}>
+          <div class="px-3 py-2 text-[11.5px] text-rose-400 font-mono bg-rose-500/5 border-t border-rose-500/15">
+            {props.sec.error}
           </div>
         </Show>
+        <Show when={props.sec.diff}>
+          <div class="border-t border-line/20">
+            <DiffView text={props.sec.diff} max={60} name={props.sec.file} />
+          </div>
+        </Show>
+      </Show>
+    </div>
+  );
+}
+
+export function ToolEditBodies(props: ToolPartProps) {
+  const defaultPath = () => {
+    const a = props.m.args();
+    if (a.path) return String(a.path);
+    if (a.file) return String(a.file);
+    if (Array.isArray(a.edits) && a.edits.length === 1) {
+      return String(a.edits[0]?.path || a.edits[0]?.file || "");
+    }
+    return "";
+  };
+
+  const sections = createMemo(() => {
+    const res = props.u.result?.toolResult || "";
+    return parseEditResults(res, defaultPath());
+  });
+
+  return (
+    <>
+      {/* Context body per tool kind (scrollable, always inline — the
+          collapsible rows already are the "open file/diff" view). */}
+      <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && props.u.result?.toolResult}>
+        <Show when={props.m.args().dryRun === true}>
+          <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+            <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
+          </div>
+        </Show>
+        <Show
+          when={sections().length > 0}
+          fallback={
+            <div class="px-3 py-2 text-[11px] text-ink-600">
+              No changes
+            </div>
+          }
+        >
+          <For each={sections()}>
+            {(sec) => <FileEditCard sec={sec} />}
+          </For>
+          <Show when={sections().length > 1}>
+            <div class="flex items-center justify-between px-3 py-1.5 border-t border-line/50 bg-ink-950/40 text-[11px] text-ink-500">
+              <span>{sections().length} files modified</span>
+              <button
+                type="button"
+                onClick={() => copyWithToast(props.u.result?.toolResult || "")}
+                class="hover:text-ink-200 cursor-pointer transition-colors"
+              >
+                Copy all
+              </button>
+            </div>
+          </Show>
+        </Show>
+      </Show>
         <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && !props.u.result}>
           <Show when={props.m.args().dryRun === true}>
             <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
@@ -54,7 +239,7 @@ export function ToolEditBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "write"}>
           <CodeBlock
-            text={String(props.m.args().content || props.u.result?.toolResult || "")}
+            text={String(props.u.result?.toolResult || props.m.args().content || "")}
             language={languageForPath(String(props.m.args().path || ""))}
           />
         </Show>

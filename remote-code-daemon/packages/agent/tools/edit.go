@@ -195,21 +195,16 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 	}
 
 	var b strings.Builder
-	var uiB strings.Builder
-
 	b.WriteString(LinePrefixNotice)
 	if dryRun && !isPreview {
 		b.WriteString("DRY RUN — no files written. Re-send with dryRun:false to apply.\n")
-		uiB.WriteString("DRY RUN — no files written. Re-send with dryRun:false to apply.\n")
 	} else if !dryRun || isPreview {
 		b.WriteString("APPLIED.\n")
-		uiB.WriteString("APPLIED.\n")
 	}
 
 	for _, r := range results {
 		if r.err != "" {
 			fmt.Fprintf(&b, "\n✗ %s: %s\n", r.file, r.err)
-			fmt.Fprintf(&uiB, "\n✗ %s: %s\n", r.file, r.err)
 			continue
 		}
 		mark := "✓"
@@ -217,17 +212,10 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 			mark = "○"
 		}
 		fmt.Fprintf(&b, "\n%s %s (%d match%s)\n", mark, r.file, r.matches, plural(r.matches))
-		fmt.Fprintf(&uiB, "\n%s %s (%d match%s)\n", mark, r.file, r.matches, plural(r.matches))
 		if r.aiDiff != "" {
 			b.WriteString(r.aiDiff)
 			if !strings.HasSuffix(r.aiDiff, "\n") {
 				b.WriteString("\n")
-			}
-		}
-		if r.diff != "" {
-			uiB.WriteString(r.diff)
-			if !strings.HasSuffix(r.diff, "\n") {
-				uiB.WriteString("\n")
 			}
 		}
 	}
@@ -243,9 +231,8 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 	}
 
 	return core.ToolResult{
-		Content:   []provider.Content{provider.TextBlock{Text: b.String()}},
-		UIContent: uiB.String(),
-		Details:   details,
+		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+		Details: details,
 	}, nil
 }
 

@@ -38,8 +38,6 @@ type ToolResult struct {
 	DurationMs int64
 	// Content is sent back to the LLM (text and/or images).
 	Content []provider.Content
-	// UIContent, if non-empty, is used for UI events/display instead of Content.
-	UIContent string
 	// IsError marks this result as an error to the LLM.
 	IsError bool
 	// ActivateTools names previously deferred tools that become available

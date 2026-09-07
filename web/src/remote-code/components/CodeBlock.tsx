@@ -1,17 +1,27 @@
-import { createEffect, createSignal, Show, onCleanup } from "solid-js";
+import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
 import { escapeHtml, highlightCode } from "../utils/lang";
 
 export { ShellCmd } from "./code/ShellCmd";
 export { DiffView } from "./code/DiffView";
 
+interface CodeRow {
+  lineNum: string;
+  code: string;
+  html?: string;
+}
+
+function cleanNotice(text: string): string {
+  return (text || "").replace(
+    /^\[Note: The line prefix "[^"]+" is for line identification only and is not part of the file content\.\]\n?/,
+    "",
+  );
+}
+
 /**
- * Renders code/text with syntax highlighting (extension-detected or
- * auto-detected for extension-less content like diffs). The highlighted
- * HTML is re-computed reactively when text/language change via the
- * hl-loaded singleton — escaped <pre> until the lib arrives (same paint as
- * before, zero layout shift). innerHTML below only ever carries one of two
- * safe payloads: highlight.js-generated spans (built from escaped text) or
- * escapeHtml() output — never raw upstream strings.
+ * Renders code/text with syntax highlighting. When the text carries line
+ * numbers (e.g. read/write tools: "<number>:<content>"), the numbers are
+ * isolated into a select-none gutter so they do not contaminate syntax
+ * highlighting or clipboard copy.
  */
 export function CodeBlock(props: {
   text: string;
@@ -19,33 +29,126 @@ export function CodeBlock(props: {
   bare?: boolean;
   maxH?: string;
 }) {
-  const [html, setHtml] = createSignal<string | null>(null);
+  const [rows, setRows] = createSignal<CodeRow[] | null>(null);
+  const [rawHtml, setRawHtml] = createSignal<string | null>(null);
+
+  const clean = () => cleanNotice(props.text || "");
+  const rawLines = () => clean().split("\n");
+  const hasGutter = () => !props.bare && rawLines().some((l) => /^\d+:/.test(l));
+
   createEffect(() => {
-    const text = props.text || "";
+    const text = clean();
     const lang = props.language;
-    setHtml(null);
+    setRows(null);
+    setRawHtml(null);
     let cancelled = false;
-    void highlightCode(text, lang).then((h) => {
-      if (!cancelled) setHtml(h);
-    }).catch(() => { if (!cancelled) setHtml(escapeHtml(text)); });
+
+    if (!hasGutter()) {
+      void highlightCode(text, lang)
+        .then((h) => {
+          if (!cancelled) setRawHtml(h);
+        })
+        .catch(() => {
+          if (!cancelled) setRawHtml(escapeHtml(text));
+        });
+      return;
+    }
+
+    const lines = rawLines();
+    const parsed: CodeRow[] = lines.map((line) => {
+      const m = line.match(/^(\d+):(.*)$/);
+      if (m) {
+        return { lineNum: m[1], code: m[2] };
+      }
+      return { lineNum: "", code: line };
+    });
+
+    const cleanCode = parsed.map((p) => p.code).join("\n");
+    void highlightCode(cleanCode, lang)
+      .then((h) => {
+        if (cancelled) return;
+        const htmlLines = h.split("\n");
+        setRows(
+          parsed.map((p, i) => ({
+            lineNum: p.lineNum,
+            code: p.code,
+            html: htmlLines[i] || escapeHtml(p.code),
+          })),
+        );
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRows(
+          parsed.map((p) => ({
+            lineNum: p.lineNum,
+            code: p.code,
+            html: escapeHtml(p.code),
+          })),
+        );
+      });
+
     onCleanup(() => {
       cancelled = true;
     });
   });
+
   return (
-    <pre
-      class={`px-3 py-2 text-[11px] text-ink-300 overflow-x-auto whitespace-pre-wrap ${
+    <div
+      class={`font-mono text-[11px] text-ink-300 overflow-x-auto select-text ${
         props.maxH || "max-h-56"
       }`}
     >
       <Show
-        when={html() !== null}
-        // eslint-disable-next-line solid/no-innerhtml
-        fallback={<code class="tok" innerHTML={escapeHtml(props.text || "")} />}
+        when={hasGutter()}
+        fallback={
+          <pre class="px-3 py-2 whitespace-pre-wrap">
+            <Show
+              when={rawHtml() !== null}
+              // eslint-disable-next-line solid/no-innerhtml
+              fallback={<code class="tok" innerHTML={escapeHtml(clean())} />}
+            >
+              {/* eslint-disable-next-line solid/no-innerhtml */}
+              <code class="tok" innerHTML={rawHtml() || ""} />
+            </Show>
+          </pre>
+        }
       >
-        {/* eslint-disable-next-line solid/no-innerhtml */}
-        <code class="tok" innerHTML={html() || ""} />
+        <div class="py-1">
+          <Show
+            when={rows() !== null}
+            fallback={
+              <For each={rawLines()}>
+                {(line) => {
+                  const m = line.match(/^(\d+):(.*)$/);
+                  const num = m ? m[1] : "";
+                  const content = m ? m[2] : line;
+                  return (
+                    <div class="flex items-start px-2 py-0.5 leading-relaxed whitespace-pre hover:bg-surface/30">
+                      <span class="select-none text-right font-mono text-[10px] text-ink-600/50 min-w-[2.25rem] shrink-0 pr-2 border-r border-line/25 mr-2">
+                        {num}
+                      </span>
+                      {/* eslint-disable-next-line solid/no-innerhtml */}
+                      <code class="tok flex-1 overflow-x-auto" innerHTML={escapeHtml(content || " ")} />
+                    </div>
+                  );
+                }}
+              </For>
+            }
+          >
+            <For each={rows()}>
+              {(r) => (
+                <div class="flex items-start px-2 py-0.5 leading-relaxed whitespace-pre hover:bg-surface/30">
+                  <span class="select-none text-right font-mono text-[10px] text-ink-600/50 min-w-[2.25rem] shrink-0 pr-2 border-r border-line/25 mr-2">
+                    {r.lineNum}
+                  </span>
+                  {/* eslint-disable-next-line solid/no-innerhtml */}
+                  <code class="tok flex-1 overflow-x-auto" innerHTML={r.html || " "} />
+                </div>
+              )}
+            </For>
+          </Show>
+        </div>
       </Show>
-    </pre>
+    </div>
   );
 }

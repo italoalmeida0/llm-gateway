@@ -76,9 +76,6 @@ func TestReadOffsetLimit(t *testing.T) {
 	if got != wantAI {
 		t.Fatalf("want %q, got %q", wantAI, got)
 	}
-	if res.UIContent != "2\n3\n" {
-		t.Fatalf("UIContent want \"2\\n3\\n\", got %q", res.UIContent)
-	}
 	if start, ok := res.Details.(map[string]any)["start_line"]; !ok || start != 2 {
 		t.Errorf("start_line detail want 2, got %v", start)
 	}
@@ -410,9 +407,6 @@ func TestWriteLineNumbers(t *testing.T) {
 	if got != wantAI {
 		t.Fatalf("want AI content %q, got %q", wantAI, got)
 	}
-	if res.UIContent != content {
-		t.Fatalf("want UIContent %q, got %q", content, res.UIContent)
-	}
 }
 
 func TestEditLineNumbers(t *testing.T) {
@@ -433,16 +427,6 @@ func TestEditLineNumbers(t *testing.T) {
 	}
 	if !strings.Contains(got, "2:-line2") || !strings.Contains(got, "2:+replaced") {
 		t.Fatalf("expected 2:-line2 and 2:+replaced in AI output, got %q", got)
-	}
-	// Verify UIContent is clean (no LinePrefixNotice and no 2:- prefix)
-	if strings.Contains(res.UIContent, LinePrefixNotice) {
-		t.Fatalf("UIContent must not contain LinePrefixNotice: %q", res.UIContent)
-	}
-	if !strings.Contains(res.UIContent, "-line2") || !strings.Contains(res.UIContent, "+replaced") {
-		t.Fatalf("UIContent must contain clean diff: %q", res.UIContent)
-	}
-	if strings.Contains(res.UIContent, "2:-line2") {
-		t.Fatalf("UIContent must not contain line numbers: %q", res.UIContent)
 	}
 }
 

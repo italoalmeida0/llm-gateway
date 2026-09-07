@@ -6,6 +6,16 @@ import { FileIcon } from "../../presentation";
 import type { ToolPartProps } from "./toolUnitModel";
 
 export function ToolUnitHeader(props: ToolPartProps) {
+  const targetPath = () => {
+    const a = props.m.args();
+    if (a.path) return String(a.path);
+    if (a.file) return String(a.file);
+    if (Array.isArray(a.edits) && a.edits.length === 1) {
+      return String(a.edits[0]?.path || a.edits[0]?.file || "");
+    }
+    return "";
+  };
+
   return (
     <div
       onClick={() => props.ctx.toggleToolOpen(props.m.key())}
@@ -25,8 +35,8 @@ export function ToolUnitHeader(props: ToolPartProps) {
       </Show>
       <span class="text-ink-500 shrink-0">{props.m.sum().verb}</span>
       <span class="flex items-center gap-2 min-w-0 flex-1">
-        <span class="inline-flex items-center gap-2 min-w-0" data-rc-tip={props.m.args().path ? absoluteRemotePath(String(props.m.args().path), props.ctx.activeSession()?.cwd || "", props.ctx.projects().find((p: { protected?: boolean }) => p.protected)?.path) : undefined}>
-          <Show when={props.m.args().path}><FileIcon path={String(props.m.args().path)} /></Show>
+        <span class="inline-flex items-center gap-2 min-w-0" data-rc-tip={targetPath() ? absoluteRemotePath(targetPath(), props.ctx.activeSession()?.cwd || "", props.ctx.projects().find((p: { protected?: boolean }) => p.protected)?.path) : undefined}>
+          <Show when={targetPath()}><FileIcon path={targetPath()} /></Show>
           <Show when={props.m.name() === "bash" || props.m.name() === "python"} fallback={
             <span class="truncate text-ink-200 font-medium min-w-0">{props.m.sum().target}</span>
           }>

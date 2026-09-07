@@ -62,7 +62,7 @@ function FloatMenu(props: {
             onCleanup(anchorFloat(a, el, { placement: props.placement ?? "bottom-start", maxHeight: 520 }));
           }}
           data-floatmenu
-          class="anim-float-in max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-line bg-card shadow-xl p-1.5 text-xs"
+          class="anim-float-in max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-line bg-card shadow-xl p-1.5 text-xs [scrollbar-gutter:stable]"
           style={props.width ? { width: props.width } : undefined}
           onClick={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}
@@ -2515,7 +2515,7 @@ export default function RemoteCodePage() {
             ref={(el) => setTimeout(() => el?.focus(), 40)}
           />
         </div>
-        <div class="max-h-56 overflow-y-auto overflow-x-auto">
+        <div class="max-h-56 overflow-y-auto overflow-x-auto [scrollbar-gutter:stable]">
           <div class="min-w-full w-max flex flex-col">
             <For
               each={filteredGatewayModels()}
@@ -2873,7 +2873,7 @@ export default function RemoteCodePage() {
           />
         </button>
         <Show when={open()}>
-          <div class="mt-2 max-h-64 overflow-y-auto pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap break-words text-xs leading-relaxed">
+          <div class="mt-2 max-h-64 overflow-y-auto [scrollbar-gutter:stable] pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap break-words text-xs leading-relaxed">
             {block.reasoning || "(thinking…)"}
           </div>
         </Show>
@@ -3896,7 +3896,7 @@ export default function RemoteCodePage() {
             <button aria-expanded={open()} onClick={() => setExpandedThinking((prev) => ({...prev, [key]:!open()}))} class="flex items-center gap-1.5 text-xs text-ink-500 hover:text-ink-300 cursor-pointer">
               <Iconify icon="lucide:bot" size={14} /><span>Thinking</span><Iconify icon="lucide:chevron-down" size={12} class={open() ? "rotate-180" : ""} />
             </button>
-            <Show when={open()}><ol class="mt-2 max-h-64 overflow-y-auto space-y-3 text-xs text-ink-400 leading-relaxed">
+            <Show when={open()}><ol class="mt-2 max-h-64 overflow-y-auto [scrollbar-gutter:stable] space-y-3 text-xs text-ink-400 leading-relaxed">
               <For each={thoughts()}>{(entry) => <li class="flex gap-3 items-start">
                 <span class="shrink-0 tabular-nums text-ink-500">{entry.msg.id === messages().at(-1)?.id && thinkingStart() !== null ? `${thinkingElapsed()}s` : entry.msg.thinkingDuration !== undefined ? `${entry.msg.thinkingDuration}s` : "—"}</span>
                 <span class="pl-3 border-l border-line whitespace-pre-wrap break-words min-w-0">{entry.block.reasoning}</span>
@@ -4051,28 +4051,32 @@ export default function RemoteCodePage() {
           fallback={
             <>
               <span class="truncate flex-1 min-w-0">{s.title}</span>
-              <span class="text-[10px] text-ink-600 shrink-0">{timeAgo(s.updatedAt)}</span>
               <Show when={s.status === "running"}>
                 <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
               </Show>
-              <Show when={!selectionMode()}>
-                <div class="hidden group-hover:flex items-center shrink-0">
-                  <button
-                    onClick={(e) => togglePin(s.id, e)}
-                    class="p-0.5 text-ink-600 hover:text-ink-200 cursor-pointer"
-                    data-rc-tip={s.pinned ? "Unpin" : "Pin"} aria-label={s.pinned ? "Unpin" : "Pin"}
-                  >
-                    <Iconify icon={s.pinned ? "lucide:pin-off" : "lucide:pin"} size={11} />
-                  </button>
-                  <button
-                    onClick={(e) => deleteSession(s.id, e)}
-                    class="p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
-                    data-rc-tip="Delete" aria-label="Delete"
-                  >
-                    <Iconify icon="lucide:trash-2" size={11} />
-                  </button>
-                </div>
-              </Show>
+              <div class="relative flex items-center justify-end shrink-0 min-w-[34px]">
+                <span class="text-[10px] text-ink-600 transition-opacity group-hover:opacity-0 group-hover:pointer-events-none">
+                  {timeAgo(s.updatedAt)}
+                </span>
+                <Show when={!selectionMode()}>
+                  <div class="absolute right-0 flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={(e) => togglePin(s.id, e)}
+                      class="p-0.5 text-ink-600 hover:text-ink-200 cursor-pointer"
+                      data-rc-tip={s.pinned ? "Unpin" : "Pin"} aria-label={s.pinned ? "Unpin" : "Pin"}
+                    >
+                      <Iconify icon={s.pinned ? "lucide:pin-off" : "lucide:pin"} size={11} />
+                    </button>
+                    <button
+                      onClick={(e) => deleteSession(s.id, e)}
+                      class="p-0.5 text-ink-600 hover:text-rose-400 cursor-pointer"
+                      data-rc-tip="Delete" aria-label="Delete"
+                    >
+                      <Iconify icon="lucide:trash-2" size={11} />
+                    </button>
+                  </div>
+                </Show>
+              </div>
             </>
           }
         >
@@ -4280,7 +4284,7 @@ export default function RemoteCodePage() {
 
 
           {/* Projects */}
-          <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-3 min-h-0">
+          <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-3 min-h-0 [scrollbar-gutter:stable]">
               <div class="flex items-center justify-between px-1.5 py-1 bg-ink-950 border-b border-line/50">
                 <Show
                   when={selectionMode()}
@@ -4644,7 +4648,7 @@ export default function RemoteCodePage() {
             onKeyDown={(e) => { if (["ArrowUp", "PageUp", "Home"].includes(e.key)) transcriptScroll.detach(); }}
             tabindex="0"
             aria-label="Conversation"
-            class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 md:px-8 select-text [overflow-anchor:none]"
+            class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 md:px-8 select-text [overflow-anchor:none] [scrollbar-gutter:stable]"
           >
           <div ref={setChatContentRef} class="pt-6 pb-10 space-y-6"
           >
@@ -5056,7 +5060,7 @@ export default function RemoteCodePage() {
                         <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
                           Project
                         </div>
-                        <div class="max-h-56 overflow-y-auto">
+                        <div class="max-h-56 overflow-y-auto [scrollbar-gutter:stable]">
                           <For
                             each={projects()}
                             fallback={
@@ -5307,7 +5311,7 @@ export default function RemoteCodePage() {
                           <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
                             Session files
                           </div>
-                          <div class="max-h-48 overflow-y-auto">
+                          <div class="max-h-48 overflow-y-auto [scrollbar-gutter:stable]">
                             <For each={sessionFiles()[activeSessionId()] || []}>
                               {(f) => (
                                 <button
@@ -5574,7 +5578,7 @@ export default function RemoteCodePage() {
           <Btn type="button" disabled={folderLoading() || !folderCurrent() || newProjectPath() !== folderCurrent()} onClick={createProject}>OK</Btn>
         </form>
         <Show when={folderError()}><div role="alert" class="mb-3 p-3 rounded-lg border border-brand-500/30 text-sm text-ink-200">{folderError()}</div></Show>
-        <div role="group" aria-label="Host folders" class="h-[50vh] min-h-48 overflow-y-auto -mx-2 space-y-0.5">
+        <div role="group" aria-label="Host folders" class="h-[50vh] min-h-48 overflow-y-auto -mx-2 space-y-0.5 [scrollbar-gutter:stable]">
           <button disabled={folderLoading() || !folderParent() || folderParent() === folderCurrent()} onClick={() => requestFolders(folderParent())} class="flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-ink-300 hover:bg-elev disabled:opacity-40 cursor-pointer"><Iconify icon="lucide:arrow-up" size={17} /><span>..</span></button>
           <Show when={!folderLoading()} fallback={<p class="px-3 py-5 text-sm text-ink-500">Loading folders…</p>}>
             <For each={folderEntries()} fallback={<p class="px-3 py-5 text-sm text-ink-500">No subfolders. Select OK to use this folder.</p>}>{(folder) =>

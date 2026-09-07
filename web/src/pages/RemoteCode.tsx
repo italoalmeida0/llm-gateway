@@ -1104,10 +1104,7 @@ export default function RemoteCodePage() {
   const [searchResults, setSearchResults] = createSignal<SearchHit[]>([]);
   let searchTimer: any = null;
 
-  // Large editor modal (chatbot LargeEditor).
-  const [largeEditorOpen, setLargeEditorOpen] = createSignal(false);
-  const [largeEditorText, setLargeEditorText] = createSignal("");
-  const [, setLargeEditorSend] = createSignal(false);
+
 
   // Promise-based confirm modal (chatbot showConfirm, no native confirm()).
   interface ConfirmState {
@@ -2780,12 +2777,7 @@ export default function RemoteCodePage() {
     if (ok) sendWS({ type: "delete_message", sessionId: sid, index: rawIdx(idx) });
   }
 
-  function editUserMsg(m: ChatMessage) {
-    // Open the large editor (chatbot-style) instead of editing inline.
-    setLargeEditorText(messageText(m));
-    setLargeEditorSend(false);
-    setLargeEditorOpen(true);
-  }
+
 
   function togglePin(id: string, e: MouseEvent) {
     e.stopPropagation();
@@ -3406,8 +3398,8 @@ export default function RemoteCodePage() {
           setConfirmState(null);
           return;
         }
-        if (largeEditorOpen()) {
-          setLargeEditorOpen(false);
+        if (editingMsgIdx() != null) {
+          cancelEditMsg();
           return;
         }
         if (previewFile()) {
@@ -4680,7 +4672,7 @@ export default function RemoteCodePage() {
                 return (
                   <div
                     class={`group/msg flex flex-col w-full ${convWidthClass()} mx-auto ${
-                      msg.role === "user" ? "items-end" : "items-start"
+                      msg.role === "user" && !isEditing() ? "items-end" : "items-start"
                     }`}
                   >
                     {/* ===== SYSTEM NOTICE (e.g. auto-compaction) ===== */}
@@ -4705,9 +4697,9 @@ export default function RemoteCodePage() {
                     <Show when={!msg.system}>
                     {/* ===== USER ===== */}
                     <Show when={msg.role === "user"}>
-                      <div class="flex flex-col items-end max-w-[90%] sm:max-w-[80%]">
+                      <div class={isEditing() ? "w-full" : "flex flex-col items-end max-w-[90%] sm:max-w-[80%]"}>
                         <Show when={msg.attachments && msg.attachments.length > 0}>
-                          <div class="flex flex-wrap gap-1.5 mb-1.5 justify-end">
+                          <div class={`flex flex-wrap gap-1.5 mb-1.5 ${isEditing() ? "justify-start" : "justify-end"}`}>
                             <For each={msg.attachments || []}>
                               {(name) => (
                                 <span class="text-[11px] bg-ink-900 border border-line/70 px-2 py-1 rounded-lg text-ink-400 flex items-center gap-1.5">
@@ -4727,39 +4719,36 @@ export default function RemoteCodePage() {
                             </div>
                           }
                         >
-                          <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60">
+                          <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60 shadow-lg">
                             <textarea
                               value={editingMsgText()}
                               onInput={(e) => setEditingMsgText(e.currentTarget.value)}
-                              class="w-full bg-transparent text-ink-100 text-sm outline-none resize-none"
+                              onKeyDown={(e) => {
+                                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                                  e.preventDefault();
+                                  saveEditMsg(rawIdx(), msg);
+                                } else if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  cancelEditMsg();
+                                }
+                              }}
+                              class="w-full bg-transparent text-ink-100 text-sm outline-none resize-y min-h-[96px] leading-relaxed"
                               rows={4}
                               ref={(el) => setTimeout(() => el?.focus(), 40)}
                             />
-                            <div class="flex justify-between items-center mt-2">
+                            <div class="flex justify-end items-center gap-2 mt-2 pt-2 border-t border-line/40">
                               <button
-                                onClick={() => {
-                                  setEditingMsgText(messageText(msg));
-                                  setLargeEditorOpen(true);
-                                }}
-                                class="p-1.5 hover:bg-ink-800 rounded-lg text-ink-500 hover:text-ink-200 cursor-pointer"
-                                data-rc-tip="Expand editor" aria-label="Expand editor"
+                                onClick={cancelEditMsg}
+                                class="text-xs text-ink-400 hover:text-ink-100 px-3 py-1.5 rounded-lg hover:bg-ink-800 transition-colors cursor-pointer"
                               >
-                                <Iconify icon="lucide:expand" size={14} />
+                                Cancel
                               </button>
-                              <div class="flex gap-2">
-                                <button
-                                  onClick={cancelEditMsg}
-                                  class="text-xs text-ink-400 hover:text-ink-100 px-2 py-1 cursor-pointer"
-                                >
-                                  Cancel
-                                </button>
-                                <button
-                                  onClick={() => saveEditMsg(rawIdx(), msg)}
-                                  class="text-xs bg-ink-100 text-ink-950 px-3 py-1 rounded-lg hover:bg-accent-400 font-medium cursor-pointer"
-                                >
-                                  Save and Send
-                                </button>
-                              </div>
+                              <button
+                                onClick={() => saveEditMsg(rawIdx(), msg)}
+                                class="text-xs bg-ink-100 text-ink-950 px-3.5 py-1.5 rounded-lg hover:bg-accent-400 font-medium transition-colors cursor-pointer"
+                              >
+                                Save and Send
+                              </button>
                             </div>
                           </div>
                         </Show>
@@ -4783,13 +4772,6 @@ export default function RemoteCodePage() {
                               data-rc-tip="Edit and resend" aria-label="Edit and resend"
                             >
                               <Iconify icon="lucide:pencil" size={13} />
-                            </button>
-                            <button
-                              onClick={() => editUserMsg(msg)}
-                              class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              data-rc-tip="Edit in large editor" aria-label="Edit in large editor"
-                            >
-                              <Iconify icon="lucide:expand" size={13} />
                             </button>
                             <button
                               onClick={() => deleteMsg(rawIdx())}
@@ -5402,18 +5384,6 @@ export default function RemoteCodePage() {
                         </button>
                       </FloatMenu>
                   </div>
-                  {/* Expand to fullscreen editor (chatbot LargeEditor) */}
-                  <button
-                    onClick={() => {
-                      setLargeEditorText(inputPrompt());
-                      setLargeEditorSend(false);
-                      setLargeEditorOpen(true);
-                    }}
-                    class="w-6 h-6 rounded-full hover:bg-ink-800 hidden sm:flex items-center justify-center cursor-pointer"
-                    data-rc-tip="Expand editor" aria-label="Expand editor"
-                  >
-                    <Iconify icon="lucide:expand" size={13} />
-                  </button>
                   <div>
                     <button ref={modeBtn} data-menubtn aria-label="Agent mode and skills" aria-expanded={modeMenuOpen()}
                       onClick={() => { const next = !modeMenuOpen(); closeMenus(); setModeMenuOpen(next); }}
@@ -5630,59 +5600,6 @@ export default function RemoteCodePage() {
             </details>
           }</For>
         </Show>
-      </Modal>
-
-      {/* Modal: Large editor (chatbot FullscreenEditor) */}
-      <Modal
-        open={largeEditorOpen()}
-        onClose={() => setLargeEditorOpen(false)}
-        title="Edit message"
-        width="max-w-2xl"
-        fullOnMobile
-      >
-        <div class="space-y-3">
-          <textarea
-            class="w-full h-64 bg-ink-950 border border-line rounded-xl px-3.5 py-3 text-sm text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500 resize-y font-mono leading-relaxed"
-            placeholder="Type your message..."
-            value={largeEditorText()}
-            onInput={(e) => setLargeEditorText(e.currentTarget.value)}
-            ref={(el) => setTimeout(() => el?.focus(), 60)}
-          />
-          <div class="flex items-center justify-between">
-            <span class="text-[11px] text-ink-600 font-mono">
-              {largeEditorText().length} chars
-            </span>
-            <div class="flex items-center gap-2">
-              <button
-                onClick={() => setLargeEditorOpen(false)}
-                class="px-4 py-2 rounded-xl text-xs text-ink-400 hover:text-ink-100 hover:bg-ink-800 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  setInputPrompt(largeEditorText());
-                  setLargeEditorOpen(false);
-                }}
-                class="px-4 py-2 rounded-xl border border-line text-xs font-medium text-ink-200 hover:bg-ink-800 cursor-pointer"
-              >
-                Apply
-              </button>
-              <button
-                onClick={() => {
-                  const t = largeEditorText();
-                  setLargeEditorOpen(false);
-                  if (!t.trim()) return;
-                  setInputPrompt(t);
-                  setTimeout(() => sendPrompt(), 30);
-                }}
-                class="px-5 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-accent-400 cursor-pointer"
-              >
-                Apply & Send
-              </button>
-            </div>
-          </div>
-        </div>
       </Modal>
 
       {/* Modal: File Preview (chatbot FilePreviewModal) */}

@@ -66,7 +66,7 @@ func (t *SearchTool) Schema() json.RawMessage { return json.RawMessage(searchSch
 
 func (t *SearchTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
 	var a SearchArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
+	if err := unmarshalArgs(raw, &a); err != nil {
 		return core.ToolResult{}, fmt.Errorf("invalid args: %w", err)
 	}
 	pattern := a.Pattern

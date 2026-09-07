@@ -30,7 +30,7 @@ func (t *TodoTool) Execute(ctx context.Context, raw json.RawMessage, _ func(stri
 	var req struct {
 		Items []TodoItem `json:"items"`
 	}
-	if err := json.Unmarshal(raw, &req); err != nil {
+	if err := unmarshalArgs(raw, &req); err != nil {
 		return core.ToolResult{}, err
 	}
 	if req.Items == nil || len(req.Items) > 100 {

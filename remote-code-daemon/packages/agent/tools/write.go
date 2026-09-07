@@ -33,7 +33,7 @@ func (t *WriteTool) Schema() json.RawMessage { return json.RawMessage(writeSchem
 
 func (t *WriteTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
 	var a writeArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
+	if err := unmarshalArgs(raw, &a); err != nil {
 		return core.ToolResult{}, fmt.Errorf("invalid args: %w", err)
 	}
 	if a.Path == "" {

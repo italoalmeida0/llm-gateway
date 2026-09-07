@@ -54,7 +54,7 @@ func (t *GitTool) Schema() json.RawMessage { return json.RawMessage(gitSchema) }
 
 func (t *GitTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
 	var a GitArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
+	if err := unmarshalArgs(raw, &a); err != nil {
 		return core.ToolResult{}, fmt.Errorf("invalid args: %w", err)
 	}
 	// Gate: must run inside a git repo, and repo root must be within the jail.

@@ -114,7 +114,7 @@ func (r QuestionRequest) ValidateAnswers(answers [][]string) error {
 
 func (t *QuestionTool) Execute(ctx context.Context, raw json.RawMessage, _ func(string)) (core.ToolResult, error) {
 	var req QuestionRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
+	if err := unmarshalArgs(raw, &req); err != nil {
 		return core.ToolResult{}, err
 	}
 	if err := req.Validate(); err != nil {

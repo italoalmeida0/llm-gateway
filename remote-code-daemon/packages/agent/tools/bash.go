@@ -53,7 +53,7 @@ func (t *BashTool) Schema() json.RawMessage { return json.RawMessage(bashSchema)
 
 func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
 	var a bashArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
+	if err := unmarshalArgs(raw, &a); err != nil {
 		return core.ToolResult{}, fmt.Errorf("invalid args: %w", err)
 	}
 	if strings.TrimSpace(a.Command) == "" {

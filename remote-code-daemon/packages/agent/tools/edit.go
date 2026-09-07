@@ -78,7 +78,7 @@ func (t *EditTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 
 func (t *EditTool) plan(raw json.RawMessage) (editPlan, error) {
 	var a editArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
+	if err := unmarshalArgs(raw, &a); err != nil {
 		return editPlan{}, fmt.Errorf("invalid args: %w", err)
 	}
 	if a.Path == "" {

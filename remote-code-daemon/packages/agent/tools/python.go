@@ -110,7 +110,7 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		return core.ToolResult{}, fmt.Errorf("python tool unavailable: %v", err)
 	}
 	var a PythonArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
+	if err := unmarshalArgs(raw, &a); err != nil {
 		return core.ToolResult{}, err
 	}
 	code := strings.TrimSpace(a.Code)

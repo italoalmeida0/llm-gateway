@@ -42,7 +42,7 @@ func (t *GlobTool) Schema() json.RawMessage { return json.RawMessage(globSchema)
 
 func (t *GlobTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
 	var a globArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
+	if err := unmarshalArgs(raw, &a); err != nil {
 		return core.ToolResult{}, fmt.Errorf("invalid args: %w", err)
 	}
 	if strings.TrimSpace(a.Pattern) == "" {

@@ -46,7 +46,7 @@ func (t *ReadTool) Schema() json.RawMessage { return json.RawMessage(readSchema)
 
 func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
 	var a readArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
+	if err := unmarshalArgs(raw, &a); err != nil {
 		return core.ToolResult{}, fmt.Errorf("invalid args: %w", err)
 	}
 	if a.Path == "" {

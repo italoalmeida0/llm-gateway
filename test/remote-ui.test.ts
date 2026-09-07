@@ -5,6 +5,10 @@ import { displayToolArgs, withoutTodoActivity } from "../web/src/remote-code/liv
 import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/remote-code/paths";
 import { buildRenderBlocks, terminalPresentation, toolSummary } from "../web/src/remote-code/transcript";
 import { partitionToolSegs } from "../web/src/remote-code/utils/toolSegs";
+import {
+  appendReasoningDelta, appendTextDelta, appendToolArgsDelta, appendToolResult,
+  cutTail, finishTurn, mergeUsage, normalizeSessionMessages, upsertToolCall,
+} from "../web/src/remote-code/transcript/updaters";
 import type { ChatMessage, ToolUnit } from "../web/src/remote-code/types";
 import { fileIcon } from "../web/src/remote-code/files";
 
@@ -294,5 +298,68 @@ describe("Remote Code tool segments", () => {
   });
   test("empty input yields no segments", () => {
     expect(partitionToolSegs([])).toEqual([]);
+  });
+});
+
+describe("Remote Code transcript updaters", () => {
+  const asst = (blocks: ChatMessage["blocks"], extra?: Partial<ChatMessage>): ChatMessage => ({
+    id: "a1", role: "assistant", blocks, time: 0, ...extra,
+  });
+  test("appendTextDelta merges into trailing text or opens blocks", () => {
+    expect(appendTextDelta([asst([{ type: "text", text: "hi" }])], "!")[0].blocks).toEqual([{ type: "text", text: "hi!" }]);
+    const afterTool = appendTextDelta([asst([{ type: "tool_call", toolId: "t", toolName: "bash", toolArgs: "" }])], "x");
+    expect(afterTool[0].blocks.length).toBe(2);
+    expect(appendTextDelta([], "x")[0].role).toBe("assistant");
+  });
+  test("appendReasoningDelta merges panels and keeps them on top", () => {
+    const merged = appendReasoningDelta(
+      [asst([{ type: "text", text: "done" }, { type: "reasoning", reasoning: "a" }])], "b");
+    expect(merged[0].blocks[0]).toEqual({ type: "reasoning", reasoning: "ab" });
+    const fresh = appendReasoningDelta([asst([{ type: "text", text: "done" }])], "b");
+    expect(fresh[0].blocks[0]).toEqual({ type: "reasoning", reasoning: "b" });
+  });
+  test("upsertToolCall finalizes pre-created cards, appends otherwise", () => {
+    const pre = [asst([{ type: "tool_call", toolId: "t", toolName: "", toolArgs: "" }])];
+    const done = upsertToolCall(pre, "t", "bash", { command: "ls" });
+    expect(done[0].blocks[0].toolName).toBe("bash");
+    expect(done[0].blocks[0].toolArgs).toContain("ls");
+    const added = upsertToolCall([asst([{ type: "text", text: "x" }])], "u", "read", { path: "f" });
+    expect(added[0].blocks.length).toBe(2);
+    expect(appendToolArgsDelta(pre, "missing", "zzz")).toBe(pre);
+  });
+  test("appendToolResult carries duration only with startedAt", () => {
+    const withStart = appendToolResult([], "t", "ok", false, 100, 5)[0].blocks[0];
+    expect(withStart.toolDurationMs).toBe(5);
+    const withoutStart = appendToolResult([], "t", "ok")[0].blocks[0];
+    expect(withoutStart.toolDurationMs).toBeUndefined();
+  });
+  test("cutTail drops messages past the raw keep index", () => {
+    const list = [asst([], { srcIdx: 1 }), asst([], { srcIdx: 3 }), asst([], { srcIdx: 5 })];
+    expect(cutTail(list, 3).length).toBe(2);
+    expect(cutTail(list, 9)).toBe(list);
+  });
+  test("mergeUsage keeps previous buckets when the payload omits them", () => {
+    const prev = { s: { inTok: 1, outTok: 2, cacheTok: 3, reasoningTok: 4, costUsd: 5 } };
+    const next = mergeUsage(prev, "s", { output_tokens: 9 }, null);
+    expect(next.s).toEqual({ inTok: 1, outTok: 9, cacheTok: 0, reasoningTok: 4, costUsd: 5 });
+    expect(mergeUsage(prev, "", {}, null)).toBe(prev);
+  });
+  test("normalizeSessionMessages hoists tool results and drops image mirrors", () => {
+    const raw = [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "read", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "bytes" }] },
+    ];
+    const out = normalizeSessionMessages(raw);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(out[1].blocks.some((b) => b.type === "tool_result")).toBe(true);
+    expect(out[1].srcIdx).toBe(1);
+  });
+  test("finishTurn closes open turns, keeps the rest", () => {
+    const open = finishTurn({ startedAt: 1, status: "running" });
+    expect(open?.status).toBe("completed");
+    expect(typeof open?.endedAt).toBe("number");
+    expect(finishTurn({ startedAt: 1, endedAt: 2, status: "completed" })?.endedAt).toBe(2);
+    expect(finishTurn(null)).toBeNull();
   });
 });

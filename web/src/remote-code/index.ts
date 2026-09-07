@@ -10,3 +10,10 @@ export { createDataLayer } from "./store/sessions";
 export type { RcProject, RcSession } from "./store/sessions";
 export { buildRenderBlocks, toolSummary, terminalPresentation, baseNameOf, diffStat } from "./transcript";
 export type { ToolSummary } from "./transcript";
+export {
+  normalizeSessionMessages, mergeUsage, appendTextDelta, appendReasoningDelta,
+  upsertToolCall, appendToolArgsDelta, appendToolResult, stampDuration,
+  cutTail, mergeAssistantMessage, pushAssistantCarrier, finishTurn,
+} from "./transcript/updaters";
+export { partitionToolSegs } from "./utils/toolSegs";
+export type { ToolSeg } from "./utils/toolSegs";

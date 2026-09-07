@@ -66,6 +66,56 @@ export interface ToolSummary {
   statDel?: number;
 }
 
+function isCleanQuestionLabel(text: any): boolean {
+  if (typeof text !== "string") return false;
+  const t = text.trim();
+  if (!t) return false;
+  if (t.startsWith("[") || t.startsWith("{") || t.includes('"header"') || t.includes('"options"') || t.includes('{"')) {
+    return false;
+  }
+  return true;
+}
+
+function extractQuestionItems(args: any): any[] {
+  if (!args) return [];
+  if (Array.isArray(args)) return args;
+
+  const raw = args.questions ?? args.question;
+  if (!raw) return [];
+
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) return parsed;
+        if (parsed && typeof parsed === "object") {
+          return Array.isArray(parsed.questions)
+            ? parsed.questions
+            : Array.isArray(parsed.question)
+              ? parsed.question
+              : [parsed];
+        }
+      } catch {
+        return [];
+      }
+    }
+    if (isCleanQuestionLabel(trimmed)) {
+      return [{ question: trimmed }];
+    }
+    return [];
+  }
+
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "object") {
+    if (Array.isArray(raw.questions)) return raw.questions;
+    if (Array.isArray(raw.question)) return raw.question;
+    return [raw];
+  }
+
+  return [];
+}
+
 /** One-line Antigravity-style summary for a tool unit. */
 export function toolSummary(u: ToolUnit): ToolSummary {
   const name = u.call?.toolName || "tool";
@@ -73,22 +123,13 @@ export function toolSummary(u: ToolUnit): ToolSummary {
   const res = u.result?.toolResult || "";
   switch (name) {
     case "question": {
-      let qList: any[] = [];
-      if (Array.isArray(args?.questions)) {
-        qList = args.questions;
-      } else if (Array.isArray(args?.question)) {
-        qList = args.question;
-      } else if (args?.questions && typeof args.questions === "object") {
-        qList = [args.questions];
-      } else if (args?.question && typeof args.question === "object") {
-        qList = [args.question];
-      } else if (typeof args?.questions === "string" && args.questions.trim()) {
-        qList = [{ question: args.questions.trim() }];
-      } else if (typeof args?.question === "string" && args.question.trim()) {
-        qList = [{ question: args.question.trim() }];
-      }
+      const qList = extractQuestionItems(args);
       const targets = qList
-        .map((q: any) => (typeof q === "string" ? q.trim() : (q?.header || q?.question || "")).toString().trim())
+        .map((q: any) => {
+          if (typeof q === "string") return isCleanQuestionLabel(q) ? q.trim() : "";
+          const label = q?.header || q?.question || "";
+          return isCleanQuestionLabel(label) ? label.trim() : "";
+        })
         .filter(Boolean);
       return {
         icon: "lucide:message-circle",

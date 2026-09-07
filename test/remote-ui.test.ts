@@ -202,20 +202,20 @@ describe("Remote Code toolSummary", () => {
 
     // Stringified JSON questions field (parses inner JSON and extracts header)
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "10", toolName: "question", toolArgs: JSON.stringify({ questions: JSON.stringify([{ header: "Ficheiro", question: "Qual arquivo?", options: [] }]) }) },
+      call: { type: "tool_call", toolId: "10", toolName: "question", toolArgs: JSON.stringify({ questions: JSON.stringify([{ header: "File", question: "Which file?", options: [] }]) }) },
       result: { type: "tool_result", toolId: "10", toolResult: "ok" }
-    })).toEqual({ icon: "lucide:message-circle", verb: "Asked", target: "Ficheiro" });
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asked", target: "File" });
 
     // Truncated / malformed inner JSON string falls back cleanly to "Questions" (never raw JSON)
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "11", toolName: "question", toolArgs: JSON.stringify({ questions: '[{"header": "Ficheiro", "options": [{"label": ' }) },
+      call: { type: "tool_call", toolId: "11", toolName: "question", toolArgs: JSON.stringify({ questions: '[{"header": "File", "options": [{"label": ' }) },
       result: { type: "tool_result", toolId: "11", toolResult: "ok" }
     })).toEqual({ icon: "lucide:message-circle", verb: "Asked", target: "Questions" });
 
     // Top-level array of questions
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "12", toolName: "question", toolArgs: JSON.stringify([{ header: "Destino", question: "Qual pasta?" }]) }
-    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Destino" });
+      call: { type: "tool_call", toolId: "12", toolName: "question", toolArgs: JSON.stringify([{ header: "Destination", question: "Which folder?" }]) }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Destination" });
 
     // Empty or malformed arguments
     expect(toolSummary({

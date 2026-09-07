@@ -2,8 +2,8 @@ import { createSignal, onCleanup } from "solid-js";
 
 export type NoticeKind = "ok" | "err";
 
-/** Toast/notice efémero da página (extraído de RemoteCodePage sem
- * mudança de comportamento). */
+/** Ephemeral page toast/notice (extracted from RemoteCodePage without
+ * behavioral changes). */
 export function createNotice() {
   const [appNotice, setAppNotice] = createSignal<{ message: string; kind: NoticeKind } | null>(null);
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;

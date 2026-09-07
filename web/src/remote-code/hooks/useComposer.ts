@@ -6,8 +6,8 @@ import type { ChatMessage } from "../types";
 import type { PendingAttachment } from "../viewTypes";
 import type { Transcript } from "./useTranscript";
 
-/** Composer: prompt, anexos, slash palette e envio (extraído de
- * RemoteCodePage verbatim — colaboradores por params). */
+/** Composer: prompt, attachments, slash palette, and sending (extracted
+ * verbatim from RemoteCodePage — collaborators via params). */
 export function createComposer(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
@@ -27,9 +27,9 @@ export function createComposer(opts: {
     setActiveModel: (v: string) => void;
     setEffort: (v: string) => void;
   };
-  /** /clear: a página abre um draft novo. */
+  /** /clear: the page opens a fresh draft. */
   onClearConversation: () => void;
-  /** Sem sessão: a página cria uma no projeto ativo. */
+  /** No session: the page creates one in the active project. */
   onBeginConversation: () => void;
   isCreatingSession: () => boolean;
 }) {
@@ -37,8 +37,8 @@ export function createComposer(opts: {
   const [pendingAttachments, setPendingAttachments] = createSignal<PendingAttachment[]>([]);
   const uploadWaiters = new Map<string, { ok: (id: string) => void; fail: (msg: string) => void }>();
 
-  // Menus do composer (âncoras addBtn/filesBtn vivem na página, como antes —
-  // ref={ctx.x} copia o valor, sempre undefined; semântica preservada).
+  // Composer menus (addBtn/filesBtn anchors live on the page, as before —
+  // ref={ctx.x} copies the value, always undefined; semantics preserved).
   const [addContextOpen, setAddContextOpen] = createSignal(false);
   const [filesMenuOpen, setFilesMenuOpen] = createSignal(false);
 
@@ -215,7 +215,7 @@ export function createComposer(opts: {
     });
   }
 
-  /** Resolve um upload pendente (ack do daemon via dispatcher da página). */
+  /** Resolves a pending upload (daemon ack via page dispatcher). */
   function noteAttachmentUploaded(requestId: string | undefined, attachment: { id: string; name: string }) {
     setPendingAttachments((prev) =>
       prev.map((p) =>

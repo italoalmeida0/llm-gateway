@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
 import { escapeHtml, highlightCode } from "../utils/lang";
+import { recordToolScroll, restoreToolScroll } from "../utils/scrollMemory";
 
 export { ShellCmd } from "./code/ShellCmd";
 export { DiffView } from "./code/DiffView";
@@ -28,7 +29,9 @@ export function CodeBlock(props: {
   language?: string;
   bare?: boolean;
   maxH?: string;
+  scrollKey?: string;
 }) {
+  let containerRef: HTMLDivElement | null = null;
   const [rows, setRows] = createSignal<CodeRow[] | null>(null);
   const [rawHtml, setRawHtml] = createSignal<string | null>(null);
 
@@ -39,17 +42,21 @@ export function CodeBlock(props: {
   createEffect(() => {
     const text = clean();
     const lang = props.language;
-    setRows(null);
-    setRawHtml(null);
     let cancelled = false;
 
     if (!hasGutter()) {
       void highlightCode(text, lang)
         .then((h) => {
-          if (!cancelled) setRawHtml(h);
+          if (!cancelled) {
+            setRawHtml(h);
+            requestAnimationFrame(() => restoreToolScroll(props.scrollKey, containerRef));
+          }
         })
         .catch(() => {
-          if (!cancelled) setRawHtml(escapeHtml(text));
+          if (!cancelled) {
+            setRawHtml(escapeHtml(text));
+            requestAnimationFrame(() => restoreToolScroll(props.scrollKey, containerRef));
+          }
         });
       return;
     }
@@ -75,6 +82,7 @@ export function CodeBlock(props: {
             html: htmlLines[i] || escapeHtml(p.code),
           })),
         );
+        requestAnimationFrame(() => restoreToolScroll(props.scrollKey, containerRef));
       })
       .catch(() => {
         if (cancelled) return;
@@ -85,6 +93,7 @@ export function CodeBlock(props: {
             html: escapeHtml(p.code),
           })),
         );
+        requestAnimationFrame(() => restoreToolScroll(props.scrollKey, containerRef));
       });
 
     onCleanup(() => {
@@ -94,6 +103,12 @@ export function CodeBlock(props: {
 
   return (
     <div
+      ref={(el) => {
+        containerRef = el;
+        restoreToolScroll(props.scrollKey, el);
+        requestAnimationFrame(() => restoreToolScroll(props.scrollKey, el));
+      }}
+      onScroll={(e) => recordToolScroll(props.scrollKey, e.currentTarget)}
       class={`font-mono text-[11px] text-ink-300 overflow-x-auto select-text ${
         props.maxH || "max-h-56"
       }`}

@@ -2,15 +2,15 @@ import { parseContentBlocks, prettyArgs } from "../utils/wire";
 import type { ChatMessage, ContentBlock, SessionUsage } from "../types";
 import type { TurnActivity } from "../viewTypes";
 
-/** Redutores puros do transcript (extraídos de RemoteCodePage verbatim,
- * sem dependência Solid — cobertos por testes). Cada função recebe a lista
- * anterior e devolve a próxima; o hook/threading Solid vive em useTranscript. */
+/** Pure transcript reducers (extracted verbatim from RemoteCodePage,
+ * with no Solid dependency — covered by tests). Each function receives the
+ * previous list and returns the next; Solid hook/threading lives in useTranscript. */
 
 const TOOLS_IMAGE_MARKER = "Tool output included the following image content:";
 
-/** Normaliza o transcript bruto do daemon em bolhas renderizáveis: tool
- * results são içados para o carrier assistant (com srcIdx para as ops
- * edit/delete/regenerate), envelopes "tool" nunca viram bolha. */
+/** Normalizes the raw daemon transcript into renderable bubbles: tool
+ * results are hoisted onto the assistant carrier (with srcIdx for
+ * edit/delete/regenerate ops); "tool" envelopes never become a bubble. */
 export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
   const out: ChatMessage[] = [];
   let carrier: ChatMessage | null = null;
@@ -38,7 +38,7 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
       const reason: ContentBlock[] = [];
       const rest: ContentBlock[] = [];
       for (const b of blocks) (b.type === "reasoning" ? reason : rest).push(b);
-      // Thinkings mais novos primeiro: o último reasoning do turno fica no topo.
+      // Newest thoughts first: the turn's last reasoning stays at the top.
       reason.reverse();
       const msg: ChatMessage = {
         id: `msg_${idx}`,
@@ -91,7 +91,7 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
   return out;
 }
 
-/** Acumula usage (cumulativo vence) sem perder buckets anteriores. */
+/** Accumulates usage (cumulative wins) without losing previous buckets. */
 export function mergeUsage(
   prev: Record<string, SessionUsage>,
   sessionId: string,
@@ -113,7 +113,7 @@ export function mergeUsage(
   };
 }
 
-/** Junta um delta de texto ao último bloco de texto do assistant vivo. */
+/** Appends a text delta to the last text block of the active assistant. */
 export function appendTextDelta(prev: ChatMessage[], delta: string): ChatMessage[] {
   const last = prev[prev.length - 1];
   if (last && last.role === "assistant") {
@@ -140,9 +140,9 @@ export function appendTextDelta(prev: ChatMessage[], delta: string): ChatMessage
   ];
 }
 
-/** Junta um delta de reasoning ao painel de thinking do assistant vivo
- * (merge no painel existente, que fica no topo; painel novo vai à frente
- * para a vista live já condizer com o refresh normalizado). */
+/** Appends a reasoning delta to the active assistant's thinking panel
+ * (merges into the existing panel, which stays on top; new panel goes in front
+ * so the live view matches the normalized refresh). */
 export function appendReasoningDelta(prev: ChatMessage[], delta: string): ChatMessage[] {
   const last = prev[prev.length - 1];
   if (last && last.role === "assistant") {
@@ -177,7 +177,7 @@ export function appendReasoningDelta(prev: ChatMessage[], delta: string): ChatMe
   ];
 }
 
-/** Upsert de tool_call: tool_use_start pré-cria o cartão, tool_call finaliza. */
+/** Upsert of tool_call: tool_use_start pre-creates the card, tool_call finalizes it. */
 export function upsertToolCall(prev: ChatMessage[], callId: string, name: string, args: any): ChatMessage[] {
   const argsStr = prettyArgs(args);
   for (let i = prev.length - 1; i >= 0; i--) {
@@ -218,7 +218,7 @@ export function upsertToolCall(prev: ChatMessage[], callId: string, name: string
   ];
 }
 
-/** Junta args em streaming ao tool_call existente (sem cartão: sem-op). */
+/** Appends streaming args to the existing tool_call (without card: no-op). */
 export function appendToolArgsDelta(prev: ChatMessage[], callId: string, delta: string): ChatMessage[] {
   for (let i = prev.length - 1; i >= 0; i--) {
     const m = prev[i];
@@ -236,7 +236,7 @@ export function appendToolArgsDelta(prev: ChatMessage[], callId: string, delta: 
   return prev;
 }
 
-/** Anexa o tool_result ao assistant vivo (ou abre carrier novo). */
+/** Appends tool_result to the active assistant (or opens a new carrier). */
 export function appendToolResult(
   prev: ChatMessage[],
   callId: string,
@@ -272,7 +272,7 @@ export function appendToolResult(
   ];
 }
 
-/** Carimba a duração do thinking no assistant mais recente. */
+/** Stamps thinking duration onto the most recent assistant. */
 export function stampDuration(prev: ChatMessage[], dur: number): ChatMessage[] {
   for (let i = prev.length - 1; i >= 0; i--) {
     if (prev[i].role === "assistant") {
@@ -283,15 +283,15 @@ export function stampDuration(prev: ChatMessage[], dur: number): ChatMessage[] {
   return prev;
 }
 
-/** Corte otimista da cauda renderizada (edit/regenerate): descarta
- * mensagens com srcIdx além do índice bruto mantido. */
+/** Optimistic cut of the rendered tail (edit/regenerate): discards
+ * messages with srcIdx beyond the retained raw index. */
 export function cutTail(prev: ChatMessage[], keepRawIdx: number): ChatMessage[] {
   const cut = prev.findIndex((m) => (m.srcIdx ?? -1) > keepRawIdx);
   return cut < 0 ? prev : prev.slice(0, cut);
 }
 
-/** Merge de assistant_message: funde no último assistant ou abre bolha
- * (reasoning primeiro — mais novo no topo —, duração do thinking preservada). */
+/** Merges assistant_message: merges into the last assistant or opens a bubble
+ * (reasoning first — newest on top —, thinking duration preserved). */
 export function mergeAssistantMessage(prev: ChatMessage[], ev: any): ChatMessage[] {
   const blocks = parseContentBlocks(ev.message);
   const reason = blocks.filter((b) => b.type === "reasoning").reverse();
@@ -309,8 +309,8 @@ export function mergeAssistantMessage(prev: ChatMessage[], ev: any): ChatMessage
   return last?.role === "assistant" ? [...prev.slice(0, -1), message] : [...prev, message];
 }
 
-/** Novo carrier vazio por model step (loops de tools não fundem thinking
- * novo na resposta assistant anterior). */
+/** New empty carrier per model step (tool loops do not merge new
+ * thinking into the previous assistant response). */
 export function pushAssistantCarrier(prev: ChatMessage[]): ChatMessage[] {
   return [...prev, {
     id: `asst_${crypto.randomUUID()}`,
@@ -320,7 +320,7 @@ export function pushAssistantCarrier(prev: ChatMessage[]): ChatMessage[] {
   }];
 }
 
-/** Transição do turn ao ficar idle (fim de turno sem endedAt). */
+/** Turn transition when becoming idle (turn end without endedAt). */
 export function finishTurn(turn: TurnActivity | null): TurnActivity | null {
   return turn && !turn.endedAt
     ? {

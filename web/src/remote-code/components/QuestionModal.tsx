@@ -7,7 +7,7 @@ export interface PendingQuestion {
   questions: {header:string; question:string; options:{label:string; description?:string}[]; multiple?:boolean; custom?:boolean; recommend?:string; decideLater?:boolean}[];
 }
 
-const DELEGATE_LABEL = "Decide later (faz o que achar melhor)";
+const DELEGATE_LABEL = "Decide later (do whatever you think is best)";
 
 /** One request stays mounted across live snapshots so typed answers survive. */
 export function QuestionPanel(props: {

@@ -5,8 +5,8 @@ import { formatEffort } from "../utils/format";
 import type { GatewayModel } from "../context";
 
 /** Session choices, also remembered by the daemon for the next draft.
- * (Extraído de RemoteCodePage.modelPickerBody verbatim — props estreitas
- * em vez do god-ctx; Fase 3 liga direto no ToolbarModel.) */
+ * (Extracted verbatim from RemoteCodePage.modelPickerBody — narrow props
+ * instead of the god-ctx; Phase 3 connects directly to ToolbarModel.) */
 export function ModelPickerBody(props: {
   models: () => GatewayModel[];
   filtered: () => GatewayModel[];

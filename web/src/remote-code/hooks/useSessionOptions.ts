@@ -1,8 +1,8 @@
 import type { DaemonCommand } from "../daemon-protocol";
 import { createSignal } from "solid-js";
 
-/** Opções de sessão (model/effort/mode/skills/access) + reconciliação com o
- * daemon (extraído de RemoteCodePage verbatim). */
+/** Session options (model/effort/mode/skills/access) + reconciliation with the
+ * daemon (extracted verbatim from RemoteCodePage). */
 export function createSessionOptions(opts: {
   send: (payload: DaemonCommand) => void;
   getSessionId: () => string;
@@ -35,8 +35,8 @@ export function createSessionOptions(opts: {
     setYoloMode(options?.access !== "ask");
   }
 
-  /** Reconcilia a seleção vinda do daemon (session_data): acks de configure
-   * mais antigos não esmagam uma escolha local mais recente. */
+  /** Reconciles server selection from daemon (session_data): older configure
+   * acks do not overwrite a newer local choice. */
   function reconcileServerSelection(sid: string, model: string | undefined, options: any, knownModelIds: string[], fallbackModelId: string) {
     // Older configure acknowledgements must not overwrite a newer choice
     // while multiple changes are travelling to/from the daemon.
@@ -48,12 +48,12 @@ export function createSessionOptions(opts: {
     }
   }
 
-  /** Troca de sessão/host: esquece escolhas locais pendentes. */
+  /** Session/host switch: forgets pending local choices. */
   function resetPending() {
     lastLocalSelection = undefined;
     pendingSessionChoice = undefined;
   }
-  /** Socket fechado: esquece só o ack pendente (a seleção local sobrevive). */
+  /** Closed socket: forgets only the pending ack (local selection survives). */
   function resetPendingChoice() {
     pendingSessionChoice = undefined;
   }

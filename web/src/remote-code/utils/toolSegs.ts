@@ -1,10 +1,10 @@
 import { toolCatOf } from "./tools";
 import type { ToolUnit } from "../types";
 
-/** Um segmento dentro do cartão agregado de tools: ou um grupo colapsável
- * (≥2 calls consecutivas de explore/command da mesma categoria) ou uma
- * unit isolada. Extração pura de `renderToolSegs` (TranscriptBlocks) —
- * sem dependência Solid, coberta por testes. */
+/** A segment inside the aggregated tools card: either a collapsible group
+ * (≥2 consecutive explore/command calls in the same category) or an
+ * isolated unit. Pure extraction from `renderToolSegs` (TranscriptBlocks) —
+ * no Solid dependency, covered by tests. */
 export type ToolSeg =
   | { kind: "group"; cat: "explore" | "command"; units: ToolUnit[] }
   | { kind: "unit"; unit: ToolUnit; idx: number };

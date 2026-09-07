@@ -48,7 +48,7 @@ export function SessionStopButton(props: {
   );
 }
 
-/** Linha de sessão da sidebar (row completa com rename inline + hover actions). */
+/** Sidebar session line (full row with inline rename + hover actions). */
 export interface SessionRowCtx {
   activeSessionId: () => string | null;
   selectedSessions: () => Set<string>;

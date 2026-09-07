@@ -1,8 +1,8 @@
 import type { JSX } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 
-/** Item de menu partilhado dos popovers FloatMenu (mesma classe em todos os
- * menus de contexto/ficheiros/sidebars — extraído para um só sítio). */
+/** Shared menu item for FloatMenu popovers (same class across all
+ * context/file/sidebar menus — extracted to a single place). */
 export function MenuItem(props: {
   icon?: string;
   iconSize?: number;

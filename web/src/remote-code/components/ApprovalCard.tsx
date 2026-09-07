@@ -4,8 +4,8 @@ import { FileIcon } from "../presentation";
 import { tryParseArgs } from "../utils/tools";
 import type { PendingApproval } from "../types";
 
-/** Cartão de aprovação de tool call (extraído de TranscriptView sem
- * mudança visual — props estreitas em vez do god-ctx). */
+/** Tool call approval card (extracted from TranscriptView without
+ * visual changes — narrow props instead of the god-ctx). */
 export interface ApprovalCardProps {
   pendingApproval: () => PendingApproval | null;
   convWidthClass: () => string;

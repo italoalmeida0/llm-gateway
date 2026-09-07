@@ -3,7 +3,7 @@ import { createEffect, createSignal } from "solid-js";
 import type { AgentSettings, MCPServerConfig, SkillConfig } from "../types";
 import type { RcConfig } from "../store/sessions";
 
-/** Configuração do agente + MCP + skills (extraído de RemoteCodePage verbatim). */
+/** Agent configuration + MCP + skills (extracted verbatim from RemoteCodePage). */
 export function createSettings(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;

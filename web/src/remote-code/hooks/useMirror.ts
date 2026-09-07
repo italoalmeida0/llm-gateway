@@ -4,8 +4,8 @@ import type { DaemonCommand } from "../daemon-protocol";
 import { projectsByActivity } from "../paths";
 import type { Project, SessionSummary } from "../types";
 
-/** Espelho SignalDB (sessions/projects/config por host). A página nunca é
- * dona destes dados — o daemon é (extraído de RemoteCodePage verbatim). */
+/** SignalDB mirror (sessions/projects/config per host). The page never
+ * owns this data — the daemon does (extracted verbatim from RemoteCodePage). */
 export function createMirror(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
@@ -19,10 +19,10 @@ export function createMirror(opts: {
     const hid = opts.getHostId();
     return hid ? dataLayer.storeFor(hid) : null;
   });
-  // Ordenação memoizada por identidade rasa: os memos Solid comparam por
-  // === e os pings de change chegam à escala de keystrokes — devolver a
-  // mesma referência quando nada mudou (mesmos ids+updatedAt) evita
-  // recomputar toda a cadeia (sidebar, contadores, default effects).
+  // Memoized sorting by shallow identity: Solid memos compare by
+  // === and change pings arrive at keystroke frequency — returning the
+  // same reference when nothing changed (same ids+updatedAt) avoids
+  // recomputing the whole chain (sidebar, counters, default effects).
   let prevSessions: SessionSummary[] | null = null;
   let prevSessionsHid = "";
   const sessions = createMemo<SessionSummary[]>(() => {

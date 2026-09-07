@@ -24,7 +24,7 @@ type Question struct {
 	// Recommend marks the suggested option label (rendered first with
 	// "(Recommended)" suffix when the caller doesn't pre-order options).
 	Recommend string `json:"recommend,omitempty"`
-	// DecideLater adds a "Decide later / faz o que achar melhor" escape
+	// DecideLater adds a "Decide later (do whatever you think is best)" escape
 	// hatch: the user delegates the decision instead of answering.
 	DecideLater bool `json:"decideLater,omitempty"`
 }
@@ -74,7 +74,7 @@ func (r QuestionRequest) Validate() error {
 
 // delegateLabel is the escape-hatch answer recorded when the user picks
 // "decide later" — the agent proceeds with its own judgment.
-const delegateLabel = "Decide later (faz o que achar melhor)"
+const delegateLabel = "Decide later (do whatever you think is best)"
 
 func (r QuestionRequest) ValidateAnswers(answers [][]string) error {
 	if len(answers) != len(r.Questions) {

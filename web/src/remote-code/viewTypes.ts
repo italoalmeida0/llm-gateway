@@ -1,4 +1,4 @@
-/** Tipos de vista locais da página RemoteCode (estado efémero, não-wire). */
+/** Local view types for the RemoteCode page (ephemeral state, non-wire). */
 
 export interface TurnActivity {
   startedAt: number;

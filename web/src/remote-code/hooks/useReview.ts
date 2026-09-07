@@ -4,8 +4,8 @@ import type { PreviewFile } from "../types";
 import type { AttachmentDataEvent, ChangesUpdatedEvent, SessionChangesEvent } from "../daemon-protocol";
 import type { Review, StoredAttachment } from "../viewTypes";
 
-/** Review de changes + preview de ficheiros + anexos da sessão (extraído
- * de RemoteCodePage verbatim — colaboradores por params). */
+/** Review of changes + file preview + session attachments (extracted
+ * verbatim from RemoteCodePage — collaborators via params). */
 export function createReview(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
@@ -49,7 +49,7 @@ export function createReview(opts: {
     opts.send({ type: "undo_changes", sessionId: opts.getSessionId(), reviewId: review.id, path, detail: reviewOpen(), requestId: reviewRequestId });
   }
 
-  /** Evento session_changes (com guarda de sessão/requestId). */
+  /** session_changes event (with session/requestId guard). */
   function noteSessionChanges(msg: SessionChangesEvent) {
     if (msg.sessionId !== opts.getSessionId() || (msg.requestId && msg.requestId !== reviewRequestId)) return;
     if (msg.requestId) setReviewLoading(false);

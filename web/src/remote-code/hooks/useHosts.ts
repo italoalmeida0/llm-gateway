@@ -1,11 +1,11 @@
 import { createMemo, createSignal } from "solid-js";
 import { api, type RemoteHostDto } from "../../api";
 
-/** Hosts + pairing indireto (extraído de RemoteCodePage verbatim). */
+/** Hosts + indirect pairing (extracted verbatim from RemoteCodePage). */
 export function createHosts(opts: {
   toast: (message: string, kind?: "ok" | "err") => void;
   showConfirm: (o: { title?: string; message?: string; confirmText?: string; cancelText?: string; danger?: boolean }) => Promise<boolean>;
-  /** Após remoção bem-sucedida: a página liberta o espelho do host. */
+  /** After successful removal: the page releases the host mirror. */
   onHostRemoved?: (id: string) => void;
 }) {
   const [hosts, setHosts] = createSignal<RemoteHostDto[]>([]);

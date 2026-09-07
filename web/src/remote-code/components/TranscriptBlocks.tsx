@@ -248,6 +248,7 @@ export function renderSeriesLead(ctx: TranscriptRenderCtx, series: RenderBlockSe
     return entry.msg.thinkingDuration !== undefined ? `${entry.msg.thinkingDuration}s` : "—";
   };
   const maxDurLen = createMemo(() => Math.max(3, ...thoughts().map((e) => entryDuration(e).length)));
+  const displayThoughts = createMemo(() => thoughts().slice().reverse());
   return <div class="w-full space-y-2.5">
     <Show when={ctx.verboseChat() && thoughts().length}>
       <Show when={thoughts().length > 1} fallback={<For each={thoughts()}>{(entry) => renderThinkingBlock(ctx, entry.msg, entry.block, entry.nth)}</For>}>
@@ -256,7 +257,7 @@ export function renderSeriesLead(ctx: TranscriptRenderCtx, series: RenderBlockSe
             <Iconify icon="lucide:bot" size={14} /><span>Thinking</span><Iconify icon="lucide:chevron-down" size={12} class={open() ? "rotate-180" : ""} />
           </button>
           <Show when={open()}><ol class="mt-2 max-h-64 overflow-y-auto [scrollbar-gutter:stable] space-y-3 text-xs text-ink-400 leading-relaxed">
-            <For each={thoughts()}>{(entry) => <li class="flex gap-3 items-start">
+            <For each={displayThoughts()}>{(entry) => <li class="flex gap-3 items-start">
               <span class="w-10 shrink-0 text-right tabular-nums font-mono whitespace-pre text-ink-500">{entryDuration(entry).padStart(maxDurLen(), " ")}</span>
               <span class="pl-3 border-l border-line whitespace-pre-wrap break-words min-w-0">{entry.block.reasoning}</span>
             </li>}</For>
@@ -283,7 +284,7 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
   const segKey = (seg: ToolSeg) =>
     seg.kind === "unit"
       ? `u:${seg.unit.call?.toolId || seg.unit.result?.toolId || "i" + seg.idx}`
-      : `g:${seg.cat}:${seg.units.map((u) => u.call?.toolId || u.result?.toolId || "?").join(",")}`;
+      : `g:${seg.cat}:${seg.units[0]?.call?.toolId || seg.units[0]?.result?.toolId || "0"}`;
   return (
     <div class="w-full space-y-0.5" style={{ "overflow-anchor": "none" }}>
       <For each={segs}>

@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
 import { escapeHtml, highlightCode, languageForPath } from "../../utils/lang";
+import { recordToolScroll, restoreToolScroll } from "../../utils/scrollMemory";
 
 /**
  * Renders a unified context diff (daemon edit results). Diff marker lines
@@ -55,7 +56,8 @@ export function parseDiffLine(line: string): {
  * the line BODY is syntax-highlighted per the file extension without marker/number
  * interference.
  */
-export function DiffView(props: { text: string; max?: number; name?: string }) {
+export function DiffView(props: { text: string; max?: number; name?: string; scrollKey?: string }) {
+  let containerRef: HTMLDivElement | null = null;
   const [expanded, setExpanded] = createSignal(false);
   const [rows, setRows] = createSignal<DiffRow[] | null>(null);
   const lines = () =>
@@ -72,7 +74,6 @@ export function DiffView(props: { text: string; max?: number; name?: string }) {
   createEffect(() => {
     const currentLines = shown();
     const lang = languageForPath(props.name);
-    setRows(null);
     let cancelled = false;
 
     const parsed = currentLines.map(parseDiffLine);
@@ -93,7 +94,10 @@ export function DiffView(props: { text: string; max?: number; name?: string }) {
         };
       }),
     ).then((result) => {
-      if (!cancelled) setRows(result);
+      if (!cancelled) {
+        setRows(result);
+        requestAnimationFrame(() => restoreToolScroll(props.scrollKey, containerRef));
+      }
     }).catch(() => {
       if (!cancelled) {
         setRows(
@@ -105,6 +109,7 @@ export function DiffView(props: { text: string; max?: number; name?: string }) {
             kind: p.kind,
           })),
         );
+        requestAnimationFrame(() => restoreToolScroll(props.scrollKey, containerRef));
       }
     });
 
@@ -116,7 +121,15 @@ export function DiffView(props: { text: string; max?: number; name?: string }) {
   const hasGutter = () => shown().some((l) => /^\d+:/.test(l));
 
   return (
-    <div class="font-mono text-[11px] leading-relaxed overflow-x-auto select-text">
+    <div
+      ref={(el) => {
+        containerRef = el;
+        restoreToolScroll(props.scrollKey, el);
+        requestAnimationFrame(() => restoreToolScroll(props.scrollKey, el));
+      }}
+      onScroll={(e) => recordToolScroll(props.scrollKey, e.currentTarget)}
+      class="font-mono text-[11px] leading-relaxed overflow-x-auto select-text"
+    >
       <div class="min-w-full w-fit">
         <Show
           when={rows() !== null}

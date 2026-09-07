@@ -4,8 +4,8 @@ import { projectForDirectory } from "../paths";
 import type { Project, SessionSummary } from "../types";
 import type { FoldersEvent, ProjectCreatedEvent, SearchResultsEvent } from "../daemon-protocol";
 
-/** Projetos, lista de sessões, seleção/bulk, rename e busca (extraído de
- * RemoteCodePage verbatim — colaboradores por params). */
+/** Projects, session list, selection/bulk, rename and search (extracted
+ * verbatim from RemoteCodePage — collaborators via params). */
 export function createProjects(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
@@ -43,7 +43,7 @@ export function createProjects(opts: {
     setActiveProjectId(id);
   }
 
-  // Browser de pastas do host (modal NewProject) + criação.
+  // Host folder browser (NewProject modal) + creation.
   const [folderEntries, setFolderEntries] = createSignal<{ name: string; path: string }[]>([]);
   const [folderParent, setFolderParent] = createSignal("");
   const [folderCurrent, setFolderCurrent] = createSignal("");
@@ -109,7 +109,7 @@ export function createProjects(opts: {
     projectCreationId = crypto.randomUUID();
     opts.send({ type: "create_project", path: "~", requestId: projectCreationId });
   }
-  /** Evento folders (com guarda de requestId). */
+  /** folders event (with requestId guard). */
   function noteFolders(msg: FoldersEvent) {
     if (msg.requestId !== folderRequestId) return;
     setFolderLoading(false);
@@ -119,15 +119,15 @@ export function createProjects(opts: {
     setFolderCurrent(msg.path || "");
     setNewProjectPath(msg.path || "");
   }
-  /** Guarda de requestId para o browser de pastas (dispatcher da página). */
+  /** requestId guard for the folder browser (page dispatcher). */
   function isFolderRequest(requestId: string | undefined) {
     return requestId === folderRequestId;
   }
-  /** Guarda de requestId para create_project (dispatcher da página). */
+  /** requestId guard for create_project (page dispatcher). */
   function isProjectCreation(requestId: string | undefined) {
     return requestId === projectCreationId;
   }
-  /** Evento project_created; devolve o projeto quando é o nosso ack. */
+  /** project_created event; returns the project when it matches our ack. */
   function noteProjectCreated(msg: ProjectCreatedEvent): { id: string; name?: string } | null {
     if (msg.requestId !== projectCreationId) return null;
     const p = msg.project;
@@ -173,7 +173,7 @@ export function createProjects(opts: {
     return sortedSessions(opts.sessions().filter((s) => !projectForDirectory(s.cwd, opts.projects())));
   }
 
-  // Filtro + busca daemon (histórico).
+  // Filter + daemon search (history).
   const [sessionFilter, setSessionFilter] = createSignal<string>("");
   function matchQuery(s: SessionSummary) {
     const q = sessionFilter().toLowerCase().trim();

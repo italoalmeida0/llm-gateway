@@ -1,8 +1,8 @@
 import { Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 
-/** Botão de ação hover do transcript (classes byte-idênticas às inline
- * que estavam duplicadas em TranscriptView para user/assistant). */
+/** Transcript hover action button (byte-identical classes to the inline
+ * ones that were duplicated in TranscriptView for user/assistant). */
 export function MsgIconBtn(props: {
   tip: string;
   icon: string;
@@ -39,7 +39,7 @@ export interface MsgActionState {
   onCopy: () => void;
 }
 
-/** Ações hover das bolhas de user (fork/copy/edit/delete). */
+/** Hover actions for user bubbles (fork/copy/edit/delete). */
 export function UserMsgActions(props: MsgActionState & { onEdit: () => void; onDelete: () => void }) {
   return (
     <div class="flex items-center gap-0.5 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
@@ -53,7 +53,7 @@ export function UserMsgActions(props: MsgActionState & { onEdit: () => void; onD
   );
 }
 
-/** Ações hover das bolhas de assistant (fork/copy/regenerate). */
+/** Hover actions for assistant bubbles (fork/copy/regenerate). */
 export function AssistantMsgActions(props: MsgActionState & { onRegenerate: () => void }) {
   return (
     <div class="flex items-center gap-0.5 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">

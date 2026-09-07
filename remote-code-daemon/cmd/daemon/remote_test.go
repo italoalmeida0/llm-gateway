@@ -42,8 +42,8 @@ func (c titleClient) Stream(_ context.Context, req provider.Request) (<-chan pro
 		c.hook(req)
 	}
 	events := make(chan provider.Event, 3)
-	events <- provider.EventTextDelta{Delta: "Corrigir Interface"}
-	done := provider.EventDone{Message: provider.Message{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: "Corrigir Interface"}}}}
+	events <- provider.EventTextDelta{Delta: "Fix Interface"}
+	done := provider.EventDone{Message: provider.Message{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: "Fix Interface"}}}}
 	if c.failure {
 		done.Err = fmt.Errorf("upstream failed")
 	}
@@ -56,7 +56,7 @@ func TestAutoTitleShortPromptAndManualRename(t *testing.T) {
 	for _, scenario := range []string{"short", "manual", "deleted", "failed"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDaemon(t)
-			rec := &SessionRecord{ID: "s", Title: "oi", TitleSource: "pending", Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "oi"}}}}}
+			rec := &SessionRecord{ID: "s", Title: "hi", TitleSource: "pending", Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "hi"}}}}}
 			act := &ActiveSession{record: rec, gen: 1}
 			d.sessions[rec.ID] = act
 			if err := d.saveSession(rec); err != nil {
@@ -68,7 +68,7 @@ func TestAutoTitleShortPromptAndManualRename(t *testing.T) {
 				}
 				if scenario == "manual" {
 					act.mu.Lock()
-					rec.Title = "Meu título…"
+					rec.Title = "My title…"
 					rec.TitleSource = "manual"
 					act.mu.Unlock()
 				}
@@ -82,11 +82,11 @@ func TestAutoTitleShortPromptAndManualRename(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if stored.Title != "Corrigir Interface" || stored.TitleSource != "generated" {
+				if stored.Title != "Fix Interface" || stored.TitleSource != "generated" {
 					t.Fatalf("title duplicated or not persisted: %+v", stored)
 				}
 			}
-			if scenario == "manual" && rec.Title != "Meu título…" {
+			if scenario == "manual" && rec.Title != "My title…" {
 				t.Fatal("manual rename overwritten")
 			}
 			if scenario == "deleted" {
@@ -94,7 +94,7 @@ func TestAutoTitleShortPromptAndManualRename(t *testing.T) {
 					t.Fatal("deleted session resurrected")
 				}
 			}
-			if scenario == "failed" && rec.Title != "oi" {
+			if scenario == "failed" && rec.Title != "hi" {
 				t.Fatal("failed stream generated a title")
 			}
 		})

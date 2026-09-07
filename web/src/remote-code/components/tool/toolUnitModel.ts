@@ -5,9 +5,9 @@ import { toolRowKey } from "../../utils/titles";
 import type { ToolUnit } from "../../types";
 import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 
-/** Modelo reativo de uma tool row: memos derivados do ToolUnit.
- * Chamado de forma síncrona dentro do componente (mesmo owner Solid),
- * por isso os createMemo pertencem à row e descartam com ela. */
+/** Reactive model of a tool row: memos derived from ToolUnit.
+ * Called synchronously within the component (same Solid owner),
+ * so createMemo instances belong to the row and dispose with it. */
 export function useToolUnitModel(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean) {
 const key = () => toolRowKey(msgId, u, ui);
 const open = () => ctx.toolOpen()[key()] ?? (running && !u.result);
@@ -49,8 +49,8 @@ const elapsed = () => {
 
 export type ToolModel = ReturnType<typeof useToolUnitModel>;
 
-/** Props partilhadas pelas secções de uma tool row (header + bodies). Definida
- * uma única vez aqui; ToolUnitHeader/ToolEditBodies/ToolSearchBodies importam. */
+/** Props shared across sections of a tool row (header + bodies). Defined
+ * once here; imported by ToolUnitHeader/ToolEditBodies/ToolSearchBodies. */
 export interface ToolPartProps {
   ctx: TranscriptRenderCtx;
   msgId: string;

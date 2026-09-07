@@ -1,4 +1,4 @@
-/** Barrel do feature remote-code: página + API pública (tipos, store, utils). */
+/** Barrel for the remote-code feature: page + public API (types, store, utils). */
 export { default } from "./RemoteCodePage";
 export { default as RemoteCodePage } from "./RemoteCodePage";
 export type {

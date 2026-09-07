@@ -4,8 +4,8 @@ import { timeAgo } from "../utils/format";
 import type { SessionSummary } from "../types";
 import type { SearchHit } from "../viewTypes";
 
-/** Vista de histórico de conversas (extraída de TranscriptView sem
- * mudança visual — props estreitas em vez do god-ctx). */
+/** Conversation history view (extracted from TranscriptView without
+ * visual changes — narrow props instead of the god-ctx). */
 export interface HistoryViewProps {
   sessionFilter: () => string;
   setSessionFilter: (v: string) => void;

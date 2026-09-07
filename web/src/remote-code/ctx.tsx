@@ -15,9 +15,9 @@ import type { Settings } from "./hooks/useSettings";
 import type { Notice } from "./hooks/useNotice";
 import { contextDisplay, type GatewayModel } from "./context";
 
-/** Contextos Solid do Remote Code — substituem o god-object
- * RemoteCodeViewCtx (260 campos) por 6 fatias coesas. Cada componente
- * consome só o que usa; a página monta os valores a partir dos hooks. */
+/** Solid contexts for Remote Code — replace the god-object
+ * RemoteCodeViewCtx (260 fields) with 6 cohesive slices. Each component
+ * consumes only what it needs; the page assembles values from hooks. */
 
 export interface HostCtxValue extends Hosts {
   connectionState: Relay["connectionState"];
@@ -122,7 +122,7 @@ export interface RemoteCodeProviderValue {
   ui: UICtxValue;
 }
 
-/** Provedor único montado pela página (valores vêm dos hooks de domínio). */
+/** Single provider mounted by the page (values come from domain hooks). */
 export function RemoteCodeProvider(props: RemoteCodeProviderValue & { children: JSX.Element }) {
   return (
     <HostCtx.Provider value={props.host}>
@@ -139,5 +139,5 @@ export function RemoteCodeProvider(props: RemoteCodeProviderValue & { children: 
   );
 }
 
-// Re-export de tipos usados nas assinaturas acima (evita imports dispersos).
+// Re-export of types used in signatures above (avoids scattered imports).
 export type { GatewayModel, SessionSummary, Project, WorkspaceStatus };

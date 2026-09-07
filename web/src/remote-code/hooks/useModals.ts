@@ -2,8 +2,8 @@ import { createSignal, onCleanup } from "solid-js";
 import { api, type RemotePairDto } from "../../api";
 import type { ChoiceOption, ConfirmState } from "../viewTypes";
 
-/** Modais promise-based (choice/confirm) + pairing (extraídos de
- * RemoteCodePage sem mudança de comportamento). */
+/** Promise-based modals (choice/confirm) + pairing (extracted from
+ * RemoteCodePage without behavioral changes). */
 export function createModals(opts: { toast: (message: string, kind?: "ok" | "err") => void }) {
   // Choice modal: like showConfirm but returns the picked option id
   // (or null on cancel). Used for fork-vs-resend on edit/regenerate.

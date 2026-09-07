@@ -29,9 +29,9 @@ import type {
 } from "../types";
 import type { TodoItem, TurnActivity } from "../viewTypes";
 
-/** Domínio do transcript: mensagens, turn state, thinking, tools live,
- * scroll, render blocks e ops por-mensagem (extraído de RemoteCodePage
- * verbatim — só a origem dos colaboradores muda: vêm por params). */
+/** Transcript domain: messages, turn state, thinking, live tools,
+ * scroll, render blocks, and per-message ops (extracted verbatim from RemoteCodePage —
+ * only the source of collaborators changes: passed via params). */
 export function createTranscript(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
@@ -39,9 +39,9 @@ export function createTranscript(opts: {
   toast: (message: string, kind?: "ok" | "err") => void;
   showChoice: (o: { title: string; message: string; options: { id: string; label: string; hint?: string; primary?: boolean }[] }) => Promise<string | null>;
   showConfirm: (o: { title?: string; message?: string; confirmText?: string; cancelText?: string; danger?: boolean }) => Promise<boolean>;
-  /** Turno ficou idle: a página refresca o review. */
+  /** Turn became idle: the page refreshes the review. */
   onTurnIdle: () => void;
-  /** Contexto vindo em usage: a página compara com o catálogo. */
+  /** Context received in usage: the page compares it with the catalog. */
   onUsageContext: (ctx: SessionContext) => void;
 }) {
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
@@ -183,7 +183,7 @@ export function createTranscript(opts: {
   onCleanup(() => transcriptScroll.dispose());
   function scrollToBottom(force = false) { transcriptScroll.schedule(force); }
 
-  // Render blocks (reconciled store para preservar identidade DOM nos deltas)
+  // Render blocks (reconciled store to preserve DOM identity across deltas)
   const [renderState, setRenderState] = createStore<{ blocks: (RenderBlock & { id: string })[] }>({ blocks: [] });
   createEffect(() => {
     const blocks = buildRenderBlocks(messages()).map((block) => ({ ...block, id: block.msg.id }));
@@ -247,14 +247,14 @@ export function createTranscript(opts: {
     return undefined;
   }
 
-  // --- Busca de sessão (get_session com requestId próprio) ---
+  // --- Session fetch (get_session with dedicated requestId) ---
   let transcriptRequestId = "";
   let initialScrollSession = "";
   function fetchSession(sessionId: string) {
     transcriptRequestId = crypto.randomUUID();
     opts.send({ type: "get_session", sessionId, requestId: transcriptRequestId });
   }
-  /** Marca a sessão cujo próximo snapshot cheio faz scroll inicial. */
+  /** Marks the session whose next full snapshot triggers initial scroll. */
   function beginLoad(sessionId: string) {
     initialScrollSession = sessionId;
   }
@@ -271,8 +271,8 @@ export function createTranscript(opts: {
     setSessionUsage((prev) => mergeUsage(prev, sessionId, u, cum));
   }
 
-  /** Bloco transcript-owned do evento session_data (modelo/opções ficam no
-   * domínio options; workspace no domínio workspace — a página compõe). */
+  /** Transcript-owned block of the session_data event (model/options live in
+   * the options domain; workspace in the workspace domain — the page composes). */
   function applySnapshot(sid: string, r: any) {
     if (r.workspace) setWorkspaceSnapshot(r.workspace);
     setSessionStatus(r.status === "running" ? "running" : "idle");
@@ -290,8 +290,8 @@ export function createTranscript(opts: {
     applySessionContent(sid, r.messages || r.Messages || []);
   }
 
-  // Workspace pontual vindo no snapshot — redirecionado pela página via
-  // setWorkspaceSink (evita o transcript conhecer o domínio workspace).
+  // Point-in-time workspace received in the snapshot — redirected by the page via
+  // setWorkspaceSink (avoids coupling the transcript to the workspace domain).
   let workspaceSink: ((w: any) => void) | null = null;
   function setWorkspaceSink(fn: (w: any) => void) {
     workspaceSink = fn;
@@ -379,8 +379,8 @@ export function createTranscript(opts: {
       title: "Regenerate response?",
       message: "Everything from this point down will be discarded and the turn re-runs from the previous user message.\n\nFork keeps the current timeline in a copy and regenerates there instead.",
       options: [
-        { id: "resend", label: "Discard & regenerate", hint: "Apaga a cauda e reenvia aqui", primary: true },
-        { id: "fork", label: "Fork & regenerate", hint: "Preserva aqui, regenera numa cópia" },
+        { id: "resend", label: "Discard & regenerate", hint: "Discards the tail and resends here", primary: true },
+        { id: "fork", label: "Fork & regenerate", hint: "Preserves here, regenerates in a copy" },
       ],
     });
     if (!choice) return;
@@ -425,8 +425,8 @@ export function createTranscript(opts: {
         title: "Resend edited message?",
         message: "Everything from this message down will be discarded and the turn re-runs with your edited text.\n\nFork keeps the current timeline in a copy and resends there instead.",
         options: [
-          { id: "resend", label: "Discard & resend", hint: "Apaga a cauda e reenvia aqui", primary: true },
-          { id: "fork", label: "Fork & resend", hint: "Preserva aqui, reenvia numa cópia" },
+          { id: "resend", label: "Discard & resend", hint: "Discards the tail and resends here", primary: true },
+          { id: "fork", label: "Fork & resend", hint: "Preserves here, resends in a copy" },
         ],
       });
       if (!choice) return;
@@ -466,7 +466,7 @@ export function createTranscript(opts: {
     if (ok) opts.send({ type: "delete_message", sessionId: sid, index: rawIdx(idx) });
   }
 
-  // --- Eventos do daemon (chamados pelo dispatcher da página) ---
+  // --- Daemon events (called by the page dispatcher) ---
   function noteSessionDataRequestGuard(requestId: string | undefined): boolean {
     if (requestId && requestId !== transcriptRequestId) return true;
     return false;
@@ -578,7 +578,7 @@ export function createTranscript(opts: {
     }
     scrollToBottom();
   }
-  /** Evento tool_approval_request (com guarda de sessão). */
+  /** tool_approval_request event (with session guard). */
   function noteApprovalRequest(msg: ToolApprovalRequestEvent) {
     if (msg.sessionId === opts.getSessionId()) {
       setPendingApproval({
@@ -591,19 +591,19 @@ export function createTranscript(opts: {
       });
     }
   }
-  /** Evento question_resolved (com guarda de sessão/pergunta). */
+  /** question_resolved event (with session/question guard). */
   function noteQuestionResolved(sessionId: string | undefined, questionId: string) {
     if (sessionId === opts.getSessionId() && pendingQuestion()?.id === questionId) showQuestion(null);
   }
-  /** Evento question_error (com guarda de sessão/pergunta). */
+  /** question_error event (with session/question guard). */
   function noteQuestionError(sessionId: string | undefined, questionId: string, message: string | undefined) {
     if (sessionId === opts.getSessionId() && pendingQuestion()?.id === questionId) {
       setQuestionSubmitting(false);
       setQuestionError(message || "Could not submit answers");
     }
   }
-  /** Reset de troca de sessão (o resto — review/opções/composer — cada
-   * domínio limpa o seu; a página orquestra).
+  /** Session switch reset (remaining items — review/options/composer — are
+   * cleaned up by their own domains; the page orchestrates).
    */
   function resetForSession() {
     setTurnActivity(null); setTodos([]); setToolProgress({}); setToolStarts({});
@@ -616,12 +616,12 @@ export function createTranscript(opts: {
     cancelEditMsg();
     stopThinkingTimer();
   }
-  /** Limpa caches por-sessão ao trocar de host (daemon diferente). */
+  /** Clears per-session caches when switching hosts (different daemon). */
   function resetCaches() {
     setSessionUsage({});
     setSessionContexts({});
   }
-  /** Limpa leftovers de sessão que sumiu do espelho (usage). */
+  /** Cleans up leftovers of sessions removed from the mirror (usage). */
   function purgeSession(sessionId: string) {
     setSessionUsage((prev) => {
       if (!(sessionId in prev)) return prev;
@@ -636,11 +636,11 @@ export function createTranscript(opts: {
   function clearMessages() {
     setMessages([]);
   }
-  /** Bolha otimista do user (composer, antes do ack do daemon). */
+  /** Optimistic user bubble (composer, before daemon ack). */
   function pushUserMessage(msg: ChatMessage) {
     setMessages((prev) => [...prev, msg]);
   }
-  /** Marca início de turno no composer (status + atividade + tail). */
+  /** Marks turn start in composer (status + activity + tail). */
   function beginTurn() {
     setSessionStatus("running");
     setIsAtBottom(true);
@@ -666,7 +666,7 @@ export function createTranscript(opts: {
     transcriptScroll, scrollToBottom, onChatScroll,
     renderBlocks, visibleBlocks, hiddenCount, growWindow, resetWindow,
     rawIdx, blockRawIdx, specialProgress,
-    // sessão
+    // session
     fetchSession, beginLoad, applySessionContent, applyUsage, applySnapshot,
     setWorkspaceSink, noteSessionDataRequestGuard,
     handleTruncated, handleStatusEvent, handleAgentEvent,

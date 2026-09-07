@@ -3,7 +3,7 @@ import { createEffect, createMemo, createSignal, onCleanup, untrack } from "soli
 import type { WorkspaceStatus } from "../viewTypes";
 import type { WorkspaceStatusEvent } from "../daemon-protocol";
 
-/** Estado do workspace remoto + poll (extraído de RemoteCodePage verbatim). */
+/** Remote workspace state + polling (extracted verbatim from RemoteCodePage). */
 export function createWorkspace(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;

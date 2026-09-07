@@ -42,7 +42,7 @@ import { createHosts } from "./hooks/useHosts";
 import { createSettings } from "./hooks/useSettings";
 
 export default function RemoteCodePage() {
-  // --- Domínios (cada hook é dono do seu estado; a página orquestra) ---
+  // --- Domains (each hook owns its state; the page orchestrates) ---
   const notice = createNotice();
   const modals = createModals({ toast: notice.toast });
 
@@ -184,7 +184,7 @@ export default function RemoteCodePage() {
     getConfigDoc: () => mirror.configDoc(),
   });
 
-  // --- Estado próprio da página (orquestração + view) ---
+  // --- Page's own state (orchestration + view) ---
   // Gateway Models (Fetched live from /api/me/models)
   const [gatewayModels, setGatewayModels] = createSignal<GatewayModel[]>([]);
   const activeContext = createMemo(() => contextDisplay(
@@ -270,7 +270,7 @@ export default function RemoteCodePage() {
     if (isMobile()) setSidebarOpen(false);
   }
 
-  // --- Orquestração de sessões (compõe os domínios) ---
+  // --- Session orchestration (composes the domains) ---
   function selectSession(id: string) {
     if (creatingSession()) return;
     options.resetPending();
@@ -352,7 +352,7 @@ export default function RemoteCodePage() {
     } catch {}
   }
 
-  // --- Dispatcher de mensagens (delegação por domínio) ---
+  // --- Message dispatcher (delegation by domain) ---
   // The daemon speaks two dialects on the wire: Anthropic-style blocks
   // ({type:"text"|"tool_use"|"tool_result"}) and raw Go structs
   // ({text}, {id,name,arguments}, {call_id,content,is_error},
@@ -769,8 +769,8 @@ export default function RemoteCodePage() {
     setUsageOpen(false);
   }
 
-  // --- Contextos (a página monta a partir dos hooks; os componentes
-  // consomem por fatia — sem prop-drilling) ---
+  // --- Contexts (the page assembles from hooks; components
+  // consume per slice — without prop-drilling) ---
   const hostValue: HostCtxValue = {
     ...hosts,
     connectionState: relay.connectionState,

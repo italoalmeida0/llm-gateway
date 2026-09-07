@@ -91,7 +91,7 @@ export function parseEditResults(raw: string, defaultPath?: string): FileEditSec
   return sections;
 }
 
-function FileEditCard(props: { sec: FileEditSection }) {
+function FileEditCard(props: { sec: FileEditSection; scrollKey?: string }) {
   const [open, setOpen] = createSignal(true);
   const stat = () => diffStat(props.sec.diff);
 
@@ -149,7 +149,7 @@ function FileEditCard(props: { sec: FileEditSection }) {
         </Show>
         <Show when={props.sec.diff}>
           <div class="border-t border-line/20">
-            <DiffView text={props.sec.diff} max={60} name={props.sec.file} />
+            <DiffView text={props.sec.diff} max={60} name={props.sec.file} scrollKey={props.scrollKey} />
           </div>
         </Show>
       </Show>
@@ -192,7 +192,7 @@ export function ToolEditBodies(props: ToolPartProps) {
           }
         >
           <For each={sections()}>
-            {(sec) => <FileEditCard sec={sec} />}
+            {(sec) => <FileEditCard sec={sec} scrollKey={`${props.m.key()}:${sec.file}`} />}
           </For>
         </Show>
       </Show>
@@ -214,6 +214,7 @@ export function ToolEditBodies(props: ToolPartProps) {
             <CodeBlock
               text={props.u.result?.toolResult || props.m.prog() || ""}
               language={languageForPath(String(props.m.args().path || ""))}
+              scrollKey={props.m.key()}
             />
           </Show>
         </Show>
@@ -221,6 +222,7 @@ export function ToolEditBodies(props: ToolPartProps) {
           <CodeBlock
             text={String(props.u.result?.toolResult || props.m.args().content || "")}
             language={languageForPath(String(props.m.args().path || ""))}
+            scrollKey={props.m.key()}
           />
         </Show>
         <Show when={props.m.name() === "python"}>
@@ -235,10 +237,10 @@ export function ToolEditBodies(props: ToolPartProps) {
               </div>
             </Show>
             <Show when={props.m.args().code}>
-              <CodeBlock text={String(props.m.args().code || "")} language="python" />
+              <CodeBlock text={String(props.m.args().code || "")} language="python" scrollKey={`${props.m.key()}:code`} />
             </Show>
             <div class="border-t border-line/50">
-              <CodeBlock text={props.m.terminal().output || "No output"} language={undefined} />
+              <CodeBlock text={props.m.terminal().output || "No output"} language={undefined} scrollKey={props.m.key()} />
             </div>
           </Show>
         </Show>

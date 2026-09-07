@@ -2,14 +2,14 @@ import type { MCPServerConfig, SkillConfig } from "./types";
 import type { SessionContext } from "./context";
 import type { TodoItem } from "./viewTypes";
 
-/** Protocolo tipado do daemon (fronteira WebSocket).
+/** Typed daemon protocol (WebSocket boundary).
  *
- * Sem dependências de validação (deps mínimas): os envelopes de saída são
- * verificados pelo tsc nos call sites (`send` só aceita `DaemonCommand`) e
- * os de entrada estreitam no dispatcher (`switch` sobre `DaemonEvent`).
- * Os interiores (registos Go: session/attachment/review) ficam
- * intencionalmente soltos (`WireRecord`) — a fonte de verdade mora no
- * daemon. `parseDaemonMessage` é o único sítio que toca `JSON.parse`.
+ * No validation dependencies (minimal deps): outbound envelopes are
+ * verified by tsc at call sites (`send` only accepts `DaemonCommand`) and
+ * inbound envelopes narrow in the dispatcher (`switch` over `DaemonEvent`).
+ * Payloads (Go records: session/attachment/review) are intentionally
+ * loose (`WireRecord`) — the single source of truth lives in the
+ * daemon. `parseDaemonMessage` is the only place touching `JSON.parse`.
  */
 
 export interface CommandBase {
@@ -59,17 +59,17 @@ export type DaemonCommand = CommandBase &
     | {
         type: "update_config";
         requestId: string;
-        // Chaves Go (snake_case): tradução das chaves UI em useSettings.
+        // Go keys (snake_case): translation of UI keys in useSettings.
       settings: Record<string, unknown>;
       mcpServers: Record<string, MCPServerConfig>;
       skills: Record<string, SkillConfig>;
     }
   );
 
-/** Interior bruto vindo do daemon (registos Go: session/attachment/review).
- * Intencionalmente `any`: a fonte de verdade mora no daemon e estes
- * objetos já eram `any` em todos os handlers. O rigor vive nos envelopes
- * (comandos/eventos), verificados pelo tsc. */
+/** Raw payload from daemon (Go records: session/attachment/review).
+ * Intentionally `any`: the source of truth lives in the daemon and these
+ * objects were already `any` across all handlers. Strictness lives in envelopes
+ * (commands/events), checked by tsc. */
 export type WireRecord = any;
 
 interface EventBase {
@@ -126,7 +126,7 @@ export type DaemonEvent = EventBase &
     | { type: "error"; requestId?: string; sessionId?: string; message?: string; replyTo?: string }
   );
 
-/** Resposta de pull do sync (sem `type`: resolvida por id numérico). */
+/** Sync pull response (no `type`: resolved via numeric id). */
 export interface PullWireMessage {
   type?: undefined;
   id: number;
@@ -137,7 +137,7 @@ export interface PullWireMessage {
 
 export type DaemonMessage = DaemonEvent | PullWireMessage;
 
-/** Comando pull do sync (único com `id` obrigatório na ida). */
+/** Sync pull command (the only one with mandatory outbound `id`). */
 export type PullCommand = Extract<DaemonCommand, { type: "pull" }>;
 export type SessionStatusEvent = Extract<DaemonEvent, { type: "session_status" }>;
 export type ToolApprovalRequestEvent = Extract<DaemonEvent, { type: "tool_approval_request" }>;
@@ -149,7 +149,7 @@ export type AttachmentDataEvent = Extract<DaemonEvent, { type: "attachment_data"
 export type ChangesUpdatedEvent = Extract<DaemonEvent, { type: "changes_updated" }>;
 export type WorkspaceStatusEvent = Extract<DaemonEvent, { type: "workspace_status" }>;
 
-/** Fronteira de entrada: objeto com envelope reconhecível ou null. */
+/** Inbound boundary: object with recognizable envelope or null. */
 export function parseDaemonMessage(data: unknown): DaemonMessage | null {
   if (typeof data !== "object" || data === null) return null;
   const m = data as Record<string, unknown>;

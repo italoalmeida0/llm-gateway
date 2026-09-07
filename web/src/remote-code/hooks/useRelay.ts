@@ -2,24 +2,24 @@ import { createSignal, onCleanup } from "solid-js";
 import { currentSession } from "../../api";
 import type { DaemonCommand } from "../daemon-protocol";
 
-/** Socket do daemon + heartbeat + reconnect com backoff (extraído de
- * RemoteCodePage sem mudança de comportamento).
+/** Daemon socket + heartbeat + reconnect with backoff (extracted from
+ * RemoteCodePage without behavioral changes).
  *
- * O hook é burro quanto ao protocolo: `send` só carimba o hostId, e os
- * eventos de ciclo de vida (open/close/message) são delegados à página,
- * que compõe os restantes domínios. */
+ * The hook is agnostic regarding the protocol: `send` only stamps the hostId, and
+ * lifecycle events (open/close/message) are delegated to the page,
+ * which composes the remaining domains. */
 
 export type RelayState = "connecting" | "connected" | "disconnected";
 
 export function createRelay(opts: {
   getHostId: () => string;
-  /** Mensagem decodificada vinda do relay (página faz parse + batch + dispatch). */
+  /** Decoded message from relay (page handles parse + batch + dispatch). */
   onMessage: (data: unknown) => void;
-  /** Socket aberto e pronto: página sincroniza (modelos, mirror, sessão). */
+  /** Socket open and ready: page syncs (models, mirror, session). */
   onOpen: (hostId: string) => void;
-  /** Socket fechado (não-dispose): página limpa estado por-conexão. */
+  /** Closed socket (non-dispose): page cleans up per-connection state. */
   onClose: () => void;
-  /** Antes de religar: refresca auth/hosts (token pode ter expirado). */
+  /** Before reconnecting: refreshes auth/hosts (token may have expired). */
   ensureAuth: () => Promise<void>;
   isActiveHost: (hostId: string) => boolean;
 }) {
@@ -91,12 +91,12 @@ export function createRelay(opts: {
     };
   }
 
-  /** Troca de host: zera o backoff antes de religar (como o efeito fazia). */
+  /** Host switch: resets backoff before reconnecting (as the effect did). */
   function resetBackoff() {
     reconnectAttempt = 0;
   }
 
-  /** Desliga sem religar (troca de host): a próxima connect() recomeça. */
+  /** Disconnects without reconnecting (host switch): next connect() starts fresh. */
   function shutdown() {    clearTimeout(reconnectTimer);
     clearInterval(heartbeatTimer);
     if (ws) { ws.onclose = null; ws.close(); ws = null; }

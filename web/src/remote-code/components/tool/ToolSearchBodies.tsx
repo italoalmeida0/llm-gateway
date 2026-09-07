@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import { Streamdown } from "streamdown-solid";
 import { Icon as Iconify } from "../../../components/icon";
 import { CodeBlock } from "../CodeBlock";
+import { recordToolScroll, restoreToolScroll } from "../../utils/scrollMemory";
 import type { ToolPartProps } from "./toolUnitModel";
 
 export function ToolSearchBodies(props: ToolPartProps) {
@@ -17,7 +18,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               {props.m.args().isRegex ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">regex</span> : null}
               {props.m.args().path && String(props.m.args().path) !== "." ? <span class="ml-1.5">in {String(props.m.args().path)}</span> : null}
             </div>
-            <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} />
+            <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
           </Show>
         </Show>
         <Show when={props.m.name() === "inspect"}>
@@ -25,7 +26,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
             when={props.u.result?.toolResult || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Listing…</div>}
           >
-            <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} />
+            <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
           </Show>
         </Show>
         <Show when={props.m.name() === "search_web"}>
@@ -39,7 +40,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               <Show when={props.m.webDetails()?.cached}><span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">cached</span></Show>
             </div>
             <Show when={(props.m.webDetails()?.results || []).length > 0} fallback={
-              <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} />
+              <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={`${props.m.key()}:results`} />
             }>
               <ol class="px-3 pb-2 space-y-1.5">
                 <For each={(props.m.webDetails()?.results || []).slice(0, 10)}>{(r: any, i: () => number) =>
@@ -59,7 +60,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               </Show>
               <details class="border-t border-line/50">
                 <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
-                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || ""} language={undefined} />
+                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || ""} language={undefined} scrollKey={`${props.m.key()}:raw`} />
               </details>
             </Show>
           </Show>
@@ -82,10 +83,17 @@ export function ToolSearchBodies(props: ToolPartProps) {
             </a>
             <Show when={props.m.fetchDetails()?.content} fallback={
               <div class="border-t border-line/50 mt-2">
-                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language="markdown" />
+                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language="markdown" scrollKey={`${props.m.key()}:content`} />
               </div>
             }>
-              <div class="px-3 py-2 max-h-96 overflow-y-auto text-[12.5px] leading-relaxed text-ink-200 article-body">
+              <div
+                ref={(el) => {
+                  restoreToolScroll(props.m.key(), el);
+                  requestAnimationFrame(() => restoreToolScroll(props.m.key(), el));
+                }}
+                onScroll={(e) => recordToolScroll(props.m.key(), e.currentTarget)}
+                class="px-3 py-2 max-h-96 overflow-y-auto text-[12.5px] leading-relaxed text-ink-200 article-body"
+              >
                 <Streamdown>{String(props.m.fetchDetails()?.content || "")}</Streamdown>
               </div>
               <Show when={props.m.fetchDetails()?.truncated}>
@@ -93,7 +101,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               </Show>
               <details class="border-t border-line/50">
                 <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
-                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || ""} language="markdown" />
+                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || ""} language="markdown" scrollKey={`${props.m.key()}:raw`} />
               </details>
             </Show>
           </Show>
@@ -103,7 +111,14 @@ export function ToolSearchBodies(props: ToolPartProps) {
             when={props.u.result?.toolResult || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.m.name() === "question" ? "Waiting for your answers…" : props.ctx.pendingApproval()?.callId === props.u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
           >
-            <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
+            <pre
+              ref={(el) => {
+                restoreToolScroll(props.m.key(), el);
+                requestAnimationFrame(() => restoreToolScroll(props.m.key(), el));
+              }}
+              onScroll={(e) => recordToolScroll(props.m.key(), e.currentTarget)}
+              class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap"
+            >
               {props.m.name() === "bash" && props.u.result ? props.m.terminal().output || "No output" : props.u.result?.toolResult || props.m.prog() || ""}
             </pre>
           </Show>

@@ -65,6 +65,7 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 	info := gatewayModel(ctx, cfg.GatewayURL, cfg.DaemonToken, model)
 	client := provider.NewGatewayOpenAI(cfg.APIKey, strings.TrimRight(cfg.GatewayURL, "/")+"/v1", info)
 	agent := core.NewAgent(client, model, "", core.NewRegistry())
+	agent.MaxTokens = maxOutputTokens(info)
 	agent.SetMessages(messages)
 	_, err := agent.Compact(ctx, max(2, len(messages)*7/10), nil)
 	if err != nil {

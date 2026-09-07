@@ -167,3 +167,33 @@ func TestBuildRequestClampDoesNotInflate(t *testing.T) {
 		t.Fatalf("output budget = %d; want 8000 (explicit request below ceiling, unchanged)", got)
 	}
 }
+
+// TestBuildRequestClampsDynamicPromptTokens verifies that when the prompt itself
+// is large (e.g. 100k+ tokens), the output budget is clamped dynamically so that
+// input + max_output fits within the context window, avoiding OpenRouter 400 errors.
+func TestBuildRequestClampsDynamicPromptTokens(t *testing.T) {
+	const window = 1048576
+	withLiveModels(t, []Model{{
+		Provider:      "openrouter",
+		ID:            "gemini-like",
+		ContextWindow: window,
+		MaxOutput:     window,
+	}})
+	c := &openaiClient{name: "openrouter"}
+
+	// 400,000 characters ~ 100,000 tokens
+	largePrompt := string(make([]byte, 400000))
+	out, err := c.buildRequest(Request{
+		Model:    "gemini-like",
+		Messages: []Message{{Role: RoleUser, Content: []Content{TextBlock{Text: largePrompt}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := outputBudget(t, out)
+	inputEst := (400000 + 3) / 4
+	if got+inputEst > window {
+		t.Fatalf("output budget (%d) + input estimate (%d) = %d exceeds window (%d)", got, inputEst, got+inputEst, window)
+	}
+}
+

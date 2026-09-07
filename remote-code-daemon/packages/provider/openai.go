@@ -250,34 +250,20 @@ func (c *openaiClient) buildRequest(req Request) (*oaiRequest, error) {
 	if maxTok <= 0 {
 		maxTok = m.MaxOutput
 	}
-	// Clamp max_tokens so output plus a minimum input reservation fits
-	// within the context window. Some providers (OpenRouter) enforce
-	// input + max_output <= context_length and reject requests where the
-	// total exceeds it. Reserving headroom guarantees the system prompt,
-	// first message, and tool definitions have room.
-	//
-	// The cap is derived from the context window, never from MaxOutput:
-	// MaxOutput is already the output ceiling, so subtracting from it
-	// would shrink every model's budget even when its output comfortably
-	// fits the window. We only lower maxTok when ContextWindow - reserve
-	// is actually tighter than the requested budget, which is exactly the
-	// pathological case (e.g. a model whose MaxOutput equals its window).
-	//
-	// The reserve is proportional (window/8, capped at 4096) rather than a
-	// flat 4096 so small-window models aren't over-penalized: a flat 4096
-	// would halve gpt-4's 8192 budget, while window/8 reserves a sensible
-	// 1024 there and still tops out at 4096 for large contexts.
-	//
-	// Some providers (OpenRouter) report inflated model-level context
-	// windows (e.g. 1000000) while the serving provider enforces a much
-	// tighter limit (e.g. 262144). Discovery already prefers the serving
-	// provider's smaller context_length, so m.ContextWindow is the real
-	// limit by the time we get here.
-	if m.ContextWindow > 0 {
+	// Clamp max_tokens so output plus estimated input fits within the context window.
+	// Some providers (OpenRouter) enforce input + max_output <= context_length and
+	// reject requests where the total exceeds it. Reserving headroom based on actual
+	// prompt size guarantees the request fits, even with large multi-turn contexts.
+	if m.ContextWindow > 0 && maxTok > 0 {
 		reserve := m.ContextWindow / 8
 		const maxReserve = 4096
 		if reserve > maxReserve {
 			reserve = maxReserve
+		}
+		// Expand reserve when the actual prompt tokens exceed the static reserve,
+		// guaranteeing that input + max_output fits within the context window.
+		if inputEst := estimateRequestTokens(req); inputEst > reserve {
+			reserve = inputEst + 256
 		}
 		clamped := m.ContextWindow - reserve
 		if clamped < 1 {
@@ -823,3 +809,33 @@ func (c *openaiClient) runStream(ctx context.Context, resp *http.Response, req R
 		}
 	}
 }
+
+// estimateRequestTokens estimates the token size of a request before dispatch.
+// 1 token ~ 4 characters, with an added 10% safety margin.
+func estimateRequestTokens(req Request) int {
+	totalChars := len(req.System)
+	for _, m := range req.Messages {
+		for _, c := range m.Content {
+			switch v := c.(type) {
+			case TextBlock:
+				totalChars += len(v.Text)
+			case ToolCallBlock:
+				totalChars += len(v.Name) + len(v.Arguments)
+			case ToolResultBlock:
+				for _, inner := range v.Content {
+					if tb, ok := inner.(TextBlock); ok {
+						totalChars += len(tb.Text)
+					}
+				}
+			}
+		}
+	}
+	for _, t := range req.Tools {
+		totalChars += len(t.Name) + len(t.Description) + len(t.Schema)
+	}
+	if totalChars <= 0 {
+		return 0
+	}
+	return (totalChars + 3) / 4
+}
+

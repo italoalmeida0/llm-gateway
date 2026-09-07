@@ -392,7 +392,7 @@ func (d *DaemonServer) loadConfig() error {
 		}
 	}
 	if !thresholdPresent && cfg.Settings.AutoCompactThreshold == 0 {
-		cfg.Settings.AutoCompactThreshold = 95
+		cfg.Settings.AutoCompactThreshold = 80
 	}
 	if cfg.Settings.ToolRender == "" {
 		cfg.Settings.ToolRender = "box"
@@ -474,7 +474,7 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 	if d.config == nil {
 		d.config = &DaemonConfig{
 			Settings: ZotSettings{
-				AutoCompactThreshold: 95,
+				AutoCompactThreshold: 80,
 				RespectGitignore:     true,
 				ToolRender:           "box",
 				Reasoning:            "medium",
@@ -2394,7 +2394,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 			client = provider.NewGatewayOpenAI(cfg.APIKey, apiBase, requestModel)
 			modelToUse = modelInfo.ID
 			agent.Client, agent.Model, agent.Reasoning = client, modelToUse, nextOptions.Effort
-			agent.MaxTokens = modelInfo.MaxOutput
+			agent.MaxTokens = maxOutputTokens(modelInfo)
 			d.configMu.RLock()
 			system := sessionSystemPrompt(*d.config, sessionCWD, nextOptions)
 			d.configMu.RUnlock()
@@ -2409,7 +2409,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		}
 	}
 	agent.Temperature = &cfg.Settings.Temperature
-	agent.MaxTokens = modelInfo.MaxOutput
+	agent.MaxTokens = maxOutputTokens(modelInfo)
 	act.mu.Lock()
 	if act.gen != myGen || ctx.Err() != nil {
 		act.mu.Unlock()
@@ -2439,6 +2439,29 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		act.record.UpdatedAt = time.Now().UnixMilli()
 		_ = d.saveSession(act.record)
 		act.mu.Unlock()
+	}
+
+	// Persistent compaction hook: whenever transcript is auto-compacted, record and broadcast it
+	agent.OnTranscriptCompacted = func(msgs []provider.Message) {
+		act.mu.Lock()
+		if act.gen != myGen {
+			act.mu.Unlock()
+			return
+		}
+		act.record.Messages = append([]provider.Message(nil), msgs...)
+		act.record.UpdatedAt = time.Now().UnixMilli()
+		act.record.Context = estimateContext(agent, modelInfo)
+		rec := *act.record
+		_ = d.saveSession(act.record)
+		act.mu.Unlock()
+		_ = d.sendWS(map[string]any{
+			"type":      "session_compacted",
+			"hostId":    cfg.HostID,
+			"sessionId": rec.ID,
+			"messages":  rec.Messages,
+			"context":   rec.Context,
+			"auto":      true,
+		})
 	}
 
 	// Stream events to WebSocket
@@ -2595,6 +2618,12 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		fullPrompt = promptText + "\n\n" + strings.Join(contextParts, "\n\n")
 	}
 
+	// Proactive auto-compact: if the conversation is already near the context limit,
+	// compact older history before sending the new turn (matching OpenCode's usable budget).
+	if ctx.Err() == nil {
+		d.maybeAutoCompact(ctx, act, agent, modelInfo, cfg.Settings.AutoCompactThreshold, myGen)
+	}
+
 	if err := agent.Prompt(ctx, fullPrompt, images, sink); err != nil && ctx.Err() == nil {
 		act.mu.Lock()
 		if act.gen == myGen {
@@ -2612,9 +2641,8 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 }
 
-// maybeAutoCompact triggers an LLM compaction of the oldest ~30% of the
-// transcript once input usage passes the configured threshold percent of
-// the model's context window.
+// maybeAutoCompact triggers an LLM compaction once input usage passes the
+// configured threshold or exceeds OpenCode's usable context headroom.
 func (d *DaemonServer) maybeAutoCompact(ctx context.Context, act *ActiveSession, agent *core.Agent, model provider.Model, threshold, gen int) {
 	if threshold <= 0 || agent == nil {
 		return
@@ -2626,19 +2654,25 @@ func (d *DaemonServer) maybeAutoCompact(ctx context.Context, act *ActiveSession,
 	}
 	n := len(act.record.Messages)
 	act.mu.Unlock()
-	if n <= 6 {
+	if n <= 4 {
 		return
 	}
 	used := contextFromUsage(agent.LastTurnUsage(), model).UsedTokens
+	if used <= 0 {
+		used = estimateContext(agent, model).UsedTokens
+	}
 	window := model.ContextWindow
-	if window <= 0 || used*100 < threshold*window {
+	if window <= 0 {
 		return
 	}
-	keepTail := n * 7 / 10
-	if keepTail < 4 {
-		keepTail = 4
+	// OpenCode usable formula: contextWindow - outputBudget - 20,000 buffer
+	outputCap := maxOutputTokens(model)
+	usable := window - outputCap - 20000
+	needsCompact := (used*100 >= threshold*window)
+	if usable > 0 && used >= usable {
+		needsCompact = true
 	}
-	if n-keepTail < 2 {
+	if !needsCompact {
 		return
 	}
 	_ = d.sendWS(map[string]any{
@@ -2649,7 +2683,7 @@ func (d *DaemonServer) maybeAutoCompact(ctx context.Context, act *ActiveSession,
 	})
 	cctx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
-	summary, err := agent.Compact(cctx, keepTail, func(delta string) {
+	summary, err := agent.Compact(cctx, 0, func(delta string) {
 		_ = d.sendWS(map[string]any{
 			"type":      "agent_event",
 			"hostId":    d.config.HostID,

@@ -424,7 +424,18 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		for attempt := 0; ; attempt++ {
 			stop, assistantMsg, err = a.oneTurn(ctx, sink)
 			sink(EvTurnEnd{Stop: stop, Err: err})
-			if err == nil || !a.canRetryError(err, attempt) {
+			if err == nil {
+				break
+			}
+			// OpenCode reactive recovery: if the provider rejected due to context overflow,
+			// compact the transcript and retry immediately instead of hard-failing the turn.
+			if IsContextOverflow(err) && attempt == 0 {
+				sink(EvToolProgress{Text: "Context limit reached upstream; automatically compacting older context…"})
+				if summary, compactErr := a.Compact(ctx, 0, nil); compactErr == nil && summary != "" {
+					continue
+				}
+			}
+			if !a.canRetryError(err, attempt) {
 				break
 			}
 			a.dropLastAssistantMessage()
@@ -616,7 +627,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			// next in-process request is rejected by providers like Anthropic
 			// with "tool_use ids were found without tool_result blocks". The
 			// repair is pure and a no-op on already-valid transcripts.
-			Messages:     repairToolUseResultPairs(append([]provider.Message(nil), a.messages...)),
+			Messages:     repairToolUseResultPairs(PruneOldToolResults(append([]provider.Message(nil), a.messages...))),
 			Tools:        a.Tools.Specs(),
 			Reasoning:    a.Reasoning,
 			MaxTokens:    a.MaxTokens,

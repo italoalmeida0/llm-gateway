@@ -107,3 +107,23 @@ func contextFromUsage(u provider.Usage, model provider.Model) *SessionContext {
 		WindowTokens: model.ContextWindow, Model: model.ID,
 	}
 }
+
+const (
+	DefaultOutputTokenMax          = 32000
+	DefaultReasoningOutputTokenMax = 64000
+)
+
+// maxOutputTokens computes a sane per-turn output budget matching OpenCode.
+// It prevents requests from omitting max_tokens or requesting hundreds of
+// thousands of tokens, which causes OpenRouter to default to 90% of the window.
+func maxOutputTokens(model provider.Model) int {
+	cap := DefaultOutputTokenMax
+	if model.Reasoning {
+		cap = DefaultReasoningOutputTokenMax
+	}
+	if model.MaxOutput > 0 {
+		return min(model.MaxOutput, cap)
+	}
+	return cap
+}
+

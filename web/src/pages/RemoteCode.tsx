@@ -1148,7 +1148,7 @@ export default function RemoteCodePage() {
   const [showConfigModal, setShowConfigModal] = createSignal(false);
   const [daemonSettings, setDaemonSettings] = createSignal<AgentSettings>({
     temperature: 0.7,
-    autoCompactPercent: 95,
+    autoCompactPercent: 80,
     noAutoTitle: false,
     jailByDefault: false,
     autoSwarmEnabled: false,
@@ -1859,7 +1859,7 @@ export default function RemoteCodePage() {
           applySessionContent(msg.sessionId, msg.messages || []);
           toast(
             msg.auto
-              ? "Context auto-compacted — oldest 30% summarized, recent 70% kept"
+              ? "Context auto-compacted — older turns summarized, recent context preserved"
               : "Transcript compacted successfully",
             "ok",
           );
@@ -5930,7 +5930,7 @@ export default function RemoteCodePage() {
                             setDaemonSettings({ ...daemonSettings(), autoCompactPercent: v })
                           }
                           class={`py-1 rounded-lg text-center font-medium transition-colors cursor-pointer ${
-                            (daemonSettings().autoCompactPercent ?? 95) === v
+                            (daemonSettings().autoCompactPercent ?? 80) === v
                               ? "bg-ink-100 text-ink-950"
                               : "text-ink-400 hover:text-ink-200"
                           }`}

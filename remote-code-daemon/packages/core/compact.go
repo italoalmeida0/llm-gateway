@@ -29,8 +29,8 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	if len(msgs) == 0 {
 		return "", fmt.Errorf("nothing to compact")
 	}
-	if keepTail < 0 {
-		keepTail = 0
+	if keepTail <= 0 {
+		keepTail = calculateKeepTail(msgs)
 	}
 	if keepTail > len(msgs) {
 		keepTail = len(msgs)
@@ -172,7 +172,11 @@ func serializeTranscript(msgs []provider.Message) string {
 				for _, inner := range v.Content {
 					if tb, ok := inner.(provider.TextBlock); ok {
 						sb.WriteString("[tool_result] ")
-						sb.WriteString(tb.Text)
+						text := tb.Text
+						if len(text) > ToolOutputMaxChars {
+							text = text[:ToolOutputMaxChars] + "\n[truncated]"
+						}
+						sb.WriteString(text)
 						sb.WriteString("\n")
 					}
 				}
@@ -218,3 +222,52 @@ Use this EXACT format:
 - [Or "(none)" if not applicable]
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`
+
+// calculateKeepTail dynamically computes the number of recent messages to retain
+// verbatim after compaction, targeting between 2,000 and 15,000 tokens of the
+// most recent turns (matching OpenCode's preserveRecentBudget approach).
+func calculateKeepTail(msgs []provider.Message) int {
+	const maxTailTokens = 15000
+	if len(msgs) <= 2 {
+		return 0
+	}
+
+	tokens := 0
+	count := 0
+	userTurns := 0
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		mTokens := estimateMessageTokens(m)
+		if tokens+mTokens > maxTailTokens && count >= 2 && userTurns >= 1 {
+			break
+		}
+		tokens += mTokens
+		count++
+		if m.Role == provider.RoleUser {
+			userTurns++
+		}
+	}
+	if count >= len(msgs) {
+		count = len(msgs) / 2
+	}
+	return count
+}
+
+func estimateMessageTokens(m provider.Message) int {
+	chars := 0
+	for _, c := range m.Content {
+		switch v := c.(type) {
+		case provider.TextBlock:
+			chars += len(v.Text)
+		case provider.ToolCallBlock:
+			chars += len(v.Name) + len(v.Arguments)
+		case provider.ToolResultBlock:
+			for _, inner := range v.Content {
+				if tb, ok := inner.(provider.TextBlock); ok {
+					chars += len(tb.Text)
+				}
+			}
+		}
+	}
+	return chars/4 + 1
+}

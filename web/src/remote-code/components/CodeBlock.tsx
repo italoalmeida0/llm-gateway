@@ -113,7 +113,7 @@ export function CodeBlock(props: {
           </pre>
         }
       >
-        <div class="py-1">
+        <div class="py-1 min-w-full w-fit">
           <Show
             when={rows() !== null}
             fallback={
@@ -128,7 +128,7 @@ export function CodeBlock(props: {
                         {num}
                       </span>
                       {/* eslint-disable-next-line solid/no-innerhtml */}
-                      <code class="tok flex-1 overflow-x-auto" innerHTML={escapeHtml(content || " ")} />
+                      <code class="tok flex-1" innerHTML={escapeHtml(content || " ")} />
                     </div>
                   );
                 }}
@@ -142,7 +142,7 @@ export function CodeBlock(props: {
                     {r.lineNum}
                   </span>
                   {/* eslint-disable-next-line solid/no-innerhtml */}
-                  <code class="tok flex-1 overflow-x-auto" innerHTML={r.html || " "} />
+                  <code class="tok flex-1" innerHTML={r.html || " "} />
                 </div>
               )}
             </For>

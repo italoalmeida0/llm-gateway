@@ -117,17 +117,56 @@ export function DiffView(props: { text: string; max?: number; name?: string }) {
 
   return (
     <div class="font-mono text-[11px] leading-relaxed overflow-x-auto select-text">
-      <Show
-        when={rows() !== null}
-        fallback={
-          <For each={shown().map(parseDiffLine)}>
+      <div class="min-w-full w-fit">
+        <Show
+          when={rows() !== null}
+          fallback={
+            <For each={shown().map(parseDiffLine)}>
+              {(r) => (
+                <div
+                  class={`flex items-start px-2 py-0.5 whitespace-pre ${
+                    r.kind === "add"
+                      ? "bg-emerald-500/10 text-emerald-300"
+                      : r.kind === "del"
+                        ? "bg-rose-500/10 text-rose-300"
+                        : r.kind === "header"
+                          ? "text-ink-500 text-[10px]"
+                          : r.kind === "ellipsis"
+                            ? "text-ink-600/70"
+                            : "text-ink-400"
+                  }`}
+                >
+                  <Show when={hasGutter()}>
+                    <span class="select-none text-right font-mono text-[10px] text-ink-600/50 min-w-[2.25rem] shrink-0 pr-2 border-r border-line/25 mr-2">
+                      {r.lineNum || ""}
+                    </span>
+                  </Show>
+                  <span
+                    class={`select-none w-3.5 shrink-0 text-center font-bold ${
+                      r.kind === "add"
+                        ? "text-emerald-400"
+                        : r.kind === "del"
+                          ? "text-rose-400"
+                          : "text-transparent"
+                    }`}
+                  >
+                    {r.marker || " "}
+                  </span>
+                  {/* eslint-disable-next-line solid/no-innerhtml */}
+                  <code class="tok flex-1" innerHTML={escapeHtml(r.code || " ")} />
+                </div>
+              )}
+            </For>
+          }
+        >
+          <For each={rows()}>
             {(r) => (
               <div
                 class={`flex items-start px-2 py-0.5 whitespace-pre ${
                   r.kind === "add"
-                    ? "bg-emerald-500/10 text-emerald-300"
+                    ? "bg-emerald-500/10"
                     : r.kind === "del"
-                      ? "bg-rose-500/10 text-rose-300"
+                      ? "bg-rose-500/10"
                       : r.kind === "header"
                         ? "text-ink-500 text-[10px]"
                         : r.kind === "ellipsis"
@@ -152,49 +191,12 @@ export function DiffView(props: { text: string; max?: number; name?: string }) {
                   {r.marker || " "}
                 </span>
                 {/* eslint-disable-next-line solid/no-innerhtml */}
-                <code class="tok flex-1 overflow-x-auto" innerHTML={escapeHtml(r.code || " ")} />
+                <code class="tok flex-1" innerHTML={r.codeHtml || " "} />
               </div>
             )}
           </For>
-        }
-      >
-        <For each={rows()}>
-          {(r) => (
-            <div
-              class={`flex items-start px-2 py-0.5 whitespace-pre ${
-                r.kind === "add"
-                  ? "bg-emerald-500/10"
-                  : r.kind === "del"
-                    ? "bg-rose-500/10"
-                    : r.kind === "header"
-                      ? "text-ink-500 text-[10px]"
-                      : r.kind === "ellipsis"
-                        ? "text-ink-600/70"
-                        : "text-ink-400"
-              }`}
-            >
-              <Show when={hasGutter()}>
-                <span class="select-none text-right font-mono text-[10px] text-ink-600/50 min-w-[2.25rem] shrink-0 pr-2 border-r border-line/25 mr-2">
-                  {r.lineNum || ""}
-                </span>
-              </Show>
-              <span
-                class={`select-none w-3.5 shrink-0 text-center font-bold ${
-                  r.kind === "add"
-                    ? "text-emerald-400"
-                    : r.kind === "del"
-                      ? "text-rose-400"
-                      : "text-transparent"
-                }`}
-              >
-                {r.marker || " "}
-              </span>
-              {/* eslint-disable-next-line solid/no-innerhtml */}
-              <code class="tok flex-1 overflow-x-auto" innerHTML={r.codeHtml || " "} />
-            </div>
-          )}
-        </For>
-      </Show>
+        </Show>
+      </div>
       <Show when={hidden() > 0}>
         <button
           onClick={() => setExpanded(true)}

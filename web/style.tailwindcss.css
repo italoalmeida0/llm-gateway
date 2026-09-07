@@ -296,6 +296,12 @@ html.theme-xfade body * {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--ink-600);
 }
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-resizer {
+  background: transparent;
+}
 
 @keyframes fade-in {
   from {

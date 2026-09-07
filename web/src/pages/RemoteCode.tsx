@@ -165,6 +165,24 @@ export interface SkillConfig {
  */
 const REASONING_LEVELS = ["none", "minimum", "low", "medium", "high", "xhigh", "max"] as const;
 
+const REASONING_LABELS: Record<string, string> = {
+  none: "OFF",
+  off: "OFF",
+  minimum: "MIN",
+  min: "MIN",
+  low: "LOW",
+  medium: "MEDI",
+  med: "MEDI",
+  medi: "MEDI",
+  high: "HIGH",
+  xhigh: "XHIGH",
+  max: "MAX",
+};
+
+function formatEffort(lvl: string): string {
+  return REASONING_LABELS[lvl.toLowerCase()] || lvl.toUpperCase();
+}
+
 /**
  * Slash command definitions for autocomplete palette.
  * Only commands NOT already configurable somewhere in the UI are listed:
@@ -2497,36 +2515,38 @@ export default function RemoteCodePage() {
             ref={(el) => setTimeout(() => el?.focus(), 40)}
           />
         </div>
-        <div class="max-h-56 overflow-y-auto">
-          <For
-            each={filteredGatewayModels()}
-            fallback={
-              <div class="px-2.5 py-2 text-[11px] text-ink-600">
-                {gatewayModels().length ? "No models match." : "No compatible models configured in the gateway."}
-              </div>
-            }
-          >
-            {(m) => (
-              <button
-                onClick={() => {
-                  const id = m.id;
-                  setActiveModel(id);
-                  setModelMenuOpen(false);
-                  configureSession();
-                }}
-                class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
-                  m.id === activeModel()
-                    ? "bg-ink-800 text-ink-100"
-                    : "text-ink-300 hover:bg-ink-800/60"
-                }`}
-              >
-                <span class="truncate">{m.name || m.id}</span>
-                <Show when={m.id === activeModel()}>
-                  <Iconify icon="lucide:check" size={13} />
-                </Show>
-              </button>
-            )}
-          </For>
+        <div class="max-h-56 overflow-y-auto overflow-x-auto">
+          <div class="min-w-full w-max flex flex-col">
+            <For
+              each={filteredGatewayModels()}
+              fallback={
+                <div class="px-2.5 py-2 text-[11px] text-ink-600 whitespace-nowrap">
+                  {gatewayModels().length ? "No models match." : "No compatible models configured in the gateway."}
+                </div>
+              }
+            >
+              {(m) => (
+                <button
+                  onClick={() => {
+                    const id = m.id;
+                    setActiveModel(id);
+                    setModelMenuOpen(false);
+                    configureSession();
+                  }}
+                  class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-3 cursor-pointer ${
+                    m.id === activeModel()
+                      ? "bg-ink-800 text-ink-100"
+                      : "text-ink-300 hover:bg-ink-800/60"
+                  }`}
+                >
+                  <span class="whitespace-nowrap">{m.name || m.id}</span>
+                  <Show when={m.id === activeModel()}>
+                    <Iconify icon="lucide:check" size={13} class="shrink-0" />
+                  </Show>
+                </button>
+              )}
+            </For>
+          </div>
         </div>
         <div class="mt-1.5 pt-1.5 border-t border-line/60">
           <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
@@ -2540,15 +2560,14 @@ export default function RemoteCodePage() {
                     setEffort(lvl);
                     configureSession();
                     setModelMenuOpen(false);
-
                   }}
-                  class={`py-1 rounded-md text-center text-[11px] font-medium lowercase cursor-pointer ${
+                  class={`py-1 rounded-md text-center text-[10px] sm:text-[11px] font-medium uppercase cursor-pointer ${
                     effort() === lvl
                       ? "bg-ink-100 text-ink-950"
                       : "text-ink-400 hover:text-ink-200"
                   }`}
                 >
-                  {lvl}
+                  {formatEffort(lvl)}
                 </button>
               )}
             </For>
@@ -3160,6 +3179,7 @@ export default function RemoteCodePage() {
       case "low":
         return "low";
       case "med":
+      case "medi":
       case "medium":
         return "medium";
       case "hi":
@@ -3200,13 +3220,12 @@ export default function RemoteCodePage() {
       case "/reasoning": {
         const lvl = normalizeEffort(arg);
         if (!lvl || !(REASONING_LEVELS as readonly string[]).includes(lvl)) {
-          toast(`Reasoning: ${effort()}`, "ok");
+          toast(`Reasoning: ${formatEffort(effort())}`, "ok");
           return true;
         }
         setEffort(lvl);
-                    configureSession();
-
-        toast(`Reasoning effort set to ${lvl}`, "ok");
+        configureSession();
+        toast(`Reasoning effort set to ${formatEffort(lvl)}`, "ok");
         return true;
       }
       default:
@@ -5424,10 +5443,11 @@ export default function RemoteCodePage() {
                       class="flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-ink-800 font-medium cursor-pointer"
                       data-rc-tip="Switch model" aria-label="Switch model"
                     >
-                      <span class="max-w-[120px] sm:max-w-[150px] truncate">{activeModel().split("/").pop() || "Select model"} <span class="capitalize text-ink-500">{effort()}</span></span>
-                      <Iconify icon="lucide:chevron-down" size={11} />
+                      <span class="max-w-[120px] sm:max-w-[150px] truncate">{activeModel().split("/").pop() || "Select model"}</span>
+                      <span class="uppercase text-ink-500 shrink-0 text-[11px]">{formatEffort(effort())}</span>
+                      <Iconify icon="lucide:chevron-down" size={11} class="shrink-0" />
                     </button>
-                    <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="32rem">
+                    <FloatMenu anchor={() => modelBtn} open={modelMenuOpen()} placement="top-start" width="26rem">
                       <div>{modelPickerBody()}</div>
                     </FloatMenu>
 

@@ -3750,7 +3750,33 @@ export default function RemoteCodePage() {
                 </Show>
               </Show>
             </Show>
-            <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python" && name() !== "search" && name() !== "inspect" && name() !== "patch" && name() !== "git"}>
+            <Show when={name() === "search_web"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Searching the web…</div>}
+              >
+                <div class="px-3 py-1.5 text-[11px] text-ink-500">
+                  <span class="font-mono text-ink-300">“{String(args().query || "")}”</span>
+                  <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">DuckDuckGo</span>
+                </div>
+                <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language={undefined} />
+              </Show>
+            </Show>
+            <Show when={name() === "fetch_url"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Fetching {String(args().url || "URL")}…</div>}
+              >
+                <div class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-ink-500">
+                  <Iconify icon="lucide:link" size={12} />
+                  <span class="font-mono truncate">{String(args().url || "")}</span>
+                </div>
+                <div class="border-t border-line/50">
+                  <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language="markdown" />
+                </div>
+              </Show>
+            </Show>
+            <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python" && name() !== "search" && name() !== "inspect" && name() !== "patch" && name() !== "git" && name() !== "search_web" && name() !== "fetch_url"}>
               <Show
                 when={u.result?.toolResult || prog()}
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{name() === "question" ? "Waiting for your answers…" : pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
@@ -5502,8 +5528,8 @@ export default function RemoteCodePage() {
                           <p class="text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan explores freely but never mutates. Edit, create and patch are disabled." : "Learning observes read-only. Edit, create, patch and code execution are disabled."}</p>
                           <div class="mt-1.5 flex flex-wrap gap-1">
                             <For each={agentMode() === "plan"
-                              ? ["read", "search", "inspect", "bash", "git", "glob", "question", "todo"]
-                              : ["read", "search", "inspect", "glob", "question", "todo"]}>
+                              ? ["read", "search", "inspect", "bash", "git", "glob", "question", "todo", "search_web", "fetch_url"]
+                              : ["read", "search", "inspect", "glob", "question", "todo", "search_web", "fetch_url"]}>
                               {(cap) => <span class="rounded-md bg-ink-700/60 px-1.5 py-px font-mono text-[10px] text-ink-300">{cap}</span>}
                             </For>
                             <For each={agentMode() === "plan" ? ["write", "edit", "patch"] : ["write", "edit", "patch", "bash", "python"]}>

@@ -85,9 +85,9 @@ func (d *DaemonServer) configureSession(raw []byte) {
 // renders these as capability badges in the mode picker (10/10 visibility),
 // and restrictModeTools enforces the write/patch side below.
 var modeCapabilities = map[string][]string{
-	"build":    {"read", "write", "edit", "patch", "search", "inspect", "bash", "python", "git", "glob", "question", "todo"},
-	"plan":     {"read", "search", "inspect", "bash", "git", "glob", "question", "todo"},
-	"learning": {"read", "search", "inspect", "bash", "glob", "question", "todo"},
+	"build":    {"read", "write", "edit", "patch", "search", "inspect", "bash", "python", "git", "glob", "question", "todo", "search_web", "fetch_url"},
+	"plan":     {"read", "search", "inspect", "bash", "git", "glob", "question", "todo", "search_web", "fetch_url"},
+	"learning": {"read", "search", "inspect", "bash", "glob", "question", "todo", "search_web", "fetch_url"},
 }
 
 // ModeCapabilities returns the tool names available in a mode (sorted).

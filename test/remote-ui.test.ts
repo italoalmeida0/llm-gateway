@@ -269,5 +269,16 @@ describe("Remote Code toolSummary", () => {
       call: { type: "tool_call", toolId: "g3", toolName: "git", toolArgs: JSON.stringify({ op: "stash_restore", ref: "stash@{0}" }) }
     })).toEqual({ icon: "lucide:archive-restore", verb: "Restore", target: "stash@{0}" });
   });
+  test("summarizes search_web and fetch_url calls", () => {
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "w1", toolName: "search_web", toolArgs: JSON.stringify({ query: "golang html parser" }) }
+    })).toEqual({ icon: "lucide:globe", verb: "Web search", target: "golang html parser" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "w2", toolName: "fetch_url", toolArgs: JSON.stringify({ url: "https://www.example.com/post?q=1" }) }
+    })).toEqual({ icon: "lucide:link", verb: "Fetch", target: "example.com" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "w3", toolName: "fetch_url", toolArgs: "{}" }
+    })).toEqual({ icon: "lucide:link", verb: "Fetch", target: "url" });
+  });
 });
 

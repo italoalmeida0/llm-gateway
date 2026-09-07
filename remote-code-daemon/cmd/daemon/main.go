@@ -2332,6 +2332,8 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		&tools.InspectTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.PatchTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.GitTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.SearchWebTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.FetchURLTool{CWD: sessionCWD, Sandbox: sb},
 	}
 	// The python tool is only advertised when a Python 3 interpreter exists
 	// on this machine (PythonAvailable probes PATH once and caches).

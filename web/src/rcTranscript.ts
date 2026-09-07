@@ -207,6 +207,27 @@ export function toolSummary(u: ToolUnit): ToolSummary {
           : "";
       return { icon, verb, target: scope };
     }
+    case "search_web": {
+      const q = String(args.query || "").replace(/\s+/g, " ").trim();
+      return {
+        icon: "lucide:globe",
+        verb: "Web search",
+        target: q.length > 90 ? q.slice(0, 90) + "…" : q || "query",
+      };
+    }
+    case "fetch_url": {
+      let host = String(args.url || "");
+      try {
+        host = new URL(String(args.url || "")).hostname.replace(/^www\./, "");
+      } catch {
+        // keep raw url string
+      }
+      return {
+        icon: "lucide:link",
+        verb: "Fetch",
+        target: host.length > 90 ? host.slice(0, 90) + "…" : host || "url",
+      };
+    }
     case "python": {
       // Script mode shows the file; code mode shows the first meaningful line.
       if (args.script) {

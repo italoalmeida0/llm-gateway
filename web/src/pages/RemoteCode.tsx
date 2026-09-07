@@ -3065,12 +3065,19 @@ export default function RemoteCodePage() {
     });
   }
 
+  function cancelTurnForSession(sessionId: string, e?: MouseEvent | KeyboardEvent) {
+    e?.stopPropagation();
+    if (!sessionId || !wsOpen()) return;
+    sendWS({ type: "cancel", sessionId });
+    if (sessionId === activeSessionId()) {
+      setTurnActivity((turn) => turn ? {...turn, status:"cancelling"} : null);
+      stopThinkingTimer();
+      transcriptScroll.detach();
+    }
+  }
+
   function cancelCurrentTurn() {
-    if (!activeSessionId()) return;
-    sendWS({ type: "cancel", sessionId: activeSessionId() });
-    setTurnActivity((turn) => turn ? {...turn, status:"cancelling"} : null);
-    stopThinkingTimer();
-    transcriptScroll.detach();
+    cancelTurnForSession(activeSessionId());
   }
 
   function respondApproval(approved: boolean, always = false) {
@@ -3982,8 +3989,40 @@ export default function RemoteCodePage() {
           fallback={
             <>
               <span class="truncate flex-1 min-w-0">{s.title}</span>
-              <Show when={s.status === "running"}>
-                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              <Show when={s.status === "running" || (s.id === activeSessionId() && sessionStatus() === "running")}>
+                {(() => {
+                  const isCancelling = () => s.id === activeSessionId() && turnActivity()?.status === "cancelling";
+                  return (
+                    <button
+                      type="button"
+                      onClick={(e) => cancelTurnForSession(s.id, e)}
+                      disabled={isCancelling()}
+                      class={`group/stop w-4.5 h-4.5 rounded flex items-center justify-center shrink-0 border border-transparent transition-colors ${
+                        isCancelling()
+                          ? "text-ink-500 opacity-60 cursor-default"
+                          : "text-emerald-400 hover:text-rose-400 hover:bg-rose-950/60 hover:border-rose-800/40 focus:text-rose-400 focus:bg-rose-950/60 focus-visible:ring-1 focus-visible:ring-rose-500 focus:outline-none cursor-pointer"
+                      }`}
+                      data-rc-tip={isCancelling() ? "Stopping…" : "Stop"}
+                      aria-label={isCancelling() ? "Stopping turn" : "Stop turn"}
+                    >
+                      <Show
+                        when={!isCancelling()}
+                        fallback={<Iconify icon="lucide:loader-2" size={12} class="animate-spin text-ink-500" />}
+                      >
+                        <Iconify
+                          icon="lucide:loader-2"
+                          size={12}
+                          class="animate-spin group-hover/stop:hidden group-focus/stop:hidden group-focus-visible/stop:hidden"
+                        />
+                        <Iconify
+                          icon="lucide:square"
+                          size={9}
+                          class="hidden group-hover/stop:block group-focus/stop:block group-focus-visible/stop:block fill-current"
+                        />
+                      </Show>
+                    </button>
+                  );
+                })()}
               </Show>
               <div class="relative flex items-center justify-end shrink-0 min-w-[34px]">
                 <span class="text-[10px] text-ink-600 transition-opacity group-hover:opacity-0 group-hover:pointer-events-none">

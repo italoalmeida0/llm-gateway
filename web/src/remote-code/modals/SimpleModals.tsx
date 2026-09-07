@@ -92,7 +92,7 @@ export function ReviewModal(ctx: SimpleModalsCtx) {
 export function ChoiceModal(ctx: SimpleModalsCtx) {
   return (
 <>
-<Modal open={true} title={ctx.choiceState()?.title || "Choose"} onClose={() => ctx.choiceState()?.resolve(null)}>
+<Modal open={!!ctx.choiceState()} title={ctx.choiceState()?.title || "Choose"} onClose={() => ctx.choiceState()?.resolve(null)}>
   <p class="text-sm text-ink-400 whitespace-pre-line leading-relaxed">{ctx.choiceState()?.message}</p>
   <div class="mt-4 flex flex-col gap-2">
     <For each={ctx.choiceState()?.options || []}>{(opt) =>

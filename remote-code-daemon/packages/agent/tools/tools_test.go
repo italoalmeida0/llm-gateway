@@ -70,10 +70,12 @@ func TestReadOffsetLimit(t *testing.T) {
 	tool := &ReadTool{CWD: dir}
 	res, _ := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "a.txt", "offset": 2, "limit": 2}), nil)
 	got := res.Content[0].(provider.TextBlock).Text
-	// Current output format is raw bytes (no embedded line numbers):
-	// the tui draws its own gutter from the `start_line` detail.
-	if got != "2\n3\n" {
-		t.Fatalf("want \"2\\n3\\n\", got %q", got)
+	wantAI := LinePrefixNotice + "2:2\n3:3\n"
+	if got != wantAI {
+		t.Fatalf("want %q, got %q", wantAI, got)
+	}
+	if res.UIContent != "2\n3\n" {
+		t.Fatalf("UIContent want \"2\\n3\\n\", got %q", res.UIContent)
 	}
 	if start, ok := res.Details.(map[string]any)["start_line"]; !ok || start != 2 {
 		t.Errorf("start_line detail want 2, got %v", start)
@@ -387,5 +389,57 @@ func TestBashFailure(t *testing.T) {
 	got := res.Content[0].(provider.TextBlock).Text
 	if !strings.Contains(got, "[exit 1]") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestWriteLineNumbers(t *testing.T) {
+	dir := t.TempDir()
+	tool := &WriteTool{CWD: dir}
+	content := "alpha\nbeta\ngamma\n"
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":    "file.txt",
+		"content": content,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.Content[0].(provider.TextBlock).Text
+	wantAI := LinePrefixNotice + "1:alpha\n2:beta\n3:gamma\n"
+	if got != wantAI {
+		t.Fatalf("want AI content %q, got %q", wantAI, got)
+	}
+	if res.UIContent != content {
+		t.Fatalf("want UIContent %q, got %q", content, res.UIContent)
+	}
+}
+
+func TestEditLineNumbers(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "e.txt")
+	os.WriteFile(p, []byte("line1\nline2\nline3\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "e.txt",
+		"edits": []map[string]any{{"oldText": "line2", "newText": "replaced"}},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.Content[0].(provider.TextBlock).Text
+	if !strings.HasPrefix(got, LinePrefixNotice) {
+		t.Fatalf("expected LinePrefixNotice prefix, got %q", got)
+	}
+	if !strings.Contains(got, "2:-line2") || !strings.Contains(got, "2:+replaced") {
+		t.Fatalf("expected 2:-line2 and 2:+replaced in AI output, got %q", got)
+	}
+	// Verify UIContent is clean (no LinePrefixNotice and no 2:- prefix)
+	if strings.Contains(res.UIContent, LinePrefixNotice) {
+		t.Fatalf("UIContent must not contain LinePrefixNotice: %q", res.UIContent)
+	}
+	if !strings.Contains(res.UIContent, "-line2") || !strings.Contains(res.UIContent, "+replaced") {
+		t.Fatalf("UIContent must contain clean diff: %q", res.UIContent)
+	}
+	if strings.Contains(res.UIContent, "2:-line2") {
+		t.Fatalf("UIContent must not contain line numbers: %q", res.UIContent)
 	}
 }

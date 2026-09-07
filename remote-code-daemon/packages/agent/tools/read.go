@@ -20,6 +20,10 @@ const (
 	maxReadBytes = 50 * 1024
 )
 
+// LinePrefixNotice informs the AI that the leading "<number>:" prefix is for line
+// reference only and not part of the file content.
+const LinePrefixNotice = "[Note: The line prefix \"<number>:\" is for line identification only and is not part of the file content.]\n"
+
 // ReadTool reads file contents from disk.
 type ReadTool struct {
 	CWD     string
@@ -135,42 +139,36 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		truncLines = true
 	}
 
-	// Raw file contents go to the model. We deliberately DON'T
-	// prepend line numbers here: they'd inflate the token count by
-	// ~15-20% on typical source files (7 bytes per line, every
-	// line, every time the file gets re-sent as context on later
-	// turns) and the model doesn't need them — edit goes through
-	// exact-match text replacement, not line ranges.
-	//
-	// The TUI renders its own gutter using the start offset stored
-	// in Details, so the on-screen view still looks like cat -n.
-	var sb strings.Builder
-	if a.ShowLineNumbers {
-		width := len(fmt.Sprintf("%d", start+len(selected)))
-		for i, line := range selected {
-			fmt.Fprintf(&sb, "%*d  %s\n", width, start+i+1, line)
-		}
-	} else {
-		for _, line := range selected {
-			sb.WriteString(line)
-			sb.WriteByte('\n')
-		}
+	var rawSb strings.Builder
+	var aiSb strings.Builder
+	aiSb.WriteString(LinePrefixNotice)
+	for i, line := range selected {
+		lineNum := start + i + 1
+		fmt.Fprintf(&aiSb, "%d:%s\n", lineNum, line)
+		rawSb.WriteString(line)
+		rawSb.WriteByte('\n')
 	}
 	if truncLines || truncBytes {
-		sb.WriteString("\n")
+		aiSb.WriteString("\n")
+		rawSb.WriteString("\n")
 	}
 	if truncLines {
-		sb.WriteString(fmt.Sprintf("... [truncated at %d lines]\n", maxReadLines))
+		msg := fmt.Sprintf("... [truncated at %d lines]\n", maxReadLines)
+		aiSb.WriteString(msg)
+		rawSb.WriteString(msg)
 	}
 	if truncBytes {
-		sb.WriteString(fmt.Sprintf("... [truncated at %d bytes]\n", maxReadBytes))
+		msg := fmt.Sprintf("... [truncated at %d bytes]\n", maxReadBytes)
+		aiSb.WriteString(msg)
+		rawSb.WriteString(msg)
 	}
 	if progress != nil {
-		progress(sb.String())
+		progress(rawSb.String())
 	}
 
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: sb.String()}},
+		Content:   []provider.Content{provider.TextBlock{Text: aiSb.String()}},
+		UIContent: rawSb.String(),
 		Details: map[string]any{
 			"path":              path,
 			"start_line":        start + 1, // 1-indexed; TUI draws the gutter

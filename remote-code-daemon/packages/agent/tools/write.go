@@ -51,19 +51,23 @@ func (t *WriteTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 		return core.ToolResult{}, err
 	}
 
-	// Return the file content as the result body, just like `read`
-	// does. The TUI renders it with a syntax-highlighted gutter so
-	// the on-screen view after a `write` matches the pre-write
-	// streaming preview seamlessly. The model also sees the written
-	// content in its tool_result, which is useful on follow-up turns
-	// where it wants to reference what it just wrote without a
-	// second `read` call.
+	lines := strings.Split(a.Content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" && strings.HasSuffix(a.Content, "\n") {
+		lines = lines[:len(lines)-1]
+	}
+	var aiSb strings.Builder
+	aiSb.WriteString(LinePrefixNotice)
+	for i, line := range lines {
+		fmt.Fprintf(&aiSb, "%d:%s\n", i+1, line)
+	}
+
 	totalLines := strings.Count(a.Content, "\n")
 	if len(a.Content) > 0 && !strings.HasSuffix(a.Content, "\n") {
 		totalLines++ // count the last unterminated line
 	}
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: a.Content}},
+		Content:   []provider.Content{provider.TextBlock{Text: aiSb.String()}},
+		UIContent: a.Content,
 		Details: map[string]any{
 			"path":        path,
 			"bytes":       len(a.Content),

@@ -41,6 +41,7 @@ type patchResult struct {
 	applied bool
 	matches int
 	diff    string
+	aiDiff  string
 	err     string
 }
 
@@ -110,14 +111,19 @@ func (t *PatchTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 	}
 
 	var b strings.Builder
+	var uiB strings.Builder
 	if dryRun {
 		b.WriteString("DRY RUN — no files written. Re-send with dryRun:false to apply.\n")
+		uiB.WriteString("DRY RUN — no files written. Re-send with dryRun:false to apply.\n")
 	} else {
 		b.WriteString("APPLIED.\n")
+		uiB.WriteString("APPLIED.\n")
 	}
+	b.WriteString(LinePrefixNotice)
 	for _, r := range results {
 		if r.err != "" {
 			fmt.Fprintf(&b, "\n✗ %s: %s\n", r.file, r.err)
+			fmt.Fprintf(&uiB, "\n✗ %s: %s\n", r.file, r.err)
 			continue
 		}
 		mark := "✓"
@@ -125,15 +131,23 @@ func (t *PatchTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 			mark = "○"
 		}
 		fmt.Fprintf(&b, "\n%s %s (%d match%s)\n", mark, r.file, r.matches, plural(r.matches))
-		if r.diff != "" {
-			b.WriteString(r.diff)
-			if !strings.HasSuffix(r.diff, "\n") {
+		fmt.Fprintf(&uiB, "\n%s %s (%d match%s)\n", mark, r.file, r.matches, plural(r.matches))
+		if r.aiDiff != "" {
+			b.WriteString(r.aiDiff)
+			if !strings.HasSuffix(r.aiDiff, "\n") {
 				b.WriteString("\n")
+			}
+		}
+		if r.diff != "" {
+			uiB.WriteString(r.diff)
+			if !strings.HasSuffix(r.diff, "\n") {
+				uiB.WriteString("\n")
 			}
 		}
 	}
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+		Content:   []provider.Content{provider.TextBlock{Text: b.String()}},
+		UIContent: uiB.String(),
 	}, nil
 }
 
@@ -170,6 +184,7 @@ func (t *PatchTool) applyFile(file string, edits []PatchEdit, dryRun bool) patch
 		return patchResult{file: file, err: "no changes"}
 	}
 	diff := patchDiff(slash(file), orig, cur)
+	aiDiff := patchDiffNumbered(slash(file), orig, cur)
 	if !dryRun {
 		st, err := os.Stat(abs)
 		if err != nil {
@@ -179,7 +194,7 @@ func (t *PatchTool) applyFile(file string, edits []PatchEdit, dryRun bool) patch
 			return patchResult{file: file, err: fmt.Sprintf("write failed: %v", err)}
 		}
 	}
-	return patchResult{file: slash(file), applied: !dryRun, matches: totalMatches, diff: diff}
+	return patchResult{file: slash(file), applied: !dryRun, matches: totalMatches, diff: diff, aiDiff: aiDiff}
 }
 
 func applyOneEdit(content string, e PatchEdit) (string, int, error) {
@@ -246,5 +261,12 @@ func patchDiff(file, before, after string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "--- %s\n+++ %s\n", file, file)
 	sb.WriteString(DiffText(before, after))
+	return sb.String()
+}
+
+func patchDiffNumbered(file, before, after string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "--- %s\n+++ %s\n", file, file)
+	sb.WriteString(DiffTextNumbered(before, after))
 	return sb.String()
 }

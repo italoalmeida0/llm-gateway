@@ -148,6 +148,45 @@ func sessionListItem(s SessionSummary) map[string]any {
 	}
 }
 
+func sanitizeMessagesForFrontend(msgs []provider.Message) []provider.Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+	out := make([]provider.Message, len(msgs))
+	for i, m := range msgs {
+		if m.Role != provider.RoleTool {
+			out[i] = m
+			continue
+		}
+		newBlocks := make([]provider.Content, len(m.Content))
+		for j, c := range m.Content {
+			tr, ok := c.(provider.ToolResultBlock)
+			if !ok {
+				newBlocks[j] = c
+				continue
+			}
+			innerContent := make([]provider.Content, len(tr.Content))
+			for k, inner := range tr.Content {
+				if tb, ok := inner.(provider.TextBlock); ok {
+					cleaned := strings.ReplaceAll(tb.Text, tools.LinePrefixNotice, "")
+					innerContent[k] = provider.TextBlock{
+						Text:             cleaned,
+						ThoughtSignature: tb.ThoughtSignature,
+					}
+				} else {
+					innerContent[k] = inner
+				}
+			}
+			tr.Content = innerContent
+			newBlocks[j] = tr
+		}
+		mCopy := m
+		mCopy.Content = newBlocks
+		out[i] = mCopy
+	}
+	return out
+}
+
 // sessionPayload serializes a full record for the web client (both key styles).
 func sessionPayload(rec *SessionRecord) map[string]any {
 	return map[string]any{
@@ -155,7 +194,7 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
 		"turn": rec.Turn, "todos": rec.Todos,
 		"workspace":  inspectWorkspace(rec.CWD),
-		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": rec.Messages,
+		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages),
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
 	}
 }
@@ -1207,7 +1246,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"type":      "session_content",
 			"hostId":    d.config.HostID,
 			"sessionId": rec.ID,
-			"messages":  rec.Messages,
+			"messages":  sanitizeMessagesForFrontend(rec.Messages),
 		})
 		if req.Regen {
 			d.truncateAndRun(req.SessionID, req.Index+1, req.Text, req.Model, req.YOLO, nil)
@@ -2172,7 +2211,7 @@ func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int,
 	})
 	_ = d.sendWS(map[string]any{
 		"type": "session_content", "hostId": d.config.HostID, "sessionId": sessionID,
-		"messages": msgs,
+		"messages": sanitizeMessagesForFrontend(msgs),
 	})
 }
 
@@ -2535,14 +2574,18 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 				"type": "tool_call", "id": e.ID, "name": e.Name, "args": e.Args,
 			}
 		case core.EvToolResult:
-			var contentStr strings.Builder
-			for _, c := range e.Result.Content {
-				if tb, ok := c.(provider.TextBlock); ok {
-					contentStr.WriteString(tb.Text)
+			contentStr := e.Result.UIContent
+			if contentStr == "" {
+				var sb strings.Builder
+				for _, c := range e.Result.Content {
+					if tb, ok := c.(provider.TextBlock); ok {
+						sb.WriteString(tb.Text)
+					}
 				}
+				contentStr = strings.ReplaceAll(sb.String(), tools.LinePrefixNotice, "")
 			}
 			ev := map[string]any{
-				"type": "tool_result", "id": e.ID, "content": contentStr.String(), "isError": e.Result.IsError, "startedAt": e.Result.StartedAt, "durationMs": e.Result.DurationMs,
+				"type": "tool_result", "id": e.ID, "content": contentStr, "isError": e.Result.IsError, "startedAt": e.Result.StartedAt, "durationMs": e.Result.DurationMs,
 			}
 			if e.Details != nil {
 				if raw, err := json.Marshal(e.Details); err == nil {

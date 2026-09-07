@@ -111,7 +111,7 @@ func liveSessionPayload(act *ActiveSession) map[string]any {
 		return payload
 	}
 	messages := make([]any, 0, len(act.record.Messages)+1)
-	for _, message := range act.record.Messages {
+	for _, message := range sanitizeMessagesForFrontend(act.record.Messages) {
 		messages = append(messages, message)
 	}
 	live := *act.live

@@ -177,6 +177,7 @@ func sessionSystemPrompt(cfg DaemonConfig, cwd string, options SessionOptions) s
 	prompt.WriteString("You are an expert autonomous AI software engineering agent running directly on the user's machine.\n")
 	fmt.Fprintf(&prompt, "Working Directory: %s\n", cwd)
 	prompt.WriteString(modeInstructions(options.Mode) + "\n")
+	prompt.WriteString("File tools (read, write, edit, patch) prefix lines with \"<number>:\" for line identification. This prefix is NOT part of the file content. When using edit or patch, never include \"<number>:\" in oldText or newText.\n")
 	prompt.WriteString("Use the todo tool to maintain a visible checklist for multi-step work. Update it as steps start and finish.\n")
 	prompt.WriteString("Use the question tool when you need user preferences, clarification or implementation decisions. It waits for explicit answers, including in Full access mode.\n")
 	if cfg.Settings.JailByDefault {

@@ -206,6 +206,7 @@ func (t *EditTool) plan(raw json.RawMessage) (editPlan, error) {
 	final = append(final, []byte(newBody)...)
 
 	diff := unifiedDiff(a.Path, string(orig), strings.ReplaceAll(newBody, "\r\n", "\n"))
+	aiDiff := unifiedDiffNumbered(a.Path, string(orig), strings.ReplaceAll(newBody, "\r\n", "\n"))
 	dryNote := ""
 	if a.DryRun {
 		dryNote = "DRY RUN — no files written. Re-send with dryRun:false to apply.\n"
@@ -214,8 +215,9 @@ func (t *EditTool) plan(raw json.RawMessage) (editPlan, error) {
 	// result body is just the context diff. Details carries metadata for
 	// programmatic consumers and confirmation previews.
 	result := core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: dryNote + diff}},
-		Details: map[string]any{"path": path, "edits": len(a.Edits), "diff": diff, "dryRun": a.DryRun},
+		Content:   []provider.Content{provider.TextBlock{Text: dryNote + LinePrefixNotice + aiDiff}},
+		UIContent: dryNote + diff,
+		Details:   map[string]any{"path": path, "edits": len(a.Edits), "diff": diff, "dryRun": a.DryRun},
 	}
 	return editPlan{path: path, final: final, result: result, dryRun: a.DryRun}, nil
 }
@@ -299,6 +301,73 @@ func unifiedDiff(name, a, b string) string {
 		anyOutput = true
 	}
 	_ = name // header dropped; kept in signature for call-site stability
+	return sb.String()
+}
+
+// DiffTextNumbered returns a context diff with 1-indexed line numbers (<number>:)
+// for AI model consumption.
+func DiffTextNumbered(a, b string) string { return unifiedDiffNumbered("", a, b) }
+
+func unifiedDiffNumbered(name, a, b string) string {
+	if a == b {
+		return ""
+	}
+	aLines := strings.Split(a, "\n")
+	bLines := strings.Split(b, "\n")
+	ops := diffLines(aLines, bLines)
+
+	keep := make([]bool, len(ops))
+	for i, op := range ops {
+		if op.kind == '+' || op.kind == '-' {
+			keep[i] = true
+			for d := 1; d <= diffContextLines; d++ {
+				if i-d >= 0 {
+					keep[i-d] = true
+				}
+				if i+d < len(ops) {
+					keep[i+d] = true
+				}
+			}
+		}
+	}
+
+	var sb strings.Builder
+	prevKept := false
+	anyOutput := false
+	lineA := 0
+	lineB := 0
+	for i, op := range ops {
+		switch op.kind {
+		case ' ':
+			lineA++
+			lineB++
+		case '-':
+			lineA++
+		case '+':
+			lineB++
+		}
+		if !keep[i] {
+			if prevKept {
+				sb.WriteString("...\n")
+				prevKept = false
+			}
+			continue
+		}
+		if !prevKept && anyOutput {
+			sb.WriteString("...\n")
+		}
+		switch op.kind {
+		case ' ':
+			fmt.Fprintf(&sb, "%d: %s\n", lineA, op.line)
+		case '-':
+			fmt.Fprintf(&sb, "%d:-%s\n", lineA, op.line)
+		case '+':
+			fmt.Fprintf(&sb, "%d:+%s\n", lineB, op.line)
+		}
+		prevKept = true
+		anyOutput = true
+	}
+	_ = name
 	return sb.String()
 }
 

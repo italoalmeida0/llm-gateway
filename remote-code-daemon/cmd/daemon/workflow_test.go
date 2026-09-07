@@ -91,7 +91,7 @@ func TestBrowseFoldersNavigatesWithoutCreatingPaths(t *testing.T) {
 }
 
 func TestModesExposeTheirIntendedTools(t *testing.T) {
-	for _, mode := range []string{"plan", "learning", "ask"} {
+	for _, mode := range []string{"plan", "learning", "talk"} {
 		reg := core.NewRegistry(
 			&tools.ReadTool{}, &tools.GlobTool{}, &tools.BashTool{}, &tools.PythonTool{},
 			&tools.WriteTool{}, &tools.EditTool{}, &tools.PatchTool{},
@@ -100,8 +100,8 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 			&tools.TodoTool{}, &tools.QuestionTool{},
 		)
 		restrictModeTools(reg, mode)
-		if mode == "ask" {
-			// Ask has its own assertions below (no workspace tools at all).
+		if mode == "talk" {
+			// Talk has its own assertions below (no workspace tools at all).
 		} else {
 			if reg["write"] != nil || reg["edit"] != nil || reg["patch"] != nil || reg["read"] == nil || reg["glob"] == nil || reg["todo"] == nil {
 				t.Fatal("mode exposed the wrong file tools or lost the checklist")
@@ -119,15 +119,15 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 		if mode == "learning" && (reg["bash"] != nil || reg["python"] != nil) {
 			t.Fatal("Learning must not execute code (read-only observation)")
 		}
-		if mode == "ask" {
+		if mode == "talk" {
 			for _, keep := range []string{"question", "search_web", "fetch_url", "todo"} {
 				if reg[keep] == nil {
-					t.Fatalf("Ask must retain %s", keep)
+					t.Fatalf("Talk must retain %s", keep)
 				}
 			}
 			for _, drop := range []string{"read", "write", "edit", "patch", "search", "inspect", "bash", "python", "glob"} {
 				if reg[drop] != nil {
-					t.Fatalf("Ask must not expose %s (no workspace access)", drop)
+					t.Fatalf("Talk must not expose %s (no workspace access)", drop)
 				}
 			}
 		}

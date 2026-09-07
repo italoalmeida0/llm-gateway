@@ -88,7 +88,7 @@ var modeCapabilities = map[string][]string{
 	"build":    {"read", "write", "edit", "patch", "search", "inspect", "bash", "python", "glob", "question", "todo", "search_web", "fetch_url"},
 	"plan":     {"read", "search", "inspect", "bash", "glob", "question", "todo", "search_web", "fetch_url"},
 	"learning": {"read", "search", "inspect", "bash", "glob", "question", "todo", "search_web", "fetch_url"},
-	"ask":      {"question", "search_web", "fetch_url", "todo"},
+	"talk":     {"question", "search_web", "fetch_url", "todo"},
 }
 
 // ModeCapabilities returns the tool names available in a mode (sorted).
@@ -106,8 +106,8 @@ func modeInstructions(mode string) string {
 	switch mode {
 	case "plan":
 		return "You are in Plan mode. Inspect the project using read, search, inspect, glob and shell commands (bash/python for read-only exploration), and produce an actionable implementation plan with relevant files, tradeoffs and validation. Git status/diff/log are available for context. Use the question tool to clarify requirements, confirm uncertain assumptions and get user decisions before finalizing your plan. Do not repeat questions the user already answered. Do not modify files or implement changes; write, edit and patch tools are unavailable. Ask the user to switch to Build when ready to implement."
-	case "ask":
-		return "You are in Ask mode. Answer the user's questions directly and concisely — explain concepts, compare options, summarize docs. You may research on the web (search_web/fetch_url) to ground your answers in current sources; always cite the URLs you used. Use the question tool when the request is ambiguous and a quick clarification would change the answer. Never touch the workspace: no reading, editing, creating or executing files, no shell, no git. If the user asks for implementation, ask them to switch to Build; for a plan, switch to Plan."
+	case "talk":
+		return "You are in Talk mode, a conversational agent. Chat naturally — answer questions, explain concepts, compare options, summarize docs. You may research on the web (search_web/fetch_url) to ground your answers in current sources; always cite the URLs you used. Use the question tool when the request is ambiguous and a quick clarification would change the answer. Never touch the workspace: no reading, editing, creating or executing files, no shell, no git. If the user asks for implementation, ask them to switch to Build; for a plan, switch to Plan."
 	case "learning":
 		return `You are a patient Socratic programming tutor. Help the user develop independent problem-solving and debugging skills. Never write the solution or modify files. Do not give complete code blocks that solve the user's current task, even when asked to give up or provide the answer. Pseudocode, conceptual diagrams and small unrelated syntax examples are allowed.
 Inspect relevant code with read, glob and shell commands before discussing it. You may run commands to inspect behavior and demonstrate concepts. State an observation, offer a conceptual hint, then ask exactly one guiding question at a time. Ask the learner to explain what the code does before suggesting a flaw. For beginners use familiar analogies; for intermediate learners discuss structure and best practices; for advanced learners discuss complexity and architecture.
@@ -134,8 +134,8 @@ func restrictModeTools(reg core.Registry, mode string) {
 		delete(reg, "patch")
 		delete(reg, "bash")
 		delete(reg, "python")
-	case "ask":
-		// Ask answers questions: only question + web research + checklist.
+	case "talk":
+		// Talk is conversational: only question + web research + checklist.
 		// No workspace access at all (not even read) — pure Q&A.
 		for _, name := range []string{"read", "write", "edit", "patch", "search", "inspect", "bash", "python", "glob"} {
 			delete(reg, name)

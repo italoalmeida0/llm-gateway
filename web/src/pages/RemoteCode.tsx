@@ -2692,7 +2692,9 @@ export default function RemoteCodePage() {
   }
 
   function copyMsg(id: string, text: string) {
-    copyWithToast(text || "");
+    const trimmed = (text || "").trim();
+    if (!trimmed) return;
+    copyWithToast(trimmed);
     setCopiedMsgId(id);
     setTimeout(() => setCopiedMsgId((cur) => (cur === id ? null : cur)), 1500);
   }
@@ -4759,13 +4761,15 @@ export default function RemoteCodePage() {
                               data-rc-tip="Fork conversation from here" aria-label="Fork conversation from here">
                               <Iconify icon="lucide:git-branch" size={14} />
                             </button>
-                            <button
-                              onClick={() => copyMsg(msg.id, textOf())}
-                              class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              data-rc-tip="Copy" aria-label="Copy"
-                            >
-                              <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={13} />
-                            </button>
+                            <Show when={textOf().trim() !== ""}>
+                              <button
+                                onClick={() => copyMsg(msg.id, textOf())}
+                                class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                                data-rc-tip="Copy" aria-label="Copy"
+                              >
+                                <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={13} />
+                              </button>
+                            </Show>
                             <button
                               onClick={() => startEditMsg(rawIdx(), msg)}
                               class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
@@ -4816,13 +4820,15 @@ export default function RemoteCodePage() {
                               data-rc-tip="Fork conversation from here" aria-label="Fork conversation from here">
                               <Iconify icon="lucide:git-branch" size={14} />
                             </button>
-                            <button
-                              onClick={() => copyMsg(msg.id, textOf())}
-                              class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                              data-rc-tip="Copy" aria-label="Copy"
-                            >
-                              <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={14} />
-                            </button>
+                            <Show when={textOf().trim() !== ""}>
+                              <button
+                                onClick={() => copyMsg(msg.id, textOf())}
+                                class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
+                                data-rc-tip="Copy" aria-label="Copy"
+                              >
+                                <Iconify icon={copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={14} />
+                              </button>
+                            </Show>
                             <button
                               onClick={() => regenerateMsg(rawIdx())}
                               class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"

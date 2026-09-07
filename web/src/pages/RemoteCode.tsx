@@ -5472,45 +5472,45 @@ export default function RemoteCodePage() {
                />
             </div>
               </Show>
-              <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-ink-500" data-composer-footer>
-                <span class="flex items-center gap-1.5 min-w-0" data-rc-tip={currentProject()?.path}><Iconify icon="lucide:folder" size={13} /><span class="truncate">{currentProject()?.name || baseNameOf(activeSession()?.cwd) || "Project"}</span></span>
-                  <Show when={activeSessionId()}>
-                    <FloatMenu anchor={() => contextBtn} open={usageOpen()} placement="top-end" width="19rem">
-                      <div class="p-1.5 text-xs">
-                        <div class="font-semibold text-ink-200 mb-3">Conversation context</div>
-                        <div class="text-lg font-medium text-ink-100 tabular-nums">{activeContext().label}</div>
-                        <p class="text-[11px] text-ink-500 mt-1 leading-relaxed">
-                          {activeContext().window > 0 ? `${compactTokens(activeContext().window)} tokens configured in the gateway.` : "Context limit not configured in the gateway."}
-                          {" "}Measured from the latest model request and its response.
-                        </p>
-                        <Show when={activeContext().percent !== null}>
-                          <div class="h-1.5 rounded-full bg-elev overflow-hidden mt-3" role="progressbar" aria-label="Context used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, activeContext().percent ?? 0)}>
-                            <div class="h-full rounded-full bg-accent-500" style={{ width: `${Math.min(100, activeContext().percent ?? 0)}%` }} />
+              <Show when={activeSessionId()}>
+                <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-ink-500" data-composer-footer>
+                  <span class="flex items-center gap-1.5 min-w-0" data-rc-tip={currentProject()?.path}><Iconify icon="lucide:folder" size={13} /><span class="truncate">{currentProject()?.name || baseNameOf(activeSession()?.cwd) || "Project"}</span></span>
+                  <FloatMenu anchor={() => contextBtn} open={usageOpen()} placement="top-end" width="19rem">
+                    <div class="p-1.5 text-xs">
+                      <div class="font-semibold text-ink-200 mb-3">Conversation context</div>
+                      <div class="text-lg font-medium text-ink-100 tabular-nums">{activeContext().label}</div>
+                      <p class="text-[11px] text-ink-500 mt-1 leading-relaxed">
+                        {activeContext().window > 0 ? `${compactTokens(activeContext().window)} tokens configured in the gateway.` : "Context limit not configured in the gateway."}
+                        {" "}Measured from the latest model request and its response.
+                      </p>
+                      <Show when={activeContext().percent !== null}>
+                        <div class="h-1.5 rounded-full bg-elev overflow-hidden mt-3" role="progressbar" aria-label="Context used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, activeContext().percent ?? 0)}>
+                          <div class="h-full rounded-full bg-accent-500" style={{ width: `${Math.min(100, activeContext().percent ?? 0)}%` }} />
+                        </div>
+                      </Show>
+                      <div class="font-semibold text-ink-200 mb-2 mt-4 pt-3 border-t border-line">Session usage</div>
+                      <Show
+                        when={activeUsage()}
+                        fallback={
+                          <p class="text-ink-500 text-[11px]">
+                            No usage reported yet. Run the agent to see input / cache / output tokens here.
+                          </p>
+                        }
+                      >
+                        {(u) => (
+                          <div class="space-y-1.5 font-mono text-[11px]">
+                            <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}</span></div>
+                            <div class="flex justify-between"><span class="text-ink-500">Cache</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
+                            <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}</span></div>
+                            <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}</span></div>
+                            <Show when={u().costUsd > 0}>
+                              <div class="flex justify-between pt-1 border-t border-line/60"><span class="text-ink-500">Cost</span><span class="text-ink-200">${u().costUsd.toFixed(4)}</span></div>
+                            </Show>
                           </div>
-                        </Show>
-                        <div class="font-semibold text-ink-200 mb-2 mt-4 pt-3 border-t border-line">Session usage</div>
-                        <Show
-                          when={activeUsage()}
-                          fallback={
-                            <p class="text-ink-500 text-[11px]">
-                              No usage reported yet. Run the agent to see input / cache / output tokens here.
-                            </p>
-                          }
-                        >
-                          {(u) => (
-                            <div class="space-y-1.5 font-mono text-[11px]">
-                              <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}</span></div>
-                              <div class="flex justify-between"><span class="text-ink-500">Cache</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
-                              <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}</span></div>
-                              <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}</span></div>
-                              <Show when={u().costUsd > 0}>
-                                <div class="flex justify-between pt-1 border-t border-line/60"><span class="text-ink-500">Cost</span><span class="text-ink-200">${u().costUsd.toFixed(4)}</span></div>
-                              </Show>
-                            </div>
-                          )}
-                        </Show>
-                      </div>
-                    </FloatMenu>
+                        )}
+                      </Show>
+                    </div>
+                  </FloatMenu>
                   <Tooltip content="Conversation context and session usage">
                     <button ref={contextBtn} data-menubtn aria-label={`Conversation context: ${activeContext().label}`} aria-expanded={usageOpen()}
                       onClick={() => { const next = !usageOpen(); closeMenus(); setUsageOpen(next); }}
@@ -5518,8 +5518,8 @@ export default function RemoteCodePage() {
                       <Iconify icon="lucide:chart-pie" size={12} /><span>{activeContext().label}</span>
                     </button>
                   </Tooltip>
-                  </Show>
-              </div>
+                </div>
+              </Show>
             </div>
           </div>
           </Show>

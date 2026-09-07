@@ -639,6 +639,53 @@ export function CodeBlock(props: {
   );
 }
 /**
+ * Inline shell syntax highlight for tool headers (bash/run rows):
+ * `$ command` with flags, strings, vars, pipes and comments tinted.
+ * Sync + regex-based (no async hljs): headers render instantly and update
+ * for free on every keystroke/signal change. Long commands clamp with
+ * ellipsis (title attr keeps the full text).
+ */
+export function ShellCmd(props: { text: string; max?: number }) {
+  const max = () => props.max ?? 90;
+  const short = () => {
+    const t = props.text || "";
+    return t.length > max() ? t.slice(0, max()) + "…" : t;
+  };
+  // Tokenize: comments | strings | vars | operators | flags | numbers.
+  const parts = () => {
+    const src = short();
+    const re = /(#[^\n]*)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(\$[A-Za-z_][A-Za-z0-9_]*|\$\{|\$\(|\$\d+)|(&&|\|\||\||;|>|>>|<|2>|&)|(^|\s)(-[A-Za-z][A-Za-z0-9-]*|--[A-Za-z0-9][A-Za-z0-9-]*)(?=\s|$)|\b(\d+(?:\.\d+)?)\b/g;
+    const out: { t: string; c: string }[] = [];
+    let last = 0;
+    let m: RegExpExecArray | null;
+    // Safety: bail to plain text on pathological input.
+    let guard = 0;
+    while ((m = re.exec(src)) !== null && guard++ < 500) {
+      if (m.index > last) out.push({ t: src.slice(last, m.index), c: "" });
+      const [full, comment, str, vr, op, _pre, flag, num] = m;
+      if (comment) out.push({ t: full, c: "text-ink-600 italic" });
+      else if (str) out.push({ t: full, c: "text-emerald-300" });
+      else if (vr) out.push({ t: full, c: "text-amber-300" });
+      else if (op) out.push({ t: full, c: "text-rose-300" });
+      else if (flag) out.push({ t: full, c: "text-sky-300" });
+      else if (num) out.push({ t: full, c: "text-violet-300" });
+      else out.push({ t: full, c: "" });
+      last = m.index + full.length;
+      if (full.length === 0) re.lastIndex++;
+    }
+    if (last < src.length) out.push({ t: src.slice(last), c: "" });
+    return out;
+  };
+  return (
+    <code title={props.text || ""} class="font-mono truncate min-w-0">
+      <span class="text-ink-600 select-none">$ </span>
+      <For each={parts()}>{(p) =>
+        p.c ? <span class={p.c}>{p.t}</span> : <span>{p.t}</span>
+      }</For>
+    </code>
+  );
+}
+/**
  * Renders a unified context diff (daemon edit results). Diff marker lines
  * (+/-) keep their red/green lane so added/removed still jump out; the line
  * BODY is syntax-highlighted per the file extension, and a truncate
@@ -3600,6 +3647,17 @@ export default function RemoteCodePage() {
     const prog = () => (u.call?.toolId ? toolProgress()[u.call.toolId] : undefined);
     const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
     const name = () => u.call?.toolName || "tool";
+    // Full shell command for the highlighted header: commands[] joined with
+    // the effective joiner (&& or ;), else the single command. Python rows
+    // show script + args or the first code line (same as the summary).
+    const bashHeaderCmd = () => {
+      if (name() === "python") return sum().target || "";
+      const a: any = args();
+      if (Array.isArray(a.commands) && a.commands.length > 0) {
+        return a.commands.map(String).join(a.stopOnError === false ? " ; " : " && ");
+      }
+      return String(a.command || sum().target || "");
+    };
     const terminal = createMemo(() => terminalPresentation(u.result?.toolResult || ""));
     const webDetails = () => {
       const d: any = u.result?.toolDetails;
@@ -3641,7 +3699,11 @@ export default function RemoteCodePage() {
           <span class="flex items-center gap-2 min-w-0 flex-1">
             <span class="inline-flex items-center gap-2 min-w-0" data-rc-tip={args().path ? absoluteRemotePath(String(args().path), activeSession()?.cwd || "", projects().find((p) => p.protected)?.path) : undefined}>
               <Show when={args().path}><FileIcon path={String(args().path)} /></Show>
-              <span class="truncate text-ink-200 font-medium min-w-0">{sum().target}</span>
+              <Show when={name() === "bash" || name() === "python"} fallback={
+                <span class="truncate text-ink-200 font-medium min-w-0">{sum().target}</span>
+              }>
+                <span class="truncate text-ink-200 min-w-0 text-[12.5px]"><ShellCmd text={bashHeaderCmd()} /></span>
+              </Show>
             </span>
           </span>
           <Show when={sum().statAdd != null || sum().statDel != null}>
@@ -3829,13 +3891,27 @@ export default function RemoteCodePage() {
                 </Show>
               </Show>
             </Show>
-            <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python" && name() !== "search" && name() !== "inspect" && name() !== "patch" && name() !== "search_web" && name() !== "fetch_url"}>
+            <Show when={name() === "bash"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Running…</div>}
+              >
+                <div class="px-3 pt-2 pb-1.5 border-b border-line/50 overflow-x-auto">
+                  <ShellCmd text={bashHeaderCmd()} max={500} />
+                </div>
+                <Show when={args().workdir}>
+                  <div class="px-3 py-1 text-[10px] font-mono text-ink-600">in {String(args().workdir)}</div>
+                </Show>
+                <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">{u.result ? terminal().output || "No output" : prog() || ""}</pre>
+              </Show>
+            </Show>
+            <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python" && name() !== "search" && name() !== "inspect" && name() !== "patch" && name() !== "search_web" && name() !== "fetch_url" && name() !== "bash"}>
               <Show
                 when={u.result?.toolResult || prog()}
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{name() === "question" ? "Waiting for your answers…" : pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
               >
                 <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
-                  {name() === "bash" && u.result ? terminal().output || "No output" : u.result?.toolResult || prog() || ""}
+                  {u.result?.toolResult || prog() || ""}
                 </pre>
               </Show>
             </Show>

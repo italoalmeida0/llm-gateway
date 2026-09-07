@@ -3586,7 +3586,7 @@ export default function RemoteCodePage() {
     const name = () => u.call?.toolName || "tool";
     const terminal = createMemo(() => terminalPresentation(u.result?.toolResult || ""));
     const elapsed = () => {
-      if (name() !== "bash") return "";
+      if (name() !== "bash" && name() !== "python") return "";
       const duration = u.result?.toolDurationMs ?? terminal().durationMs;
       if (duration !== undefined) return elapsedLabel(duration);
       const start = toolStarts()[u.call?.toolId || ""];
@@ -3680,7 +3680,26 @@ export default function RemoteCodePage() {
                 language={languageForPath(String(args().path || ""))}
               />
             </Show>
-            <Show when={name() !== "edit" && name() !== "read" && name() !== "write"}>
+            <Show when={name() === "python"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Running Python…</div>}
+              >
+                <Show when={args().script}>
+                  <div class="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-ink-500">
+                    <FileIcon path={String(args().script || "")} />
+                    <span class="font-mono truncate">{String(args().script || "")}{Array.isArray(args().args) && args().args.length > 0 ? ` ${args().args.map(String).join(" ")}` : ""}</span>
+                  </div>
+                </Show>
+                <Show when={args().code}>
+                  <CodeBlock text={String(args().code || "")} language="python" />
+                </Show>
+                <div class="border-t border-line/50">
+                  <CodeBlock text={terminal().output || "No output"} language={undefined} />
+                </div>
+              </Show>
+            </Show>
+            <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python"}>
               <Show
                 when={u.result?.toolResult || prog()}
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{name() === "question" ? "Waiting for your answers…" : pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}

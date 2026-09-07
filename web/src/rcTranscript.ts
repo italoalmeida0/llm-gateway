@@ -165,6 +165,29 @@ export function toolSummary(u: ToolUnit): ToolSummary {
         target: cmd.length > 90 ? cmd.slice(0, 90) + "…" : cmd,
       };
     }
+    case "python": {
+      // Script mode shows the file; code mode shows the first meaningful line.
+      if (args.script) {
+        const a = Array.isArray(args.args) ? args.args : [];
+        const suffix = a.length > 0 ? ` ${a.map(String).join(" ")}` : "";
+        const target = `${baseNameOf(args.script) || args.script}${suffix}`;
+        return {
+          icon: "mdi:language-python",
+          verb: "Run",
+          target: target.length > 90 ? target.slice(0, 90) + "…" : target,
+        };
+      }
+      const first = String(args.code || "")
+        .split("\n")
+        .map((l) => l.trim())
+        .find((l) => l && !l.startsWith("#"));
+      const one = (first || "snippet").replace(/\s+/g, " ").trim();
+      return {
+        icon: "mdi:language-python",
+        verb: "Run",
+        target: one.length > 90 ? one.slice(0, 90) + "…" : one,
+      };
+    }
     case "write": {
       const content = String(args.content || "");
       const n = content ? content.split("\n").length : 0;

@@ -224,5 +224,21 @@ describe("Remote Code toolSummary", () => {
       call: { type: "tool_call", toolId: "9", toolName: "question" }
     })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Questions" });
   });
+  test("summarizes python code and script calls", () => {
+    // Code mode shows the first meaningful line (skips blanks/comments).
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "p1", toolName: "python", toolArgs: JSON.stringify({ code: "# calc\n\nprint(sum(range(10)))" }) }
+    })).toEqual({ icon: "mdi:language-python", verb: "Run", target: "print(sum(range(10)))" });
+    // Script mode shows the file plus CLI args.
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "p2", toolName: "python", toolArgs: JSON.stringify({ script: "scripts/seed.py", args: ["--dry"] }) }
+    })).toEqual({ icon: "mdi:language-python", verb: "Run", target: "seed.py --dry" });
+    // Empty code falls back to a clean placeholder (never blank).
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "p3", toolName: "python", toolArgs: "{}" }
+    })).toEqual({ icon: "mdi:language-python", verb: "Run", target: "snippet" });
+    // Exit footers parse for duration, same as bash.
+    expect(terminalPresentation("ok\n[exit 0]  Took 0.1s")).toEqual({ output: "ok", durationMs: 100 });
+  });
 });
 

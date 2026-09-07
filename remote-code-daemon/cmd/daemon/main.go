@@ -2322,32 +2322,39 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		sb.Lock()
 	}
 
-	reg := core.NewRegistry(
+	baseTools := []core.Tool{
 		&tools.ReadTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.WriteTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.EditTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.BashTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.GlobTool{CWD: sessionCWD, Sandbox: sb},
-		&tools.QuestionTool{Ask: func(ctx context.Context, req tools.QuestionRequest) ([][]string, error) {
-			return d.askQuestions(ctx, act, myGen, cfg.HostID, req)
-		}},
-		&tools.TodoTool{Update: func(items []tools.TodoItem) error {
-			act.mu.Lock()
-			defer act.mu.Unlock()
-			if act.gen != myGen || ctx.Err() != nil {
-				return context.Canceled
-			}
-			act.record.Todos = append([]tools.TodoItem{}, items...)
-			if err := d.saveSession(act.record); err != nil {
-				return err
-			}
-			_ = d.sendWS(map[string]any{"type": "agent_event", "hostId": cfg.HostID, "sessionId": sessionID, "event": map[string]any{"type": "todo_update", "items": items}})
-			return nil
-		}},
-	)
+	}
+	// The python tool is only advertised when a Python 3 interpreter exists
+	// on this machine (PythonAvailable probes PATH once and caches).
+	if _, err := tools.PythonAvailable(); err == nil {
+		baseTools = append(baseTools, &tools.PythonTool{CWD: sessionCWD, Sandbox: sb})
+	}
+
+	questionTool := &tools.QuestionTool{Ask: func(ctx context.Context, req tools.QuestionRequest) ([][]string, error) {
+		return d.askQuestions(ctx, act, myGen, cfg.HostID, req)
+	}}
+	todoTool := &tools.TodoTool{Update: func(items []tools.TodoItem) error {
+		act.mu.Lock()
+		defer act.mu.Unlock()
+		if act.gen != myGen || ctx.Err() != nil {
+			return context.Canceled
+		}
+		act.record.Todos = append([]tools.TodoItem{}, items...)
+		if err := d.saveSession(act.record); err != nil {
+			return err
+		}
+		_ = d.sendWS(map[string]any{"type": "agent_event", "hostId": cfg.HostID, "sessionId": sessionID, "event": map[string]any{"type": "todo_update", "items": items}})
+		return nil
+	}}
+	reg := core.NewRegistry(append(append(baseTools, questionTool), todoTool)...)
 
 	journal = newReviewJournal(d, act, myGen, sessionCWD, cfg.HostID, sessionID)
-	for _, name := range []string{"write", "edit", "bash"} {
+	for _, name := range []string{"write", "edit", "bash", "python"} {
 		if tool, ok := reg[name]; ok {
 			reg[name] = &reviewedTool{Tool: tool, journal: journal}
 		}

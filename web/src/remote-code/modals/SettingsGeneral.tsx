@@ -2,35 +2,7 @@ import { For } from "solid-js";
 import { ThemeToggle } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 
-export interface SettingsModalCtx {
-  showConfigModal: () => boolean;
-  setShowConfigModal: (v: boolean) => void;
-  cancelSettings: () => void;
-  saveDaemonConfig: () => boolean;
-  toast: (msg: string, kind?: string) => void;
-  appNotice: () => { kind: string; message: string } | null;
-  convWidth: () => string;
-  setConvWidth: (v: string) => void;
-  daemonSettings: () => Record<string, any>;
-  setDaemonSettings: (v: Record<string, any> | ((p: Record<string, any>) => Record<string, any>)) => void;
-  verboseChat: () => boolean;
-  setVerboseChat: (v: boolean) => void;
-  mcpServers: () => Record<string, { command?: string; args?: string[]; url?: string; transport?: string }>;
-  newMcpName: () => string; setNewMcpName: (v: string) => void;
-  newMcpCmd: () => string; setNewMcpCmd: (v: string) => void;
-  newMcpArgs: () => string; setNewMcpArgs: (v: string) => void;
-  newMcpUrl: () => string; setNewMcpUrl: (v: string) => void;
-  newMcpTransport: () => string; setNewMcpTransport: (v: string) => void;
-  handleAddMcpServer: () => void;
-  handleDeleteMcpServer: (name: string) => void;
-  newSkillName: () => string; setNewSkillName: (v: string) => void;
-  newSkillDesc: () => string; setNewSkillDesc: (v: string) => void;
-  newSkillBody: () => string; setNewSkillBody: (v: string) => void;
-  handleAddSkill: () => void;
-  handleDeleteSkill: (name: string) => void;
-  toggleSkill: (name: string) => void;
-  skills: () => Array<{ name: string; description: string; enabled: boolean }>;
-}
+import type { SettingsModalCtx } from "./SettingsModal";
 
 export function SettingsGeneralSection(ctx: SettingsModalCtx) {
   return (

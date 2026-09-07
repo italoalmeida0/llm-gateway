@@ -1,21 +1,9 @@
 import { For, Show } from "solid-js";
 import { copyWithToast } from "../../../ui";
-import type { ToolUnit } from "../../types";
-import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 import { CodeBlock, DiffView } from "../CodeBlock";
 import { FileIcon } from "../../presentation";
 import { languageForPath } from "../../utils/lang";
-import type { useToolUnitModel } from "./toolUnitModel";
-
-type ToolModel = ReturnType<typeof useToolUnitModel>;
-
-export interface ToolPartProps {
-  ctx: TranscriptRenderCtx;
-  msgId: string;
-  u: ToolUnit;
-  m: ToolModel;
-  running: boolean;
-}
+import type { ToolPartProps } from "./toolUnitModel";
 
 export function ToolEditBodies(props: ToolPartProps) {
   return (

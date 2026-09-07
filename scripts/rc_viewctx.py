@@ -2,7 +2,7 @@
 import json
 import re
 
-ORIG = "web/src/pages/RemoteCode.tsx"
+ORIG = "web/src/remote-code/RemoteCodePage.tsx"
 lines = open(ORIG, encoding="utf-8").read().splitlines(keepends=True)
 syms = json.load(open("/tmp/syms.json", encoding="utf-8"))
 

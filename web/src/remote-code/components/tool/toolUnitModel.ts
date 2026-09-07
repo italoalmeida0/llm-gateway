@@ -46,3 +46,15 @@ const elapsed = () => {
 };
   return { key, open, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed };
 }
+
+export type ToolModel = ReturnType<typeof useToolUnitModel>;
+
+/** Props partilhadas pelas secções de uma tool row (header + bodies). Definida
+ * uma única vez aqui; ToolUnitHeader/ToolEditBodies/ToolSearchBodies importam. */
+export interface ToolPartProps {
+  ctx: TranscriptRenderCtx;
+  msgId: string;
+  u: ToolUnit;
+  m: ToolModel;
+  running: boolean;
+}

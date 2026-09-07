@@ -35,6 +35,7 @@ import {
 import { PreviewModal } from "./modals/PreviewModal";
 import { SettingsModal } from "./modals/SettingsModal";
 import type { RemoteCodeViewCtx } from "./viewCtx";
+import type { Review, TurnActivity, TodoItem, PendingAttachment, SearchHit, StoredAttachment, WorkspaceStatus, ChoiceOption, ConfirmState } from "./viewTypes";
 import type {
   AgentSettings, ChatMessage, ContentBlock, MCPServerConfig, PendingApproval,
   PreviewFile, Project, RenderBlock, SessionSummary,
@@ -69,8 +70,6 @@ export default function RemoteCodePage() {
   let folderRequestId = "";
   let projectCreationId = "";
   const [pendingProjectId, setPendingProjectId] = createSignal("");
-  interface ReviewFile { state?: "exists" | "deleted" | "unavailable"; canUndo?: boolean; truncated?: boolean; path: string; kind: string; diff?: string; binary?: boolean; }
-  interface Review { checkedAt?:number; id: string; files: ReviewFile[]; notice?: string; }
   const [taskReview, setTaskReview] = createSignal<Review | null>(null);
   const [reviewOpen, setReviewOpen] = createSignal(false);
   const [reviewLoading, setReviewLoading] = createSignal(false);
@@ -170,7 +169,7 @@ export default function RemoteCodePage() {
       return false;
     }
   }
-  // SignalDB data layer (see rcStore.ts). One store per host, persisted.
+  // SignalDB data layer (see store/sessions.ts). One store per host, persisted.
   const dataLayer = createDataLayer({
     send: (payload) => sendWS(payload),
     isOpen: wsOpen,
@@ -207,8 +206,6 @@ export default function RemoteCodePage() {
   const [activeModel, setActiveModel] = createSignal("");
   const [yoloMode, setYoloMode] = createSignal(true);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
-  interface TurnActivity { startedAt: number; endedAt?: number; status: "running" | "cancelling" | "cancelled" | "completed" | "failed"; }
-  interface TodoItem { id: string; text: string; status: "pending" | "in_progress" | "completed"; }
   const [turnActivity, setTurnActivity] = createSignal<TurnActivity | null>(null);
   const [todos, setTodos] = createSignal<TodoItem[]>([]);
   const [todosOpen, setTodosOpen] = createSignal(true);
@@ -344,33 +341,10 @@ export default function RemoteCodePage() {
   const [isAtBottom, setIsAtBottom] = createSignal(true);
 
   // Attachments (chatbot-style): picked in the browser, stored on the daemon.
-  interface PendingAttachment {
-    key: string;
-    name: string;
-    mime: string;
-    size: number;
-    dataB64: string;
-    objectUrl?: string;
-    /** Browser-extracted markdown/text for pdf/office/plain files. */
-    text?: string;
-    loading?: boolean;
-    loadError?: string;
-    serverId?: string;
-    uploading?: boolean;
-    uploadKey?: string;
-  }
   const [pendingAttachments, setPendingAttachments] = createSignal<PendingAttachment[]>([]);
   const uploadWaiters = new Map<string, { ok: (id: string) => void; fail: (msg: string) => void }>();
 
   // Advanced search (daemon full-text over local transcripts).
-  interface SearchHit {
-    sessionId: string;
-    title: string;
-    cwd: string;
-    updatedAt: number;
-    snippet: string;
-    matchCount: number;
-  }
   const [searchResults, setSearchResults] = createSignal<SearchHit[]>([]);
   let searchTimer: any = null;
 
@@ -378,7 +352,6 @@ export default function RemoteCodePage() {
 
   // Choice modal: like showConfirm but returns the picked option id
   // (or null on cancel). Used for fork-vs-resend on edit/regenerate.
-  interface ChoiceOption { id: string; label: string; hint?: string; primary?: boolean }
   const [choiceState, setChoiceState] = createSignal<{ title: string; message: string; options: ChoiceOption[]; resolve: (id: string | null) => void } | null>(null);
   function showChoice(opts: { title: string; message: string; options: ChoiceOption[] }): Promise<string | null> {
     return new Promise((resolve) => {
@@ -387,14 +360,6 @@ export default function RemoteCodePage() {
   }
 
   // Promise-based confirm modal (chatbot showConfirm, no native confirm()).
-  interface ConfirmState {
-    title: string;
-    message: string;
-    confirmText: string;
-    cancelText: string;
-    danger: boolean;
-    resolve: (v: boolean) => void;
-  }
   const [confirmState, setConfirmState] = createSignal<ConfirmState | null>(null);
   function showConfirm(opts: {
     title?: string;
@@ -458,12 +423,6 @@ export default function RemoteCodePage() {
   const [selectedSessions, setSelectedSessions] = createSignal<Set<string>>(new Set());
 
   // Stored attachments per session (from session_data + uploads).
-  interface StoredAttachment {
-    id: string;
-    name: string;
-    mime: string;
-    size: number;
-  }
   const [sessionFiles, setSessionFiles] = createSignal<Record<string, StoredAttachment[]>>({});
   // Fetched bytes cache for preview (attachmentId -> data).
   const [previewCache, setPreviewCache] = createSignal<
@@ -555,7 +514,6 @@ export default function RemoteCodePage() {
   });
 
   const currentProject = createMemo(() => activeSessionId() ? projectForDirectory(activeSession()?.cwd || "", projects()) : activeProject());
-  interface WorkspaceStatus { path:string; status:"available" | "missing" | "unavailable"; }
   const [workspace, setWorkspace] = createSignal<WorkspaceStatus | null>(null);
   const workspacePath = createMemo(() => activeSessionId() ? activeSession()?.cwd || "" : currentProject()?.path || "");
   const workspaceState = () => workspace()?.path === workspacePath() ? workspace()?.status : currentProject()?.folderStatus;

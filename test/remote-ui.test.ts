@@ -4,7 +4,8 @@ import { createTranscriptScroll } from "../web/src/remote-code/scroll";
 import { displayToolArgs, withoutTodoActivity } from "../web/src/remote-code/live";
 import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/remote-code/paths";
 import { buildRenderBlocks, terminalPresentation, toolSummary } from "../web/src/remote-code/transcript";
-import type { ChatMessage } from "../web/src/remote-code/types";
+import { partitionToolSegs } from "../web/src/remote-code/utils/toolSegs";
+import type { ChatMessage, ToolUnit } from "../web/src/remote-code/types";
 import { fileIcon } from "../web/src/remote-code/files";
 
 describe("Remote Code file presentation", () => {
@@ -273,3 +274,25 @@ describe("Remote Code toolSummary", () => {
   });
 });
 
+
+describe("Remote Code tool segments", () => {
+  const unit = (name: string, id: string): ToolUnit => ({
+    call: { type: "tool_call", toolId: id, toolName: name, toolArgs: "{}" },
+  });
+  test("groups consecutive explore/command runs of 2+, keeps singles flat", () => {
+    const segs = partitionToolSegs([unit("read", "a"), unit("glob", "b"), unit("edit", "c"), unit("bash", "d")]);
+    expect(segs.length).toBe(3);
+    expect(segs[0]).toEqual({ kind: "group", cat: "explore", units: [unit("read", "a"), unit("glob", "b")] });
+    expect(segs[1]).toEqual({ kind: "unit", unit: unit("edit", "c"), idx: 2 });
+    expect(segs[2]).toEqual({ kind: "unit", unit: unit("bash", "d"), idx: 3 });
+  });
+  test("splits on category change and non-groupable tools", () => {
+    const segs = partitionToolSegs([unit("bash", "a"), unit("bash", "b"), unit("read", "c"), unit("read", "d"), unit("read", "e")]);
+    expect(segs.length).toBe(2);
+    expect(segs[0]).toEqual({ kind: "group", cat: "command", units: [unit("bash", "a"), unit("bash", "b")] });
+    expect(segs[1]).toEqual({ kind: "group", cat: "explore", units: [unit("read", "c"), unit("read", "d"), unit("read", "e")] });
+  });
+  test("empty input yields no segments", () => {
+    expect(partitionToolSegs([])).toEqual([]);
+  });
+});

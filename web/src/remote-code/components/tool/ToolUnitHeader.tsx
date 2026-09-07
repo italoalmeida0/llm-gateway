@@ -1,21 +1,9 @@
 import { Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
 import { absoluteRemotePath } from "../../paths";
-import type { ToolUnit } from "../../types";
-import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 import { ShellCmd } from "../CodeBlock";
 import { FileIcon } from "../../presentation";
-import type { useToolUnitModel } from "./toolUnitModel";
-
-type ToolModel = ReturnType<typeof useToolUnitModel>;
-
-export interface ToolPartProps {
-  ctx: TranscriptRenderCtx;
-  msgId: string;
-  u: ToolUnit;
-  m: ToolModel;
-  running: boolean;
-}
+import type { ToolPartProps } from "./toolUnitModel";
 
 export function ToolUnitHeader(props: ToolPartProps) {
   return (

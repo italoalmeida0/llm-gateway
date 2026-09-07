@@ -33,7 +33,3 @@ export function FloatMenu(props: {
   );
 }
 
-/**
- * Interfaces
- */
-

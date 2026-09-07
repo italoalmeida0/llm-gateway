@@ -2,12 +2,13 @@ import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { Streamdown } from "streamdown-solid";
 import { FileIcon } from "../presentation";
-import { tryParseArgs } from "../utils/tools";
-import { timeAgo } from "../utils/format";
 import type { RemoteCodeViewCtx } from "../viewCtx";
 import {
   renderAssistantSpecial, renderMessageContent, renderSeriesLead,
 } from "./TranscriptBlocks";
+import { HistoryView } from "./HistoryView";
+import { ApprovalCard } from "./ApprovalCard";
+import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
 
 export function TranscriptView(ctx: RemoteCodeViewCtx) {
   return (
@@ -48,96 +49,19 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
 <Show
   when={!ctx.historyView()}
   fallback={
-    <div class="flex-1 overflow-y-auto px-4 md:px-8 py-8">
-      <div class="max-w-2xl mx-auto">
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-base font-semibold text-ink-100">Conversation History</h2>
-          <button
-            onClick={() => ctx.setHistoryView(false)}
-            class="p-1.5 rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-900 cursor-pointer"
-            data-rc-tip="Back to chat" aria-label="Back to chat"
-          >
-            <Iconify icon="lucide:x" size={15} />
-          </button>
-        </div>
-        <div class="relative mb-4">
-          <Iconify icon="lucide:search" size={14} class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-600" />
-          <input
-            type="text"
-            placeholder={
-              ctx.isMobile()
-                ? "Search conversations and messages..."
-                : "Search conversations and messages... (Ctrl+K)"
-            }
-            class="w-full text-[13px] bg-ink-900 border border-line/70 rounded-xl pl-9 pr-3 py-2 text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
-            value={ctx.sessionFilter()}
-            onInput={(e) => {
-              ctx.setSessionFilter(e.currentTarget.value);
-              ctx.queueDaemonSearch(e.currentTarget.value);
-            }}
-            ref={(el) => setTimeout(() => el?.focus(), 50)}
-          />
-        </div>
-        {/* Daemon full-text hits (message content, host-local) */}
-        <Show when={ctx.searchResults().length > 0}>
-          <div class="px-1 pb-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-            Message matches
-          </div>
-          <div class="space-y-1 mb-4">
-            <For each={ctx.searchResults()}>
-              {(r) => (
-                <button
-                  onClick={() => {
-                    ctx.setHistoryView(false);
-                    ctx.setSearchResults([]);
-                    ctx.selectSession(r.sessionId);
-                  }}
-                  class="w-full text-left px-3 py-2.5 rounded-xl border border-line/50 hover:bg-ink-900/70 transition-colors cursor-pointer"
-                >
-                  <div class="flex items-center justify-between gap-3">
-                    <span class="text-[13px] text-ink-200 truncate font-medium">{r.title}</span>
-                    <span class="text-[11px] text-ink-600 shrink-0">
-                      {r.matchCount > 1 ? `${r.matchCount} hits · ` : ""}{timeAgo(r.updatedAt)}
-                    </span>
-                  </div>
-                  <p class="text-[11px] text-ink-500 mt-1 line-clamp-2 leading-relaxed">{r.snippet}</p>
-                </button>
-              )}
-            </For>
-          </div>
-        </Show>
-        <div class="px-1 pb-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-          Conversations
-        </div>
-        <div class="space-y-1">
-          <For
-            each={ctx.sortedSessions(ctx.sessions().filter(ctx.matchQuery))}
-            fallback={
-              <p class="text-xs text-ink-600 py-6 text-center">No conversations found.</p>
-            }
-          >
-            {(s) => (
-              <button
-                onClick={() => {
-                  ctx.setHistoryView(false);
-                  ctx.selectSession(s.id);
-                }}
-                class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-ink-900/70 transition-colors group cursor-pointer"
-              >
-                <div class="flex items-center justify-between gap-3">
-                  <span class="text-[13px] text-ink-200 truncate font-medium">{s.title}</span>
-                  <span class="text-[11px] text-ink-600 shrink-0">{timeAgo(s.updatedAt)}</span>
-                </div>
-                <div class="flex items-center gap-1.5 mt-0.5 text-[11px] text-ink-500">
-                  <Iconify icon="lucide:folder" size={11} />
-                  <span class="truncate font-mono">{s.cwd}</span>
-                </div>
-              </button>
-            )}
-          </For>
-        </div>
-      </div>
-    </div>
+    <HistoryView
+      sessionFilter={ctx.sessionFilter}
+      setSessionFilter={ctx.setSessionFilter}
+      queueDaemonSearch={ctx.queueDaemonSearch}
+      searchResults={ctx.searchResults}
+      setSearchResults={ctx.setSearchResults}
+      setHistoryView={ctx.setHistoryView}
+      selectSession={ctx.selectSession}
+      sessions={ctx.sessions}
+      matchQuery={ctx.matchQuery}
+      sortedSessions={ctx.sortedSessions}
+      isMobile={ctx.isMobile}
+    />
   }
 >
 <Show when={!ctx.draftMode()}>
@@ -267,36 +191,16 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
                 </div>
               </Show>
               <Show when={!isEditing()}>
-                <div class="flex items-center gap-0.5 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
-                  <button onClick={() => ctx.forkMessage(block)} disabled={ctx.forking() || (block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx == null}
-                    class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-elev transition-colors cursor-pointer disabled:opacity-40"
-                    data-rc-tip="Fork conversation from here" aria-label="Fork conversation from here">
-                    <Iconify icon="lucide:git-branch" size={14} />
-                  </button>
-                  <Show when={textOf().trim() !== ""}>
-                    <button
-                      onClick={() => ctx.copyMsg(msg.id, textOf())}
-                      class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                      data-rc-tip="Copy" aria-label="Copy"
-                    >
-                      <Iconify icon={ctx.copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={13} />
-                    </button>
-                  </Show>
-                  <button
-                    onClick={() => ctx.startEditMsg(rawIdx(), msg)}
-                    class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                    data-rc-tip="Edit and resend" aria-label="Edit and resend"
-                  >
-                    <Iconify icon="lucide:pencil" size={13} />
-                  </button>
-                  <button
-                    onClick={() => ctx.deleteMsg(rawIdx())}
-                    class="p-1 rounded-md text-ink-500 hover:text-rose-400 hover:bg-ink-900 transition-colors cursor-pointer"
-                    data-rc-tip="Delete" aria-label="Delete"
-                  >
-                    <Iconify icon="lucide:trash-2" size={13} />
-                  </button>
-                </div>
+                <UserMsgActions
+                  forking={ctx.forking()}
+                  canFork={(block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx != null}
+                  showCopy={textOf().trim() !== ""}
+                  copied={ctx.copiedMsgId() === msg.id}
+                  onFork={() => ctx.forkMessage(block)}
+                  onCopy={() => ctx.copyMsg(msg.id, textOf())}
+                  onEdit={() => ctx.startEditMsg(rawIdx(), msg)}
+                  onDelete={() => ctx.deleteMsg(rawIdx())}
+                />
               </Show>
             </div>
           </Show>
@@ -326,29 +230,15 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
 
               {/* Hover actions (chatbot-style) */}
               <Show when={(ctx.sessionStatus() !== "running" || !isLast()) && !isEditing()}>
-                <div class="flex items-center gap-0.5 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
-                  <button onClick={() => ctx.forkMessage(block)} disabled={ctx.forking() || (block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx == null}
-                    class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-elev transition-colors cursor-pointer disabled:opacity-40"
-                    data-rc-tip="Fork conversation from here" aria-label="Fork conversation from here">
-                    <Iconify icon="lucide:git-branch" size={14} />
-                  </button>
-                  <Show when={textOf().trim() !== ""}>
-                    <button
-                      onClick={() => ctx.copyMsg(msg.id, textOf())}
-                      class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                      data-rc-tip="Copy" aria-label="Copy"
-                    >
-                      <Iconify icon={ctx.copiedMsgId() === msg.id ? "lucide:check" : "lucide:copy"} size={14} />
-                    </button>
-                  </Show>
-                  <button
-                    onClick={() => ctx.regenerateMsg(rawIdx())}
-                    class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
-                    data-rc-tip="Regenerate response" aria-label="Regenerate response"
-                  >
-                    <Iconify icon="lucide:rotate-cw" size={14} />
-                  </button>
-                </div>
+                <AssistantMsgActions
+                  forking={ctx.forking()}
+                  canFork={(block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx != null}
+                  showCopy={textOf().trim() !== ""}
+                  copied={ctx.copiedMsgId() === msg.id}
+                  onFork={() => ctx.forkMessage(block)}
+                  onCopy={() => ctx.copyMsg(msg.id, textOf())}
+                  onRegenerate={() => ctx.regenerateMsg(rawIdx())}
+                />
               </Show>
             </div>
           </Show>
@@ -359,138 +249,12 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
   </For>
 
   {/* Pending Tool Approval (Antigravity-style, human-readable) */}
-  <Show when={ctx.pendingApproval()}>
-    {(pa) => {
-      const args = tryParseArgs(pa().args);
-      const name = pa().tool || "tool";
-      return (
-        <div class={`${ctx.convWidthClass()} mx-auto rounded-2xl border border-amber-500/40 bg-amber-500/[0.06] p-4 shadow-xl`}>
-          <div class="flex items-center gap-2 text-[13px]">
-            <Iconify icon="lucide:shield" size={15} class="text-amber-400 shrink-0" />
-            <span class="font-semibold text-ink-100">Review tool call</span>
-            <span class="text-[11px] text-ink-500">Safe mode — nothing ran yet</span>
-          </div>
-          {/* Human summary per tool (never raw JSON) */}
-          <div class="mt-2.5 rounded-xl border border-line/60 bg-ink-950/70 overflow-hidden">
-            <Show when={name === "bash"}>
-              <div class="px-3.5 py-2.5">
-                <div class="text-[11px] text-ink-500 mb-1">Run command</div>
-                <pre class="font-mono text-[13px] text-ink-100 whitespace-pre-wrap break-all">{String(args.command || "")}</pre>
-              </div>
-            </Show>
-            <Show when={name === "read"}>
-              <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
-                <FileIcon path={String(args.path || "")} size={14} />
-                <span class="text-ink-500">Read</span>
-                <span class="font-mono text-ink-100 truncate">{String(args.path || "")}</span>
-                <Show when={args.limit || args.offset}>
-                  <span class="font-mono text-[11px] text-ink-500 shrink-0">
-                    L{Number(args.offset || 0) + 1}-{Number(args.offset || 0) + Number(args.limit || 0)}
-                  </span>
-                </Show>
-              </div>
-            </Show>
-            <Show when={name === "write"}>
-              <div class="px-3.5 py-2.5 text-[13px]">
-                <div class="flex items-center gap-2">
-                  <FileIcon path={String(args.path || "")} size={14} />
-                  <span class="text-ink-500">Create</span>
-                  <span class="font-mono text-ink-100 truncate">{String(args.path || "")}</span>
-                </div>
-                <Show when={args.content}>
-                  <pre class="mt-2 font-mono text-[11px] text-ink-400 whitespace-pre-wrap max-h-32 overflow-y-auto border-t border-line/50 pt-2">
-                    {String(args.content).split("\n").slice(0, 12).join("\n")}
-                    {String(args.content).split("\n").length > 12 ? "\n…" : ""}
-                  </pre>
-                </Show>
-              </div>
-            </Show>
-            <Show when={name === "edit"}>
-              <div class="px-3.5 py-2.5 text-[13px]">
-                <div class="flex items-center gap-2">
-                  <FileIcon path={String(args.path || "")} size={14} />
-                  <span class="text-ink-500">Edit</span>
-                  <span class="font-mono text-ink-100 truncate">{String(args.path || "")}</span>
-                  <Show when={Array.isArray(args.edits)}>
-                    <span class="text-[11px] text-ink-500 shrink-0">
-                      {args.edits.length} change{args.edits.length === 1 ? "" : "s"}
-                    </span>
-                  </Show>
-                </div>
-                <Show when={Array.isArray(args.edits) && args.edits.length > 0}>
-                  <div class="mt-2 rounded-lg overflow-hidden border border-line/50 font-mono text-[11px]">
-                    <For each={args.edits.slice(0, 2)}>
-                      {(e: any) => (
-                        <>
-                          <div class="px-2.5 py-1 bg-rose-500/10 text-rose-300 whitespace-pre-wrap break-all max-h-20 overflow-y-auto">
-                            {(String(e.oldText || "").split("\n").slice(0, 6).join("\n"))}
-                          </div>
-                          <div class="px-2.5 py-1 bg-emerald-500/10 text-emerald-300 whitespace-pre-wrap break-all max-h-20 overflow-y-auto">
-                            {(String(e.newText || "").split("\n").slice(0, 6).join("\n"))}
-                          </div>
-                        </>
-                      )}
-                    </For>
-                    <Show when={args.edits.length > 2}>
-                      <div class="px-2.5 py-1 text-ink-600">+{args.edits.length - 2} more changes</div>
-                    </Show>
-                  </div>
-                </Show>
-              </div>
-            </Show>
-            <Show when={name === "glob"}>
-              <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
-                <Iconify icon="lucide:search" size={14} class="text-ink-400 shrink-0" />
-                <span class="text-ink-500">Search files</span>
-                <span class="font-mono text-ink-100 truncate">{String(args.pattern || "")}</span>
-              </div>
-            </Show>
-            <Show when={name === "todo"}>
-              <div class="px-3.5 py-2.5 text-xs"><p class="font-medium text-ink-200 mb-2">Update task plan</p><ul class="space-y-1 text-ink-400"><For each={args.items || []}>{(item) => <li class="flex gap-2"><span class="text-ink-500">{String(item.status).replaceAll("_", " ")}</span><span>{item.text}</span></li>}</For></ul></div>
-            </Show>
-            <Show when={!["bash", "read", "write", "edit", "glob", "todo"].includes(name)}>
-              <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
-                <Iconify icon="lucide:wrench" size={14} class="text-ink-400 shrink-0" />
-                <span class="font-mono text-ink-100">{name}</span>
-              </div>
-            </Show>
-            <details>
-              <summary class="px-3.5 py-1.5 text-[11px] text-ink-600 hover:text-ink-300 cursor-pointer select-none border-t border-line/50">
-                Details
-              </summary>
-              <pre class="px-3.5 pb-3 font-mono text-[11px] text-ink-500 overflow-x-auto whitespace-pre-wrap max-h-40">
-                {pa().args}
-              </pre>
-            </details>
-          </div>
-          <div class="mt-3 flex items-center justify-end gap-2">
-            <button
-              onClick={() => ctx.respondApproval(false)}
-              class="px-3.5 py-1.5 rounded-xl text-xs font-medium text-ink-300 hover:text-ink-100 border border-line hover:bg-ink-800 transition-colors cursor-pointer"
-            >
-              Reject
-            </button>
-            <button
-              onClick={() => ctx.respondApproval(true)}
-              class="px-4 py-1.5 rounded-xl bg-ink-100 text-ink-950 hover:bg-accent-400 text-xs font-semibold transition-colors cursor-pointer"
-            >
-              Allow once
-            </button>
-            <button
-              onClick={() => {
-                ctx.setYoloMode(true);
-                ctx.respondApproval(true, true);
-              }}
-              class="px-3.5 py-1.5 rounded-xl bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 text-xs font-semibold transition-colors cursor-pointer"
-              data-rc-tip="Enable Full access and allow all tool calls" aria-label="Always allow — enable Full access"
-            >
-              Always allow
-            </button>
-          </div>
-        </div>
-      );
-    }}
-  </Show>
+  <ApprovalCard
+    pendingApproval={ctx.pendingApproval}
+    convWidthClass={ctx.convWidthClass}
+    respondApproval={ctx.respondApproval}
+    setYoloMode={ctx.setYoloMode}
+  />
 </div>
 </div>
 </Show>

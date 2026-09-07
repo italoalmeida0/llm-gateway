@@ -2,7 +2,8 @@ import { createMemo, For, Show } from "solid-js";
 import { Streamdown } from "streamdown-solid";
 import { Icon as Iconify } from "../../components/icon";
 import type { ChatMessage, ContentBlock, RenderBlock, RenderBlockSeries, ToolUnit } from "../types";
-import { splitToolRuns, toolCatOf } from "../utils/tools";
+import { splitToolRuns } from "../utils/tools";
+import { partitionToolSegs } from "../utils/toolSegs";
 import { groupTitle, specialTitle } from "../utils/titles";
 import { useToolUnitModel } from "./tool/toolUnitModel";
 import { ToolUnitHeader } from "./tool/ToolUnitHeader";
@@ -272,36 +273,9 @@ export function renderSeriesLead(ctx: TranscriptRenderCtx, series: RenderBlockSe
  */
 
 export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt: string, units: ToolUnit[], running: boolean) {
-  // Partition consecutive explore/command runs into collapsible groups.
-  const segs: Array<{ kind: "group"; cat: "explore" | "command"; units: ToolUnit[] } | { kind: "unit"; unit: ToolUnit; idx: number }> = [];
-  let run: ToolUnit[] = [];
-  let runIdx: number[] = [];
-  let runCat: "explore" | "command" | null = null;
-  const flush = () => {
-    if (run.length >= 2 && runCat) segs.push({ kind: "group", cat: runCat, units: run });
-    else run.forEach((unit, k) => segs.push({ kind: "unit", unit, idx: runIdx[k] }));
-    run = [];
-    runIdx = [];
-    runCat = null;
-  };
-  units.forEach((unit, i) => {
-    const cat = toolCatOf(unit.call?.toolName);
-    if ((cat === "explore" || cat === "command") && (runCat === null || runCat === cat)) {
-      runCat = cat;
-      run.push(unit);
-      runIdx.push(i);
-    } else {
-      flush();
-      if (cat === "explore" || cat === "command") {
-        runCat = cat;
-        run.push(unit);
-        runIdx.push(i);
-      } else {
-        segs.push({ kind: "unit", unit, idx: i });
-      }
-    }
-  });
-  flush();
+  // Partition consecutive explore/command runs into collapsible groups
+  // (pure helper — algorithm lives in utils/toolSegs, covered by tests).
+  const segs = partitionToolSegs(units);
   return (
     <div class="w-full space-y-0.5">
       <For each={segs}>

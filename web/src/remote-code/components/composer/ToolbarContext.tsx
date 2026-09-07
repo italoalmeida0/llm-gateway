@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
 import type { RemoteCodeViewCtx } from "../../viewCtx";
 import { FloatMenu } from "../FloatMenu";
+import { MenuItem } from "../MenuItem";
 
 export function ToolbarContext(ctx: RemoteCodeViewCtx) {
   return (
@@ -25,17 +26,17 @@ export function ToolbarContext(ctx: RemoteCodeViewCtx) {
       <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
         Add context
       </div>
-      <button
+      <MenuItem
+        icon="lucide:paperclip"
         onClick={() => {
           ctx.setAddContextOpen(false);
           document.querySelector<HTMLInputElement>("#rc-file-input")?.click();
         }}
-        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
       >
-        <Iconify icon="lucide:paperclip" size={13} />
         <span>Attach files</span>
-      </button>
-      <button
+      </MenuItem>
+      <MenuItem
+        icon="lucide:at-sign"
         onClick={() => {
           ctx.setAddContextOpen(false);
           ctx.setInputPrompt((p) => p + "@");
@@ -43,12 +44,11 @@ export function ToolbarContext(ctx: RemoteCodeViewCtx) {
             document.querySelector<HTMLTextAreaElement>("#rc-composer")?.focus();
           } catch {}
         }}
-        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
       >
-        <Iconify icon="lucide:at-sign" size={13} />
         <span>Mentions</span>
-      </button>
-      <button
+      </MenuItem>
+      <MenuItem
+        icon="lucide:slash"
         onClick={() => {
           ctx.setAddContextOpen(false);
           ctx.setInputPrompt("/");
@@ -56,11 +56,9 @@ export function ToolbarContext(ctx: RemoteCodeViewCtx) {
             document.querySelector<HTMLTextAreaElement>("#rc-composer")?.focus();
           } catch {}
         }}
-        class="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
       >
-        <Iconify icon="lucide:slash" size={13} />
         <span>Actions</span>
-      </button>
+      </MenuItem>
     </FloatMenu>
 </div>
 <div>

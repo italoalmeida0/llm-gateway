@@ -1,20 +1,8 @@
 import { For, Show } from "solid-js";
 import { Streamdown } from "streamdown-solid";
 import { Icon as Iconify } from "../../../components/icon";
-import type { ToolUnit } from "../../types";
-import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 import { CodeBlock, DiffView } from "../CodeBlock";
-import type { useToolUnitModel } from "./toolUnitModel";
-
-type ToolModel = ReturnType<typeof useToolUnitModel>;
-
-export interface ToolPartProps {
-  ctx: TranscriptRenderCtx;
-  msgId: string;
-  u: ToolUnit;
-  m: ToolModel;
-  running: boolean;
-}
+import type { ToolPartProps } from "./toolUnitModel";
 
 export function ToolSearchBodies(props: ToolPartProps) {
   return (

@@ -5163,7 +5163,7 @@ export default function RemoteCodePage() {
                   <div class="mt-3 flex gap-3"><button onClick={checkWorkspace} class="text-xs text-ink-200 hover:underline cursor-pointer">Check again</button><Show when={sessionStatus() === "running"}><button onClick={cancelCurrentTurn} class="text-xs text-ink-200 hover:underline cursor-pointer">Stop turn</button></Show></div>
                 </div>
               }>
-              <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors relative">
+              <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors relative flex flex-col">
                 {/* Attachment chips (chatbot-style) */}
                 <Show when={pendingAttachments().length > 0}>
                   <div class="flex flex-wrap gap-1.5 px-3.5 pt-3">
@@ -5189,7 +5189,7 @@ export default function RemoteCodePage() {
                           </Show>
                           <span class="truncate text-ink-300">{att.name}</span>
                           <Show when={att.uploading}>
-                            <span class="w-3 h-3 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
+                            <span class="w-3 dot-spin border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
                           </Show>
                           <button
                             onClick={(e) => {
@@ -5206,86 +5206,90 @@ export default function RemoteCodePage() {
                     </For>
                   </div>
                 </Show>
-                <textarea
-                  id="rc-composer"
+
+                {/* Input row: textarea occupies remaining width, clear button takes its own size */}
+                <div class="flex items-start">
+                  <textarea
+                    id="rc-composer"
                     disabled={creatingSession()}
-                  rows={1}
-                  class="w-full bg-transparent text-base sm:text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto"
-                  placeholder={
-                    isMobile() ? "Ask anything…" : activeSession()
-                      ? `Ask anything, @ to mention, / for actions`
-                      : `Start a conversation in ${activeProject()?.name || "project"}...`
-                  }
-                  value={inputPrompt()}
-                  onInput={(e) => {
-                    setInputPrompt(e.currentTarget.value);
-                    const el = e.currentTarget;
-                    el.style.height = "auto";
-                    el.style.height = Math.min(el.scrollHeight, 160) + "px";
-                  }}
-                  onPaste={(e) => {
-                    const files: File[] = [];
-                    try {
-                      const items = e.clipboardData?.items;
-                      if (items) {
-                        for (const it of items) {
-                          if (it.kind === "file") {
-                            const f = it.getAsFile();
-                            if (f) files.push(f);
+                    rows={1}
+                    class="flex-1 min-w-0 bg-transparent text-base sm:text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto [scrollbar-gutter:stable]"
+                    placeholder={
+                      isMobile() ? "Ask anything…" : activeSession()
+                        ? `Ask anything, @ to mention, / for actions`
+                        : `Start a conversation in ${activeProject()?.name || "project"}...`
+                    }
+                    value={inputPrompt()}
+                    onInput={(e) => {
+                      setInputPrompt(e.currentTarget.value);
+                      const el = e.currentTarget;
+                      el.style.height = "auto";
+                      el.style.height = Math.min(el.scrollHeight, 160) + "px";
+                    }}
+                    onPaste={(e) => {
+                      const files: File[] = [];
+                      try {
+                        const items = e.clipboardData?.items;
+                        if (items) {
+                          for (const it of items) {
+                            if (it.kind === "file") {
+                              const f = it.getAsFile();
+                              if (f) files.push(f);
+                            }
                           }
                         }
+                      } catch {}
+                      if (files.length > 0) {
+                        e.preventDefault();
+                        handleFiles(files);
                       }
-                    } catch {}
-                    if (files.length > 0) {
+                    }}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
                       e.preventDefault();
-                      handleFiles(files);
-                    }
-                  }}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    try {
-                      const files = Array.from(e.dataTransfer?.files || []);
-                      if (files.length > 0) handleFiles(files);
-                    } catch {}
-                  }}
-                onKeyDown={(e) => {
-                  if (slashMatches().length > 0) {
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      setSlashIndex((prev) =>
-                        Math.min(prev + 1, slashMatches().length - 1),
-                      );
-                      return;
-                    }
-                    if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setSlashIndex((prev) => Math.max(prev - 1, 0));
-                      return;
-                    }
-                    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
-                      e.preventDefault();
-                      const pick = slashMatches()[slashIndex()];
-                      if (pick) pickSlash(pick.cmd);
-                      return;
-                    }
-                  }
+                      try {
+                        const files = Array.from(e.dataTransfer?.files || []);
+                        if (files.length > 0) handleFiles(files);
+                      } catch {}
+                    }}
+                    onKeyDown={(e) => {
+                      if (slashMatches().length > 0) {
+                        if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          setSlashIndex((prev) =>
+                            Math.min(prev + 1, slashMatches().length - 1),
+                          );
+                          return;
+                        }
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          setSlashIndex((prev) => Math.max(prev - 1, 0));
+                          return;
+                        }
+                        if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                          e.preventDefault();
+                          const pick = slashMatches()[slashIndex()];
+                          if (pick) pickSlash(pick.cmd);
+                          return;
+                        }
+                      }
 
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    sendPrompt();
-                  }
-                }}
-              />
-              <Show when={inputPrompt().length > 0}>
-                <button
-                  onClick={() => setInputPrompt("")}
-                  class="absolute top-2.5 right-2.5 p-1 rounded-md text-ink-600 hover:text-ink-300 hover:bg-ink-800 transition-colors cursor-pointer"
-                  data-rc-tip="Clear input" aria-label="Clear input"
-                >
-                  <Iconify icon="lucide:x" size={13} />
-                </button>
-              </Show>
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        sendPrompt();
+                      }
+                    }}
+                  />
+                  <Show when={inputPrompt().length > 0}>
+                    <button
+                      onClick={() => setInputPrompt("")}
+                      class="shrink-0 mr-2.5 mt-2.5 p-1 rounded-md text-ink-600 hover:text-ink-300 hover:bg-ink-800 transition-colors cursor-pointer"
+                      data-rc-tip="Clear input" aria-label="Clear input"
+                    >
+                      <Iconify icon="lucide:x" size={13} />
+                    </button>
+                  </Show>
+                </div>
 
               <div class="flex items-end justify-between gap-2 px-3 pb-2.5 pt-1">
                 <div class="flex flex-1 min-w-0 flex-wrap items-center gap-0.5 text-xs text-ink-400">

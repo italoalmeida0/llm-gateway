@@ -5458,49 +5458,35 @@ export default function RemoteCodePage() {
 
                 </div>
 
-                <div class="flex shrink-0 items-center gap-2">
-                  <Show when={sessionStatus() === "running"}>
+                <div class="flex shrink-0 items-center">
+                  <Show
+                    when={sessionStatus() === "running"}
+                    fallback={
+                      <button
+                        onClick={sendPrompt}
+                        disabled={
+                          creatingSession() || !activeModel() ||
+                          (activeSessionId()
+                            ? !inputPrompt().trim() && pendingAttachments().length === 0
+                            : (!inputPrompt().trim() && pendingAttachments().length === 0) || !activeProject())
+                        }
+                        class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-accent-400 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
+                        data-rc-tip={!activeSessionId() ? "Start conversation" : "Send"}
+                        aria-label={!activeSessionId() ? "Start conversation" : "Send"}
+                      >
+                        <Iconify icon="lucide:arrow-right" size={14} />
+                      </button>
+                    }
+                  >
                     <button
                       onClick={cancelCurrentTurn}
-                      class="w-7 h-7 rounded-full bg-ink-700 text-ink-100 hover:bg-ink-600 flex items-center justify-center transition-colors cursor-pointer"
-                      data-rc-tip="Stop" aria-label="Stop"
+                      class="w-7 h-7 rounded-full bg-rose-950 text-rose-50 hover:bg-rose-900 border border-rose-800/40 flex items-center justify-center transition-colors cursor-pointer"
+                      data-rc-tip="Stop"
+                      aria-label="Stop"
                     >
                       <Iconify icon="lucide:square" size={13} />
                     </button>
                   </Show>
-
-                  <button
-                    onClick={sendPrompt}
-                    disabled={
-                      creatingSession() || sessionStatus() === "running" || !activeModel() ||
-                      (activeSessionId()
-                        ? !inputPrompt().trim() && pendingAttachments().length === 0
-                        : (!inputPrompt().trim() && pendingAttachments().length === 0) || !activeProject())
-                    }
-                    class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-accent-400 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
-                    data-rc-tip={
-                      sessionStatus() === "running"
-                        ? "Generating..."
-                        : !activeSessionId()
-                          ? "Start conversation"
-                          : "Send"
-                    } aria-label={
-                      sessionStatus() === "running"
-                        ? "Generating..."
-                        : !activeSessionId()
-                          ? "Start conversation"
-                          : "Send"
-                    }
-                  >
-                    <Show
-                      when={sessionStatus() !== "running"}
-                      fallback={
-                        <span class="w-3.5 h-3.5 border-2 border-ink-950/40 border-t-ink-950 rounded-full animate-spin" />
-                      }
-                    >
-                      <Iconify icon="lucide:arrow-right" size={14} />
-                    </Show>
-                  </button>
                 </div>
               </div>
               <input

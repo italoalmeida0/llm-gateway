@@ -1,11 +1,13 @@
+import type { DaemonCommand } from "../daemon-protocol";
 import { createMemo, createSignal, Show } from "solid-js";
 import { projectForDirectory } from "../paths";
 import type { Project, SessionSummary } from "../types";
+import type { FoldersEvent, ProjectCreatedEvent, SearchResultsEvent } from "../daemon-protocol";
 
 /** Projetos, lista de sessões, seleção/bulk, rename e busca (extraído de
  * RemoteCodePage verbatim — colaboradores por params). */
 export function createProjects(opts: {
-  send: (payload: any) => void;
+  send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
   getHostId: () => string;
   sessions: () => SessionSummary[];
@@ -108,7 +110,7 @@ export function createProjects(opts: {
     opts.send({ type: "create_project", path: "~", requestId: projectCreationId });
   }
   /** Evento folders (com guarda de requestId). */
-  function noteFolders(msg: any) {
+  function noteFolders(msg: FoldersEvent) {
     if (msg.requestId !== folderRequestId) return;
     setFolderLoading(false);
     if (msg.error) { setFolderError(msg.error); return; }
@@ -126,7 +128,7 @@ export function createProjects(opts: {
     return requestId === projectCreationId;
   }
   /** Evento project_created; devolve o projeto quando é o nosso ack. */
-  function noteProjectCreated(msg: any): { id: string; name?: string } | null {
+  function noteProjectCreated(msg: ProjectCreatedEvent): { id: string; name?: string } | null {
     if (msg.requestId !== projectCreationId) return null;
     const p = msg.project;
     if (!p?.id) return null;
@@ -196,7 +198,7 @@ export function createProjects(opts: {
       if (opts.isOpen()) opts.send({ type: "search", query, limit: 30 });
     }, 300);
   }
-  function noteSearchResults(msg: any) {
+  function noteSearchResults(msg: SearchResultsEvent) {
     if (typeof msg.query === "string" && msg.query.trim() !== sessionFilter().trim()) return;
     const raw = Array.isArray(msg.results) ? msg.results : [];
     setSearchResults(

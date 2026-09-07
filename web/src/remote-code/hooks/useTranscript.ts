@@ -1,3 +1,4 @@
+import type { DaemonCommand } from "../daemon-protocol";
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { copyWithToast } from "../../ui";
@@ -19,6 +20,9 @@ import { prettyArgs } from "../utils/wire";import {
   upsertToolCall as reduceToolCall,
 } from "../transcript/updaters";
 import type { PendingQuestion } from "../components/QuestionModal";
+import type {
+  AgentEvent, SessionStatusEvent, ToolApprovalRequestEvent,
+} from "../daemon-protocol";
 import type { SessionContext } from "../context";
 import type {
   ChatMessage, PendingApproval, RenderBlock, SessionUsage, ToolUnit,
@@ -29,7 +33,7 @@ import type { TodoItem, TurnActivity } from "../viewTypes";
  * scroll, render blocks e ops por-mensagem (extraído de RemoteCodePage
  * verbatim — só a origem dos colaboradores muda: vêm por params). */
 export function createTranscript(opts: {
-  send: (payload: any) => void;
+  send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
   getSessionId: () => string;
   toast: (message: string, kind?: "ok" | "err") => void;
@@ -38,7 +42,7 @@ export function createTranscript(opts: {
   /** Turno ficou idle: a página refresca o review. */
   onTurnIdle: () => void;
   /** Contexto vindo em usage: a página compara com o catálogo. */
-  onUsageContext: (ctx: any) => void;
+  onUsageContext: (ctx: SessionContext) => void;
 }) {
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
@@ -316,7 +320,7 @@ export function createTranscript(opts: {
     if (!delta) return;
     setMessages((prev) => reduceToolArgs(prev, callId, delta));
   }
-  function appendToolResult(callId: string, result: string, isError?: boolean, startedAt?: number, durationMs?: number) {
+  function appendToolResult(callId: string, result: string | undefined, isError?: boolean, startedAt?: number, durationMs?: number) {
     setMessages((prev) => reduceToolResult(prev, callId, result, isError, startedAt, durationMs));
   }
   // Drop rendered messages below a raw keep-index (optimistic edit/regen cut).
@@ -467,7 +471,7 @@ export function createTranscript(opts: {
     if (requestId && requestId !== transcriptRequestId) return true;
     return false;
   }
-  function handleTruncated(sessionId: string, keep: number) {
+  function handleTruncated(sessionId: string | undefined, keep: number) {
     // Authoritative tail cut after edit/regenerate (daemon broadcast).
     // keepIndex is the last RAW message to keep; drop rendered messages
     // whose srcIdx exceeds it, then let the following session_content
@@ -481,7 +485,7 @@ export function createTranscript(opts: {
       showQuestion(null);
     }
   }
-  function handleStatusEvent(msg: any) {
+  function handleStatusEvent(msg: SessionStatusEvent) {
     // Composer responsiveness only (stop button state) — the collections
     // get the same truth via the sessions change ping.
     if (msg.sessionId === opts.getSessionId()) {
@@ -497,7 +501,7 @@ export function createTranscript(opts: {
       }
     }
   }
-  function handleAgentEvent(sessionId: string, ev: any) {
+  function handleAgentEvent(sessionId: string, ev: AgentEvent | undefined) {
     if (!ev) return;
     if (ev.type === "turn_start") {
       setSessionStatus("running");
@@ -545,9 +549,10 @@ export function createTranscript(opts: {
       setToolStarts((prev) => { const next = { ...prev }; delete next[ev.id]; return next; });
     } else if (ev.type === "usage") {
       applyUsage(sessionId, ev.usage, ev.cumulative);
-      if (ev.context) {
-        setSessionContexts((prev) => ({ ...prev, [sessionId]: ev.context }));
-        opts.onUsageContext(ev.context);
+      const uctx = ev.context;
+      if (uctx) {
+        setSessionContexts((prev) => ({ ...prev, [sessionId]: uctx }));
+        opts.onUsageContext(uctx);
       }
     } else if (ev.type === "compact_progress") {
       if (ev.text === "Compacting older context…") opts.toast(ev.text, "ok");
@@ -574,7 +579,7 @@ export function createTranscript(opts: {
     scrollToBottom();
   }
   /** Evento tool_approval_request (com guarda de sessão). */
-  function noteApprovalRequest(msg: any) {
+  function noteApprovalRequest(msg: ToolApprovalRequestEvent) {
     if (msg.sessionId === opts.getSessionId()) {
       setPendingApproval({
         callId: msg.callId,
@@ -587,11 +592,11 @@ export function createTranscript(opts: {
     }
   }
   /** Evento question_resolved (com guarda de sessão/pergunta). */
-  function noteQuestionResolved(sessionId: string, questionId: string) {
+  function noteQuestionResolved(sessionId: string | undefined, questionId: string) {
     if (sessionId === opts.getSessionId() && pendingQuestion()?.id === questionId) showQuestion(null);
   }
   /** Evento question_error (com guarda de sessão/pergunta). */
-  function noteQuestionError(sessionId: string, questionId: string, message: string) {
+  function noteQuestionError(sessionId: string | undefined, questionId: string, message: string | undefined) {
     if (sessionId === opts.getSessionId() && pendingQuestion()?.id === questionId) {
       setQuestionSubmitting(false);
       setQuestionError(message || "Could not submit answers");

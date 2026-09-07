@@ -1,3 +1,4 @@
+import type { DaemonCommand } from "../daemon-protocol";
 import { createEffect, createMemo, createSignal } from "solid-js";
 import { REASONING_LEVELS, SLASH_COMMANDS } from "../constants";
 import { formatEffort, normalizeEffort } from "../utils/format";
@@ -8,7 +9,7 @@ import type { Transcript } from "./useTranscript";
 /** Composer: prompt, anexos, slash palette e envio (extraído de
  * RemoteCodePage verbatim — colaboradores por params). */
 export function createComposer(opts: {
-  send: (payload: any) => void;
+  send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
   isDisposed: () => boolean;
   getSessionId: () => string;
@@ -229,7 +230,7 @@ export function createComposer(opts: {
       w.ok(attachment.id);
     }
   }
-  function failUpload(requestId: string, message: string): boolean {
+  function failUpload(requestId: string | undefined, message: string): boolean {
     if (requestId && uploadWaiters.has(requestId)) {
       const w = uploadWaiters.get(requestId)!;
       uploadWaiters.delete(requestId);

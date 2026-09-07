@@ -1,9 +1,11 @@
+import type { DaemonCommand } from "../daemon-protocol";
 import { createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import type { WorkspaceStatus } from "../viewTypes";
+import type { WorkspaceStatusEvent } from "../daemon-protocol";
 
 /** Estado do workspace remoto + poll (extraído de RemoteCodePage verbatim). */
 export function createWorkspace(opts: {
-  send: (payload: any) => void;
+  send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
   getSessionId: () => string;
   getSessionCwd: () => string;
@@ -23,7 +25,7 @@ export function createWorkspace(opts: {
     workspaceRequest = crypto.randomUUID();
     opts.send({ type: "check_workspace", requestId: workspaceRequest, sessionId: opts.getSessionId(), projectId: opts.getProjectId() });
   }
-  function noteWorkspaceStatus(msg: any) {
+  function noteWorkspaceStatus(msg: WorkspaceStatusEvent) {
     if (msg.requestId === workspaceRequest && msg.workspace?.path === workspacePath()) setWorkspace(msg.workspace);
   }
   createEffect(() => {

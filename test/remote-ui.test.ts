@@ -5,6 +5,7 @@ import { displayToolArgs, withoutTodoActivity } from "../web/src/remote-code/liv
 import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/remote-code/paths";
 import { buildRenderBlocks, terminalPresentation, toolSummary } from "../web/src/remote-code/transcript";
 import { partitionToolSegs } from "../web/src/remote-code/utils/toolSegs";
+import { parseDaemonMessage } from "../web/src/remote-code/daemon-protocol";
 import {
   appendReasoningDelta, appendTextDelta, appendToolArgsDelta, appendToolResult,
   cutTail, finishTurn, mergeUsage, normalizeSessionMessages, upsertToolCall,
@@ -361,5 +362,16 @@ describe("Remote Code transcript updaters", () => {
     expect(typeof open?.endedAt).toBe("number");
     expect(finishTurn({ startedAt: 1, endedAt: 2, status: "completed" })?.endedAt).toBe(2);
     expect(finishTurn(null)).toBeNull();
+  });
+});
+
+describe("Remote Code daemon protocol", () => {
+  test("accepts envelopes with type or numeric id, rejects the rest", () => {
+    expect(parseDaemonMessage({ type: "notice", message: "hi" })).toEqual({ type: "notice", message: "hi" });
+    expect(parseDaemonMessage({ id: 7, hostId: "h", items: [] })).toEqual({ id: 7, hostId: "h", items: [] });
+    expect(parseDaemonMessage(null)).toBeNull();
+    expect(parseDaemonMessage("ping")).toBeNull();
+    expect(parseDaemonMessage({})).toBeNull();
+    expect(parseDaemonMessage([])).toBeNull();
   });
 });

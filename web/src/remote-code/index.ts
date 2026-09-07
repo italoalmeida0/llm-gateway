@@ -17,3 +17,7 @@ export {
 } from "./transcript/updaters";
 export { partitionToolSegs } from "./utils/toolSegs";
 export type { ToolSeg } from "./utils/toolSegs";
+export { parseDaemonMessage } from "./daemon-protocol";
+export type {
+  DaemonCommand, DaemonMessage, DaemonEvent, AgentEvent, PullWireMessage,
+} from "./daemon-protocol";

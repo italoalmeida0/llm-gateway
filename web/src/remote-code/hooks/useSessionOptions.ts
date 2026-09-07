@@ -1,9 +1,10 @@
+import type { DaemonCommand } from "../daemon-protocol";
 import { createSignal } from "solid-js";
 
 /** Opções de sessão (model/effort/mode/skills/access) + reconciliação com o
  * daemon (extraído de RemoteCodePage verbatim). */
 export function createSessionOptions(opts: {
-  send: (payload: any) => void;
+  send: (payload: DaemonCommand) => void;
   getSessionId: () => string;
 }) {
   const [effort, setEffort] = createSignal("medium");

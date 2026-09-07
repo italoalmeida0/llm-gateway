@@ -1,10 +1,11 @@
+import type { DaemonCommand } from "../daemon-protocol";
 import { createEffect, createSignal } from "solid-js";
 import type { AgentSettings, MCPServerConfig, SkillConfig } from "../types";
 import type { RcConfig } from "../store/sessions";
 
 /** Configuração do agente + MCP + skills (extraído de RemoteCodePage verbatim). */
 export function createSettings(opts: {
-  send: (payload: any) => void;
+  send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
   isHostOnline: () => boolean;
   toast: (message: string, kind?: "ok" | "err") => void;

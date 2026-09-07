@@ -5,6 +5,8 @@ import { api, type RemoteHostDto } from "../../api";
 export function createHosts(opts: {
   toast: (message: string, kind?: "ok" | "err") => void;
   showConfirm: (o: { title?: string; message?: string; confirmText?: string; cancelText?: string; danger?: boolean }) => Promise<boolean>;
+  /** Após remoção bem-sucedida: a página liberta o espelho do host. */
+  onHostRemoved?: (id: string) => void;
 }) {
   const [hosts, setHosts] = createSignal<RemoteHostDto[]>([]);
   const [activeHostId, setActiveHostId] = createSignal<string>("");
@@ -52,11 +54,12 @@ export function createHosts(opts: {
     try {
       await api("DELETE", `/api/remote/hosts/${encodeURIComponent(host.id)}`);
       await loadHosts();
+      opts.onHostRemoved?.(host.id);
       opts.toast("Host removed", "ok");
     } catch (error: any) { opts.toast(error?.message || "Could not remove host", "err"); }
   }
 
-  function noteHostStatus(hostId: string, status: string) {
+  function noteHostStatus(hostId: string | undefined, status: string | undefined) {
     if (hostId && status) {
       setHosts((prev) =>
         prev.map((h) => (h.id === hostId ? { ...h, status: status as RemoteHostDto["status"] } : h)),

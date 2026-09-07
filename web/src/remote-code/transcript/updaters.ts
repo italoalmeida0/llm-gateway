@@ -238,7 +238,7 @@ export function appendToolArgsDelta(prev: ChatMessage[], callId: string, delta: 
 export function appendToolResult(
   prev: ChatMessage[],
   callId: string,
-  result: string,
+  result: string | undefined,
   isError?: boolean,
   startedAt?: number,
   durationMs?: number,

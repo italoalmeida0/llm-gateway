@@ -1,5 +1,6 @@
 import { createSignal, onCleanup } from "solid-js";
 import { currentSession } from "../../api";
+import type { DaemonCommand } from "../daemon-protocol";
 
 /** Socket do daemon + heartbeat + reconnect com backoff (extraído de
  * RemoteCodePage sem mudança de comportamento).
@@ -12,8 +13,8 @@ export type RelayState = "connecting" | "connected" | "disconnected";
 
 export function createRelay(opts: {
   getHostId: () => string;
-  /** Mensagem decodificada vinda do relay (página faz batch + dispatch). */
-  onMessage: (msg: any) => void;
+  /** Mensagem decodificada vinda do relay (página faz parse + batch + dispatch). */
+  onMessage: (data: unknown) => void;
   /** Socket aberto e pronto: página sincroniza (modelos, mirror, sessão). */
   onOpen: (hostId: string) => void;
   /** Socket fechado (não-dispose): página limpa estado por-conexão. */
@@ -41,7 +42,7 @@ export function createRelay(opts: {
     return disposed;
   }
 
-  function send(payload: any) {
+  function send(payload: DaemonCommand) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       if (!payload.hostId && opts.getHostId()) {
         payload.hostId = opts.getHostId();

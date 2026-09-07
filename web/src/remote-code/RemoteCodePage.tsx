@@ -27,6 +27,7 @@ import {
   type ComposerCtxValue, type HostCtxValue, type ModalCtxValue,
   type SessionCtxValue, type TranscriptCtxValue, type UICtxValue,
 } from "./ctx";
+import { parseDaemonMessage, type DaemonMessage } from "./daemon-protocol";
 import { createNotice } from "./hooks/useNotice";
 import { createModals } from "./hooks/useModals";
 import { createRelay } from "./hooks/useRelay";
@@ -52,10 +53,17 @@ export default function RemoteCodePage() {
 
   const relay = createRelay({
     getHostId: () => hosts.activeHostId(),
-    onMessage: (msg) => batch(() => handleIncomingMessage(msg)),
+    onMessage: (data) => {
+      const msg = parseDaemonMessage(data);
+      if (!msg) {
+        console.warn("[rc] ignoring malformed relay message");
+        return;
+      }
+      batch(() => handleIncomingMessage(msg));
+    },
     onOpen: (hostId) => {
       void loadGatewayModels();
-      mirror.dataLayer.storeFor(hostId).syncAll();
+      mirror.dataLayer.storeFor(hostId).syncAll().catch((e) => console.warn("[rc-sync] syncAll:", e));
       if (activeSessionId()) { transcript.fetchSession(activeSessionId()); review.requestReview(review.reviewOpen()); }
     },
     onClose: () => {
@@ -162,7 +170,11 @@ export default function RemoteCodePage() {
   });
   transcript.setWorkspaceSink(workspace.setWorkspace);
 
-  const hosts = createHosts({ toast: notice.toast, showConfirm: modals.showConfirm });
+  const hosts = createHosts({
+    toast: notice.toast,
+    showConfirm: modals.showConfirm,
+    onHostRemoved: (id) => { void mirror.dataLayer.disposeHost(id); },
+  });
 
   const settings = createSettings({
     send: (payload) => relay.send(payload),
@@ -346,7 +358,7 @@ export default function RemoteCodePage() {
   // ({text}, {id,name,arguments}, {call_id,content,is_error},
   // {reasoning_id,summary}, {mime_type,data}). Parse both (utils/wire,
   // transcript/updaters).
-  function handleIncomingMessage(msg: any) {
+  function handleIncomingMessage(msg: DaemonMessage) {
     // SignalDB sync protocol messages (pull responses / change pings) are
     // owned by the data layer; everything else is event-driven below.
     if (mirror.dataLayer.handleMessage(msg)) return;
@@ -358,7 +370,7 @@ export default function RemoteCodePage() {
         break;
       case "host_status": {
         if (msg.hostId === hosts.activeHostId() && msg.status === "online") {
-          mirror.dataLayer.storeFor(msg.hostId).syncAll();
+          mirror.dataLayer.storeFor(msg.hostId).syncAll().catch((e) => console.warn("[rc-sync] syncAll:", e));
           if (activeSessionId()) transcript.fetchSession(activeSessionId());
         }
         hosts.noteHostStatus(msg.hostId, msg.status);
@@ -372,7 +384,7 @@ export default function RemoteCodePage() {
       case "session_forked": {
         if (!transcript.forking() || msg.requestId !== transcript.forkRequestId() || !msg.session?.id) break;
         transcript.setForking(false);
-        mirror.dataLayer.storeFor(hosts.activeHostId()).syncAll();
+        mirror.dataLayer.storeFor(hosts.activeHostId()).syncAll().catch((e) => console.warn("[rc-sync] syncAll:", e));
         selectSession(msg.session.id);
         if (msg.resent) {
           transcript.setSessionStatus("running");
@@ -400,7 +412,7 @@ export default function RemoteCodePage() {
       case "project_created": {
         const p = projects.noteProjectCreated(msg);
         if (!p) break;
-        mirror.dataLayer.storeFor(hosts.activeHostId()).syncAll();
+        mirror.dataLayer.storeFor(hosts.activeHostId()).syncAll().catch((e) => console.warn("[rc-sync] syncAll:", e));
         notice.toast(`Project '${p.name || "Project"}' added`, "ok");
         break;
       }
@@ -483,16 +495,16 @@ export default function RemoteCodePage() {
       }
 
       case "session_compacted": {
-        if (msg.sessionId === activeSessionId()) {
-          transcript.setSessionContexts((prev) => ({ ...prev, [msg.sessionId]: msg.context ?? null }));
-          transcript.applySessionContent(msg.sessionId, msg.messages || []);
-          notice.toast(
-            msg.auto
-              ? "Context auto-compacted — older turns summarized, recent context preserved"
-              : "Transcript compacted successfully",
-            "ok",
-          );
-        }
+        const sid = msg.sessionId;
+        if (sid !== activeSessionId()) break;
+        transcript.setSessionContexts((prev) => ({ ...prev, [sid]: msg.context ?? null }));
+        transcript.applySessionContent(sid, msg.messages || []);
+        notice.toast(
+          msg.auto
+            ? "Context auto-compacted — older turns summarized, recent context preserved"
+            : "Transcript compacted successfully",
+          "ok",
+        );
         break;
       }
 
@@ -530,7 +542,7 @@ export default function RemoteCodePage() {
         if (msg.sessionId && msg.sessionId !== activeSessionId()) break;
         if (composer.failUpload(msg.requestId, msg.message || "Upload failed")) break;
         if (msg.replyTo === "create_session") setCreatingSession(false);
-        if (["get_changes", "undo_changes", "keep_changes"].includes(msg.replyTo)) { review.noteReviewError(msg.message || "Host unavailable"); }
+        if (msg.replyTo && ["get_changes", "undo_changes", "keep_changes"].includes(msg.replyTo)) { review.noteReviewError(msg.message || "Host unavailable"); }
         if (msg.message === "Remote host is offline") {
           hosts.markActiveHostOffline();
           if (msg.replyTo === "browse_folders") { projects.setFolderLoading(false); projects.setFolderError("The host went offline. Reconnect to browse its folders."); }

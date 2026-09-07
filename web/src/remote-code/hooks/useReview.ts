@@ -1,11 +1,13 @@
+import type { DaemonCommand } from "../daemon-protocol";
 import { createSignal, onCleanup } from "solid-js";
 import type { PreviewFile } from "../types";
+import type { AttachmentDataEvent, ChangesUpdatedEvent, SessionChangesEvent } from "../daemon-protocol";
 import type { Review, StoredAttachment } from "../viewTypes";
 
 /** Review de changes + preview de ficheiros + anexos da sessão (extraído
  * de RemoteCodePage verbatim — colaboradores por params). */
 export function createReview(opts: {
-  send: (payload: any) => void;
+  send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
   getSessionId: () => string;
   isSessionRunning: () => boolean;
@@ -48,14 +50,14 @@ export function createReview(opts: {
   }
 
   /** Evento session_changes (com guarda de sessão/requestId). */
-  function noteSessionChanges(msg: any) {
+  function noteSessionChanges(msg: SessionChangesEvent) {
     if (msg.sessionId !== opts.getSessionId() || (msg.requestId && msg.requestId !== reviewRequestId)) return;
     if (msg.requestId) setReviewLoading(false);
     if (msg.error) { setReviewError(msg.error); if (!reviewOpen()) opts.toast(msg.error, "err"); return; }
     if (reviewOpen() && !msg.detail && !msg.requestId) { refreshReview(); return; }
     setTaskReview(msg.review || null);
   }
-  function noteChangesUpdated(msg: any) {
+  function noteChangesUpdated(msg: ChangesUpdatedEvent) {
     if (msg.sessionId === opts.getSessionId()) refreshReview();
   }
   function noteReviewError(message: string) {
@@ -212,7 +214,7 @@ export function createReview(opts: {
   }
 
   /** Evento attachment_data (guarda bytes + abre preview). */
-  function noteAttachmentData(msg: any) {
+  function noteAttachmentData(msg: AttachmentDataEvent) {
     const a = msg.attachment;
     if (!a?.id || (!a.data && !a.text)) return;
     setPreviewCache((prev) => ({

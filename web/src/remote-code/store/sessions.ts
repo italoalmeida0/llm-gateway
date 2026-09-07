@@ -16,6 +16,7 @@ import { Collection } from "@signaldb/core";
 import solidReactivityAdapter from "@signaldb/solid";
 import createIndexedDBAdapter from "@signaldb/indexeddb";
 import { SyncManager } from "@signaldb/sync";
+import type { DaemonCommand, DaemonMessage, PullCommand, PullWireMessage } from "../daemon-protocol";
 
 /** One mirrored conversation summary (SessionSummary shape from the daemon). */
 export interface RcSession {
@@ -59,7 +60,7 @@ export interface RcHostStore {
   sessions: Collection<RcSession>;
   config: Collection<RcConfig>;
   /** (Re)pull everything from the daemon, if the socket is up. */
-  syncAll: () => void;
+  syncAll: () => Promise<void>;
 }
 
 export interface RcDataLayer {
@@ -69,7 +70,11 @@ export interface RcDataLayer {
    * Routes an incoming relay message. Returns true when the message belongs
    * to the sync protocol (pull responses / change pings) and was consumed.
    */
-  handleMessage: (msg: any) => boolean;
+  handleMessage: (msg: DaemonMessage) => boolean;
+  /** Releases a host's collections + sync manager (e.g. after host removal). */
+  disposeHost: (hostId: string) => Promise<void>;
+  /** Releases every host store (e.g. on page unmount). */
+  disposeAll: () => Promise<void>;
 }
 
 interface PendingReq {
@@ -84,7 +89,7 @@ interface PendingReq {
  * must stamp the hostId itself; `isOpen` reports socket readiness.
  */
 export function createDataLayer(opts: {
-  send: (payload: Record<string, any>) => void;
+  send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
 }): RcDataLayer {
   const pending = new Map<number, PendingReq>();
@@ -92,18 +97,22 @@ export function createDataLayer(opts: {
   // tab's pull from resolving another tab's request with the same counter.
   let nextReqId = crypto.getRandomValues(new Uint32Array(1))[0] * 1_000_000;
   const changeListeners = new Map<string, Set<() => void>>();
-  const stores = new Map<string, RcHostStore>();
+  const stores = new Map<string, {
+    api: RcHostStore;
+    mgr: SyncManager<{ name: string }>;
+    cols: Array<{ dispose(): Promise<void> }>;
+  }>();
 
-  function request(hostId: string, payload: Record<string, any>): Promise<any> {
+  function request(hostId: string, pull: PullCommand): Promise<any> {
     if (!opts.isOpen()) return Promise.reject(new Error("daemon socket is closed"));
     const id = nextReqId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`pull '${payload.collection}' timed out`));
+        reject(new Error(`pull '${pull.collection}' timed out`));
       }, 12000);
       pending.set(id, { hostId, resolve, reject, timer });
-      opts.send({ ...payload, hostId, id });
+      opts.send({ ...pull, hostId, id });
     });
   }
 
@@ -208,15 +217,35 @@ export function createDataLayer(opts: {
     mgr.addCollection(sessions, { name: "sessions" });
     mgr.addCollection(config, { name: "config" });
 
-    return {
+    const api: RcHostStore = {
       projects,
       sessions,
       config,
       syncAll: () => {
-        if (!opts.isOpen()) return;
-        mgr.syncAll().catch((e) => console.warn("[rc-sync] syncAll:", e));
+        if (!opts.isOpen()) return Promise.resolve();
+        return mgr.syncAll();
       },
     };
+    stores.set(hostId, { api, mgr, cols: [projects, sessions, config] });
+    return api;
+  }
+
+  async function disposeHost(hostId: string) {
+    const entry = stores.get(hostId);
+    if (!entry) return;
+    stores.delete(hostId);
+    for (const key of [...changeListeners.keys()]) {
+      if (key === hostId || key.startsWith(`${hostId}:`)) changeListeners.delete(key);
+    }
+    for (const [id, request] of [...pending.entries()]) {
+      if (request.hostId === hostId) {
+        pending.delete(id);
+        clearTimeout(request.timer);
+        request.reject(new Error(`host '${hostId}' disposed`));
+      }
+    }
+    await entry.mgr.dispose();
+    await Promise.all(entry.cols.map((c) => c.dispose()));
   }
 
   return {
@@ -228,22 +257,30 @@ export function createDataLayer(opts: {
       pending.clear();
     },
     storeFor(hostId: string) {
-      let store = stores.get(hostId);
-      if (!store) {
-        store = buildStore(hostId);
-        stores.set(hostId, store);
-      }
-      return store;
+      return stores.get(hostId)?.api ?? buildStore(hostId);
     },
-    handleMessage(msg: any): boolean {
+    disposeHost(hostId: string) {
+      return disposeHost(hostId);
+    },
+    disposeAll() {
+      return (async () => {
+        for (const hostId of [...stores.keys()]) await disposeHost(hostId);
+      })();
+    },
+    handleMessage(msg: DaemonMessage): boolean {
       // pull responses resolve their pending request by numeric id.
-      if (typeof msg?.id === "number" && pending.has(msg.id)) {
-        const p = pending.get(msg.id)!;
-        if (msg.hostId !== p.hostId) return true;
-        pending.delete(msg.id);
+      const replyId = (msg as { id?: unknown }).id;
+      if (typeof replyId === "number" && pending.has(replyId)) {
+        const pull = msg as PullWireMessage;
+        const p = pending.get(replyId)!;
+        // A reply for another host (or another tab's namespace) must NOT be
+        // swallowed here: returning false lets it fall through instead of
+        // resolving the wrong request.
+        if (pull.hostId !== p.hostId) return false;
+        pending.delete(replyId);
         clearTimeout(p.timer);
-        if (typeof msg.error === "string" && msg.error) p.reject(new Error(msg.error));
-        else p.resolve(msg);
+        if (typeof pull.error === "string" && pull.error) p.reject(new Error(pull.error));
+        else p.resolve(pull);
         return true;
       }
       // change pings wake the matching collection's sync.

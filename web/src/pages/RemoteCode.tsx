@@ -4492,31 +4492,7 @@ export default function RemoteCodePage() {
               Connection interrupted. Reconnecting to your host…
             </div>
           </Show>
-          {/* Offline Banner when selected host is offline */}
-          <Show when={activeHost() && activeHost()?.status !== "online"}>
-            <div class="bg-amber-500/10 border-b border-amber-500/25 px-4 py-2.5 flex items-center justify-end text-xs text-amber-300 z-10">
-              <div class="flex items-center gap-2 min-w-0">
-                <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
-                <span class="truncate">
-                  Host <strong>{activeHost()?.name || activeHost()?.hostname || activeHost()?.id}</strong> is offline. Start the daemon on your machine: <code class="bg-amber-500/20 px-1 py-0.5 rounded font-mono">./llmgw-daemon</code>
-                </span>
-                <button
-                  onClick={loadHosts}
-                  class="text-[11px] underline hover:text-amber-100 cursor-pointer shrink-0"
-                  data-rc-tip="Refresh" aria-label="Refresh"
-                >
-                  Refresh
-                </button>
-                <button
-                  onClick={generatePairingToken}
-                  class="text-[11px] px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-200 cursor-pointer shrink-0"
-                  data-rc-tip="Connect Another Host" aria-label="Connect Another Host"
-                >
-                  Connect Another Host
-                </button>
-              </div>
-            </div>
-          </Show>
+
 
           {/* Floating top-left: back + sidebar toggle (no topbar) */}
           <div class="absolute top-2 left-2 z-20 flex items-center gap-1.5">

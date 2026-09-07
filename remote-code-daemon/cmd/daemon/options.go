@@ -27,7 +27,7 @@ func normalizedOptions(o SessionOptions) SessionOptions {
 	} else {
 		o.Effort = canonicalReasoning(o.Effort)
 	}
-	if o.Mode != "plan" && o.Mode != "learning" {
+	if o.Mode != "plan" && o.Mode != "learning" && o.Mode != "talk" {
 		o.Mode = "build"
 	}
 	if o.Access != "ask" {

@@ -5048,7 +5048,7 @@ export default function RemoteCodePage() {
                         setUsageOpen(false);
                       }}
                       class="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-elev border border-line text-sm text-ink-200 hover:bg-ink-800 font-medium cursor-pointer"
-                      data-rc-tip="Project (where new conversations start)" aria-label="Project (where new conversations start)"
+                      data-rc-tip="Project" aria-label="Project"
                     >
                       <Iconify icon="lucide:folder" size={13} />
                       <span class="max-w-[110px] truncate">
@@ -5398,7 +5398,7 @@ export default function RemoteCodePage() {
                       <Iconify icon="lucide:chevron-down" size={11} />
                     </button>
                     <FloatMenu anchor={() => modeBtn} open={modeMenuOpen()} placement="top-start" width="20rem">
-                      <p class="px-2 py-1.5 font-medium text-ink-400">Mode</p><Show when={sessionStatus() === "running"}><p class="px-2 pb-2 text-[11px] text-ink-500">Changes apply to the next model response, including during this task.</p></Show>
+                      <p class="px-2 py-1.5 font-medium text-ink-400">Mode</p>
                       <For each={[{id:"build", label:"Build", description:"Implement and validate changes", icon:"lucide:hammer"}, {id:"plan", label:"Plan", description:"Explore and plan without editing files", icon:"lucide:list-checks"}, {id:"learning", label:"Learning", description:"Learn through hints and guiding questions", icon:"lucide:graduation-cap"}]}>{(mode) =>
                         <button role="menuitemradio" aria-checked={agentMode() === mode.id} onClick={() => { setAgentMode(mode.id); configureSession(); }} class="w-full flex items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-elev cursor-pointer">
                           <Iconify icon={mode.icon} size={16} /><span class="flex-1"><span class="font-medium text-ink-100">{mode.label}</span><span class="block text-[11px] text-ink-500 mt-0.5">{mode.description}</span></span><Show when={agentMode() === mode.id}><Iconify icon="lucide:check" size={14} /></Show>
@@ -5428,7 +5428,6 @@ export default function RemoteCodePage() {
                           <Iconify icon={access.icon} size={19} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /><span class="flex-1"><span class={`font-medium ${access.full ? "text-amber-800 dark:text-amber-200" : "text-ink-100"}`}>{access.label}</span><span class={`block mt-1 text-[11px] ${access.full ? "text-amber-800/80 dark:text-amber-200/80" : "text-ink-500"}`}>{access.description}</span></span><Show when={yoloMode() === access.full}><Iconify icon="lucide:check" size={14} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /></Show>
                         </button>
                       }</For>
-                      <p class="px-2 py-2 text-[11px] text-ink-500">Changes apply immediately to pending and future tool calls.</p>
                       <Show when={agentMode() !== "build"}><p class="px-2 py-2 text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan can read files, run commands and ask questions. Edit and create tools are disabled." : "Learning can read files and run commands. Edit and create tools are disabled."}</p></Show>
                     </FloatMenu>
                   </div>

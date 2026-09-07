@@ -58,7 +58,10 @@ export function parseDiffLine(line: string): {
 export function DiffView(props: { text: string; max?: number; name?: string }) {
   const [expanded, setExpanded] = createSignal(false);
   const [rows, setRows] = createSignal<DiffRow[] | null>(null);
-  const lines = () => cleanNotice(props.text || "").split("\n");
+  const lines = () =>
+    cleanNotice(props.text || "")
+      .split("\n")
+      .filter((l) => !l.startsWith("---") && !l.startsWith("+++"));
   const max = () => props.max ?? 80;
   const shown = () => {
     const all = lines();

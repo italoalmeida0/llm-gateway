@@ -1,5 +1,4 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { copyWithToast } from "../../../ui";
 import { Icon as Iconify } from "../../../components/icon";
 import { CodeBlock, DiffView } from "../CodeBlock";
 import { FileIcon } from "../../presentation";
@@ -44,7 +43,12 @@ export function parseEditResults(raw: string, defaultPath?: string): FileEditSec
 
   for (const line of lines) {
     const trimmed = line.trim();
-    if (trimmed === "APPLIED." || trimmed.startsWith("DRY RUN —")) {
+    if (
+      trimmed === "APPLIED." ||
+      trimmed.startsWith("DRY RUN —") ||
+      trimmed.startsWith("---") ||
+      trimmed.startsWith("+++")
+    ) {
       continue;
     }
     const m = line.match(headerRegex);
@@ -130,18 +134,6 @@ function FileEditCard(props: { sec: FileEditSection }) {
           </Show>
         </div>
         <div class="flex items-center gap-2 shrink-0">
-          <Show when={props.sec.diff}>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                copyWithToast(props.sec.diff);
-              }}
-              class="text-[11px] text-ink-500 hover:text-ink-200 transition-colors cursor-pointer px-1.5 py-0.5 rounded hover:bg-ink-800/50"
-            >
-              Copy
-            </button>
-          </Show>
           <Iconify
             icon="lucide:chevron-down"
             size={12}
@@ -202,18 +194,6 @@ export function ToolEditBodies(props: ToolPartProps) {
           <For each={sections()}>
             {(sec) => <FileEditCard sec={sec} />}
           </For>
-          <Show when={sections().length > 1}>
-            <div class="flex items-center justify-between px-3 py-1.5 border-t border-line/50 bg-ink-950/40 text-[11px] text-ink-500">
-              <span>{sections().length} files modified</span>
-              <button
-                type="button"
-                onClick={() => copyWithToast(props.u.result?.toolResult || "")}
-                class="hover:text-ink-200 cursor-pointer transition-colors"
-              >
-                Copy all
-              </button>
-            </div>
-          </Show>
         </Show>
       </Show>
         <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && !props.u.result}>

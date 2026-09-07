@@ -479,17 +479,13 @@ func anchorInsert(content, oldText, newText string, isRegex bool) (string, int, 
 }
 
 func patchDiff(file, before, after string) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "--- %s\n+++ %s\n", file, file)
-	sb.WriteString(DiffText(before, after))
-	return sb.String()
+	_ = file
+	return DiffText(before, after)
 }
 
 func patchDiffNumbered(file, before, after string) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "--- %s\n+++ %s\n", file, file)
-	sb.WriteString(DiffTextNumbered(before, after))
-	return sb.String()
+	_ = file
+	return DiffTextNumbered(before, after)
 }
 
 

@@ -3827,6 +3827,13 @@ export default function RemoteCodePage() {
     const live = () => thoughts().some((entry) => entry.msg.id === messages().at(-1)?.id && thinkingStart() !== null && sessionStatus() === "running");
     const key = `${series.msg.id}:group-thinking`;
     const open = () => expandedThinking()[key] ?? live();
+    const entryDuration = (entry: { msg: ChatMessage }) => {
+      if (entry.msg.id === messages().at(-1)?.id && thinkingStart() !== null) {
+        return `${thinkingElapsed()}s`;
+      }
+      return entry.msg.thinkingDuration !== undefined ? `${entry.msg.thinkingDuration}s` : "—";
+    };
+    const maxDurLen = createMemo(() => Math.max(3, ...thoughts().map((e) => entryDuration(e).length)));
     return <div class="w-full space-y-2.5">
       <Show when={verboseChat() && thoughts().length}>
         <Show when={thoughts().length > 1} fallback={<For each={thoughts()}>{(entry) => renderThinkingBlock(entry.msg, entry.block, entry.nth)}</For>}>
@@ -3836,7 +3843,7 @@ export default function RemoteCodePage() {
             </button>
             <Show when={open()}><ol class="mt-2 max-h-64 overflow-y-auto [scrollbar-gutter:stable] space-y-3 text-xs text-ink-400 leading-relaxed">
               <For each={thoughts()}>{(entry) => <li class="flex gap-3 items-start">
-                <span class="shrink-0 tabular-nums text-ink-500">{entry.msg.id === messages().at(-1)?.id && thinkingStart() !== null ? `${thinkingElapsed()}s` : entry.msg.thinkingDuration !== undefined ? `${entry.msg.thinkingDuration}s` : "—"}</span>
+                <span class="w-10 shrink-0 text-right tabular-nums font-mono whitespace-pre text-ink-500">{entryDuration(entry).padStart(maxDurLen(), " ")}</span>
                 <span class="pl-3 border-l border-line whitespace-pre-wrap break-words min-w-0">{entry.block.reasoning}</span>
               </li>}</For>
             </ol></Show>

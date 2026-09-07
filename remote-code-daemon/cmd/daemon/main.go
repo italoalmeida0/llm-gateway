@@ -2520,9 +2520,15 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 					contentStr.WriteString(tb.Text)
 				}
 			}
-			payload["event"] = map[string]any{
+			ev := map[string]any{
 				"type": "tool_result", "id": e.ID, "content": contentStr.String(), "isError": e.Result.IsError, "startedAt": e.Result.StartedAt, "durationMs": e.Result.DurationMs,
 			}
+			if e.Details != nil {
+				if raw, err := json.Marshal(e.Details); err == nil {
+					ev["details"] = json.RawMessage(raw)
+				}
+			}
+			payload["event"] = ev
 		case core.EvToolExecutionStart:
 			payload["event"] = map[string]any{"type": "tool_execution_start", "id": e.ID, "startedAt": e.StartedAt}
 		case core.EvUsage:

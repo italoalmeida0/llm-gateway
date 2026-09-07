@@ -781,7 +781,7 @@ func (a *Agent) executeTools(ctx context.Context, msg provider.Message, sink fun
 				addedTools = append(addedTools, name)
 			}
 		}
-		sink(EvToolResult{ID: tc.ID, Result: res})
+		sink(EvToolResult{ID: tc.ID, Result: res, Details: res.Details})
 	}
 
 	return provider.Message{

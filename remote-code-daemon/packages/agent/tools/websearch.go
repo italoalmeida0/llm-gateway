@@ -33,8 +33,9 @@ type webResult struct {
 }
 
 type webCacheEntry struct {
-	at   time.Time
-	text string
+	at      time.Time
+	text    string
+	results []webResult
 }
 
 var (
@@ -91,7 +92,7 @@ func (t *SearchWebTool) Execute(ctx context.Context, raw json.RawMessage, progre
 	}
 	// Network tools bypass the filesystem jail (they touch no local files);
 	// only the SSRF guard in fetch_url constrains destinations.
-	text, cached, err := t.search(ctx, q, count, a.Offset)
+	text, cached, results, err := t.search(ctx, q, count, a.Offset)
 	if err != nil {
 		return core.ToolResult{}, err
 	}
@@ -102,11 +103,11 @@ func (t *SearchWebTool) Execute(ctx context.Context, raw json.RawMessage, progre
 	b.WriteString(text)
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
-		Details: map[string]any{"query": q, "count": count, "cached": cached},
+		Details: map[string]any{"query": q, "count": count, "cached": cached, "results": webDetailItems(results)},
 	}, nil
 }
 
-func (t *SearchWebTool) search(ctx context.Context, query string, count, offset int) (string, bool, error) {
+func (t *SearchWebTool) search(ctx context.Context, query string, count, offset int) (string, bool, []webResult, error) {
 	key := fmt.Sprintf("%s|%d|%d", query, count, offset)
 	now := time.Now()
 	if t.Now != nil {
@@ -115,13 +116,13 @@ func (t *SearchWebTool) search(ctx context.Context, query string, count, offset 
 	webCacheMu.Lock()
 	if e, ok := webCache[key]; ok && now.Sub(e.at) < webCacheTTL {
 		webCacheMu.Unlock()
-		return e.text, true, nil
+		return e.text, true, e.results, nil
 	}
 	webCacheMu.Unlock()
 
 	results, err := t.queryDDG(ctx, query, count, offset)
 	if err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d result%s for %q (DuckDuckGo)\n", len(results), plural(len(results)), query)
@@ -136,9 +137,9 @@ func (t *SearchWebTool) search(ctx context.Context, query string, count, offset 
 	}
 	text := b.String()
 	webCacheMu.Lock()
-	webCache[key] = webCacheEntry{at: now, text: text}
+	webCache[key] = webCacheEntry{at: now, text: text, results: results}
 	webCacheMu.Unlock()
-	return text, false, nil
+	return text, false, results, nil
 }
 
 func (t *SearchWebTool) queryDDG(ctx context.Context, query string, count, offset int) ([]webResult, error) {
@@ -304,4 +305,12 @@ func textOf(n *html.Node) string {
 	walk(n)
 	s := strings.ReplaceAll(b.String(), "\n", " ")
 	return strings.Join(strings.Fields(s), " ")
+}
+
+func webDetailItems(results []webResult) []map[string]any {
+	items := make([]map[string]any, 0, len(results))
+	for _, r := range results {
+		items = append(items, map[string]any{"title": r.Title, "url": r.URL, "snippet": r.Snippet})
+	}
+	return items
 }

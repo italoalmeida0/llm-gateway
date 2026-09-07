@@ -88,9 +88,12 @@ func TestSearchWebCache(t *testing.T) {
 	webCacheMu.Lock()
 	webCache[key] = webCacheEntry{at: time.Now(), text: "cached text"}
 	webCacheMu.Unlock()
-	text, cached, err := tool.search(context.Background(), "cache-probe", 10, 0)
+	text, cached, results, err := tool.search(context.Background(), "cache-probe", 10, 0)
 	if err != nil || !cached || text != "cached text" {
 		t.Fatalf("cache miss: cached=%v err=%v text=%q", cached, err, text)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected empty cached results, got %d", len(results))
 	}
 }
 

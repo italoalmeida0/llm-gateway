@@ -103,6 +103,10 @@ func (EvToolProgress) Type() string { return "tool_progress" }
 type EvToolResult struct {
 	ID     string
 	Result ToolResult
+	// Details mirrors Result.Details for UIs (structured data: exit codes,
+	// web results, file lists...). Kept as a separate field so the WS
+	// layer can forward it without re-parsing Content text.
+	Details any
 }
 
 func (EvToolResult) Type() string { return "tool_result" }

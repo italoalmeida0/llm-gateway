@@ -96,6 +96,8 @@ export interface ContentBlock {
   reasoning?: string;
   imageMime?: string;
   imageData?: string;
+  /** Structured Details forwarded by the daemon (web results, exit codes...). */
+  toolDetails?: any;
 }
 
 export interface SessionUsage {
@@ -1461,6 +1463,19 @@ export default function RemoteCodePage() {
     }
     return prettyArgs(content);
   }
+  // Structured Details arrive as a JSON string (WS) or object (mirror).
+  function parseToolDetails(d: any): any {
+    if (d == null) return undefined;
+    if (typeof d === "object") return d;
+    if (typeof d === "string") {
+      try {
+        return JSON.parse(d);
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
   function parseContentBlocks(m: any): ContentBlock[] {
     const blocks: ContentBlock[] = [];
     const pushBlock = (c: any) => {
@@ -1506,6 +1521,7 @@ export default function RemoteCodePage() {
           toolResult: toolResultText(c),
           toolStartedAt:c.started_at, toolDurationMs:c.started_at ? (c.duration_ms || 0) : undefined,
           isError: !!(c.is_error ?? c.isError ?? c.is_error === true),
+          toolDetails: parseToolDetails(c.details),
         });
         return;
       }
@@ -3585,6 +3601,16 @@ export default function RemoteCodePage() {
     const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
     const name = () => u.call?.toolName || "tool";
     const terminal = createMemo(() => terminalPresentation(u.result?.toolResult || ""));
+    const webDetails = () => {
+      const d: any = u.result?.toolDetails;
+      if (!d || !Array.isArray(d.results)) return undefined;
+      return d as { query?: string; cached?: boolean; results: { title?: string; url?: string; snippet?: string }[] };
+    };
+    const fetchDetails = () => {
+      const d: any = u.result?.toolDetails;
+      if (!d || typeof d.url !== "string") return undefined;
+      return d as { url: string; host?: string; title?: string; content?: string; truncated?: boolean };
+    };
     const elapsed = () => {
       if (name() !== "bash" && name() !== "python") return "";
       const duration = u.result?.toolDurationMs ?? terminal().durationMs;
@@ -3731,6 +3757,76 @@ export default function RemoteCodePage() {
                   </div>
                 </Show>
                 <DiffView text={terminal().output || u.result?.toolResult || prog() || ""} max={60} />
+              </Show>
+            </Show>
+            <Show when={name() === "search_web"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Searching the web…</div>}
+              >
+                <div class="px-3 pt-2 pb-1 text-[11px] text-ink-500">
+                  <span class="font-mono text-ink-300">“{String(args().query || webDetails()?.query || "")}”</span>
+                  <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">DuckDuckGo</span>
+                  <Show when={webDetails()?.cached}><span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">cached</span></Show>
+                </div>
+                <Show when={(webDetails()?.results || []).length > 0} fallback={
+                  <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language={undefined} />
+                }>
+                  <ol class="px-3 pb-2 space-y-1.5">
+                    <For each={(webDetails()?.results || []).slice(0, 10)}>{(r: any, i: () => number) =>
+                      <li class="group rounded-lg border border-line/60 bg-elev/50 px-2.5 py-1.5 transition-colors hover:border-ink-500">
+                        <a href={String(r.url || "")} target="_blank" rel="noreferrer"
+                           class="flex items-baseline gap-1.5 text-[12px] leading-snug">
+                          <span class="shrink-0 font-mono text-[10px] text-ink-600">{i() + 1}.</span>
+                          <span class="font-medium text-ink-100 group-hover:text-accent-300 group-hover:underline line-clamp-1">{String(r.title || r.url || "")}</span>
+                        </a>
+                        <div class="mt-0.5 truncate font-mono text-[10px] text-ink-600">{String(r.url || "")}</div>
+                        <Show when={r.snippet}><p class="mt-0.5 text-[11px] leading-snug text-ink-400 line-clamp-2">{String(r.snippet)}</p></Show>
+                      </li>
+                    }</For>
+                  </ol>
+                  <Show when={(webDetails()?.results || []).length > 10}>
+                    <p class="px-3 pb-2 text-[10px] text-ink-600">+{(webDetails()?.results || []).length - 10} more in raw output below</p>
+                  </Show>
+                  <details class="border-t border-line/50">
+                    <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
+                    <CodeBlock text={terminal().output || u.result?.toolResult || ""} language={undefined} />
+                  </details>
+                </Show>
+              </Show>
+            </Show>
+            <Show when={name() === "fetch_url"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Fetching {String(args().url || "URL")}…</div>}
+              >
+                <a href={String(fetchDetails()?.url || args().url || "")} target="_blank" rel="noreferrer"
+                   class="mx-3 mt-2 flex items-center gap-2 rounded-lg border border-line/60 bg-elev/50 px-2.5 py-2 transition-colors hover:border-ink-500">
+                  <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent-500/15 font-mono text-[11px] font-bold text-accent-300">
+                    {(fetchDetails()?.host || "?").slice(0, 1).toUpperCase()}
+                  </span>
+                  <span class="min-w-0">
+                    <span class="block truncate text-[12px] font-medium text-ink-100">{String(fetchDetails()?.title || fetchDetails()?.host || args().url || "Article")}</span>
+                    <span class="block truncate font-mono text-[10px] text-ink-500">{String(fetchDetails()?.host || "")}</span>
+                  </span>
+                  <Iconify icon="lucide:external-link" size={12} class="ml-auto shrink-0 text-ink-500" />
+                </a>
+                <Show when={fetchDetails()?.content} fallback={
+                  <div class="border-t border-line/50 mt-2">
+                    <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language="markdown" />
+                  </div>
+                }>
+                  <div class="px-3 py-2 max-h-96 overflow-y-auto text-[12.5px] leading-relaxed text-ink-200 article-body">
+                    <Streamdown>{String(fetchDetails()?.content || "")}</Streamdown>
+                  </div>
+                  <Show when={fetchDetails()?.truncated}>
+                    <p class="px-3 pb-1 text-[10px] text-ink-600">Truncated — full text in raw output below</p>
+                  </Show>
+                  <details class="border-t border-line/50">
+                    <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
+                    <CodeBlock text={terminal().output || u.result?.toolResult || ""} language="markdown" />
+                  </details>
+                </Show>
               </Show>
             </Show>
             <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python" && name() !== "search" && name() !== "inspect" && name() !== "patch" && name() !== "search_web" && name() !== "fetch_url"}>

@@ -88,7 +88,7 @@ func (t *FetchURLTool) Execute(ctx context.Context, raw json.RawMessage, progres
 	b.WriteString(text)
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
-		Details: map[string]any{"url": finalURL, "truncated": truncated},
+		Details: fetchDetail(finalURL, text, truncated),
 	}, nil
 }
 
@@ -502,4 +502,22 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func fetchDetail(finalURL, text string, truncated bool) map[string]any {
+	host := ""
+	if u, err := url.Parse(finalURL); err == nil {
+		host = u.Hostname()
+	}
+	return map[string]any{"url": finalURL, "host": host, "title": articleTitle(text), "content": text, "truncated": truncated}
+}
+
+func articleTitle(text string) string {
+	for _, ln := range strings.Split(text, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "# ") {
+			return strings.TrimSpace(strings.TrimPrefix(ln, "# "))
+		}
+	}
+	return ""
 }

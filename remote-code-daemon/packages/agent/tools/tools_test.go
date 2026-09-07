@@ -315,17 +315,17 @@ func TestShellDescription(t *testing.T) {
 		{
 			name:  "bash",
 			shell: shellCommand{path: "/opt/bin/bash", flag: "-c", isBash: true},
-			want:  "Run a Bash command via /opt/bin/bash -c. stdout+stderr merged.",
+			want:  "Run a Bash command via /opt/bin/bash -c. LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), patch (not sed -i), edit (single-file fix), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
 		},
 		{
 			name:  "POSIX fallback",
 			shell: shellCommand{path: "/bin/sh", flag: "-c"},
-			want:  "Bash is unavailable; run a POSIX sh command via /bin/sh -c. stdout+stderr merged.",
+			want:  "Run a POSIX sh command via /bin/sh -c (Bash unavailable). LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), patch (not sed -i), edit (single-file fix), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
 		},
 		{
 			name:  "Windows",
 			shell: shellCommand{path: "cmd", flag: "/C"},
-			want:  "Run a Windows Command Prompt command via cmd /C. stdout+stderr merged.",
+			want:  "Run a Windows Command Prompt command via cmd /C. LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), patch (not sed -i), edit (single-file fix), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
 		},
 	}
 	for _, tt := range tests {

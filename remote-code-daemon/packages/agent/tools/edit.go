@@ -40,7 +40,7 @@ const editSchema = `{"type":"object","properties":{"path":{"type":"string","desc
 
 func (t *EditTool) Name() string { return "edit" }
 func (t *EditTool) Description() string {
-	return "Apply exact substitutions to an existing file (verbatim default; regex:true for patterns; replaceAll:true for mass rename). Inspect that file before editing and take every oldText directly from its current contents. Use short excerpts that identify one location; choose write when replacing most or all of a file. Pass dryRun:true to preview the diff without writing."
+	return "Apply exact substitutions to an existing file (verbatim default; regex:true for patterns; replaceAll:true for mass rename). Inspect that file before editing and take every oldText directly from its current contents. Use short excerpts that identify one location; choose write when replacing most or all of a file. Pass dryRun:true to preview the diff without writing. For the SAME change across MANY files use patch (multi-file + preview) instead of repeated edit calls."
 }
 func (t *EditTool) Schema() json.RawMessage { return json.RawMessage(editSchema) }
 

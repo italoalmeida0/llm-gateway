@@ -189,24 +189,6 @@ export function toolSummary(u: ToolUnit): ToolSummary {
         target: shown || `${edits.length} edit${edits.length === 1 ? "" : "s"}`,
       };
     }
-    case "git": {
-      const op = String(args.op || "status");
-      const labels: Record<string, [string, string]> = {
-        status: ["lucide:git-branch", "Status"],
-        diff: ["lucide:git-compare", "Diff"],
-        log: ["lucide:history", "Log"],
-        stash_list: ["lucide:archive", "Stashes"],
-        stash_show: ["lucide:archive", "Stash"],
-        stash_restore: ["lucide:archive-restore", "Restore"],
-      };
-      const [icon, verb] = labels[op] || ["lucide:git-branch", "Git"];
-      const scope = Array.isArray(args.paths) && args.paths.length > 0
-        ? args.paths.map((x: any) => baseNameOf(x) || x).slice(0, 2).join(", ")
-        : op === "stash_show" || op === "stash_restore"
-          ? String(args.ref || "stash@{0}")
-          : "";
-      return { icon, verb, target: scope };
-    }
     case "search_web": {
       const q = String(args.query || "").replace(/\s+/g, " ").trim();
       return {

@@ -1,13 +1,16 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/patriceckhart/zot/packages/core"
 	"github.com/patriceckhart/zot/packages/ignore"
@@ -296,4 +299,22 @@ func countLines(data []byte) int {
 		n = 1
 	}
 	return n
+}
+
+// runGit executes git with a fixed timeout, no pager, no color, and no
+// interactive prompts. Moved here from the removed git tool — inspect's
+// git-status flags are its only remaining user (git ops go via bash).
+func runGit(cwd string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "color.ui=false", "--no-pager"}, args...)...)
+	cmd.Dir = cwd
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "SYSTEMROOT=" + os.Getenv("SYSTEMROOT")}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String() + stderr.String(), err
+	}
+	return stdout.String(), nil
 }

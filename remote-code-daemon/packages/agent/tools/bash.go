@@ -404,13 +404,18 @@ func isExecutableFile(path string) bool {
 }
 
 func shellDescription(shell shellCommand) string {
+	base := "Run a shell command"
 	if shell.flag == "/C" {
-		return "Run a Windows Command Prompt command via cmd /C. stdout+stderr merged."
+		base = "Run a Windows Command Prompt command via cmd /C"
+	} else if shell.isBash {
+		base = fmt.Sprintf("Run a Bash command via %s -c", shell.path)
+	} else {
+		base = "Run a POSIX sh command via /bin/sh -c (Bash unavailable)"
 	}
-	if shell.isBash {
-		return fmt.Sprintf("Run a Bash command via %s -c. stdout+stderr merged.", shell.path)
-	}
-	return "Bash is unavailable; run a POSIX sh command via /bin/sh -c. stdout+stderr merged."
+	return base + ". LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). " +
+		"Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), patch (not sed -i), " +
+		"edit (single-file fix), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). " +
+		"Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams."
 }
 
 func newShellCmd(ctx context.Context, command string) *exec.Cmd {

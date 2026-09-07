@@ -40,7 +40,7 @@ const readSchema = `{"type":"object","properties":{"path":{"type":"string"},"off
 
 func (t *ReadTool) Name() string { return "read" }
 func (t *ReadTool) Description() string {
-	return "Read a file with line-range paging (offset/limit) and totalLines in Details. Images (png/jpg/gif/webp) return inline. Pass showLineNumbers:true when you need to cite exact lines."
+	return "Read a file with line-range paging (offset/limit) and totalLines in Details. Images (png/jpg/gif/webp) return inline. Pass showLineNumbers:true when you need to cite exact lines. To FIND text first use search, then open hits here — never grep + read."
 }
 func (t *ReadTool) Schema() json.RawMessage { return json.RawMessage(readSchema) }
 

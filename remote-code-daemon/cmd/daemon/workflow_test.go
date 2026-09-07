@@ -95,15 +95,15 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 		reg := core.NewRegistry(
 			&tools.ReadTool{}, &tools.GlobTool{}, &tools.BashTool{}, &tools.PythonTool{},
 			&tools.WriteTool{}, &tools.EditTool{}, &tools.PatchTool{},
-			&tools.SearchTool{}, &tools.InspectTool{}, &tools.GitTool{},
+			&tools.SearchTool{}, &tools.InspectTool{},
 			&tools.TodoTool{}, &tools.QuestionTool{},
 		)
 		restrictModeTools(reg, mode)
 		if reg["write"] != nil || reg["edit"] != nil || reg["patch"] != nil || reg["read"] == nil || reg["glob"] == nil || reg["todo"] == nil {
 			t.Fatal("mode exposed the wrong file tools or lost the checklist")
 		}
-		if reg["search"] == nil || reg["inspect"] == nil || reg["git"] == nil {
-			t.Fatal("Plan and Learning must retain exploration tools (search/inspect/git)")
+		if reg["search"] == nil || reg["inspect"] == nil {
+			t.Fatal("Plan and Learning must retain exploration tools (search/inspect)")
 		}
 		if reg["question"] == nil {
 			t.Fatal("Plan and Learning must retain questions")

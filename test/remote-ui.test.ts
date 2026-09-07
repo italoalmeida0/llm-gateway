@@ -259,15 +259,6 @@ describe("Remote Code toolSummary", () => {
     expect(toolSummary({
       call: { type: "tool_call", toolId: "p2", toolName: "patch", toolArgs: JSON.stringify({ dryRun: false, edits: [{ file: "a.ts", old: "x", new: "y" }] }) }
     })).toEqual({ icon: "lucide:file-diff", verb: "Patch", target: "a.ts" });
-    expect(toolSummary({
-      call: { type: "tool_call", toolId: "g1", toolName: "git", toolArgs: JSON.stringify({ op: "status" }) }
-    })).toEqual({ icon: "lucide:git-branch", verb: "Status", target: "" });
-    expect(toolSummary({
-      call: { type: "tool_call", toolId: "g2", toolName: "git", toolArgs: JSON.stringify({ op: "diff", paths: ["server/db.ts"] }) }
-    })).toEqual({ icon: "lucide:git-compare", verb: "Diff", target: "db.ts" });
-    expect(toolSummary({
-      call: { type: "tool_call", toolId: "g3", toolName: "git", toolArgs: JSON.stringify({ op: "stash_restore", ref: "stash@{0}" }) }
-    })).toEqual({ icon: "lucide:archive-restore", verb: "Restore", target: "stash@{0}" });
   });
   test("summarizes search_web and fetch_url calls", () => {
     expect(toolSummary({

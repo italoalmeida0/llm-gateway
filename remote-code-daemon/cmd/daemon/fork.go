@@ -21,6 +21,11 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		SessionID string `json:"sessionId"`
 		RequestID string `json:"requestId"`
 		Index     *int   `json:"index"`
+		// Fork-&-resend (edit popup): apply this text to the boundary user
+		// message and re-run the turn on the copy.
+		EditText  string `json:"editText"`
+		EditModel string `json:"editModel"`
+		EditYOLO  bool   `json:"editYolo"`
 	}
 	if json.Unmarshal(raw, &req) != nil {
 		return
@@ -110,6 +115,30 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		}
 		rec.Attachments = append(rec.Attachments, attachment)
 	}
+	// Fork-&-resend: apply the edited text to the boundary user message.
+	// The fork ends at the edited message (user) or includes it, so it is
+	// always the last user message of the copy.
+	resent := false
+	if strings.TrimSpace(req.EditText) != "" {
+		for i := len(rec.Messages) - 1; i >= 0; i-- {
+			if rec.Messages[i].Role != provider.RoleUser {
+				continue
+			}
+			replaced := false
+			for j, c := range rec.Messages[i].Content {
+				if tb, ok := c.(provider.TextBlock); ok {
+					rec.Messages[i].Content[j] = provider.TextBlock{Text: req.EditText, ThoughtSignature: tb.ThoughtSignature}
+					replaced = true
+					break
+				}
+			}
+			if replaced {
+				rec.Messages[i].Time = time.Now()
+				resent = true
+			}
+			break
+		}
+	}
 	// Task state, review/undo journal and accumulated spend belong to the source.
 	// The new conversation starts idle; its next request measures the copied context.
 	if err := d.saveSession(rec); err != nil {
@@ -117,7 +146,15 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		return
 	}
 	committed = true
-	_ = d.sendWS(map[string]any{"type": "session_forked", "requestId": req.RequestID, "hostId": d.config.HostID, "session": sessionPayload(rec)})
+	_ = d.sendWS(map[string]any{"type": "session_forked", "requestId": req.RequestID, "hostId": d.config.HostID, "session": sessionPayload(rec), "resent": resent})
+	if resent {
+		// Re-run the turn on the copy from the edited text.
+		model := req.EditModel
+		if model == "" {
+			model = rec.Model
+		}
+		d.truncateAndRun(rec.ID, len(rec.Messages), req.EditText, model, req.EditYOLO, nil)
+	}
 }
 
 func copyForkAttachment(source, target string) error {

@@ -1104,6 +1104,16 @@ export default function RemoteCodePage() {
 
 
 
+  // Choice modal: like showConfirm but returns the picked option id
+  // (or null on cancel). Used for fork-vs-resend on edit/regenerate.
+  interface ChoiceOption { id: string; label: string; hint?: string; primary?: boolean }
+  const [choiceState, setChoiceState] = createSignal<{ title: string; message: string; options: ChoiceOption[]; resolve: (id: string | null) => void } | null>(null);
+  function showChoice(opts: { title: string; message: string; options: ChoiceOption[] }): Promise<string | null> {
+    return new Promise((resolve) => {
+      setChoiceState({ ...opts, resolve: (id) => { setChoiceState(null); resolve(id); } });
+    });
+  }
+
   // Promise-based confirm modal (chatbot showConfirm, no native confirm()).
   interface ConfirmState {
     title: string;
@@ -1726,7 +1736,12 @@ export default function RemoteCodePage() {
         setForking(false);
         dataLayer.storeFor(activeHostId()).syncAll();
         selectSession(msg.session.id);
-        toast("Conversation fork created", "ok");
+        if (msg.resent) {
+          setSessionStatus("running");
+          toast("Fork created — resending with edited text", "ok");
+        } else {
+          toast("Conversation fork created", "ok");
+        }
         break;
       }
       case "session_created": {
@@ -1884,6 +1899,22 @@ export default function RemoteCodePage() {
         break;
       }
 
+      case "session_truncated": {
+        // Authoritative tail cut after edit/regenerate (daemon broadcast).
+        // keepIndex is the last RAW message to keep; drop rendered messages
+        // whose srcIdx exceeds it, then let the following session_content
+        // (or the new turn) repaint.
+        if (msg.sessionId !== activeSessionId()) break;
+        const keep = typeof msg.keepIndex === "number" ? msg.keepIndex : -1;
+        if (keep >= 0) {
+          setMessages((prev: ChatMessage[]) => {
+            const cut = prev.findIndex((m) => (m.srcIdx ?? -1) > keep);
+            return cut < 0 ? prev : prev.slice(0, cut);
+          });
+          showQuestion(null);
+        }
+        break;
+      }
       case "session_content": {
         if (msg.sessionId !== activeSessionId()) break;
         applySessionContent(msg.sessionId, msg.messages || []);
@@ -2744,14 +2775,41 @@ export default function RemoteCodePage() {
 
   // Regenerate from message idx: the daemon drops that message and everything
   // after it, then re-runs the turn (chatbot regenerateMessage semantics).
-  function regenerateMsg(idx: number) {
+  // Offers fork-vs-resend: fork preserves the current timeline in a copy.
+  async function regenerateMsg(idx: number) {
     const sid = activeSessionId();
     if (!sid || !wsOpen()) return;
     if (sessionStatus() === "running") {
       toast("Stop the current turn first", "err");
       return;
     }
+    const choice = await showChoice({
+      title: "Regenerate response?",
+      message: "Everything from this point down will be discarded and the turn re-runs from the previous user message.\n\nFork keeps the current timeline in a copy and regenerates there instead.",
+      options: [
+        { id: "resend", label: "Discard & regenerate", hint: "Apaga a cauda e reenvia aqui", primary: true },
+        { id: "fork", label: "Fork & regenerate", hint: "Preserva aqui, regenera numa cópia" },
+      ],
+    });
+    if (!choice) return;
+    if (choice === "fork") {
+      forkRequestId = crypto.randomUUID();
+      setForking(true);
+      sendWS({ type: "fork_session", sessionId: sid, index: rawIdx(idx), requestId: forkRequestId });
+      return;
+    }
+    // Optimistic cut: drop rendered tail now (daemon reconciles via session_truncated).
+    cutLiveTail(rawIdx(idx) - 1);
     sendWS({ type: "regenerate", sessionId: sid, index: rawIdx(idx), model: activeModel(), yolo: yoloMode() });
+  }
+
+  // Drop rendered messages below a raw keep-index (optimistic edit/regen cut).
+  function cutLiveTail(keepRawIdx: number) {
+    setMessages((prev: ChatMessage[]) => {
+      const cut = prev.findIndex((m) => (m.srcIdx ?? -1) > keepRawIdx);
+      return cut < 0 ? prev : prev.slice(0, cut);
+    });
+    showQuestion(null);
   }
 
   // Inline edit (chatbot startEditMessage): user edits resubmit, assistant
@@ -2764,7 +2822,7 @@ export default function RemoteCodePage() {
     setEditingMsgIdx(null);
     setEditingMsgText("");
   }
-  function saveEditMsg(idx: number, m: ChatMessage) {
+  async function saveEditMsg(idx: number, m: ChatMessage) {
     const sid = activeSessionId();
     const text = editingMsgText().trim();
     if (!sid || !wsOpen()) {
@@ -2779,6 +2837,28 @@ export default function RemoteCodePage() {
     if (regen && sessionStatus() === "running") {
       toast("Stop the current turn first", "err");
       return;
+    }
+    if (regen) {
+      const choice = await showChoice({
+        title: "Resend edited message?",
+        message: "Everything from this message down will be discarded and the turn re-runs with your edited text.\n\nFork keeps the current timeline in a copy and resends there instead.",
+        options: [
+          { id: "resend", label: "Discard & resend", hint: "Apaga a cauda e reenvia aqui", primary: true },
+          { id: "fork", label: "Fork & resend", hint: "Preserva aqui, reenvia numa cópia" },
+        ],
+      });
+      if (!choice) return;
+      if (choice === "fork") {
+        // Fork at this message carrying the edited text: the daemon
+        // applies it to the boundary user message and resends from there.
+        forkRequestId = crypto.randomUUID();
+        setForking(true);
+        sendWS({ type: "fork_session", sessionId: sid, index: rawIdx(idx), requestId: forkRequestId, editText: text, editModel: activeModel(), editYolo: yoloMode() });
+        cancelEditMsg();
+        return;
+      }
+      // Optimistic cut: drop rendered tail now (daemon reconciles via session_truncated).
+      cutLiveTail(rawIdx(idx));
     }
     sendWS({
       type: "edit_message",
@@ -6000,6 +6080,28 @@ export default function RemoteCodePage() {
         </Show>
       </Modal>
 
+      <Show when={choiceState()}>
+        <Modal open={true} title={choiceState()?.title || "Choose"} onClose={() => choiceState()?.resolve(null)}>
+          <p class="text-sm text-ink-400 whitespace-pre-line leading-relaxed">{choiceState()?.message}</p>
+          <div class="mt-4 flex flex-col gap-2">
+            <For each={choiceState()?.options || []}>{(opt) =>
+              <button
+                onClick={() => choiceState()?.resolve(opt.id)}
+                class={`flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-colors cursor-pointer ${opt.primary ? "border-accent-500/50 bg-accent-500/10 hover:bg-accent-500/20" : "border-line hover:bg-ink-800"}`}
+              >
+                <span>
+                  <span class={`block text-[13px] font-medium ${opt.primary ? "text-ink-50" : "text-ink-200"}`}>{opt.label}</span>
+                  <Show when={opt.hint}><span class="block text-[11px] text-ink-500">{opt.hint}</span></Show>
+                </span>
+                <Show when={opt.primary}><span class="rounded bg-accent-500/20 px-1.5 py-0.5 text-[10px] font-medium text-accent-300">default</span></Show>
+              </button>
+            }</For>
+          </div>
+          <div class="mt-3 flex items-center justify-end gap-2">
+            <button onClick={() => choiceState()?.resolve(null)} class="px-3.5 py-1.5 rounded-xl text-xs font-medium text-ink-300 hover:text-ink-100 border border-line hover:bg-ink-800 transition-colors cursor-pointer">Cancel</button>
+          </div>
+        </Modal>
+      </Show>
       <Modal open={!!confirmState()} title={confirmState()?.title || "Confirm"}
         onClose={() => { confirmState()?.resolve(false); setConfirmState(null); }}
         footer={<>

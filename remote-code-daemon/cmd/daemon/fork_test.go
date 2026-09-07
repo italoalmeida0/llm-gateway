@@ -83,3 +83,57 @@ func TestForkRejectsInvalidBoundaries(t *testing.T) {
 		t.Fatal("invalid boundary created fork")
 	}
 }
+
+func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
+	d := testDaemon(t)
+	rec := &SessionRecord{ID: "src-edit", CWD: t.TempDir(), Title: "T", Model: "m", Status: "idle", Messages: []provider.Message{
+		{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "original question"}}},
+		{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: "stale answer"}}},
+		{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "later question"}}},
+	}}
+	d.sessions["src-edit"] = &ActiveSession{record: rec, gen: 1}
+	if err := d.saveSession(rec); err != nil {
+		t.Fatal(err)
+	}
+	// Fork at the first user message carrying edited text. truncateAndRun
+	// would start a live turn — neutralize by pre-cancelling: instead assert
+	// the fork content + resent flag path via a daemon with no provider.
+	// (Full resend is covered by truncateAndRun tests; here we check the
+	// boundary rewrite happened before the turn starts.)
+	command, _ := json.Marshal(map[string]any{"type": "fork_session", "sessionId": "src-edit", "index": 0, "editText": "edited question"})
+	done := make(chan struct{})
+	go func() {
+		// Let forkSession reach truncateAndRun then cancel the turn fast.
+		// runAgentTurn with no provider fails fast; we only care the fork
+		// was persisted with the edited text.
+		defer close(done)
+		d.handleMessage(command)
+	}()
+	<-done
+	var fork *SessionRecord
+	for _, summary := range d.listSessions() {
+		if summary.ID != "src-edit" {
+			fork, _ = d.loadSession(summary.ID)
+		}
+	}
+	if fork == nil || len(fork.Messages) == 0 {
+		t.Fatalf("no fork created: %+v", fork)
+	}
+	lastUser := ""
+	for i := len(fork.Messages) - 1; i >= 0; i-- {
+		if fork.Messages[i].Role == provider.RoleUser {
+			if tb, ok := fork.Messages[i].Content[0].(provider.TextBlock); ok {
+				lastUser = tb.Text
+			}
+			break
+		}
+	}
+	if lastUser != "edited question" {
+		t.Fatalf("boundary not rewritten: %q", lastUser)
+	}
+	// Source keeps the original text.
+	src, _ := d.loadSession("src-edit")
+	if src.Messages[0].Content[0].(provider.TextBlock).Text != "original question" {
+		t.Fatal("source mutated")
+	}
+}

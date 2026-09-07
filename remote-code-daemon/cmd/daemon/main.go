@@ -1190,10 +1190,18 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		if !replaced {
 			return
 		}
+		// Truncate everything below the edited message: stale assistant
+		// replies (and later turns) no longer belong to this timeline.
+		before := len(rec.Messages)
 		rec.Messages[req.Index] = msg
 		rec.Messages = append([]provider.Message(nil), rec.Messages[:req.Index+1]...)
 		rec.Messages = provider.RepairOrphanedToolResults(rec.Messages)
 		rec.UpdatedAt = time.Now().UnixMilli()
+		removed := before - len(rec.Messages)
+		if removed < 0 {
+			removed = 0
+		}
+		broadcastTruncated(d, req.SessionID, req.Index, removed, rec.Messages)
 		_ = d.saveSession(rec)
 		_ = d.sendWS(map[string]any{
 			"type":      "session_content",
@@ -2154,6 +2162,20 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 
 // Agent Loop Runner for a Session
 
+// broadcastTruncated tells clients to drop rendered messages below keepIdx
+// (the authoritative cut after edit/regenerate). Clients apply the same cut
+// optimistically; this event reconciles them (and other devices).
+func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int, msgs []provider.Message) {
+	_ = d.sendWS(map[string]any{
+		"type": "session_truncated", "hostId": d.config.HostID, "sessionId": sessionID,
+		"keepIndex": keepIdx, "removed": removed,
+	})
+	_ = d.sendWS(map[string]any{
+		"type": "session_content", "hostId": d.config.HostID, "sessionId": sessionID,
+		"messages": msgs,
+	})
+}
+
 // truncateAndRun replaces the transcript tail (keeping the first `keep`
 // messages) and starts a fresh turn. It powers edit & regenerate: any
 // in-flight turn is cancelled first and a generation counter keeps the old
@@ -2187,6 +2209,10 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	if model != "" {
 		rec.Model = model
 	}
+	removed := len(rec.Messages) - keep
+	if removed < 0 {
+		removed = 0
+	}
 	rec.Messages = append([]provider.Message(nil), rec.Messages[:keep]...)
 	rec.Status = "idle"
 	rec.UpdatedAt = time.Now().UnixMilli()
@@ -2195,12 +2221,7 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	act.mu.Unlock()
 	d.sessionsMu.Unlock()
 
-	_ = d.sendWS(map[string]any{
-		"type":      "session_content",
-		"hostId":    d.config.HostID,
-		"sessionId": rec.ID,
-		"messages":  rec.Messages,
-	})
+	broadcastTruncated(d, rec.ID, keep-1, removed, rec.Messages)
 	go d.runAgentTurn(act, promptText, "", yolo, attachmentIDs)
 }
 

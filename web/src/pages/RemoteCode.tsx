@@ -2358,7 +2358,19 @@ export default function RemoteCodePage() {
   }
 
   function scrollToBottom(force = false) { transcriptScroll.schedule(force); }
-  function onChatScroll() { transcriptScroll.measure(); }
+  function onChatScroll() {
+    transcriptScroll.measure();
+    const el = chatContainerRef();
+    if (el && el.scrollTop < 400 && hiddenCount() > 0) growWindow();
+  }
+  // While a turn streams and the reader follows the tail, keep the window
+  // pinned to the newest blocks (otherwise fresh units would render outside
+  // the slice and appear stuck).
+  createEffect(() => {
+    if (sessionStatus() === "running" && isAtBottom()) {
+      setWindowSize((n) => Math.max(n, renderState.blocks.length));
+    }
+  });
 
   function selectSession(id: string) {
     if (creatingSession()) return;
@@ -2371,6 +2383,7 @@ export default function RemoteCodePage() {
     setAppNotice(null);
     initialScrollSession = id;
     transcriptScroll.reset();
+    resetWindow();
     setMessages([]);
     setSessionStatus("idle");
     setActiveSessionId(id);
@@ -2889,6 +2902,8 @@ export default function RemoteCodePage() {
     _isLast: boolean,
     extraSrcIds: number[] = [],
   ) {
+    // NOTE: renderBlocks() is the FULL list (window only affects the <For>);
+    // the running unit is always the newest block, which is always visible.
     const running = createMemo(() => renderBlocks().at(-1)?.msg.id === msgId && sessionStatus() === "running");
     const summary = createMemo(() => specialTitle(units));
     const key = `${msgId}:special`;
@@ -4151,6 +4166,28 @@ export default function RemoteCodePage() {
   });
   const renderBlocks = () => renderState.blocks;
 
+  /**
+   * Transcript window: only the newest WINDOW_BLOCKS render. Scrolling near
+   * the top ("load older") grows the window by WINDOW_STEP; switching
+   * sessions or receiving a fresh full transcript resets it. Solid's <For>
+   * only creates DOM for the slice, so a 500-message session mounts ~10
+   * bubbles until the reader scrolls up.
+   */
+  const WINDOW_BLOCKS = 10;
+  const WINDOW_STEP = 20;
+  const [windowSize, setWindowSize] = createSignal(WINDOW_BLOCKS);
+  const visibleBlocks = () => {
+    const all = renderState.blocks;
+    return all.length <= windowSize() ? all : all.slice(all.length - windowSize());
+  };
+  const hiddenCount = () => Math.max(0, renderState.blocks.length - windowSize());
+  function growWindow() {
+    setWindowSize((n) => Math.min(n + WINDOW_STEP, renderState.blocks.length));
+  }
+  function resetWindow() {
+    setWindowSize(WINDOW_BLOCKS);
+  }
+
   /** Raw daemon index of a render block's lead message. */
   function blockRawIdx(block: RenderBlock): number {
     const i = messages().findIndex((msg) => msg.id === block.msg.id);
@@ -4865,10 +4902,21 @@ export default function RemoteCodePage() {
                 skipped for actions, and the lead keeps its own raw index so
                 every per-message op still maps 1:1 to the daemon
                 transcript — fusing is purely visual. */}
-            <For each={renderBlocks()}>
+            <Show when={hiddenCount() > 0}>
+              <div class="flex justify-center">
+                <button
+                  onClick={() => growWindow()}
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-ink-900 border border-line/70 text-ink-300 shadow hover:text-ink-100 cursor-pointer"
+                >
+                  <Iconify icon="lucide:chevron-up" size={13} />
+                  <span>Load {Math.min(20, hiddenCount())} older ({hiddenCount()} hidden)</span>
+                </button>
+              </div>
+            </Show>
+            <For each={visibleBlocks()}>
               {(block, bi) => {
                 const msg = block.msg;
-                const isLast = () => bi() === renderBlocks().length - 1;
+                const isLast = () => bi() === visibleBlocks().length - 1;
                 const rawIdx = () => blockRawIdx(block);
                 const textOf = () =>
                   msg.blocks

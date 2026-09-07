@@ -1,10 +1,9 @@
 import { For, Show } from "solid-js";
 import { Modal, Btn } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
-import { languageForPath } from "../utils/lang";
 import type { ChoiceOption, ConfirmState } from "../viewTypes";
 import { FileIcon } from "../presentation";
-import { CodeBlock, DiffView } from "../components/CodeBlock";
+import { DiffView } from "../components/CodeBlock";
 import { copyWithToast } from "../../ui";
 import type { Review } from "../viewTypes";
 

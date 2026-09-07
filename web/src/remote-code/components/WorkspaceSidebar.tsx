@@ -1,6 +1,5 @@
 import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
-import { ThemeToggle } from "../../ui";
 import type { RemoteCodeViewCtx } from "../viewCtx";
 import { SessionRow } from "./SessionSidebar";
 import { FloatMenu } from "./FloatMenu";

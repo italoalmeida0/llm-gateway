@@ -1,6 +1,6 @@
 import type {
   AgentSettings, ChatMessage, MCPServerConfig, PendingApproval, PreviewFile,
-  Project, RenderBlock, RenderBlockSeries, SessionSummary, SessionUsage,
+  Project, RenderBlock, SessionSummary, SessionUsage,
   SkillConfig, ToolUnit,
 } from "./types";
 import type { PendingQuestion } from "./components/QuestionModal";

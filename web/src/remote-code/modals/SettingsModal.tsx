@@ -1,6 +1,5 @@
-import { For, Show } from "solid-js";
-import { Modal, Btn, ThemeToggle } from "../../ui";
-import { Icon as Iconify } from "../../components/icon";
+import { Show } from "solid-js";
+import { Modal, Btn } from "../../ui";
 
 export interface SettingsModalCtx {
   showConfigModal: () => boolean;

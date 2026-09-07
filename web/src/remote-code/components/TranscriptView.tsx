@@ -1,14 +1,12 @@
 import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
-import { copyWithToast } from "../../ui";
-import { QuestionPanel } from "./QuestionModal";
 import { Streamdown } from "streamdown-solid";
 import { FileIcon } from "../presentation";
 import { tryParseArgs } from "../utils/tools";
 import { timeAgo } from "../utils/format";
 import type { RemoteCodeViewCtx } from "../viewCtx";
 import {
-  renderAssistantSpecial, renderImageBlock, renderMessageContent, renderSeriesLead,
+  renderAssistantSpecial, renderMessageContent, renderSeriesLead,
 } from "./TranscriptBlocks";
 
 export function TranscriptView(ctx: RemoteCodeViewCtx) {
@@ -68,8 +66,8 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
             type="text"
             placeholder={
               ctx.isMobile()
-                ? "Search conversations and ctx.messages..."
-                : "Search conversations and ctx.messages... (Ctrl+K)"
+                ? "Search conversations and messages..."
+                : "Search conversations and messages... (Ctrl+K)"
             }
             class="w-full text-[13px] bg-ink-900 border border-line/70 rounded-xl pl-9 pr-3 py-2 text-ink-100 placeholder:text-ink-600 focus:outline-none focus:border-ink-500"
             value={ctx.sessionFilter()}

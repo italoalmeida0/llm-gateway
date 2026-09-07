@@ -1,4 +1,4 @@
-import { onCleanup, onMount, Show, type JSX } from "solid-js";
+import { onCleanup, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import type { Placement } from "@floating-ui/dom";
 import { anchorFloat } from "../../floating";

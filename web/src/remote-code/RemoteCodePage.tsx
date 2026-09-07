@@ -9,25 +9,21 @@ import {
   For,
   Show,
 } from "solid-js";
-import { Portal } from "solid-js/web";
 import { createStore, reconcile } from "solid-js/store";
-import { FileIcon, RemoteHints } from "./presentation";
-import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "./paths";
-import { baseNameOf, buildRenderBlocks, diffStat, toolSummary } from "./transcript";
-import { QuestionPanel, type PendingQuestion } from "./components/QuestionModal";
+import { RemoteHints } from "./presentation";
+import { projectForDirectory, projectsByActivity } from "./paths";
+import { buildRenderBlocks } from "./transcript";
+import { type PendingQuestion } from "./components/QuestionModal";
 import { createTranscriptScroll } from "./scroll";
-import { compactTokens, contextDisplay, type GatewayModel, type SessionContext } from "./context";
-import { Streamdown } from "streamdown-solid";
+import { contextDisplay, type GatewayModel, type SessionContext } from "./context";
 import { api, currentSession, type RemoteHostDto, type RemotePairDto } from "../api";
-import { createDataLayer, type RcProject, type RcSession } from "./store/sessions";
-import { Modal, Btn, Tooltip, ThemeToggle, copyWithToast } from "../ui";
+import { createDataLayer } from "./store/sessions";
+import { copyWithToast } from "../ui";
 import { Icon as Iconify } from "../components/icon";
-import { anchorFloat } from "../floating";
 import { REASONING_LEVELS, SLASH_COMMANDS } from "./constants";
 import { formatEffort } from "./utils/format";
 import { elapsedLabel, messageText, normalizeEffort, timeAgo } from "./utils/format";
 import { prettyArgs, parseContentBlocks } from "./utils/wire";
-import { FloatMenu } from "./components/FloatMenu";
 import { Onboarding } from "./components/Onboarding";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { TranscriptView } from "./components/TranscriptView";
@@ -41,7 +37,7 @@ import { SettingsModal } from "./modals/SettingsModal";
 import type { RemoteCodeViewCtx } from "./viewCtx";
 import type {
   AgentSettings, ChatMessage, ContentBlock, MCPServerConfig, PendingApproval,
-  PreviewFile, Project, RenderBlock, RenderBlockSeries, SessionSummary,
+  PreviewFile, Project, RenderBlock, SessionSummary,
   SessionUsage, SkillConfig, ToolUnit,
 } from "./types";
 
@@ -3028,18 +3024,10 @@ export default function RemoteCodePage() {
     yoloMode,
   };
 
-  const tx: import("./components/TranscriptBlocks").TranscriptRenderCtx = {
-    renderBlocks, sessionStatus, messages, thinkingStart, thinkingElapsed,
-    expandedThinking, toolGroupOpen, toolOpen, toolProgress,
-    toggleToolGroup, toggleToolOpen, elapsedLabel, specialProgress,
-    thinkingIndex, setExpandedThinking, verboseChat, setPreviewFile,
-    turnClock, toolStarts, activeSession, pendingApproval, projects,
-  };
-  const rowCtx = view as unknown as import("./components/SessionSidebar").SessionRowCtx;
   const simpleCtx = view as unknown as SimpleModalsCtx;
 
   return (
-    <div class="h-full flex flex-col min-h-0 bg-ink-950 text-ink-100">
+    <div class="fixed inset-0 w-full h-dvh flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50">
       <RemoteHints />
       {/* Main Workspace Layout or Connect Host Onboarding */}
       <Show

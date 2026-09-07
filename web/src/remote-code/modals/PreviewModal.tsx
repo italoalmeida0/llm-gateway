@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { Show } from "solid-js";
 import { Modal } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { languageForPath } from "../utils/lang";

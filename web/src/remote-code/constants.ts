@@ -20,10 +20,6 @@ export const REASONING_LABELS: Record<string, string> = {
   max: "MAX",
 };
 
-function formatEffort(lvl: string): string {
-  return REASONING_LABELS[lvl.toLowerCase()] || lvl.toUpperCase();
-}
-
 /**
  * Slash command definitions for autocomplete palette.
  * Only commands NOT already configurable somewhere in the UI are listed:

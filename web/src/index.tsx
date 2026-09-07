@@ -34,7 +34,7 @@ import { usal, usalItems } from "./motion";
 import LoginPage from "./pages/Login";
 import SetPasswordPage from "./pages/SetPassword";
 import DashboardPage from "./pages/Dashboard";
-import RemoteCodePage from "./pages/RemoteCode";
+import RemoteCodePage from "./remote-code/RemoteCodePage";
 import KeysPage from "./pages/Keys";
 import UsagePage from "./pages/Usage";
 import SettingsPage from "./pages/Settings";

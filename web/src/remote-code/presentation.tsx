@@ -1,10 +1,10 @@
 import { createSignal, createUniqueId, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { anchorFloat } from "./floating";
-import { Icon } from "./components/icon";
+import { anchorFloat } from "../floating";
+import { Icon } from "../components/icon";
 
-import { fileIcon } from "./rcFiles";
-export { fileIcon } from "./rcFiles";
+import { fileIcon } from "./files";
+export { fileIcon } from "./files";
 
 export function FileIcon(props: { path: string; size?: number }) {
   return <Icon icon={fileIcon(props.path).icon} class={fileIcon(props.path).class} size={props.size ?? 15} />;

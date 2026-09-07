@@ -1,6 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
 import { createStore } from "solid-js/store";
-import { Icon } from "./components/icon";
+import { Icon } from "../../components/icon";
 
 export interface PendingQuestion {
   id: string;

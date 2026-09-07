@@ -1,5 +1,5 @@
-import type { ChatMessage, RenderBlock, ToolUnit } from "./pages/RemoteCode";
-import { displayToolArgs, withoutTodoActivity } from "./rcLive";
+import type { ChatMessage, RenderBlock, ToolUnit } from "./types";
+import { displayToolArgs, withoutTodoActivity } from "./live";
 
 export function hasVisibleText(message: ChatMessage): boolean {
   return message.blocks.some((b) => b.type === "text" && !!b.text?.trim());

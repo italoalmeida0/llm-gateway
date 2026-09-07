@@ -1,4 +1,4 @@
-import type { ChatMessage } from "./pages/RemoteCode";
+import type { ChatMessage } from "./types";
 
 // Read complete characters from a streamed JSON string without guessing a
 // missing escape or displaying the raw JSON around the tool's file content.

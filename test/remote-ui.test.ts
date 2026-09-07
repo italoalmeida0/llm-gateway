@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { compactTokens, contextDisplay } from "../web/src/rcContext";
-import { createTranscriptScroll } from "../web/src/rcScroll";
-import { displayToolArgs, withoutTodoActivity } from "../web/src/rcLive";
-import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/rcPaths";
-import { buildRenderBlocks, terminalPresentation, toolSummary } from "../web/src/rcTranscript";
-import type { ChatMessage } from "../web/src/pages/RemoteCode";
-import { fileIcon } from "../web/src/rcFiles";
+import { compactTokens, contextDisplay } from "../web/src/remote-code/context";
+import { createTranscriptScroll } from "../web/src/remote-code/scroll";
+import { displayToolArgs, withoutTodoActivity } from "../web/src/remote-code/live";
+import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/remote-code/paths";
+import { buildRenderBlocks, terminalPresentation, toolSummary } from "../web/src/remote-code/transcript";
+import type { ChatMessage } from "../web/src/remote-code/types";
+import { fileIcon } from "../web/src/remote-code/files";
 
 describe("Remote Code file presentation", () => {
   test("shows absolute tool paths resolved against the remote working directory", () => {

@@ -21,6 +21,12 @@ type Question struct {
 	Options  []QuestionOption `json:"options"`
 	Multiple bool             `json:"multiple,omitempty"`
 	Custom   *bool            `json:"custom,omitempty"`
+	// Recommend marks the suggested option label (rendered first with
+	// "(Recommended)" suffix when the caller doesn't pre-order options).
+	Recommend string `json:"recommend,omitempty"`
+	// DecideLater adds a "Decide later / faz o que achar melhor" escape
+	// hatch: the user delegates the decision instead of answering.
+	DecideLater bool `json:"decideLater,omitempty"`
 }
 
 func (q Question) AllowsCustom() bool { return q.Custom == nil || *q.Custom }
@@ -66,6 +72,10 @@ func (r QuestionRequest) Validate() error {
 	return nil
 }
 
+// delegateLabel is the escape-hatch answer recorded when the user picks
+// "decide later" — the agent proceeds with its own judgment.
+const delegateLabel = "Decide later (faz o que achar melhor)"
+
 func (r QuestionRequest) ValidateAnswers(answers [][]string) error {
 	if len(answers) != len(r.Questions) {
 		return fmt.Errorf("answer every question before submitting")
@@ -81,6 +91,9 @@ func (r QuestionRequest) ValidateAnswers(answers [][]string) error {
 				return fmt.Errorf("answers must be nonempty, unique and at most 4000 bytes")
 			}
 			seen[answer] = true
+			if q.DecideLater && answer == delegateLabel {
+				continue
+			}
 			listed := false
 			for _, o := range q.Options {
 				if o.Label == answer {

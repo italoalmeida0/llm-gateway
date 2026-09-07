@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/patriceckhart/zot/packages/core"
@@ -21,18 +22,25 @@ type EditTool struct {
 type editOp struct {
 	OldText string `json:"oldText"`
 	NewText string `json:"newText"`
+	// Regex treats OldText as an RE2 pattern ($1-style groups in NewText).
+	Regex bool `json:"regex,omitempty"`
+	// ReplaceAll replaces every match (verbatim: every occurrence;
+	// regex: every match). Default replaces the single unique match.
+	ReplaceAll bool `json:"replaceAll,omitempty"`
 }
 
 type editArgs struct {
 	Path  string   `json:"path"`
 	Edits []editOp `json:"edits"`
+	// DryRun validates and returns the diff without writing (default false).
+	DryRun bool `json:"dryRun,omitempty"`
 }
 
-const editSchema = `{"type":"object","properties":{"path":{"type":"string","description":"File to modify, given as an absolute path or one relative to the working directory."},"edits":{"type":"array","description":"A set of non-overlapping substitutions, all located in the file content as it existed before this call.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"A verbatim excerpt from the file being modified. Include enough surrounding text to identify exactly one location, without intersecting another edit."},"newText":{"type":"string","description":"Content that will replace the matched excerpt."}},"required":["oldText","newText"]}}},"required":["path","edits"]}`
+const editSchema = `{"type":"object","properties":{"path":{"type":"string","description":"File to modify, given as an absolute path or one relative to the working directory."},"edits":{"type":"array","description":"A set of non-overlapping substitutions, all located in the file content as it existed before this call.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"A verbatim excerpt from the file being modified. Include enough surrounding text to identify exactly one location, without intersecting another edit."},"newText":{"type":"string","description":"Content that will replace the matched excerpt."},"regex":{"type":"boolean","description":"Treat oldText as RE2 regex ($1 groups in newText)."},"replaceAll":{"type":"boolean","description":"Replace every match instead of requiring a unique one."}},"required":["oldText","newText"]}},"dryRun":{"type":"boolean","description":"Preview the diff without writing (default false)."}},"required":["path","edits"]}`
 
 func (t *EditTool) Name() string { return "edit" }
 func (t *EditTool) Description() string {
-	return "Apply exact substitutions to an existing file. Inspect that file before editing and take every oldText directly from its current contents. Use short excerpts that identify one location; choose write when replacing most or all of a file."
+	return "Apply exact substitutions to an existing file (verbatim default; regex:true for patterns; replaceAll:true for mass rename). Inspect that file before editing and take every oldText directly from its current contents. Use short excerpts that identify one location; choose write when replacing most or all of a file. Pass dryRun:true to preview the diff without writing."
 }
 func (t *EditTool) Schema() json.RawMessage { return json.RawMessage(editSchema) }
 
@@ -40,6 +48,7 @@ type editPlan struct {
 	path   string
 	final  []byte
 	result core.ToolResult
+	dryRun bool
 }
 
 // Preview validates the edit against the current file and returns the exact
@@ -57,6 +66,9 @@ func (t *EditTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	plan, err := t.plan(raw)
 	if err != nil {
 		return core.ToolResult{}, err
+	}
+	if plan.dryRun {
+		return plan.result, nil
 	}
 	if err := os.WriteFile(plan.path, plan.final, 0o644); err != nil {
 		return core.ToolResult{}, err
@@ -100,15 +112,28 @@ func (t *EditTool) plan(raw json.RawMessage) (editPlan, error) {
 		if e.OldText == "" {
 			return editPlan{}, fmt.Errorf("edit %d: oldText must not be empty", i+1)
 		}
-		if e.OldText == e.NewText {
+		if e.OldText == e.NewText && !e.Regex {
 			return editPlan{}, fmt.Errorf("edit %d: oldText equals newText", i+1)
+		}
+		if e.Regex {
+			if _, err := regexp.Compile(e.OldText); err != nil {
+				return editPlan{}, fmt.Errorf("edit %d: invalid regex: %v", i+1, err)
+			}
+			count := regexp.MustCompile(e.OldText).FindAllStringIndex(body, -1)
+			if len(count) == 0 {
+				return editPlan{}, fmt.Errorf("edit %d: regex matches nothing in %s", i+1, a.Path)
+			}
+			if len(count) > 1 && !e.ReplaceAll {
+				return editPlan{}, fmt.Errorf("edit %d: regex matches %d times (must be unique or set replaceAll) in %s", i+1, len(count), a.Path)
+			}
+			continue
 		}
 		count := strings.Count(body, e.OldText)
 		if count == 0 {
 			return editPlan{}, fmt.Errorf("edit %d: oldText not found in %s; inspect that file again and use a verbatim excerpt with matching spaces and line breaks", i+1, a.Path)
 		}
-		if count > 1 {
-			return editPlan{}, fmt.Errorf("edit %d: oldText matches %d times (must be unique) in %s", i+1, count, a.Path)
+		if count > 1 && !e.ReplaceAll {
+			return editPlan{}, fmt.Errorf("edit %d: oldText matches %d times (must be unique or set replaceAll) in %s", i+1, count, a.Path)
 		}
 	}
 
@@ -119,6 +144,33 @@ func (t *EditTool) plan(raw json.RawMessage) (editPlan, error) {
 	}
 	spans := make([]span, 0, len(a.Edits))
 	for _, e := range a.Edits {
+		if e.Regex {
+			re := regexp.MustCompile(e.OldText)
+			locs := re.FindAllStringIndex(body, -1)
+			if !e.ReplaceAll {
+				locs = locs[:1]
+			}
+			for _, loc := range locs {
+				expanded := re.ReplaceAllString(body[loc[0]:loc[1]], e.NewText)
+				spans = append(spans, span{start: loc[0], end: loc[1], replacement: expanded})
+			}
+			continue
+		}
+		if e.ReplaceAll {
+			search := body
+			base := 0
+			for {
+				idx := strings.Index(search, e.OldText)
+				if idx < 0 {
+					break
+				}
+				spans = append(spans, span{start: base + idx, end: base + idx + len(e.OldText), replacement: e.NewText})
+				step := base + idx + len(e.OldText)
+				base = step
+				search = body[step:]
+			}
+			continue
+		}
 		idx := strings.Index(body, e.OldText)
 		spans = append(spans, span{start: idx, end: idx + len(e.OldText), replacement: e.NewText})
 	}
@@ -154,14 +206,18 @@ func (t *EditTool) plan(raw json.RawMessage) (editPlan, error) {
 	final = append(final, []byte(newBody)...)
 
 	diff := unifiedDiff(a.Path, string(orig), strings.ReplaceAll(newBody, "\r\n", "\n"))
+	dryNote := ""
+	if a.DryRun {
+		dryNote = "DRY RUN — no files written. Re-send with dryRun:false to apply.\n"
+	}
 	// The tool-call header renders the path above the result, so the
 	// result body is just the context diff. Details carries metadata for
 	// programmatic consumers and confirmation previews.
 	result := core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: diff}},
-		Details: map[string]any{"path": path, "edits": len(a.Edits), "diff": diff},
+		Content: []provider.Content{provider.TextBlock{Text: dryNote + diff}},
+		Details: map[string]any{"path": path, "edits": len(a.Edits), "diff": diff, "dryRun": a.DryRun},
 	}
-	return editPlan{path: path, final: final, result: result}, nil
+	return editPlan{path: path, final: final, result: result, dryRun: a.DryRun}, nil
 }
 
 func detectLineEnding(b []byte) string {

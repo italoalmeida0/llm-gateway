@@ -240,5 +240,34 @@ describe("Remote Code toolSummary", () => {
     // Exit footers parse for duration, same as bash.
     expect(terminalPresentation("ok\n[exit 0]  Took 0.1s")).toEqual({ output: "ok", durationMs: 100 });
   });
+  test("summarizes search/inspect/patch/git calls", () => {
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "s1", toolName: "search", toolArgs: JSON.stringify({ pattern: "from \"../", path: "web/src" }) }
+    })).toEqual({ icon: "lucide:search", verb: "Search", target: "from \"../ in src" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "s2", toolName: "search", toolArgs: JSON.stringify({ pattern: "foo\\d", isRegex: true }) }
+    })).toEqual({ icon: "lucide:search", verb: "Regex search", target: "foo\\d" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "i1", toolName: "inspect", toolArgs: JSON.stringify({ path: "server/routes" }) }
+    })).toEqual({ icon: "lucide:folder-tree", verb: "Inspect", target: "server/routes" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "i2", toolName: "inspect", toolArgs: "{}" }
+    })).toEqual({ icon: "lucide:folder-tree", verb: "Inspect", target: "workspace" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "p1", toolName: "patch", toolArgs: JSON.stringify({ edits: [{ file: "a.ts", old: "x", new: "y" }, { file: "b.ts", old: "1", new: "2" }] }) }
+    })).toEqual({ icon: "lucide:file-diff", verb: "Preview patch", target: "a.ts, b.ts" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "p2", toolName: "patch", toolArgs: JSON.stringify({ dryRun: false, edits: [{ file: "a.ts", old: "x", new: "y" }] }) }
+    })).toEqual({ icon: "lucide:file-diff", verb: "Patch", target: "a.ts" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "g1", toolName: "git", toolArgs: JSON.stringify({ op: "status" }) }
+    })).toEqual({ icon: "lucide:git-branch", verb: "Status", target: "" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "g2", toolName: "git", toolArgs: JSON.stringify({ op: "diff", paths: ["server/db.ts"] }) }
+    })).toEqual({ icon: "lucide:git-compare", verb: "Diff", target: "db.ts" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "g3", toolName: "git", toolArgs: JSON.stringify({ op: "stash_restore", ref: "stash@{0}" }) }
+    })).toEqual({ icon: "lucide:archive-restore", verb: "Restore", target: "stash@{0}" });
+  });
 });
 

@@ -30,13 +30,17 @@ type readArgs struct {
 	Path   string `json:"path"`
 	Offset int    `json:"offset,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
+	// ShowLineNumbers prefixes each line with its 1-indexed number
+	// (cat -n style). Default false to save tokens; enable when the
+	// caller needs to cite exact lines (e.g. before an edit).
+	ShowLineNumbers bool `json:"showLineNumbers,omitempty"`
 }
 
-const readSchema = `{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}`
+const readSchema = `{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"},"showLineNumbers":{"type":"boolean","description":"Prefix lines with 1-indexed numbers (cat -n). Default false."}},"required":["path"]}`
 
 func (t *ReadTool) Name() string { return "read" }
 func (t *ReadTool) Description() string {
-	return "Read a file. Images (png/jpg/gif/webp) return inline."
+	return "Read a file with line-range paging (offset/limit) and totalLines in Details. Images (png/jpg/gif/webp) return inline. Pass showLineNumbers:true when you need to cite exact lines."
 }
 func (t *ReadTool) Schema() json.RawMessage { return json.RawMessage(readSchema) }
 
@@ -141,9 +145,16 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	// The TUI renders its own gutter using the start offset stored
 	// in Details, so the on-screen view still looks like cat -n.
 	var sb strings.Builder
-	for _, line := range selected {
-		sb.WriteString(line)
-		sb.WriteByte('\n')
+	if a.ShowLineNumbers {
+		width := len(fmt.Sprintf("%d", start+len(selected)))
+		for i, line := range selected {
+			fmt.Fprintf(&sb, "%*d  %s\n", width, start+i+1, line)
+		}
+	} else {
+		for _, line := range selected {
+			sb.WriteString(line)
+			sb.WriteByte('\n')
+		}
 	}
 	if truncLines || truncBytes {
 		sb.WriteString("\n")
@@ -161,11 +172,13 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: sb.String()}},
 		Details: map[string]any{
-			"path":            path,
-			"start_line":      start + 1, // 1-indexed; TUI draws the gutter
-			"lines_truncated": truncLines,
-			"bytes_truncated": truncBytes,
-			"total_lines":     len(lines),
+			"path":              path,
+			"start_line":        start + 1, // 1-indexed; TUI draws the gutter
+			"lines_truncated":   truncLines,
+			"bytes_truncated":   truncBytes,
+			"total_lines":       len(lines),
+			"totalLines":        len(lines),
+			"show_line_numbers": a.ShowLineNumbers,
 		},
 	}, nil
 }

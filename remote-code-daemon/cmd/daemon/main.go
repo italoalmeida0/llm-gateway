@@ -2328,6 +2328,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		&tools.EditTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.BashTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.GlobTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.SearchTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.InspectTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.PatchTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.GitTool{CWD: sessionCWD, Sandbox: sb},
 	}
 	// The python tool is only advertised when a Python 3 interpreter exists
 	// on this machine (PythonAvailable probes PATH once and caches).
@@ -2354,7 +2358,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	reg := core.NewRegistry(append(append(baseTools, questionTool), todoTool)...)
 
 	journal = newReviewJournal(d, act, myGen, sessionCWD, cfg.HostID, sessionID)
-	for _, name := range []string{"write", "edit", "bash", "python"} {
+	for _, name := range []string{"write", "edit", "bash", "python", "patch"} {
 		if tool, ok := reg[name]; ok {
 			reg[name] = &reviewedTool{Tool: tool, journal: journal}
 		}

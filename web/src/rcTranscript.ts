@@ -165,6 +165,48 @@ export function toolSummary(u: ToolUnit): ToolSummary {
         target: cmd.length > 90 ? cmd.slice(0, 90) + "…" : cmd,
       };
     }
+    case "search": {
+      const pat = String(args.pattern || "").replace(/\s+/g, " ").trim();
+      const scope = args.path && String(args.path) !== "." ? ` in ${baseNameOf(args.path) || args.path}` : "";
+      const target = `${pat.length > 80 ? pat.slice(0, 80) + "…" : pat}${scope}`;
+      return {
+        icon: "lucide:search",
+        verb: args.isRegex ? "Regex search" : "Search",
+        target: target || "pattern",
+      };
+    }
+    case "inspect": {
+      const target = args.path && String(args.path) !== "." ? String(args.path) : "workspace";
+      return { icon: "lucide:folder-tree", verb: "Inspect", target };
+    }
+    case "patch": {
+      const edits = Array.isArray(args.edits) ? args.edits : [];
+      const files = [...new Set(edits.map((e: any) => baseNameOf(e?.file) || e?.file).filter(Boolean))];
+      const shown = files.slice(0, 3).join(", ") + (files.length > 3 ? ` +${files.length - 3}` : "");
+      return {
+        icon: "lucide:file-diff",
+        verb: args.dryRun === false ? "Patch" : "Preview patch",
+        target: shown || `${edits.length} edit${edits.length === 1 ? "" : "s"}`,
+      };
+    }
+    case "git": {
+      const op = String(args.op || "status");
+      const labels: Record<string, [string, string]> = {
+        status: ["lucide:git-branch", "Status"],
+        diff: ["lucide:git-compare", "Diff"],
+        log: ["lucide:history", "Log"],
+        stash_list: ["lucide:archive", "Stashes"],
+        stash_show: ["lucide:archive", "Stash"],
+        stash_restore: ["lucide:archive-restore", "Restore"],
+      };
+      const [icon, verb] = labels[op] || ["lucide:git-branch", "Git"];
+      const scope = Array.isArray(args.paths) && args.paths.length > 0
+        ? args.paths.map((x: any) => baseNameOf(x) || x).slice(0, 2).join(", ")
+        : op === "stash_show" || op === "stash_restore"
+          ? String(args.ref || "stash@{0}")
+          : "";
+      return { icon, verb, target: scope };
+    }
     case "python": {
       // Script mode shows the file; code mode shows the first meaningful line.
       if (args.script) {

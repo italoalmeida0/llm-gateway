@@ -3699,7 +3699,58 @@ export default function RemoteCodePage() {
                 </div>
               </Show>
             </Show>
-            <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python"}>
+            <Show when={name() === "search"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Searching…</div>}
+              >
+                <div class="px-3 py-1.5 text-[11px] text-ink-500 font-mono">
+                  <span class="text-ink-300">/{String(args().pattern || "")}/</span>
+                  {args().isRegex ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">regex</span> : null}
+                  {args().path && String(args().path) !== "." ? <span class="ml-1.5">in {String(args().path)}</span> : null}
+                </div>
+                <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language={undefined} />
+              </Show>
+            </Show>
+            <Show when={name() === "inspect"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Listing…</div>}
+              >
+                <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language={undefined} />
+              </Show>
+            </Show>
+            <Show when={name() === "patch"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Previewing…</div>}
+              >
+                <Show when={args().dryRun !== false}>
+                  <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+                    <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
+                  </div>
+                </Show>
+                <DiffView text={terminal().output || u.result?.toolResult || prog() || ""} max={60} />
+              </Show>
+            </Show>
+            <Show when={name() === "git"}>
+              <Show
+                when={u.result?.toolResult || prog()}
+                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Running git {String(args().op || "status")}…</div>}
+              >
+                <div class="px-3 py-1.5 text-[11px] text-ink-500 font-mono">
+                  <span class="text-ink-300">git {String(args().op || "status")}</span>
+                  {Array.isArray(args().paths) && args().paths.length > 0 ? <span class="ml-1.5">{args().paths.map(String).join(" ")}</span> : null}
+                  {args().staged ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">staged</span> : null}
+                </div>
+                <Show when={String(args().op || "") === "diff" && !args().statOnly} fallback={
+                  <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language="diff" />
+                }>
+                  <DiffView text={terminal().output || u.result?.toolResult || prog() || ""} max={60} />
+                </Show>
+              </Show>
+            </Show>
+            <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python" && name() !== "search" && name() !== "inspect" && name() !== "patch" && name() !== "git"}>
               <Show
                 when={u.result?.toolResult || prog()}
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{name() === "question" ? "Waiting for your answers…" : pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
@@ -5446,7 +5497,21 @@ export default function RemoteCodePage() {
                           <Iconify icon={access.icon} size={19} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /><span class="flex-1"><span class={`font-medium ${access.full ? "text-amber-800 dark:text-amber-200" : "text-ink-100"}`}>{access.label}</span><span class={`block mt-1 text-[11px] ${access.full ? "text-amber-800/80 dark:text-amber-200/80" : "text-ink-500"}`}>{access.description}</span></span><Show when={yoloMode() === access.full}><Iconify icon="lucide:check" size={14} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /></Show>
                         </button>
                       }</For>
-                      <Show when={agentMode() !== "build"}><p class="px-2 py-2 text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan can read files, run commands and ask questions. Edit and create tools are disabled." : "Learning can read files and run commands. Edit and create tools are disabled."}</p></Show>
+                      <Show when={agentMode() !== "build"}>
+                        <div class="px-2 py-2">
+                          <p class="text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan explores freely but never mutates. Edit, create and patch are disabled." : "Learning observes read-only. Edit, create, patch and code execution are disabled."}</p>
+                          <div class="mt-1.5 flex flex-wrap gap-1">
+                            <For each={agentMode() === "plan"
+                              ? ["read", "search", "inspect", "bash", "git", "glob", "question", "todo"]
+                              : ["read", "search", "inspect", "glob", "question", "todo"]}>
+                              {(cap) => <span class="rounded-md bg-ink-700/60 px-1.5 py-px font-mono text-[10px] text-ink-300">{cap}</span>}
+                            </For>
+                            <For each={agentMode() === "plan" ? ["write", "edit", "patch"] : ["write", "edit", "patch", "bash", "python"]}>
+                              {(cap) => <span class="rounded-md border border-line/60 px-1.5 py-px font-mono text-[10px] text-ink-600 line-through">{cap}</span>}
+                            </For>
+                          </div>
+                        </div>
+                      </Show>
                     </FloatMenu>
                   </div>
                   {/* Model picker (moved from the removed topbar) */}

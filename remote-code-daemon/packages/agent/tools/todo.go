@@ -64,6 +64,18 @@ func (t *TodoTool) Execute(ctx context.Context, raw json.RawMessage, _ func(stri
 			return core.ToolResult{}, err
 		}
 	}
+	done := 0
+	for _, it := range req.Items {
+		if it.Status == "completed" {
+			done++
+		}
+	}
+	progress := 0
+	if len(req.Items) > 0 {
+		progress = done * 100 / len(req.Items)
+	}
 	data, _ := json.Marshal(req.Items)
-	return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: string(data)}}, Details: req.Items}, nil
+	return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: string(data)}}, Details: map[string]any{
+		"items": req.Items, "progress": progress, "done": done, "total": len(req.Items),
+	}}, nil
 }

@@ -33,9 +33,19 @@ type BashTool struct {
 type bashArgs struct {
 	Command string `json:"command"`
 	Timeout int    `json:"timeout,omitempty"`
+	// Workdir overrides the run directory (jailed to CWD when sandboxed).
+	Workdir string `json:"workdir,omitempty"`
+	// Env adds extra environment variables (SANDBOX-safe keys only).
+	Env map[string]string `json:"env,omitempty"`
+	// SeparateStreams captures stdout/stderr separately instead of merged.
+	SeparateStreams bool `json:"separateStreams,omitempty"`
+	// Commands runs steps sequentially with stopOnError (default true).
+	Commands []string `json:"commands,omitempty"`
+	// StopOnError stops the sequence at the first non-zero exit (default true).
+	StopOnError *bool `json:"stopOnError,omitempty"`
 }
 
-const bashSchema = `{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"}},"required":["command"]}`
+const bashSchema = `{"type":"object","properties":{"command":{"type":"string","description":"Single shell command to run."},"timeout":{"type":"integer","description":"Timeout in seconds (default 120, max 600)."},"workdir":{"type":"string","description":"Run directory (defaults to session CWD; jailed when sandboxed)."},"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra environment variables."},"separateStreams":{"type":"boolean","description":"Capture stdout/stderr separately with [stdout]/[stderr] sections."},"commands":{"type":"array","items":{"type":"string"},"description":"Run steps sequentially in one shell session context (same dir/env)."},"stopOnError":{"type":"boolean","description":"Stop the sequence at first non-zero exit (default true)."}},"required":["command"]}`
 
 func (t *BashTool) Name() string            { return "bash" }
 func (t *BashTool) Description() string     { return shellDescription(currentShell()) }
@@ -49,34 +59,82 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	if strings.TrimSpace(a.Command) == "" {
 		return core.ToolResult{}, fmt.Errorf("command is required")
 	}
-	if err := t.Sandbox.CheckCommand(a.Command); err != nil {
-		return core.ToolResult{}, err
+	// Build the step list: single command, or sequential commands[] sharing
+	// dir/env (stopOnError default true).
+	steps := []string{a.Command}
+	if len(a.Commands) > 0 {
+		if len(a.Commands) > 20 {
+			return core.ToolResult{}, fmt.Errorf("bash: max 20 commands per call")
+		}
+		steps = a.Commands
 	}
-	if err := t.Sandbox.CheckBashPermission(a.Command); err != nil {
-		return core.ToolResult{}, err
+	stopOnError := true
+	if a.StopOnError != nil {
+		stopOnError = *a.StopOnError
+	}
+	for _, step := range steps {
+		if strings.TrimSpace(step) == "" {
+			return core.ToolResult{}, fmt.Errorf("bash: empty command in sequence")
+		}
+		if err := t.Sandbox.CheckCommand(step); err != nil {
+			return core.ToolResult{}, err
+		}
+		if err := t.Sandbox.CheckBashPermission(step); err != nil {
+			return core.ToolResult{}, err
+		}
 	}
 	cwd := t.CWD
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-
-	runCtx := ctx
-	var cancel context.CancelFunc
-	if a.Timeout > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, time.Duration(a.Timeout)*time.Second)
-		defer cancel()
+	if w := strings.TrimSpace(a.Workdir); w != "" {
+		cwd = resolvePath(cwd, w)
+		if err := t.Sandbox.CheckPath(cwd); err != nil {
+			return core.ToolResult{}, fmt.Errorf("bash: invalid workdir: %v", err)
+		}
 	}
 
+	timeout := a.Timeout
+	if timeout <= 0 {
+		timeout = 120
+	}
+	if timeout > 600 {
+		timeout = 600
+	}
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+
 	start := time.Now()
-	cmd := newShellCmd(runCtx, a.Command)
+	// Join steps with && (stop) or ; (continue) so one shell carries cwd/env.
+	joiner := " && "
+	if !stopOnError {
+		joiner = " ; "
+	}
+	joined := strings.Join(steps, joiner)
+	cmd := newShellCmd(runCtx, joined)
 	cmd.Dir = cwd
-	cmd.Env = os.Environ()
+	cmd.Env = bashEnv(a.Env)
 	setProcessGroup(cmd)
 
-	// Capture merged stdout+stderr with line-by-line streaming.
+	// Capture with line-by-line streaming. Default merges stdout+stderr
+	// (classic terminal look); separateStreams keeps them apart so failures
+	// are attributable (no more guessing which stream an error came from).
 	pr, pw := io.Pipe()
-	cmd.Stdout = pw
-	cmd.Stderr = pw
+	var prErr *io.PipeReader
+	var pwErr *io.PipeWriter
+	var capturedErr *bytes.Buffer
+	var doneErr chan struct{}
+	if a.SeparateStreams {
+		epr, epw := io.Pipe()
+		prErr, pwErr = epr, epw
+		capturedErr = &bytes.Buffer{}
+		doneErr = make(chan struct{})
+		cmd.Stdout = pw
+		cmd.Stderr = epw
+	} else {
+		cmd.Stdout = pw
+		cmd.Stderr = pw
+	}
 
 	if err := cmd.Start(); err != nil {
 		return core.ToolResult{}, fmt.Errorf("start: %w", err)
@@ -94,11 +152,37 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		select {
 		case <-runCtx.Done():
 			killProcessGroup(cmd)
-			// Close the write end so the reader goroutine unblocks.
+			// Close the write ends so reader goroutines unblock.
 			pw.Close()
+			if pwErr != nil {
+				pwErr.Close()
+			}
 		case <-done:
 		}
 	}()
+	if a.SeparateStreams {
+		go func() {
+			defer close(doneErr)
+			buf := make([]byte, 4096)
+			for {
+				n, err := prErr.Read(buf)
+				if n > 0 {
+					chunk := buf[:n]
+					if capturedErr.Len() < maxBashBytes {
+						room := maxBashBytes - capturedErr.Len()
+						if n > room {
+							capturedErr.Write(chunk[:room])
+						} else {
+							capturedErr.Write(chunk)
+						}
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
 	go func() {
 		defer close(done)
 		buf := make([]byte, 4096)
@@ -127,8 +211,16 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	waitErr := cmd.Wait()
 	pw.Close()
 	<-done
+	if a.SeparateStreams {
+		pwErr.Close()
+		<-doneErr
+	}
 
 	output := captured.String()
+	stderrOut := ""
+	if a.SeparateStreams {
+		stderrOut = capturedErr.String()
+	}
 	truncBytes := captured.Len() >= maxBashBytes
 	lines := strings.Split(output, "\n")
 	truncLines := false
@@ -155,8 +247,27 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	// a human would see if they ran the command themselves, which
 	// makes the model's reasoning about it more natural too.
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "$ %s\n", a.Command)
-	if trimmed != "" {
+	fmt.Fprintf(&sb, "$ %s\n", joined)
+	if cwd != t.CWD && t.CWD != "" {
+		if rel, err := filepath.Rel(t.CWD, cwd); err == nil {
+			fmt.Fprintf(&sb, "(in %s)\n", rel)
+		}
+	}
+	if a.SeparateStreams {
+		outTrim := strings.TrimRight(trimmed, "\n")
+		errTrim := strings.TrimRight(stderrOut, "\n")
+		if outTrim != "" {
+			sb.WriteString("\n[stdout]\n")
+			sb.WriteString(outTrim + "\n")
+		}
+		if errTrim != "" {
+			sb.WriteString("\n[stderr]\n")
+			sb.WriteString(errTrim + "\n")
+		}
+		if outTrim == "" && errTrim == "" {
+			sb.WriteString("\n(no output)\n")
+		}
+	} else if trimmed != "" {
 		sb.WriteString("\n")
 		sb.WriteString(trimmed)
 		if !strings.HasSuffix(trimmed, "\n") {
@@ -191,10 +302,16 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		IsError: isErr,
 		Details: map[string]any{
 			"exit_code":        exitCode,
+			"exitCode":         exitCode,
+			"stdout":           stdoutDetail(trimmed, a.SeparateStreams),
+			"stderr":           stderrDetail(stderrOut, a.SeparateStreams),
+			"truncated":        truncLines || truncBytes,
 			"full_output_path": fullPath,
 			"lines_truncated":  truncLines,
 			"bytes_truncated":  truncBytes,
 			"duration_ms":      elapsed.Milliseconds(),
+			"workdir":          cwd,
+			"steps":            len(steps),
 		},
 	}, nil
 }
@@ -219,6 +336,33 @@ func humanDuration(d time.Duration) string {
 		m := int(d.Minutes()) - h*60
 		return fmt.Sprintf("%dh%dm", h, m)
 	}
+}
+
+// bashEnv starts from the daemon environment plus SANDBOX-safe extras
+// (same key policy as the python tool).
+func bashEnv(extra map[string]string) []string {
+	env := os.Environ()
+	for k, v := range extra {
+		if !validEnvKey(k) {
+			continue
+		}
+		env = append(env, k+"="+v)
+	}
+	return env
+}
+
+func stdoutDetail(trimmed string, separated bool) string {
+	if !separated {
+		return trimmed
+	}
+	return trimmed
+}
+
+func stderrDetail(stderrOut string, separated bool) string {
+	if !separated {
+		return ""
+	}
+	return stderrOut
 }
 
 func writeFullOutput(s string) string {

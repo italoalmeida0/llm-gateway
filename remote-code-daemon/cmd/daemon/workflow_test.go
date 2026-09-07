@@ -92,16 +92,33 @@ func TestBrowseFoldersNavigatesWithoutCreatingPaths(t *testing.T) {
 
 func TestModesExposeTheirIntendedTools(t *testing.T) {
 	for _, mode := range []string{"plan", "learning"} {
-		reg := core.NewRegistry(&tools.ReadTool{}, &tools.GlobTool{}, &tools.BashTool{}, &tools.WriteTool{}, &tools.EditTool{}, &tools.TodoTool{}, &tools.QuestionTool{})
+		reg := core.NewRegistry(
+			&tools.ReadTool{}, &tools.GlobTool{}, &tools.BashTool{}, &tools.PythonTool{},
+			&tools.WriteTool{}, &tools.EditTool{}, &tools.PatchTool{},
+			&tools.SearchTool{}, &tools.InspectTool{}, &tools.GitTool{},
+			&tools.TodoTool{}, &tools.QuestionTool{},
+		)
 		restrictModeTools(reg, mode)
-		if reg["write"] != nil || reg["edit"] != nil || reg["read"] == nil || reg["glob"] == nil || reg["todo"] == nil {
+		if reg["write"] != nil || reg["edit"] != nil || reg["patch"] != nil || reg["read"] == nil || reg["glob"] == nil || reg["todo"] == nil {
 			t.Fatal("mode exposed the wrong file tools or lost the checklist")
 		}
-		if reg["bash"] == nil || reg["question"] == nil {
-			t.Fatal("Plan and Learning must retain shell commands and questions")
+		if reg["search"] == nil || reg["inspect"] == nil || reg["git"] == nil {
+			t.Fatal("Plan and Learning must retain exploration tools (search/inspect/git)")
+		}
+		if reg["question"] == nil {
+			t.Fatal("Plan and Learning must retain questions")
+		}
+		if mode == "plan" && reg["bash"] == nil {
+			t.Fatal("Plan must retain shell commands for read-only inspection")
+		}
+		if mode == "learning" && (reg["bash"] != nil || reg["python"] != nil) {
+			t.Fatal("Learning must not execute code (read-only observation)")
 		}
 		if modeInstructions(mode) == "" {
 			t.Fatal("missing mode instructions")
+		}
+		if len(ModeCapabilities(mode)) == 0 {
+			t.Fatal("missing mode capability list")
 		}
 	}
 }

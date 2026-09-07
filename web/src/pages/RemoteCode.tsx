@@ -3938,7 +3938,53 @@ export default function RemoteCodePage() {
     const i = messages().findIndex((msg) => msg.id === block.msg.id);
     return i >= 0 ? i : 0;
   }
-  function sessionRow(s: SessionSummary) {    const isActive = () => s.id === activeSessionId();
+  function SessionStopButton(props: {
+    sessionId: string;
+    isCancelling: boolean;
+    onCancel: (e: MouseEvent | KeyboardEvent) => void;
+  }) {
+    const [hovered, setHovered] = createSignal(false);
+    return (
+      <button
+        type="button"
+        onClick={(e) => props.onCancel(e)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onFocus={() => setHovered(true)}
+        onBlur={() => setHovered(false)}
+        disabled={props.isCancelling}
+        class={`w-4.5 h-4.5 rounded flex items-center justify-center shrink-0 border border-transparent transition-colors ${
+          props.isCancelling
+            ? "text-ink-500 opacity-60 cursor-default"
+            : hovered()
+              ? "text-rose-400 bg-rose-950/60 border-rose-800/40 cursor-pointer"
+              : "text-emerald-400 cursor-pointer"
+        } focus-visible:ring-1 focus-visible:ring-rose-500 focus:outline-none`}
+        data-rc-tip={props.isCancelling ? "Stopping…" : "Stop"}
+        aria-label={props.isCancelling ? "Stopping turn" : "Stop turn"}
+      >
+        <Show
+          when={!props.isCancelling && hovered()}
+          fallback={
+            <Iconify
+              icon="lucide:loader-2"
+              size={12}
+              class={`animate-spin ${props.isCancelling ? "text-ink-500" : "text-emerald-400"}`}
+            />
+          }
+        >
+          <Iconify
+            icon="lucide:square"
+            size={9}
+            class="text-rose-400 fill-current"
+          />
+        </Show>
+      </button>
+    );
+  }
+
+  function sessionRow(s: SessionSummary) {
+    const isActive = () => s.id === activeSessionId();
     const selected = () => selectedSessions().has(s.id);
     return (
       <div
@@ -3990,39 +4036,11 @@ export default function RemoteCodePage() {
             <>
               <span class="truncate flex-1 min-w-0">{s.title}</span>
               <Show when={s.status === "running" || (s.id === activeSessionId() && sessionStatus() === "running")}>
-                {(() => {
-                  const isCancelling = () => s.id === activeSessionId() && turnActivity()?.status === "cancelling";
-                  return (
-                    <button
-                      type="button"
-                      onClick={(e) => cancelTurnForSession(s.id, e)}
-                      disabled={isCancelling()}
-                      class={`group/stop w-4.5 h-4.5 rounded flex items-center justify-center shrink-0 border border-transparent transition-colors ${
-                        isCancelling()
-                          ? "text-ink-500 opacity-60 cursor-default"
-                          : "text-emerald-400 hover:text-rose-400 hover:bg-rose-950/60 hover:border-rose-800/40 focus:text-rose-400 focus:bg-rose-950/60 focus-visible:ring-1 focus-visible:ring-rose-500 focus:outline-none cursor-pointer"
-                      }`}
-                      data-rc-tip={isCancelling() ? "Stopping…" : "Stop"}
-                      aria-label={isCancelling() ? "Stopping turn" : "Stop turn"}
-                    >
-                      <Show
-                        when={!isCancelling()}
-                        fallback={<Iconify icon="lucide:loader-2" size={12} class="animate-spin text-ink-500" />}
-                      >
-                        <Iconify
-                          icon="lucide:loader-2"
-                          size={12}
-                          class="animate-spin group-hover/stop:hidden group-focus/stop:hidden group-focus-visible/stop:hidden"
-                        />
-                        <Iconify
-                          icon="lucide:square"
-                          size={9}
-                          class="hidden group-hover/stop:block group-focus/stop:block group-focus-visible/stop:block fill-current"
-                        />
-                      </Show>
-                    </button>
-                  );
-                })()}
+                <SessionStopButton
+                  sessionId={s.id}
+                  isCancelling={s.id === activeSessionId() && turnActivity()?.status === "cancelling"}
+                  onCancel={(e) => cancelTurnForSession(s.id, e)}
+                />
               </Show>
               <div class="relative flex items-center justify-end shrink-0 min-w-[34px]">
                 <span class="text-[10px] text-ink-600 transition-opacity group-hover:opacity-0 group-hover:pointer-events-none">

@@ -5376,7 +5376,7 @@ export default function RemoteCodePage() {
                       class={`flex items-center gap-1.5 rounded-full px-2 py-1 text-xs hover:bg-elev cursor-pointer transition-colors ${
                         yoloMode() ? "text-amber-800 dark:text-amber-200" : ""
                       }`}>
-                      <Iconify icon={yoloMode() ? "lucide:shield-alert" : "lucide:hand"} size={14} class={yoloMode() ? "text-amber-800 dark:text-amber-200" : ""} /><span class={`hidden sm:inline ${yoloMode() ? "text-amber-800 dark:text-amber-200 font-medium" : ""}`}>{yoloMode() ? "Full access" : "Ask for approval"}</span>
+                      <Iconify icon={yoloMode() ? "lucide:shield-alert" : "lucide:hand"} size={14} class={yoloMode() ? "text-amber-800 dark:text-amber-200" : ""} /><span class={`hidden sm:inline ${yoloMode() ? "text-amber-800 dark:text-amber-200" : ""}`}>{yoloMode() ? "Full access" : "Ask for approval"}</span>
                     </button>
                     <FloatMenu anchor={() => accessBtn} open={accessMenuOpen()} placement="top-start" width="22rem">
                       <p class="px-2 py-2 text-ink-400">How should actions be approved?</p>

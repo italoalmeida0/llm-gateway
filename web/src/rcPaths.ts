@@ -17,9 +17,10 @@ function comparable(path: string): string {
 }
 
 /** Each conversation belongs to exactly one project: the deepest ancestor. */
-export function projectForDirectory<T extends { id: string; path: string }>(cwd: string, projects: T[]): T | undefined {
-  const directory = comparable(cwd);
-  if (!directory) return undefined;
+export function projectForDirectory<T extends { id: string; path: string; protected?:boolean }>(cwd: string, projects: T[]): T | undefined {
+  const home = projects.find((p) => p.protected);
+  const directory = comparable(cwd === "" || cwd === "~" ? home?.path || "" : home && cwd.startsWith("~/") ? home.path + cwd.slice(1) : cwd);
+  if (!directory) return home;
   let match: T | undefined;
   let length = -1;
   for (const project of projects) {
@@ -31,7 +32,7 @@ export function projectForDirectory<T extends { id: string; path: string }>(cwd:
       length = path.length;
     }
   }
-  return match;
+  return match || home;
 }
 
 export function absoluteRemotePath(path: string, cwd: string, home = ""): string {

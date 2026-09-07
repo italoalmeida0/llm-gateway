@@ -826,7 +826,14 @@ export default function RemoteCodePage() {
     reviewRefreshTimer = setTimeout(() => requestReview(reviewOpen(), true), 100);
   }
   function sessionOptions() { return { effort: effort(), mode: agentMode(), skills: selectedSkills(), access: yoloMode() ? "full" : "ask" }; }
+  let lastLocalSelection: ReturnType<typeof sessionOptions> & {model:string} | undefined;
+  let pendingSessionChoice: {sessionId:string; choice:ReturnType<typeof sessionOptions> & {model:string}} | undefined;
+  function matchesChoice(a:any, b:any) {
+    return a?.model === b?.model && a?.effort === b?.effort && a?.mode === b?.mode && a?.access === b?.access && JSON.stringify(a?.skills || []) === JSON.stringify(b?.skills || []);
+  }
   function configureSession() {
+    lastLocalSelection = {model:activeModel(), ...sessionOptions()};
+    pendingSessionChoice = activeSessionId() ? {sessionId:activeSessionId(), choice:lastLocalSelection} : undefined;
     if (wsOpen()) sendWS({ type: "configure_session", sessionId: activeSessionId(), model: activeModel(), options: sessionOptions() });
   }
   function applyOptions(options: any) {
@@ -1399,6 +1406,21 @@ export default function RemoteCodePage() {
     }
   }
 
+  async function removeHost() {
+    const host = activeHost();
+    if (!host) return;
+    setHostMenuOpen(false);
+    const confirmed = await showConfirm({title:`Remove ${host.name || host.hostname || "host"}?`,
+      message:"This disconnects the host and revokes its gateway access. Conversations and project files remain on that machine. Pair the daemon again to reconnect.",
+      confirmText:"Remove host", danger:true});
+    if (!confirmed) return;
+    try {
+      await api("DELETE", `/api/remote/hosts/${encodeURIComponent(host.id)}`);
+      await loadHosts();
+      toast("Host removed", "ok");
+    } catch (error:any) { toast(error?.message || "Could not remove host", "err"); }
+  }
+
   // --- WebSocket Connection ---
   function connectWebSocket(hostId: string) {
     clearTimeout(reconnectTimer);
@@ -1428,6 +1450,8 @@ export default function RemoteCodePage() {
     };
     socket.onclose = () => {
       if (socket !== ws || disposed) return;
+      pendingSessionChoice = undefined;
+      setForking(false); forkRequestId = "";
       clearInterval(heartbeatTimer);
       setConnectionState("disconnected");
       setCreatingSession(false);
@@ -1667,6 +1691,7 @@ export default function RemoteCodePage() {
     if (dataLayer.handleMessage(msg)) return;
     // The relay fans out every host; foreground events belong to the selected host only.
     if (msg.type !== "host_status" && msg.hostId && msg.hostId !== activeHostId()) return;
+    if (msg.type === "error" && msg.requestId === forkRequestId) setForking(false);
     switch (msg.type) {
       case "relay_connected":
         break;
@@ -1687,6 +1712,14 @@ export default function RemoteCodePage() {
       // SignalDB sync owns them (daemon change ping → pull → collection).
       // The events below are action acks that drive local continuation.
 
+      case "session_forked": {
+        if (!forking() || msg.requestId !== forkRequestId || !msg.session?.id) break;
+        setForking(false);
+        dataLayer.storeFor(activeHostId()).syncAll();
+        selectSession(msg.session.id);
+        toast("Conversation fork created", "ok");
+        break;
+      }
       case "session_created": {
         if (!creatingSession() || msg.requestId !== creationRequestId) break;
         const r = msg.session;
@@ -1697,7 +1730,7 @@ export default function RemoteCodePage() {
         setActiveSessionId(r.id);
         setInputPrompt(firstDraft);
         try { localStorage.setItem(`llmgw-draft:${r.id}`, firstDraft); } catch {}
-        applyOptions(r.options);
+        applyOptions(lastLocalSelection || r.options);
         // Attachments stay in the draft until upload succeeds on this new session.
         void sendPrompt();
         break;
@@ -1827,8 +1860,14 @@ export default function RemoteCodePage() {
           setPendingApproval(r.pendingApproval ? {...r.pendingApproval, args:prettyArgs(r.pendingApproval.args)} : null);
           if (r.thinkingStartedAt && r.status === "running") startThinkingTimer(r.thinkingStartedAt);
           else stopThinkingTimer();
-          if (r.model) setActiveModel(gatewayModels().some((m) => m.id === r.model) ? r.model : gatewayModels()[0]?.id || "");
-          applyOptions(r.options);
+          // Older configure acknowledgements must not overwrite a newer choice
+          // while multiple changes are travelling to/from the daemon.
+          const pending = pendingSessionChoice?.sessionId === sid ? pendingSessionChoice : undefined;
+          if (!pending || matchesChoice({model:r.model, ...r.options}, pending.choice)) {
+            pendingSessionChoice = undefined;
+            if (r.model) setActiveModel(gatewayModels().some((m) => m.id === r.model) ? r.model : gatewayModels()[0]?.id || "");
+            applyOptions(r.options);
+          }
           if (r.usage) applyUsage(sid, r.usage, null);
           setSessionContexts((prev) => ({ ...prev, [sid]: r.context ?? null }));
           applySessionContent(sid, r.messages || r.Messages || []);
@@ -2314,6 +2353,7 @@ export default function RemoteCodePage() {
 
   function selectSession(id: string) {
     if (creatingSession()) return;
+    pendingSessionChoice = undefined;
     showQuestion(null);
     setDraftMode(false);
     setTurnActivity(null); setTodos([]); setToolProgress({}); setToolStarts({});
@@ -2361,8 +2401,7 @@ export default function RemoteCodePage() {
     setTaskReview(null);
     setReviewOpen(false);
     setAppNotice(null);
-    setAgentMode("build");
-    setSelectedSkills([]);
+    applyOptions(lastLocalSelection || configDoc()?.lastSelection);
     stopThinkingTimer();
     transcriptScroll.reset();
     for (const p of pendingAttachments()) if (p.objectUrl) URL.revokeObjectURL(p.objectUrl);
@@ -2665,6 +2704,17 @@ export default function RemoteCodePage() {
   // tool envelopes, so naive For indices mismatch the raw array).
   function rawIdx(idx: number): number {
     return messages()[idx]?.srcIdx ?? idx;
+  }
+
+  const [forking, setForking] = createSignal(false);
+  let forkRequestId = "";
+  function forkMessage(block: RenderBlock) {
+    if (!activeSessionId() || !wsOpen() || forking()) return;
+    const last = block.kind === "series" ? block.extras.at(-1) || block.msg : block.msg;
+    if (last.srcIdx == null) return;
+    forkRequestId = crypto.randomUUID();
+    setForking(true);
+    sendWS({type:"fork_session", sessionId:activeSessionId(), index:last.srcIdx, requestId:forkRequestId});
   }
 
   // Regenerate from message idx: the daemon drops that message and everything
@@ -2991,8 +3041,6 @@ export default function RemoteCodePage() {
     const text = inputPrompt().trim();
     const sid = activeSessionId();
     const hostId = activeHostId();
-    const model = activeModel();
-    const options = sessionOptions();
     // Slash fast-path: UI commands resolve locally, transcript ops go down.
     if (text.startsWith("/")) {
       try {
@@ -3031,6 +3079,9 @@ export default function RemoteCodePage() {
       }
     }
     if (disposed || activeHostId() !== hostId || activeSessionId() !== sid) return;
+    // Options may have changed while attachments were uploading.
+    const model = activeModel();
+    const options = sessionOptions();
     const attachmentNames = pending.map((a) => a.name);
 
     const displayText = text || attachmentNames.map((n) => `[Attached ${n}]`).join("\n");
@@ -3389,6 +3440,8 @@ export default function RemoteCodePage() {
       // Switching hosts swaps the whole world: nothing from the previous
       // daemon may bleed through (frontend = dumb monitor).
       untrack(() => {
+        lastLocalSelection = undefined; pendingSessionChoice = undefined;
+        forkRequestId = ""; setForking(false);
         setDraftMode(true);
         setCreatingSession(false);
         creationRequestId = "";
@@ -3514,10 +3567,12 @@ export default function RemoteCodePage() {
 
   createEffect(() => {
     const catalog = gatewayModels();
-    const selection = configDoc()?.lastSelection;
+    const saved = configDoc()?.lastSelection;
+    if (lastLocalSelection && matchesChoice(saved, lastLocalSelection)) lastLocalSelection = undefined;
     if (activeSessionId()) return;
+    const selection = lastLocalSelection || saved;
     setActiveModel(catalog.find((m) => m.id === selection?.model)?.id || catalog[0]?.id || "");
-    setEffort(selection?.effort || "medium");
+    applyOptions(selection);
   });
 
   // Auto-poll hosts while waiting for initial daemon pairing
@@ -4419,6 +4474,9 @@ export default function RemoteCodePage() {
                   onClick={() => { setHostMenuOpen(false); void loadHosts(); }}><Iconify icon="lucide:refresh-cw" size={13} />Refresh hosts</button>
                 <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-ink-200 hover:bg-elev cursor-pointer"
                   onClick={() => { setHostMenuOpen(false); void generatePairingToken(); }}><Iconify icon="lucide:plus" size={13} />Connect another host</button>
+                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-brand-500 hover:bg-elev cursor-pointer" onClick={() => void removeHost()}>
+                  <Iconify icon="lucide:trash-2" size={13} />Remove current host
+                </button>
               </div>
             </FloatMenu>
             {/* () => … — openSettings takes an optional section id; passing it
@@ -4707,6 +4765,11 @@ export default function RemoteCodePage() {
                         </Show>
                         <Show when={!isEditing()}>
                           <div class="flex items-center gap-0.5 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+                            <button onClick={() => forkMessage(block)} disabled={forking() || (block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx == null}
+                              class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-elev transition-colors cursor-pointer disabled:opacity-40"
+                              data-rc-tip="Fork conversation from here" aria-label="Fork conversation from here">
+                              <Iconify icon="lucide:git-branch" size={14} />
+                            </button>
                             <button
                               onClick={() => copyMsg(msg.id, textOf())}
                               class="p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
@@ -4766,6 +4829,11 @@ export default function RemoteCodePage() {
                         {/* Hover actions (chatbot-style) */}
                         <Show when={(sessionStatus() !== "running" || !isLast()) && !isEditing()}>
                           <div class="flex items-center gap-0.5 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+                            <button onClick={() => forkMessage(block)} disabled={forking() || (block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx == null}
+                              class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-elev transition-colors cursor-pointer disabled:opacity-40"
+                              data-rc-tip="Fork conversation from here" aria-label="Fork conversation from here">
+                              <Iconify icon="lucide:git-branch" size={14} />
+                            </button>
                             <button
                               onClick={() => copyMsg(msg.id, textOf())}
                               class="p-1.5 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer"
@@ -5355,7 +5423,7 @@ export default function RemoteCodePage() {
                       <Iconify icon="lucide:chevron-down" size={11} />
                     </button>
                     <FloatMenu anchor={() => modeBtn} open={modeMenuOpen()} placement="top-start" width="20rem">
-                      <p class="px-2 py-1.5 font-medium text-ink-400">Mode</p><Show when={sessionStatus() === "running"}><p class="px-2 pb-2 text-[11px] text-ink-500">Changes apply to the next task.</p></Show>
+                      <p class="px-2 py-1.5 font-medium text-ink-400">Mode</p><Show when={sessionStatus() === "running"}><p class="px-2 pb-2 text-[11px] text-ink-500">Changes apply to the next model response, including during this task.</p></Show>
                       <For each={[{id:"build", label:"Build", description:"Implement and validate changes", icon:"lucide:hammer"}, {id:"plan", label:"Plan", description:"Explore and plan without editing files", icon:"lucide:list-checks"}, {id:"learning", label:"Learning", description:"Learn through hints and guiding questions", icon:"lucide:graduation-cap"}]}>{(mode) =>
                         <button role="menuitemradio" aria-checked={agentMode() === mode.id} onClick={() => { setAgentMode(mode.id); configureSession(); }} class="w-full flex items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-elev cursor-pointer">
                           <Iconify icon={mode.icon} size={16} /><span class="flex-1"><span class="font-medium text-ink-100">{mode.label}</span><span class="block text-[11px] text-ink-500 mt-0.5">{mode.description}</span></span><Show when={agentMode() === mode.id}><Iconify icon="lucide:check" size={14} /></Show>

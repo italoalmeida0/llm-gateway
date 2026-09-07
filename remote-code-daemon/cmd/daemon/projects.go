@@ -7,9 +7,7 @@ import (
 )
 
 func projectForDirectory(cwd string, projects []ProjectEntry) *ProjectEntry {
-	if cwd == "" {
-		return nil
-	}
+	cwd = resolvePath(cwd)
 	normalize := func(path string) string {
 		path = filepath.Clean(path)
 		if runtime.GOOS == "windows" {
@@ -29,6 +27,13 @@ func projectForDirectory(cwd string, projects []ProjectEntry) *ProjectEntry {
 		if (cwd == path || strings.HasPrefix(cwd, prefix)) && len(path) > length {
 			match = &projects[i]
 			length = len(path)
+		}
+	}
+	if match == nil {
+		for i := range projects {
+			if projects[i].Protected {
+				return &projects[i]
+			}
 		}
 	}
 	return match

@@ -174,14 +174,21 @@ func (d *DaemonServer) projectsFile() string {
 }
 
 func (d *DaemonServer) loadProjects() []ProjectEntry {
-	data, err := os.ReadFile(d.projectsFile())
-	if err != nil {
-		return nil
-	}
+	data, _ := os.ReadFile(d.projectsFile())
 	var list []ProjectEntry
-	if err := json.Unmarshal(data, &list); err != nil {
-		return nil
+	_ = json.Unmarshal(data, &list)
+	home, _ := os.UserHomeDir()
+	found := false
+	for i := range list {
+		if filepath.Clean(resolvePath(list[i].Path)) == filepath.Clean(home) {
+			list[i].Path, list[i].Name, list[i].Protected = home, "Home", true
+			found = true
+		}
 	}
+	if !found && home != "" {
+		list = append(list, ProjectEntry{ID: "home", Name: "Home", Path: home, Protected: true})
+	}
+
 	return list
 }
 
@@ -573,7 +580,7 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		Turn: rawRec.Turn, Todos: rawRec.Todos,
 		Options:     rawRec.Options,
 		ID:          rawRec.ID,
-		CWD:         rawRec.CWD,
+		CWD:         resolvePath(rawRec.CWD),
 		Title:       rawRec.Title,
 		TitleSource: rawRec.TitleSource, Usage: rawRec.Usage, Context: rawRec.Context,
 		Model:       rawRec.Model,
@@ -1548,9 +1555,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			title = "New conversation"
 		}
 
-		if req.Options.Effort == "" && d.config.LastSelection != nil {
-			req.Options.Effort = d.config.LastSelection.Effort
-		}
+		req.Options = d.defaultSessionOptions(req.Options)
 		if req.Model == "" && d.config.LastSelection != nil {
 			req.Model = d.config.LastSelection.Model
 		}
@@ -1585,6 +1590,9 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"hostId":    d.config.HostID,
 			"session":   sessionPayload(rec),
 		})
+
+	case "fork_session":
+		d.forkSession(raw)
 
 	case "delete_session":
 		var req struct {
@@ -1632,6 +1640,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			}
 			if req.Always && req.Approved {
 				act.record.Options.Access = "full"
+				d.rememberSelection(act.record.Model, act.record.Options)
 				d.allowPendingTools(act)
 				_ = d.saveSession(act.record)
 				_ = d.sendWS(map[string]any{"type": "session_data", "hostId": d.config.HostID, "session": liveSessionPayload(act)})
@@ -1943,10 +1952,13 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		// rename. Instant feedback: the sidebar never shows five stale "New
 		// conversation" rows again.
 		act.mu.Lock()
+		if req.Model != "" {
+			act.record.Model = req.Model
+		}
 		if req.Options != nil {
 			act.record.Options = normalizedOptions(*req.Options)
-			_ = d.saveSession(act.record)
 		}
+		_ = d.saveSession(act.record)
 		if !d.config.Settings.NoAutoTitle && (act.record.Title == "" || act.record.Title == "New conversation") {
 			if t := instantTitle(cleanText); t != "" {
 				act.record.Title = t
@@ -1964,7 +1976,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		act.mu.Unlock()
 
-		go d.runAgentTurn(act, req.Text, req.Model, req.YOLO, req.AttachmentIDs)
+		go d.runAgentTurn(act, req.Text, "", req.YOLO, req.AttachmentIDs)
 	}
 }
 
@@ -2172,6 +2184,9 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	if keep > len(rec.Messages) {
 		keep = len(rec.Messages)
 	}
+	if model != "" {
+		rec.Model = model
+	}
 	rec.Messages = append([]provider.Message(nil), rec.Messages[:keep]...)
 	rec.Status = "idle"
 	rec.UpdatedAt = time.Now().UnixMilli()
@@ -2186,7 +2201,7 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 		"sessionId": rec.ID,
 		"messages":  rec.Messages,
 	})
-	go d.runAgentTurn(act, promptText, model, yolo, attachmentIDs)
+	go d.runAgentTurn(act, promptText, "", yolo, attachmentIDs)
 }
 
 func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string) {
@@ -2238,9 +2253,6 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	_ = d.saveSession(act.record)
 	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
-	if modelToUse == "" {
-		modelToUse = "gpt-4o"
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2249,9 +2261,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	myGen := act.gen
 	options := normalizedOptions(act.record.Options)
 	turnStarted := *act.record.Turn
-	if act.record.Options.Effort == "" && cfg.Settings.Reasoning != "" {
-		options.Effort = canonicalReasoning(cfg.Settings.Reasoning)
-	}
+
 	act.mu.Unlock()
 
 	var journal *reviewJournal
@@ -2336,7 +2346,6 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		}},
 	)
 
-	restrictModeTools(reg, options.Mode)
 	journal = newReviewJournal(d, act, myGen, sessionCWD, cfg.HostID, sessionID)
 	for _, name := range []string{"write", "edit", "bash"} {
 		if tool, ok := reg[name]; ok {
@@ -2344,34 +2353,61 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		}
 	}
 
-	// Build rich system instructions with working directory, jail status, and active skills
-	var sysPrompt strings.Builder
-	sysPrompt.WriteString("You are an expert autonomous AI software engineering agent running directly on the user's machine.\n")
-	sysPrompt.WriteString(fmt.Sprintf("Working Directory: %s\n", sessionCWD))
-	sysPrompt.WriteString(modeInstructions(options.Mode) + "\n")
-	sysPrompt.WriteString("Use the todo tool to maintain a visible checklist for multi-step work. Update it as steps start and finish.\n")
-	sysPrompt.WriteString("Use the question tool when you need user preferences, clarification or implementation decisions. It waits for explicit answers, including in Full access mode.\n")
-	if cfg.Settings.JailByDefault {
-		sysPrompt.WriteString("Sandbox: Strict jail mode is active. Only access files inside the working directory.\n")
-	}
-	if len(cfg.Skills) > 0 {
-		sysPrompt.WriteString("\n### Active Skills & Custom Instructions:\n")
-		for _, name := range options.Skills {
-			sk, exists := cfg.Skills[name]
-			if exists && sk.Enabled {
-				sysPrompt.WriteString(fmt.Sprintf("#### Skill [%s]: %s\n%s\n\n", name, sk.Description, sk.Body))
-			}
-		}
-	}
-	if len(cfg.MCPServers) > 0 {
-		sysPrompt.WriteString("\n### Configured MCP Servers:\n")
-		for name, mcp := range cfg.MCPServers {
-			sysPrompt.WriteString(fmt.Sprintf("- %s (%s): %s %s\n", name, mcp.Transport, mcp.Command, strings.Join(mcp.Args, " ")))
-		}
-	}
-
-	agent := core.NewAgent(client, modelToUse, sysPrompt.String(), reg)
+	agent := core.NewAgent(client, modelToUse, sessionSystemPrompt(cfg, sessionCWD, options), reg)
 	agent.Reasoning = options.Effort
+	// Only the agent goroutine changes runtime fields. Commands write the session;
+	// each request reads a fresh snapshot, after the preceding tool batch finishes.
+	agent.BeforeRequest = func(requestCtx context.Context) error {
+		for {
+			act.mu.Lock()
+			if act.gen != myGen || requestCtx.Err() != nil {
+				act.mu.Unlock()
+				return context.Canceled
+			}
+			nextModel := act.record.Model
+			nextOptions := normalizedOptions(act.record.Options)
+			act.mu.Unlock()
+			if nextModel != modelInfo.ID {
+				modelInfo = gatewayModel(requestCtx, cfg.GatewayURL, cfg.DaemonToken, nextModel)
+			}
+			// Metadata lookup may take time: re-read choices before building the request.
+			act.mu.Lock()
+			if act.gen != myGen || requestCtx.Err() != nil {
+				act.mu.Unlock()
+				return context.Canceled
+			}
+			if act.record.Model != nextModel {
+				act.mu.Unlock()
+				continue
+			}
+			nextOptions = normalizedOptions(act.record.Options)
+			if modelInfo.ID != nextModel {
+				act.record.Model = modelInfo.ID
+				_ = d.saveSession(act.record)
+				_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": liveSessionPayload(act)})
+			}
+			act.mu.Unlock()
+			requestModel := modelInfo
+			if nextOptions.Effort != "none" {
+				requestModel.Reasoning = true
+			}
+			client = provider.NewGatewayOpenAI(cfg.APIKey, apiBase, requestModel)
+			modelToUse = modelInfo.ID
+			agent.Client, agent.Model, agent.Reasoning = client, modelToUse, nextOptions.Effort
+			agent.MaxTokens = modelInfo.MaxOutput
+			d.configMu.RLock()
+			system := sessionSystemPrompt(*d.config, sessionCWD, nextOptions)
+			d.configMu.RUnlock()
+			agent.SetSystem(system)
+			available := core.Registry{}
+			for name, tool := range reg {
+				available[name] = tool
+			}
+			restrictModeTools(available, nextOptions.Mode)
+			agent.SetTools(available)
+			return nil
+		}
+	}
 	agent.Temperature = &cfg.Settings.Temperature
 	agent.MaxTokens = modelInfo.MaxOutput
 	act.mu.Lock()

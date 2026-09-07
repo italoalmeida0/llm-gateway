@@ -2,14 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/patriceckhart/zot/packages/core"
 )
 
 type ModelSelection struct {
-	Model  string `json:"model"`
-	Effort string `json:"effort"`
+	Model string `json:"model"`
+	SessionOptions
 }
 
 type SessionOptions struct {
@@ -38,7 +39,7 @@ func normalizedOptions(o SessionOptions) SessionOptions {
 }
 
 // Called by the dispatcher with configMu held. Selection is saved on the
-// session, while only the last explicitly chosen model/effort becomes a default.
+// session; every explicit choice also becomes the default for new sessions.
 func (d *DaemonServer) configureSession(raw []byte) {
 	var req struct {
 		SessionID string         `json:"sessionId"`
@@ -59,7 +60,16 @@ func (d *DaemonServer) configureSession(raw []byte) {
 		if req.Model != "" {
 			act.record.Model = req.Model
 		}
+		req.Model = act.record.Model
 		act.record.Options = req.Options
+		if pending := act.pendingApproval; pending != nil && modeToolRestriction(req.Options.Mode, pending.Tool) != "" {
+			if ch := act.approvalReqs[pending.CallID]; ch != nil {
+				select {
+				case ch <- false:
+				default:
+				}
+			}
+		}
 		if req.Options.Access == "full" {
 			d.allowPendingTools(act)
 		}
@@ -67,10 +77,7 @@ func (d *DaemonServer) configureSession(raw []byte) {
 		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": d.config.HostID, "session": liveSessionPayload(act)})
 		act.mu.Unlock()
 	}
-	if req.Model != "" {
-		d.config.LastSelection = &ModelSelection{Model: req.Model, Effort: req.Options.Effort}
-		_ = d.saveConfig()
-	}
+	d.rememberSelection(req.Model, req.Options)
 }
 
 func modeInstructions(mode string) string {
@@ -91,4 +98,57 @@ func restrictModeTools(reg core.Registry, mode string) {
 		delete(reg, "write")
 		delete(reg, "edit")
 	}
+}
+
+// configMu is held by the command dispatcher.
+func (d *DaemonServer) rememberSelection(model string, options SessionOptions) {
+	if model == "" && d.config.LastSelection != nil {
+		model = d.config.LastSelection.Model
+	}
+	options = normalizedOptions(options)
+	options.Skills = append([]string{}, options.Skills...)
+	d.config.LastSelection = &ModelSelection{Model: model, SessionOptions: options}
+	_ = d.saveConfig()
+}
+
+func (d *DaemonServer) defaultSessionOptions(options SessionOptions) SessionOptions {
+	if last := d.config.LastSelection; last != nil {
+		if options.Effort == "" {
+			options.Effort = last.Effort
+		}
+		if options.Mode == "" {
+			options.Mode = last.Mode
+		}
+		if options.Access == "" {
+			options.Access = last.Access
+		}
+		if options.Skills == nil {
+			options.Skills = append([]string{}, last.Skills...)
+		}
+	}
+	return normalizedOptions(options)
+}
+
+func sessionSystemPrompt(cfg DaemonConfig, cwd string, options SessionOptions) string {
+	var prompt strings.Builder
+	prompt.WriteString("You are an expert autonomous AI software engineering agent running directly on the user's machine.\n")
+	fmt.Fprintf(&prompt, "Working Directory: %s\n", cwd)
+	prompt.WriteString(modeInstructions(options.Mode) + "\n")
+	prompt.WriteString("Use the todo tool to maintain a visible checklist for multi-step work. Update it as steps start and finish.\n")
+	prompt.WriteString("Use the question tool when you need user preferences, clarification or implementation decisions. It waits for explicit answers, including in Full access mode.\n")
+	if cfg.Settings.JailByDefault {
+		prompt.WriteString("Sandbox: Strict jail mode is active. Only access files inside the working directory.\n")
+	}
+	for _, name := range options.Skills {
+		if skill, exists := cfg.Skills[name]; exists && skill.Enabled {
+			fmt.Fprintf(&prompt, "\n#### Skill [%s]: %s\n%s\n", name, skill.Description, skill.Body)
+		}
+	}
+	if len(cfg.MCPServers) > 0 {
+		prompt.WriteString("\n### Configured MCP Servers:\n")
+		for name, mcp := range cfg.MCPServers {
+			fmt.Fprintf(&prompt, "- %s (%s): %s %s\n", name, mcp.Transport, mcp.Command, strings.Join(mcp.Args, " "))
+		}
+	}
+	return prompt.String()
 }

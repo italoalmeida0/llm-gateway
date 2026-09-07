@@ -117,6 +117,10 @@ func TestGatewayMetadataUnknownLimits(t *testing.T) {
 	if unknown.ContextWindow != 0 || unknown.MaxOutput != 0 {
 		t.Fatal("guessed a built-in model limit")
 	}
+	fallback := gatewayModel(context.Background(), upstream.URL, "test-daemon", "removed/model")
+	if fallback.ID != "custom/alias" || fallback.ContextWindow != 1024000 {
+		t.Fatal("removed model did not fall back to first catalog entry")
+	}
 	u := provider.Usage{InputTokens: 400000, CacheReadTokens: 32000, OutputTokens: 500}
 	if contextFromUsage(u, model).UsedTokens != 432500 {
 		t.Fatal("wrong current context")
@@ -197,7 +201,7 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 	defer conn.Close()
 	cwd := t.TempDir()
 	os.WriteFile(filepath.Join(cwd, "hello.txt"), []byte("hello"), 0600)
-	rec := &SessionRecord{ID: "session", CWD: cwd, Title: "Manual", TitleSource: "manual", Model: "custom/alias", Status: "idle"}
+	rec := &SessionRecord{ID: "session", CWD: cwd, Title: "Manual", TitleSource: "manual", Model: "custom/alias", Status: "idle", Options: SessionOptions{Effort: "high"}}
 	act := &ActiveSession{record: rec, approvalReqs: map[string]chan bool{}}
 	d.sessions[rec.ID] = act
 	d.runAgentTurn(act, "Read hello.txt", rec.Model, true, nil)

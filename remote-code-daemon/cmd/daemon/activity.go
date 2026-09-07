@@ -40,6 +40,10 @@ func (d *DaemonServer) toolApprovalHook(ctx context.Context, act *ActiveSession,
 			act.mu.Unlock()
 			return false, "Turn cancelled", nil
 		}
+		if reason := modeToolRestriction(act.record.Options.Mode, call.Name); reason != "" {
+			act.mu.Unlock()
+			return false, reason, nil
+		}
 		// The questionnaire is itself an explicit user interaction. Avoid an
 		// extra permission prompt before asking the actual questions.
 		if act.record.Options.Access == "full" || call.Name == "question" {
@@ -66,6 +70,16 @@ func (d *DaemonServer) toolApprovalHook(ctx context.Context, act *ActiveSession,
 		}()
 		select {
 		case approved := <-ch:
+			act.mu.Lock()
+			reason := modeToolRestriction(act.record.Options.Mode, call.Name)
+			stale := act.gen != gen
+			act.mu.Unlock()
+			if stale {
+				return false, "Turn cancelled", nil
+			}
+			if reason != "" {
+				return false, reason, nil
+			}
 			if ctx.Err() != nil {
 				return false, "Turn cancelled", nil
 			}
@@ -89,4 +103,11 @@ func finishTurnActivity(act *ActiveSession, cancelled bool) {
 	} else if act.record.Turn.Status == "running" {
 		act.record.Turn.Status = "completed"
 	}
+}
+
+func modeToolRestriction(mode, tool string) string {
+	if (mode == "plan" || mode == "learning") && (tool == "write" || tool == "edit") {
+		return "The session is now in " + mode + " mode. Edit and create tools are disabled."
+	}
+	return ""
 }

@@ -36,6 +36,21 @@ func TestSessionChoicesPersistIndependentlyAndRememberLastSelection(t *testing.T
 	if two.Model != "custom/two" || two.Options.Effort != "low" || d.config.LastSelection.Model != "custom/two" || d.config.LastSelection.Effort != "low" {
 		t.Fatal("last choice was not remembered independently")
 	}
+
+	if d.config.LastSelection.Mode != "plan" || d.config.LastSelection.Access != "full" {
+		t.Fatal("agent/access were not remembered")
+	}
+	d.handleMessage([]byte(`{"type":"create_session"}`))
+	created := d.listSessions()
+	var inherited *SessionRecord
+	for _, summary := range created {
+		if summary.ID != "one" && summary.ID != "two" {
+			inherited, _ = d.loadSession(summary.ID)
+		}
+	}
+	if inherited == nil || inherited.Model != "custom/two" || inherited.Options.Mode != "plan" || inherited.Options.Access != "full" || inherited.Options.Effort != "low" {
+		t.Fatal("new session did not inherit latest choices")
+	}
 	d.handleMessage([]byte(`{"type":"update_config","settings":{"temperature":0.2},"skills":{"review":{"name":"review","enabled":true},"style":{"name":"style","enabled":true}}}`))
 	var saved DaemonConfig
 	data, err := os.ReadFile(d.configPath)

@@ -45,7 +45,7 @@ export interface RcProject {
 
 /** Daemon configuration mirror (single doc per host). */
 export interface RcConfig {
-  lastSelection?: { model: string; effort: string };
+  lastSelection?: { model: string; effort: string; mode?:string; access?:string; skills?:string[] };
   id: string;
   hostId: string;
   settings?: Record<string, any>;

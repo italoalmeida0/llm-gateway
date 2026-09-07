@@ -41,6 +41,12 @@ test("nested projects own their sessions exclusively, with path boundaries", () 
   expect(projectForDirectory("C:\\work\\TAP\\src", [{id:"windows",path:"c:/work/tap/"}])?.id).toBe("windows");
 });
 
+test("Home groups unassigned conversations and expands host home aliases", () => {
+  const projects = [{id:"home",path:"/home/user",protected:true}, {id:"work",path:"/home/user/work"}];
+  for (const cwd of ["", "~", "/home/user", "/home/user/", "/tmp/unregistered"]) expect(projectForDirectory(cwd, projects)?.id).toBe("home");
+  expect(projectForDirectory("~/work/src", projects)?.id).toBe("work");
+});
+
 test("orders projects by their own conversations' most recent activity", () => {
   const projects = [{id:"home",path:"/home",createdAt:1},{id:"first",path:"/home/first",createdAt:10},{id:"second",path:"/home/second",createdAt:20}];
   const ordered = projectsByActivity(projects,[{cwd:"/home/first",updatedAt:300},{cwd:"/home/second",updatedAt:100}]);

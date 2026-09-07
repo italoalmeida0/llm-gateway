@@ -463,7 +463,7 @@ describe("Remote Code Relay and Pairing", () => {
       expect(configured.session.options.access).toBe("ask");
       send({ type: "pull", id: 1234, collection: "config" });
       const preferences = await waitFor((m) => m.type === "pull-response" && m.id === 1234);
-      expect(preferences.items[0].lastSelection).toEqual({ model: "gpt-4o", effort: "low" });
+      expect(preferences.items[0].lastSelection).toEqual({ model: "gpt-4o", effort: "low", mode: "build", skills: [], access: "ask" });
 
       // Rename + pin round-trip
       send({ type: "rename_session", sessionId: sid, title: "Renamed Session" });
@@ -479,6 +479,18 @@ describe("Remote Code Relay and Pairing", () => {
       send({ type: "list_sessions" });
       const listed = await waitFor((m) => m.type === "sessions_list");
       expect(listed.sessions.some((s: any) => s.id === sid && s.pinned === true)).toBe(true);
+
+      // Forks are daemon-owned independent prefixes, with an action ack and a
+      // normal mirrored listing; both user and assistant boundaries are valid.
+      for (const index of [0, 1]) {
+        send({ type: "fork_session", sessionId: sid, index, requestId: `fork-${index}` });
+        const forked = await waitFor((m) => m.type === "session_forked" && m.requestId === `fork-${index}`);
+        expect(forked.session.id).not.toBe(sid);
+        expect(forked.session.cwd).toBe(workDir);
+        expect(forked.session.status).toBe("idle");
+        expect(forked.session.messages.length).toBe(index + 1);
+        expect(forked.session.options).toEqual(configured.session.options);
+      }
 
       // Search finds seeded transcript terms (before we edit/delete them)
       send({ type: "search", query: "Slash Commands" });
@@ -517,7 +529,9 @@ describe("Remote Code Relay and Pairing", () => {
       expect(pullConfig.items[0].id).toBe("daemon");
       send({ type: "pull", id: 4545, collection: "projects" });
       const pullProjectsEmpty = await waitFor((m) => m.type === "pull-response" && m.collection === "projects");
-      expect(pullProjectsEmpty.items.length).toBe(0);
+      expect(pullProjectsEmpty.items.length).toBe(1);
+      expect(pullProjectsEmpty.items[0].name).toBe("Home");
+      expect(pullProjectsEmpty.items[0].protected).toBe(true);
 
       // Change pings: a mutation must broadcast a debounced change notice
       send({ type: "rename_session", sessionId: sid, title: "Ping Source" });

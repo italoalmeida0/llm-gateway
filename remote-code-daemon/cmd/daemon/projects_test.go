@@ -28,7 +28,25 @@ func TestDeletingParentProjectPreservesNestedProjectConversations(t *testing.T) 
 			t.Fatalf("deleted another project's session %s: %v", id, err)
 		}
 	}
-	if got := d.loadProjects(); len(got) != 1 || got[0].ID != "child" {
+	if got := d.loadProjects(); len(got) != 2 || got[0].ID != "child" || !got[1].Protected {
 		t.Fatal("nested project was removed")
+	}
+}
+
+func TestHomeOwnsUnassignedAndHomeAliases(t *testing.T) {
+	d := testDaemon(t)
+	projects := d.loadProjects()
+	if len(projects) != 1 || projects[0].Name != "Home" || !projects[0].Protected {
+		t.Fatal("missing default Home")
+	}
+	home := projects[0].Path
+	projects = append(projects, ProjectEntry{ID: "work", Path: filepath.Join(home, "work")})
+	for _, path := range []string{"", "~", home, home + string(filepath.Separator), t.TempDir()} {
+		if project := projectForDirectory(path, projects); project == nil || project.ID != "home" {
+			t.Fatalf("%q did not resolve to Home", path)
+		}
+	}
+	if projectForDirectory(filepath.Join(home, "work", "src"), projects).ID != "work" {
+		t.Fatal("Home captured another project")
 	}
 }

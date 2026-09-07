@@ -59,6 +59,10 @@ type Agent struct {
 	// limiting, business-hour gates, and deny-by-default setups.
 	BeforeTurn func(step int) (allowed bool, reason string)
 
+	// BeforeRequest refreshes runtime configuration on the agent goroutine before
+	// every provider request, including retries. In-flight requests are untouched.
+	BeforeRequest func(context.Context) error
+
 	// BeforeAssistantMessage, if set, is called after the model's
 	// final assistant message is assembled but before it's appended
 	// to the transcript. Returning (allowed=false) suppresses both
@@ -583,6 +587,11 @@ func (a *Agent) dropLastAssistantMessage() {
 // oneTurn calls the LLM once, forwards events, returns the stop reason
 // and the assembled assistant message (already appended to the transcript).
 func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.StopReason, provider.Message, error) {
+	if a.BeforeRequest != nil {
+		if err := a.BeforeRequest(ctx); err != nil {
+			return provider.StopError, provider.Message{}, err
+		}
+	}
 	var req provider.Request
 	for {
 		if err := a.prepareStart(ctx); err != nil {

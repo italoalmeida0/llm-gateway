@@ -3691,7 +3691,7 @@ export default function RemoteCodePage() {
 
   function groupTitle(cat: "explore" | "command", units: ToolUnit[]): string {
     if (cat === "command") {
-      return `Ran ${units.length} command${units.length === 1 ? "" : "s"}`;
+      return `Run ${units.length} command${units.length === 1 ? "" : "s"}`;
     }
     const files = units.filter((u) => u.call?.toolName === "read").length;
     const searches = units.filter((u) => u.call?.toolName === "glob").length;

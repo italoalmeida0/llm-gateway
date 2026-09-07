@@ -161,7 +161,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       const cmd = String(args.command || "").replace(/\s+/g, " ").trim();
       return {
         icon: "lucide:terminal",
-        verb: "Ran",
+        verb: "Run",
         target: cmd.length > 90 ? cmd.slice(0, 90) + "…" : cmd,
       };
     }

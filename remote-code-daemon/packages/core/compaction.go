@@ -471,7 +471,50 @@ func FindCutPoint(msgs []provider.Message, keepRecent int) CutPoint {
 	if idx < 0 {
 		idx = 0
 	}
+	// Pi parity (findCutPoint keepRecent): the kept tail must start at
+	// a user boundary so the summary + tail reads as a coherent
+	// conversation. Snap forward past a leading tool-result run and
+	// its owning assistant turn, then to the next user message; if no
+	// user message follows, fall back to the pair-safe index above.
+	idx = snapCutToUserBoundary(msgs, idx)
 	return CutPoint{Index: idx}
+}
+
+// snapCutToUserBoundary moves a pair-safe cut forward to the next user
+// message so the kept tail never starts mid-turn (orphan tool result,
+// bare assistant continuation). Hidden/internal messages (MetaHidden)
+// and legacy image mirrors do not count as boundaries: they are
+// filtered from the request context anyway, so starting the tail at
+// one would still read as mid-turn to the model.
+func snapCutToUserBoundary(msgs []provider.Message, idx int) int {
+	if idx <= 0 || idx >= len(msgs) {
+		return idx
+	}
+	if isUserBoundary(msgs[idx]) {
+		return idx
+	}
+	for i := idx; i < len(msgs); i++ {
+		if isUserBoundary(msgs[i]) {
+			return i
+		}
+	}
+	return idx
+}
+
+// isUserBoundary reports whether m is a genuine user turn start: role
+// user, visible to the model (not hidden), and not a legacy image
+// mirror (request-derived now, filtered by filterHidden).
+func isUserBoundary(m provider.Message) bool {
+	if m.Role != provider.RoleUser {
+		return false
+	}
+	if m.Meta != nil && m.Meta[MetaHidden] == "true" {
+		return false
+	}
+	if m.Meta != nil && m.Meta[MetaEphemeral] == "true" {
+		return false
+	}
+	return !isLegacyImageMirror(m)
 }
 
 // isToolCallTail reports whether m is an assistant message ending in (or

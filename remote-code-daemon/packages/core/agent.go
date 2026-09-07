@@ -61,16 +61,38 @@ type Agent struct {
 
 	// BeforeRequest refreshes runtime configuration on the agent goroutine before
 	// every provider request, including retries. In-flight requests are untouched.
+	// Kept as-is: it mutates runtime config, not message context.
 	BeforeRequest func(context.Context) error
 
-	// BeforeAssistantMessage, if set, is called after the model's
-	// final assistant message is assembled but before it's appended
-	// to the transcript. Returning (allowed=false) suppresses both
-	// the transcript append and the UI event. A non-empty
-	// replacement rewrites the visible text for the user while
-	// leaving the model's original text in the transcript (so the
-	// model can still see what it said in subsequent turns).
-	BeforeAssistantMessage func(text string) (allowed bool, reason, replacement string)
+	// Transforms shapes the derived request context every turn without
+	// touching the live transcript. Pi parity: transformContext in
+	// buildContextMessages. Typical uses: AGENTS.md/skills/memory
+	// injection, project-context rewrites. Runs inside BuildContext
+	// after prune+repair, before provider mirror and reminders.
+	//
+	// Rules: do not mutate the input slice; keep tool_call/tool_result
+	// pairs intact; never persist the result (request-only).
+	Transforms []ContextTransformer
+
+	// AssistantTextTransforms rewrites visible assistant text
+	// (suppress or replace) for UI emission. Replaces the removed
+	// BeforeAssistantMessage hook as a stackable transform: the
+	// transcript always keeps the model's original output.
+	AssistantTextTransforms []AssistantTextTransform
+
+	// RemindersForTurn, if set, returns synthetic non-persisted
+	// reminders appended to the request context (pi: system
+	// reminders — pending approvals, compaction notices, queued
+	// messages). Called on the agent goroutine per model call.
+	// Defaults to collectReminders (registered ReminderProviders);
+	// hosts may override for custom reminder sets.
+	RemindersForTurn func() []Reminder
+
+	// WindowForTurn, if set, returns the active model context window
+	// in tokens. The host owns the provider.Model; core only reads
+	// the window for pressure-driven reminders (compactionReminder)
+	// via compactionPressure. Nil/0 disables window-based reminders.
+	WindowForTurn func() int
 
 	// MaxRetries controls agent-level retries for transient provider
 	// failures that arrive after the HTTP stream opens (for example
@@ -88,10 +110,12 @@ type Agent struct {
 	// OnMessageAppended, if set, fires every time a message is
 	// appended to the in-memory transcript by the agent loop — the
 	// initial user prompt, each finalised assistant message, and
-	// each tool-results message (plus the synthetic OpenAI image
-	// mirror, if any). Hosts wire this to the on-disk session so
-	// that turns are durable as soon as they happen, instead of
-	// only being flushed on a clean exit.
+	// each tool-results message. Derived context (provider image
+	// mirrors, reminders, transform output) never fires this hook:
+	// it exists only in the request, never in the transcript.
+	// Hosts wire this to the on-disk session so that turns are
+	// durable as soon as they happen, instead of only being
+	// flushed on a clean exit.
 	OnMessageAppended func(provider.Message)
 
 	// OnUsage, if set, fires after every turn's usage row arrives,
@@ -140,11 +164,23 @@ type Agent struct {
 	// after a text-only assistant turn finishes. It never interrupts
 	// a running tool or cancels an in-flight provider request.
 	queued []string
+
+	// reminderProviders produce synthetic non-persisted reminders
+	// consumed by BuildContext (see reminders.go). Pi parity:
+	// system reminders in buildContextMessages.
+	reminderProviders []ReminderProvider
+	// store, when attached via AttachStore, is the persistence
+	// backend (SessionStore). The agent loop writes messages, usage
+	// and compaction checkpoints through it; Compact persists its
+	// checkpoint through it mandatorily (pi: compaction event).
+	store SessionStore
+	// defaultRemindersWired guards WireDefaultReminders idempotency.
+	defaultRemindersWired bool
 }
 
 // NewAgent returns an Agent with sensible defaults.
 func NewAgent(client provider.Client, model, system string, tools Registry) *Agent {
-	return &Agent{
+	a := &Agent{
 		Client:         client,
 		Model:          model,
 		System:         system,
@@ -153,6 +189,11 @@ func NewAgent(client provider.Client, model, system string, tools Registry) *Age
 		MaxRetries:     3,
 		RetryBaseDelay: 2 * time.Second,
 	}
+	// Default wiring: derive RemindersForTurn from registered
+	// providers unless the host overrides it explicitly. Pi parity:
+	// buildContextMessages always injects system reminders.
+	a.RemindersForTurn = a.collectReminders
+	return a
 }
 
 // QueueMessage queues text to be injected as a user message at the
@@ -338,14 +379,30 @@ func (a *Agent) SeedLastTurnUsage(u provider.Usage) {
 	a.cost.LastTurn = u
 }
 
-// fireMessageAppended invokes OnMessageAppended without holding the
-// agent mutex, so the host's persistence callback can take its own
-// locks without deadlocking the agent loop. Tolerates a nil hook so
-// non-persisting callers (tests, RPC mode) don't have to set it.
+// fireMessageAppended persists through the attached store (if any)
+// and invokes OnMessageAppended without holding the agent mutex, so
+// the host's persistence callback can take its own locks without
+// deadlocking the agent loop. Tolerates a nil hook so non-persisting
+// callers (tests, RPC mode) don't have to set it. Ephemeral rows
+// (MetaEphemeral, e.g. reminders/mirrors) never reach here: they
+// exist only in the derived request context, never in a.messages.
 func (a *Agent) fireMessageAppended(m provider.Message) {
-	if a.OnMessageAppended != nil {
-		a.OnMessageAppended(m)
+	a.mu.Lock()
+	cb := a.OnMessageAppended
+	store := a.store
+	a.mu.Unlock()
+	if store != nil && !isEphemeralRow(m) {
+		_ = store.AppendMessage(m)
 	}
+	if cb != nil {
+		cb(m)
+	}
+}
+
+// isEphemeralRow reports whether m is request-only derived context
+// (reminder, provider mirror) that must never persist.
+func isEphemeralRow(m provider.Message) bool {
+	return m.Meta != nil && m.Meta[MetaEphemeral] == "true"
 }
 
 // Prompt sends a user message and runs the agent loop until the model
@@ -469,32 +526,13 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			a.mu.Lock()
 			a.messages = append(a.messages, toolMsg)
 			a.rev++
-			// OpenAI's chat-completions tool message shape is text-centric.
-			// Vision models reliably consume images when they arrive as user
-			// content, so when a tool result contains images we mirror them
-			// into a synthetic user message immediately after the tool result.
-			// This keeps the transcript self-contained for providers that can
-			// see image blocks in tool messages while making OpenAI vision
-			// models actually receive the image bytes.
-			//
-			// The OpenAI Responses route ("openai-codex") has the same
-			// text-centric tool-output shape: a function_call_output only
-			// carries a string, so images in a tool result never reach the
-			// model. Both providers serialize images correctly when they
-			// arrive as user content, so the mirror covers them both.
-			var imageMirror provider.Message
-			if a.Client != nil && (a.Client.Name() == "openai" || a.Client.Name() == "openai-codex") {
-				if mirror := mirrorToolImagesAsUser(toolMsg); len(mirror.Content) > 0 {
-					a.messages = append(a.messages, mirror)
-					a.rev++
-					imageMirror = mirror
-				}
-			}
 			a.mu.Unlock()
 			a.fireMessageAppended(toolMsg)
-			if len(imageMirror.Content) > 0 {
-				a.fireMessageAppended(imageMirror)
-			}
+			// Note: the provider image mirror (openai/openai-codex) is
+			// derived per-turn inside BuildContext now — it is request-only
+			// and never appended to the transcript. filterHidden drops
+			// legacy mirrors persisted by older builds so they are not
+			// duplicated in the request.
 			// If context was cancelled during tool execution, bail out.
 			if err := ctx.Err(); err != nil {
 				sink(EvDone{})
@@ -607,6 +645,137 @@ func (a *Agent) dropLastAssistantMessage() {
 	}
 }
 
+// BuildContext derives the request context for the next model call
+// from the live transcript without mutating it. Pi parity:
+// buildContextMessages in pi's harness/session/context.ts.
+//
+// Pipeline: snapshot -> filterHidden (pi: isMeta) ->
+// PruneOldToolResults -> repairToolUseResultPairs -> Transforms[]
+// (pi: transformContext) -> provider image mirror ->
+// RemindersForTurn (pi: system reminders).
+//
+// Steps after the snapshot are request-only: mirrors, transform
+// output and reminders never persist and never feed back into
+// a.messages. Callers hold no lock; the snapshot is taken under mu
+// and every step after that works on the copy.
+func (a *Agent) BuildContext() []provider.Message {
+	a.mu.Lock()
+	msgs := append([]provider.Message(nil), a.messages...)
+	transforms := append([]ContextTransformer(nil), a.Transforms...)
+	remindersFn := a.RemindersForTurn
+	clientName := ""
+	if a.Client != nil {
+		clientName = a.Client.Name()
+	}
+	a.mu.Unlock()
+
+	var reminders []Reminder
+	if remindersFn != nil {
+		reminders = remindersFn()
+	}
+	return a.buildContextFromLocked(msgs, transforms, reminders, clientName)
+}
+
+// buildContextFromLocked runs the derivation pipeline over an
+// already-snapshotted transcript. Both BuildContext (unlocked) and
+// BuildContextLocked share it so the pipeline exists in one place.
+func (a *Agent) buildContextFromLocked(msgs []provider.Message, transforms []ContextTransformer, reminders []Reminder, clientName string) []provider.Message {
+	msgs = filterHidden(msgs)
+	msgs = PruneOldToolResults(msgs)
+	msgs = repairToolUseResultPairs(msgs)
+	for _, t := range transforms {
+		if t == nil {
+			continue
+		}
+		if out := t(msgs); out != nil {
+			msgs = out
+		}
+	}
+	if mirror := mirrorImagesForProvider(clientName, msgs); mirror != nil {
+		msgs = append(msgs, *mirror)
+	}
+	msgs = injectReminders(msgs, reminders)
+	return msgs
+}
+
+// BuildContextLocked is BuildContext for callers already holding mu.
+// oneTurn uses it so the start-generation check and the transcript
+// snapshot stay under the same lock; external callers use
+// BuildContext.
+func (a *Agent) BuildContextLocked() []provider.Message {
+	// No pre-collected reminders available and the caller holds mu:
+	// skip reminder collection (collectReminders needs mu). oneTurn
+	// uses BuildContextLockedWith with reminders collected before
+	// locking. External locked callers that need reminders should
+	// collect them before taking mu.
+	return a.BuildContextLockedWith(nil, true)
+}
+
+// BuildContextLockedWith derives context while the caller holds mu.
+// Pass pre-collected reminders when the reminder fn needs the lock
+// (collectReminders does); useCollected=true skips in-lock collection.
+// oneTurn pre-collects before locking to avoid self-deadlock.
+func (a *Agent) BuildContextLockedWith(precollected []Reminder, useCollected bool) []provider.Message {
+	msgs := append([]provider.Message(nil), a.messages...)
+	transforms := append([]ContextTransformer(nil), a.Transforms...)
+	remindersFn := a.RemindersForTurn
+	clientName := ""
+	if a.Client != nil {
+		clientName = a.Client.Name()
+	}
+	var reminders []Reminder
+	if useCollected {
+		reminders = precollected
+	} else if remindersFn != nil {
+		// Only safe when remindersFn never touches a.mu.
+		reminders = remindersFn()
+	}
+	return a.buildContextFromLocked(msgs, transforms, reminders, clientName)
+}
+
+// AddTransform appends a ContextTransformer to the agent's pipeline.
+// Safe for concurrent use; takes effect on the next model call.
+func (a *Agent) AddTransform(t ContextTransformer) {
+	if t == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Transforms = append(a.Transforms, t)
+	a.rev++
+}
+
+// AttachStore sets the persistence backend for the agent loop and
+// compaction checkpoints. Safe for concurrent use. A nil store
+// detaches (legacy callback-only mode: OnMessageAppended /
+// OnTranscriptCompacted keep working, nothing is written by core).
+func (a *Agent) AttachStore(st SessionStore) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.store = st
+	a.rev++
+}
+
+// Store returns the attached SessionStore, or nil.
+func (a *Agent) Store() SessionStore {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.store
+}
+
+// AddAssistantTextTransform appends an AssistantTextTransform used
+// for visible-text emission (suppress/replace). The transcript
+// always keeps the model's original output.
+func (a *Agent) AddAssistantTextTransform(t AssistantTextTransform) {
+	if t == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.AssistantTextTransforms = append(a.AssistantTextTransforms, t)
+	a.rev++
+}
+
 // oneTurn calls the LLM once, forwards events, returns the stop reason
 // and the assembled assistant message (already appended to the transcript).
 func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.StopReason, provider.Message, error) {
@@ -620,6 +789,15 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		if err := a.prepareStart(ctx); err != nil {
 			return provider.StopError, provider.Message{}, err
 		}
+		// Collect reminders BEFORE locking: the default fn
+		// (collectReminders) takes a.mu itself. Request-only output.
+		a.mu.Lock()
+		remindersFn := a.RemindersForTurn
+		a.mu.Unlock()
+		var turnReminders []Reminder
+		if remindersFn != nil {
+			turnReminders = remindersFn()
+		}
 		a.mu.Lock()
 		// A reset can also arrive after runLoop's preparation, for example
 		// while BeforeTurn waits. Validate and snapshot under the same lock
@@ -631,15 +809,12 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		req = provider.Request{
 			Model:  a.Model,
 			System: a.System,
-			// Repair any dangling tool_use blocks before sending. A turn
-			// aborted mid-flight (cancel, connection drop, ECONNREFUSED to a
-			// dev server, etc.) can leave an assistant tool_use with no
-			// matching tool_result in the live transcript. The load-time
-			// repair in OpenSession only runs on restart, so without this the
-			// next in-process request is rejected by providers like Anthropic
-			// with "tool_use ids were found without tool_result blocks". The
-			// repair is pure and a no-op on already-valid transcripts.
-			Messages:     repairToolUseResultPairs(PruneOldToolResults(append([]provider.Message(nil), a.messages...))),
+			// Derived request context: BuildContext snapshots the live
+			// transcript and runs the pi-parity pipeline (hidden
+			// filter -> prune -> repair -> Transforms -> provider
+			// mirror -> reminders). Request-only output never
+			// feeds back into a.messages.
+			Messages:     a.BuildContextLockedWith(turnReminders, true),
 			Tools:        a.Tools.Specs(),
 			Reasoning:    a.Reasoning,
 			MaxTokens:    a.MaxTokens,
@@ -692,6 +867,12 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			sink(EvToolUseEnd{ID: e.ID})
 		case provider.EventUsage:
 			cum := a.cost.Add(e.Usage)
+			a.mu.Lock()
+			usageStore := a.store
+			a.mu.Unlock()
+			if usageStore != nil {
+				_ = usageStore.AppendUsage(e.Usage, cum)
+			}
 			sink(EvUsage{Usage: e.Usage, Cumulative: cum})
 			if a.OnUsage != nil {
 				a.OnUsage(cum)
@@ -730,21 +911,15 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		emit := finalMsg
 		suppress := false
 
-		// BeforeAssistantMessage hook: extensions can suppress or
-		// rewrite the visible text. The transcript keeps the
-		// model's original output so the model still sees what it
-		// said on subsequent turns.
-		if a.BeforeAssistantMessage != nil {
-			orig := extractText(finalMsg)
-			if orig != "" {
-				allowed, _, replacement := a.BeforeAssistantMessage(orig)
-				if !allowed {
-					suppress = true
-				} else if replacement != "" && replacement != orig {
-					emit = replaceText(finalMsg, replacement)
-				}
-			}
-		}
+		// AssistantTextTransforms: extensions suppress or rewrite
+		// visible text as stackable transforms. The transcript keeps
+		// the model's original output so the model still sees what
+		// it said on subsequent turns.
+		a.mu.Lock()
+		textTransforms := append([]AssistantTextTransform(nil), a.AssistantTextTransforms...)
+		a.mu.Unlock()
+		emit, suppressed := applyAssistantTextTransforms(finalMsg, textTransforms)
+		suppress = suppressed
 
 		a.mu.Lock()
 		a.messages = append(a.messages, finalMsg)

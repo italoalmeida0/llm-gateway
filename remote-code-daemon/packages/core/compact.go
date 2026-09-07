@@ -147,18 +147,42 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	a.rev++
 	a.setCompactionStateLocked(nextState)
 	onCompacted := a.OnTranscriptCompacted
+	onState := a.OnCompactionState
+	store := a.store
 	persisted := append([]provider.Message(nil), next...)
 	persistState := *nextState
 	a.mu.Unlock()
 
+	// Compaction checkpoints are first-class persistence rows (pi:
+	// compaction SessionEvent), not best-effort callbacks. The store
+	// write is mandatory when a store is attached; the legacy hooks
+	// stay for hosts that mirror to their own session file.
+	if store != nil {
+		if err := store.AppendCompaction(persisted, &persistState); err != nil {
+			return "", fmt.Errorf("persist compaction checkpoint: %w", err)
+		}
+	}
 	if onCompacted != nil {
 		onCompacted(persisted)
 	}
-	if a.OnCompactionState != nil {
-		a.OnCompactionState(&persistState)
+	if onState != nil {
+		onState(&persistState)
 	}
 
 	return summary, nil
+}
+
+// snapTailToUserBoundary drops leading non-user rows (orphan tool
+// results, bare assistant continuations, hidden/internal rows) so the
+// kept tail starts at a genuine user turn. It never drops the whole
+// tail: if no user row exists, the tail is returned unchanged.
+func snapTailToUserBoundary(tail []provider.Message) []provider.Message {
+	for i, m := range tail {
+		if isUserBoundary(m) {
+			return tail[i:]
+		}
+	}
+	return tail
 }
 
 // runSummarizer issues one summarization request with tool use disabled
@@ -245,6 +269,12 @@ func applyCompaction(msgs []provider.Message, plan *CompactionPlan, summary stri
 	}
 
 	tail := append([]provider.Message(nil), msgs[plan.KeepFrom:]...)
+	// User-boundary guarantee (pi: findCutPoint keepRecent): the kept
+	// tail must start at a user message. FindCutPoint already snaps
+	// forward, but plans built by older callers (or hand-made KeepFrom)
+	// may still start mid-turn — snap again defensively. Hidden and
+	// ephemeral rows never count as boundaries.
+	tail = snapTailToUserBoundary(tail)
 	tail = repairOrphanedToolResults(tail)
 
 	next := make([]provider.Message, 0, 1+len(tail))

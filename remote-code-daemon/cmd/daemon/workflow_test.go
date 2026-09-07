@@ -94,7 +94,7 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 	for _, mode := range []string{"plan", "learning", "talk"} {
 		reg := core.NewRegistry(
 			&tools.ReadTool{}, &tools.GlobTool{}, &tools.BashTool{}, &tools.PythonTool{},
-			&tools.WriteTool{}, &tools.EditTool{}, &tools.PatchTool{},
+			&tools.WriteTool{}, &tools.EditTool{},
 			&tools.SearchTool{}, &tools.InspectTool{},
 			&tools.SearchWebTool{}, &tools.FetchURLTool{},
 			&tools.TodoTool{}, &tools.QuestionTool{},
@@ -103,7 +103,7 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 		if mode == "talk" {
 			// Talk has its own assertions below (no workspace tools at all).
 		} else {
-			if reg["write"] != nil || reg["edit"] != nil || reg["patch"] != nil || reg["read"] == nil || reg["glob"] == nil || reg["todo"] == nil {
+			if reg["write"] != nil || reg["edit"] != nil || reg["read"] == nil || reg["glob"] == nil || reg["todo"] == nil {
 				t.Fatal("mode exposed the wrong file tools or lost the checklist")
 			}
 			if reg["search"] == nil || reg["inspect"] == nil {
@@ -125,7 +125,7 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 					t.Fatalf("Talk must retain %s", keep)
 				}
 			}
-			for _, drop := range []string{"read", "write", "edit", "patch", "search", "inspect", "bash", "python", "glob"} {
+			for _, drop := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob"} {
 				if reg[drop] != nil {
 					t.Fatalf("Talk must not expose %s (no workspace access)", drop)
 				}

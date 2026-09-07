@@ -1,7 +1,7 @@
 import { For, Show } from "solid-js";
 import { Streamdown } from "streamdown-solid";
 import { Icon as Iconify } from "../../../components/icon";
-import { CodeBlock, DiffView } from "../CodeBlock";
+import { CodeBlock } from "../CodeBlock";
 import type { ToolPartProps } from "./toolUnitModel";
 
 export function ToolSearchBodies(props: ToolPartProps) {
@@ -26,19 +26,6 @@ export function ToolSearchBodies(props: ToolPartProps) {
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Listing…</div>}
           >
             <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} />
-          </Show>
-        </Show>
-        <Show when={props.m.name() === "patch"}>
-          <Show
-            when={props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Previewing…</div>}
-          >
-            <Show when={props.m.args().dryRun !== false}>
-              <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
-                <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
-              </div>
-            </Show>
-            <DiffView text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} max={60} />
           </Show>
         </Show>
         <Show when={props.m.name() === "search_web"}>

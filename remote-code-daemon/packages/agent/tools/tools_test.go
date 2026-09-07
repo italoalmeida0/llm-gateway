@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/patriceckhart/zot/packages/core"
 	"github.com/patriceckhart/zot/packages/provider"
 )
 
@@ -317,17 +319,17 @@ func TestShellDescription(t *testing.T) {
 		{
 			name:  "bash",
 			shell: shellCommand{path: "/opt/bin/bash", flag: "-c", isBash: true},
-			want:  "Run a Bash command via /opt/bin/bash -c. LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), patch (not sed -i), edit (single-file fix), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
+			want:  "Run a Bash command via /opt/bin/bash -c. LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), edit (not sed -i), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
 		},
 		{
 			name:  "POSIX fallback",
 			shell: shellCommand{path: "/bin/sh", flag: "-c"},
-			want:  "Run a POSIX sh command via /bin/sh -c (Bash unavailable). LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), patch (not sed -i), edit (single-file fix), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
+			want:  "Run a POSIX sh command via /bin/sh -c (Bash unavailable). LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), edit (not sed -i), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
 		},
 		{
 			name:  "Windows",
 			shell: shellCommand{path: "cmd", flag: "/C"},
-			want:  "Run a Windows Command Prompt command via cmd /C. LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), patch (not sed -i), edit (single-file fix), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
+			want:  "Run a Windows Command Prompt command via cmd /C. LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), edit (not sed -i), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
 		},
 	}
 	for _, tt := range tests {
@@ -443,3 +445,57 @@ func TestEditLineNumbers(t *testing.T) {
 		t.Fatalf("UIContent must not contain line numbers: %q", res.UIContent)
 	}
 }
+
+func TestDumpToolsSchema(t *testing.T) {
+	allTools := []core.Tool{
+		&BashTool{},
+		&EditTool{},
+		&FetchURLTool{},
+		&GlobTool{},
+		&InspectTool{},
+		&PythonTool{},
+		&QuestionTool{},
+		&ReadTool{},
+		&SearchTool{},
+		&SearchWebTool{},
+		&TodoTool{},
+		&WriteTool{},
+	}
+
+	sort.Slice(allTools, func(i, j int) bool {
+		return allTools[i].Name() < allTools[j].Name()
+	})
+
+	type funcDef struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		Parameters  json.RawMessage `json:"parameters"`
+	}
+	type oaiTool struct {
+		Type     string  `json:"type"`
+		Function funcDef `json:"function"`
+	}
+	type toolsPayload struct {
+		Tools []oaiTool `json:"tools"`
+	}
+
+	var payload toolsPayload
+	for _, tool := range allTools {
+		payload.Tools = append(payload.Tools, oaiTool{
+			Type: "function",
+			Function: funcDef{
+				Name:        tool.Name(),
+				Description: tool.Description(),
+				Parameters:  tool.Schema(),
+			},
+		})
+	}
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal tools schema: %v", err)
+	}
+
+	t.Logf("\n=== TOOLS SCHEMA JSON ===\n%s\n=== END TOOLS SCHEMA JSON ===", string(data))
+}
+

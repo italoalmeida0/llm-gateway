@@ -1,5 +1,6 @@
-import { For, Show } from "solid-js";
+import { Show } from "solid-js";
 import { copyWithToast } from "../../../ui";
+import { Icon as Iconify } from "../../../components/icon";
 import { CodeBlock, DiffView } from "../CodeBlock";
 import { FileIcon } from "../../presentation";
 import { languageForPath } from "../../utils/lang";
@@ -10,11 +11,16 @@ export function ToolEditBodies(props: ToolPartProps) {
 <>
         {/* Context body per tool kind (scrollable, always inline — the
             collapsible rows already are the "open file/diff" view). */}
-        <Show when={props.m.name() === "edit" && props.u.result?.toolResult}>
+        <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && props.u.result?.toolResult}>
+          <Show when={props.m.args().dryRun === true}>
+            <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+              <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
+            </div>
+          </Show>
           <DiffView
             text={props.u.result?.toolResult || ""}
-            max={40}
-            name={String(props.m.args().path || "")}
+            max={60}
+            name={String(props.m.args().path || props.m.args().file || "")}
           />
           <div class="flex items-center gap-2 px-3 py-1.5 border-t border-line/50">
             <button
@@ -25,8 +31,15 @@ export function ToolEditBodies(props: ToolPartProps) {
             </button>
           </div>
         </Show>
-        <Show when={props.m.name() === "edit" && !props.u.result}>
-          <For each={props.m.args().edits || []}>{(edit) => <DiffView text={`${String(edit.oldText || "").split("\n").map((s) => "-" + s).join("\n")}\n${String(edit.newText || "").split("\n").map((s) => "+" + s).join("\n")}`} name={String(props.m.args().path || "")} />}</For>
+        <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && !props.u.result}>
+          <Show when={props.m.args().dryRun === true}>
+            <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+              <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
+            </div>
+          </Show>
+          <div class="px-3 py-2 text-[11px] text-ink-600">
+            {props.m.args().dryRun === true ? "Previewing edit…" : "Applying edit…"}
+          </div>
         </Show>
         <Show when={props.m.name() === "read"}>
           <Show

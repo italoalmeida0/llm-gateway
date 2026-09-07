@@ -85,7 +85,7 @@ func (d *DaemonServer) configureSession(raw []byte) {
 // renders these as capability badges in the mode picker (10/10 visibility),
 // and restrictModeTools enforces the write/patch side below.
 var modeCapabilities = map[string][]string{
-	"build":    {"read", "write", "edit", "patch", "search", "inspect", "bash", "python", "glob", "question", "todo", "search_web", "fetch_url"},
+	"build":    {"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "question", "todo", "search_web", "fetch_url"},
 	"plan":     {"read", "search", "inspect", "bash", "glob", "question", "todo", "search_web", "fetch_url"},
 	"learning": {"read", "search", "inspect", "bash", "glob", "question", "todo", "search_web", "fetch_url"},
 	"talk":     {"question", "search_web", "fetch_url", "todo"},
@@ -105,7 +105,7 @@ func ModeCapabilities(mode string) []string {
 func modeInstructions(mode string) string {
 	switch mode {
 	case "plan":
-		return "You are in Plan mode. Inspect the project using read, search, inspect, glob and shell commands (bash/python for read-only exploration), and produce an actionable implementation plan with relevant files, tradeoffs and validation. Git status/diff/log are available for context. Use the question tool to clarify requirements, confirm uncertain assumptions and get user decisions before finalizing your plan. Do not repeat questions the user already answered. Do not modify files or implement changes; write, edit and patch tools are unavailable. Ask the user to switch to Build when ready to implement."
+		return "You are in Plan mode. Inspect the project using read, search, inspect, glob and shell commands (bash/python for read-only exploration), and produce an actionable implementation plan with relevant files, tradeoffs and validation. Git status/diff/log are available for context. Use the question tool to clarify requirements, confirm uncertain assumptions and get user decisions before finalizing your plan. Do not repeat questions the user already answered. Do not modify files or implement changes; write and edit tools are unavailable. Ask the user to switch to Build when ready to implement."
 	case "talk":
 		return "You are in Talk mode, a conversational agent. Chat naturally — answer questions, explain concepts, compare options, summarize docs. Your training data has a cutoff: for anything time-sensitive (versions, releases, prices, docs, APIs, news, current best practices) or any fact you are not SURE about, RESEARCH FIRST with search_web and then fetch_url on the most relevant hits before answering — never guess when you can verify in seconds. Prefer primary sources (official docs, changelogs, repos) over blog summaries. Always cite the URLs you used inline so the user can check. Use the question tool when the request is ambiguous and a quick clarification would change the answer. Never touch the workspace: no reading, editing, creating or executing files, no shell, no git. If the user asks for implementation, ask them to switch to Build; for a plan, switch to Plan."
 	case "learning":
@@ -120,15 +120,15 @@ Wait for each answer, adapt the next hint, and use an unrelated example if they 
 func restrictModeTools(reg core.Registry, mode string) {
 	switch mode {
 	case "plan":
-		// Plan explores freely but never mutates: no file writes, no patch.
+		// Plan explores freely but never mutates: no file writes.
 		// (Bash/python still allowed for read-only inspection; the sandbox
 		// permission prompt remains the backstop for destructive commands.)
 		delete(reg, "write")
 		delete(reg, "edit")
 		delete(reg, "patch")
 	case "learning":
-		// Learning is read-only plus guidance: no writes, no patch, no
-		// execution at all (observe via read/search/inspect), no git writes.
+		// Learning is read-only plus guidance: no writes, no execution at all
+		// (observe via read/search/inspect), no git writes.
 		delete(reg, "write")
 		delete(reg, "edit")
 		delete(reg, "patch")
@@ -137,9 +137,10 @@ func restrictModeTools(reg core.Registry, mode string) {
 	case "talk":
 		// Talk is conversational: only question + web research + checklist.
 		// No workspace access at all (not even read) — pure Q&A.
-		for _, name := range []string{"read", "write", "edit", "patch", "search", "inspect", "bash", "python", "glob"} {
+		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob"} {
 			delete(reg, name)
 		}
+		delete(reg, "patch")
 	}
 }
 
@@ -177,7 +178,7 @@ func sessionSystemPrompt(cfg DaemonConfig, cwd string, options SessionOptions) s
 	prompt.WriteString("You are an expert autonomous AI software engineering agent running directly on the user's machine.\n")
 	fmt.Fprintf(&prompt, "Working Directory: %s\n", cwd)
 	prompt.WriteString(modeInstructions(options.Mode) + "\n")
-	prompt.WriteString("File tools (read, write, edit, patch) prefix lines with \"<number>:\" for line identification. This prefix is NOT part of the file content. When using edit or patch, never include \"<number>:\" in oldText or newText.\n")
+	prompt.WriteString("File tools (read, write, edit) prefix lines with \"<number>:\" for line identification. This prefix is NOT part of the file content. When using edit, never include \"<number>:\" in oldText or newText.\n")
 	prompt.WriteString("Use the todo tool to maintain a visible checklist for multi-step work. Update it as steps start and finish.\n")
 	prompt.WriteString("Use the question tool when you need user preferences, clarification or implementation decisions. It waits for explicit answers, including in Full access mode.\n")
 	if cfg.Settings.JailByDefault {

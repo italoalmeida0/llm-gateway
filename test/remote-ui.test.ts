@@ -260,11 +260,17 @@ describe("Remote Code toolSummary", () => {
       call: { type: "tool_call", toolId: "i2", toolName: "inspect", toolArgs: "{}" }
     })).toEqual({ icon: "lucide:folder-tree", verb: "Inspect", target: "workspace" });
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "p1", toolName: "patch", toolArgs: JSON.stringify({ edits: [{ file: "a.ts", old: "x", new: "y" }, { file: "b.ts", old: "1", new: "2" }] }) }
+      call: { type: "tool_call", toolId: "p1", toolName: "patch", toolArgs: JSON.stringify({ dryRun: true, edits: [{ file: "a.ts", old: "x", new: "y" }, { file: "b.ts", old: "1", new: "2" }] }) }
     })).toEqual({ icon: "lucide:file-diff", verb: "Preview patch", target: "a.ts, b.ts" });
     expect(toolSummary({
       call: { type: "tool_call", toolId: "p2", toolName: "patch", toolArgs: JSON.stringify({ dryRun: false, edits: [{ file: "a.ts", old: "x", new: "y" }] }) }
     })).toEqual({ icon: "lucide:file-diff", verb: "Patch", target: "a.ts" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "e1", toolName: "edit", toolArgs: JSON.stringify({ dryRun: true, edits: [{ file: "a.ts", old: "x", new: "y" }] }) }
+    })).toEqual({ icon: "lucide:file-diff", verb: "Preview edit", target: "a.ts" });
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "e2", toolName: "edit", toolArgs: JSON.stringify({ edits: [{ file: "a.ts", old: "x", new: "y" }] }) }
+    })).toEqual({ icon: "lucide:file-diff", verb: "Edited", target: "a.ts" });
   });
   test("summarizes search_web and fetch_url calls", () => {
     expect(toolSummary({

@@ -93,6 +93,9 @@ func (r Registry) Specs() []provider.Tool {
 // Get looks up a tool by name.
 func (r Registry) Get(name string) (Tool, error) {
 	t, ok := r[name]
+	if !ok && name == "patch" {
+		t, ok = r["edit"]
+	}
 	if !ok {
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}

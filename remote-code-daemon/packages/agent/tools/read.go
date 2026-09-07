@@ -34,17 +34,13 @@ type readArgs struct {
 	Path   string `json:"path"`
 	Offset int    `json:"offset,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
-	// ShowLineNumbers prefixes each line with its 1-indexed number
-	// (cat -n style). Default false to save tokens; enable when the
-	// caller needs to cite exact lines (e.g. before an edit).
-	ShowLineNumbers bool `json:"showLineNumbers,omitempty"`
 }
 
-const readSchema = `{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"},"showLineNumbers":{"type":"boolean","description":"Prefix lines with 1-indexed numbers (cat -n). Default false."}},"required":["path"]}`
+const readSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to read (absolute or relative to working directory)."},"offset":{"type":"integer","description":"1-indexed line number to start reading from (default: 1)."},"limit":{"type":"integer","description":"Maximum number of lines to read (default: 2000, capped at 2000 or 50KB)."}},"required":["path"]}`
 
 func (t *ReadTool) Name() string { return "read" }
 func (t *ReadTool) Description() string {
-	return "Read a file with line-range paging (offset/limit) and totalLines in Details. Images (png/jpg/gif/webp) return inline. Pass showLineNumbers:true when you need to cite exact lines. To FIND text first use search, then open hits here — never grep + read."
+	return "Read a file with line-range paging (offset/limit) and totalLines in Details. Images (png/jpg/gif/webp) return inline. To FIND text first use search, then open hits here — never grep + read."
 }
 func (t *ReadTool) Schema() json.RawMessage { return json.RawMessage(readSchema) }
 
@@ -170,13 +166,12 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		Content:   []provider.Content{provider.TextBlock{Text: aiSb.String()}},
 		UIContent: rawSb.String(),
 		Details: map[string]any{
-			"path":              path,
-			"start_line":        start + 1, // 1-indexed; TUI draws the gutter
-			"lines_truncated":   truncLines,
-			"bytes_truncated":   truncBytes,
-			"total_lines":       len(lines),
-			"totalLines":        len(lines),
-			"show_line_numbers": a.ShowLineNumbers,
+			"path":            path,
+			"start_line":      start + 1, // 1-indexed; TUI draws the gutter
+			"lines_truncated": truncLines,
+			"bytes_truncated": truncBytes,
+			"total_lines":     len(lines),
+			"totalLines":      len(lines),
 		},
 	}, nil
 }

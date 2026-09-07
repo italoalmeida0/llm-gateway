@@ -103,23 +103,6 @@ export function ToolbarContext() {
         <Iconify icon={access.icon} size={19} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /><span class="flex-1"><span class={`font-medium ${access.full ? "text-amber-800 dark:text-amber-200" : "text-ink-100"}`}>{access.label}</span><span class={`block mt-1 text-[11px] ${access.full ? "text-amber-800/80 dark:text-amber-200/80" : "text-ink-500"}`}>{access.description}</span></span><Show when={c.yoloMode() === access.full}><Iconify icon="lucide:check" size={14} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /></Show>
       </button>
     }</For>
-    <Show when={c.agentMode() !== "build"}>
-      <div class="px-2 py-2">
-        <p class="text-[11px] text-ink-500">{c.agentMode() === "plan" ? "Plan explores freely but never mutates. Edit, create and patch are disabled." : c.agentMode() === "talk" ? "Talk chats with web research. No workspace access at all." : "Learning observes read-only. Edit, create, patch and code execution are disabled."}</p>
-        <div class="mt-1.5 flex flex-wrap gap-1">
-          <For each={c.agentMode() === "plan"
-            ? ["read", "search", "inspect", "bash", "glob", "question", "todo", "search_web", "fetch_url"]
-            : c.agentMode() === "talk"
-            ? ["question", "search_web", "fetch_url", "todo"]
-            : ["read", "search", "inspect", "glob", "question", "todo", "search_web", "fetch_url"]}>
-            {(cap) => <span class="rounded-md bg-ink-700/60 px-1.5 py-px font-mono text-[10px] text-ink-300">{cap}</span>}
-          </For>
-          <For each={c.agentMode() === "plan" ? ["write", "edit", "patch"] : c.agentMode() === "talk" ? ["read", "write", "edit", "patch", "search", "inspect", "bash", "python", "glob"] : ["write", "edit", "patch", "bash", "python"]}>
-            {(cap) => <span class="rounded-md border border-line/60 px-1.5 py-px font-mono text-[10px] text-ink-600 line-through">{cap}</span>}
-          </For>
-        </div>
-      </div>
-    </Show>
   </FloatMenu>
 </div>
 </>

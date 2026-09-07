@@ -179,14 +179,23 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       const target = args.path && String(args.path) !== "." ? String(args.path) : "workspace";
       return { icon: "lucide:folder-tree", verb: "Inspect", target };
     }
-    case "patch": {
+    case "patch":
+    case "edit": {
       const edits = Array.isArray(args.edits) ? args.edits : [];
-      const files = [...new Set(edits.map((e: any) => baseNameOf(e?.file) || e?.file).filter(Boolean))];
+      const files = [...new Set([
+        args.path ? (baseNameOf(args.path) || args.path) : null,
+        args.file ? (baseNameOf(args.file) || args.file) : null,
+        ...edits.map((e: any) => baseNameOf(e?.file || e?.path) || e?.file || e?.path),
+      ].filter(Boolean))];
       const shown = files.slice(0, 3).join(", ") + (files.length > 3 ? ` +${files.length - 3}` : "");
+      const isPreview = args.dryRun === true;
+      const verb = isPreview ? (name === "patch" ? "Preview patch" : "Preview edit") : (name === "patch" ? "Patch" : "Edited");
+      const st = diffStat(res);
       return {
         icon: "lucide:file-diff",
-        verb: args.dryRun === false ? "Patch" : "Preview patch",
-        target: shown || `${edits.length} edit${edits.length === 1 ? "" : "s"}`,
+        verb,
+        target: shown || (baseNameOf(args.path) || args.path || `${edits.length} edit${edits.length === 1 ? "" : "s"}`),
+        ...(st.add > 0 || st.del > 0 ? { statAdd: st.add, statDel: st.del } : {}),
       };
     }
     case "search_web": {
@@ -241,16 +250,6 @@ export function toolSummary(u: ToolUnit): ToolSummary {
         verb: "Created",
         target: baseNameOf(args.path) || args.path || "file",
         stat: n > 0 ? `${n} lines` : undefined,
-      };
-    }
-    case "edit": {
-      const st = diffStat(res);
-      return {
-        icon: "lucide:pencil",
-        verb: "Edited",
-        target: baseNameOf(args.path) || args.path || "file",
-        statAdd: st.add,
-        statDel: st.del,
       };
     }
     default:

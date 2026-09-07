@@ -54,7 +54,7 @@ func (t *InspectTool) Description() string {
 	return "List a directory tree with sizes, line counts and git status flags. Params: `path` (default '.'), `depth` (default 1, max 5), `showHidden` (default false), `gitStatus` (default true), `maxEntries` (default 200, max 1000), `include`/`exclude` globs. Single files report size + line count + git flag."
 }
 
-const inspectSchema = `{"type":"object","properties":{"path":{"type":"string"},"depth":{"type":"number"},"showHidden":{"type":"boolean"},"gitStatus":{"type":"boolean"},"maxEntries":{"type":"number"},"include":{"type":"array","items":{"type":"string"}},"exclude":{"type":"array","items":{"type":"string"}}}}`
+const inspectSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Directory or file path to inspect (defaults to '.')."},"depth":{"type":"number","description":"Maximum directory recursion depth (default 1, max 5)."},"showHidden":{"type":"boolean","description":"Include hidden files and dotfiles (default false)."},"gitStatus":{"type":"boolean","description":"Annotate files with git status flags (M/A/D/??) (default true)."},"maxEntries":{"type":"number","description":"Maximum entries to return (default 200, max 1000)."},"include":{"type":"array","items":{"type":"string"},"description":"Glob patterns to include."},"exclude":{"type":"array","items":{"type":"string"},"description":"Glob patterns to exclude."}}}`
 
 func (t *InspectTool) Schema() json.RawMessage { return json.RawMessage(inspectSchema) }
 

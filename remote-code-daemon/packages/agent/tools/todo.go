@@ -24,7 +24,7 @@ func (*TodoTool) Description() string {
 	return "Create or update the visible task checklist. Send the full list, keep at most one item in_progress, and mark finished work completed. Use for multi-step tasks and keep it current as work progresses."
 }
 func (*TodoTool) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"items":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["id","text","status"]}}},"required":["items"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"items":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"id":{"type":"string","description":"Unique task identifier."},"text":{"type":"string","description":"Task description."},"status":{"type":"string","enum":["pending","in_progress","completed"],"description":"Task status."}},"required":["id","text","status"]}}},"required":["items"]}`)
 }
 func (t *TodoTool) Execute(ctx context.Context, raw json.RawMessage, _ func(string)) (core.ToolResult, error) {
 	var req struct {

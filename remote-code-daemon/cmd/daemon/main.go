@@ -2390,7 +2390,6 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		&tools.GlobTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.SearchTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.InspectTool{CWD: sessionCWD, Sandbox: sb},
-		&tools.PatchTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.SearchWebTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.FetchURLTool{CWD: sessionCWD, Sandbox: sb},
 	}

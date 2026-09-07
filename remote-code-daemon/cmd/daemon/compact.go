@@ -67,6 +67,11 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 	agent := core.NewAgent(client, model, "", core.NewRegistry())
 	agent.MaxTokens = maxOutputTokens(info)
 	agent.SetMessages(messages)
+	// Seed the incremental chain so manual /compact keeps updating the
+	// previous summary instead of re-summarizing from scratch (pi parity).
+	// Explicit keep-tail: manual compaction always honors the request,
+	// even on short transcripts, preserving ~70% as the recent tail.
+	agent.SeedCompactionState(act.record.Compaction)
 	_, err := agent.Compact(ctx, max(2, len(messages)*7/10), nil)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -80,6 +85,7 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 		return
 	}
 	act.record.Messages = append([]provider.Message(nil), agent.Messages()...)
+	act.record.Compaction = agent.CompactionChain()
 	act.record.Context = estimateContext(agent, info)
 	act.record.UpdatedAt = time.Now().UnixMilli()
 	_ = d.saveSession(act.record)

@@ -37,6 +37,12 @@ type Session struct {
 	// freshFile it tells Close() whether the session left any content
 	// worth keeping.
 	messagesAppended int
+
+	// compaction is the incremental chain head ported from pi's
+	// CompactionEntry: previous summary + file ops + cut anchor. It is
+	// written to the session file on every compaction row so restarts
+	// keep chaining instead of re-summarizing from scratch.
+	compaction *CompactionState
 }
 
 // SessionMeta is written as the first line of every session file.
@@ -75,6 +81,10 @@ type sessionLine struct {
 	Messages   []provider.Message `json:"messages,omitempty"`
 	Usage      *provider.Usage    `json:"usage,omitempty"`
 	Cumulative *provider.Usage    `json:"cumulative,omitempty"`
+	// Compaction carries the incremental chain head (previous summary +
+	// file ops + cut anchor) on compaction rows. Old readers ignore it;
+	// new readers restore it so the next summarization is an update.
+	Compaction *CompactionState `json:"compaction,omitempty"`
 }
 
 type sessionLineHead struct {
@@ -250,6 +260,7 @@ func OpenSession(path string) (*Session, []provider.Message, error) {
 
 	var meta SessionMeta
 	var messages []provider.Message
+	var chainHead *CompactionState
 	if err := forEachJSONLLine(f, func(line []byte) error {
 		var head sessionLineHead
 		if err := json.Unmarshal(line, &head); err != nil {
@@ -268,8 +279,9 @@ func OpenSession(path string) (*Session, []provider.Message, error) {
 				messages = append(messages, msg)
 			}
 		case "compaction":
-			if compacted, err := hydrateCompaction(line); err == nil {
+			if compacted, state, err := hydrateCompactionWithState(line); err == nil {
 				messages = compacted
+				chainHead = state
 			}
 		}
 		return nil
@@ -281,7 +293,7 @@ func OpenSession(path string) (*Session, []provider.Message, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	s := &Session{ID: meta.ID, Path: path, Meta: meta, writer: out, buf: bufio.NewWriter(out)}
+	s := &Session{ID: meta.ID, Path: path, Meta: meta, writer: out, buf: bufio.NewWriter(out), compaction: chainHead}
 	return s, messages, nil
 }
 
@@ -708,15 +720,39 @@ func (s *Session) AppendMessage(m provider.Message) error {
 // transcript rows when the session is resumed. The old rows remain in
 // the JSONL file for audit/export, while loaders use the latest
 // compaction row as the effective transcript.
-func (s *Session) AppendCompaction(messages []provider.Message) error {
+//
+// state is the incremental chain head (previous summary + merged file
+// ops + cut anchor + count). It is persisted on the row so the next
+// compaction — even after a restart — builds an update prompt instead
+// of re-summarizing from scratch, exactly like pi's CompactionEntry.
+func (s *Session) AppendCompaction(messages []provider.Message, state *CompactionState) error {
 	if s == nil {
 		return nil
 	}
-	if err := s.writeLine(sessionLine{Type: "compaction", Messages: messages}); err != nil {
+	if err := s.writeLine(sessionLine{Type: "compaction", Messages: messages, Compaction: state}); err != nil {
 		return err
 	}
 	s.messagesAppended = len(messages)
+	s.compaction = state
 	return nil
+}
+
+// CompactionState returns the session's incremental compaction chain
+// head, or nil when no compaction has run yet.
+func (s *Session) CompactionState() *CompactionState {
+	if s == nil {
+		return nil
+	}
+	return s.compaction
+}
+
+// SetCompactionState replaces the in-memory chain head without writing.
+// Used when hydrating state from a compaction row read back from disk.
+func (s *Session) SetCompactionState(state *CompactionState) {
+	if s == nil {
+		return
+	}
+	s.compaction = state
 }
 
 // UpdateModel records a provider/model switch in the session file.
@@ -783,11 +819,21 @@ func (s *Session) writeLine(row sessionLine) error {
 // rebuilding Content from discriminated fields.
 
 func hydrateCompaction(lineBytes []byte) ([]provider.Message, error) {
+	msgs, _, err := hydrateCompactionWithState(lineBytes)
+	return msgs, err
+}
+
+// hydrateCompactionWithState additionally restores the incremental chain
+// head (previous summary + file ops + cut anchor) persisted on the row.
+// Old rows without the payload hydrate with a nil state, exactly like a
+// session that was never compacted.
+func hydrateCompactionWithState(lineBytes []byte) ([]provider.Message, *CompactionState, error) {
 	var row struct {
-		Messages []json.RawMessage `json:"messages"`
+		Messages   []json.RawMessage `json:"messages"`
+		Compaction *CompactionState  `json:"compaction"`
 	}
 	if err := json.Unmarshal(lineBytes, &row); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	messages := make([]provider.Message, 0, len(row.Messages))
 	for _, raw := range row.Messages {
@@ -796,7 +842,7 @@ func hydrateCompaction(lineBytes []byte) ([]provider.Message, error) {
 			messages = append(messages, msg)
 		}
 	}
-	return messages, nil
+	return messages, row.Compaction, nil
 }
 
 func hydrateMessage(lineBytes []byte) (provider.Message, error) {

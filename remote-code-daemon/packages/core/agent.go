@@ -107,6 +107,14 @@ type Agent struct {
 	// wholesale transcript replacement.
 	OnTranscriptCompacted func(messages []provider.Message)
 
+	// OnCompactionState, if set, fires alongside OnTranscriptCompacted
+	// with the new incremental chain head (previous summary + merged
+	// file ops + cut anchor + count). Hosts persist it on the
+	// compaction row so the next summarization — even after a restart —
+	// is an update, not a from-scratch re-summary. Port of pi's
+	// CompactionEntry chaining.
+	OnCompactionState func(state *CompactionState)
+
 	// Preparation caches the effective prompt separately from its unmodified
 	// base so a model or session reset cannot stack extension appendices.
 	startPrepared                                    bool
@@ -115,6 +123,10 @@ type Agent struct {
 
 	mu       sync.Mutex
 	messages []provider.Message
+	// compactionState is the incremental chain head ported from pi's
+	// CompactionEntry. Seeded from the session file on resume
+	// (SeedCompactionState) and advanced by every Compact call.
+	compactionState *CompactionState
 	// rev increments whenever the transcript slice is replaced or a
 	// message is appended. The TUI uses it as a cheap redraw cache key
 	// so editor-only typing doesn't copy/rebuild a long transcript on

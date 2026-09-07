@@ -122,6 +122,12 @@ type SessionRecord struct {
 	UpdatedAt   int64              `json:"updated_at"`
 	Messages    []provider.Message `json:"messages"`
 	Attachments []AttachmentRef    `json:"attachments,omitempty"`
+	// Compaction is the incremental chain head ported from pi's
+	// CompactionEntry (previous summary + file ops + cut anchor +
+	// count). Persisted on every compaction so the next summarization
+	// — even after a daemon restart — builds an update prompt instead
+	// of re-summarizing from scratch. Old frontends ignore it.
+	Compaction *core.CompactionState `json:"compaction,omitempty"`
 }
 
 // SessionSummary is returned to the web client for listing.
@@ -587,24 +593,25 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		return nil, err
 	}
 	var rawRec struct {
-		Turn           *TurnActivity     `json:"turn"`
-		Todos          []tools.TodoItem  `json:"todos"`
-		Options        SessionOptions    `json:"options"`
-		ID             string            `json:"id"`
-		CWD            string            `json:"cwd"`
-		Title          string            `json:"title"`
-		TitleSource    string            `json:"title_source"`
-		Usage          provider.Usage    `json:"usage"`
-		Context        *SessionContext   `json:"context"`
-		Model          string            `json:"model"`
-		Status         string            `json:"status"`
-		Pinned         bool              `json:"pinned"`
-		CreatedAt      int64             `json:"createdAt"`
-		UpdatedAt      int64             `json:"updatedAt"`
-		CreatedAtSnake int64             `json:"created_at"`
-		UpdatedAtSnake int64             `json:"updated_at"`
-		Messages       []json.RawMessage `json:"messages"`
-		Attachments    []AttachmentRef   `json:"attachments"`
+		Turn           *TurnActivity         `json:"turn"`
+		Todos          []tools.TodoItem      `json:"todos"`
+		Options        SessionOptions        `json:"options"`
+		ID             string                `json:"id"`
+		CWD            string                `json:"cwd"`
+		Title          string                `json:"title"`
+		TitleSource    string                `json:"title_source"`
+		Usage          provider.Usage        `json:"usage"`
+		Context        *SessionContext       `json:"context"`
+		Model          string                `json:"model"`
+		Status         string                `json:"status"`
+		Pinned         bool                  `json:"pinned"`
+		CreatedAt      int64                 `json:"createdAt"`
+		UpdatedAt      int64                 `json:"updatedAt"`
+		CreatedAtSnake int64                 `json:"created_at"`
+		UpdatedAtSnake int64                 `json:"updated_at"`
+		Messages       []json.RawMessage     `json:"messages"`
+		Attachments    []AttachmentRef       `json:"attachments"`
+		Compaction     *core.CompactionState `json:"compaction,omitempty"`
 	}
 	if err := json.Unmarshal(data, &rawRec); err != nil {
 		return nil, err
@@ -630,6 +637,7 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,
 		Attachments: rawRec.Attachments,
+		Compaction:  rawRec.Compaction,
 	}
 	for _, mBytes := range rawRec.Messages {
 		msg, err := core.HydrateMessageObject(mBytes)
@@ -2492,6 +2500,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		agent.SetMessages(act.record.Messages)
 	}
 	agent.SeedCost(act.record.Usage)
+	agent.SeedCompactionState(act.record.Compaction)
 	act.agent = agent
 	act.mu.Unlock()
 
@@ -2515,6 +2524,14 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 
 	// Persistent compaction hook: whenever transcript is auto-compacted, record and broadcast it
+	agent.OnCompactionState = func(state *core.CompactionState) {
+		act.mu.Lock()
+		defer act.mu.Unlock()
+		if act.gen != myGen {
+			return
+		}
+		act.record.Compaction = state
+	}
 	agent.OnTranscriptCompacted = func(msgs []provider.Message) {
 		act.mu.Lock()
 		if act.gen != myGen {
@@ -2522,6 +2539,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 			return
 		}
 		act.record.Messages = append([]provider.Message(nil), msgs...)
+		act.record.Compaction = agent.CompactionChain()
 		act.record.UpdatedAt = time.Now().UnixMilli()
 		act.record.Context = estimateContext(agent, modelInfo)
 		rec := *act.record
@@ -2737,18 +2755,26 @@ func (d *DaemonServer) maybeAutoCompact(ctx context.Context, act *ActiveSession,
 	if n <= 4 {
 		return
 	}
-	used := contextFromUsage(agent.LastTurnUsage(), model).UsedTokens
-	if used <= 0 {
-		used = estimateContext(agent, model).UsedTokens
-	}
 	window := model.ContextWindow
 	if window <= 0 {
 		return
 	}
-	// OpenCode usable formula: contextWindow - outputBudget - 20,000 buffer
+	// pi-style trigger port: cumulative usage + trailing-context estimate
+	// (messages after the last usage snapshot) vs window minus reserve.
+	// The configured threshold (default 85) is kept as an additional
+	// early-trip wire; the reserve check is authoritative.
+	used := core.UsageTotal(agent.Cost()) + core.TrailingTokens(agent.Messages(), agent.Cost())
+	if used <= 0 {
+		used = estimateContext(agent, model).UsedTokens
+	}
+	needsCompact := core.ShouldCompact(window, core.UsageTotal(agent.Cost()), core.TrailingTokens(agent.Messages(), agent.Cost()))
+	if !needsCompact && threshold > 0 {
+		needsCompact = (used*100 >= threshold*window)
+	}
+	// OpenCode usable formula stays as a final safety net:
+	// contextWindow - outputBudget - 20,000 buffer.
 	outputCap := maxOutputTokens(model)
 	usable := window - outputCap - 20000
-	needsCompact := (used*100 >= threshold*window)
 	if usable > 0 && used >= usable {
 		needsCompact = true
 	}
@@ -2783,6 +2809,7 @@ func (d *DaemonServer) maybeAutoCompact(ctx context.Context, act *ActiveSession,
 		return
 	}
 	act.record.Messages = append([]provider.Message(nil), agent.Messages()...)
+	act.record.Compaction = agent.CompactionChain()
 	act.record.UpdatedAt = time.Now().UnixMilli()
 	act.record.Context = estimateContext(agent, model)
 	rec := *act.record

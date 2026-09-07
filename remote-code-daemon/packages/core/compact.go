@@ -21,34 +21,154 @@ import (
 // The method blocks until the summary request completes. Emitted
 // events via sink are limited to text deltas from the summary call so
 // the UI can show progress.
+// Compact summarizes the agent's transcript via the LLM and splices the
+// summary back in, preserving a recent tail verbatim. This is a faithful
+// port of pi's compactConversation + applyCompaction:
+//
+//   - cut point via FindCutPoint (tool-boundary-safe, split-turn aware)
+//   - keep floor = max(CompactionKeepRecentTokens, 30% of transcript
+//     tokens) — the hybrid window: pi-faithful on small windows, sane on
+//     1M-token windows
+//   - initial vs update summarization prompts (incremental chaining via
+//     the persisted CompactionState)
+//   - file-ops tracking (read/modified) carried across compactions
+//   - summarizer guards: reject empty summaries, tool calls, and
+//     length-truncated output (stop=length), with one retry
+//   - orphaned tool_result repair on the spliced transcript
+//
+// keepTail, when > 0, overrides the computed keep floor with an exact
+// message count (used by manual /compact callers and tests). 0 means
+// "compute from the hybrid window".
+//
+// The method blocks until the summary request completes. Emitted events
+// via sink are limited to text deltas from the summary call so the UI
+// can show progress. Returns the raw summary text.
 func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta string)) (summary string, err error) {
 	a.mu.Lock()
 	msgs := append([]provider.Message(nil), a.messages...)
+	state := a.compactionStateLocked()
 	a.mu.Unlock()
 
 	if len(msgs) == 0 {
 		return "", fmt.Errorf("nothing to compact")
 	}
-	if keepTail <= 0 {
-		keepTail = calculateKeepTail(msgs)
+	if len(msgs) < CompactionMinMessages && keepTail <= 0 {
+		return "", fmt.Errorf("nothing to compact: transcript below minimum (%d messages)", CompactionMinMessages)
 	}
-	if keepTail > len(msgs) {
-		keepTail = len(msgs)
+
+	keepTokens := hybridKeepFloor(msgs)
+	keepFrom := len(msgs)
+	if keepTail > 0 {
+		keepFrom = len(msgs) - keepTail
+		if keepFrom < 0 {
+			keepFrom = 0
+		}
+	} else {
+		keepFrom = FindCutPoint(msgs, keepTokens).Index
 	}
-	summarizable := msgs[:len(msgs)-keepTail]
-	if len(summarizable) == 0 {
+	// pi parity on the auto path: when the whole transcript fits under
+	// the keep floor, FindCutPoint returns 0 — meaning "nothing worth
+	// summarizing". Report it instead of force-halving the transcript,
+	// which would drop history without need. Explicit keepTail callers
+	// (manual /compact, overflow retry) asked for that exact split.
+	if keepFrom <= 0 {
+		if keepTail > 0 {
+			keepFrom = len(msgs) / 2
+			if keepFrom <= 0 {
+				keepFrom = 1
+			}
+		} else {
+			return "", fmt.Errorf("nothing to compact: transcript fits under the keep floor")
+		}
+	}
+	if keepFrom >= len(msgs) {
 		return "", fmt.Errorf("nothing to compact: keep-tail covers the whole transcript")
 	}
 
-	// Serialize the summarizable transcript to text and wrap it in tags
-	// so the model treats it as material to summarize, not to continue.
-	transcript := serializeTranscript(summarizable)
+	plan := PrepareCompaction(msgs, state, keepTokens)
+	// When the caller forced an explicit keepTail, re-cut the plan to it.
+	if keepTail > 0 {
+		window := msgs[:keepFrom]
+		ops := ExtractFileOps(window)
+		plan = &CompactionPlan{
+			Summarize:   window,
+			KeepFrom:    keepFrom,
+			WindowOps:   ops,
+			FileOpsNote: FormatFileOperations(ops),
+		}
+		conversation := SerializeConversation(window)
+		if state != nil && state.PreviousSummary != "" {
+			plan.Incremental = true
+			merged := FileOps{
+				Read:     MergeFileOps(state.ReadFiles, ops.Read),
+				Modified: MergeFileOps(state.ModifiedFiles, ops.Modified),
+			}
+			plan.FileOpsNote = FormatFileOperations(merged)
+			plan.Prompt = UpdateSummarizationPrompt(state.PreviousSummary, conversation, plan.FileOpsNote)
+		} else {
+			plan.Prompt = InitialSummarizationPrompt(conversation)
+		}
+	}
 
-	prompt := "<conversation>\n" + transcript + "\n</conversation>\n\n" + compactionPrompt
+	summary, stopLen, err := a.runSummarizer(ctx, plan.Prompt, sink)
+	if err != nil {
+		return "", err
+	}
+	if stopLen {
+		// pi rejects length-truncated summaries and retries once with a
+		// smaller window before giving up.
+		retryFrom := keepFrom + (len(msgs)-keepFrom)/2
+		if retryFrom >= len(msgs) {
+			return "", fmt.Errorf("summary truncated by length; transcript too short to retry")
+		}
+		retryPlan := PrepareCompaction(msgs[retryFrom-len(plan.Summarize):], state, keepTokens)
+		_ = retryPlan
+		smaller := PrepareCompaction(msgs[:retryFrom], state, keepTokens)
+		summary, stopLen, err = a.runSummarizer(ctx, smaller.Prompt, sink)
+		if err != nil {
+			return "", err
+		}
+		if stopLen {
+			return "", fmt.Errorf("summary truncated by length after retry")
+		}
+		plan = smaller
+		keepFrom = smaller.KeepFrom
+	}
 
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return "", fmt.Errorf("empty summary from model")
+	}
+
+	next, nextState := applyCompaction(msgs, plan, summary, state)
+
+	a.mu.Lock()
+	a.messages = next
+	a.rev++
+	a.setCompactionStateLocked(nextState)
+	onCompacted := a.OnTranscriptCompacted
+	persisted := append([]provider.Message(nil), next...)
+	persistState := *nextState
+	a.mu.Unlock()
+
+	if onCompacted != nil {
+		onCompacted(persisted)
+	}
+	if a.OnCompactionState != nil {
+		a.OnCompactionState(&persistState)
+	}
+
+	return summary, nil
+}
+
+// runSummarizer issues one summarization request with tool use disabled
+// and cache bypassed (port of pi's retryAssistantCall with
+// cacheRetention:none). It rejects assistant tool calls outright and
+// reports whether the turn stopped for length.
+func (a *Agent) runSummarizer(ctx context.Context, prompt string, sink func(delta string)) (string, bool, error) {
 	req := provider.Request{
 		Model:       a.Model,
-		System:      summarizationSystem,
+		System:      SummarizationSystemPrompt,
 		MaxTokens:   4096,
 		Temperature: a.Temperature,
 		SessionID:   a.SessionID,
@@ -57,16 +177,19 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 				Role:    provider.RoleUser,
 				Content: []provider.Content{provider.TextBlock{Text: prompt}},
 				Time:    time.Now(),
+				Meta:    map[string]string{"compaction": "summarizer"},
 			},
 		},
 	}
 
 	stream, err := a.Client.Stream(ctx, req)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	var sb strings.Builder
+	stopLen := false
+	sawToolCall := false
 	for ev := range stream {
 		switch e := ev.(type) {
 		case provider.EventTextDelta:
@@ -74,22 +197,32 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 			if sink != nil {
 				sink(e.Delta)
 			}
+		case provider.EventToolStart, provider.EventToolArgs, provider.EventToolEnd:
+			sawToolCall = true
 		case provider.EventDone:
 			if e.Err != nil {
-				return "", e.Err
+				return "", false, e.Err
+			}
+			if e.Stop == provider.StopLength {
+				stopLen = true
 			}
 		}
 	}
-	summary = strings.TrimSpace(sb.String())
-	if summary == "" {
-		return "", fmt.Errorf("empty summary from model")
+	if sawToolCall {
+		return "", false, fmt.Errorf("summarizer attempted a tool call; retrying without tools is not supported by this provider route")
 	}
+	return sb.String(), stopLen, nil
+}
 
-	// Estimate token count before compaction (rough: 1 token ~ 4 chars).
-	tokensBefore := len(transcript) / 4
+// applyCompaction splices the summary back into the transcript: one
+// synthetic user message carrying the summary, followed by the preserved
+// tail, with orphaned tool results repaired. It also advances the
+// incremental chain head. Port of pi's applyCompaction.
+func applyCompaction(msgs []provider.Message, plan *CompactionPlan, summary string, prev *CompactionState) ([]provider.Message, *CompactionState) {
+	tokensBefore := EstimateConversationTokens(plan.Summarize)
 
-	// Replace transcript: one synthetic user message with the summary,
-	// followed by the preserved tail (if any).
+	// Preserve activated tool names so deferred/provider tool wiring
+	// survives the splice (same as before).
 	var activatedTools []string
 	for _, message := range msgs {
 		for _, name := range message.AddedToolNames {
@@ -111,29 +244,78 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 		},
 	}
 
-	tail := msgs[len(msgs)-keepTail:]
-	// Repair the tail: remove orphaned tool_result blocks whose
-	// matching tool_use was in the compacted (now-removed) portion.
-	// Anthropic rejects transcripts where a tool_result references
-	// a tool_use ID that doesn't exist.
+	tail := append([]provider.Message(nil), msgs[plan.KeepFrom:]...)
 	tail = repairOrphanedToolResults(tail)
 
 	next := make([]provider.Message, 0, 1+len(tail))
 	next = append(next, synthetic)
 	next = append(next, tail...)
 
-	a.mu.Lock()
-	a.messages = next
-	a.rev++
-	onCompacted := a.OnTranscriptCompacted
-	persisted := append([]provider.Message(nil), next...)
-	a.mu.Unlock()
-
-	if onCompacted != nil {
-		onCompacted(persisted)
+	// Advance the chain head: merged file ops + new summary + anchor.
+	var readFiles, modFiles []string
+	if prev != nil {
+		readFiles = MergeFileOps(prev.ReadFiles, plan.WindowOps.Read)
+		modFiles = MergeFileOps(prev.ModifiedFiles, plan.WindowOps.Modified)
+	} else {
+		readFiles = append([]string(nil), plan.WindowOps.Read...)
+		modFiles = append([]string(nil), plan.WindowOps.Modified...)
 	}
+	count := 1
+	if prev != nil {
+		count = prev.Count + 1
+	}
+	// Anchor: index of the first kept message in the NEW transcript is 1
+	// (right after the synthetic summary).
+	nextState := &CompactionState{
+		PreviousSummary:  summary,
+		ReadFiles:        readFiles,
+		ModifiedFiles:    modFiles,
+		FirstKeptEntryID: "compacted-1",
+		Count:            count,
+	}
+	return next, nextState
+}
 
-	return summary, nil
+// SeedCompactionState primes the incremental chain head, e.g. from the
+// compaction row restored out of the session file on resume. A nil state
+// clears the chain (fresh session).
+func (a *Agent) SeedCompactionState(state *CompactionState) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.compactionState = state
+}
+
+// CompactionChain returns a copy of the current chain head, or nil.
+func (a *Agent) CompactionChain() *CompactionState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.compactionStateLocked()
+}
+
+func (a *Agent) compactionStateLocked() *CompactionState {
+	if a.compactionState == nil {
+		return nil
+	}
+	cp := *a.compactionState
+	cp.ReadFiles = append([]string(nil), a.compactionState.ReadFiles...)
+	cp.ModifiedFiles = append([]string(nil), a.compactionState.ModifiedFiles...)
+	return &cp
+}
+
+func (a *Agent) setCompactionStateLocked(state *CompactionState) {
+	a.compactionState = state
+}
+
+// hybridKeepFloor ports the keep decision: pi's 20k-token floor, raised
+// to 30% of the transcript when the transcript is large (so 1M-token
+// windows keep working context instead of summarizing 98% away).
+func hybridKeepFloor(msgs []provider.Message) int {
+	total := EstimateConversationTokens(msgs)
+	floor := CompactionKeepRecentTokens
+	if thirty := total * 30 / 100; thirty > floor {
+		floor = thirty
+	}
+	return floor
 }
 
 // repairOrphanedToolResults removes tool_result content blocks (and

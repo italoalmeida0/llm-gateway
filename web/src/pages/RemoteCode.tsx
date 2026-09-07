@@ -15,8 +15,8 @@ import { createStore, reconcile } from "solid-js/store";
 import { FileIcon, RemoteHints } from "../rcPresentation";
 import { displayToolArgs } from "../rcLive";
 import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../rcPaths";
-import { buildRenderBlocks, terminalPresentation } from "../rcTranscript";
-export { buildRenderBlocks } from "../rcTranscript";
+import { baseNameOf, buildRenderBlocks, terminalPresentation, toolSummary } from "../rcTranscript";
+export { baseNameOf, buildRenderBlocks, diffStat, toolSummary, type ToolSummary } from "../rcTranscript";
 import { QuestionPanel, type PendingQuestion } from "../rcQuestion";
 import { createTranscriptScroll } from "../rcScroll";
 import { compactTokens, contextDisplay, type GatewayModel, type SessionContext } from "../rcContext";
@@ -222,23 +222,6 @@ export function tryParseArgs(a?: string): any {
   return displayToolArgs(a);
 }
 
-export function baseNameOf(p?: string): string {
-  if (!p) return "";
-  const t = String(p).replace(/\\/g, "/").replace(/\/+$/, "");
-  const i = t.lastIndexOf("/");
-  return i >= 0 ? t.slice(i + 1) : t;
-}
-
-export function diffStat(text: string): { add: number; del: number } {
-  let add = 0;
-  let del = 0;
-  for (const ln of (text || "").split("\n")) {
-    if (ln.startsWith("+") && !ln.startsWith("+++")) add++;
-    else if (ln.startsWith("-") && !ln.startsWith("---")) del++;
-  }
-  return { add, del };
-}
-
 export interface ToolUnit {
   call?: ContentBlock;
   result?: ContentBlock;
@@ -397,75 +380,6 @@ export interface RenderBlockSeries extends RenderBlockBase {
 }
 
 export type RenderBlock = RenderBlockSingle | RenderBlockSeries;
-
-export interface ToolSummary {
-  icon: string;
-  verb: string;
-  target: string;
-  stat?: string;
-  statAdd?: number;
-  statDel?: number;
-}
-
-/** One-line Antigravity-style summary for a tool unit. */
-export function toolSummary(u: ToolUnit): ToolSummary {
-  const name = u.call?.toolName || "tool";
-  const args = tryParseArgs(u.call?.toolArgs);
-  const res = u.result?.toolResult || "";
-  switch (name) {
-    case "question": return {icon:"lucide:message-circle", verb:u.result ? "Asked" : "Asking", target:(args.questions || []).map((q: {header?:string}) => q.header).filter(Boolean).join(" · ") || "Questions"};
-    case "read": {
-      const off = Number(args.offset || 0);
-      const lines = res ? res.split("\n").length : 0;
-      const lim = Number(args.limit || 0);
-      const end = lim > 0 ? off + lim : off + lines;
-      return {
-        icon: "lucide:file-text",
-        verb: "Analyzed",
-        target: `${baseNameOf(args.path) || args.path || "file"}#L${off + 1}-${Math.max(end, off + 1)}`,
-      };
-    }
-    case "glob": {
-      const n = res ? res.split("\n").filter((l) => l.trim()).length : 0;
-      return {
-        icon: "lucide:search",
-        verb: "Searched",
-        target: String(args.pattern || ""),
-        stat: n > 0 ? `${n} match${n === 1 ? "" : "es"}` : undefined,
-      };
-    }
-    case "bash": {
-      const cmd = String(args.command || "").replace(/\s+/g, " ").trim();
-      return {
-        icon: "lucide:terminal",
-        verb: "Ran",
-        target: cmd.length > 90 ? cmd.slice(0, 90) + "…" : cmd,
-      };
-    }
-    case "write": {
-      const content = String(args.content || "");
-      const n = content ? content.split("\n").length : 0;
-      return {
-        icon: "lucide:file-text",
-        verb: "Created",
-        target: baseNameOf(args.path) || args.path || "file",
-        stat: n > 0 ? `${n} lines` : undefined,
-      };
-    }
-    case "edit": {
-      const st = diffStat(res);
-      return {
-        icon: "lucide:pencil",
-        verb: "Edited",
-        target: baseNameOf(args.path) || args.path || "file",
-        statAdd: st.add,
-        statDel: st.del,
-      };
-    }
-    default:
-      return { icon: "lucide:wrench", verb: name, target: "" };
-  }
-}
 
 /**
  * Lightweight token highlighter on top of highlight.js (already a runtime
@@ -996,6 +910,23 @@ export default function RemoteCodePage() {
   const [questionSubmitting, setQuestionSubmitting] = createSignal(false);
   const [questionError, setQuestionError] = createSignal("");
   function showQuestion(question: PendingQuestion | null) {
+    if (question) {
+      const raw = (question as any).questions ?? (question as any).question;
+      const normalized: PendingQuestion["questions"] = Array.isArray(raw)
+        ? raw.map((q: any) => typeof q === "string" ? { header: "Question", question: q, options: [] } : { header: q?.header || "Question", question: q?.question || "", options: Array.isArray(q?.options) ? q.options : [], multiple: !!q?.multiple, custom: q?.custom })
+        : raw && typeof raw === "object"
+          ? [{ header: raw.header || "Question", question: raw.question || "", options: Array.isArray(raw.options) ? raw.options : [], multiple: !!raw.multiple, custom: raw.custom }]
+          : typeof raw === "string" && raw.trim()
+            ? [{ header: "Question", question: raw.trim(), options: [] }]
+            : [];
+      if (!normalized.length) {
+        setPendingQuestion(null);
+        setQuestionSubmitting(false);
+        setQuestionError("");
+        return;
+      }
+      question = { ...question, questions: normalized };
+    }
     setPendingQuestion(question);
     setQuestionSubmitting(false);
     setQuestionError("");

@@ -3,7 +3,7 @@ import { compactTokens, contextDisplay } from "../web/src/rcContext";
 import { createTranscriptScroll } from "../web/src/rcScroll";
 import { displayToolArgs, withoutTodoActivity } from "../web/src/rcLive";
 import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/rcPaths";
-import { buildRenderBlocks, terminalPresentation } from "../web/src/rcTranscript";
+import { buildRenderBlocks, terminalPresentation, toolSummary } from "../web/src/rcTranscript";
 import type { ChatMessage } from "../web/src/pages/RemoteCode";
 import { fileIcon } from "../web/src/rcFiles";
 
@@ -155,3 +155,57 @@ describe("Remote Code transcript following", () => {
     expect(h.el.scrollTop).toBe(600);
   });
 });
+
+describe("Remote Code toolSummary", () => {
+  test("defensively handles question tool arguments of any shape", () => {
+    // Array of objects with header
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "1", toolName: "question", toolArgs: JSON.stringify({ questions: [{ header: "Confirmation", question: "Proceed?" }] }) }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Confirmation" });
+
+    // Completed question shows "Asked"
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "1", toolName: "question", toolArgs: JSON.stringify({ questions: [{ header: "Confirmation", question: "Proceed?" }] }) },
+      result: { type: "tool_result", toolId: "1", toolResult: "yes" }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asked", target: "Confirmation" });
+
+    // String questions field (caused the previous TypeError: (n.questions || []).map is not a function)
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "2", toolName: "question", toolArgs: JSON.stringify({ questions: "How should I structure this?" }) }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "How should I structure this?" });
+
+    // Singular question field as string
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "3", toolName: "question", toolArgs: JSON.stringify({ question: "Do you agree?" }) }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Do you agree?" });
+
+    // Single object (not array)
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "4", toolName: "question", toolArgs: JSON.stringify({ questions: { header: "Design", question: "Pick one" } }) }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Design" });
+
+    // Array of strings
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "5", toolName: "question", toolArgs: JSON.stringify({ questions: ["First choice", "Second choice"] }) }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "First choice · Second choice" });
+
+    // Array of objects without header (uses question text)
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "6", toolName: "question", toolArgs: JSON.stringify({ questions: [{ question: "Is this correct?" }] }) }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Is this correct?" });
+
+    // Empty or malformed arguments
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "7", toolName: "question", toolArgs: "{}" }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Questions" });
+
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "8", toolName: "question", toolArgs: "invalid json {" }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Questions" });
+
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "9", toolName: "question" }
+    })).toEqual({ icon: "lucide:message-circle", verb: "Asking", target: "Questions" });
+  });
+});
+

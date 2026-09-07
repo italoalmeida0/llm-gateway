@@ -16,29 +16,36 @@ export function QuestionPanel(props: {
   onSubmit: (answers: string[][]) => void;
 }) {
   const [step, setStep] = createSignal(0);
-  const [drafts, setDrafts] = createStore(props.request.questions.map((q) => ({selected:[] as string[], custom:!q.options?.length && q.custom !== false, text:""})));
-  const question = () => props.request.questions[step()];
-  const draft = () => drafts[step()];
-  const answers = (i: number) => [...drafts[i].selected, ...(drafts[i].custom && drafts[i].text.trim() ? [drafts[i].text.trim()] : [])];
-  const ready = (i: number) => answers(i).length > 0 && (!drafts[i].custom || !!drafts[i].text.trim());
+  const questions = () => Array.isArray(props.request?.questions) ? props.request.questions : [];
+  const [drafts, setDrafts] = createStore(questions().map((q) => ({selected:[] as string[], custom:!q.options?.length && q.custom !== false, text:""})));
+  const question = () => questions()[step()] || { header: "", question: "", options: [] };
+  const draft = () => drafts[step()] || { selected: [], custom: false, text: "" };
+  const answers = (i: number) => {
+    const d = drafts[i];
+    if (!d) return [];
+    return [...d.selected, ...(d.custom && d.text.trim() ? [d.text.trim()] : [])];
+  };
+  const ready = (i: number) => answers(i).length > 0 && (!drafts[i]?.custom || !!drafts[i]?.text.trim());
   let heading: HTMLLegendElement | undefined;
   function move(next: number) {
     setStep(next);
     requestAnimationFrame(() => heading?.focus());
   }
   function choose(label: string, checked: boolean) {
-    if (question().multiple) setDrafts(step(), "selected", checked ? [...draft().selected, label] : draft().selected.filter((v) => v !== label));
+    const q = question();
+    const d = draft();
+    if (q.multiple) setDrafts(step(), "selected", checked ? [...d.selected, label] : d.selected.filter((v) => v !== label));
     else setDrafts(step(), {selected:[label], custom:false});
   }
   return <section aria-label="Questions from assistant" class="mb-3 overflow-hidden rounded-2xl border border-line bg-card shadow-lg">
     <div class="flex items-center gap-2 px-4 py-3 border-b border-line text-xs text-ink-400">
       <Icon icon="lucide:message-circle" size={15} /><span class="font-medium text-ink-200">Your input is needed</span>
-      <span class="ml-auto" aria-live="polite">{step()+1} of {props.request.questions.length}</span>
+      <span class="ml-auto" aria-live="polite">{step()+1} of {questions().length}</span>
     </div>
     <form onSubmit={(e) => {
       e.preventDefault();
       if (!ready(step()) || props.submitting) return;
-      if (step() < props.request.questions.length-1) move(step()+1);
+      if (step() < questions().length-1) move(step()+1);
       else if (props.connected && drafts.every((_, i) => ready(i))) props.onSubmit(drafts.map((_, i) => answers(i)));
     }}>
       <fieldset disabled={props.submitting} class="px-4 py-3 max-h-[38vh] overflow-y-auto min-w-0">
@@ -69,8 +76,8 @@ export function QuestionPanel(props: {
       <div class="flex items-center gap-2 border-t border-line px-4 py-3">
         <button type="button" disabled={step() === 0 || props.submitting} onClick={() => move(step()-1)} class="rounded-lg px-3 py-2 text-xs text-ink-300 hover:bg-elev disabled:opacity-40 cursor-pointer disabled:cursor-default">Back</button>
         <Show when={!props.connected}><span class="text-[11px] text-ink-500">Reconnecting…</span></Show>
-        <button type="submit" disabled={!ready(step()) || props.submitting || (step() === props.request.questions.length-1 && !props.connected)} class="ml-auto rounded-lg bg-ink-100 text-ink-950 px-4 py-2 text-xs font-medium hover:bg-ink-200 disabled:opacity-40 cursor-pointer disabled:cursor-default">
-          {props.submitting ? "Sending…" : step() < props.request.questions.length-1 ? "Next" : "Send answers"}
+        <button type="submit" disabled={!ready(step()) || props.submitting || (step() === questions().length-1 && !props.connected)} class="ml-auto rounded-lg bg-ink-100 text-ink-950 px-4 py-2 text-xs font-medium hover:bg-ink-200 disabled:opacity-40 cursor-pointer disabled:cursor-default">
+          {props.submitting ? "Sending…" : step() < questions().length-1 ? "Next" : "Send answers"}
         </button>
       </div>
     </form>

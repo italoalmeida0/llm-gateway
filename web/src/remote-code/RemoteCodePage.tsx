@@ -12,7 +12,6 @@ import { RemoteHints } from "./presentation";
 import { projectForDirectory } from "./paths";
 import { contextDisplay, type GatewayModel } from "./context";
 import { api } from "../api";
-import { elapsedLabel, timeAgo } from "./utils/format";
 import { Onboarding } from "./components/Onboarding";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { TranscriptView } from "./components/TranscriptView";
@@ -20,12 +19,14 @@ import { Composer } from "./components/Composer";
 import { ModelPickerBody } from "./components/ModelPickerBody";
 import {
   NewProjectModal, ReviewModal, ChoiceModal, ConfirmModal, PairModal,
-  type SimpleModalsCtx,
 } from "./modals/SimpleModals";
 import { PreviewModal } from "./modals/PreviewModal";
 import { SettingsModal } from "./modals/SettingsModal";
-import type { RemoteCodeViewCtx } from "./viewCtx";
-import type { ChatMessage } from "./types";
+import {
+  RemoteCodeProvider,
+  type ComposerCtxValue, type HostCtxValue, type ModalCtxValue,
+  type SessionCtxValue, type TranscriptCtxValue, type UICtxValue,
+} from "./ctx";
 import { createNotice } from "./hooks/useNotice";
 import { createModals } from "./hooks/useModals";
 import { createRelay } from "./hooks/useRelay";
@@ -573,13 +574,6 @@ export default function RemoteCodePage() {
     );
   }
 
-  function regenerateMsg(idx: number) {
-    return transcript.regenerateMsg(idx, options.activeModel, options.yoloMode);
-  }
-  function saveEditMsg(idx: number, m: ChatMessage) {
-    return transcript.saveEditMsg(idx, m, options.activeModel, options.yoloMode);
-  }
-
   // Mount logic
   onMount(() => {
     void Promise.allSettled([loadGatewayModels(), hosts.loadHosts()]).then(() => {
@@ -763,290 +757,124 @@ export default function RemoteCodePage() {
     setUsageOpen(false);
   }
 
-  function rawIdx(idx: number): number {
-    return transcript.rawIdx(idx);
-  }
-
-  const view: RemoteCodeViewCtx = {
-    accessBtn: options.accessBtn,
-    accessMenuOpen: options.accessMenuOpen,
-    activeContext,
-    activeHost: hosts.activeHost,
-    activeHostId: hosts.activeHostId,
-    activeModel: options.activeModel,
-    activeProject: projects.activeProject,
-    activeSession,
-    activeSessionId,
-    activeUsage: transcript.activeUsage,
-    addBtn,
-    addContextOpen: composer.addContextOpen,
-    agentMode: options.agentMode,
-    answerQuestion: transcript.answerQuestion,
-    appNotice: notice.appNotice,
-    blockRawIdx: transcript.blockRawIdx,
-    cancelCurrentTurn: transcript.cancelCurrentTurn,
-    cancelEditMsg: transcript.cancelEditMsg,
-    cancelSettings: settings.cancelSettings,
-    cancelTurnForSession: transcript.cancelTurnForSession,
-    checkWorkspace: workspace.checkWorkspace,
-    choiceState: modals.choiceState,
-    closeMenus,
-    closeSidebarOnMobile,
-    configureSession: options.configureSession,
-    confirmState: modals.confirmState,
+  // --- Contextos (a página monta a partir dos hooks; os componentes
+  // consomem por fatia — sem prop-drilling) ---
+  const hostValue: HostCtxValue = {
+    ...hosts,
     connectionState: relay.connectionState,
-    contextBtn,
-    convWidth,
-    convWidthClass,
-    copiedMsgId: transcript.copiedMsgId,
-    copyMsg: transcript.copyMsg,
-    createProject: projects.createProject,
-    creatingSession,
-    currentProject,
-    daemonSettings: settings.daemonSettings,
-    deleteMsg: transcript.deleteMsg,
-    deleteProject: projects.deleteProject,
-    deleteSelected: projects.deleteSelected,
-    deleteSession,
-    downloadPreviewFile: review.downloadPreviewFile,
-    draftMode,
-    editingMsgIdx: transcript.editingMsgIdx,
-    editingMsgText: transcript.editingMsgText,
-    effort: options.effort,
-    elapsedLabel,
-    exitSelectionMode: projects.exitSelectionMode,
-    expandedThinking: transcript.expandedThinking,
-    filesBtn,
-    filesMenuOpen: composer.filesMenuOpen,
-    folderCurrent: projects.folderCurrent,
-    folderEntries: projects.folderEntries,
-    folderError: projects.folderError,
-    folderLoading: projects.folderLoading,
-    folderParent: projects.folderParent,
-    forkMessage: transcript.forkMessage,
-    forking: transcript.forking,
-    generatePairingToken: modals.generatePairingToken,
-    growWindow: transcript.growWindow,
-    handleAddMcpServer: settings.handleAddMcpServer,
-    handleAddSkill: settings.handleAddSkill,
-    handleDeleteMcpServer: settings.handleDeleteMcpServer,
-    handleDeleteSkill: settings.handleDeleteSkill,
-    handleFiles: composer.handleFiles,
-    hiddenCount: transcript.hiddenCount,
-    historyView,
-    hostBtn: hosts.hostBtn,
-    hostMenuOpen: hosts.hostMenuOpen,
-    hosts: hosts.hosts,
-    inputPrompt: composer.inputPrompt,
-    isAtBottom: transcript.isAtBottom,
-    isMobile,
-    isProjectExpanded: projects.isProjectExpanded,
-    keepChanges: review.keepChanges,
-    loadHosts: hosts.loadHosts,
-    looseSessions: projects.looseSessions,
-    matchQuery: projects.matchQuery,
-    mcpServers: settings.mcpServers,
-    messages: transcript.messages,
-    modeBtn: options.modeBtn,
-    modeMenuOpen: options.modeMenuOpen,
-    modelBtn,
-    modelMenuOpen,
-    modelPickerBody,
-    newMcpArgs: settings.newMcpArgs,
-    newMcpCmd: settings.newMcpCmd,
-    newMcpName: settings.newMcpName,
-    newMcpTransport: settings.newMcpTransport,
-    newMcpUrl: settings.newMcpUrl,
-    newProjBtn,
-    newProjectMenuOpen: projects.newProjectMenuOpen,
-    newProjectPath: projects.newProjectPath,
-    newSkillBody: settings.newSkillBody,
-    newSkillDesc: settings.newSkillDesc,
-    newSkillName: settings.newSkillName,
-    onChatScroll: transcript.onChatScroll,
-    openNewProjectModal: projects.openNewProjectModal,
-    openSettings: settings.openSettings,
-    openStoredPreview: review.openStoredPreview,
-    pairingData: modals.pairingData,
-    pairingLoading: modals.pairingLoading,
-    pendingApproval: transcript.pendingApproval,
-    pendingAttachments: composer.pendingAttachments,
-    pendingQuestion: transcript.pendingQuestion,
-    pickProject: projects.pickProject,
-    pickSlash: composer.pickSlash,
-    pinSelected: projects.pinSelected,
-    previewCopied: review.previewCopied,
-    previewFile: review.previewFile,
-    previewPending: review.previewPending,
-    projBtn,
-    projectMenuOpen: projects.projectMenuOpen,
-    projectSessions: projects.projectSessions,
-    projects: mirror.projects,
-    questionError: transcript.questionError,
-    questionSubmitting: transcript.questionSubmitting,
-    queueDaemonSearch: projects.queueDaemonSearch,
-    quickStartProject: projects.quickStartProject,
-    rawIdx,
-    regenerateMsg,
-    removeHost: hosts.removeHost,
-    removePendingAttachment: composer.removePendingAttachment,
-    renameText: projects.renameText,
-    renamingId: projects.renamingId,
-    renderBlocks: transcript.renderBlocks,
-    requestFolders: projects.requestFolders,
-    requestReview: review.requestReview,
-    respondApproval: transcript.respondApproval,
-    restorePreviewFile: review.restorePreviewFile,
-    reviewError: review.reviewError,
-    reviewLoading: review.reviewLoading,
-    reviewOpen: review.reviewOpen,
-    saveDaemonConfig: settings.saveDaemonConfig,
-    saveEditMsg,
-    scrollToBottom: transcript.scrollToBottom,
-    searchResults: projects.searchResults,
-    selectSession,
-    selectedSessions: projects.selectedSessions,
-    selectedSkills: options.selectedSkills,
-    selectionMode: projects.selectionMode,
-    sendPrompt: composer.sendPrompt,
-    sessionFiles: review.sessionFiles,
-    sessionFilter: projects.sessionFilter,
-    sessionListToggle: projects.sessionListToggle,
-    sessionStatus: transcript.sessionStatus,
+    wsOpen,
+  };
+  const sessionValue: SessionCtxValue = {
+    ...projects,
     sessions: mirror.sessions,
-    setAccessMenuOpen: options.setAccessMenuOpen,
-    setActiveHostId: hosts.setActiveHostId,
-    setAddContextOpen: composer.setAddContextOpen,
-    setAgentMode: options.setAgentMode,
-    setAppNotice: notice.setAppNotice,
-    setChatContainerRef: transcript.setChatContainerRef,
-    setChatContentRef: transcript.setChatContentRef,
-    setConfirmState: modals.setConfirmState,
-    setConvWidth,
-    setDaemonSettings: settings.setDaemonSettings,
-    setEditingMsgText: transcript.setEditingMsgText,
-    setExpandedThinking: transcript.setExpandedThinking,
-    setFilesMenuOpen: composer.setFilesMenuOpen,
-    setHistoryView,
-    setHostMenuOpen: hosts.setHostMenuOpen,
-    setInputPrompt: composer.setInputPrompt,
-    setIsAtBottom: transcript.setIsAtBottom,
-    setModeMenuOpen: options.setModeMenuOpen,
-    setModelMenuOpen,
-    setNewMcpArgs: settings.setNewMcpArgs,
-    setNewMcpCmd: settings.setNewMcpCmd,
-    setNewMcpName: settings.setNewMcpName,
-    setNewMcpTransport: settings.setNewMcpTransport,
-    setNewMcpUrl: settings.setNewMcpUrl,
-    setNewProjectMenuOpen: projects.setNewProjectMenuOpen,
-    setNewProjectPath: projects.setNewProjectPath,
-    setNewSkillBody: settings.setNewSkillBody,
-    setNewSkillDesc: settings.setNewSkillDesc,
-    setNewSkillName: settings.setNewSkillName,
-    setPreviewCopied: review.setPreviewCopied,
-    setPreviewFile: review.setPreviewFile,
-    setProjectMenuOpen: projects.setProjectMenuOpen,
-    setRenameText: projects.setRenameText,
-    setRenamingId: projects.setRenamingId,
-    setReviewOpen: review.setReviewOpen,
-    setSearchResults: projects.setSearchResults,
-    setSelectedSkills: options.setSelectedSkills,
-    setSelectionMode: projects.setSelectionMode,
-    setSessionFilter: projects.setSessionFilter,
-    setShowConfigModal: settings.setShowConfigModal,
-    setShowNewProjectModal: projects.setShowNewProjectModal,
-    setShowPairModal: modals.setShowPairModal,
-    setShowTruncateInput: review.setShowTruncateInput,
-    setSidebarOpen,
-    setSlashIndex: composer.setSlashIndex,
-    setTodosOpen: transcript.setTodosOpen,
-    setTruncateTokens: review.setTruncateTokens,
-    setUsageOpen,
-    setVerboseChat,
-    setYoloMode: options.setYoloMode,
-    showConfigModal: settings.showConfigModal,
-    showNewProjectModal: projects.showNewProjectModal,
-    showPairModal: modals.showPairModal,
-    showTruncateInput: review.showTruncateInput,
-    sidebarOpen,
-    skills: settings.skills,
-    slashIndex: composer.slashIndex,
-    slashMatches: composer.slashMatches,
-    sortedSessions: projects.sortedSessions,
-    specialProgress: transcript.specialProgress,
-    startEditMsg: transcript.startEditMsg,
+    projects: mirror.projects,
+    activeSession,
+    currentProject,
+    activeSessionId,
+    draftMode,
+    creatingSession,
+    selectSession,
     startNewConversation,
-    submitRename: projects.submitRename,
-    taskReview: review.taskReview,
-    thinkingElapsed: transcript.thinkingElapsed,
-    thinkingIndex: transcript.thinkingIndex,
-    thinkingStart: transcript.thinkingStart,
-    timeAgo,
-    toast: notice.toast,
-    todos: transcript.todos,
-    todosOpen: transcript.todosOpen,
-    togglePin: projects.togglePin,
-    toggleProjectExpanded: projects.toggleProjectExpanded,
-    toggleSessionSelect: projects.toggleSessionSelect,
-    toggleSkill: settings.toggleSkill,
-    toggleToolGroup: transcript.toggleToolGroup,
-    toggleToolOpen: transcript.toggleToolOpen,
-    toolGroupOpen: transcript.toolGroupOpen,
-    toolOpen: transcript.toolOpen,
-    toolProgress: transcript.toolProgress,
-    toolStarts: transcript.toolStarts,
-    transcriptScroll: transcript.transcriptScroll,
-    truncatePreviewFile: review.truncatePreviewFile,
-    truncateTokens: review.truncateTokens,
-    turnActivity: transcript.turnActivity,
-    turnClock: transcript.turnClock,
-    turnLabel: transcript.turnLabel,
-    undoChanges: review.undoChanges,
-    usageOpen,
-    verboseChat,
-    visibleBlocks: transcript.visibleBlocks,
-    visibleSessions: projects.visibleSessions,
+    deleteSession,
+    pendingProjectId: projects.pendingProjectId,
+    setPendingProjectId: projects.setPendingProjectId,
+    newestSessionProjectId: projects.newestSessionProjectId,
     workspace: workspace.workspace,
     workspaceBlocked: workspace.workspaceBlocked,
     workspacePath: workspace.workspacePath,
     workspaceState: workspace.workspaceState,
-    wsOpen,
+    checkWorkspace: workspace.checkWorkspace,
+    newProjBtn,
+    projBtn,
+  };
+  const transcriptValue: TranscriptCtxValue = {
+    ...transcript,
+    saveEditMsg: (idx, m) => transcript.saveEditMsg(idx, m, options.activeModel, options.yoloMode),
+    regenerateMsg: (idx) => transcript.regenerateMsg(idx, options.activeModel, options.yoloMode),
+  };
+  const composerValue: ComposerCtxValue = {
+    ...composer,
+    activeModel: options.activeModel,
+    effort: options.effort,
+    agentMode: options.agentMode,
+    setAgentMode: options.setAgentMode,
+    selectedSkills: options.selectedSkills,
+    setSelectedSkills: options.setSelectedSkills,
     yoloMode: options.yoloMode,
+    setYoloMode: options.setYoloMode,
+    modeMenuOpen: options.modeMenuOpen,
+    setModeMenuOpen: options.setModeMenuOpen,
+    accessMenuOpen: options.accessMenuOpen,
+    setAccessMenuOpen: options.setAccessMenuOpen,
+    modeBtn: options.modeBtn,
+    accessBtn: options.accessBtn,
+    configureSession: options.configureSession,
+    modelPickerBody,
+    activeContext,
+    addBtn,
+    filesBtn,
+    modelBtn,
+  };
+  const modalValue: ModalCtxValue = {
+    ...modals,
+    ...review,
+    ...settings,
+  };
+  const uiValue: UICtxValue = {
+    ...notice,
+    sidebarOpen,
+    setSidebarOpen,
+    isMobile,
+    historyView,
+    setHistoryView,
+    closeSidebarOnMobile,
+    closeMenus,
+    verboseChat,
+    setVerboseChat,
+    convWidth,
+    setConvWidth,
+    convWidthClass,
+    modelMenuOpen,
+    setModelMenuOpen,
+    usageOpen,
+    setUsageOpen,
+    contextBtn,
   };
 
-  const simpleCtx = view as unknown as SimpleModalsCtx;
-
   return (
+    <RemoteCodeProvider
+      host={hostValue}
+      session={sessionValue}
+      transcript={transcriptValue}
+      composer={composerValue}
+      modal={modalValue}
+      ui={uiValue}
+    >
     <div class="fixed inset-0 w-full h-dvh flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50">
       <RemoteHints />
       {/* Main Workspace Layout or Connect Host Onboarding */}
       <Show
         when={hosts.hosts().length > 0}
-        fallback={<Onboarding {...view} />}
+        fallback={<Onboarding />}
       >
         <div class="flex-1 flex min-h-0 overflow-hidden relative">
-          <WorkspaceSidebar {...view} />
+          <WorkspaceSidebar />
           <main class="flex-1 flex flex-col min-w-0 bg-ink-950 relative">
-            <TranscriptView {...view} />
-            <Composer {...view} />
+            <TranscriptView />
+            <Composer />
           </main>
         </div>
       </Show>
 
-      <NewProjectModal {...simpleCtx} />
-      <ReviewModal {...simpleCtx} />
-      <PreviewModal
-        previewFile={review.previewFile} setPreviewFile={review.setPreviewFile} previewCopied={review.previewCopied}
-        setPreviewCopied={review.setPreviewCopied} downloadPreviewFile={review.downloadPreviewFile}
-        restorePreviewFile={review.restorePreviewFile} truncatePreviewFile={review.truncatePreviewFile}
-        showTruncateInput={review.showTruncateInput} setShowTruncateInput={review.setShowTruncateInput}
-        truncateTokens={review.truncateTokens} setTruncateTokens={review.setTruncateTokens}
-      />
-      <ChoiceModal {...simpleCtx} />
-      <ConfirmModal {...simpleCtx} />
-      <PairModal {...simpleCtx} />
-      <SettingsModal {...(view as unknown as import("./modals/SettingsModal").SettingsModalCtx)} />
+      <NewProjectModal />
+      <ReviewModal />
+      <PreviewModal />
+      <ChoiceModal />
+      <ConfirmModal />
+      <PairModal />
+      <SettingsModal />
     </div>
+    </RemoteCodeProvider>
   );
 }
 

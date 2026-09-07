@@ -2,18 +2,50 @@ import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { Streamdown } from "streamdown-solid";
 import { FileIcon } from "../presentation";
-import type { RemoteCodeViewCtx } from "../viewCtx";
+import { elapsedLabel } from "../utils/format";
+import type { TranscriptRenderCtx } from "./TranscriptBlocks";
 import {
   renderAssistantSpecial, renderMessageContent, renderSeriesLead,
 } from "./TranscriptBlocks";
 import { HistoryView } from "./HistoryView";
 import { ApprovalCard } from "./ApprovalCard";
 import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
+import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI } from "../ctx";
 
-export function TranscriptView(ctx: RemoteCodeViewCtx) {
+export function TranscriptView() {
+  const t = useTranscriptCtx();
+  const s = useSession();
+  const h = useHost();
+  const c = useComposerCtx();
+  const m = useModal();
+  const ui = useUI();
+  const renderCtx = (): TranscriptRenderCtx => ({
+    renderBlocks: t.renderBlocks,
+    sessionStatus: t.sessionStatus,
+    messages: t.messages,
+    thinkingStart: t.thinkingStart,
+    thinkingElapsed: t.thinkingElapsed,
+    expandedThinking: t.expandedThinking,
+    toolGroupOpen: t.toolGroupOpen,
+    toolOpen: t.toolOpen,
+    toolProgress: t.toolProgress,
+    toggleToolGroup: t.toggleToolGroup,
+    toggleToolOpen: t.toggleToolOpen,
+    elapsedLabel,
+    specialProgress: t.specialProgress,
+    thinkingIndex: t.thinkingIndex,
+    setExpandedThinking: t.setExpandedThinking,
+    verboseChat: ui.verboseChat,
+    setPreviewFile: m.setPreviewFile,
+    turnClock: t.turnClock,
+    toolStarts: t.toolStarts,
+    activeSession: s.activeSession,
+    pendingApproval: t.pendingApproval,
+    projects: s.projects,
+  });
   return (
 <>
-<Show when={ctx.activeHost() && ctx.connectionState() !== "connected"}>
+<Show when={h.activeHost() && h.connectionState() !== "connected"}>
   <div role="status" class="border-b border-line bg-elev px-4 py-2 text-center text-xs text-ink-400">
     Connection interrupted. Reconnecting to your host…
   </div>
@@ -30,13 +62,13 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
     <Iconify icon="lucide:arrow-left" size={14} />
   </a>
   <button
-    onClick={() => ctx.setSidebarOpen(!ctx.sidebarOpen())}
+    onClick={() => ui.setSidebarOpen(!ui.sidebarOpen())}
     class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line/70 text-ink-400 hover:text-ink-200 transition-colors shadow-sm cursor-pointer"
-    data-rc-tip={ctx.sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"} aria-label={ctx.sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"}
+    data-rc-tip={ui.sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"} aria-label={ui.sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"}
   >
     <Iconify
       icon={
-        ctx.sidebarOpen()
+        ui.sidebarOpen()
           ? "lucide:panel-left-close"
           : "lucide:panel-left-open"
       }
@@ -47,36 +79,36 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
 
 {/* Chat Stream Viewport */}
 <Show
-  when={!ctx.historyView()}
+  when={!ui.historyView()}
   fallback={
     <HistoryView
-      sessionFilter={ctx.sessionFilter}
-      setSessionFilter={ctx.setSessionFilter}
-      queueDaemonSearch={ctx.queueDaemonSearch}
-      searchResults={ctx.searchResults}
-      setSearchResults={ctx.setSearchResults}
-      setHistoryView={ctx.setHistoryView}
-      selectSession={ctx.selectSession}
-      sessions={ctx.sessions}
-      matchQuery={ctx.matchQuery}
-      sortedSessions={ctx.sortedSessions}
-      isMobile={ctx.isMobile}
+      sessionFilter={s.sessionFilter}
+      setSessionFilter={s.setSessionFilter}
+      queueDaemonSearch={s.queueDaemonSearch}
+      searchResults={s.searchResults}
+      setSearchResults={s.setSearchResults}
+      setHistoryView={ui.setHistoryView}
+      selectSession={s.selectSession}
+      sessions={s.sessions}
+      matchQuery={s.matchQuery}
+      sortedSessions={s.sortedSessions}
+      isMobile={ui.isMobile}
     />
   }
 >
-<Show when={!ctx.draftMode()}>
+<Show when={!s.draftMode()}>
 <div
-  ref={ctx.setChatContainerRef}
-  onScroll={ctx.onChatScroll}
-  onWheel={(e) => { if (e.deltaY < 0) ctx.transcriptScroll.detach(); }}
-  onPointerDown={() => ctx.transcriptScroll.detach()}
-  onTouchMove={() => ctx.transcriptScroll.detach()}
-  onKeyDown={(e) => { if (["ArrowUp", "PageUp", "Home"].includes(e.key)) ctx.transcriptScroll.detach(); }}
+  ref={t.setChatContainerRef}
+  onScroll={t.onChatScroll}
+  onWheel={(e) => { if (e.deltaY < 0) t.transcriptScroll.detach(); }}
+  onPointerDown={() => t.transcriptScroll.detach()}
+  onTouchMove={() => t.transcriptScroll.detach()}
+  onKeyDown={(e) => { if (["ArrowUp", "PageUp", "Home"].includes(e.key)) t.transcriptScroll.detach(); }}
   tabindex="0"
   aria-label="Conversation"
   class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 md:px-8 select-text [overflow-anchor:none] [scrollbar-gutter:stable]"
 >
-<div ref={ctx.setChatContentRef} class="pt-6 pb-10 space-y-6"
+<div ref={t.setChatContentRef} class="pt-6 pb-10 space-y-6"
 >
   {/* Conversation Messages.
       buildRenderBlocks fuses consecutive assistant messages that
@@ -85,31 +117,32 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
       skipped for actions, and the lead keeps its own raw index so
       every per-message op still maps 1:1 to the daemon
       transcript — fusing is purely visual. */}
-  <Show when={ctx.hiddenCount() > 0}>
+  <Show when={t.hiddenCount() > 0}>
     <div class="flex justify-center">
       <button
-        onClick={() => ctx.growWindow()}
+        onClick={() => t.growWindow()}
         class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-ink-900 border border-line/70 text-ink-300 shadow hover:text-ink-100 cursor-pointer"
       >
         <Iconify icon="lucide:chevron-up" size={13} />
-        <span>Load {Math.min(20, ctx.hiddenCount())} older ({ctx.hiddenCount()} hidden)</span>
+        <span>Load {Math.min(20, t.hiddenCount())} older ({t.hiddenCount()} hidden)</span>
       </button>
     </div>
   </Show>
-  <For each={ctx.visibleBlocks()}>
+  <For each={t.visibleBlocks()}>
     {(block, bi) => {
       const msg = block.msg;
-      const isLast = () => bi() === ctx.visibleBlocks().length - 1;
-      const rawIdx = () => ctx.blockRawIdx(block);
+      const isLast = () => bi() === t.visibleBlocks().length - 1;
+      const rawIdx = () => t.blockRawIdx(block);
       const textOf = () =>
         msg.blocks
           .filter((b) => b.type === "text" && b.text)
           .map((b) => b.text as string)
           .join("\n");
-      const isEditing = () => ctx.editingMsgIdx() === rawIdx();
+      const isEditing = () => t.editingMsgIdx() === rawIdx();
+      const rctx = renderCtx();
       return (
         <div
-          class={`group/msg flex flex-col w-full ${ctx.convWidthClass()} mx-auto ${
+          class={`group/msg flex flex-col w-full ${ui.convWidthClass()} mx-auto ${
             msg.role === "user" && !isEditing() ? "items-end" : "items-start"
           }`}
         >
@@ -159,15 +192,15 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
               >
                 <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60 shadow-lg">
                   <textarea
-                    value={ctx.editingMsgText()}
-                    onInput={(e) => ctx.setEditingMsgText(e.currentTarget.value)}
+                    value={t.editingMsgText()}
+                    onInput={(e) => t.setEditingMsgText(e.currentTarget.value)}
                     onKeyDown={(e) => {
                       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
                         e.preventDefault();
-                        ctx.saveEditMsg(rawIdx(), msg);
+                        t.saveEditMsg(rawIdx(), msg);
                       } else if (e.key === "Escape") {
                         e.preventDefault();
-                        ctx.cancelEditMsg();
+                        t.cancelEditMsg();
                       }
                     }}
                     class="w-full bg-transparent text-ink-100 text-sm outline-none resize-y min-h-[96px] leading-relaxed"
@@ -176,13 +209,13 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
                   />
                   <div class="flex justify-end items-center gap-2 mt-2 pt-2 border-t border-line/40">
                     <button
-                      onClick={ctx.cancelEditMsg}
+                      onClick={t.cancelEditMsg}
                       class="text-xs text-ink-400 hover:text-ink-100 px-3 py-1.5 rounded-lg hover:bg-ink-800 transition-colors cursor-pointer"
                     >
                       Cancel
                     </button>
                     <button
-                      onClick={() => ctx.saveEditMsg(rawIdx(), msg)}
+                      onClick={() => t.saveEditMsg(rawIdx(), msg)}
                       class="text-xs bg-ink-100 text-ink-950 px-3.5 py-1.5 rounded-lg hover:bg-accent-400 font-medium transition-colors cursor-pointer"
                     >
                       Save and Send
@@ -192,14 +225,14 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
               </Show>
               <Show when={!isEditing()}>
                 <UserMsgActions
-                  forking={ctx.forking()}
+                  forking={t.forking()}
                   canFork={(block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx != null}
                   showCopy={textOf().trim() !== ""}
-                  copied={ctx.copiedMsgId() === msg.id}
-                  onFork={() => ctx.forkMessage(block)}
-                  onCopy={() => ctx.copyMsg(msg.id, textOf())}
-                  onEdit={() => ctx.startEditMsg(rawIdx(), msg)}
-                  onDelete={() => ctx.deleteMsg(rawIdx())}
+                  copied={t.copiedMsgId() === msg.id}
+                  onFork={() => t.forkMessage(block)}
+                  onCopy={() => t.copyMsg(msg.id, textOf())}
+                  onEdit={() => t.startEditMsg(rawIdx(), msg)}
+                  onDelete={() => t.deleteMsg(rawIdx())}
                 />
               </Show>
             </div>
@@ -211,7 +244,7 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
               {/* Loading dots while the first tokens arrive */}
               <Show
                 when={
-                  ctx.sessionStatus() === "running" &&
+                  t.sessionStatus() === "running" &&
                   isLast() &&
                   msg.blocks.length === 0
                 }
@@ -224,20 +257,20 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
               </Show>
 
               {block.kind === "series" ? <>
-                {renderSeriesLead(ctx, block)}
-                <Show when={block.units.length}>{renderAssistantSpecial(ctx, msg.id, block.units, isLast(), block.extras.map((e) => e.srcIdx ?? 0))}</Show>
-              </> : renderMessageContent(ctx, msg, isLast())}
+                {renderSeriesLead(rctx, block)}
+                <Show when={block.units.length}>{renderAssistantSpecial(rctx, msg.id, block.units, isLast(), block.extras.map((e) => e.srcIdx ?? 0))}</Show>
+              </> : renderMessageContent(rctx, msg, isLast())}
 
               {/* Hover actions (chatbot-style) */}
-              <Show when={(ctx.sessionStatus() !== "running" || !isLast()) && !isEditing()}>
+              <Show when={(t.sessionStatus() !== "running" || !isLast()) && !isEditing()}>
                 <AssistantMsgActions
-                  forking={ctx.forking()}
+                  forking={t.forking()}
                   canFork={(block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx != null}
                   showCopy={textOf().trim() !== ""}
-                  copied={ctx.copiedMsgId() === msg.id}
-                  onFork={() => ctx.forkMessage(block)}
-                  onCopy={() => ctx.copyMsg(msg.id, textOf())}
-                  onRegenerate={() => ctx.regenerateMsg(rawIdx())}
+                  copied={t.copiedMsgId() === msg.id}
+                  onFork={() => t.forkMessage(block)}
+                  onCopy={() => t.copyMsg(msg.id, textOf())}
+                  onRegenerate={() => t.regenerateMsg(rawIdx())}
                 />
               </Show>
             </div>
@@ -250,10 +283,10 @@ export function TranscriptView(ctx: RemoteCodeViewCtx) {
 
   {/* Pending Tool Approval (Antigravity-style, human-readable) */}
   <ApprovalCard
-    pendingApproval={ctx.pendingApproval}
-    convWidthClass={ctx.convWidthClass}
-    respondApproval={ctx.respondApproval}
-    setYoloMode={ctx.setYoloMode}
+    pendingApproval={t.pendingApproval}
+    convWidthClass={ui.convWidthClass}
+    respondApproval={t.respondApproval}
+    setYoloMode={c.setYoloMode}
   />
 </div>
 </div>

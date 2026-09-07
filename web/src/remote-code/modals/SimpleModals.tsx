@@ -1,52 +1,22 @@
 import { For, Show } from "solid-js";
 import { Modal, Btn } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
-import type { ChoiceOption, ConfirmState } from "../viewTypes";
 import { copyWithToast } from "../../ui";
-import type { Review } from "../viewTypes";
+import { useModal } from "../ctx";
 
 export { NewProjectModal } from "./NewProjectModal";
 export { ReviewModal } from "./ReviewModal";
 
-/** Props partilhadas dos modais simples (getters + ações vindos da página). */
-export interface SimpleModalsCtx {
-  showNewProjectModal: () => boolean;
-  setShowNewProjectModal: (v: boolean) => void;
-  newProjectPath: () => string;
-  folderCurrent: () => string | null;
-  folderParent: () => string;
-  folderEntries: () => Array<{ name: string; path: string }>;
-  createProject: () => void;
-  setNewProjectPath: (v: string) => void;
-  folderLoading: () => boolean;
-  folderError: () => string | null;
-  requestFolders: (path: string) => void;
-  reviewOpen: () => boolean;
-  setReviewOpen: (v: boolean) => void;
-  reviewLoading: () => boolean;
-  reviewError: () => string | null;
-  taskReview: () => Review | null;
-  sessionStatus: () => string;
-  wsOpen: () => boolean;
-  undoChanges: (path?: string) => Promise<void>;
-  keepChanges: () => void;
-  choiceState: () => { title: string; message: string; options: ChoiceOption[]; resolve: (id: string | null) => void } | null;
-  confirmState: () => ConfirmState | null;
-  setConfirmState: (v: null) => void;
-  showPairModal: () => boolean;
-  setShowPairModal: (v: boolean) => void;
-  pairingData: () => { token: string; expiresAt: number; connectUrl: string } | null;
-}
-
-export function ChoiceModal(ctx: SimpleModalsCtx) {
+export function ChoiceModal() {
+  const m = useModal();
   return (
 <>
-<Modal open={!!ctx.choiceState()} title={ctx.choiceState()?.title || "Choose"} onClose={() => ctx.choiceState()?.resolve(null)}>
-  <p class="text-sm text-ink-400 whitespace-pre-line leading-relaxed">{ctx.choiceState()?.message}</p>
+<Modal open={!!m.choiceState()} title={m.choiceState()?.title || "Choose"} onClose={() => m.choiceState()?.resolve(null)}>
+  <p class="text-sm text-ink-400 whitespace-pre-line leading-relaxed">{m.choiceState()?.message}</p>
   <div class="mt-4 flex flex-col gap-2">
-    <For each={ctx.choiceState()?.options || []}>{(opt) =>
+    <For each={m.choiceState()?.options || []}>{(opt) =>
       <button
-        onClick={() => ctx.choiceState()?.resolve(opt.id)}
+        onClick={() => m.choiceState()?.resolve(opt.id)}
         class={`flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-colors cursor-pointer ${opt.primary ? "border-accent-500/50 bg-accent-500/10 hover:bg-accent-500/20" : "border-line hover:bg-ink-800"}`}
       >
         <span>
@@ -58,35 +28,37 @@ export function ChoiceModal(ctx: SimpleModalsCtx) {
     }</For>
   </div>
   <div class="mt-3 flex items-center justify-end gap-2">
-    <button onClick={() => ctx.choiceState()?.resolve(null)} class="px-3.5 py-1.5 rounded-xl text-xs font-medium text-ink-300 hover:text-ink-100 border border-line hover:bg-ink-800 transition-colors cursor-pointer">Cancel</button>
+    <button onClick={() => m.choiceState()?.resolve(null)} class="px-3.5 py-1.5 rounded-xl text-xs font-medium text-ink-300 hover:text-ink-100 border border-line hover:bg-ink-800 transition-colors cursor-pointer">Cancel</button>
   </div>
 </Modal>
 </>
   );
 }
 
-export function ConfirmModal(ctx: SimpleModalsCtx) {
+export function ConfirmModal() {
+  const m = useModal();
   return (
 <>
-<Modal open={!!ctx.confirmState()} title={ctx.confirmState()?.title || "Confirm"}
-  onClose={() => { ctx.confirmState()?.resolve(false); ctx.setConfirmState(null); }}
+<Modal open={!!m.confirmState()} title={m.confirmState()?.title || "Confirm"}
+  onClose={() => { m.confirmState()?.resolve(false); m.setConfirmState(null); }}
   footer={<>
-    <Btn variant="ghost" onClick={() => { ctx.confirmState()?.resolve(false); ctx.setConfirmState(null); }}>{ctx.confirmState()?.cancelText || "Cancel"}</Btn>
-    <Btn variant={ctx.confirmState()?.danger ? "danger" : "primary"} onClick={() => { ctx.confirmState()?.resolve(true); ctx.setConfirmState(null); }}>{ctx.confirmState()?.confirmText || "Confirm"}</Btn>
+    <Btn variant="ghost" onClick={() => { m.confirmState()?.resolve(false); m.setConfirmState(null); }}>{m.confirmState()?.cancelText || "Cancel"}</Btn>
+    <Btn variant={m.confirmState()?.danger ? "danger" : "primary"} onClick={() => { m.confirmState()?.resolve(true); m.setConfirmState(null); }}>{m.confirmState()?.confirmText || "Confirm"}</Btn>
   </>}>
-  <p class="text-sm text-ink-400 whitespace-pre-line leading-relaxed">{ctx.confirmState()?.message}</p>
+  <p class="text-sm text-ink-400 whitespace-pre-line leading-relaxed">{m.confirmState()?.message}</p>
 </Modal>
 </>
   );
 }
 
-export function PairModal(ctx: SimpleModalsCtx) {
+export function PairModal() {
+  const m = useModal();
   return (
 <>
 <Modal
-  open={ctx.showPairModal()}
+  open={m.showPairModal()}
   title="Pair Remote Daemon Host"
-  onClose={() => ctx.setShowPairModal(false)}
+  onClose={() => m.setShowPairModal(false)}
 >
     <div class="space-y-4 text-xs">
       <p class="text-ink-400">
@@ -94,7 +66,7 @@ export function PairModal(ctx: SimpleModalsCtx) {
         LLM Gateway account:
       </p>
 
-      <Show when={ctx.pairingData()}>
+      <Show when={m.pairingData()}>
         {(p) => {
           const cmd = `./llmgw-daemon -connect "${p().connectUrl}"`;
           return (
@@ -140,7 +112,7 @@ export function PairModal(ctx: SimpleModalsCtx) {
 
       <div class="flex justify-end pt-2">
         <button
-          onClick={() => ctx.setShowPairModal(false)}
+          onClick={() => m.setShowPairModal(false)}
           class="px-4 py-2 rounded-xl bg-ink-100 text-ink-950 text-xs font-semibold hover:bg-accent-400 cursor-pointer"
         >
           Done

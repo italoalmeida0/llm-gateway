@@ -1,9 +1,11 @@
 import { Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { copyWithToast } from "../../ui";
-import type { RemoteCodeViewCtx } from "../viewCtx";
+import { useHost, useModal } from "../ctx";
 
-export function Onboarding(ctx: RemoteCodeViewCtx) {
+export function Onboarding() {
+  const h = useHost();
+  const m = useModal();
   return (
 <>
 <div class="flex-1 flex flex-col items-center justify-center p-6 bg-ink-950 text-center overflow-y-auto">
@@ -29,16 +31,16 @@ export function Onboarding(ctx: RemoteCodeViewCtx) {
 
     {/* Action: Connect / Pair */}
     <Show
-      when={ctx.pairingData()}
+      when={m.pairingData()}
       fallback={
         <div class="pt-2">
           <button
-            onClick={ctx.generatePairingToken}
-            disabled={ctx.pairingLoading()}
+            onClick={m.generatePairingToken}
+            disabled={m.pairingLoading()}
             class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-sm transition-all shadow-lg shadow-brand-500/20 hover:shadow-brand-500/30 cursor-pointer disabled:opacity-50"
           >
             <Show
-              when={!ctx.pairingLoading()}
+              when={!m.pairingLoading()}
               fallback={<Iconify icon="lucide:refresh-cw" size={18} class="animate-spin" />}
             >
               <Iconify icon="lucide:plus" size={18} />
@@ -69,7 +71,7 @@ export function Onboarding(ctx: RemoteCodeViewCtx) {
             <button
               onClick={() =>
                 copyWithToast(
-                  `./llmgw-daemon -connect "${ctx.pairingData()?.connectUrl}"`,
+                  `./llmgw-daemon -connect "${m.pairingData()?.connectUrl}"`,
                 )
               }
               class="text-brand-400 hover:text-brand-300 flex items-center gap-1 text-[11px] cursor-pointer"
@@ -79,7 +81,7 @@ export function Onboarding(ctx: RemoteCodeViewCtx) {
             </button>
           </div>
           <div class="p-3 rounded-xl bg-ink-950 border border-line font-mono text-xs text-brand-300 break-all select-all">
-            ./llmgw-daemon -connect "{ctx.pairingData()?.connectUrl}"
+            ./llmgw-daemon -connect "{m.pairingData()?.connectUrl}"
           </div>
         </div>
 
@@ -89,7 +91,7 @@ export function Onboarding(ctx: RemoteCodeViewCtx) {
             <span>Or paste this Connection URL into the daemon:</span>
             <button
               onClick={() =>
-                copyWithToast(ctx.pairingData()?.connectUrl || "")
+                copyWithToast(m.pairingData()?.connectUrl || "")
               }
               class="text-brand-400 hover:text-brand-300 flex items-center gap-1 text-[11px] cursor-pointer"
             >
@@ -98,7 +100,7 @@ export function Onboarding(ctx: RemoteCodeViewCtx) {
             </button>
           </div>
           <div class="p-2.5 rounded-xl bg-ink-950 border border-line font-mono text-[11px] text-ink-300 break-all select-all">
-            {ctx.pairingData()?.connectUrl}
+            {m.pairingData()?.connectUrl}
           </div>
         </div>
 
@@ -118,13 +120,13 @@ export function Onboarding(ctx: RemoteCodeViewCtx) {
         {/* Action Buttons */}
         <div class="flex items-center justify-end gap-2.5 pt-2 text-xs">
           <button
-            onClick={ctx.loadHosts}
+            onClick={h.loadHosts}
             class="px-3.5 py-1.5 rounded-lg border border-line text-ink-300 hover:text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer"
           >
             Check Connection
           </button>
           <button
-            onClick={ctx.generatePairingToken}
+            onClick={m.generatePairingToken}
             class="px-3.5 py-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 transition-colors cursor-pointer"
           >
             Regenerate Token

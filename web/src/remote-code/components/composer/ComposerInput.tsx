@@ -1,18 +1,22 @@
 import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
-import type { RemoteCodeViewCtx } from "../../viewCtx";
+import { useComposerCtx, useModal, useSession, useUI } from "../../ctx";
 import { FileIcon } from "../../presentation";
 
-export function ComposerInput(ctx: RemoteCodeViewCtx) {
+export function ComposerInput() {
+  const c = useComposerCtx();
+  const s = useSession();
+  const m = useModal();
+  const ui = useUI();
   return (
 <>
 {/* Attachment chips (chatbot-style) */}
-<Show when={ctx.pendingAttachments().length > 0}>
+<Show when={c.pendingAttachments().length > 0}>
   <div class="flex flex-wrap gap-1.5 px-3.5 pt-3">
-    <For each={ctx.pendingAttachments()}>
+    <For each={c.pendingAttachments()}>
       {(att) => (
         <div
-          onClick={() => ctx.previewPending(att)}
+          onClick={() => m.previewPending(att)}
           class="relative group flex items-center gap-1.5 bg-ink-950 rounded-lg border border-line/70 pl-1.5 pr-2 py-1 text-xs max-w-[180px] cursor-pointer hover:border-ink-500 transition-colors"
           data-rc-tip={`${att.name} (${Math.round(att.size / 1024)}KB) — click to preview`}
         >
@@ -36,7 +40,7 @@ export function ComposerInput(ctx: RemoteCodeViewCtx) {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              ctx.removePendingAttachment(att.key);
+              c.removePendingAttachment(att.key);
             }}
             class="absolute -top-1.5 -right-1.5 bg-ink-700 hover:bg-rose-500 rounded-full p-0.5 transition-colors shadow cursor-pointer"
             data-rc-tip="Remove" aria-label="Remove"
@@ -53,17 +57,17 @@ export function ComposerInput(ctx: RemoteCodeViewCtx) {
 <div class="flex items-start">
   <textarea
     id="rc-composer"
-    disabled={ctx.creatingSession()}
+    disabled={s.creatingSession()}
     rows={1}
     class="flex-1 min-w-0 bg-transparent text-base sm:text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto [scrollbar-gutter:stable]"
     placeholder={
-      ctx.isMobile() ? "Ask anything…" : ctx.activeSession()
+      ui.isMobile() ? "Ask anything…" : s.activeSession()
         ? `Ask anything, @ to mention, / for actions`
-        : `Start a conversation in ${ctx.activeProject()?.name || "project"}...`
+        : `Start a conversation in ${s.activeProject()?.name || "project"}...`
     }
-    value={ctx.inputPrompt()}
+    value={c.inputPrompt()}
     onInput={(e) => {
-      ctx.setInputPrompt(e.currentTarget.value);
+      c.setInputPrompt(e.currentTarget.value);
       const el = e.currentTarget;
       el.style.height = "auto";
       el.style.height = Math.min(el.scrollHeight, 160) + "px";
@@ -83,7 +87,7 @@ export function ComposerInput(ctx: RemoteCodeViewCtx) {
       } catch {}
       if (files.length > 0) {
         e.preventDefault();
-        ctx.handleFiles(files);
+        c.handleFiles(files);
       }
     }}
     onDragOver={(e) => e.preventDefault()}
@@ -91,40 +95,40 @@ export function ComposerInput(ctx: RemoteCodeViewCtx) {
       e.preventDefault();
       try {
         const files = Array.from(e.dataTransfer?.files || []);
-        if (files.length > 0) ctx.handleFiles(files);
+        if (files.length > 0) c.handleFiles(files);
       } catch {}
     }}
     onKeyDown={(e) => {
-      if (ctx.slashMatches().length > 0) {
+      if (c.slashMatches().length > 0) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
-          ctx.setSlashIndex((prev) =>
-            Math.min(prev + 1, ctx.slashMatches().length - 1),
+          c.setSlashIndex((prev) =>
+            Math.min(prev + 1, c.slashMatches().length - 1),
           );
           return;
         }
         if (e.key === "ArrowUp") {
           e.preventDefault();
-          ctx.setSlashIndex((prev) => Math.max(prev - 1, 0));
+          c.setSlashIndex((prev) => Math.max(prev - 1, 0));
           return;
         }
         if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
           e.preventDefault();
-          const pick = ctx.slashMatches()[ctx.slashIndex()];
-          if (pick) ctx.pickSlash(pick.cmd);
+          const pick = c.slashMatches()[c.slashIndex()];
+          if (pick) c.pickSlash(pick.cmd);
           return;
         }
       }
 
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        ctx.sendPrompt();
+        c.sendPrompt();
       }
     }}
   />
-  <Show when={ctx.inputPrompt().length > 0}>
+  <Show when={c.inputPrompt().length > 0}>
     <button
-      onClick={() => ctx.setInputPrompt("")}
+      onClick={() => c.setInputPrompt("")}
       class="shrink-0 mr-2.5 mt-2.5 p-1 rounded-md text-ink-600 hover:text-ink-300 hover:bg-ink-800 transition-colors cursor-pointer"
       data-rc-tip="Clear input" aria-label="Clear input"
     >

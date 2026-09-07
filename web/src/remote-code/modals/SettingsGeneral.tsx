@@ -1,10 +1,11 @@
 import { For } from "solid-js";
 import { ThemeToggle } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
+import { useModal, useUI } from "../ctx";
 
-import type { SettingsModalCtx } from "./SettingsModal";
-
-export function SettingsGeneralSection(ctx: SettingsModalCtx) {
+export function SettingsGeneralSection() {
+  const m = useModal();
+  const ui = useUI();
   return (
 <>
 <div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
@@ -32,18 +33,18 @@ export function SettingsGeneralSection(ctx: SettingsModalCtx) {
       </div>
       <button
         onClick={() => {
-          const v = !ctx.verboseChat();
-          ctx.setVerboseChat(v);
+          const v = !ui.verboseChat();
+          ui.setVerboseChat(v);
           try { localStorage.setItem("llmgw-rc-verbose", v ? "1" : "0"); } catch {}
         }}
-        class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${ctx.verboseChat() ? "bg-accent-500" : "bg-ink-700"}`}
+        class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${ui.verboseChat() ? "bg-accent-500" : "bg-ink-700"}`}
         style={{ height: "22px" }}
         role="switch"
-        aria-checked={ctx.verboseChat()}
+        aria-checked={ui.verboseChat()}
         aria-label="Verbose agent chat"
       >
         <span
-          class={`block w-4 h-4 rounded-full bg-accent-fg transition-transform ${ctx.verboseChat() ? "translate-x-[18px]" : "translate-x-0"}`}
+          class={`block w-4 h-4 rounded-full bg-accent-fg transition-transform ${ui.verboseChat() ? "translate-x-[18px]" : "translate-x-0"}`}
           style={{ height: "16px", width: "16px" }}
         />
       </button>
@@ -58,11 +59,11 @@ export function SettingsGeneralSection(ctx: SettingsModalCtx) {
           {([v, label]) => (
             <button
               onClick={() => {
-                ctx.setConvWidth(v);
+                ui.setConvWidth(v);
                 try { localStorage.setItem("llmgw-rc-width", v); } catch {}
               }}
               class={`py-1.5 rounded-lg text-center font-medium transition-colors cursor-pointer ${
-                ctx.convWidth() === v
+                ui.convWidth() === v
                   ? "bg-ink-800 text-ink-100"
                   : "text-ink-500 hover:text-ink-300"
               }`}
@@ -87,10 +88,10 @@ export function SettingsGeneralSection(ctx: SettingsModalCtx) {
       <label class="flex items-center gap-2 cursor-pointer select-none">
         <input
           type="checkbox"
-          checked={ctx.daemonSettings().autoSwarmEnabled ?? false}
+          checked={m.daemonSettings().autoSwarmEnabled ?? false}
           onChange={(e) =>
-            ctx.setDaemonSettings({
-              ...ctx.daemonSettings(),
+            m.setDaemonSettings({
+              ...m.daemonSettings(),
               autoSwarmEnabled: e.currentTarget.checked,
             })
           }
@@ -119,10 +120,10 @@ export function SettingsGeneralSection(ctx: SettingsModalCtx) {
           {(v) => (
             <button
               onClick={() =>
-                ctx.setDaemonSettings({ ...ctx.daemonSettings(), autoCompactPercent: v })
+                m.setDaemonSettings({ ...m.daemonSettings(), autoCompactPercent: v })
               }
               class={`py-1 rounded-lg text-center font-medium transition-colors cursor-pointer ${
-                (ctx.daemonSettings().autoCompactPercent ?? 80) === v
+                (m.daemonSettings().autoCompactPercent ?? 80) === v
                   ? "bg-ink-100 text-ink-950"
                   : "text-ink-400 hover:text-ink-200"
               }`}
@@ -147,9 +148,9 @@ export function SettingsGeneralSection(ctx: SettingsModalCtx) {
   <label class="flex items-start gap-2 cursor-pointer select-none text-xs">
     <input
       type="checkbox"
-      checked={!(ctx.daemonSettings().noAutoTitle ?? false)}
+      checked={!(m.daemonSettings().noAutoTitle ?? false)}
       onChange={(e) =>
-        ctx.setDaemonSettings({ ...ctx.daemonSettings(), noAutoTitle: !e.currentTarget.checked })
+        m.setDaemonSettings({ ...m.daemonSettings(), noAutoTitle: !e.currentTarget.checked })
       }
       class="rounded accent-brand-500 mt-0.5"
     />

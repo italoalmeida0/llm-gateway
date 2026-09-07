@@ -3,31 +3,35 @@ import { Icon as Iconify } from "../../../components/icon";
 import { Tooltip } from "../../../ui";
 import { compactTokens } from "../../context";
 import { baseNameOf } from "../../transcript";
-import type { RemoteCodeViewCtx } from "../../viewCtx";
+import { useComposerCtx, useSession, useTranscriptCtx, useUI } from "../../ctx";
 import { FloatMenu } from "../FloatMenu";
 
-export function ComposerFooter(ctx: RemoteCodeViewCtx) {
+export function ComposerFooter() {
+  const c = useComposerCtx();
+  const s = useSession();
+  const t = useTranscriptCtx();
+  const ui = useUI();
   return (
 <>
-<Show when={ctx.activeSessionId()}>
+<Show when={s.activeSessionId()}>
   <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-ink-500" data-composer-footer>
-    <span class="flex items-center gap-1.5 min-w-0" data-rc-tip={ctx.currentProject()?.path}><Iconify icon="lucide:folder" size={13} /><span class="truncate">{ctx.currentProject()?.name || baseNameOf(ctx.activeSession()?.cwd) || "Project"}</span></span>
-    <FloatMenu anchor={() => ctx.contextBtn} open={ctx.usageOpen()} placement="top-end" width="19rem">
+    <span class="flex items-center gap-1.5 min-w-0" data-rc-tip={s.currentProject()?.path}><Iconify icon="lucide:folder" size={13} /><span class="truncate">{s.currentProject()?.name || baseNameOf(s.activeSession()?.cwd) || "Project"}</span></span>
+    <FloatMenu anchor={() => ui.contextBtn} open={ui.usageOpen()} placement="top-end" width="19rem">
       <div class="p-1.5 text-xs">
         <div class="font-semibold text-ink-200 mb-3">Conversation context</div>
-        <div class="text-lg font-medium text-ink-100 tabular-nums">{ctx.activeContext().label}</div>
+        <div class="text-lg font-medium text-ink-100 tabular-nums">{c.activeContext().label}</div>
         <p class="text-[11px] text-ink-500 mt-1 leading-relaxed">
-          {ctx.activeContext().window > 0 ? `${compactTokens(ctx.activeContext().window)} tokens configured in the gateway.` : "Context limit not configured in the gateway."}
+          {c.activeContext().window > 0 ? `${compactTokens(c.activeContext().window)} tokens configured in the gateway.` : "Context limit not configured in the gateway."}
           {" "}Measured from the latest model request and its response.
         </p>
-        <Show when={ctx.activeContext().percent !== null}>
-          <div class="h-1.5 rounded-full bg-elev overflow-hidden mt-3" role="progressbar" aria-label="Context used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, ctx.activeContext().percent ?? 0)}>
-            <div class="h-full rounded-full bg-accent-500" style={{ width: `${Math.min(100, ctx.activeContext().percent ?? 0)}%` }} />
+        <Show when={c.activeContext().percent !== null}>
+          <div class="h-1.5 rounded-full bg-elev overflow-hidden mt-3" role="progressbar" aria-label="Context used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, c.activeContext().percent ?? 0)}>
+            <div class="h-full rounded-full bg-accent-500" style={{ width: `${Math.min(100, c.activeContext().percent ?? 0)}%` }} />
           </div>
         </Show>
         <div class="font-semibold text-ink-200 mb-2 mt-4 pt-3 border-t border-line">Session usage</div>
         <Show
-          when={ctx.activeUsage()}
+          when={t.activeUsage()}
           fallback={
             <p class="text-ink-500 text-[11px]">
               No usage reported yet. Run the agent to see input / cache / output tokens here.
@@ -49,10 +53,10 @@ export function ComposerFooter(ctx: RemoteCodeViewCtx) {
       </div>
     </FloatMenu>
     <Tooltip content="Conversation context and session usage">
-      <button ref={ctx.contextBtn} data-menubtn aria-label={`Conversation context: ${ctx.activeContext().label}`} aria-expanded={ctx.usageOpen()}
-        onClick={() => { const next = !ctx.usageOpen(); ctx.closeMenus(); ctx.setUsageOpen(next); }}
+      <button ref={ui.contextBtn} data-menubtn aria-label={`Conversation context: ${c.activeContext().label}`} aria-expanded={ui.usageOpen()}
+        onClick={() => { const next = !ui.usageOpen(); ui.closeMenus(); ui.setUsageOpen(next); }}
         class="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] tabular-nums text-ink-400 hover:bg-elev hover:text-ink-200 cursor-pointer">
-        <Iconify icon="lucide:chart-pie" size={12} /><span>{ctx.activeContext().label}</span>
+        <Iconify icon="lucide:chart-pie" size={12} /><span>{c.activeContext().label}</span>
       </button>
     </Tooltip>
   </div>

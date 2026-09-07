@@ -1,16 +1,13 @@
-import { createMemo, For, Show, type JSX } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import { Streamdown } from "streamdown-solid";
 import { Icon as Iconify } from "../../components/icon";
-import { copyWithToast } from "../../ui";
 import type { ChatMessage, ContentBlock, RenderBlock, RenderBlockSeries, ToolUnit } from "../types";
-import { msgIsEmpty, splitToolRuns, toolCatOf, tryParseArgs } from "../utils/tools";
-import { elapsedLabel } from "../utils/format";
-import { absoluteRemotePath } from "../paths";
-import { groupTitle, specialTitle, toolRowKey } from "../utils/titles";
-import { toolSummary, terminalPresentation } from "../transcript";
-import { CodeBlock, DiffView, ShellCmd } from "./CodeBlock";
-import { FileIcon } from "../presentation";
-import { languageForPath } from "../utils/lang";
+import { splitToolRuns, toolCatOf } from "../utils/tools";
+import { groupTitle, specialTitle } from "../utils/titles";
+import { useToolUnitModel } from "./tool/toolUnitModel";
+import { ToolUnitHeader } from "./tool/ToolUnitHeader";
+import { ToolEditBodies } from "./tool/ToolEditBodies";
+import { ToolSearchBodies } from "./tool/ToolSearchBodies";
 
 /** Closures da página que os blocos de transcript precisam para renderizar. */
 export interface TranscriptRenderCtx {
@@ -351,270 +348,18 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
 // on every token remounted Markdown and collapsed its height before repaint.
 
 export function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean) {
-  const key = () => toolRowKey(msgId, u, ui);
-  const open = () => ctx.toolOpen()[key()] ?? (running && !u.result);
-  const sum = createMemo(() => toolSummary(u));
-  const prog = () => (u.call?.toolId ? ctx.toolProgress()[u.call.toolId] : undefined);
-  const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
-  const name = () => u.call?.toolName || "tool";
-  // Full shell command for the highlighted header: commands[] joined with
-  // the effective joiner (&& or ;), else the single command. Python rows
-  // show script + args or the first code line (same as the summary).
-  const bashHeaderCmd = () => {
-    if (name() === "python") return sum().target || "";
-    const a: any = args();
-    if (Array.isArray(a.commands) && a.commands.length > 0) {
-      return a.commands.map(String).join(a.stopOnError === false ? " ; " : " && ");
-    }
-    return String(a.command || sum().target || "");
-  };
-  const terminal = createMemo(() => terminalPresentation(u.result?.toolResult || ""));
-  const webDetails = () => {
-    const d: any = u.result?.toolDetails;
-    if (!d || !Array.isArray(d.results)) return undefined;
-    return d as { query?: string; cached?: boolean; results: { title?: string; url?: string; snippet?: string }[] };
-  };
-  const fetchDetails = () => {
-    const d: any = u.result?.toolDetails;
-    if (!d || typeof d.url !== "string") return undefined;
-    return d as { url: string; host?: string; title?: string; content?: string; truncated?: boolean };
-  };
-  const elapsed = () => {
-    if (name() !== "bash" && name() !== "python") return "";
-    const duration = u.result?.toolDurationMs ?? terminal().durationMs;
-    if (duration !== undefined) return ctx.elapsedLabel(duration);
-    const start = ctx.toolStarts()[u.call?.toolId || ""];
-    return start ? ctx.elapsedLabel(ctx.turnClock() - start) : "";
-  };
-  if (name() === "question") return <div class="flex items-center gap-2 pl-1 py-1 text-[13px]" data-question-summary><Iconify icon="lucide:message-circle" size={14} class="text-ink-500 shrink-0" /><span class="text-ink-500">{sum().verb}</span><span class="text-ink-200 truncate">{sum().target}</span></div>;
+  const m = useToolUnitModel(ctx, msgId, u, ui, running);
+  const part = { ctx, msgId, u, m, running };
+  if (m.name() === "question") return <div class="flex items-center gap-2 pl-1 py-1 text-[13px]" data-question-summary><Iconify icon="lucide:message-circle" size={14} class="text-ink-500 shrink-0" /><span class="text-ink-500">{m.sum().verb}</span><span class="text-ink-200 truncate">{m.sum().target}</span></div>;
   return (
     <div class="w-full">
-      <div
-        onClick={() => ctx.toggleToolOpen(key())}
-        class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
-      >
-        <Show
-          when={!(running && !u.result)}
-          fallback={
-            <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
-          }
-        >
-          <Iconify
-            icon={sum().icon}
-            size={14}
-            class="shrink-0 text-ink-500"
-          />
-        </Show>
-        <span class="text-ink-500 shrink-0">{sum().verb}</span>
-        <span class="flex items-center gap-2 min-w-0 flex-1">
-          <span class="inline-flex items-center gap-2 min-w-0" data-rc-tip={args().path ? absoluteRemotePath(String(args().path), ctx.activeSession()?.cwd || "", ctx.projects().find((p) => p.protected)?.path) : undefined}>
-            <Show when={args().path}><FileIcon path={String(args().path)} /></Show>
-            <Show when={name() === "bash" || name() === "python"} fallback={
-              <span class="truncate text-ink-200 font-medium min-w-0">{sum().target}</span>
-            }>
-              <span class="truncate text-ink-200 min-w-0 text-[12.5px]"><ShellCmd text={bashHeaderCmd()} /></span>
-            </Show>
-          </span>
-        </span>
-        <Show when={sum().statAdd != null || sum().statDel != null}>
-          <span class="font-mono text-[11px] shrink-0">
-            <Show when={(sum().statAdd || 0) > 0}>
-              <span class="text-emerald-400">+{sum().statAdd}</span>
-            </Show>
-            <Show when={(sum().statAdd || 0) > 0 && (sum().statDel || 0) > 0}>
-              <span class="text-ink-600"> </span>
-            </Show>
-            <Show when={(sum().statDel || 0) > 0}>
-              <span class="text-rose-400">-{sum().statDel}</span>
-            </Show>
-          </span>
-        </Show>
-        <Show when={sum().stat && sum().statAdd == null}>
-          <span class="text-[11px] text-ink-600 shrink-0">{sum().stat}</span>
-        </Show>
-        <Show when={elapsed()}><span data-tool-duration class="text-[11px] text-ink-500 tabular-nums shrink-0">{elapsed()}</span></Show>
-        <Iconify
-          icon="lucide:chevron-down"
-          size={12}
-          class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
-        />
-      </div>
-      <Show when={open()}>
+      <ToolUnitHeader {...part} />
+      <Show when={m.open()}>
         <div class="ml-5 mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 overflow-hidden">
-          {/* Context body per tool kind (scrollable, always inline — the
-              collapsible rows already are the "open file/diff" view). */}
-          <Show when={name() === "edit" && u.result?.toolResult}>
-            <DiffView
-              text={u.result?.toolResult || ""}
-              max={40}
-              name={String(args().path || "")}
-            />
-            <div class="flex items-center gap-2 px-3 py-1.5 border-t border-line/50">
-              <button
-                onClick={() => copyWithToast(u.result?.toolResult || "")}
-                class="text-[11px] text-ink-600 hover:text-ink-300 cursor-pointer"
-              >
-                Copy
-              </button>
-            </div>
-          </Show>
-          <Show when={name() === "edit" && !u.result}>
-            <For each={args().edits || []}>{(edit) => <DiffView text={`${String(edit.oldText || "").split("\n").map((s) => "-" + s).join("\n")}\n${String(edit.newText || "").split("\n").map((s) => "+" + s).join("\n")}`} name={String(args().path || "")} />}</For>
-          </Show>
-          <Show when={name() === "read"}>
-            <Show
-              when={u.result?.toolResult || prog()}
-              fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Reading file…</div>}
-            >
-              <CodeBlock
-                text={u.result?.toolResult || prog() || ""}
-                language={languageForPath(String(args().path || ""))}
-              />
-            </Show>
-          </Show>
-          <Show when={name() === "write"}>
-            <CodeBlock
-              text={String(args().content || u.result?.toolResult || "")}
-              language={languageForPath(String(args().path || ""))}
-            />
-          </Show>
-          <Show when={name() === "python"}>
-            <Show
-              when={u.result?.toolResult || prog()}
-              fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Running Python…</div>}
-            >
-              <Show when={args().script}>
-                <div class="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-ink-500">
-                  <FileIcon path={String(args().script || "")} />
-                  <span class="font-mono truncate">{String(args().script || "")}{Array.isArray(args().args) && args().args.length > 0 ? ` ${args().args.map(String).join(" ")}` : ""}</span>
-                </div>
-              </Show>
-              <Show when={args().code}>
-                <CodeBlock text={String(args().code || "")} language="python" />
-              </Show>
-              <div class="border-t border-line/50">
-                <CodeBlock text={terminal().output || "No output"} language={undefined} />
-              </div>
-            </Show>
-          </Show>
-          <Show when={name() === "search"}>
-            <Show
-              when={u.result?.toolResult || prog()}
-              fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Searching…</div>}
-            >
-              <div class="px-3 py-1.5 text-[11px] text-ink-500 font-mono">
-                <span class="text-ink-300">/{String(args().pattern || "")}/</span>
-                {args().isRegex ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">regex</span> : null}
-                {args().path && String(args().path) !== "." ? <span class="ml-1.5">in {String(args().path)}</span> : null}
-              </div>
-              <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language={undefined} />
-            </Show>
-          </Show>
-          <Show when={name() === "inspect"}>
-            <Show
-              when={u.result?.toolResult || prog()}
-              fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Listing…</div>}
-            >
-              <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language={undefined} />
-            </Show>
-          </Show>
-          <Show when={name() === "patch"}>
-            <Show
-              when={u.result?.toolResult || prog()}
-              fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Previewing…</div>}
-            >
-              <Show when={args().dryRun !== false}>
-                <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
-                  <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
-                </div>
-              </Show>
-              <DiffView text={terminal().output || u.result?.toolResult || prog() || ""} max={60} />
-            </Show>
-          </Show>
-          <Show when={name() === "search_web"}>
-            <Show
-              when={u.result?.toolResult || prog()}
-              fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Searching the web…</div>}
-            >
-              <div class="px-3 pt-2 pb-1 text-[11px] text-ink-500">
-                <span class="font-mono text-ink-300">“{String(args().query || webDetails()?.query || "")}”</span>
-                <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">DuckDuckGo</span>
-                <Show when={webDetails()?.cached}><span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">cached</span></Show>
-              </div>
-              <Show when={(webDetails()?.results || []).length > 0} fallback={
-                <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language={undefined} />
-              }>
-                <ol class="px-3 pb-2 space-y-1.5">
-                  <For each={(webDetails()?.results || []).slice(0, 10)}>{(r: any, i: () => number) =>
-                    <li class="group rounded-lg border border-line/60 bg-elev/50 px-2.5 py-1.5 transition-colors hover:border-ink-500">
-                      <a href={String(r.url || "")} target="_blank" rel="noreferrer"
-                         class="flex items-baseline gap-1.5 text-[12px] leading-snug">
-                        <span class="shrink-0 font-mono text-[10px] text-ink-600">{i() + 1}.</span>
-                        <span class="font-medium text-ink-100 group-hover:text-accent-300 group-hover:underline line-clamp-1">{String(r.title || r.url || "")}</span>
-                      </a>
-                      <div class="mt-0.5 truncate font-mono text-[10px] text-ink-600">{String(r.url || "")}</div>
-                      <Show when={r.snippet}><p class="mt-0.5 text-[11px] leading-snug text-ink-400 line-clamp-2">{String(r.snippet)}</p></Show>
-                    </li>
-                  }</For>
-                </ol>
-                <Show when={(webDetails()?.results || []).length > 10}>
-                  <p class="px-3 pb-2 text-[10px] text-ink-600">+{(webDetails()?.results || []).length - 10} more in raw output below</p>
-                </Show>
-                <details class="border-t border-line/50">
-                  <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
-                  <CodeBlock text={terminal().output || u.result?.toolResult || ""} language={undefined} />
-                </details>
-              </Show>
-            </Show>
-          </Show>
-          <Show when={name() === "fetch_url"}>
-            <Show
-              when={u.result?.toolResult || prog()}
-              fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Fetching {String(args().url || "URL")}…</div>}
-            >
-              <a href={String(fetchDetails()?.url || args().url || "")} target="_blank" rel="noreferrer"
-                 class="mx-3 mt-2 flex items-center gap-2 rounded-lg border border-line/60 bg-elev/50 px-2.5 py-2 transition-colors hover:border-ink-500">
-                <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent-500/15 font-mono text-[11px] font-bold text-accent-300">
-                  {(fetchDetails()?.host || "?").slice(0, 1).toUpperCase()}
-                </span>
-                <span class="min-w-0">
-                  <span class="block truncate text-[12px] font-medium text-ink-100">{String(fetchDetails()?.title || fetchDetails()?.host || args().url || "Article")}</span>
-                  <span class="block truncate font-mono text-[10px] text-ink-500">{String(fetchDetails()?.host || "")}</span>
-                </span>
-                <Iconify icon="lucide:external-link" size={12} class="ml-auto shrink-0 text-ink-500" />
-              </a>
-              <Show when={fetchDetails()?.content} fallback={
-                <div class="border-t border-line/50 mt-2">
-                  <CodeBlock text={terminal().output || u.result?.toolResult || prog() || ""} language="markdown" />
-                </div>
-              }>
-                <div class="px-3 py-2 max-h-96 overflow-y-auto text-[12.5px] leading-relaxed text-ink-200 article-body">
-                  <Streamdown>{String(fetchDetails()?.content || "")}</Streamdown>
-                </div>
-                <Show when={fetchDetails()?.truncated}>
-                  <p class="px-3 pb-1 text-[10px] text-ink-600">Truncated — full text in raw output below</p>
-                </Show>
-                <details class="border-t border-line/50">
-                  <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
-                  <CodeBlock text={terminal().output || u.result?.toolResult || ""} language="markdown" />
-                </details>
-              </Show>
-            </Show>
-          </Show>
-          <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python" && name() !== "search" && name() !== "inspect" && name() !== "patch" && name() !== "search_web" && name() !== "fetch_url"}>
-            <Show
-              when={u.result?.toolResult || prog()}
-              fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{name() === "question" ? "Waiting for your answers…" : ctx.pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
-            >
-              <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
-                {name() === "bash" && u.result ? terminal().output || "No output" : u.result?.toolResult || prog() || ""}
-              </pre>
-            </Show>
-          </Show>
+          <ToolEditBodies {...part} />
+          <ToolSearchBodies {...part} />
         </div>
       </Show>
     </div>
   );
 }
-
-

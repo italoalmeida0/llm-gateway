@@ -69,7 +69,28 @@ func TestUnmarshalArgsBasics(t *testing.T) {
 		t.Fatalf("got %q, want %q", s.Path, "2")
 	}
 
-	// empty args still error.
+	// numeric fields accept whole-number strings from string-serializing harnesses.
+	var n struct {
+		Limit int `json:"limit"`
+	}
+	if err := unmarshalArgs(json.RawMessage(`{"limit":"6.0"}`), &n); err != nil {
+		t.Fatalf("unmarshalArgs numeric string: %v", err)
+	}
+	if n.Limit != 6 {
+		t.Fatalf("got %+v, want limit=6", n)
+	}
+	// fractional strings are rejected on numeric fields.
+	if err := unmarshalArgs(json.RawMessage(`{"limit":"2.5"}`), &n); err == nil {
+		t.Fatal("expected error for fractional string, got nil")
+	}
+	// numeric-looking strings on NON-numeric fields stay strings.
+	var ti TodoItem
+	if err := unmarshalArgs(json.RawMessage(`{"id":"1","text":"x","status":"pending"}`), &ti); err != nil {
+		t.Fatalf("unmarshalArgs todo: %v", err)
+	}
+	if ti.ID != "1" {
+		t.Fatalf("todo id coerced: %q", ti.ID)
+	}
 	var e struct {
 		Path string `json:"path"`
 	}

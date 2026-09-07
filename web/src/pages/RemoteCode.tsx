@@ -3891,27 +3891,13 @@ export default function RemoteCodePage() {
                 </Show>
               </Show>
             </Show>
-            <Show when={name() === "bash"}>
-              <Show
-                when={u.result?.toolResult || prog()}
-                fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Running…</div>}
-              >
-                <div class="px-3 pt-2 pb-1.5 border-b border-line/50 overflow-x-auto">
-                  <ShellCmd text={bashHeaderCmd()} max={500} />
-                </div>
-                <Show when={args().workdir}>
-                  <div class="px-3 py-1 text-[10px] font-mono text-ink-600">in {String(args().workdir)}</div>
-                </Show>
-                <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">{u.result ? terminal().output || "No output" : prog() || ""}</pre>
-              </Show>
-            </Show>
-            <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python" && name() !== "search" && name() !== "inspect" && name() !== "patch" && name() !== "search_web" && name() !== "fetch_url" && name() !== "bash"}>
+            <Show when={name() !== "edit" && name() !== "read" && name() !== "write" && name() !== "python" && name() !== "search" && name() !== "inspect" && name() !== "patch" && name() !== "search_web" && name() !== "fetch_url"}>
               <Show
                 when={u.result?.toolResult || prog()}
                 fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{name() === "question" ? "Waiting for your answers…" : pendingApproval()?.callId === u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
               >
                 <pre class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap">
-                  {u.result?.toolResult || prog() || ""}
+                  {name() === "bash" && u.result ? terminal().output || "No output" : u.result?.toolResult || prog() || ""}
                 </pre>
               </Show>
             </Show>

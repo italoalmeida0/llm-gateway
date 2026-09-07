@@ -152,14 +152,14 @@ export function TranscriptView() {
               <div class="max-w-xl text-center px-4 py-2.5 rounded-xl border border-line/60 bg-ink-900/60">
                 <div class="flex items-center justify-center gap-1.5 text-xs font-medium text-ink-300">
                   <Iconify icon="lucide:boxes" size={13} class="text-ink-500" />
-                  <span>Context auto-compacted — oldest 30% summarized</span>
+                  <span>Context auto-compacted</span>
                 </div>
                 <details class="mt-1.5 text-left">
                   <summary class="text-[11px] text-ink-500 hover:text-ink-300 cursor-pointer select-none text-center">
                     View summary
                   </summary>
                   <div class="rc-markdown mt-2 text-left text-xs max-h-48 overflow-y-auto">
-                    <Streamdown>{textOf().replace(/^## Context Summary \(compacted\)\n\n/, "")}</Streamdown>
+                    <Streamdown class="text-xs">{textOf().replace(/^## Context Summary \(compacted\)\n\n/, "")}</Streamdown>
                   </div>
                 </details>
               </div>

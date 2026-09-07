@@ -15,7 +15,7 @@
  *
  *  - ink-*   : neutral scale. ink-950 = page bg … ink-100 = strongest text.
  *  - accent  : monochrome primary action (near-black in white, near-white in dark).
- *  - brand   : red highlight (var(--brand-500)) — nav ativa, destaques, charts.
+ *  - brand   : red highlight (var(--brand-500)) — active nav, highlights, charts.
  *  - card    : big surface color (mock #f5f6f8), elev: surface on top of cards.
  */
 
@@ -629,6 +629,110 @@ html[data-theme="dark"] .ag-theme-quartz-dark {
 .rc-markdown td { vertical-align: top; min-width: 5rem; overflow-wrap: anywhere; }
 .rc-markdown img { max-width: 100%; border-radius: 0.6rem; }
 .rc-markdown hr { border: none; border-top: 1px solid var(--line); margin: 0.9rem 0; }
+
+/* text-xs modifier for .rc-markdown and Streamdown components */
+.rc-markdown.text-xs,
+.rc-markdown .text-xs,
+.text-xs.rc-markdown,
+[data-streamdown].text-xs,
+.text-xs [data-streamdown] {
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.rc-markdown.text-xs p,
+.rc-markdown .text-xs p,
+.text-xs.rc-markdown p,
+.text-xs [data-streamdown] p {
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin: 0 0 0.4rem;
+}
+.rc-markdown.text-xs h1, .rc-markdown .text-xs h1, .text-xs.rc-markdown h1, .text-xs [data-streamdown="heading-1"] {
+  font-size: 0.92rem !important;
+  font-weight: 650;
+  line-height: 1.3;
+  margin: 0.5rem 0 0.25rem !important;
+}
+.rc-markdown.text-xs h2, .rc-markdown .text-xs h2, .text-xs.rc-markdown h2, .text-xs [data-streamdown="heading-2"] {
+  font-size: 0.85rem !important;
+  font-weight: 650;
+  line-height: 1.3;
+  margin: 0.45rem 0 0.2rem !important;
+}
+.rc-markdown.text-xs h3, .rc-markdown .text-xs h3, .text-xs.rc-markdown h3, .text-xs [data-streamdown="heading-3"] {
+  font-size: 0.8rem !important;
+  font-weight: 650;
+  line-height: 1.3;
+  margin: 0.4rem 0 0.2rem !important;
+}
+.rc-markdown.text-xs h4, .rc-markdown .text-xs h4, .text-xs.rc-markdown h4, .text-xs [data-streamdown="heading-4"],
+.rc-markdown.text-xs h5, .rc-markdown .text-xs h5, .text-xs.rc-markdown h5, .text-xs [data-streamdown="heading-5"],
+.rc-markdown.text-xs h6, .rc-markdown .text-xs h6, .text-xs.rc-markdown h6, .text-xs [data-streamdown="heading-6"] {
+  font-size: 0.75rem !important;
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 0.35rem 0 0.15rem !important;
+}
+.rc-markdown.text-xs ul, .rc-markdown.text-xs ol,
+.rc-markdown .text-xs ul, .rc-markdown .text-xs ol,
+.text-xs.rc-markdown ul, .text-xs.rc-markdown ol,
+.text-xs [data-streamdown="unordered-list"],
+.text-xs [data-streamdown="ordered-list"] {
+  margin: 0 0 0.4rem;
+  padding-left: 1rem;
+}
+.rc-markdown.text-xs li,
+.rc-markdown .text-xs li,
+.text-xs.rc-markdown li,
+.text-xs [data-streamdown="list-item"] {
+  margin: 0.1rem 0;
+  font-size: 0.75rem;
+}
+.rc-markdown.text-xs code:not(pre code),
+.rc-markdown .text-xs code:not(pre code),
+.text-xs.rc-markdown code:not(pre code),
+.text-xs [data-streamdown="inline-code"] {
+  font-size: 0.72rem !important;
+  padding: 0.05rem 0.25rem;
+}
+.rc-markdown.text-xs pre,
+.rc-markdown .text-xs pre,
+.text-xs.rc-markdown pre,
+.text-xs pre {
+  margin: 0 0 0.4rem;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+.rc-markdown.text-xs table,
+.rc-markdown .text-xs table,
+.text-xs.rc-markdown table,
+.text-xs [data-streamdown="table"] {
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+}
+.rc-markdown.text-xs th, .rc-markdown.text-xs td,
+.rc-markdown .text-xs th, .rc-markdown .text-xs td,
+.text-xs.rc-markdown th, .text-xs.rc-markdown td,
+.text-xs [data-streamdown="table-header-cell"],
+.text-xs [data-streamdown="table-cell"] {
+  font-size: 0.72rem !important;
+  padding: 0.2rem 0.4rem !important;
+}
+.rc-markdown.text-xs blockquote,
+.rc-markdown .text-xs blockquote,
+.text-xs.rc-markdown blockquote,
+.text-xs [data-streamdown="blockquote"] {
+  margin: 0 0 0.4rem;
+  padding: 0.1rem 0 0.1rem 0.6rem;
+  font-size: 0.75rem;
+}
+.text-xs.space-y-4 > * + *,
+.text-xs .space-y-4 > * + *,
+.rc-markdown.text-xs .space-y-4 > * + *,
+.rc-markdown .text-xs.space-y-4 > * + * {
+  margin-top: 0.45rem !important;
+}
 .hljs-comment, .hljs-quote { color: var(--ink-500); font-style: italic; }
 .hljs-keyword, .hljs-selector-tag { color: #f472b6; font-weight: 600; }
 .hljs-number, .hljs-literal, .hljs-variable, .hljs-template-variable { color: #fb923c; }

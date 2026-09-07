@@ -51,6 +51,12 @@ export default function RemoteCodePage() {
   let creationRequestId = "";
   const [activeSessionId, setActiveSessionId] = createSignal<string>("");
 
+  const hosts = createHosts({
+    toast: notice.toast,
+    showConfirm: modals.showConfirm,
+    onHostRemoved: (id) => { void mirror.dataLayer.disposeHost(id); },
+  });
+
   const relay = createRelay({
     getHostId: () => hosts.activeHostId(),
     onMessage: (data) => {
@@ -169,12 +175,6 @@ export default function RemoteCodePage() {
     isConnected: () => relay.connectionState() === "connected",
   });
   transcript.setWorkspaceSink(workspace.setWorkspace);
-
-  const hosts = createHosts({
-    toast: notice.toast,
-    showConfirm: modals.showConfirm,
-    onHostRemoved: (id) => { void mirror.dataLayer.disposeHost(id); },
-  });
 
   const settings = createSettings({
     send: (payload) => relay.send(payload),

@@ -5651,13 +5651,13 @@ export default function RemoteCodePage() {
                     <button ref={modeBtn} data-menubtn aria-label="Agent mode and skills" aria-expanded={modeMenuOpen()}
                       onClick={() => { const next = !modeMenuOpen(); closeMenus(); setModeMenuOpen(next); }}
                       class="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs hover:bg-elev cursor-pointer">
-                      <Iconify icon={agentMode() === "plan" ? "lucide:list-checks" : agentMode() === "learning" ? "lucide:graduation-cap" : "lucide:hammer"} size={14} />
+                      <Iconify icon={agentMode() === "plan" ? "lucide:list-checks" : agentMode() === "learning" ? "lucide:graduation-cap" : agentMode() === "ask" ? "lucide:message-circle-question" : "lucide:hammer"} size={14} />
                       <span class="capitalize">{agentMode()}</span><Show when={selectedSkills().length}><span class="text-ink-500">+{selectedSkills().length}</span></Show>
                       <Iconify icon="lucide:chevron-down" size={11} />
                     </button>
                     <FloatMenu anchor={() => modeBtn} open={modeMenuOpen()} placement="top-start" width="20rem">
                       <p class="px-2 py-1.5 font-medium text-ink-400">Mode</p>
-                      <For each={[{id:"build", label:"Build", description:"Implement and validate changes", icon:"lucide:hammer"}, {id:"plan", label:"Plan", description:"Explore and plan without editing files", icon:"lucide:list-checks"}, {id:"learning", label:"Learning", description:"Learn through hints and guiding questions", icon:"lucide:graduation-cap"}]}>{(mode) =>
+                      <For each={[{id:"build", label:"Build", description:"Implement and validate changes", icon:"lucide:hammer"}, {id:"plan", label:"Plan", description:"Explore and plan without editing files", icon:"lucide:list-checks"}, {id:"ask", label:"Ask", description:"Answer questions with web research, no workspace access", icon:"lucide:message-circle-question"}, {id:"learning", label:"Learning", description:"Learn through hints and guiding questions", icon:"lucide:graduation-cap"}]}>{(mode) =>
                         <button role="menuitemradio" aria-checked={agentMode() === mode.id} onClick={() => { setAgentMode(mode.id); configureSession(); }} class="w-full flex items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-elev cursor-pointer">
                           <Iconify icon={mode.icon} size={16} /><span class="flex-1"><span class="font-medium text-ink-100">{mode.label}</span><span class="block text-[11px] text-ink-500 mt-0.5">{mode.description}</span></span><Show when={agentMode() === mode.id}><Iconify icon="lucide:check" size={14} /></Show>
                         </button>
@@ -5688,14 +5688,16 @@ export default function RemoteCodePage() {
                       }</For>
                       <Show when={agentMode() !== "build"}>
                         <div class="px-2 py-2">
-                          <p class="text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan explores freely but never mutates. Edit, create and patch are disabled." : "Learning observes read-only. Edit, create, patch and code execution are disabled."}</p>
+                          <p class="text-[11px] text-ink-500">{agentMode() === "plan" ? "Plan explores freely but never mutates. Edit, create and patch are disabled." : agentMode() === "ask" ? "Ask answers questions with web research. No workspace access at all." : "Learning observes read-only. Edit, create, patch and code execution are disabled."}</p>
                           <div class="mt-1.5 flex flex-wrap gap-1">
                             <For each={agentMode() === "plan"
                               ? ["read", "search", "inspect", "bash", "glob", "question", "todo", "search_web", "fetch_url"]
+                              : agentMode() === "ask"
+                              ? ["question", "search_web", "fetch_url", "todo"]
                               : ["read", "search", "inspect", "glob", "question", "todo", "search_web", "fetch_url"]}>
                               {(cap) => <span class="rounded-md bg-ink-700/60 px-1.5 py-px font-mono text-[10px] text-ink-300">{cap}</span>}
                             </For>
-                            <For each={agentMode() === "plan" ? ["write", "edit", "patch"] : ["write", "edit", "patch", "bash", "python"]}>
+                            <For each={agentMode() === "plan" ? ["write", "edit", "patch"] : agentMode() === "ask" ? ["read", "write", "edit", "patch", "search", "inspect", "bash", "python", "glob"] : ["write", "edit", "patch", "bash", "python"]}>
                               {(cap) => <span class="rounded-md border border-line/60 px-1.5 py-px font-mono text-[10px] text-ink-600 line-through">{cap}</span>}
                             </For>
                           </div>

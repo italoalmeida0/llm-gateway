@@ -343,6 +343,8 @@ type ActiveSession struct {
 	agent             *core.Agent
 	cancel            context.CancelFunc
 	approvalReqs      map[string]chan bool
+	// gitTracker backs change review (nil when git is unavailable/disabled).
+	gitTracker *gitReviewTracker
 	// gen counts started turns; a stale turn's finalizer skips when it no
 	// longer matches, so edit/regenerate can't corrupt the new turn.
 	gen int
@@ -893,11 +895,11 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		})
 
 	case "get_changes":
-		d.handleReview(raw, false)
+		d.handleGitReview(raw, false)
 	case "undo_changes":
-		d.handleReview(raw, true)
+		d.handleGitReview(raw, true)
 	case "keep_changes":
-		d.handleKeepChanges(raw)
+		d.handleGitKeep(raw)
 	case "question_response":
 		d.answerQuestions(raw)
 	case "check_workspace":
@@ -2324,10 +2326,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 	act.mu.Unlock()
 
-	var journal *reviewJournal
+	var tracker *gitReviewTracker
 	defer func() {
-		if journal != nil {
-			journal.finalize()
+		if tracker != nil {
+			tracker.finalizeTurn()
 		}
 		act.mu.Lock()
 		defer act.mu.Unlock()
@@ -2417,10 +2419,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}}
 	reg := core.NewRegistry(append(append(baseTools, questionTool), todoTool)...)
 
-	journal = newReviewJournal(d, act, myGen, sessionCWD, cfg.HostID, sessionID)
+	tracker = d.ensureGitTracker(act, sessionID, sessionCWD)
 	for _, name := range []string{"write", "edit", "bash", "python", "patch"} {
 		if tool, ok := reg[name]; ok {
-			reg[name] = &reviewedTool{Tool: tool, journal: journal}
+			reg[name] = &countingTool{Tool: tool, tracker: tracker}
 		}
 	}
 

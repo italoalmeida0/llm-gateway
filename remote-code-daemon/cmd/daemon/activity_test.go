@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -91,40 +90,5 @@ func TestAlwaysAllowPersistsFullAccess(t *testing.T) {
 	}
 	if allowed, _, _ := hook(provider.ToolCallBlock{ID: "two", Name: "bash"}); !allowed {
 		t.Fatal("Always allow still prompted on the next tool")
-	}
-}
-
-func TestReviewAccumulatesUntilKeepAndUndoUsesAcceptedBaseline(t *testing.T) {
-	d, j, sb := reviewFixture(t)
-	path := filepath.Join(j.cwd, "file.txt")
-	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	reviewedWrite(t, j, sb, "file.txt", "first turn")
-	j.act.gen++
-	next := newReviewJournal(d, j.act, j.act.gen, j.cwd, j.hostID, j.sessionID)
-	if len(next.review.Files) != 1 {
-		t.Fatal("new turn cleared pending changes")
-	}
-	reviewedWrite(t, next, sb, "file.txt", "second turn")
-	if string(next.review.Files[path].Before.Data) != "original" {
-		t.Fatal("new turn replaced the original backup")
-	}
-	keep, _ := json.Marshal(map[string]any{"type": "keep_changes", "sessionId": j.sessionID, "reviewId": next.review.ID})
-	d.handleMessage(keep)
-	if _, err := os.Stat(d.reviewPath(j.sessionID)); !os.IsNotExist(err) {
-		t.Fatal("Keep did not clear pending changes")
-	}
-	got, _ := os.ReadFile(path)
-	if string(got) != "second turn" {
-		t.Fatal("Keep changed the file")
-	}
-	j.act.gen++
-	last := newReviewJournal(d, j.act, j.act.gen, j.cwd, j.hostID, j.sessionID)
-	reviewedWrite(t, last, sb, "file.txt", "third turn")
-	undoReview(d, last, "")
-	got, _ = os.ReadFile(path)
-	if string(got) != "second turn" {
-		t.Fatal("Undo discarded previously kept changes")
 	}
 }

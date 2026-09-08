@@ -14,17 +14,17 @@ export function StatusBanners() {
   return (
 <>
 <Show when={s.draftMode()}>
-  <div class="flex flex-col items-center justify-center gap-2.5 min-w-0">
+  <div class="flex flex-col items-center justify-center min-w-0">
       <img
         src="/indirect-big-icon.svg"
         alt="Indirect"
-        class="w-5 h-5 shrink-0 object-contain rounded"
+        class="w-auto h-60 shrink-0 object-contain rounded"
       />
-      <span class="font-mono text-lg font-semibold tracking-wider text-ink-100 uppercase truncate">
+      <span class="font-mono mt-[-1rem] text-[2.5rem] font-semibold tracking-wider text-ink-100 uppercase truncate">
         INDIRECT
       </span>
   </div>
-  <div class="mb-3 flex justify-start" data-draft-project>
+  <div class="mb-3 flex justify-center" data-draft-project>
     {/* Project picker — where the next conversation starts.
         Default: project of the newest conversation (daemon). */}
     <div>

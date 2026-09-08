@@ -3,23 +3,26 @@ package main
 // Git-backed change tracking for indirect-code sessions ("review").
 //
 // The daemon keeps a TEMPORARY git repository OUTSIDE the project folder,
-// under the daemon data dir:
+// under the daemon data dir — ONE PER PROJECT FOLDER (shared by every
+// session/chat rooted there), like a normal .git would be:
 //
-//	<dataDir>/sessions/<sessionID>/git/   (GIT_DIR; HEAD, objects, refs, info/exclude)
+//	<dataDir>/reviews/<key>/git/   (GIT_DIR; HEAD, objects, refs, info/exclude)
+//	<dataDir>/reviews/<key>/meta.json (root + timestamps, for debug/GC)
 //
-// Every git invocation uses --git-dir=<gitDir> --work-tree=<sessionCWD>, so:
+// Every git invocation uses --git-dir=<gitDir> --work-tree=<reviewRoot>, so:
 //   - no .git is ever created inside the project folder;
 //   - a project-owned .git (if any) is untouched — the AI keeps using the
 //     project's own git normally; this repo exists only for the daemon to
 //     discover changes (baseline commit + diff + checkout/clean on undo).
 //
-// Lifecycle (per session):
+// Lifecycle (per project root, shared across sessions):
 //   - before a turn: ensure repo exists, refresh info/exclude, baseline commit.
 //   - during the turn: after every 5 tool calls, collect a SUMMARY and
-//     broadcast session_changes (no diffs) + changes_updated.
+//     broadcast session_changes (no diffs) + changes_updated to every
+//     sibling session of the same root.
 //   - end of turn: one more summary collection.
 //   - get_changes (user opens Review): full collection WITH diffs.
-//   - undo (all): checkout + clean, then DELETE the temp git dir.
+//   - undo (all): checkout + clean, then DELETE the shared temp git dir.
 //   - undo (single file): checkout/clean that path, KEEP the temp git dir.
 //   - keep: DELETE the temp git dir (work-tree already has what the user wants).
 //
@@ -96,12 +99,16 @@ func gitReviewAvailable() bool {
 	return err == nil
 }
 
-// gitReviewTracker tracks pending changes of one session with a temp repo.
+// gitReviewTracker tracks pending changes of one project root with a temp
+// repo shared by every session rooted there. act/sessionID identify the
+// session that created (or last attached) the tracker and are used for
+// lifecycle bookkeeping; the work-tree is ALWAYS root.
 type gitReviewTracker struct {
 	mu        sync.Mutex
 	d         *DaemonServer
 	act       *ActiveSession
-	cwd       string
+	cwd       string // review root (work-tree)
+	key       string // reviews/<key> dir name for this root
 	hostID    string
 	sessionID string
 	gitDir    string
@@ -114,10 +121,12 @@ type gitReviewTracker struct {
 
 // gitFileSummary is the cached lightweight entry broadcast during a turn.
 type gitFileSummary struct {
-	Path   string
-	Kind   string
-	State  string
-	Binary bool
+	Path    string
+	Kind    string
+	State   string
+	Binary  bool
+	Added   int
+	Removed int
 }
 
 // gitChangeFile is one collected change (summary + optional full diff).
@@ -134,9 +143,53 @@ type gitChangeFile struct {
 	CurrentState string
 }
 
-// gitDirForSession returns the temp GIT_DIR for a session.
+// reviewsDir returns the base dir for shared per-project review repos.
+func (d *DaemonServer) reviewsDir() string {
+	return filepath.Join(d.dataDir, "reviews")
+}
+
+// gitDirForSession resolves the SHARED temp GIT_DIR for a session by mapping
+// its CWD to the owning review root. Kept under the session-oriented name
+// so existing call sites keep reading naturally; it is root-keyed, not
+// session-keyed. Legacy per-session repos (sessions/<id>/git) are migrated
+// away on first use (see migrateLegacySessionGit).
 func (d *DaemonServer) gitDirForSession(sessionID string) string {
-	return filepath.Join(d.sessionsDir(), sessionID, "git")
+	root, key := d.reviewRootAndKeyForSession(sessionID)
+	_ = root
+	return filepath.Join(d.reviewsDir(), key, "git")
+}
+
+// reviewRootAndKeyForSession maps a session to its shared (root, key).
+// Unknown sessions fall back to a key derived from the session id so callers
+// never receive an empty path.
+func (d *DaemonServer) reviewRootAndKeyForSession(sessionID string) (string, string) {
+	cwd := ""
+	d.sessionsMu.RLock()
+	cached := d.sessions[sessionID]
+	d.sessionsMu.RUnlock()
+	if cached != nil {
+		cached.mu.Lock()
+		if cached.record != nil {
+			cwd = cached.record.CWD
+		}
+		cached.mu.Unlock()
+	}
+	if cwd == "" {
+		if rec, err := d.loadSession(sessionID); err == nil {
+			cwd = rec.CWD
+		}
+	}
+	if strings.TrimSpace(cwd) == "" {
+		return "", "sess-" + sessionID
+	}
+	root := reviewRootForCWD(cwd, d.loadProjects())
+	return root, reviewKeyForRoot(root)
+}
+
+// reviewRootAndKeyForCWD maps an arbitrary CWD to its shared (root, key).
+func (d *DaemonServer) reviewRootAndKeyForCWD(cwd string) (string, string) {
+	root := reviewRootForCWD(cwd, d.loadProjects())
+	return root, reviewKeyForRoot(root)
 }
 
 // trackerFor returns the live tracker of an active session, if any.
@@ -152,17 +205,26 @@ func (d *DaemonServer) trackerFor(sessionID string) *gitReviewTracker {
 	return act.gitTracker
 }
 
-// ensureGitTracker creates (or reuses) the session tracker, initializes the
-// temp repo on first use, refreshes info/exclude, and records a baseline
-// commit capturing everything currently on disk — but ONLY when the repo is
-// clean. If changes are still pending (dirty), the old baseline is kept so
-// pending changes accumulate across turns until keep/undo-all. A pre-existing
-// temp repo (e.g. daemon restart with pending changes) is reattached, never
-// re-baselined blindly. It returns nil (disabled, no error) when git is
-// unavailable.
+// ensureGitTracker creates (or reuses) the SHARED tracker for the session's
+// review root, initializes the temp repo on first use, refreshes
+// info/exclude, and records a baseline commit capturing everything currently
+// on disk — but ONLY when the repo is clean. If changes are still pending
+// (dirty), the old baseline is kept so pending changes accumulate across
+// turns AND sessions until keep/undo-all. A pre-existing temp repo (e.g.
+// daemon restart with pending changes) is reattached, never re-baselined
+// blindly. It returns nil (disabled, no error) when git is unavailable.
+//
+// The tracker is owned by d.reviewTrackers[key]; act.gitTracker is just a
+// back-pointer so noteToolCall/finalizeTurn keep working. The tracker's own
+// mu serializes baseline/collect/undo within the root, so concurrent turns
+// from sibling sessions can't corrupt the baseline.
 func (d *DaemonServer) ensureGitTracker(act *ActiveSession, sessionID, cwd string) *gitReviewTracker {
+	root, key := d.reviewRootAndKeyForCWD(cwd)
+	if root == "" || key == "" {
+		return nil
+	}
 	act.mu.Lock()
-	if act.gitTracker != nil {
+	if act.gitTracker != nil && act.gitTracker.key == key {
 		t := act.gitTracker
 		act.mu.Unlock()
 		// New turn over pending changes: keep accumulating, do NOT re-baseline.
@@ -175,15 +237,32 @@ func (d *DaemonServer) ensureGitTracker(act *ActiveSession, sessionID, cwd strin
 	if _, err := resolveGitBinary(); err != nil {
 		return nil
 	}
-	gitDir := d.gitDirForSession(sessionID)
+	d.reviewMu.Lock()
+	if d.reviewTrackers == nil {
+		d.reviewTrackers = make(map[string]*gitReviewTracker)
+	}
+	if t, ok := d.reviewTrackers[key]; ok {
+		d.reviewMu.Unlock()
+		_ = t.maybeBaseline("turn")
+		act.mu.Lock()
+		act.gitTracker = t
+		act.mu.Unlock()
+		return t
+	}
+	d.migrateLegacySessionGitLocked(root, key)
+	gitDir := filepath.Join(d.reviewsDir(), key, "git")
 	reattaching := false
 	if _, err := os.Stat(filepath.Join(gitDir, "HEAD")); err == nil {
 		reattaching = true
 	}
-	t := &gitReviewTracker{d: d, act: act, cwd: cwd, hostID: d.config.HostID, sessionID: sessionID, gitDir: gitDir}
+	t := &gitReviewTracker{d: d, act: act, cwd: root, key: key, hostID: d.config.HostID, sessionID: sessionID, gitDir: gitDir}
 	if err := t.init(); err != nil {
+		d.reviewMu.Unlock()
 		return nil
 	}
+	d.reviewTrackers[key] = t
+	d.reviewMu.Unlock()
+	t.touchMeta()
 	if reattaching {
 		// Daemon restart (or any new in-memory tracker) over an existing temp
 		// repo: keep the old baseline so pending changes stay visible.
@@ -198,6 +277,45 @@ func (d *DaemonServer) ensureGitTracker(act *ActiveSession, sessionID, cwd strin
 	act.gitTracker = t
 	act.mu.Unlock()
 	return t
+}
+
+// trackerForRoot returns the live shared tracker for a review key, if any.
+func (d *DaemonServer) trackerForRoot(key string) *gitReviewTracker {
+	if key == "" {
+		return nil
+	}
+	d.reviewMu.Lock()
+	defer d.reviewMu.Unlock()
+	return d.reviewTrackers[key]
+}
+
+// detachTrackerKey removes a shared tracker from the map and clears every
+// back-pointer sessions hold to it. Callers must already have destroyed the
+// on-disk repo (or decided to keep it for reattach — then don't call this).
+func (d *DaemonServer) detachTrackerKey(key string, t *gitReviewTracker) {
+	if key == "" {
+		return
+	}
+	d.reviewMu.Lock()
+	if cur, ok := d.reviewTrackers[key]; !ok || (t != nil && cur != t) {
+		d.reviewMu.Unlock()
+		return
+	}
+	delete(d.reviewTrackers, key)
+	d.reviewMu.Unlock()
+	d.sessionsMu.RLock()
+	acts := make([]*ActiveSession, 0, len(d.sessions))
+	for _, act := range d.sessions {
+		acts = append(acts, act)
+	}
+	d.sessionsMu.RUnlock()
+	for _, act := range acts {
+		act.mu.Lock()
+		if act.gitTracker != nil && (t == nil || act.gitTracker == t) && act.gitTracker.key == key {
+			act.gitTracker = nil
+		}
+		act.mu.Unlock()
+	}
 }
 
 // gitEnv returns the environment forcing git to use the temp repo + work-tree.
@@ -301,8 +419,133 @@ func (t *gitReviewTracker) destroy() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	_ = os.RemoveAll(t.gitDir)
+	// Remove the parent key dir too when it holds nothing but meta.json, so
+	// keep/undo-all leaves no empty husk behind.
+	if t.d != nil && t.key != "" {
+		parent := filepath.Dir(t.gitDir)
+		entries, err := os.ReadDir(parent)
+		if err == nil {
+			leftovers := false
+			for _, e := range entries {
+				if e.Name() != "meta.json" {
+					leftovers = true
+					break
+				}
+			}
+			if !leftovers {
+				_ = os.RemoveAll(parent)
+			}
+		}
+	}
 	t.summary = nil
 	t.baseline = ""
+}
+
+// reviewMeta is the sidecar stored next to each shared repo for debug/GC.
+type reviewMeta struct {
+	Root      string `json:"root"`
+	Key       string `json:"key"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
+// touchMeta creates/refreshes reviews/<key>/meta.json.
+func (t *gitReviewTracker) touchMeta() {
+	if t.d == nil || t.key == "" {
+		return
+	}
+	dir := filepath.Dir(t.gitDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	p := filepath.Join(dir, "meta.json")
+	now := time.Now().UnixMilli()
+	meta := reviewMeta{Root: t.cwd, Key: t.key, CreatedAt: now, UpdatedAt: now}
+	if data, err := os.ReadFile(p); err == nil {
+		var prev reviewMeta
+		if json.Unmarshal(data, &prev) == nil && prev.CreatedAt != 0 {
+			meta.CreatedAt = prev.CreatedAt
+		}
+	}
+	if out, err := json.MarshalIndent(meta, "", "  "); err == nil {
+		_ = os.WriteFile(p, out, 0o600)
+	}
+}
+
+// migrateLegacySessionGitLocked discards per-session repos
+// (sessions/<id>/git, the pre-project layout) whose session CWD resolves to
+// this root, so the first shared baseline starts clean. The caller must hold
+// d.reviewMu. Objects are NOT transplanted: a fresh baseline is safer than
+// grafting another repo's objects/refs.
+func (d *DaemonServer) migrateLegacySessionGitLocked(root, key string) {
+	_ = key
+	if strings.TrimSpace(root) == "" {
+		return
+	}
+	projects := d.loadProjects()
+	dir := d.sessionsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		legacy := filepath.Join(dir, e.Name(), "git")
+		if _, err := os.Stat(filepath.Join(legacy, "HEAD")); err != nil {
+			continue
+		}
+		cwd := ""
+		if rec, err := d.loadSession(e.Name()); err == nil {
+			cwd = rec.CWD
+		}
+		if strings.TrimSpace(cwd) == "" {
+			continue
+		}
+		if reviewRootForCWD(cwd, projects) != root {
+			continue
+		}
+		_ = os.RemoveAll(legacy)
+		fmt.Printf("[INFO] migrated review git: removed legacy sessions/%s/git (now shared under reviews/)\n", e.Name())
+	}
+}
+
+// gcStaleReviews removes shared repos whose root vanished or that have been
+// untouched for 30 days. Best-effort and lazy: called from ensureGitTracker
+// paths is too hot, so callers invoke it explicitly (project delete/list).
+func (d *DaemonServer) gcStaleReviews() {
+	base := d.reviewsDir()
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	now := time.Now().UnixMilli()
+	const maxAge = int64(30 * 24 * time.Hour / time.Millisecond)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		key := e.Name()
+		if d.trackerForRoot(key) != nil {
+			continue // live tracker: in use
+		}
+		metaPath := filepath.Join(base, key, "meta.json")
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue // no meta (legacy hand-made dir?): leave alone
+		}
+		var meta reviewMeta
+		if json.Unmarshal(data, &meta) != nil {
+			continue
+		}
+		stale := now-meta.UpdatedAt > maxAge
+		missing := strings.TrimSpace(meta.Root) != "" && inspectWorkspace(meta.Root).Status == "missing"
+		if stale || missing {
+			_ = os.RemoveAll(filepath.Join(base, key))
+			fmt.Printf("[INFO] gc review repo %s (root %q)\n", key, meta.Root)
+		}
+	}
 }
 
 // statusPaths parses `git status --porcelain=v1 -uall` into path -> code.
@@ -471,6 +714,12 @@ func (t *gitReviewTracker) workTreeHas(relPath string) bool {
 func (t *gitReviewTracker) collect(ctx context.Context, full bool) ([]gitChangeFile, int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.collectLocked(ctx, full)
+}
+
+// collectLocked is collect without the mutex (callers already holding t.mu,
+// e.g. broadcast paths that need summary + payload from one snapshot).
+func (t *gitReviewTracker) collectLocked(ctx context.Context, full bool) ([]gitChangeFile, int64) {
 	paths, err := t.statusPathsLocked(ctx)
 	if err != nil {
 		return nil, 0
@@ -484,6 +733,9 @@ func (t *gitReviewTracker) collect(ctx context.Context, full bool) ([]gitChangeF
 		names = append(names, p)
 	}
 	sort.Strings(names)
+	// Untracked directories show in porcelain as "dir/" but numstat reports
+	// per-FILE paths — expand them so counts/diffs resolve to real files.
+	names = t.expandUntrackedDirs(ctx, paths, names)
 
 	files := make([]gitChangeFile, 0, len(names))
 	for _, p := range names {
@@ -521,7 +773,41 @@ func (t *gitReviewTracker) collect(ctx context.Context, full bool) ([]gitChangeF
 	return files, time.Now().UnixMilli()
 }
 
-// untrackedCounts synthesizes added/removed line counts for a path git does
+// expandUntrackedDirs replaces porcelain "dir/" entries (untracked dirs are
+// collapsed to one line by `git status`) with the actual untracked file
+// paths inside, so numstat counts and diffs attach to real files instead of
+// leaving the directory entry with 0/0. Tracked paths pass through as-is.
+func (t *gitReviewTracker) expandUntrackedDirs(ctx context.Context, paths map[string]string, names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, p := range names {
+		if paths[p] != "??" || !strings.HasSuffix(p, "/") {
+			out = append(out, p)
+			continue
+		}
+		abs := filepath.Join(t.cwd, filepath.FromSlash(p))
+		var found []string
+		_ = filepath.WalkDir(abs, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if rel, err := filepath.Rel(t.cwd, path); err == nil {
+				rel = filepath.ToSlash(rel)
+				found = append(found, rel)
+				paths[rel] = "??"
+			}
+			return nil
+		})
+		if len(found) == 0 {
+			out = append(out, p)
+			continue
+		}
+		sort.Strings(found)
+		out = append(out, found...)
+		delete(paths, p)
+	}
+	sort.Strings(out)
+	return out
+}
 // not track (new file). Binary content reports (-1, -1); unreadable files
 // report (0, 0).
 func untrackedCounts(cwd, rel string) (int, int) {
@@ -573,7 +859,8 @@ func isBinaryBytes(data []byte) bool {
 }
 
 // publicGitReview renders collected files in the session_changes payload shape
-// the web client already understands.
+// the web client already understands. Added/removed counts ride along even
+// on summary payloads (no diff) so the banner can show +N/-M live.
 func publicGitReview(reviewID string, files []gitChangeFile, checkedAt int64, notice string) map[string]any {
 	out := []map[string]any{}
 	for _, f := range files {
@@ -608,21 +895,27 @@ func reviewIDFor(files []gitChangeFile) string {
 
 // broadcastSummary collects a cheap summary and publishes session_changes
 // (without diffs) plus changes_updated so the UI badge updates live.
+// The repo is shared per project root, so the summary fans out to EVERY
+// sibling session of the same root (same payload, per-session sessionId) —
+// the frontend keeps filtering by its own sessionId, unchanged.
 func (t *gitReviewTracker) broadcastSummary() {
-	files, checkedAt := t.collect(context.Background(), false)
+	t.mu.Lock()
+	files, checkedAt := t.collectLocked(context.Background(), false)
 	summary := make([]gitFileSummary, 0, len(files))
 	for _, f := range files {
-		summary = append(summary, gitFileSummary{Path: f.Path, Kind: f.Kind, State: f.State, Binary: f.Binary})
+		summary = append(summary, gitFileSummary{Path: f.Path, Kind: f.Kind, State: f.State, Binary: f.Binary, Added: f.Added, Removed: f.Removed})
 	}
-	t.mu.Lock()
 	t.summary = summary
 	t.summaryAt = checkedAt
 	t.mu.Unlock()
-	_ = t.d.sendWS(map[string]any{
-		"type": "session_changes", "hostId": t.hostID, "sessionId": t.sessionID,
-		"review": publicGitReview(reviewIDFor(files), files, checkedAt, gitReviewNotice()),
-	})
-	_ = t.d.sendWS(map[string]any{"type": "changes_updated", "hostId": t.hostID, "sessionId": t.sessionID})
+	review := publicGitReview(reviewIDFor(files), files, checkedAt, gitReviewNotice())
+	for _, sid := range t.d.siblingSessionIDs(t.key, t.sessionID) {
+		_ = t.d.sendWS(map[string]any{
+			"type": "session_changes", "hostId": t.hostID, "sessionId": sid,
+			"review": review,
+		})
+		_ = t.d.sendWS(map[string]any{"type": "changes_updated", "hostId": t.hostID, "sessionId": sid})
+	}
 	t.d.notifyChange("projects")
 }
 
@@ -695,12 +988,18 @@ func (d *DaemonServer) handleGitReview(raw []byte, undo bool) {
 		response["error"] = "This conversation is no longer available on the host."
 		return
 	}
-	cwd := act.record.CWD
-	t := d.trackerFor(req.SessionID)
+	act.mu.Lock()
+	cwd := ""
+	if act.record != nil {
+		cwd = act.record.CWD
+	}
+	act.mu.Unlock()
+	root, key := d.reviewRootAndKeyForCWD(cwd)
+	t := d.trackerForRoot(key)
 	if t == nil {
 		// No tracker yet (turn never ran, or keep/undo-all cleared it):
-		// answer with whatever the temp repo still shows, if anything.
-		t = &gitReviewTracker{d: d, act: act, cwd: cwd, hostID: d.config.HostID, sessionID: req.SessionID, gitDir: d.gitDirForSession(req.SessionID)}
+		// answer with whatever the shared temp repo still shows, if anything.
+		t = &gitReviewTracker{d: d, act: act, cwd: root, key: key, hostID: d.config.HostID, sessionID: req.SessionID, gitDir: filepath.Join(d.reviewsDir(), key, "git")}
 		if _, err := os.Stat(filepath.Join(t.gitDir, "HEAD")); err != nil {
 			response["review"] = map[string]any{"files": []any{}}
 			return
@@ -770,10 +1069,10 @@ func (d *DaemonServer) handleGitReview(raw []byte, undo bool) {
 			response["error"] = "Skipped unsafe paths (symlink parents): " + strings.Join(skipped, ", ")
 			return
 		}
+			key, shared := t.key, t
 		t.destroy()
-		act.mu.Lock()
-		act.gitTracker = nil
-		act.mu.Unlock()
+		d.detachTrackerKey(key, shared)
+		d.fanOutChanges(key, req.SessionID, req.Detail, true)
 	} else {
 		// Single file: restore it, KEEP the temp repo for the rest.
 		rel := req.Path
@@ -816,8 +1115,113 @@ func (d *DaemonServer) handleGitReview(raw []byte, undo bool) {
 		}
 	}
 	after, checkedAt2 := t.collect(context.Background(), req.Detail)
-	response["review"] = publicGitReview(reviewIDFor(after), after, checkedAt2, "")
-	_ = d.sendWS(map[string]any{"type": "changes_updated", "hostId": d.config.HostID, "sessionId": req.SessionID})
+	review := publicGitReview(reviewIDFor(after), after, checkedAt2, "")
+	response["review"] = review
+	d.fanOutReview(keyOf(t), req.SessionID, review, req.Detail)
+}
+
+// keyOf returns the shared review key of a tracker (empty when nil).
+func keyOf(t *gitReviewTracker) string {
+	if t == nil {
+		return ""
+	}
+	return t.key
+}
+
+// siblingSessionIDs lists every session rooted at the same review key —
+// in-memory actives plus on-disk records — always including origin first.
+// Fan-out sends one event per id so the frontend's per-session filter works
+// unchanged in every open chat of the project.
+func (d *DaemonServer) siblingSessionIDs(key, origin string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	add(origin)
+	if key == "" {
+		return out
+	}
+	projects := d.loadProjects()
+	d.sessionsMu.RLock()
+	acts := make([]*ActiveSession, 0, len(d.sessions))
+	for _, act := range d.sessions {
+		acts = append(acts, act)
+	}
+	d.sessionsMu.RUnlock()
+	for _, act := range acts {
+		act.mu.Lock()
+		id, cwd := "", ""
+		if act.record != nil {
+			id, cwd = act.record.ID, act.record.CWD
+		}
+		act.mu.Unlock()
+		if id == "" || id == origin || strings.TrimSpace(cwd) == "" {
+			continue
+		}
+		if reviewKeyForRoot(reviewRootForCWD(cwd, projects)) == key {
+			add(id)
+		}
+	}
+	for _, s := range d.listSessionSummaries() {
+		if s.ID == "" || s.ID == origin || strings.TrimSpace(s.CWD) == "" {
+			continue
+		}
+		if reviewKeyForRoot(reviewRootForCWD(s.CWD, projects)) == key {
+			add(s.ID)
+		}
+	}
+	return out
+}
+
+// fanOutReview publishes a session_changes payload (+ changes_updated) to
+// every sibling session of key, except origin (whose handler already answers
+// via its own response object). includeOrigin re-adds origin for fire-and-
+// forget paths like keep/undo-all where no direct response carries the state.
+func (d *DaemonServer) fanOutReview(key, origin string, review map[string]any, detail bool) {
+	for _, sid := range d.siblingSessionIDs(key, origin) {
+		if sid == origin {
+			continue
+		}
+		_ = d.sendWS(map[string]any{
+			"type": "session_changes", "hostId": d.config.HostID,
+			"sessionId": sid, "detail": detail, "review": review,
+		})
+		_ = d.sendWS(map[string]any{"type": "changes_updated", "hostId": d.config.HostID, "sessionId": sid})
+	}
+}
+
+// fanOutChanges re-collects the current state and fans it out (used after
+// destructive ops). When includeOrigin is set, origin gets the events too.
+func (d *DaemonServer) fanOutChanges(key, origin string, detail, includeOrigin bool) {
+	t := d.trackerForRoot(key)
+	files := []gitChangeFile{}
+	checkedAt := time.Now().UnixMilli()
+	if t != nil {
+		files, checkedAt = t.collect(context.Background(), detail)
+	}
+	review := publicGitReview(reviewIDFor(files), files, checkedAt, "")
+	targets := d.siblingSessionIDs(key, origin)
+	if !includeOrigin {
+		filtered := targets[:0]
+		for _, sid := range targets {
+			if sid != origin {
+				filtered = append(filtered, sid)
+			}
+		}
+		targets = filtered
+	}
+	for _, sid := range targets {
+		_ = d.sendWS(map[string]any{
+			"type": "session_changes", "hostId": d.config.HostID,
+			"sessionId": sid, "detail": detail, "review": review,
+		})
+		_ = d.sendWS(map[string]any{"type": "changes_updated", "hostId": d.config.HostID, "sessionId": sid})
+	}
 }
 
 // handleGitKeep serves keep_changes: the work-tree already holds the wanted
@@ -844,13 +1248,19 @@ func (d *DaemonServer) handleGitKeep(raw []byte) {
 	}
 	act.mu.Lock()
 	running := act.record.Status == "running"
-	tracker := act.gitTracker
+	cwd := ""
+	if act.record != nil {
+		cwd = act.record.CWD
+	}
 	act.mu.Unlock()
 	if running {
 		response["error"] = "Wait for the turn to finish before keeping changes"
 		return
 	}
-	gitDir := d.gitDirForSession(req.SessionID)
+	root, key := d.reviewRootAndKeyForCWD(cwd)
+	_ = root
+	tracker := d.trackerForRoot(key)
+	gitDir := filepath.Join(d.reviewsDir(), key, "git")
 	if _, err := os.Stat(filepath.Join(gitDir, "HEAD")); err != nil {
 		response["error"] = "No pending changes"
 		return
@@ -859,10 +1269,9 @@ func (d *DaemonServer) handleGitKeep(raw []byte) {
 		files, _ := tracker.collect(context.Background(), false)
 		if len(files) == 0 {
 			tracker.destroy()
-			act.mu.Lock()
-			act.gitTracker = nil
-			act.mu.Unlock()
+			d.detachTrackerKey(key, tracker)
 			response["error"] = "No pending changes"
+			d.fanOutChanges(key, req.SessionID, true, true)
 			return
 		}
 		if req.ReviewID == "" || req.ReviewID != reviewIDFor(files) {
@@ -871,12 +1280,10 @@ func (d *DaemonServer) handleGitKeep(raw []byte) {
 			return
 		}
 		tracker.destroy()
+		d.detachTrackerKey(key, tracker)
 	} else {
 		_ = os.RemoveAll(gitDir)
 	}
-	act.mu.Lock()
-	act.gitTracker = nil
-	act.mu.Unlock()
 	response["review"] = map[string]any{"files": []any{}}
-	_ = d.sendWS(map[string]any{"type": "changes_updated", "hostId": d.config.HostID, "sessionId": req.SessionID})
+	d.fanOutReview(key, req.SessionID, map[string]any{"files": []any{}}, true)
 }

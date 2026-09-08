@@ -39,7 +39,7 @@ export function ShellCmd(props: { text: string; max?: number }) {
     return out;
   };
   return (
-    <code title={props.text || ""} class="font-mono truncate min-w-0">
+    <code class="font-mono truncate min-w-0">
       <span class="text-ink-600 select-none">$ </span>
       <For each={parts()}>{(p) =>
         p.c ? <span class={p.c}>{p.t}</span> : <span>{p.t}</span>

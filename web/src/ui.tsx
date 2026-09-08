@@ -742,6 +742,7 @@ export function Modal(props: {
   fullOnMobile?: boolean;
   footer?: JSX.Element;
   children: JSX.Element;
+  bodyRef?: (el: HTMLDivElement | undefined) => void;
 }) {
   const titleId = createUniqueId();
   const descriptionId = createUniqueId();
@@ -802,7 +803,7 @@ export function Modal(props: {
                   <Icon name={Icons.x} />
                 </button>
               </div>
-              <div class="min-h-0 overflow-y-auto overscroll-contain px-5 py-5 sm:px-6">{props.children}</div>
+              <div ref={(el) => props.bodyRef?.(el)} class="min-h-0 overflow-y-auto overscroll-contain px-5 py-5 sm:px-6">{props.children}</div>
               <Show when={props.footer}><div class="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-line bg-elev/40 px-5 py-3 sm:px-6 rounded-b-2xl">{props.footer}</div></Show>
             </div>
           </div>

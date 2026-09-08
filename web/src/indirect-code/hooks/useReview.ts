@@ -42,7 +42,7 @@ export function createReview(opts: {
   async function undoChanges(path = "") {
     const review = taskReview();
     if (!review || opts.isSessionRunning() || !opts.isOpen()) return;
-    const yes = await opts.showConfirm({ title: path ? "Undo this file?" : "Undo pending changes?", message: "Restore the captured files to their state before the pending changes. Later manual edits will be preserved.", confirmText: "Undo changes" });
+    const yes = await opts.showConfirm({ title: path ? "Undo this file?" : "Undo pending changes?", message: path ? "Restore this file to its state before the pending changes. Later manual edits will be preserved." : "This undoes pending changes for ALL conversations in this project folder, not just this one. Later manual edits will be preserved.", confirmText: "Undo changes" });
     if (!yes) return;
     setReviewLoading(true); setReviewError("");
     reviewRequestId = crypto.randomUUID();

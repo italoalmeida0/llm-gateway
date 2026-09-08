@@ -419,6 +419,13 @@ type DaemonServer struct {
 	sessionsMu sync.RWMutex
 	sessions   map[string]*ActiveSession
 
+	// reviewMu guards reviewTrackers: one shared gitReviewTracker per
+	// project root (keyed by reviewKeyForRoot), shared by every session
+	// rooted there. The tracker's own mu serializes baseline/collect/undo
+	// within a root so concurrent turns can't corrupt the baseline.
+	reviewMu       sync.Mutex
+	reviewTrackers map[string]*gitReviewTracker
+
 	// Change pings (SignalDB sync): one debounced timer per collection so a
 	// busy turn (a save per appended message) collapses into a single ping.
 	pingMu     sync.Mutex
@@ -855,6 +862,9 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 // stale and cancelled (its deferred save can't resurrect the transcript),
 // then the JSON record and the attachment folder are wiped from disk and a
 // session_deleted event goes out. Deletions are always 100%, never hides.
+// The shared per-project review repo is KEPT: sibling sessions of the same
+// root still need it. Only the legacy per-session git dir (pre-project
+// layout) is removed if still present.
 func (d *DaemonServer) purgeSession(id string) {
 	d.sessionsMu.Lock()
 	if act, ok := d.sessions[id]; ok {
@@ -863,12 +873,14 @@ func (d *DaemonServer) purgeSession(id string) {
 		if act.cancel != nil {
 			act.cancel()
 		}
+		act.gitTracker = nil
 		act.mu.Unlock()
 		delete(d.sessions, id)
 	}
 	d.sessionsMu.Unlock()
 	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".json"))
-	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id))
+	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id, "attachments"))
+	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id, "git"))
 	_ = d.sendWS(map[string]any{
 		"type":      "session_deleted",
 		"hostId":    d.config.HostID,
@@ -1436,6 +1448,9 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		// Cascade only this project's conversations. A nested project owns
 		// its own sessions, matching the sidebar's deepest-folder grouping.
+		// The project's shared review repo is removed too (keep/undo state
+		// dies with the project); live trackers are detached first so no
+		// session points at a deleted dir.
 		if doomed != nil {
 			target := strings.TrimRight(resolvePath(doomed.Path), "/")
 			if len(target) > 1 {
@@ -1447,7 +1462,16 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 					d.purgeSession(s.ID)
 				}
 			}
+			root := normalizeReviewRoot(doomed.Path)
+			key := reviewKeyForRoot(root)
+			if t := d.trackerForRoot(key); t != nil {
+				t.destroy()
+				d.detachTrackerKey(key, t)
+			} else {
+				_ = os.RemoveAll(filepath.Join(d.reviewsDir(), key))
+			}
 		}
+		d.gcStaleReviews()
 		_ = d.saveProjects(next)
 		_ = d.sendWS(map[string]any{
 			"type":      "project_deleted",

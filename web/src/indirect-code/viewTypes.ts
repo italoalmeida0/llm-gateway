@@ -20,6 +20,8 @@ export interface ReviewFile {
   kind: string;
   diff?: string;
   binary?: boolean;
+  added?: number;
+  removed?: number;
 }
 
 export interface Review {

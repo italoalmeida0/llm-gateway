@@ -21,6 +21,7 @@ if ([string]::IsNullOrWhiteSpace($RepoRaw)) {
 $DataDir = Join-Path $HOME ".indirect-code"
 $BinDir = Join-Path $DataDir "bin"
 $LogFile = Join-Path $DataDir "daemon.log"
+$ErrFile = Join-Path $DataDir "daemon.err.log"
 $PidFile = Join-Path $DataDir "daemon.pid"
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
@@ -60,12 +61,13 @@ if (Test-Path $PidFile) {
 
 # --- Pair + detach (Hidden window: prompt stays free) ---
 # NOTE: $args is a PowerShell automatic variable, so the daemon argv lives
-# in $daemonArgs instead.
+# in $daemonArgs instead. Start-Process requires distinct stdout/stderr
+# files, so stderr goes to daemon.err.log (kept tiny/empty in practice).
 $daemonArgs = @('-connect', $ConnectUrl)
 if (-not [string]::IsNullOrWhiteSpace($Name)) { $daemonArgs += @('--name', $Name) }
 Write-Host "[indirect] pairing and starting in background (log: $LogFile) ..."
 Start-Process -FilePath $Bin -ArgumentList $daemonArgs -WindowStyle Hidden `
-  -RedirectStandardOutput $LogFile -RedirectStandardError $LogFile
+  -RedirectStandardOutput $LogFile -RedirectStandardError $ErrFile
 
 Start-Sleep -Seconds 2
 if (Test-Path $PidFile) {
@@ -82,4 +84,5 @@ if (Test-Path $PidFile) {
 }
 Write-Error "[indirect] started, but pid check failed - see $LogFile"
 Get-Content $LogFile -Tail 20 -ErrorAction SilentlyContinue
+Get-Content $ErrFile -Tail 20 -ErrorAction SilentlyContinue
 exit 1

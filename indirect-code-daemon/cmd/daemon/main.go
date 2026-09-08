@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -73,7 +75,7 @@ type DaemonConfig struct {
 	APIKey        string                     `json:"api_key"`
 	HostID        string                     `json:"host_id"`
 	Name          string                     `json:"name"`
-	Settings      HarnessSettings                `json:"settings"`
+	Settings      HarnessSettings            `json:"settings"`
 	MCPServers    map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
 	Skills        map[string]SkillConfig     `json:"skills,omitempty"`
 }
@@ -402,6 +404,90 @@ func defaultDataDir() string {
 		home = "."
 	}
 	return filepath.Join(home, ".indirect-code")
+}
+
+// errDaemonRevoked aborts the reconnect loop: the gateway deleted/revoked
+// this host (DELETE /api/indirect-code/hosts/:id), so retrying forever
+// would resurrect a ghost process. Both the explicit WS shutdown message
+// and a 401 on dial map to this sentinel.
+var errDaemonRevoked = errors.New("daemon credentials revoked by gateway")
+
+func (d *DaemonServer) pidFile() string {
+	return filepath.Join(d.dataDir, "daemon.pid")
+}
+
+func (d *DaemonServer) writePidFile() {
+	if err := os.MkdirAll(d.dataDir, 0o700); err != nil {
+		return
+	}
+	_ = os.WriteFile(d.pidFile(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+}
+
+func (d *DaemonServer) removePidFile() {
+	_ = os.Remove(d.pidFile())
+}
+
+// gracefulShutdown persists idle sessions, closes the WS cleanly, removes
+// the pidfile and exits. Used by SIGINT/SIGTERM AND by the remote
+// shutdown message (frontend "Desconectar") so both paths behave alike.
+func (d *DaemonServer) gracefulShutdown(reason string) {
+	fmt.Printf("\n[SHUTDOWN] %s\n", reason)
+	d.quiesceSessions()
+	d.wsMu.Lock()
+	if d.wsConn != nil {
+		_ = d.wsConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
+		_ = d.wsConn.Close()
+	}
+	d.wsMu.Unlock()
+	d.removePidFile()
+	os.Exit(0)
+}
+
+// stopDaemonFromPidFile implements "--stop" for the local fallback kill
+// (gateway offline => no remote shutdown possible). Returns nil when a
+// process was signalled, error otherwise.
+func stopDaemonFromPidFile(dataDir string) error {
+	raw, err := os.ReadFile(filepath.Join(dataDir, "daemon.pid"))
+	if err != nil {
+		return fmt.Errorf("no daemon.pid in %s (is the daemon running?)", dataDir)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		return fmt.Errorf("invalid daemon.pid content")
+	}
+	if pid == os.Getpid() {
+		return fmt.Errorf("refusing to stop self")
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	// Unix: SIGTERM lets the daemon quiesce sessions. Windows has no
+	// SIGTERM semantics in Go — Signal fails and we fall back to Kill.
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		if kerr := proc.Kill(); kerr != nil {
+			return fmt.Errorf("failed to stop pid %d: %v / %v", pid, err, kerr)
+		}
+	}
+	// Best-effort pidfile cleanup; the dying daemon removes it too.
+	_ = os.Remove(filepath.Join(dataDir, "daemon.pid"))
+	fmt.Printf("[STOP] signalled daemon pid %d\n", pid)
+	return nil
+}
+
+// isRevokedDialError reports a 401 handshake: token deleted/revoked via
+// DELETE /hosts/:id while the daemon was offline.
+func isRevokedDialError(resp *http.Response, err error) bool {
+	if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "401") ||
+		strings.Contains(msg, "unauthorized daemon token") ||
+		strings.Contains(msg, "unauth")
 }
 
 func (d *DaemonServer) sessionsDir() string {
@@ -890,6 +976,14 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 	}
 
 	switch base.Type {
+	case "shutdown", "disconnected":
+		// Remote kill from the gateway (DELETE /api/indirect-code/hosts/:id
+		// while online). The relay sends this right before closing the WS.
+		// Self-terminate instead of reconnecting: the host row is gone, so
+		// any redial would 401 anyway. Unlock first: gracefulShutdown exits.
+		d.configMu.Unlock()
+		d.gracefulShutdown("[REMOTE] Host removed from gateway, shutting down.")
+		return
 	case "list_sessions":
 		summaries := d.listSessions()
 		items := make([]map[string]any, 0, len(summaries))
@@ -2873,8 +2967,15 @@ func (d *DaemonServer) connectWebSocket() error {
 		HandshakeTimeout: 10 * time.Second,
 	}
 
-	conn, _, err := dialer.Dial(wsURL, nil)
+	conn, resp, err := dialer.Dial(wsURL, nil)
 	if err != nil {
+		if isRevokedDialError(resp, err) {
+			// Host deleted while offline: token no longer exists server-side.
+			// Do NOT backoff-retry forever; surface the sentinel so main()
+			// exits instead of spinning as a ghost process.
+			fmt.Println("[REVOKED] This host was removed from the gateway. Exiting (re-pair to reconnect).")
+			return errDaemonRevoked
+		}
 		return err
 	}
 
@@ -2918,11 +3019,22 @@ func main() {
 	nameFlag := flag.String("name", "", "Host display name")
 	configFlag := flag.String("config", "", "Path to config.json")
 	dataDirFlag := flag.String("data-dir", "", "Path to daemon data directory")
+	stopFlag := flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
 	flag.Parse()
 
 	dataDir := *dataDirFlag
 	if dataDir == "" {
 		dataDir = defaultDataDir()
+	}
+
+	// Local fallback kill: works even with the gateway offline (no remote
+	// shutdown possible then). Used by the user directly, not the frontend.
+	if *stopFlag {
+		if err := stopDaemonFromPidFile(dataDir); err != nil {
+			fmt.Printf("Stop failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	configPath := *configFlag
@@ -2977,21 +3089,16 @@ func main() {
 	// A previous run dying mid-turn must not brick sessions forever.
 	server.resetRunningSessions()
 
+	// Track the background process so install scripts and --stop can find it.
+	server.writePidFile()
+
 	// Graceful shutdown handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-sigChan
-		fmt.Println("\n[SHUTDOWN] Exiting daemon...")
-		server.quiesceSessions()
-		server.wsMu.Lock()
-		if server.wsConn != nil {
-			_ = server.wsConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
-			_ = server.wsConn.Close()
-		}
-		server.wsMu.Unlock()
-		os.Exit(0)
+		server.gracefulShutdown("[SHUTDOWN] Exiting daemon...")
 	}()
 
 	// Reconnection loop
@@ -2999,6 +3106,10 @@ func main() {
 	for {
 		err := server.connectWebSocket()
 		if err != nil {
+			if errors.Is(err, errDaemonRevoked) {
+				server.removePidFile()
+				os.Exit(0)
+			}
 			fmt.Printf("[DISCONNECTED] %v. Retrying in %v...\n", err, backoff)
 		}
 		time.Sleep(backoff)

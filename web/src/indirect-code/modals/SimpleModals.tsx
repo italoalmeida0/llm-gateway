@@ -3,6 +3,7 @@ import { Modal, Btn } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { copyWithToast } from "../../ui";
 import { useModal } from "../ctx";
+import { indirectInstallCommands } from "../install";
 
 export { NewProjectModal } from "./NewProjectModal";
 export { ReviewModal } from "./ReviewModal";
@@ -68,21 +69,24 @@ export function PairModal() {
 
       <Show when={m.pairingData()}>
         {(p) => {
-          const cmd = `./indirect-code -connect "${p().connectUrl}"`;
+          const cmds = () => indirectInstallCommands(p().connectUrl);
           return (
             <div class="space-y-3">
-              <div class="space-y-1">
-                <div class="text-[11px] text-ink-300 font-medium">1. Run daemon with connection flag:</div>
-                <div class="p-3 bg-ink-950 rounded-xl border border-line font-mono text-[11px] text-ink-200 flex items-center justify-between gap-2">
-                  <span class="truncate">{cmd}</span>
-                  <button
-                    onClick={() => copyWithToast(cmd)}
-                    class="p-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 shrink-0 cursor-pointer"
-                    data-rc-tip="Copy command" aria-label="Copy command"
-                  >
-                    <Iconify icon="lucide:copy" size={14} />
-                  </button>
-                </div>
+              <div class="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => copyWithToast(cmds().unix)}
+                  class="flex items-center justify-between gap-2 p-3 rounded-xl bg-ink-950 border border-line hover:border-brand-500/40 transition-colors cursor-pointer group"
+                >
+                  <span class="text-[11px] text-ink-200 font-medium">Linux e macOS</span>
+                  <Iconify icon="lucide:copy" size={14} class="text-ink-500 group-hover:text-brand-300" />
+                </button>
+                <button
+                  onClick={() => copyWithToast(cmds().windows)}
+                  class="flex items-center justify-between gap-2 p-3 rounded-xl bg-ink-950 border border-line hover:border-brand-500/40 transition-colors cursor-pointer group"
+                >
+                  <span class="text-[11px] text-ink-200 font-medium">Windows</span>
+                  <Iconify icon="lucide:copy" size={14} class="text-ink-500 group-hover:text-brand-300" />
+                </button>
               </div>
 
               <div class="space-y-1">
@@ -101,9 +105,9 @@ export function PairModal() {
 
               <div class="p-3 rounded-xl bg-ink-900 border border-line/60 text-ink-400 space-y-1 text-[11px]">
                 <div class="font-semibold text-ink-200">Quick steps:</div>
-                <div>1. Run the command or paste the URL into your daemon.</div>
-                <div>2. The daemon pairs with your account and obtains host credentials.</div>
-                <div>3. The host connects via WebSocket and appears online immediately.</div>
+                <div>1. Copy the command for your system and run it once — it downloads the latest build, pairs and stays in background.</div>
+                <div>2. The host connects via WebSocket and appears online immediately.</div>
+                <div>3. Removing the host here shuts the background process down; if it was offline it exits on next reconnect (revoked token).</div>
               </div>
             </div>
           );

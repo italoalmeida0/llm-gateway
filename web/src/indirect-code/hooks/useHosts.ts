@@ -47,7 +47,7 @@ export function createHosts(opts: {
     setHostMenuOpen(false);
     const confirmed = await opts.showConfirm({
       title: `Remove ${host.name || host.hostname || "host"}?`,
-      message: "This disconnects the host and revokes its gateway access. Conversations and project files remain on that machine. Pair the daemon again to reconnect.",
+      message: "This disconnects the host, shuts down its background daemon process and revokes its gateway access. Conversations and project files remain on that machine. If the daemon is offline right now it will be revoked and exit by itself on the next reconnect (invalid token). Pair again to reconnect.",
       confirmText: "Remove host", danger: true,
     });
     if (!confirmed) return;

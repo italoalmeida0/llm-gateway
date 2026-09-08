@@ -2,6 +2,7 @@ import { Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { copyWithToast } from "../../ui";
 import { useHost, useModal } from "../ctx";
+import { indirectInstallCommands } from "../install";
 
 export function Onboarding() {
   const h = useHost();
@@ -64,28 +65,47 @@ export function Onboarding() {
           </span>
         </div>
 
-        {/* Step 1: Run Command */}
+        {/* Step 1: one-line install (auto OS/arch, background) */}
         <div class="space-y-2">
-          <div class="flex items-center justify-between text-xs font-medium text-ink-200">
-            <span>1. Run the daemon on your machine:</span>
+          <div class="text-xs font-medium text-ink-200">
+            1. Copy the command for your system and run it once in a terminal:
+          </div>
+          <div class="grid grid-cols-2 gap-2">
             <button
               onClick={() =>
                 copyWithToast(
-                  `./indirect-code -connect "${m.pairingData()?.connectUrl}"`,
+                  indirectInstallCommands(m.pairingData()?.connectUrl || "").unix,
                 )
               }
-              class="text-brand-400 hover:text-brand-300 flex items-center gap-1 text-[11px] cursor-pointer"
+              class="flex items-center justify-between gap-2 p-3 rounded-xl bg-ink-950 border border-line hover:border-brand-500/40 transition-colors cursor-pointer group"
             >
-              <Iconify icon="lucide:copy" size={12} />
-              <span>Copy Command</span>
+              <span class="flex items-center gap-2 text-xs font-medium text-ink-200">
+                <Iconify icon="lucide:terminal" size={14} class="text-brand-400" />
+                Linux e macOS
+              </span>
+              <Iconify icon="lucide:copy" size={14} class="text-ink-500 group-hover:text-brand-300" />
+            </button>
+            <button
+              onClick={() =>
+                copyWithToast(
+                  indirectInstallCommands(m.pairingData()?.connectUrl || "").windows,
+                )
+              }
+              class="flex items-center justify-between gap-2 p-3 rounded-xl bg-ink-950 border border-line hover:border-brand-500/40 transition-colors cursor-pointer group"
+            >
+              <span class="flex items-center gap-2 text-xs font-medium text-ink-200">
+                <Iconify icon="lucide:app-window" size={14} class="text-brand-400" />
+                Windows
+              </span>
+              <Iconify icon="lucide:copy" size={14} class="text-ink-500 group-hover:text-brand-300" />
             </button>
           </div>
-          <div class="p-3 rounded-xl bg-ink-950 border border-line font-mono text-xs text-brand-300 break-all select-all">
-            ./indirect-code -connect "{m.pairingData()?.connectUrl}"
-          </div>
+          <p class="text-[11px] text-ink-500 leading-relaxed">
+            Downloads the latest compatible build, pairs this host and keeps it running in the background (log: ~/.indirect-code/daemon.log).
+          </p>
         </div>
 
-        {/* Step 2: Connection URL */}
+        {/* Step 2: Connection URL (manual fallback) */}
         <div class="space-y-2">
           <div class="flex items-center justify-between text-xs font-medium text-ink-200">
             <span>Or paste this Connection URL into the daemon:</span>

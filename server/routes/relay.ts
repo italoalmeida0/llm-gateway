@@ -14,6 +14,10 @@ export function closeDaemonSocket(hostId: string): void {
   const ws = daemons.get(hostId);
   if (ws) {
     try {
+      // "shutdown" is the remote-kill signal: the daemon self-terminates
+      // (quiesce + exit) instead of entering its reconnect backoff.
+      // "disconnected" is kept for old daemons that only log it.
+      ws.send(JSON.stringify({ type: "shutdown", hostId, reason: "host_deleted" }));
       ws.send(JSON.stringify({ type: "disconnected", reason: "host_deleted" }));
       ws.close(1000, "host_deleted");
     } catch {}

@@ -1,5 +1,4 @@
 node_modules/
-dist/
 data/
 .env
 *.log
@@ -11,5 +10,11 @@ indirect-code-daemon/bin/
 indirect-code-daemon/code-daemon
 indirect-code-daemon/indirect-code
 remote-code-ref/
+dist/
+# Web build output (gitignored) — but the daemon release binaries ARE committed.
+!indirect-code-daemon/dist/
+!indirect-code-daemon/dist/indirect-code-*
+!indirect-code-daemon/dist/indirect-install.*
+!indirect-code-daemon/dist/SHA256SUMS.txt
 
 .cache/iconify/

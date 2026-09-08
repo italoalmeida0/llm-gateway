@@ -49,7 +49,7 @@ export function WorkspaceSidebar() {
   }`}
 >
   {/* Brand Header */}
-  <div class="flex items-center justify-between px-3.5 py-3 border-b border-line/70 select-none">
+  <div class="flex items-center justify-between px-3.5 pt-3 select-none">
     <div class="flex items-center gap-2.5 min-w-0">
       <img
         src="/indirect-icon.svg"
@@ -57,7 +57,7 @@ export function WorkspaceSidebar() {
         class="w-5 h-5 shrink-0 object-contain rounded"
       />
       <span class="font-mono text-xs font-semibold tracking-wider text-ink-100 uppercase truncate">
-        INDIRECT
+        INDIRECT CODE
       </span>
     </div>
     <Show when={ui.isMobile()}>

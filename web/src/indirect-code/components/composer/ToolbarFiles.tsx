@@ -12,8 +12,8 @@ export function ToolbarFiles() {
   const ui = useUI();
   return (
 <>
-{/* Session files (stored on the daemon) */}
-<Show when={(m.sessionFiles()[s.activeSessionId()] || []).length > 0}>
+{/* Session files (stored on the daemon; desktop toolbar only) */}
+<Show when={!ui.isMobile() && (m.sessionFiles()[s.activeSessionId()] || []).length > 0}>
   <div>
     <button
       ref={c.filesBtn}

@@ -1,3 +1,4 @@
+import { Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
 import { formatEffort } from "../../utils/format";
 import { useComposerCtx, useSession, useUI } from "../../ctx";
@@ -9,7 +10,8 @@ export function ToolbarModel() {
   const ui = useUI();
   return (
 <>
-{/* Model picker (moved from the removed topbar) */}
+{/* Model picker (desktop toolbar only — on mobile it is in the + menu) */}
+<Show when={!ui.isMobile()}>
 <div>
   <button
     ref={c.modelBtn}
@@ -33,6 +35,7 @@ export function ToolbarModel() {
   </FloatMenu>
 
 </div>
+</Show>
 </>
   );
 }

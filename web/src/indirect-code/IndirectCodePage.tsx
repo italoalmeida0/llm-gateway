@@ -606,6 +606,7 @@ export default function IndirectCodePage() {
         onPick={(id) => {
           options.setActiveModel(id);
           setModelMenuOpen(false);
+          composer.setAddContextOpen(false);
           options.configureSession();
         }}
         effort={options.effort}
@@ -613,6 +614,7 @@ export default function IndirectCodePage() {
           options.setEffort(lvl);
           options.configureSession();
           setModelMenuOpen(false);
+          composer.setAddContextOpen(false);
         }}
         onRefresh={async () => {
           await loadGatewayModels();

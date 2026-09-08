@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { createEffect, For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
 import { useComposerCtx, useModal, useSession, useUI } from "../../ctx";
 import { FileIcon } from "../../presentation";
@@ -8,6 +8,22 @@ export function ComposerInput() {
   const s = useSession();
   const m = useModal();
   const ui = useUI();
+  let textareaRef: HTMLTextAreaElement | undefined;
+
+  createEffect(() => {
+    const text = c.inputPrompt();
+    if (!textareaRef) return;
+    if (!text) {
+      textareaRef.style.height = "";
+    } else {
+      if (textareaRef.value !== text) {
+        textareaRef.value = text;
+      }
+      textareaRef.style.height = "auto";
+      textareaRef.style.height = Math.min(textareaRef.scrollHeight, 160) + "px";
+    }
+  });
+
   return (
 <>
 {/* Attachment chips (chatbot-style) */}
@@ -57,6 +73,7 @@ export function ComposerInput() {
 <div class="flex items-start">
   <textarea
     id="rc-composer"
+    ref={textareaRef}
     disabled={s.creatingSession()}
     rows={1}
     class="flex-1 min-w-0 bg-transparent text-base sm:text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto [scrollbar-gutter:stable]"
@@ -70,8 +87,12 @@ export function ComposerInput() {
     onInput={(e) => {
       c.setInputPrompt(e.currentTarget.value);
       const el = e.currentTarget;
-      el.style.height = "auto";
-      el.style.height = Math.min(el.scrollHeight, 160) + "px";
+      if (!el.value) {
+        el.style.height = "";
+      } else {
+        el.style.height = "auto";
+        el.style.height = Math.min(el.scrollHeight, 160) + "px";
+      }
     }}
     onPaste={(e) => {
       const files: File[] = [];
@@ -123,13 +144,17 @@ export function ComposerInput() {
 
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
+        if (textareaRef) textareaRef.style.height = "";
         c.sendPrompt();
       }
     }}
   />
   <Show when={c.inputPrompt().length > 0}>
     <button
-      onClick={() => c.setInputPrompt("")}
+      onClick={() => {
+        c.setInputPrompt("");
+        if (textareaRef) textareaRef.style.height = "";
+      }}
       class="shrink-0 mr-2.5 mt-2.5 p-1 rounded-md text-ink-600 hover:text-ink-300 hover:bg-ink-800 transition-colors cursor-pointer"
       data-rc-tip="Clear input" aria-label="Clear input"
     >

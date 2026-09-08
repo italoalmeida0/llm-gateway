@@ -73,7 +73,7 @@ interface NavItem {
 
 const USER_NAV: NavItem[] = [
   { path: "/", label: "Overview", icon: Icons.home },
-  { path: "/code", label: "Indirect Code", icon: Icons.terminal },
+  { path: "/code", label: "Indirect Code", icon: "indirect-code" },
   { path: "/keys", label: "API Keys", icon: Icons.key },
   { path: "/usage", label: "Usage", icon: Icons.chart },
   { path: "/settings", label: "Settings", icon: Icons.cog },
@@ -142,7 +142,16 @@ function RailItem(props: { item: NavItem; current: string; badge?: number }) {
         aria-label={props.item.label}
         aria-current={active() ? "page" : undefined}
       >
-        <Icon name={props.item.icon} size={22} />
+        <Show when={props.item.icon == "indirect-code"} fallback={
+          <Icon name={props.item.icon} size={22} />
+        }>
+          <img
+            src="/indirect-icon.svg"
+            alt="Indirect"
+            class="w-[22px] h-[22px] shrink-0 object-contain rounded"
+          />
+        </Show>
+        
         <Show when={(props.badge ?? 0) > 0}>
           <span class="absolute top-1 right-1 min-w-4 h-4 px-1 rounded-full bg-brand-500 text-white text-[9px] font-bold leading-4 text-center tabular-nums">
             {props.badge}

@@ -14,7 +14,7 @@ export function StatusBanners() {
   return (
 <>
 <Show when={s.draftMode()}>
-  <div class="flex flex-col items-center justify-center min-w-0">
+  <div class="flex flex-col items-center mb-10 justify-center min-w-0">
       <img
         src="/indirect-big-icon.svg"
         alt="Indirect"
@@ -23,79 +23,6 @@ export function StatusBanners() {
       <span class="font-mono mt-[-1rem] text-[2.5rem] font-semibold tracking-wider text-ink-100 uppercase truncate">
         INDIRECT
       </span>
-  </div>
-  <div class="mb-3 flex justify-center" data-draft-project>
-    {/* Project picker — where the next conversation starts.
-        Default: project of the newest conversation (daemon). */}
-    <div>
-      <button
-        ref={s.projBtn}
-        data-menubtn
-        onClick={(e) => {
-          e.stopPropagation();
-          s.setProjectMenuOpen(!s.projectMenuOpen());
-          ui.setModelMenuOpen(false);
-          c.setAddContextOpen(false);
-          ui.setUsageOpen(false);
-        }}
-        class="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-elev border border-line text-sm text-ink-200 hover:bg-ink-800 font-medium cursor-pointer"
-        data-rc-tip="Project" aria-label="Project"
-      >
-        <Iconify icon="lucide:folder" size={13} />
-        <span class="max-w-[110px] truncate">
-          {s.activeProject()?.name || "Select project"}
-        </span>
-        <Iconify icon="lucide:chevron-down" size={11} />
-      </button>
-      <FloatMenu anchor={() => s.projBtn} open={s.projectMenuOpen()} placement="bottom-start" width="18rem">
-          <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
-            Project
-          </div>
-          <div class="max-h-56 overflow-y-auto [scrollbar-gutter:stable]">
-            <For
-              each={s.projects()}
-              fallback={
-                <div class="px-2.5 py-2 text-[11px] text-ink-600">
-                  No projects yet.
-                </div>
-              }
-            >
-              {(p) => (
-                <button
-                  onClick={() => {
-                    s.pickProject(p.id);
-                    s.setProjectMenuOpen(false);
-                  }}
-                  class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2 cursor-pointer ${
-                    p.id === s.activeProject()?.id
-                      ? "bg-ink-800 text-ink-100"
-                      : "text-ink-300 hover:bg-ink-800/60"
-                  }`}
-                  data-rc-tip={p.path} aria-label={p.path}
-                >
-                  <span class="flex items-center gap-1.5 min-w-0">
-                    <Iconify icon="lucide:folder" size={13} class="shrink-0 text-ink-500" />
-                    <span class="truncate">{p.name}</span>
-                  </span>
-                  <Show when={p.id === s.activeProject()?.id}>
-                    <Iconify icon="lucide:check" size={13} />
-                  </Show>
-                </button>
-              )}
-            </For>
-          </div>
-          <button
-            onClick={() => {
-              s.setProjectMenuOpen(false);
-              s.openNewProjectModal();
-            }}
-            class="mt-1 w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-400 hover:bg-ink-800/60 hover:text-ink-200 flex items-center gap-2 cursor-pointer border-t border-line/60"
-          >
-            <Iconify icon="lucide:folder-plus" size={13} />
-            <span>New project…</span>
-          </button>
-      </FloatMenu>
-    </div>
   </div>
 </Show>
 <Show when={s.activeSessionId() && t.turnActivity()}>

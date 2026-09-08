@@ -158,11 +158,13 @@ export function createDataLayer(opts: {
   }
 
   function normalizeProject(p: any, hostId: string): RcProject {
+    const rawPath = String(p.path || "");
+    const fallback = rawPath.replace(/\/+$/, "").split("/").pop() || rawPath || "/";
     return {
       id: p.id,
       hostId,
-      name: p.name || (String(p.path || "").replace(/\/+$/, "").split("/").pop() ?? ""),
-      path: p.path || "",
+      name: p.name || fallback,
+      path: rawPath,
       createdAt: p.createdAt ?? p.created_at ?? Date.now(),
       protected: !!p.protected,
       folderStatus: p.folderStatus,

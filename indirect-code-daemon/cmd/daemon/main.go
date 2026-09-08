@@ -252,15 +252,36 @@ func (d *DaemonServer) loadProjects() []ProjectEntry {
 	var list []ProjectEntry
 	_ = json.Unmarshal(data, &list)
 	home, _ := os.UserHomeDir()
+	cleanHome := filepath.Clean(home)
 	found := false
+	modified := false
 	for i := range list {
-		if filepath.Clean(resolvePath(list[i].Path)) == filepath.Clean(home) {
+		cleanP := filepath.Clean(resolvePath(list[i].Path))
+		if cleanP == cleanHome {
 			list[i].Path, list[i].Name, list[i].Protected = home, "Home", true
 			found = true
+		} else {
+			if list[i].Protected {
+				list[i].Protected = false
+				modified = true
+			}
+			if list[i].Name == "Home" {
+				base := filepath.Base(list[i].Path)
+				if base == "." || base == "" {
+					list[i].Name = list[i].Path
+				} else {
+					list[i].Name = base
+				}
+				modified = true
+			}
 		}
 	}
 	if !found && home != "" {
 		list = append(list, ProjectEntry{ID: "home", Name: "Home", Path: home, Protected: true})
+		modified = true
+	}
+	if modified && len(data) > 0 {
+		_ = d.saveProjects(list)
 	}
 
 	return list
@@ -1326,14 +1347,20 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		_ = os.MkdirAll(path, 0o755)
 		name := strings.TrimSpace(req.Name)
-		trimmed := strings.TrimRight(path, "/")
 		home, _ := os.UserHomeDir()
-		isHome := trimmed == "" || trimmed == home
+		cleanPath := filepath.Clean(path)
+		cleanHome := filepath.Clean(home)
+		isHome := home != "" && cleanPath == cleanHome
 		if name == "" {
 			if isHome {
 				name = "Home"
 			} else {
-				name = filepath.Base(trimmed)
+				base := filepath.Base(path)
+				if base == "." || base == "" {
+					name = path
+				} else {
+					name = base
+				}
 			}
 		}
 		if len(name) > 80 {
@@ -1341,7 +1368,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		list := d.loadProjects()
 		for _, p := range list {
-			if resolvePath(p.Path) == path {
+			if filepath.Clean(resolvePath(p.Path)) == cleanPath {
 				// Idempotent "ensure": re-ack the existing entry so flows like
 				// Quick Start (~) just reopen the project instead of failing.
 				// The re-acked home project comes back protected even on

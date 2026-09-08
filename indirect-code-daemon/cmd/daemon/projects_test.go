@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -50,3 +51,61 @@ func TestHomeOwnsUnassignedAndHomeAliases(t *testing.T) {
 		t.Fatal("Home captured another project")
 	}
 }
+
+func TestRootProjectNotTreatedAsHome(t *testing.T) {
+	d := testDaemon(t)
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = "C:\\"
+	}
+	d.handleMessage([]byte(`{"type":"create_project","path":"` + root + `","requestId":"req-root"}`))
+	projects := d.loadProjects()
+	var rootProj *ProjectEntry
+	for i := range projects {
+		if filepath.Clean(projects[i].Path) == filepath.Clean(root) {
+			rootProj = &projects[i]
+			break
+		}
+	}
+	if rootProj == nil {
+		t.Fatalf("root project was not created")
+	}
+	if rootProj.Name == "Home" {
+		t.Fatalf("root project was mistakenly named 'Home': got %q", rootProj.Name)
+	}
+	if rootProj.Protected {
+		t.Fatalf("root project was mistakenly marked Protected")
+	}
+}
+
+func TestLoadProjectsRepairsCorruptedRootProject(t *testing.T) {
+	d := testDaemon(t)
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = "C:\\"
+	}
+	corrupted := []ProjectEntry{
+		{ID: "proj_root", Name: "Home", Path: root, Protected: true},
+	}
+	if err := d.saveProjects(corrupted); err != nil {
+		t.Fatal(err)
+	}
+	repaired := d.loadProjects()
+	var rootProj *ProjectEntry
+	for i := range repaired {
+		if filepath.Clean(repaired[i].Path) == filepath.Clean(root) {
+			rootProj = &repaired[i]
+			break
+		}
+	}
+	if rootProj == nil {
+		t.Fatal("root project not found")
+	}
+	if rootProj.Name == "Home" {
+		t.Fatalf("corrupted root project name was not repaired: got %q", rootProj.Name)
+	}
+	if rootProj.Protected {
+		t.Fatal("corrupted root project protected flag was not cleared")
+	}
+}
+

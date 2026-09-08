@@ -89,24 +89,10 @@ export function PairModal() {
                 </button>
               </div>
 
-              <div class="space-y-1">
-                <div class="text-[11px] text-ink-300 font-medium">Or paste Connection URL when prompted:</div>
-                <div class="p-2.5 bg-ink-950 rounded-xl border border-line font-mono text-[11px] text-ink-200 flex items-center justify-between gap-2">
-                  <span class="truncate">{p().connectUrl}</span>
-                  <button
-                    onClick={() => copyWithToast(p().connectUrl)}
-                    class="p-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 shrink-0 cursor-pointer"
-                    data-rc-tip="Copy URL" aria-label="Copy URL"
-                  >
-                    <Iconify icon="lucide:copy" size={14} />
-                  </button>
-                </div>
-              </div>
-
               <div class="p-3 rounded-xl bg-ink-900 border border-line/60 text-ink-400 space-y-1 text-[11px]">
                 <div class="font-semibold text-ink-200">Quick steps:</div>
                 <div>1. Copy the command for your system and run it once — it downloads the latest build, pairs and stays in background.</div>
-                <div>2. The host connects via WebSocket and appears online immediately.</div>
+                <div>2. The host connects and appears online immediately.</div>
                 <div>3. Removing the host here shuts the background process down; if it was offline it exits on next reconnect (revoked token).</div>
               </div>
             </div>

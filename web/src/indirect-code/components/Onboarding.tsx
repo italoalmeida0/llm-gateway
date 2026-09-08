@@ -7,24 +7,24 @@ import { indirectInstallCommands } from "../install";
 export function Onboarding() {
   const h = useHost();
   const m = useModal();
+  m.setShowPairModal(false);
   return (
 <>
 <div class="flex-1 flex flex-col items-center justify-center p-6 bg-ink-950 text-center overflow-y-auto">
   <div class="max-w-xl w-full mx-auto space-y-6 my-auto py-8">
-    {/* Hero Icon */}
-    <div class="w-16 h-16 rounded-2xl bg-brand-500/10 border border-brand-500/20 text-brand-400 flex items-center justify-center mx-auto shadow-lg shadow-brand-500/10">
-      <Iconify icon="lucide:terminal" size={32} />
-    </div>
 
     {/* Title & Subtitle */}
     <div>
-      <div class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-medium mb-3">
-        <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-        <span>No Indirect Code Daemon Connected</span>
+      <div class="flex flex-col items-center mb-10 justify-center min-w-0">
+      <img
+        src="/indirect-big-icon.svg"
+        alt="Indirect"
+        class="w-auto h-60 shrink-0 object-contain rounded"
+      />
+      <span class="font-mono mt-[-1rem] text-[2.5rem] font-semibold tracking-wider text-ink-100 uppercase truncate">
+        INDIRECT
+      </span>
       </div>
-      <h1 class="text-2xl sm:text-3xl font-bold tracking-tight text-ink-100">
-        Connect Indirect Code
-      </h1>
       <p class="text-sm text-ink-400 mt-2 max-w-md mx-auto leading-relaxed">
         Run autonomous coding agents directly on your machine. Sessions, files, and commands remain 100% local on your device while you control them from this interface.
       </p>
@@ -105,24 +105,6 @@ export function Onboarding() {
           </p>
         </div>
 
-        {/* Step 2: Connection URL (manual fallback) */}
-        <div class="space-y-2">
-          <div class="flex items-center justify-between text-xs font-medium text-ink-200">
-            <span>Or paste this Connection URL into the daemon:</span>
-            <button
-              onClick={() =>
-                copyWithToast(m.pairingData()?.connectUrl || "")
-              }
-              class="text-brand-400 hover:text-brand-300 flex items-center gap-1 text-[11px] cursor-pointer"
-            >
-              <Iconify icon="lucide:copy" size={12} />
-              <span>Copy URL</span>
-            </button>
-          </div>
-          <div class="p-2.5 rounded-xl bg-ink-950 border border-line font-mono text-[11px] text-ink-300 break-all select-all">
-            {m.pairingData()?.connectUrl}
-          </div>
-        </div>
 
         {/* Live Status */}
         <div class="p-4 rounded-xl bg-brand-500/5 border border-brand-500/20 flex items-center gap-3">

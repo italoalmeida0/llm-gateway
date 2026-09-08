@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// PermissionSet is the local-runtime permission contract for a packaged .zot agent.
+// PermissionSet is the local-runtime permission contract for an agent.
 type PermissionSet struct {
 	FS struct {
 		Read  []string `json:"read"`

@@ -81,7 +81,7 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		return
 	}
 	// Carry the compaction chain head when its anchor still resolves
-	// inside the copied prefix (pi parity: a fork keeps the compaction
+	// inside the copied prefix (a fork keeps the compaction
 	// entries reachable from its point in the log). Legacy states
 	// (Version 0) project pass-through, so they always carry.
 	if st := source.Compaction; st != nil {

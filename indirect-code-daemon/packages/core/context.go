@@ -7,108 +7,83 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// Pi-parity context pipeline: transcript vivo -> contexto derivado.
+// Context pipeline: live transcript -> derived request context.
 //
-// Em pi (packages/agent/src/harness/session/context.ts) a montagem do
-// que vai para o LLM e um pipeline puro:
+// Pipeline order (BuildContext):
 //
-//	AgentMessage[] (transcript vivo)
-//	  -> filtra isMeta
-//	  -> resolve toolResult -> tool_result blocks
-//	  -> injeta system reminders
-//	  -> transformContext(state, messages)  <- ponto de extensao
-//	  -> ApiMessage[] para model.call()
-//
-// O daemon fazia tudo inline em oneTurn (copy -> PruneOldToolResults ->
-// repair -> mirror condicional -> Request). Este ficheiro extrai essa
-// montagem para um pipeline testavel e empilhavel, sem tocar no
-// transcript vivo (a.messages).
-//
-// Ordem do pipeline (BuildContext):
-//
-//	0. projecao - historia append-only + compaction chain head ->
-//	   [resumo sintetico][tail mantido] (pi: buildContextMessages
-//	   resolve "ultima compaction entry + entries posteriores")
-//	1. snapshot do transcript vivo
-//	2. filterHidden  - remove mensagens Meta["hidden"]="true" (pi: isMeta)
-//	3. PruneOldToolResults - trunca outputs antigos mecanicamente
-//	4. repairToolUseResultPairs - stub p/ tool_use orfao (abort)
-//	5. Transforms[] - injecao derivada por turno (AGENTS.md, skills,
-//	   memoria). Nao persiste: o transcript mantem o original.
-//	6. mirrorImagesForProvider - espelho de imagens p/ openai/openai-codex
-//	   (antes persistia no transcript; agora e derivado por turno)
-//	7. injectReminders - avisos sinteticos nao persistidos (queued,
+//	0. projection - append-only history + compaction chain head ->
+//	   [synthetic summary][kept tail] (resolves latest compaction + later entries)
+//	1. snapshot live transcript
+//	2. filterHidden  - drop messages with Meta["hidden"]="true"
+//	3. PruneOldToolResults - mechanically truncate older tool outputs
+//	4. repairToolUseResultPairs - stub orphan tool_use (aborts)
+//	5. Transforms[] - derived injection per turn (AGENTS.md, skills,
+//	   memory). Never persisted: the transcript retains the original.
+//	6. mirrorImagesForProvider - image mirror for text-centric providers (openai/openai-codex)
+//	7. injectReminders - non-persisted synthetic notices (queued,
 //	   compaction, approvals)
 //
-// Tudo o que os passos 5-7 produzem existe so no request. O que
-// persiste (SessionStore / OnMessageAppended) continua a ser o
-// transcript vivo.
+// Everything produced in steps 5-7 exists only in the request.
+// Persistence (SessionStore / OnMessageAppended) continues to store
+// the unmodified live transcript.
 
-// Meta keys com semantica no pipeline de contexto.
+// Meta keys with semantics in the context pipeline.
 const (
-	// MetaHidden marca mensagens que existem no transcript (e na
-	// persistencia) mas nunca vao para o LLM. Equivalente ao isMeta
-	// do pi: status interno, espelhos legados, linhas de controlo.
+	// MetaHidden marks messages that exist in the transcript (and in
+	// persistence) but should never reach the LLM: internal status,
+	// legacy mirrors, control lines.
 	MetaHidden = "hidden"
-	// MetaEphemeral marca mensagens sinteticas produzidas pelo
-	// pipeline (reminders, mirrors). Existem so no request; nunca
-	// devem ser persistidas nem re-injetadas no transcript.
+	// MetaEphemeral marks synthetic messages produced by the
+	// pipeline (reminders, mirrors). They exist only in the request;
+	// they should never be persisted or re-injected into the transcript.
 	MetaEphemeral = "ephemeral"
-	// MetaImageMirror marca o espelho de imagens gerado para
-	// providers text-centric (openai/openai-codex). Sessões antigas
-	// podem ter o espelho persistido no transcript; o filtro trata
-	// esses casos por prefixo de texto (ver filterHidden).
+	// MetaImageMirror marks the image mirror generated for
+	// text-centric providers (openai/openai-codex). Older sessions
+	// may have persisted mirrors in the transcript; the filter handles
+	// those cases by text prefix (see filterHidden).
 	MetaImageMirror = "image_mirror"
 )
 
-// imageMirrorPrefix e o prefixo historico do espelho persistido no
-// transcript (ver mirrorToolImagesAsUser). Mantido para filtrar
-// espelhos legados em sessoes antigas; espelhos novos sao derivados
-// por turno e nunca persistem.
+// imageMirrorPrefix is the historical prefix of mirrors persisted in the
+// transcript (see mirrorToolImagesAsUser). Kept to filter legacy mirrors
+// in older sessions; newer mirrors are derived per turn and never persist.
 const imageMirrorPrefix = "Tool output included the following image content:"
 
-// ContextTransformer e o equivalente Go do transformContext do pi:
-// recebe as mensagens montadas ate aqui e devolve as mensagens
-// transformadas. Transformacoes tipicas: injecao de AGENTS.md,
-// skills, memoria de projeto, reescrita de texto visivel.
+// ContextTransformer receives assembled messages up to this point and
+// returns transformed messages. Typical transforms: AGENTS.md injection,
+// skills, project memory, visible text rewrites.
 //
-// Regras:
-//   - Nao mutar o slice de entrada; devolver slice novo ou o mesmo.
-//   - Nunca persistir: o resultado existe so no request.
-//   - Manter pares tool_call/tool_result intactos (nao remover um
-//     lado do par).
+// Rules:
+//   - Do not mutate the input slice; return a new slice or the same one.
+//   - Never persist: the result exists only in the request.
+//   - Keep tool_call/tool_result pairs intact (do not remove one side of a pair).
 type ContextTransformer func(msgs []provider.Message) []provider.Message
 
-// AssistantTextTransform reescreve o texto visivel de uma mensagem do
-// assistente (supressao ou substituicao). Substitui o antigo hook
-// BeforeAssistantMessage: em vez de um hook com semantica propria, a
-// reescrita vira um transform empilhavel sobre o texto.
+// AssistantTextTransform rewrites the visible text of an assistant message
+// (suppression or replacement).
 //
-// Retorna (replacement, ok): ok=false suprime a emissao visivel;
-// replacement != "" substitui o texto emitido. O transcript (e o que
-// o modelo ve nos proximos turnos) mantem sempre o original.
+// Returns (replacement, ok): ok=false suppresses visible emission;
+// replacement != "" replaces emitted text. The transcript (and what
+// the model sees in subsequent turns) always keeps the original.
 type AssistantTextTransform func(text string) (replacement string, ok bool)
 
-// Reminder e um aviso sintetico injetado no contexto do turno, sem
-// persistir. Equivalente aos system reminders do pi (pending
-// approvals, compaction reminders, queued messages).
+// Reminder is a synthetic notice injected into the turn context without
+// persisting (pending approvals, compaction reminders, queued messages).
 type Reminder struct {
-	// Text e o corpo do aviso.
+	// Text is the notice body.
 	Text string
-	// Meta carrega marcadores (ex. {"reminder": "queued"}).
-	// MetaEphemeral=true e forcado na emissao.
+	// Meta carries tags (e.g. {"reminder": "queued"}).
+	// MetaEphemeral=true is enforced on emission.
 	Meta map[string]string
 }
 
-// filterHidden remove do contexto mensagens marcadas como internas.
-// Equivalente ao filtro isMeta do pi em buildContextMessages.
+// filterHidden removes messages marked as internal from the context.
 //
-// Filtra:
+// Filters:
 //   - Meta[MetaHidden]=="true"
-//   - espelhos de imagem legados persistidos (MetaImageMirror ou o
-//     prefixo historico como unica/texto inicial), porque o espelho
-//     agora e derivado por turno via mirrorImagesForProvider e seria
-//     duplicado no request.
+//   - legacy persisted image mirrors (MetaImageMirror or historical
+//     prefix), because mirrors are now derived per turn via
+//     mirrorImagesForProvider and would otherwise duplicate in the request.
 func filterHidden(msgs []provider.Message) []provider.Message {
 	out := make([]provider.Message, 0, len(msgs))
 	for _, m := range msgs {
@@ -126,10 +101,10 @@ func filterHidden(msgs []provider.Message) []provider.Message {
 	return out
 }
 
-// isLegacyImageMirror detecta o espelho de imagens persistido por
-// builds antigos (runLoop anexava mirrorToolImagesAsUser ao
-// transcript). O espelho historico e uma user message cujo texto
-// começa pelo prefixo canonico.
+// isLegacyImageMirror detects image mirrors persisted by older builds
+// (runLoop used to append mirrorToolImagesAsUser to the transcript).
+// The historical mirror is a user message whose text starts with the
+// canonical prefix.
 func isLegacyImageMirror(m provider.Message) bool {
 	for _, c := range m.Content {
 		if tb, ok := c.(provider.TextBlock); ok {
@@ -141,14 +116,13 @@ func isLegacyImageMirror(m provider.Message) bool {
 	return false
 }
 
-// mirrorImagesForProvider deriva o espelho de imagens de tool results
-// como mensagem sinteticas de turno, sem persistir. Antes o runLoop
-// anexava o espelho ao transcript vivo (poluindo historico e
-// compaction); agora o espelho existe so no request.
+// mirrorImagesForProvider derives the image mirror from tool results
+// as synthetic turn messages without persisting. Previously runLoop
+// appended the mirror to the live transcript (polluting history and
+// compaction); now the mirror exists only in the request.
 //
-// Retorna nil quando o provider consome imagens em tool messages
-// nativamente ou quando nao ha imagens. O chamador anexa o
-// resultado apos a ultima mensagem.
+// Returns nil when the provider natively supports images in tool messages
+// or when there are no images. The caller appends the result after the last message.
 func mirrorImagesForProvider(clientName string, msgs []provider.Message) *provider.Message {
 	if clientName != "openai" && clientName != "openai-codex" {
 		return nil
@@ -169,9 +143,9 @@ func mirrorImagesForProvider(clientName string, msgs []provider.Message) *provid
 	return &mirror
 }
 
-// injectReminders anexa reminders como user messages sinteticas no fim
-// do contexto, marcadas MetaEphemeral. Nao persiste, nao altera o
-// transcript, nao participa de cut points de compaction.
+// injectReminders appends reminders as synthetic user messages at the end
+// of the context, marked MetaEphemeral. Never persisted, does not mutate
+// the transcript, does not affect compaction cut points.
 func injectReminders(msgs []provider.Message, reminders []Reminder) []provider.Message {
 	if len(reminders) == 0 {
 		return msgs
@@ -197,10 +171,10 @@ func injectReminders(msgs []provider.Message, reminders []Reminder) []provider.M
 	return out
 }
 
-// applyAssistantTextTransforms aplica AssistantTextTransforms sobre o
-// texto da mensagem para emissao visivel. Devolve (emit, suppress):
-// suppress=true significa nao emitir EvAssistantMessage. O transcript
-// nao e tocado — o chamador persiste sempre o original.
+// applyAssistantTextTransforms applies AssistantTextTransforms on the
+// message text for visible emission. Returns (emit, suppress):
+// suppress=true means do not emit EvAssistantMessage. The transcript
+// is untouched — callers always persist the original.
 func applyAssistantTextTransforms(msg provider.Message, transforms []AssistantTextTransform) (provider.Message, bool) {
 	if len(transforms) == 0 {
 		return msg, false

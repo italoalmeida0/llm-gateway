@@ -7,14 +7,14 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// Pi-parity system reminders: synthetic, non-persisted notices
-// appended to the request context. Em pi, buildContextMessages injeta
-// reminders (pending approvals, compaction notices, queued messages)
-// como mensagens derivadas: o modelo ve, o transcript nao guarda.
+// System reminders: synthetic, non-persisted notices
+// appended to the request context (pending approvals, compaction notices,
+// queued messages) as derived messages: the model sees them, but the
+// transcript does not retain them.
 //
-// Aqui os reminders sao produzidos por ReminderProviders registrados
-// no Agent e consumidos por BuildContext via RemindersForTurn. Nada
-// aqui toca em a.messages.
+// Reminders are produced by ReminderProviders registered on the Agent
+// and consumed by BuildContext via RemindersForTurn. Nothing here mutates
+// a.messages.
 
 // ReminderProvider returns zero or more reminders for the upcoming
 // model call. Providers run on the agent goroutine, in registration

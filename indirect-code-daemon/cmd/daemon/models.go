@@ -113,7 +113,7 @@ const (
 	DefaultReasoningOutputTokenMax = 64000
 )
 
-// maxOutputTokens computes a sane per-turn output budget matching OpenCode.
+// maxOutputTokens computes a sane per-turn output budget.
 // It prevents requests from omitting max_tokens or requesting hundreds of
 // thousands of tokens, which causes OpenRouter to default to 90% of the window.
 func maxOutputTokens(model provider.Model) int {

@@ -45,7 +45,7 @@ func TestEmptyIgnoresNothing(t *testing.T) {
 }
 
 // TestStackHonorsNestedGitignore pins the recursive-picker bug: a
-// .gitignore living inside a subdirectory (here .opencode/.gitignore
+// .gitignore living inside a subdirectory (here .nested/.gitignore
 // ignoring node_modules, exactly the layout that flooded the @-picker)
 // must prune that subdirectory's node_modules even though the root
 // .gitignore says nothing about it.
@@ -55,31 +55,31 @@ func TestStackHonorsNestedGitignore(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("build/\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	opencode := filepath.Join(root, ".opencode")
-	if err := os.MkdirAll(opencode, 0o755); err != nil {
+	nested := filepath.Join(root, ".nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(opencode, ".gitignore"), []byte("node_modules\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(nested, ".gitignore"), []byte("node_modules\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	s := NewStack(root)
-	// Before descending into .opencode the nested rule is not in scope,
+	// Before descending into .nested the nested rule is not in scope,
 	// so a same-named path elsewhere stays visible.
 	if s.Match("node_modules", true) {
 		t.Fatal("root-level node_modules should not be ignored by an unloaded nested rule")
 	}
-	// Descend into .opencode: push its .gitignore.
-	s.Push(opencode, ".opencode")
-	if !s.Match(".opencode/node_modules", true) {
-		t.Fatal("nested .opencode/.gitignore should ignore .opencode/node_modules")
+	// Descend into .nested: push its .gitignore.
+	s.Push(nested, ".nested")
+	if !s.Match(".nested/node_modules", true) {
+		t.Fatal("nested .nested/.gitignore should ignore .nested/node_modules")
 	}
-	if !s.Match(".opencode/node_modules/zod/src/v3/tests/pipeline.test.ts", false) {
+	if !s.Match(".nested/node_modules/zod/src/v3/tests/pipeline.test.ts", false) {
 		t.Fatal("files under nested-ignored node_modules should be ignored")
 	}
-	// A sibling source file inside .opencode is still visible.
-	if s.Match(".opencode/config.json", false) {
-		t.Fatal(".opencode/config.json should not be ignored")
+	// A sibling source file inside .nested is still visible.
+	if s.Match(".nested/config.json", false) {
+		t.Fatal(".nested/config.json should not be ignored")
 	}
 	// Root build/ rule still applies through the stack.
 	if !s.Match("build", true) {
@@ -87,7 +87,7 @@ func TestStackHonorsNestedGitignore(t *testing.T) {
 	}
 	// Pop the nested frame: its rule no longer applies.
 	s.Pop()
-	if s.Match(".opencode/node_modules", true) {
+	if s.Match(".nested/node_modules", true) {
 		t.Fatal("after popping, the nested rule should no longer be in scope")
 	}
 }

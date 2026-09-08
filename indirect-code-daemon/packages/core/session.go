@@ -39,8 +39,8 @@ type Session struct {
 	// worth keeping.
 	messagesAppended int
 
-	// compaction is the incremental chain head ported from pi's
-	// CompactionEntry: previous summary + file ops + cut anchor. It is
+	// compaction is the incremental chain head:
+	// previous summary + file ops + cut anchor. It is
 	// written to the session file on every compaction row so restarts
 	// keep chaining instead of re-summarizing from scratch.
 	compaction *CompactionState
@@ -320,7 +320,7 @@ func OpenSession(path string) (*Session, []provider.Message, error) {
 //
 // Corruption gets into the transcript two ways we know of:
 //
-//   - Older zot builds that persisted the assistant tool_use row
+//   - Older builds that persisted the assistant tool_use row
 //     before the tool_result row, then crashed between the two.
 //   - Abort paths in older builds that didn't drop the mid-turn
 //     assistant message cleanly.
@@ -628,7 +628,7 @@ func firstTextFromMessage(msg provider.Message) string {
 
 // PruneEmptySessions deletes session files in cwd's session directory
 // that contain only a meta line (no messages were ever appended).
-// Cleans up the backlog of empty stubs created by old zot versions
+// Cleans up the backlog of empty stubs created by older versions
 // that wrote a meta line at NewSession time and never followed up.
 // Errors are swallowed; the caller treats this as best-effort.
 func PruneEmptySessions(root, cwd string) {
@@ -727,8 +727,8 @@ func (s *Session) AppendMessage(m provider.Message) error {
 	return nil
 }
 
-// AppendCompaction appends a non-destructive compaction checkpoint
-// (pi: compaction entry). The row carries only the chain head
+// AppendCompaction appends a non-destructive compaction checkpoint.
+// The row carries only the chain head
 // (summary + file ops + KeepFrom anchor + count); earlier message
 // rows stay in the log and readers derive the compacted view by
 // projection, so the full history survives restarts.
@@ -786,7 +786,7 @@ func (s *Session) AppendUsage(u, cum provider.Usage) error {
 
 // Close flushes and closes the session file. If the session was
 // freshly created in this process and never had any messages
-// appended (the user opened zot, looked around, and exited without
+// appended (the user created a session and exited without
 // prompting), the file is deleted on close so the sessions list
 // doesn't fill up with empty meta-only stubs.
 func (s *Session) Close() error {

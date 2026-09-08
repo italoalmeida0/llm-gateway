@@ -13,10 +13,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// SQLiteSessionStore is the pi-style backend: a `sessions` row plus
-// an append-only `events` log (message / usage / compaction / meta),
-// mirroring pi's sessions+events schema in
-// packages/session-backends/sqlite-node.
+// SQLiteSessionStore is a SQLite backend: a `sessions` row plus
+// an append-only `events` log (message / usage / compaction / meta).
 //
 // Same semantics as the JSONL backend: readers see the latest
 // compaction checkpoint plus rows after it; older rows stay for
@@ -101,7 +99,7 @@ func OpenSQLiteSessionStore(path, cwd string, meta SessionMeta) (*SQLiteSessionS
 	}
 	s.meta = m
 	// Restore the in-memory compaction chain head so the next
-	// compaction builds an update prompt (pi: CompactionEntry chain).
+	// compaction builds an update prompt.
 	if _, st, err := s.readLocked(); err == nil {
 		s.compaction = st
 	}

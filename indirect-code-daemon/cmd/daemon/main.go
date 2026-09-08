@@ -134,11 +134,10 @@ type SessionRecord struct {
 	UpdatedAt   int64                 `json:"updated_at"`
 	Messages    []provider.Message    `json:"messages"`
 	Attachments []AttachmentRef       `json:"attachments,omitempty"`
-	// Compaction is the incremental chain head ported from pi's
-	// CompactionEntry (previous summary + file ops + cut anchor +
-	// count). Persisted on every compaction so the next summarization
-	// — even after a daemon restart — builds an update prompt instead
-	// of re-summarizing from scratch. Old frontends ignore it.
+	// Compaction is the incremental chain head (previous summary +
+	// file ops + cut anchor + count). Persisted on every compaction so the
+	// next summarization — even after a daemon restart — builds an update
+	// prompt instead of re-summarizing from scratch. Old frontends ignore it.
 	Compaction *core.CompactionState `json:"compaction,omitempty"`
 }
 
@@ -2857,11 +2856,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		act.mu.Unlock()
 	}
 
-	// Persistent compaction hook: the chain head (pi: CompactionEntry)
+	// Persistent compaction hook: the chain head
 	// advanced — history is append-only and never touched, so the only
 	// state to persist is the anchor + summary + file ops. Broadcasts
-	// the full history; the UI renders older messages as summarized
-	// (pi shows the whole log with a compaction marker).
+	// the full history; the UI renders older messages as summarized.
 	agent.OnCompactionState = func(state *core.CompactionState) {
 		if state == nil {
 			return
@@ -2897,13 +2895,12 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		}
 		act.mu.Unlock()
 	}
-	// Proactive in-run compaction (pi: shouldCompactBeforeNextResponse +
-	// prepareNextTurnWithContext). Checked by the agent loop before EVERY
+	// Proactive in-run compaction. Checked by the agent loop before EVERY
 	// model request, including mid-run after tool results: long runs
 	// compact without first burning a request that overflows upstream.
-	// The pi-faithful trigger (last-turn usage + trailing estimate vs.
+	// The trigger (last-turn usage + trailing estimate vs.
 	// window minus reserve) is authoritative; the configured threshold
-	// (%) and OpenCode's usable-budget formula stay as early-trip wires.
+	// (%) and usable-budget formula stay as early-trip wires.
 	agent.WindowForTurn = func() int { return modelInfo.ContextWindow }
 	agent.AutoCompact = func(cctx context.Context, esink func(core.AgentEvent)) error {
 		if cctx.Err() != nil {
@@ -2922,14 +2919,14 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		}
 		threshold := cfg.Settings.AutoCompactThreshold
 		usage := agent.LastTurnUsage()
-		msgs := agent.Messages() // projected context (pi: context view)
+		msgs := agent.Messages() // projected context
 		needs := core.ShouldCompact(window, core.UsageTotal(usage), core.TrailingTokens(msgs, usage))
 		if !needs && threshold > 0 {
 			used := core.UsageTotal(usage) + core.TrailingTokens(msgs, usage)
 			needs = used*100 >= threshold*window
 		}
 		if !needs {
-			// OpenCode usable formula stays as a final safety net:
+			// Usable formula stays as a final safety net:
 			// contextWindow - outputBudget - 20,000 buffer.
 			if usable := window - maxOutputTokens(modelInfo) - 20000; usable > 0 {
 				used := core.UsageTotal(usage) + core.TrailingTokens(msgs, usage)
@@ -2948,7 +2945,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	// Note: OnTranscriptCompacted stays unset — it fires with the
 	// projected context for legacy hosts that persisted a replacement
 	// transcript. The daemon session record keeps the append-only
-	// history (pi parity), so OnCompactionState carries everything.
+	// history, so OnCompactionState carries everything.
 
 	// Stream events to WebSocket
 	sink := func(ev core.AgentEvent) {
@@ -3113,8 +3110,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 	// Proactive compaction happens INSIDE the loop now (agent.AutoCompact,
 	// wired above): it is re-evaluated before every model request —
-	// including this turn's first one and every mid-run continuation —
-	// like pi's shouldCompactBeforeNextResponse.
+	// including this turn's first one and every mid-run continuation.
 	if err := agent.Prompt(ctx, fullPrompt, images, sink); err != nil && ctx.Err() == nil {
 		act.mu.Lock()
 		if act.gen == myGen {

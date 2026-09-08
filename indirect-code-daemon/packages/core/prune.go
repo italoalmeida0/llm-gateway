@@ -14,7 +14,7 @@ const (
 )
 
 // PruneOldToolResults returns a copy of messages with older tool outputs
-// cleared or truncated, matching OpenCode's two-tier context protection.
+// cleared or truncated using two-tier context protection.
 // The most recent 2 user turns and up to PruneProtectTokens of recent tool
 // outputs are kept intact; older outputs are pruned to save context space.
 func PruneOldToolResults(msgs []provider.Message) []provider.Message {

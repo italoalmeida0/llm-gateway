@@ -69,7 +69,7 @@ func TestUnmarshalArgsBasics(t *testing.T) {
 		t.Fatalf("got %q, want %q", s.Path, "2")
 	}
 
-	// numeric fields accept whole-number strings from string-serializing harnesses.
+	// numeric fields accept whole-number strings from string-serializing callers.
 	var n struct {
 		Limit int `json:"limit"`
 	}

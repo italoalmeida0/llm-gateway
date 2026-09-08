@@ -68,7 +68,7 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 	agent.MaxTokens = maxOutputTokens(info)
 	agent.SetMessages(messages)
 	// Seed the incremental chain so manual /compact keeps updating the
-	// previous summary instead of re-summarizing from scratch (pi parity).
+	// previous summary instead of re-summarizing from scratch.
 	// Explicit keep-tail: manual compaction always honors the request,
 	// even on short transcripts, preserving ~70% as the recent tail.
 	agent.SeedCost(act.record.Usage)
@@ -86,7 +86,7 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 		return
 	}
 	// History is append-only: manual compaction advances only the chain
-	// head (pi parity). Sync from History (projected Messages() would be
+	// head. Sync from History (projected Messages() would be
 	// the compacted view; persisting it would lose the log).
 	act.record.Messages = append([]provider.Message(nil), agent.History()...)
 	act.record.Compaction = agent.CompactionChain()

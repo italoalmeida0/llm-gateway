@@ -210,7 +210,7 @@ func (c *openaiClient) buildRequest(req Request) (*oaiRequest, error) {
 			// Some gateways expose adaptive-thinking Anthropic models through
 			// the OpenAI-compatible chat-completions wire. They accept the
 			// same reasoning_effort knob, including the top "xhigh" tier;
-			// don't clamp zot's "maximum" to "high" for those models.
+			// don't clamp "maximum" to "high" for those models.
 			effort = OpenAICompatAnthropicEffort(reasoning)
 		}
 		if hasReasoningLevelOverride(m, req.Reasoning) {
@@ -287,7 +287,7 @@ func (c *openaiClient) buildRequest(req Request) (*oaiRequest, error) {
 			}
 			// Kimi rejects assistant messages with neither visible text nor
 			// tool calls ("assistant must not be empty"). This can happen when
-			// a previous stream produced only reasoning_content, which zot keeps
+			// a previous stream produced only reasoning_content, which is kept
 			// internally for provider replay but cannot send back as standalone
 			// assistant content on OpenAI-compatible chat-completions APIs.
 			if am.Content == nil && len(am.ToolCalls) == 0 {

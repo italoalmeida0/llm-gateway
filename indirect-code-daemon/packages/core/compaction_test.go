@@ -55,7 +55,7 @@ func TestExtractFileOpsReadVsModified(t *testing.T) {
 	if len(ops.Modified) != 2 || ops.Modified[0] != "b.ts" || ops.Modified[1] != "a.ts" {
 		t.Fatalf("Modified = %v", ops.Modified)
 	}
-	// pi semantics: a file read and later modified appears in both lists
+	// A file read and later modified appears in both lists
 	// (explored, then changed). Modified membership is the assertion.
 	found := false
 	for _, f := range ops.Read {

@@ -31,7 +31,7 @@ type Agent struct {
 	// responses aren't silently cut off with stopReason=length.
 	MaxTokens int
 
-	// SessionID is the zot conversation id, forwarded to providers that
+	// SessionID is the conversation id, forwarded to providers that
 	// support sticky routing. Empty means omitted.
 	SessionID string
 
@@ -65,8 +65,7 @@ type Agent struct {
 	BeforeRequest func(context.Context) error
 
 	// Transforms shapes the derived request context every turn without
-	// touching the live transcript. Pi parity: transformContext in
-	// buildContextMessages. Typical uses: AGENTS.md/skills/memory
+	// touching the live transcript. Typical uses: AGENTS.md/skills/memory
 	// injection, project-context rewrites. Runs inside BuildContext
 	// after prune+repair, before provider mirror and reminders.
 	//
@@ -81,7 +80,7 @@ type Agent struct {
 	AssistantTextTransforms []AssistantTextTransform
 
 	// RemindersForTurn, if set, returns synthetic non-persisted
-	// reminders appended to the request context (pi: system
+	// reminders appended to the request context (system
 	// reminders — pending approvals, compaction notices, queued
 	// messages). Called on the agent goroutine per model call.
 	// Defaults to collectReminders (registered ReminderProviders);
@@ -138,7 +137,7 @@ type Agent struct {
 	// file ops + KeepFrom anchor + count). Hosts persist it on the
 	// session record so the next summarization — even after a restart —
 	// is an update, not a from-scratch re-summary, and so projection
-	// can re-derive the compacted context. Port of pi's CompactionEntry.
+	// can re-derive the compacted context.
 	// This is the ONLY state a host needs to persist for compaction:
 	// the transcript log itself is append-only and unchanged.
 	OnCompactionState func(state *CompactionState)
@@ -146,8 +145,7 @@ type Agent struct {
 	// AutoCompact, if set, runs before EVERY model request of the
 	// agent loop — including mid-loop between tool batches — so a
 	// long run compacts proactively instead of burning a failed
-	// overflowing request first (pi: shouldCompactBeforeNextResponse +
-	// prepareNextTurnWithContext). The hook owns the window/threshold
+	// overflowing request first. The hook owns the window/threshold
 	// policy (hosts know the model); it typically calls
 	// a.MaybeAutoCompact. Returning an error aborts the loop. Runs
 	// outside a.mu, so the hook may call any Agent method.
@@ -161,8 +159,7 @@ type Agent struct {
 
 	mu       sync.Mutex
 	messages []provider.Message
-	// compactionState is the incremental chain head ported from pi's
-	// CompactionEntry. Seeded from the session file on resume
+	// compactionState is the incremental chain head. Seeded from the session file on resume
 	// (SeedCompactionState) and advanced by every Compact call.
 	compactionState *CompactionState
 	// rev increments whenever the transcript slice is replaced or a
@@ -180,13 +177,12 @@ type Agent struct {
 	queued []string
 
 	// reminderProviders produce synthetic non-persisted reminders
-	// consumed by BuildContext (see reminders.go). Pi parity:
-	// system reminders in buildContextMessages.
+	// consumed by BuildContext (see reminders.go).
 	reminderProviders []ReminderProvider
 	// store, when attached via AttachStore, is the persistence
 	// backend (SessionStore). The agent loop writes messages, usage
 	// and compaction checkpoints through it; Compact persists its
-	// checkpoint through it mandatorily (pi: compaction event).
+	// checkpoint through it mandatorily.
 	store SessionStore
 	// defaultRemindersWired guards WireDefaultReminders idempotency.
 	defaultRemindersWired bool
@@ -204,8 +200,7 @@ func NewAgent(client provider.Client, model, system string, tools Registry) *Age
 		RetryBaseDelay: 2 * time.Second,
 	}
 	// Default wiring: derive RemindersForTurn from registered
-	// providers unless the host overrides it explicitly. Pi parity:
-	// buildContextMessages always injects system reminders.
+	// providers unless the host overrides it explicitly.
 	a.RemindersForTurn = a.collectReminders
 	return a
 }
@@ -295,8 +290,7 @@ func (a *Agent) appendQueuedAsUser(texts []string, sink func(AgentEvent)) {
 
 // Messages returns a copy of the effective model context: the
 // append-only history projected through the compaction chain head
-// (latest summary + kept tail). Pi parity: the context view produced
-// by buildContextMessages. Use History for the full log.
+// (latest summary + kept tail). Use History for the full log.
 func (a *Agent) Messages() []provider.Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -307,7 +301,7 @@ func (a *Agent) Messages() []provider.Message {
 // History returns a copy of the full append-only transcript — every
 // message ever appended, including ones the compaction chain has
 // summarized away. The history is the source of truth persisted by
-// hosts (pi parity: the session log); the model never sees it
+// hosts; the model never sees it
 // directly, only its projection.
 func (a *Agent) History() []provider.Message {
 	a.mu.Lock()
@@ -508,10 +502,9 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 
 		// Proactive in-run compaction, evaluated before EVERY model
 		// response — including mid-run, right after tool results.
-		// Pi parity: shouldCompactBeforeNextResponse +
-		// prepareNextTurnWithContext run inside the loop instead of
+		// Evaluated inside the loop instead of
 		// only at turn boundaries. The hook owns the window policy;
-		// core provides MaybeAutoCompact as the pi-faithful trigger.
+		// core provides MaybeAutoCompact as the trigger.
 		a.mu.Lock()
 		autoCompact := a.AutoCompact
 		a.mu.Unlock()
@@ -545,7 +538,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			if err == nil {
 				break
 			}
-			// OpenCode reactive recovery: if the provider rejected due to context overflow,
+			// Reactive recovery: if the provider rejected due to context overflow,
 			// compact the transcript and retry immediately instead of hard-failing the turn.
 			if IsContextOverflow(err) && attempt == 0 {
 				sink(EvToolProgress{Text: "Context limit reached upstream; automatically compacting older context…"})
@@ -695,13 +688,11 @@ func (a *Agent) dropLastAssistantMessage() {
 }
 
 // BuildContext derives the request context for the next model call
-// from the live transcript without mutating it. Pi parity:
-// buildContextMessages in pi's harness/session/context.ts.
+// from the live transcript without mutating it.
 //
-// Pipeline: snapshot -> filterHidden (pi: isMeta) ->
-// PruneOldToolResults -> repairToolUseResultPairs -> Transforms[]
-// (pi: transformContext) -> provider image mirror ->
-// RemindersForTurn (pi: system reminders).
+// Pipeline: snapshot -> filterHidden ->
+// PruneOldToolResults -> repairToolUseResultPairs -> Transforms[] ->
+// provider image mirror -> RemindersForTurn.
 //
 // Steps after the snapshot are request-only: mirrors, transform
 // output and reminders never persist and never feed back into
@@ -859,7 +850,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			Model:  a.Model,
 			System: a.System,
 			// Derived request context: BuildContext snapshots the live
-			// transcript and runs the pi-parity pipeline (hidden
+			// transcript and runs the context pipeline (hidden
 			// filter -> prune -> repair -> Transforms -> provider
 			// mirror -> reminders). Request-only output never
 			// feeds back into a.messages.

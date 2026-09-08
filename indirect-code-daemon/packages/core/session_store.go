@@ -6,31 +6,25 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// Pi-parity session persistence: SessionStore.
+// Session persistence: SessionStore.
 //
-// Em pi (packages/session-backends/sqlite-node + harness/session),
-// a persistencia e event-sourcing atras de uma interface SessionStore
-// (appendEvent/readEvents/fork/rename/delete/list). O daemon escrevia
-// JSONL direto em Session, sem abstracao.
-//
-// SessionStore extrai o contrato minimo que o Agent/daemon precisa:
+// SessionStore defines the contract needed by the Agent/daemon:
 //
 //	AppendMessage / AppendUsage / AppendCompaction / UpdateModel /
 //	ReadTranscript / CompactionState / Close
 //
-// Implementacoes:
-//   - JSONLSessionStore (session_store_jsonl.go): o formato atual,
-//     byte-compativel com sessoes existentes.
-//   - SQLiteSessionStore (session_store_sqlite.go): backend estilo pi
-//     (sessions + events), mesma semantica append-only.
+// Implementations:
+//   - JSONLSessionStore (session_store_jsonl.go): JSONL format,
+//     byte-compatible with existing sessions.
+//   - SQLiteSessionStore (session_store_sqlite.go): SQLite backend
+//     (sessions + events), with append-only semantics.
 //
-// O Agent nao conhece nenhuma das duas: recebe um SessionStore via
-// AttachStore e persiste via ele. Hosts escolhem o backend por
-// extensao do path (.jsonl -> JSONL, .db/.sqlite* -> SQLite) com
-// OpenSessionStore.
+// The Agent accepts a SessionStore via AttachStore and persists through it.
+// Hosts choose the backend by path extension (.jsonl -> JSONL,
+// .db/.sqlite* -> SQLite) via OpenSessionStore.
 
 // SessionStore is the persistence contract for a conversation
-// transcript. All writes are append-only, mirroring pi's event log:
+// transcript. All writes are append-only:
 // message rows accumulate and compaction checkpoints only advance the
 // chain head. History is never rewritten — readers replay the full
 // history and derive the effective context by projection
@@ -46,14 +40,14 @@ type SessionStore interface {
 	AppendUsage(u, cum provider.Usage) error
 	// AppendCompaction persists a compaction checkpoint: the chain
 	// head (summary + file ops + KeepFrom anchor) appended as one
-	// row. History rows are NOT rewritten — pi parity: the
+	// row. History rows are NOT rewritten: the
 	// compaction is just another entry in the append-only log and
 	// context is derived by projection at read time.
 	AppendCompaction(state *CompactionState) error
 	// UpdateModel records a provider/model switch.
 	UpdateModel(providerName, model string) error
 	// ReadTranscript replays the full append-only history from
-	// oldest to newest (pi: readEvents), with orphan tool_use
+	// oldest to newest, with orphan tool_use
 	// repaired. The effective model context is the projection of
 	// this history over CompactionState — see projectMessages.
 	ReadTranscript() ([]provider.Message, error)
@@ -72,7 +66,7 @@ type SessionStore interface {
 // OpenSessionStore opens (or creates) the store backing path,
 // dispatching on extension like the daemon's session loader:
 //
-//	.db, .sqlite, .sqlite3 -> SQLiteSessionStore (pi-style)
+//	.db, .sqlite, .sqlite3 -> SQLiteSessionStore
 //	anything else          -> JSONLSessionStore (legacy default)
 //
 // meta is used only when creating a new store (first line /

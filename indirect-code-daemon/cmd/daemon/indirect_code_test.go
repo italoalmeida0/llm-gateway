@@ -342,7 +342,7 @@ func TestManualCompactPreservesHistoryUntilSummarySucceeds(t *testing.T) {
 				}
 				return
 			}
-			// Pi parity (non-destructive history + projection): manual
+			// Non-destructive history + projection: manual
 			// compaction advances the chain head; the on-disk record keeps
 			// the FULL history. The compacted view is derived.
 			if len(saved.Messages) != 10 {

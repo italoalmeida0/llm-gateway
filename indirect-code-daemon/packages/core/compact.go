@@ -13,12 +13,12 @@ import (
 // Compact summarizes the conversation and records the result as a
 // chain-head advance over the append-only history. It NEVER rewrites
 // the transcript: a.messages stays intact and context changes purely
-// through projection (pi parity: compaction appends a CompactionEntry;
+// through projection (compaction advances the chain head;
 // history is immutable; context = latest entry + later entries).
 //
 // Inputs are derived from the projectMessages view (latest summary +
 // kept tail), which is also what repeated compactions summarize —
-// the incremental "update previous summary" prompt of pi.
+// the incremental "update previous summary" prompt.
 //
 // keepTail, when > 0, overrides the computed keep floor with an exact
 // message count (used by manual /compact callers and tests). 0 means
@@ -56,7 +56,7 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	} else {
 		keepFrom = FindCutPoint(msgs, keepTokens).Index
 	}
-	// pi parity on the auto path: when the whole transcript fits under
+	// On the auto path: when the whole transcript fits under
 	// the keep floor, FindCutPoint returns 0 — meaning "nothing worth
 	// summarizing". Report it instead of force-halving the transcript,
 	// which would drop history without need. Explicit keepTail callers
@@ -125,7 +125,7 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	var summary string
 	var totalUsage provider.Usage
 
-	// Split turn path (pi parity): when a turn is too large to keep, the history
+	// Split turn path: when a turn is too large to keep, the history
 	// before the split turn and the turn prefix itself are summarized separately
 	// and merged.
 	if plan.SplitTurn && len(plan.TurnPrefix) > 0 {
@@ -157,7 +157,7 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 		}
 		totalUsage = totalUsage.Add(u)
 		if stopLen {
-			// pi rejects length-truncated summaries and retries once with a
+			// Reject length-truncated summaries and retry once with a
 			// smaller window before giving up.
 			retryFrom := keepFrom + (len(msgs)-keepFrom)/2
 			if retryFrom >= len(msgs) {
@@ -184,7 +184,7 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 		return "", fmt.Errorf("empty summary from model")
 	}
 
-	// Compute file operations and append to summary (pi parity: formatFileOperations)
+	// Compute file operations and append to summary
 	ops := plan.WindowOps
 	if state != nil {
 		ops.Read = MergeFileOps(state.ReadFiles, ops.Read)
@@ -210,7 +210,7 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	projected := projectMessages(append([]provider.Message(nil), a.messages...), a.compactionStateLocked())
 	a.mu.Unlock()
 
-	// Record token usage for compaction in the session store and agent cost (pi parity)
+	// Record token usage for compaction in the session store and agent cost
 	if totalUsage.InputTokens > 0 || totalUsage.OutputTokens > 0 {
 		cum := a.cost.Add(totalUsage)
 		if store != nil {
@@ -221,8 +221,8 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 		}
 	}
 
-	// Compaction checkpoints are first-class persistence rows (pi:
-	// compaction SessionEvent), not best-effort callbacks. The store
+	// Compaction checkpoints are first-class persistence rows,
+	// not best-effort callbacks. The store
 	// write is mandatory when a store is attached; the legacy hooks
 	// stay for hosts that mirror to their own session file.
 	if store != nil {
@@ -240,12 +240,11 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	return summary, nil
 }
 
-// MaybeAutoCompact is the pi-faithful compaction trigger for the
-// AutoCompact hook: shouldCompactBeforeNextResponse +
-// prepareNextTurnWithContext in one call. It is a no-op when the next
+// MaybeAutoCompact is the proactive compaction trigger for the
+// AutoCompact hook. It is a no-op when the next
 // request still fits; otherwise it runs Compact and returns true.
 //
-// Trigger semantics (pi): the LAST turn's usage approximates the size
+// Trigger semantics: the LAST turn's usage approximates the size
 // of the prompt the model just saw; adding the trailing estimate for
 // messages appended since (tool results, queued user text) yields the
 // next request's projected size. It never uses the cumulative session
@@ -283,8 +282,7 @@ func (a *Agent) MaybeAutoCompact(ctx context.Context, window int, sink func(delt
 }
 
 // runSummarizer issues one summarization request with tool use disabled
-// and cache bypassed (port of pi's retryAssistantCall with
-// cacheRetention:none). It rejects assistant tool calls outright and
+// and cache bypassed. It rejects assistant tool calls outright and
 // reports whether the turn stopped for length plus the token usage.
 func (a *Agent) runSummarizer(ctx context.Context, prompt string, sink func(delta string)) (string, bool, provider.Usage, error) {
 	req := provider.Request{
@@ -341,9 +339,7 @@ func (a *Agent) runSummarizer(ctx context.Context, prompt string, sink func(delt
 // advanceCompactionChain advances the incremental chain head after a
 // successful summarization: merged file ops + new summary + count. The
 // transcript itself is untouched — the caller fills the projection
-// anchor (KeepFrom) with projectionIndexForContext. Port of the state
-// update half of pi's applyCompaction (the splice half is gone: pi
-// appends a compaction entry instead of rewriting history).
+// anchor (KeepFrom) with projectionIndexForContext.
 func advanceCompactionChain(plan *CompactionPlan, summary string, prev *CompactionState) *CompactionState {
 	var readFiles, modFiles []string
 	if prev != nil {
@@ -434,7 +430,7 @@ func (a *Agent) setCompactionStateLocked(state *CompactionState) {
 	a.compactionState = state
 }
 
-// hybridKeepFloor ports the keep decision: pi's 20k-token floor, raised
+// hybridKeepFloor computes the keep floor: a 20k-token floor, raised
 // to 30% of the transcript when the transcript is large (so 1M-token
 // windows keep working context instead of summarizing 98% away).
 func hybridKeepFloor(msgs []provider.Message) int {

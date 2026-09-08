@@ -262,7 +262,7 @@ func TestSQLiteCompactionCheckpoint(t *testing.T) {
 		}
 	}
 	// Append-only checkpoint: history untouched, chain head advances;
-	// projection derives the compacted view (pi parity).
+	// projection derives the compacted view.
 	state := &CompactionState{
 		Version:         CompactionProjectionVersion,
 		PreviousSummary: "s",

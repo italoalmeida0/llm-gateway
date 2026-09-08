@@ -1,7 +1,6 @@
 package core
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -10,7 +9,6 @@ import (
 
 func TestSessionRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	os.Setenv("ZOT_HOME", dir)
 
 	sess, err := NewSession(dir, "/tmp/project", "anthropic", "claude-sonnet-4-5", "test")
 	if err != nil {

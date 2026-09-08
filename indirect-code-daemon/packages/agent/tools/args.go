@@ -14,7 +14,7 @@ import (
 //
 // Background: some models emit JSON numbers with a decimal point for
 // integer fields (e.g. {"depth": 2.0} instead of {"depth": 2}), and some
-// harnesses serialize ints as strings ({"limit": "6.0"}).
+// callers serialize ints as strings ({"limit": "6.0"}).
 // encoding/json rejects both with "cannot unmarshal ... into Go struct
 // field ... of type int", surfacing as a confusing "invalid args" tool
 // error. This helper normalizes whole-number floats and whole-number

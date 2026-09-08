@@ -1,4 +1,4 @@
-// Package tools implements zot's built-in tools: read, write, edit, bash, glob.
+// Package tools implements the built-in tools: read, write, edit, bash, glob.
 package tools
 
 import (
@@ -195,8 +195,8 @@ func imageMIME(path string) string {
 // returns the real media type, independent of the file's extension.
 // Providers validate the declared media type against the actual bytes
 // and 400 the whole request on a mismatch, so the extension can never
-// be trusted. Returns "" when the format is not one zot ships images
-// for, leaving the caller's extension-based guess in place.
+// be trusted. Returns "" when the format is not recognized,
+// leaving the caller's extension-based guess in place.
 func sniffImageMIME(data []byte) string {
 	switch {
 	case len(data) >= 8 && bytes.Equal(data[:8], []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}):

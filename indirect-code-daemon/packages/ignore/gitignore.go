@@ -1,5 +1,5 @@
-// Package ignore provides a minimal .gitignore matcher shared across
-// zot. It is intentionally small: enough to drop obvious non-source
+// Package ignore provides a minimal .gitignore matcher.
+// It is intentionally small: enough to drop obvious non-source
 // directories (build outputs, dependency and tool caches) from
 // recursive walks, not a faithful git reimplementation.
 package ignore

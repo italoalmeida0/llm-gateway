@@ -1,6 +1,6 @@
 package core
 
-// Projection tests for the pi-parity compaction layer (Camada 1):
+// Projection tests for the compaction layer:
 // append-only history + projected context + proactive in-run trigger.
 //
 // The fake client below is scriptable per call: summarizer requests

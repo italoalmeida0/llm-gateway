@@ -154,7 +154,7 @@ export function CompactionBalloon(props: CompactionBalloonProps) {
         {/* Expanded Content View */}
         <Show when={expanded()}>
           <div class="mt-3 pt-3 border-t border-line/60 space-y-3">
-            {/* File Operations Chips (Pi Parity) */}
+            {/* File Operations Chips */}
             <Show when={hasFiles()}>
               <div class="space-y-2 text-[11px]">
                 <Show when={modifiedFiles().length > 0}>

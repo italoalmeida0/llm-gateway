@@ -1,4 +1,4 @@
-import { createMemo, createSignal } from "solid-js";
+import { createEffect, createMemo, createSignal } from "solid-js";
 import { api, type RemoteHostDto } from "../../api";
 
 /** Hosts + indirect pairing (extracted verbatim from RemoteCodePage). */
@@ -9,9 +9,24 @@ export function createHosts(opts: {
   onHostRemoved?: (id: string) => void;
 }) {
   const [hosts, setHosts] = createSignal<RemoteHostDto[]>([]);
-  const [activeHostId, setActiveHostId] = createSignal<string>("");
+  const [activeHostId, setActiveHostId] = createSignal<string>((() => {
+    try {
+      return localStorage.getItem("llmgw-rc-active-host") || "";
+    } catch {
+      return "";
+    }
+  })());
   const [hostMenuOpen, setHostMenuOpen] = createSignal(false);
   let hostBtn: HTMLButtonElement | undefined;
+
+  createEffect(() => {
+    const hid = activeHostId();
+    if (hid) {
+      try {
+        localStorage.setItem("llmgw-rc-active-host", hid);
+      } catch {}
+    }
+  });
 
   const activeHost = createMemo(() => {
     const list = hosts();
@@ -28,10 +43,15 @@ export function createHosts(opts: {
       const list = Array.isArray(res?.hosts) ? res.hosts : [];
       setHosts(list);
       if (list.length > 0) {
-        if (!activeHostId() || !list.some((h) => h.id === activeHostId())) {
-          const online = list.find((h) => h.status === "online");
-          setActiveHostId(online ? online.id : list[0].id);
-        }
+        const savedHostId = (() => {
+          try { return localStorage.getItem("llmgw-rc-active-host") || ""; } catch { return ""; }
+        })();
+        const currentId = activeHostId();
+        const targetHost = (savedHostId && list.find((h) => h.id === savedHostId))
+          || (currentId && list.find((h) => h.id === currentId))
+          || list.find((h) => h.status === "online")
+          || list[0];
+        setActiveHostId(targetHost.id);
       } else {
         setActiveHostId("");
       }

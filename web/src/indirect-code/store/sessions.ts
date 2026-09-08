@@ -30,6 +30,10 @@ export interface RcSession {
   createdAt: number;
   updatedAt: number;
   messageCount: number;
+  draft?: string;
+  todosOpen?: boolean;
+  editingMsg?: { index: number; text: string } | null;
+  options?: { effort: string; mode: string; skills: string[]; access: string };
 }
 
 /** One mirrored project (host folder grouping conversations). */
@@ -42,10 +46,12 @@ export interface RcProject {
   createdAt: number;
   /** The default (home) project — present but never deletable. */
   protected?: boolean;
+  collapsed?: boolean;
 }
 
 /** Daemon configuration mirror (single doc per host). */
 export interface RcConfig {
+  newDraft?: string;
   lastSelection?: { model: string; effort: string; mode?:string; access?:string; skills?:string[] };
   id: string;
   hostId: string;
@@ -117,6 +123,10 @@ export function createDataLayer(opts: {
   }
 
   function normalizeSession(r: any, hostId: string): RcSession {
+    const rawEditing = r.editingMsg ?? r.editing_msg;
+    const editingMsg = rawEditing && typeof rawEditing.index === "number"
+      ? { index: rawEditing.index, text: String(rawEditing.text || "") }
+      : null;
     return {
       id: r.id,
       hostId,
@@ -135,6 +145,15 @@ export function createDataLayer(opts: {
             : Array.isArray(r.messages)
               ? r.messages.length
               : 0,
+      draft: r.draft || "",
+      todosOpen: typeof r.todosOpen === "boolean" ? r.todosOpen : typeof r.todos_open === "boolean" ? r.todos_open : undefined,
+      editingMsg,
+      options: r.options ? {
+        effort: r.options.effort || "medium",
+        mode: r.options.mode || "build",
+        skills: Array.isArray(r.options.skills) ? r.options.skills : [],
+        access: r.options.access || "full",
+      } : undefined,
     };
   }
 
@@ -146,7 +165,8 @@ export function createDataLayer(opts: {
       path: p.path || "",
       createdAt: p.createdAt ?? p.created_at ?? Date.now(),
       protected: !!p.protected,
-      folderStatus:p.folderStatus,
+      folderStatus: p.folderStatus,
+      collapsed: !!p.collapsed,
     };
   }
 
@@ -154,6 +174,7 @@ export function createDataLayer(opts: {
     return {
       id: c.id || "daemon",
       hostId,
+      newDraft: c.newDraft ?? c.new_draft ?? "",
       lastSelection: c.lastSelection ?? c.last_selection,
       settings: c.settings && typeof c.settings === "object" ? c.settings : {},
       mcpServers: c.mcpServers ?? c.mcp_servers ?? {},

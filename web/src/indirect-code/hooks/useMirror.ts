@@ -38,7 +38,15 @@ export function createMirror(opts: {
       hid === prevSessionsHid &&
       prevSessions &&
       prevSessions.length === sorted.length &&
-      prevSessions.every((s, i) => s.id === sorted[i].id && s.updatedAt === sorted[i].updatedAt)
+      prevSessions.every((s, i) =>
+        s.id === sorted[i].id &&
+        s.updatedAt === sorted[i].updatedAt &&
+        s.draft === sorted[i].draft &&
+        s.todosOpen === sorted[i].todosOpen &&
+        s.editingMsg?.index === sorted[i].editingMsg?.index &&
+        s.editingMsg?.text === sorted[i].editingMsg?.text &&
+        s.model === sorted[i].model
+      )
     ) {
       return prevSessions;
     }
@@ -57,7 +65,12 @@ export function createMirror(opts: {
       hid === prevProjectsHid &&
       prevProjects &&
       prevProjects.length === ordered.length &&
-      prevProjects.every((p, i) => p.id === ordered[i].id && p.path === ordered[i].path && p.folderStatus === ordered[i].folderStatus)
+      prevProjects.every((p, i) =>
+        p.id === ordered[i].id &&
+        p.path === ordered[i].path &&
+        p.folderStatus === ordered[i].folderStatus &&
+        p.collapsed === ordered[i].collapsed
+      )
     ) {
       return prevProjects;
     }

@@ -56,6 +56,10 @@ export type DaemonCommand = CommandBase &
   | { type: "check_workspace"; requestId: string; sessionId: string; projectId?: string }
   | { type: "question_response"; sessionId: string; questionId: string; answers: string[][] }
   | { type: "tool_approval_response"; sessionId: string; callId: string; approved: boolean; always: boolean }
+  | { type: "set_draft"; sessionId: string; draft: string }
+  | { type: "set_todos_open"; sessionId: string; open: boolean }
+  | { type: "set_editing_msg"; sessionId: string; index: number | null; text: string }
+  | { type: "set_project_collapsed"; projectId: string; collapsed: boolean }
     | {
         type: "update_config";
         requestId: string;

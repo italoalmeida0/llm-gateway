@@ -191,9 +191,13 @@ export function TranscriptView() {
                 }
               >
                 <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60 shadow-lg">
+                  <div class="flex items-center gap-1.5 text-xs text-accent-400 font-medium mb-2 select-none">
+                    <Iconify icon="lucide:pencil" size={13} />
+                    <span>Editing message</span>
+                  </div>
                   <textarea
                     value={t.editingMsgText()}
-                    onInput={(e) => t.setEditingMsgText(e.currentTarget.value)}
+                    onInput={(e) => t.updateEditingMsgText(e.currentTarget.value)}
                     onKeyDown={(e) => {
                       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
                         e.preventDefault();
@@ -205,7 +209,12 @@ export function TranscriptView() {
                     }}
                     class="w-full bg-transparent text-ink-100 text-sm outline-none resize-y min-h-[96px] leading-relaxed"
                     rows={4}
-                    ref={(el) => setTimeout(() => el?.focus(), 40)}
+                    ref={(el) => {
+                      const active = document.activeElement;
+                      if (!active || active === document.body || active === el) {
+                        setTimeout(() => el?.focus(), 40);
+                      }
+                    }}
                   />
                   <div class="flex justify-end items-center gap-2 mt-2 pt-2 border-t border-line/40">
                     <button

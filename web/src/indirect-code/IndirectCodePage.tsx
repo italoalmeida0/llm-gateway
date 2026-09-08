@@ -50,6 +50,8 @@ export default function IndirectCodePage() {
   const [creatingSession, setCreatingSession] = createSignal(false);
   let creationRequestId = "";
   const [activeSessionId, setActiveSessionId] = createSignal<string>("");
+  let restoredHostId = "";
+  let restoreTimeout: ReturnType<typeof setTimeout> | undefined;
 
   const hosts = createHosts({
     toast: notice.toast,
@@ -69,7 +71,26 @@ export default function IndirectCodePage() {
     },
     onOpen: (hostId) => {
       void loadGatewayModels();
-      mirror.dataLayer.storeFor(hostId).syncAll().catch((e) => console.warn("[rc-sync] syncAll:", e));
+      mirror.dataLayer.storeFor(hostId).syncAll().then(() => {
+        const hid = hosts.activeHostId();
+        if (hid === hostId && restoredHostId !== hid) {
+          let saved: string | null = null;
+          try { saved = localStorage.getItem(`llmgw-rc-session:${hid}`); } catch {}
+          if (saved && saved !== "new") {
+            const fresh = mirror.sessions();
+            if (fresh.some((s) => s.id === saved)) {
+              clearTimeout(restoreTimeout);
+              restoredHostId = hid;
+              selectSession(saved);
+            } else {
+              clearTimeout(restoreTimeout);
+              restoredHostId = hid;
+              startNewConversation();
+              try { localStorage.setItem(`llmgw-rc-session:${hid}`, "new"); } catch {}
+            }
+          }
+        }
+      }).catch((e) => console.warn("[rc-sync] syncAll:", e));
       if (activeSessionId()) { transcript.fetchSession(activeSessionId()); review.requestReview(review.reviewOpen()); }
     },
     onClose: () => {
@@ -145,6 +166,8 @@ export default function IndirectCodePage() {
     onClearConversation: () => startNewConversation(),
     onBeginConversation: () => beginConversationWith(),
     isCreatingSession: () => creatingSession(),
+    getSessionDraft: () => mirror.sessions().find((s) => s.id === activeSessionId())?.draft || "",
+    getNewDraft: () => mirror.configDoc()?.newDraft || "",
   });
 
   const projects = createProjects({
@@ -280,12 +303,23 @@ export default function IndirectCodePage() {
     notice.setAppNotice(null);
     transcript.beginLoad(id);
     setActiveSessionId(id);
+    try {
+      const hid = hosts.activeHostId();
+      if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, id);
+    } catch {}
     projects.setSearchResults([]);
     composer.clearAttachments();
     const s = mirror.sessions().find((x) => x.id === id);
     if (s) {
       transcript.setSessionStatus(s.status);
       if (s.model) options.setActiveModel(s.model);
+      if (s.options) options.applyOptions(s.options);
+      if (typeof s.todosOpen === "boolean") transcript.setTodosOpen(s.todosOpen);
+      if (s.editingMsg && typeof s.editingMsg.index === "number") {
+        transcript.applyEditingMsgFromRemote(s.editingMsg.index, s.editingMsg.text || "");
+      } else {
+        transcript.applyEditingMsgFromRemote(null, "");
+      }
     }
     transcript.fetchSession(id);
     review.requestReview();
@@ -299,8 +333,12 @@ export default function IndirectCodePage() {
     transcript.setTurnActivity(null); transcript.setTodos([]); transcript.setToolProgress({}); transcript.setToolStarts({});
     setHistoryView(false);
     setActiveSessionId("");
+    try {
+      const hid = hosts.activeHostId();
+      if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, "new");
+    } catch {}
     transcript.clearMessages();
-    composer.setInputPrompt("");
+    composer.setInputPrompt(mirror.configDoc()?.newDraft || "");
     transcript.setSessionStatus("idle");
     transcript.setPendingApproval(null);
     review.resetReview();
@@ -402,6 +440,10 @@ export default function IndirectCodePage() {
         setDraftMode(false);
         const firstDraft = composer.inputPrompt();
         setActiveSessionId(r.id);
+        try {
+          const hid = hosts.activeHostId();
+          if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, r.id);
+        } catch {}
         composer.setInputPrompt(firstDraft);
         try { localStorage.setItem(`llmgw-draft:${r.id}`, firstDraft); } catch {}
         options.applyOptions(options.getLastLocalSelection() || r.options);
@@ -653,6 +695,9 @@ export default function IndirectCodePage() {
 
   createEffect(() => {
     const hid = hosts.activeHostId();
+    clearTimeout(restoreTimeout);
+    restoredHostId = "";
+    knownSessionIds = new Set();
     {
       // Switching hosts swaps the whole world: nothing from the previous
       // daemon may bleed through (frontend = dumb monitor).
@@ -715,25 +760,86 @@ export default function IndirectCodePage() {
       if (cur.has(id)) continue;
       purgeSessionTrace(id);
       if (activeSessionId() === id) {
-        setDraftMode(true);
-        setActiveSessionId("");
-        transcript.clearMessages();
-        transcript.setSessionStatus("idle");
+        startNewConversation();
       }
       projects.dropVanishedSession(id);
     }
     knownSessionIds = cur;
   });
 
-  // Default open conversation: the newest one inside the active project.
-  // If the project has none, stay blank — typing in the composer starts one.
+  // Restore saved session from localStorage (or fallback to new conversation if not found)
   createEffect(() => {
-    if (draftMode() || activeSessionId()) return;
-    if (!projects.activeProjectId()) return;
-    const ap = projects.activeProject();
-    if (!ap) return;
-    const fresh = projects.sessionsOfProject(ap.id)[0];
-    if (fresh) selectSession(fresh.id);
+    const hid = hosts.activeHostId();
+    if (!hid) return;
+    if (restoredHostId === hid) return;
+
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem(`llmgw-rc-session:${hid}`);
+    } catch {}
+
+    if (!saved || saved === "new") {
+      restoredHostId = hid;
+      clearTimeout(restoreTimeout);
+      startNewConversation();
+      return;
+    }
+
+    const all = mirror.sessions();
+    if (all.some((s) => s.id === saved)) {
+      restoredHostId = hid;
+      clearTimeout(restoreTimeout);
+      selectSession(saved);
+      return;
+    }
+
+    const st = mirror.store();
+    if (st) {
+      void st.sessions.isReady().then(() => {
+        if (restoredHostId === hid) return;
+        const fresh = mirror.sessions();
+        if (fresh.some((s) => s.id === saved)) {
+          restoredHostId = hid;
+          clearTimeout(restoreTimeout);
+          selectSession(saved);
+        } else if (!isHostOnline() || !relay.wsOpen()) {
+          restoredHostId = hid;
+          clearTimeout(restoreTimeout);
+          startNewConversation();
+          try { localStorage.setItem(`llmgw-rc-session:${hid}`, "new"); } catch {}
+        }
+      });
+    }
+
+    clearTimeout(restoreTimeout);
+    restoreTimeout = setTimeout(() => {
+      if (restoredHostId === hid) return;
+      const fresh = mirror.sessions();
+      if (fresh.some((s) => s.id === saved)) {
+        selectSession(saved);
+      } else {
+        startNewConversation();
+        try { localStorage.setItem(`llmgw-rc-session:${hid}`, "new"); } catch {}
+      }
+      restoredHostId = hid;
+    }, 2000);
+  });
+
+  // Sync active session state (todosOpen, editingMsg, options) from mirror to UI
+  createEffect(() => {
+    const s = activeSession();
+    if (!s) return;
+    if (typeof s.todosOpen === "boolean" && s.todosOpen !== transcript.todosOpen()) {
+      transcript.setTodosOpen(s.todosOpen);
+    }
+    if (s.editingMsg && typeof s.editingMsg.index === "number") {
+      transcript.applyEditingMsgFromRemote(s.editingMsg.index, s.editingMsg.text || "");
+    } else {
+      transcript.applyEditingMsgFromRemote(null, "");
+    }
+    if (s.model || s.options) {
+      options.reconcileServerSelection(s.id, s.model, s.options, gatewayModels().map((m) => m.id), gatewayModels()[0]?.id || "");
+    }
   });
 
   createEffect(() => {

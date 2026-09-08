@@ -25,7 +25,7 @@ export function createSessionOptions(opts: {
   function configureSession() {
     lastLocalSelection = { model: activeModel(), ...sessionOptions() };
     pendingSessionChoice = opts.getSessionId() ? { sessionId: opts.getSessionId(), choice: lastLocalSelection } : undefined;
-    if (opts.getSessionId()) opts.send({ type: "configure_session", sessionId: opts.getSessionId(), model: activeModel(), options: sessionOptions() });
+    opts.send({ type: "configure_session", sessionId: opts.getSessionId() || "", model: activeModel(), options: sessionOptions() });
   }
 
   function applyOptions(options: any) {

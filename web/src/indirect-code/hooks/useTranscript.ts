@@ -49,6 +49,14 @@ export function createTranscript(opts: {
   const [turnActivity, setTurnActivity] = createSignal<TurnActivity | null>(null);
   const [todos, setTodos] = createSignal<TodoItem[]>([]);
   const [todosOpen, setTodosOpen] = createSignal(true);
+  function toggleTodosOpen() {
+    const next = !todosOpen();
+    setTodosOpen(next);
+    const sid = opts.getSessionId();
+    if (sid && opts.isOpen()) {
+      opts.send({ type: "set_todos_open", sessionId: sid, open: next });
+    }
+  }
   const [turnClock, setTurnClock] = createSignal(Date.now());
   createEffect(() => {
     if (!turnActivity()?.startedAt || sessionStatus() !== "running") return;
@@ -278,6 +286,14 @@ export function createTranscript(opts: {
     setTurnActivity(r.turn || null);
     setTurnClock(Date.now());
     setTodos(r.todos || []);
+    if (typeof r.todosOpen === "boolean") setTodosOpen(r.todosOpen);
+    else if (typeof r.todos_open === "boolean") setTodosOpen(r.todos_open);
+    const em = r.editingMsg ?? r.editing_msg;
+    if (em && typeof em.index === "number") {
+      applyEditingMsgFromRemote(em.index, em.text || "");
+    } else {
+      applyEditingMsgFromRemote(null, "");
+    }
     showQuestion(r.question || null);
     setToolProgress(r.toolProgress || {});
     setToolStarts(r.toolStarts || {});
@@ -393,13 +409,77 @@ export function createTranscript(opts: {
     cutLiveTail(rawIdx(idx) - 1);
     opts.send({ type: "regenerate", sessionId: sid, index: rawIdx(idx), model: getModel(), yolo: getYolo() });
   }
+  let editMsgTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastSentEditIdx: number | null = null;
+  let lastSentEditText = "";
+  function syncEditingMsg(sid: string, idx: number | null, text: string) {
+    clearTimeout(editMsgTimer);
+    if (!opts.isOpen()) return;
+    if (idx == null) {
+      lastSentEditIdx = null;
+      lastSentEditText = "";
+      opts.send({ type: "set_editing_msg", sessionId: sid, index: null, text: "" });
+      return;
+    }
+    editMsgTimer = setTimeout(() => {
+      if (opts.isOpen()) {
+        lastSentEditIdx = idx;
+        lastSentEditText = text;
+        opts.send({ type: "set_editing_msg", sessionId: sid, index: idx, text });
+      }
+    }, 350);
+  }
+  onCleanup(() => clearTimeout(editMsgTimer));
+
+  function applyEditingMsgFromRemote(idx: number | null, text: string) {
+    if (idx == null) {
+      if (editingMsgIdx() != null) {
+        lastSentEditIdx = null;
+        lastSentEditText = "";
+        setEditingMsgIdx(null);
+        setEditingMsgText("");
+      }
+      return;
+    }
+    if (idx !== editingMsgIdx()) {
+      lastSentEditIdx = idx;
+      lastSentEditText = text;
+      setEditingMsgIdx(idx);
+      setEditingMsgText(text);
+    } else if (idx === lastSentEditIdx && text !== lastSentEditText && text !== editingMsgText()) {
+      lastSentEditText = text;
+      setEditingMsgText(text);
+    }
+  }
+
   // Inline edit (chatbot startEditMessage): user edits resubmit, assistant
   // edits just save.
   function startEditMsg(idx: number, m: ChatMessage) {
     setEditingMsgIdx(idx);
-    setEditingMsgText(messageText(m));
+    const text = messageText(m);
+    setEditingMsgText(text);
+    lastSentEditIdx = idx;
+    lastSentEditText = text;
+    const sid = opts.getSessionId();
+    if (sid && opts.isOpen()) {
+      opts.send({ type: "set_editing_msg", sessionId: sid, index: idx, text });
+    }
+  }
+  function updateEditingMsgText(text: string) {
+    setEditingMsgText(text);
+    const sid = opts.getSessionId();
+    const idx = editingMsgIdx();
+    if (sid && idx != null) {
+      syncEditingMsg(sid, idx, text);
+    }
   }
   function cancelEditMsg() {
+    const sid = opts.getSessionId();
+    if (sid && opts.isOpen() && editingMsgIdx() != null) {
+      opts.send({ type: "set_editing_msg", sessionId: sid, index: null, text: "" });
+    }
+    lastSentEditIdx = null;
+    lastSentEditText = "";
     setEditingMsgIdx(null);
     setEditingMsgText("");
   }
@@ -649,7 +729,7 @@ export function createTranscript(opts: {
   return {
     // state
     messages, sessionStatus, setSessionStatus, turnActivity, setTurnActivity,
-    todos, setTodos, todosOpen, setTodosOpen, turnClock, turnLabel,
+    todos, setTodos, todosOpen, setTodosOpen, toggleTodosOpen, turnClock, turnLabel,
     pendingApproval, setPendingApproval, pendingQuestion,
     questionSubmitting, questionError, showQuestion, clearQuestion, answerQuestion,
     sessionUsage, activeUsage, sessionContexts, setSessionContexts,
@@ -659,7 +739,7 @@ export function createTranscript(opts: {
     copiedMsgId, copyMsg,
     thinkingStart, thinkingElapsed, thinkingIndex,
     startThinkingTimer, stopThinkingTimer,
-    editingMsgIdx, editingMsgText, setEditingMsgText,
+    editingMsgIdx, setEditingMsgIdx, editingMsgText, setEditingMsgText, updateEditingMsgText, applyEditingMsgFromRemote,
     isAtBottom, setIsAtBottom,
     chatContainerRef, setChatContainerRef, chatContentRef, setChatContentRef,
     transcriptScroll, scrollToBottom, onChatScroll,

@@ -1,5 +1,5 @@
 import type { DaemonCommand } from "../daemon-protocol";
-import { createEffect, createMemo, createSignal } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { REASONING_LEVELS, SLASH_COMMANDS } from "../constants";
 import { formatEffort, normalizeEffort } from "../utils/format";
 import type { ChatMessage } from "../types";
@@ -32,6 +32,8 @@ export function createComposer(opts: {
   /** No session: the page creates one in the active project. */
   onBeginConversation: () => void;
   isCreatingSession: () => boolean;
+  getSessionDraft?: () => string;
+  getNewDraft?: () => string;
 }) {
   const [inputPrompt, setInputPrompt] = createSignal("");
   const [pendingAttachments, setPendingAttachments] = createSignal<PendingAttachment[]>([]);
@@ -72,22 +74,72 @@ export function createComposer(opts: {
     } catch {}
   }
 
-  // Per-session composer drafts (survive session switches, like the Vue app).
+  // Draft synchronization (via SignalDB mirror & daemon)
+  let lastSentDraft = "";
+  let draftTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function syncDraftToServer(sid: string, text: string) {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(() => {
+      if (lastSentDraft === text) return;
+      lastSentDraft = text;
+      if (opts.isOpen()) {
+        opts.send({ type: "set_draft", sessionId: sid, draft: text });
+      }
+    }, 350);
+  }
+  onCleanup(() => clearTimeout(draftTimer));
+
+  let currentSid: string | null = null;
   createEffect(() => {
     const sid = opts.getSessionId();
-    if (!sid) return;
-    try {
-      setInputPrompt(localStorage.getItem(`llmgw-draft:${sid}`) || "");
-    } catch {}
+    if (sid !== currentSid) {
+      currentSid = sid;
+      if (sid) {
+        const serverDraft = opts.getSessionDraft?.() ?? "";
+        const localDraft = (() => {
+          try { return localStorage.getItem(`llmgw-draft:${sid}`) || ""; } catch { return ""; }
+        })();
+        const draft = serverDraft || localDraft;
+        setInputPrompt(draft);
+        lastSentDraft = draft;
+      } else {
+        const newDraft = opts.getNewDraft?.() ?? "";
+        setInputPrompt(newDraft);
+        lastSentDraft = newDraft;
+      }
+    }
   });
+
+  createEffect(() => {
+    const sid = opts.getSessionId();
+    if (sid) {
+      const remote = opts.getSessionDraft?.() ?? "";
+      if (remote !== inputPrompt() && inputPrompt() === lastSentDraft) {
+        setInputPrompt(remote);
+        lastSentDraft = remote;
+      }
+    } else {
+      const remote = opts.getNewDraft?.() ?? "";
+      if (remote !== inputPrompt() && inputPrompt() === lastSentDraft) {
+        setInputPrompt(remote);
+        lastSentDraft = remote;
+      }
+    }
+  });
+
   createEffect(() => {
     const text = inputPrompt();
     const sid = opts.getSessionId();
-    if (!sid) return;
-    try {
-      if (text) localStorage.setItem(`llmgw-draft:${sid}`, text);
-      else localStorage.removeItem(`llmgw-draft:${sid}`);
-    } catch {}
+    if (sid) {
+      try {
+        if (text) localStorage.setItem(`llmgw-draft:${sid}`, text);
+        else localStorage.removeItem(`llmgw-draft:${sid}`);
+      } catch {}
+      syncDraftToServer(sid, text);
+    } else {
+      syncDraftToServer("", text);
+    }
   });
 
   // --- Attachments (chatbot-style; bytes live on the daemon) ---
@@ -353,6 +405,10 @@ export function createComposer(opts: {
     };
     opts.t.pushUserMessage(userMsg);
     setInputPrompt("");
+    lastSentDraft = "";
+    if (sid && opts.isOpen()) {
+      opts.send({ type: "set_draft", sessionId: sid, draft: "" });
+    }
     for (const p of pending) {
       if (p.objectUrl) {
         try {

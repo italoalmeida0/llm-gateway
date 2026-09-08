@@ -140,13 +140,16 @@ export function createProjects(opts: {
     setFolderError(message);
   }
 
-  // Nested sidebar state: expanded projects (default all expanded).
-  const [expandedProjects, setExpandedProjects] = createSignal<Record<string, boolean>>({});
-  function isProjectExpanded(p: { id: string }) {
-    return expandedProjects()[p.id] !== false;
+  // Nested sidebar state: expanded projects (mirrored via SignalDB, default expanded).
+  function isProjectExpanded(p: { id: string; collapsed?: boolean }) {
+    return !p.collapsed;
   }
   function toggleProjectExpanded(id: string) {
-    setExpandedProjects((prev) => ({ ...prev, [id]: !(prev[id] !== false) }));
+    const p = opts.projects().find((x) => x.id === id);
+    const nextCollapsed = !(p?.collapsed ?? false);
+    if (opts.isOpen()) {
+      opts.send({ type: "set_project_collapsed", projectId: id, collapsed: nextCollapsed });
+    }
   }
 
   const [expandedSessionLists, setExpandedSessionLists] = createSignal<Record<string, boolean>>({});
@@ -294,7 +297,7 @@ export function createProjects(opts: {
     pendingProjectId, setPendingProjectId,
     noteFolders, noteProjectCreated, noteProjectError,
     isFolderRequest, isProjectCreation,
-    expandedProjects, isProjectExpanded, toggleProjectExpanded,
+    isProjectExpanded, toggleProjectExpanded,
     sortedSessions, visibleSessions, sessionListToggle,
     sessionsOfProject, projectSessions, looseSessions,
     sessionFilter, setSessionFilter, matchQuery,

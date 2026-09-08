@@ -78,6 +78,7 @@ type DaemonConfig struct {
 	Settings      HarnessSettings            `json:"settings"`
 	MCPServers    map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
 	Skills        map[string]SkillConfig     `json:"skills,omitempty"`
+	NewDraft      string                     `json:"new_draft,omitempty"`
 }
 
 // AttachmentRef is a file the user attached to a session. The bytes live on
@@ -104,26 +105,35 @@ type ProjectEntry struct {
 	Path      string `json:"path"`
 	CreatedAt int64  `json:"created_at"`
 	Protected bool   `json:"protected,omitempty"`
+	Collapsed bool   `json:"collapsed,omitempty"`
+}
+
+type EditingMsgState struct {
+	Index int    `json:"index"`
+	Text  string `json:"text"`
 }
 
 // SessionRecord is the on-disk format for each local session.
 type SessionRecord struct {
-	Turn        *TurnActivity      `json:"turn,omitempty"`
-	Todos       []tools.TodoItem   `json:"todos,omitempty"`
-	Options     SessionOptions     `json:"options"`
-	ID          string             `json:"id"`
-	CWD         string             `json:"cwd"`
-	Title       string             `json:"title"`
-	TitleSource string             `json:"title_source,omitempty"`
-	Usage       provider.Usage     `json:"usage"`
-	Context     *SessionContext    `json:"context,omitempty"`
-	Model       string             `json:"model"`
-	Status      string             `json:"status"` // "idle" | "running"
-	Pinned      bool               `json:"pinned,omitempty"`
-	CreatedAt   int64              `json:"created_at"`
-	UpdatedAt   int64              `json:"updated_at"`
-	Messages    []provider.Message `json:"messages"`
-	Attachments []AttachmentRef    `json:"attachments,omitempty"`
+	Turn        *TurnActivity         `json:"turn,omitempty"`
+	Todos       []tools.TodoItem      `json:"todos,omitempty"`
+	TodosOpen   *bool                 `json:"todos_open,omitempty"`
+	Draft       string                `json:"draft,omitempty"`
+	EditingMsg  *EditingMsgState      `json:"editing_msg,omitempty"`
+	Options     SessionOptions        `json:"options"`
+	ID          string                `json:"id"`
+	CWD         string                `json:"cwd"`
+	Title       string                `json:"title"`
+	TitleSource string                `json:"title_source,omitempty"`
+	Usage       provider.Usage        `json:"usage"`
+	Context     *SessionContext       `json:"context,omitempty"`
+	Model       string                `json:"model"`
+	Status      string                `json:"status"` // "idle" | "running"
+	Pinned      bool                  `json:"pinned,omitempty"`
+	CreatedAt   int64                 `json:"created_at"`
+	UpdatedAt   int64                 `json:"updated_at"`
+	Messages    []provider.Message    `json:"messages"`
+	Attachments []AttachmentRef       `json:"attachments,omitempty"`
 	// Compaction is the incremental chain head ported from pi's
 	// CompactionEntry (previous summary + file ops + cut anchor +
 	// count). Persisted on every compaction so the next summarization
@@ -134,26 +144,41 @@ type SessionRecord struct {
 
 // SessionSummary is returned to the web client for listing.
 type SessionSummary struct {
-	ID           string `json:"id"`
-	CWD          string `json:"cwd"`
-	Title        string `json:"title"`
-	Model        string `json:"model"`
-	Status       string `json:"status"`
-	Pinned       bool   `json:"pinned"`
-	CreatedAt    int64  `json:"created_at"`
-	UpdatedAt    int64  `json:"updated_at"`
-	MessageCount int    `json:"message_count"`
+	ID           string           `json:"id"`
+	CWD          string           `json:"cwd"`
+	Title        string           `json:"title"`
+	Model        string           `json:"model"`
+	Status       string           `json:"status"`
+	Pinned       bool             `json:"pinned"`
+	CreatedAt    int64            `json:"created_at"`
+	UpdatedAt    int64            `json:"updated_at"`
+	MessageCount int              `json:"message_count"`
+	Draft        string           `json:"draft,omitempty"`
+	TodosOpen    *bool            `json:"todos_open,omitempty"`
+	EditingMsg   *EditingMsgState `json:"editing_msg,omitempty"`
+	Options      *SessionOptions  `json:"options,omitempty"`
 }
 
 // sessionListItem serializes a summary for the web client. It carries BOTH
 // snake_case (historic) and camelCase keys so old and new frontends parse it.
 func sessionListItem(s SessionSummary) map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"id": s.ID, "cwd": s.CWD, "title": s.Title, "model": s.Model, "status": s.Status,
 		"pinned":     s.Pinned,
 		"created_at": s.CreatedAt, "updated_at": s.UpdatedAt, "message_count": s.MessageCount,
 		"createdAt": s.CreatedAt, "updatedAt": s.UpdatedAt, "messageCount": s.MessageCount,
+		"draft":      s.Draft,
+		"options":    s.Options,
 	}
+	if s.TodosOpen != nil {
+		m["todosOpen"] = *s.TodosOpen
+		m["todos_open"] = *s.TodosOpen
+	}
+	if s.EditingMsg != nil {
+		m["editingMsg"] = s.EditingMsg
+		m["editing_msg"] = s.EditingMsg
+	}
+	return m
 }
 
 func sanitizeMessagesForFrontend(msgs []provider.Message) []provider.Message {
@@ -200,7 +225,8 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 	return map[string]any{
 		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
 		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
-		"turn": rec.Turn, "todos": rec.Todos,
+		"turn": rec.Turn, "todos": rec.Todos, "todosOpen": rec.TodosOpen, "todos_open": rec.TodosOpen,
+		"draft": rec.Draft, "editingMsg": rec.EditingMsg, "editing_msg": rec.EditingMsg,
 		"workspace":  inspectWorkspace(rec.CWD),
 		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages),
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
@@ -212,6 +238,7 @@ func projectPayload(p ProjectEntry) map[string]any {
 		"id": p.ID, "name": p.Name, "path": p.Path,
 		"created_at": p.CreatedAt, "createdAt": p.CreatedAt,
 		"protected":    p.Protected,
+		"collapsed":    p.Collapsed,
 		"folderStatus": inspectWorkspace(p.Path).Status,
 	}
 }
@@ -693,25 +720,30 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		return nil, err
 	}
 	var rawRec struct {
-		Turn           *TurnActivity         `json:"turn"`
-		Todos          []tools.TodoItem      `json:"todos"`
-		Options        SessionOptions        `json:"options"`
-		ID             string                `json:"id"`
-		CWD            string                `json:"cwd"`
-		Title          string                `json:"title"`
-		TitleSource    string                `json:"title_source"`
-		Usage          provider.Usage        `json:"usage"`
-		Context        *SessionContext       `json:"context"`
-		Model          string                `json:"model"`
-		Status         string                `json:"status"`
-		Pinned         bool                  `json:"pinned"`
-		CreatedAt      int64                 `json:"createdAt"`
-		UpdatedAt      int64                 `json:"updatedAt"`
-		CreatedAtSnake int64                 `json:"created_at"`
-		UpdatedAtSnake int64                 `json:"updated_at"`
-		Messages       []json.RawMessage     `json:"messages"`
-		Attachments    []AttachmentRef       `json:"attachments"`
-		Compaction     *core.CompactionState `json:"compaction,omitempty"`
+		Turn            *TurnActivity         `json:"turn"`
+		Todos           []tools.TodoItem      `json:"todos"`
+		TodosOpen       *bool                 `json:"todos_open"`
+		TodosOpenCamel  *bool                 `json:"todosOpen"`
+		Draft           string                `json:"draft"`
+		EditingMsg      *EditingMsgState      `json:"editing_msg"`
+		EditingMsgCamel *EditingMsgState      `json:"editingMsg"`
+		Options         SessionOptions        `json:"options"`
+		ID              string                `json:"id"`
+		CWD             string                `json:"cwd"`
+		Title           string                `json:"title"`
+		TitleSource     string                `json:"title_source"`
+		Usage           provider.Usage        `json:"usage"`
+		Context         *SessionContext       `json:"context"`
+		Model           string                `json:"model"`
+		Status          string                `json:"status"`
+		Pinned          bool                  `json:"pinned"`
+		CreatedAt       int64                 `json:"createdAt"`
+		UpdatedAt       int64                 `json:"updatedAt"`
+		CreatedAtSnake  int64                 `json:"created_at"`
+		UpdatedAtSnake  int64                 `json:"updated_at"`
+		Messages        []json.RawMessage     `json:"messages"`
+		Attachments     []AttachmentRef       `json:"attachments"`
+		Compaction      *core.CompactionState `json:"compaction,omitempty"`
 	}
 	if err := json.Unmarshal(data, &rawRec); err != nil {
 		return nil, err
@@ -724,8 +756,18 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 	if updatedAt == 0 {
 		updatedAt = rawRec.UpdatedAtSnake
 	}
+	todosOpen := rawRec.TodosOpen
+	if todosOpen == nil {
+		todosOpen = rawRec.TodosOpenCamel
+	}
+	editingMsg := rawRec.EditingMsg
+	if editingMsg == nil {
+		editingMsg = rawRec.EditingMsgCamel
+	}
 	rec := &SessionRecord{
-		Turn: rawRec.Turn, Todos: rawRec.Todos,
+		Turn: rawRec.Turn, Todos: rawRec.Todos, TodosOpen: todosOpen,
+		Draft:       rawRec.Draft,
+		EditingMsg:  editingMsg,
 		Options:     rawRec.Options,
 		ID:          rawRec.ID,
 		CWD:         resolvePath(rawRec.CWD),
@@ -775,6 +817,10 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 			CreatedAt:    rec.CreatedAt,
 			UpdatedAt:    rec.UpdatedAt,
 			MessageCount: len(rec.Messages),
+			Draft:        rec.Draft,
+			TodosOpen:    rec.TodosOpen,
+			EditingMsg:   rec.EditingMsg,
+			Options:      &rec.Options,
 		})
 	}
 
@@ -813,18 +859,24 @@ func (d *DaemonServer) purgeSession(id string) {
 // sessionRaw mirrors the on-disk record without hydrating message content —
 // pull/list sweeps must stay cheap even with fat transcripts on disk.
 type sessionRaw struct {
-	ID             string            `json:"id"`
-	CWD            string            `json:"cwd"`
-	Title          string            `json:"title"`
-	Model          string            `json:"model"`
-	Status         string            `json:"status"`
-	Pinned         bool              `json:"pinned"`
-	CreatedAt      int64             `json:"createdAt"`
-	UpdatedAt      int64             `json:"updatedAt"`
-	CreatedAtSnake int64             `json:"created_at"`
-	UpdatedAtSnake int64             `json:"updated_at"`
-	Messages       []json.RawMessage `json:"messages"`
-	Attachments    []AttachmentRef   `json:"attachments"`
+	ID              string            `json:"id"`
+	CWD             string            `json:"cwd"`
+	Title           string            `json:"title"`
+	Model           string            `json:"model"`
+	Status          string            `json:"status"`
+	Pinned          bool              `json:"pinned"`
+	CreatedAt       int64             `json:"createdAt"`
+	UpdatedAt       int64             `json:"updatedAt"`
+	CreatedAtSnake  int64             `json:"created_at"`
+	UpdatedAtSnake  int64             `json:"updated_at"`
+	Messages        []json.RawMessage `json:"messages"`
+	Attachments     []AttachmentRef   `json:"attachments"`
+	Draft           string            `json:"draft"`
+	TodosOpen       *bool             `json:"todos_open"`
+	TodosOpenCamel  *bool             `json:"todosOpen"`
+	EditingMsg      *EditingMsgState  `json:"editing_msg"`
+	EditingMsgCamel *EditingMsgState  `json:"editingMsg"`
+	Options         *SessionOptions   `json:"options"`
 }
 
 func (r *sessionRaw) created() int64 {
@@ -839,6 +891,20 @@ func (r *sessionRaw) updated() int64 {
 		return r.UpdatedAt
 	}
 	return r.UpdatedAtSnake
+}
+
+func (r *sessionRaw) getTodosOpen() *bool {
+	if r.TodosOpen != nil {
+		return r.TodosOpen
+	}
+	return r.TodosOpenCamel
+}
+
+func (r *sessionRaw) getEditingMsg() *EditingMsgState {
+	if r.EditingMsg != nil {
+		return r.EditingMsg
+	}
+	return r.EditingMsgCamel
 }
 
 // listSessionSummaries reads every session record but parses messages only
@@ -873,6 +939,10 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 			CreatedAt:    r.created(),
 			UpdatedAt:    r.updated(),
 			MessageCount: len(r.Messages),
+			Draft:        r.Draft,
+			TodosOpen:    r.getTodosOpen(),
+			EditingMsg:   r.getEditingMsg(),
+			Options:      r.Options,
 		})
 	}
 	sort.Slice(summaries, func(i, j int) bool {
@@ -1147,9 +1217,86 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 				"mcpServers":    d.config.MCPServers,
 				"skills":        d.config.Skills,
 				"name":          d.config.Name,
+				"newDraft":      d.config.NewDraft,
 			}}, "")
 		default:
 			reply(nil, "unknown collection")
+		}
+
+	case "set_draft":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Draft     string `json:"draft"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		if req.SessionID != "" {
+			act, err := d.getOrCreateActiveSession(req.SessionID)
+			if err == nil {
+				act.mu.Lock()
+				act.record.Draft = req.Draft
+				_ = d.saveSession(act.record)
+				act.mu.Unlock()
+			}
+		} else {
+			d.config.NewDraft = req.Draft
+			_ = d.saveConfig()
+		}
+
+	case "set_todos_open":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Open      bool   `json:"open"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		if req.SessionID != "" {
+			act, err := d.getOrCreateActiveSession(req.SessionID)
+			if err == nil {
+				act.mu.Lock()
+				act.record.TodosOpen = &req.Open
+				_ = d.saveSession(act.record)
+				act.mu.Unlock()
+			}
+		}
+
+	case "set_editing_msg":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Index     *int   `json:"index"`
+			Text      string `json:"text"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		if req.SessionID != "" {
+			act, err := d.getOrCreateActiveSession(req.SessionID)
+			if err == nil {
+				act.mu.Lock()
+				if req.Index != nil && *req.Index >= 0 {
+					act.record.EditingMsg = &EditingMsgState{
+						Index: *req.Index,
+						Text:  req.Text,
+					}
+				} else {
+					act.record.EditingMsg = nil
+				}
+				_ = d.saveSession(act.record)
+				act.mu.Unlock()
+			}
+		}
+
+	case "set_project_collapsed":
+		var req struct {
+			ProjectID string `json:"projectId"`
+			Collapsed bool   `json:"collapsed"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		if req.ProjectID != "" {
+			list := d.loadProjects()
+			for i := range list {
+				if list[i].ID == req.ProjectID {
+					list[i].Collapsed = req.Collapsed
+					_ = d.saveProjects(list)
+					break
+				}
+			}
 		}
 
 	case "create_project":
@@ -1359,6 +1506,14 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			removed = 0
 		}
 		broadcastTruncated(d, req.SessionID, req.Index, removed, rec.Messages)
+		rec.EditingMsg = nil
+		d.sessionsMu.RLock()
+		if act, ok := d.sessions[req.SessionID]; ok && act != nil {
+			act.mu.Lock()
+			act.record.EditingMsg = nil
+			act.mu.Unlock()
+		}
+		d.sessionsMu.RUnlock()
 		_ = d.saveSession(rec)
 		_ = d.sendWS(map[string]any{
 			"type":      "session_content",
@@ -1755,6 +1910,8 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"hostId":    d.config.HostID,
 			"session":   sessionPayload(rec),
 		})
+		d.config.NewDraft = ""
+		_ = d.saveConfig()
 
 	case "fork_session":
 		d.forkSession(raw)
@@ -2123,6 +2280,8 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		if req.Options != nil {
 			act.record.Options = normalizedOptions(*req.Options)
 		}
+		act.record.Draft = ""
+		act.record.EditingMsg = nil
 		_ = d.saveSession(act.record)
 		if !d.config.Settings.NoAutoTitle && (act.record.Title == "" || act.record.Title == "New conversation") {
 			if t := instantTitle(cleanText); t != "" {

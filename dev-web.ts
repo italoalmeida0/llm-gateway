@@ -9,6 +9,7 @@
  * Usage: bun ./dev-web.ts 5700
  */
 import { serve } from "bun";
+import { existsSync } from "fs";
 import path from "path";
 
 import app from "./web/index.html";
@@ -34,7 +35,15 @@ function resolveDevFile(urlPath: string): string | null {
   if (!normalized || normalized.startsWith("..") || path.isAbsolute(normalized)) return null;
   const segments = normalized.split(path.sep);
   if (segments.some((s) => s.startsWith("."))) return null;
-  if (!SERVABLE_DIRS.has(segments[0]!)) return null;
+  if (!SERVABLE_DIRS.has(segments[0]!)) {
+    const pubFile = path.join(DEV_ROOT, "web", "public", normalized);
+    if (pubFile.startsWith(path.join(DEV_ROOT, "web", "public") + path.sep)) {
+      try {
+        if (existsSync(pubFile)) return pubFile;
+      } catch {}
+    }
+    return null;
+  }
   const full = path.join(DEV_ROOT, normalized);
   if (!full.startsWith(DEV_ROOT + path.sep)) return null;
   return full;

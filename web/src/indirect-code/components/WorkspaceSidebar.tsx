@@ -48,6 +48,29 @@ export function WorkspaceSidebar() {
       : "w-0 overflow-hidden border-r-0"
   }`}
 >
+  {/* Brand Header */}
+  <div class="flex items-center justify-between px-3.5 py-3 border-b border-line/70 select-none">
+    <div class="flex items-center gap-2.5 min-w-0">
+      <img
+        src="/indirect-icon.svg"
+        alt="Indirect"
+        class="w-5 h-5 shrink-0 object-contain rounded"
+      />
+      <span class="font-mono text-xs font-semibold tracking-wider text-ink-100 uppercase truncate">
+        INDIRECT
+      </span>
+    </div>
+    <Show when={ui.isMobile()}>
+      <button
+        onClick={() => ui.setSidebarOpen(false)}
+        class="p-1 rounded-md text-ink-400 hover:text-ink-200 hover:bg-ink-900 cursor-pointer md:hidden"
+        aria-label="Close sidebar"
+      >
+        <Iconify icon="lucide:x" size={14} />
+      </button>
+    </Show>
+  </div>
+
   {/* New Conversation */}
   <div class="p-2">
     <button

@@ -18,6 +18,6 @@ export function indirectInstallCommands(connectUrl: string): {
   const url = connectUrl || "<connectUrl>";
   return {
     unix: `curl -fsSL ${INDIRECT_REPO_RAW}/indirect-install.sh | bash -s -- "${url}"`,
-    windows: `powershell -c "irm ${INDIRECT_REPO_RAW}/indirect-install.ps1 -OutFile $env:TEMP\\indirect-install.ps1; & $env:TEMP\\indirect-install.ps1 -ConnectUrl '${url}'"`,
+    windows: `powershell -ExecutionPolicy Bypass -NoProfile -Command "& ([scriptblock]::Create((irm '${INDIRECT_REPO_RAW}/indirect-install.ps1'))) -ConnectUrl '${url}'"`,
   };
 }

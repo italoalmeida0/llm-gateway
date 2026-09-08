@@ -839,6 +839,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 	)
 	var thinkingStart time.Time
 	var thinkingTime time.Duration
+	var hadThinking bool
 	finishThinking := func() {
 		if !thinkingStart.IsZero() {
 			thinkingTime += time.Since(thinkingStart)
@@ -854,6 +855,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			finishThinking()
 			sink(EvTextDelta{Delta: e.Delta})
 		case provider.EventReasoningDelta:
+			hadThinking = true
 			if thinkingStart.IsZero() {
 				thinkingStart = time.Now()
 			}
@@ -884,7 +886,15 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		}
 	}
 	finishThinking()
-	if thinkingTime > 0 {
+	if !hadThinking {
+		for _, c := range finalMsg.Content {
+			if _, ok := c.(provider.ReasoningBlock); ok {
+				hadThinking = true
+				break
+			}
+		}
+	}
+	if hadThinking || thinkingTime > 0 {
 		meta := map[string]string{}
 		for k, v := range finalMsg.Meta {
 			meta[k] = v

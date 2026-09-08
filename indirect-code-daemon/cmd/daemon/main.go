@@ -548,7 +548,7 @@ func resolvePath(p string) string {
 		home, _ := os.UserHomeDir()
 		return home
 	}
-	if strings.HasPrefix(target, "~/") {
+	if strings.HasPrefix(target, "~/") || strings.HasPrefix(target, `~\`) {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, target[2:])
 	}

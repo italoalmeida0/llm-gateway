@@ -144,15 +144,18 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 		running := false
 		for _, s := range d.sessions {
 			s.mu.Lock()
-			if s.record != nil && s.record.Status == "running" {
+			if s.cancel != nil || (s.record != nil && s.record.Status == "running") {
 				running = true
+				if s.cancel != nil {
+					s.cancel()
+				}
 			}
 			s.mu.Unlock()
 		}
 		d.sessionsMu.RUnlock()
-		if !running {
+		if !running && i > 5 {
 			break
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }

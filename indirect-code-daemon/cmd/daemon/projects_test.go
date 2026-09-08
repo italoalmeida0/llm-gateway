@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -58,7 +59,12 @@ func TestRootProjectNotTreatedAsHome(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		root = "C:\\"
 	}
-	d.handleMessage([]byte(`{"type":"create_project","path":"` + root + `","requestId":"req-root"}`))
+	payload, _ := json.Marshal(map[string]string{
+		"type":      "create_project",
+		"path":      root,
+		"requestId": "req-root",
+	})
+	d.handleMessage(payload)
 	projects := d.loadProjects()
 	var rootProj *ProjectEntry
 	for i := range projects {

@@ -88,10 +88,11 @@ func (j *JSONLSessionStore) ReadTranscript() ([]provider.Message, error) {
 	if j == nil || j.s == nil {
 		return nil, nil
 	}
-	_, msgs, err := OpenSession(j.s.Path)
+	s, msgs, err := OpenSession(j.s.Path)
 	if err != nil {
 		return nil, err
 	}
+	_ = s.Close()
 	return msgs, nil
 }
 

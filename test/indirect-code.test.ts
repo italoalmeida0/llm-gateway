@@ -119,6 +119,76 @@ describe("Indirect Code Relay and Pairing", () => {
     expect(replayRes.status).toBe(401);
   });
 
+  test("re-pair with hostId+daemonToken reuses the same host row (no duplicate)", async () => {
+    const pairRes = await fetch(`${GW}/api/indirect-code/pair`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const pairJson = (await pairRes.json()) as any;
+    expect(pairJson.success).toBe(true);
+
+    const res = await fetch(pairJson.connectUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "My MacBook",
+        hostname: "macbook.local",
+        os: "darwin",
+        arch: "arm64",
+        hostId,
+        daemonToken,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.success).toBe(true);
+    expect(json.reused).toBe(true);
+    expect(json.hostId).toBe(hostId);
+    expect(json.daemonToken).not.toBe(daemonToken);
+
+    // Old token is dead (rotated); new token still resolves to the same host.
+    const oldModels = await fetch(`${GW}/api/indirect-code/models`, {
+      headers: { Authorization: `Bearer ${daemonToken}` },
+    });
+    expect(oldModels.status).toBe(401);
+    const newModels = await fetch(`${GW}/api/indirect-code/models`, {
+      headers: { Authorization: `Bearer ${json.daemonToken}` },
+    });
+    expect(newModels.status).toBe(200);
+    daemonToken = json.daemonToken;
+
+    const listRes = await fetch(`${GW}/api/indirect-code/hosts`, {
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const listJson = (await listRes.json()) as any;
+    expect(listJson.hosts.length).toBe(1);
+    expect(listJson.hosts[0].id).toBe(hostId);
+  });
+
+  test("re-pair with wrong token falls back to a fresh host row", async () => {
+    const pairRes = await fetch(`${GW}/api/indirect-code/pair`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const pairJson = (await pairRes.json()) as any;
+    const res = await fetch(pairJson.connectUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Intruder", hostId, daemonToken: "dmt_wrong" }),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.success).toBe(true);
+    expect(json.reused ?? false).toBe(false);
+    expect(json.hostId).not.toBe(hostId);
+    // Cleanup: remove the decoy so later tests see a single host again.
+    const delRes = await fetch(`${GW}/api/indirect-code/hosts/${json.hostId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    expect(delRes.status).toBe(200);
+  });
+
   test("GET /api/indirect-code/hosts lists registered host as offline", async () => {
     const res = await fetch(`${GW}/api/indirect-code/hosts`, {
       headers: { Authorization: `Bearer ${userToken}` },

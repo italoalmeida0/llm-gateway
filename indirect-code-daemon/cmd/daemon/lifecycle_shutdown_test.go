@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -30,5 +32,67 @@ func TestIsRevokedDialError(t *testing.T) {
 func TestStopDaemonWithoutPidFile(t *testing.T) {
 	if err := stopDaemonFromPidFile(t.TempDir()); err == nil {
 		t.Fatal("sem daemon.pid deveria retornar erro")
+	}
+}
+
+// performPairing com identidade anterior (hostId + daemonToken do
+// config.json) deve provar a identidade no corpo do POST para o gateway
+// reutilizar a mesma linha em vez de duplicar o host.
+func TestPerformPairingSendsPreviousIdentity(t *testing.T) {
+	var got map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true, "hostId": "host_abc", "daemonToken": "dmt_new",
+			"apiKey": "gw_x", "gatewayUrl": "http://gw",
+		})
+	}))
+	defer srv.Close()
+
+	d := &DaemonServer{
+		dataDir:    t.TempDir(),
+		configPath: t.TempDir() + "/config.json",
+		config: &DaemonConfig{
+			HostID: "host_abc", DaemonToken: "dmt_old",
+			Settings: HarnessSettings{AutoCompactThreshold: 80},
+		},
+		sessions: map[string]*ActiveSession{},
+	}
+	if err := d.performPairing(srv.URL+"/api/indirect-code/connect/tok", "MyPC"); err != nil {
+		t.Fatalf("performPairing: %v", err)
+	}
+	if got["hostId"] != "host_abc" || got["daemonToken"] != "dmt_old" {
+		t.Fatalf("identidade anterior não enviada: %v", got)
+	}
+	if d.config.HostID != "host_abc" || d.config.DaemonToken != "dmt_new" {
+		t.Fatalf("config não atualizada com token rotacionado: %+v", d.config)
+	}
+}
+
+// performPairing sem config anterior não envia prova (fresh pair).
+func TestPerformPairingWithoutPreviousIdentity(t *testing.T) {
+	var got map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true, "hostId": "host_new", "daemonToken": "dmt_1",
+			"apiKey": "gw_x", "gatewayUrl": "http://gw",
+		})
+	}))
+	defer srv.Close()
+
+	d := &DaemonServer{
+		dataDir:    t.TempDir(),
+		configPath: t.TempDir() + "/config.json",
+		sessions:   map[string]*ActiveSession{},
+	}
+	if err := d.performPairing(srv.URL+"/api/indirect-code/connect/tok", ""); err != nil {
+		t.Fatalf("performPairing: %v", err)
+	}
+	if _, ok := got["hostId"]; ok {
+		t.Fatalf("fresh pair não deveria enviar hostId: %v", got)
+	}
+	if _, ok := got["daemonToken"]; ok {
+		t.Fatalf("fresh pair não deveria enviar daemonToken: %v", got)
 	}
 }

@@ -1,9 +1,9 @@
-import { db, audit, type RemoteHostRow, type RemotePairingTokenRow } from "../db";
+import { db, audit, type ApiKeyRow, type RemoteHostRow, type RemotePairingTokenRow } from "../db";
 import { requireAuth } from "../auth";
 import { createKey, revokeKey } from "../keys";
-import { randomToken, sha256Hex } from "../crypto";
+import { decryptSecret, randomToken, sha256Hex } from "../crypto";
 import { err, json, readJsonBody } from "../http";
-import { PUBLIC_URL } from "../config";
+import { GATEWAY_SECRET, PUBLIC_URL } from "../config";
 import { closeDaemonSocket } from "./relay";
 import { publicModelEntry, routerSnapshot } from "../models";
 
@@ -89,6 +89,81 @@ export async function handleIndirectCodeRestRoute(
     const hostname = (body?.hostname || "").slice(0, 128);
     const os = (body?.os || "").slice(0, 32);
     const arch = (body?.arch || "").slice(0, 32);
+
+    // Host reuse (B): the daemon proves its previous identity with the
+    // hostId + daemonToken stored in ~/.indirect-code/config.json. When the
+    // proof checks out (same user, token matches the stored hash) we rotate
+    // the token on the SAME host row instead of inserting a new one — so
+    // re-running the install command on the same PC never duplicates the
+    // host list. Anything else (unknown id, wrong user, wrong token, deleted
+    // row) falls through to the fresh-pair path below.
+    const claimedHostId = typeof body?.hostId === "string" ? body.hostId.slice(0, 64) : "";
+    const claimedToken = typeof body?.daemonToken === "string" ? body.daemonToken : "";
+    if (claimedHostId && claimedToken) {
+      const existing = db
+        .prepare<RemoteHostRow, [string, string]>(
+          "SELECT * FROM remote_hosts WHERE id = ? AND user_id = ?",
+        )
+        .get(claimedHostId, row.user_id);
+      if (existing && existing.daemon_token_hash === sha256Hex(claimedToken)) {
+        const newDaemonToken = `dmt_${randomToken(24)}`;
+        db.prepare(
+          `UPDATE remote_hosts
+           SET name = ?, hostname = ?, os = ?, arch = ?,
+               daemon_token_hash = ?, status = 'offline', last_seen_at = ?
+           WHERE id = ?`,
+        ).run(hostName, hostname, os, arch, sha256Hex(newDaemonToken), now, existing.id);
+
+        // Reuse the dedicated API key value when it is still revealable;
+        // otherwise mint a fresh one (old key row revoked below is harmless).
+        let apiKeyValue: string | null = null;
+        if (existing.api_key_id) {
+          const keyRow = db
+            .prepare<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?")
+            .get(existing.api_key_id);
+          if (keyRow?.token_enc) {
+            try {
+              apiKeyValue = await decryptSecret(keyRow.token_enc, GATEWAY_SECRET);
+            } catch {}
+          }
+        }
+        if (!apiKeyValue) {
+          if (existing.api_key_id) {
+            try {
+              revokeKey(existing.api_key_id);
+            } catch {}
+          }
+          const created = await createKey(row.user_id, { name: `Daemon: ${hostName}` });
+          db.prepare("UPDATE remote_hosts SET api_key_id = ? WHERE id = ?").run(
+            created.row.id,
+            existing.id,
+          );
+          apiKeyValue = created.token;
+        }
+
+        // Drop any stale socket still keyed by this host so the re-paired
+        // daemon is the only writer; it reconnects with the rotated token.
+        closeDaemonSocket(existing.id);
+
+        audit("remote_host.repaired", {
+          actorId: row.user_id,
+          target: existing.id,
+          meta: { hostname, os, arch },
+        });
+
+        return json(
+          {
+            success: true,
+            hostId: existing.id,
+            daemonToken: newDaemonToken,
+            apiKey: apiKeyValue,
+            gatewayUrl: PUBLIC_URL,
+            reused: true,
+          },
+          { req },
+        );
+      }
+    }
 
     const hostId = `host_${randomToken(12)}`;
     const daemonToken = `dmt_${randomToken(24)}`;

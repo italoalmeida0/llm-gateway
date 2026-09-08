@@ -569,12 +569,22 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 		hostName = hostname
 	}
 
-	reqBody, _ := json.Marshal(map[string]string{
+	// Host reuse (B): when this PC paired before, prove the previous
+	// identity (hostId + daemonToken from config.json) so the gateway
+	// rotates credentials on the SAME host row instead of inserting a
+	// duplicate. A deleted/unknown row simply falls back to a fresh pair.
+	pairReq := map[string]string{
 		"name":     hostName,
 		"hostname": hostname,
 		"os":       runtime.GOOS,
 		"arch":     runtime.GOARCH,
-	})
+	}
+	if d.config != nil && d.config.HostID != "" && d.config.DaemonToken != "" {
+		pairReq["hostId"] = d.config.HostID
+		pairReq["daemonToken"] = d.config.DaemonToken
+	}
+
+	reqBody, _ := json.Marshal(pairReq)
 
 	resp, err := http.Post(u.String(), "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -593,6 +603,7 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 		DaemonToken string `json:"daemonToken"`
 		APIKey      string `json:"apiKey"`
 		GatewayURL  string `json:"gatewayUrl"`
+		Reused      bool   `json:"reused"`
 		Error       string `json:"error"`
 	}
 
@@ -629,6 +640,9 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 	}
 
 	fmt.Printf("\n[SUCCESS] Host paired successfully! Host ID: %s (Gateway: %s)\n", result.HostID, result.GatewayURL)
+	if result.Reused {
+		fmt.Printf("[INFO] Reused existing host registration (token rotated, no duplicate created).\n")
+	}
 	return nil
 }
 

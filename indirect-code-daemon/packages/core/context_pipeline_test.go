@@ -167,19 +167,6 @@ func TestSnapCutToUserBoundary(t *testing.T) {
 	}
 }
 
-func TestSnapTailToUserBoundary(t *testing.T) {
-	call, res := testToolTurn("c1")
-	tail := snapTailToUserBoundary([]provider.Message{res, call, testMsg(provider.RoleUser, "u")})
-	if len(tail) != 1 || extractText(tail[0]) != "u" {
-		t.Fatalf("expected tail starting at user, got %+v", tail)
-	}
-	// No user row: unchanged (never drop the whole tail).
-	only := []provider.Message{call, res}
-	if got := snapTailToUserBoundary(only); len(got) != 2 {
-		t.Fatalf("expected unchanged tail, got %+v", got)
-	}
-}
-
 func TestJSONLStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/s.jsonl"
@@ -274,17 +261,31 @@ func TestSQLiteCompactionCheckpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	compacted := []provider.Message{testMsg(provider.RoleUser, "summary..."), testMsg(provider.RoleUser, "new tail")}
-	state := &CompactionState{PreviousSummary: "s", ModifiedFiles: []string{"a.go"}, Count: 1}
-	if err := st.AppendCompaction(compacted, state); err != nil {
+	// Append-only checkpoint: history untouched, chain head advances;
+	// projection derives the compacted view (pi parity).
+	state := &CompactionState{
+		Version:         CompactionProjectionVersion,
+		PreviousSummary: "s",
+		ModifiedFiles:   []string{"a.go"},
+		KeepFrom:        3,
+		Count:           1,
+	}
+	if err := st.AppendCompaction(state); err != nil {
 		t.Fatal(err)
 	}
 	msgs, err := st.ReadTranscript()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(msgs) != 2 || extractText(msgs[0]) != "summary..." {
-		t.Fatalf("latest compaction must win, got %+v", msgs)
+	if len(msgs) != 5 {
+		t.Fatalf("compaction must be append-only; full history = 5 rows, got %d", len(msgs))
+	}
+	projected := projectMessages(msgs, st.CompactionState())
+	if len(projected) != 3 || extractText(projected[1]) != "old" {
+		t.Fatalf("projection must be [summary][3 kept rows], got %+v", projected)
+	}
+	if tb, ok := projected[0].Content[0].(provider.TextBlock); !ok || tb.Text != summaryMessageText("s") {
+		t.Fatalf("projected summary head wrong: %+v", projected[0])
 	}
 	if st.CompactionState() == nil || st.CompactionState().Count != 1 {
 		t.Fatalf("chain head not kept: %+v", st.CompactionState())

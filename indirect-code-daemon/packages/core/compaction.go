@@ -3,7 +3,9 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
@@ -31,11 +33,24 @@ const (
 	CompactionImageTokenEstimate = 1500
 )
 
+// CompactionProjectionVersion is the projection schema version written
+// by new compactions. States restored from older session files lack the
+// field (decoded as 0) and keep the legacy inline-summary layout: the
+// synthetic summary message was spliced INTO the transcript by the old
+// destructive applyCompaction, so projection is a pass-through for them.
+const CompactionProjectionVersion = 1
+
 // CompactionState is the incremental state chained across compactions,
 // mirroring pi's CompactionEntry (summary + firstKeptEntryId + file ops).
 // It is persisted on the session record so a restart does not break the
 // chain: the next summarization receives the previous summary as context
 // instead of re-summarizing from scratch.
+//
+// Pi parity (non-destructive history + projection): the state IS the
+// compaction entry. The transcript log underneath is append-only and
+// never rewritten — context is derived by splicing [summary] +
+// [history[KeepFrom:]] at read time (see projectMessages), exactly like
+// pi's buildContextMessages resolves "latest compaction + later entries".
 type CompactionState struct {
 	// PreviousSummary is the last produced summary text.
 	PreviousSummary string `json:"previousSummary,omitempty"`
@@ -44,10 +59,90 @@ type CompactionState struct {
 	// ModifiedFiles accumulates files the agent has created/edited.
 	ModifiedFiles []string `json:"modifiedFiles,omitempty"`
 	// FirstKeptEntryID anchors the cut point: entries at or after this ID
-	// were kept verbatim by the last compaction.
+	// were kept verbatim by the last compaction. The daemon keeps it as a
+	// human/debug label; the operative anchor is KeepFrom.
 	FirstKeptEntryID string `json:"firstKeptEntryId,omitempty"`
 	// Count tracks how many compactions have run in this session.
 	Count int `json:"count,omitempty"`
+	// Version marks states that carry a projection anchor. Absent (0) in
+	// legacy rows: those sessions embed the summary inline and project
+	// as pass-through.
+	Version int `json:"version,omitempty"`
+	// KeepFrom is the index into the append-only history of the first
+	// message kept verbatim by this compaction (pi: firstKeptEntryId —
+	// daemon transcripts are index-addressed, not id-addressed).
+	// Context derivation = synthetic summary message + history[KeepFrom:].
+	KeepFrom int `json:"keepFrom,omitempty"`
+	// Usage records the LLM token cost of generating this compaction summary (pi parity).
+	Usage *provider.Usage `json:"usage,omitempty"`
+}
+
+// summaryMessageText renders the summary as the synthetic user-message
+// text the model sees after a compaction.
+func summaryMessageText(summary string) string {
+	return "## Context Summary (compacted)\n\n" + summary
+}
+
+// isCompactionSynthetic reports whether m is a synthetic compaction
+// summary message (produced by projection or spliced by a legacy build).
+func isCompactionSynthetic(m provider.Message) bool {
+	return m.Meta != nil && m.Meta["compaction"] == "true"
+}
+
+// projectionAnchor resolves a chain head against a history length to the
+// effective projection layout: whether a synthetic summary precedes the
+// kept tail and where the kept tail starts in the history.
+//
+// Legacy states (Version 0, restored from pre-projection session files)
+// project as pass-through: their summary lives inline in the transcript.
+// Corrupted/out-of-range anchors fail open to pass-through too — never
+// hide user messages from the model because of a bad anchor.
+func projectionAnchor(state *CompactionState, historyLen int) (synthetic bool, keepFrom int) {
+	if state == nil || state.Version < CompactionProjectionVersion || state.PreviousSummary == "" {
+		return false, 0
+	}
+	if state.KeepFrom < 0 || state.KeepFrom > historyLen {
+		return false, 0
+	}
+	return true, state.KeepFrom
+}
+
+// projectMessages derives the effective model context from the
+// append-only history and the compaction chain head. Pi parity:
+// buildContextMessages = latest compaction entry + later entries. The
+// history slice itself is never mutated or reordered.
+//
+// The synthetic summary message aggregates AddedToolNames gathered from
+// the whole history so deferred-tool activations survive compaction the
+// same way they did under the old splice (applyCompaction collected
+// them into the synthetic message it spliced in).
+func projectMessages(history []provider.Message, state *CompactionState) []provider.Message {
+	synthetic, keepFrom := projectionAnchor(state, len(history))
+	if !synthetic {
+		return history
+	}
+	var activated []string
+	for _, m := range history {
+		for _, name := range m.AddedToolNames {
+			if !containsString(activated, name) {
+				activated = append(activated, name)
+			}
+		}
+	}
+	syn := provider.Message{
+		Role:    provider.RoleUser,
+		Time:    time.Now(),
+		Content: []provider.Content{provider.TextBlock{Text: summaryMessageText(state.PreviousSummary)}},
+		Meta: map[string]string{
+			"compaction": "true",
+			"count":      strconv.Itoa(state.Count),
+		},
+		AddedToolNames: activated,
+	}
+	out := make([]provider.Message, 0, 1+len(history)-keepFrom)
+	out = append(out, syn)
+	out = append(out, history[keepFrom:]...)
+	return out
 }
 
 // FileOps is the per-window file activity extracted for the summary.
@@ -421,27 +516,34 @@ func MergeFileOps(old []string, add []string) []string {
 }
 
 // CutPoint is the result of FindCutPoint: the index of the first message
-// to keep verbatim, plus whether the cut split a tool turn (requiring the
-// prefix summary path).
+// to keep verbatim, plus whether the cut split a turn mid-way (pi parity).
 type CutPoint struct {
 	// Index is the first message index kept verbatim.
 	Index int
-	// SplitTurn is true when the cut landed mid tool-call/result turn, so
-	// the caller must summarize the prefix window as well (pi's split-turn
-	// path producing two summaries).
+	// SplitTurn is true when the cut landed mid-turn (at an assistant message),
+	// so the caller must summarize the prefix window as well (pi's split-turn path).
 	SplitTurn bool
-	// PrefixEnd is the end index of the prefix window when SplitTurn.
-	PrefixEnd int
+	// TurnStartIndex is the start index of the split turn (or -1 if not split).
+	TurnStartIndex int
+}
+
+func findTurnStartIndex(msgs []provider.Message, cutIndex int) int {
+	for i := cutIndex - 1; i >= 0; i-- {
+		if isUserBoundary(msgs[i]) {
+			return i
+		}
+	}
+	return -1
 }
 
 // FindCutPoint walks back from the end keeping at least keepRecent tokens
 // and never cutting in the middle of a tool result sequence. Port of pi's
 // findCutPoint, including the split-turn detection: if the boundary falls
-// between an assistant tool_call and its tool_result, the prefix (up to the
-// tool call) is summarized separately so no orphaned tool_result survives.
+// at an assistant message mid-turn, the turn is split into a prefix
+// (summarized) and a suffix (retained).
 func FindCutPoint(msgs []provider.Message, keepRecent int) CutPoint {
 	if len(msgs) == 0 {
-		return CutPoint{Index: 0}
+		return CutPoint{Index: 0, TurnStartIndex: -1}
 	}
 	// Walk back accumulating token estimates until the keep floor is met.
 	acc := 0
@@ -451,7 +553,7 @@ func FindCutPoint(msgs []provider.Message, keepRecent int) CutPoint {
 		acc += EstimateMessageTokens(msgs[idx])
 	}
 	if idx <= 0 {
-		return CutPoint{Index: 0}
+		return CutPoint{Index: 0, TurnStartIndex: -1}
 	}
 	// Never cut directly after an assistant tool_call (its results would
 	// be orphaned) — move the boundary forward past the result run.
@@ -463,21 +565,25 @@ func FindCutPoint(msgs []provider.Message, keepRecent int) CutPoint {
 	for idx > 0 && isToolResultHead(msgs[idx]) && !ownsToolCall(msgs, idx) {
 		idx--
 	}
-	// Split-turn detection: boundary sits between an assistant message
-	// with tool calls and the tool results that answer it.
-	if idx > 0 && idx < len(msgs) && isToolCallTail(msgs[idx-1]) && isToolResultHead(msgs[idx]) {
-		return CutPoint{Index: idx, SplitTurn: true, PrefixEnd: idx}
-	}
 	if idx < 0 {
 		idx = 0
 	}
-	// Pi parity (findCutPoint keepRecent): the kept tail must start at
-	// a user boundary so the summary + tail reads as a coherent
-	// conversation. Snap forward past a leading tool-result run and
-	// its owning assistant turn, then to the next user message; if no
-	// user message follows, fall back to the pair-safe index above.
-	idx = snapCutToUserBoundary(msgs, idx)
-	return CutPoint{Index: idx}
+	if idx >= len(msgs) {
+		idx = len(msgs) - 1
+	}
+
+	// Pi parity: if the cut point is a user boundary, it is a clean turn boundary.
+	// If it is an assistant message, it splits the turn!
+	if isUserBoundary(msgs[idx]) {
+		return CutPoint{Index: idx, SplitTurn: false, TurnStartIndex: -1}
+	}
+	turnStart := findTurnStartIndex(msgs, idx)
+	if turnStart >= 0 {
+		return CutPoint{Index: idx, SplitTurn: true, TurnStartIndex: turnStart}
+	}
+	// No preceding user boundary found; snap to user boundary if one follows.
+	snapped := snapCutToUserBoundary(msgs, idx)
+	return CutPoint{Index: snapped, SplitTurn: false, TurnStartIndex: -1}
 }
 
 // snapCutToUserBoundary moves a pair-safe cut forward to the next user
@@ -560,22 +666,46 @@ func ownsToolCall(msgs []provider.Message, idx int) bool {
 	return false
 }
 
+const TurnPrefixSummarizationPromptTemplate = `This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+
+Summarize the prefix to provide context for the retained suffix:
+
+## Original Request
+[What did the user ask for in this turn?]
+
+## Early Progress
+- [Key decisions and work done in the prefix]
+
+## Context for Suffix
+- [Information needed to understand the retained recent work]
+
+Be concise. Focus on what's needed to understand the kept suffix.`
+
+// TurnPrefixSummarizationPrompt formats the prompt for the split-turn prefix (pi parity).
+func TurnPrefixSummarizationPrompt(conversation string) string {
+	return fmt.Sprintf("<conversation>\n%s\n</conversation>\n\n%s", conversation, TurnPrefixSummarizationPromptTemplate)
+}
+
 // CompactionPlan is the output of PrepareCompaction: everything needed to
-// run one summarization and splice it back.
+// run summarization (including split turns) and splice it back.
 type CompactionPlan struct {
-	// Summarize holds the messages to feed the summarizer.
+	// Summarize holds the history messages before the split turn (or before KeepFrom if not split).
 	Summarize []provider.Message
+	// TurnPrefix holds the split-turn prefix messages (from TurnStartIndex to KeepFrom).
+	TurnPrefix []provider.Message
 	// KeepFrom is the transcript index kept verbatim.
 	KeepFrom int
-	// SplitTurn mirrors CutPoint.SplitTurn.
+	// TurnStartIndex is the start index of the split turn (or -1 if not split).
+	TurnStartIndex int
+	// SplitTurn is true when cutting in the middle of a turn.
 	SplitTurn bool
-	// PrefixEnd mirrors CutPoint.PrefixEnd.
-	PrefixEnd int
-	// Prompt is the fully built summarizer prompt.
+	// Prompt is the fully built summarizer prompt for history (if any).
 	Prompt string
+	// TurnPrefixPrompt is the prompt for the split turn prefix (if SplitTurn).
+	TurnPrefixPrompt string
 	// FileOpsNote is the rendered file-operations section.
 	FileOpsNote string
-	// WindowOps is the file activity in the summarized window.
+	// WindowOps is the file activity across Summarize + TurnPrefix.
 	WindowOps FileOps
 	// Incremental is true when a previous summary is being updated.
 	Incremental bool
@@ -583,36 +713,63 @@ type CompactionPlan struct {
 
 // PrepareCompaction mirrors pi's prepareCompaction: pick the cut point,
 // serialize the window, extract file ops, merge with carried state, and
-// build the initial or update prompt.
+// build the initial/update prompts (including split-turn prefix prompts).
 func PrepareCompaction(msgs []provider.Message, state *CompactionState, keepRecent int) *CompactionPlan {
 	if keepRecent <= 0 {
 		keepRecent = CompactionKeepRecentTokens
 	}
 	cut := FindCutPoint(msgs, keepRecent)
-	window := msgs
-	if cut.Index > 0 && cut.Index < len(msgs) {
-		window = msgs[:cut.Index]
+	keepFrom := cut.Index
+	if keepFrom < 0 {
+		keepFrom = 0
 	}
-	ops := ExtractFileOps(window)
+	if keepFrom > len(msgs) {
+		keepFrom = len(msgs)
+	}
+
+	historyEnd := keepFrom
+	if cut.SplitTurn && cut.TurnStartIndex >= 0 && cut.TurnStartIndex < keepFrom {
+		historyEnd = cut.TurnStartIndex
+	}
+
+	summarizeWindow := msgs[:historyEnd]
+	var turnPrefixWindow []provider.Message
+	if cut.SplitTurn && cut.TurnStartIndex >= 0 && cut.TurnStartIndex < keepFrom {
+		turnPrefixWindow = msgs[cut.TurnStartIndex:keepFrom]
+	}
+
+	allSummarized := msgs[:keepFrom]
+	ops := ExtractFileOps(allSummarized)
+
 	plan := &CompactionPlan{
-		Summarize:   window,
-		KeepFrom:    cut.Index,
-		SplitTurn:   cut.SplitTurn,
-		PrefixEnd:   cut.PrefixEnd,
-		WindowOps:   ops,
-		FileOpsNote: FormatFileOperations(ops),
+		Summarize:      summarizeWindow,
+		TurnPrefix:     turnPrefixWindow,
+		KeepFrom:       keepFrom,
+		TurnStartIndex: cut.TurnStartIndex,
+		SplitTurn:      cut.SplitTurn && len(turnPrefixWindow) > 0,
+		WindowOps:      ops,
+		FileOpsNote:    FormatFileOperations(ops),
 	}
-	conversation := SerializeConversation(window)
-	if state != nil && state.PreviousSummary != "" {
-		plan.Incremental = true
-		merged := FileOps{
-			Read:     MergeFileOps(state.ReadFiles, ops.Read),
-			Modified: MergeFileOps(state.ModifiedFiles, ops.Modified),
+
+	if len(summarizeWindow) > 0 {
+		conversation := SerializeConversation(summarizeWindow)
+		if state != nil && state.PreviousSummary != "" {
+			plan.Incremental = true
+			merged := FileOps{
+				Read:     MergeFileOps(state.ReadFiles, ops.Read),
+				Modified: MergeFileOps(state.ModifiedFiles, ops.Modified),
+			}
+			plan.FileOpsNote = FormatFileOperations(merged)
+			plan.Prompt = UpdateSummarizationPrompt(state.PreviousSummary, conversation, plan.FileOpsNote)
+		} else {
+			plan.Prompt = InitialSummarizationPrompt(conversation)
 		}
-		plan.FileOpsNote = FormatFileOperations(merged)
-		plan.Prompt = UpdateSummarizationPrompt(state.PreviousSummary, conversation, plan.FileOpsNote)
-	} else {
-		plan.Prompt = InitialSummarizationPrompt(conversation)
 	}
+
+	if plan.SplitTurn && len(turnPrefixWindow) > 0 {
+		prefixConv := SerializeConversation(turnPrefixWindow)
+		plan.TurnPrefixPrompt = TurnPrefixSummarizationPrompt(prefixConv)
+	}
+
 	return plan
 }

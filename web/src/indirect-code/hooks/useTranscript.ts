@@ -25,7 +25,7 @@ import type {
 } from "../daemon-protocol";
 import type { SessionContext } from "../context";
 import type {
-  ChatMessage, PendingApproval, RenderBlock, SessionUsage, ToolUnit,
+  ChatMessage, CompactionState, PendingApproval, RenderBlock, SessionUsage, ToolUnit,
 } from "../types";
 import type { TodoItem, TurnActivity } from "../viewTypes";
 
@@ -46,16 +46,35 @@ export function createTranscript(opts: {
 }) {
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
+  const [sessionCompaction, setSessionCompaction] = createSignal<CompactionState | null>(null);
   const [turnActivity, setTurnActivity] = createSignal<TurnActivity | null>(null);
   const [todos, setTodos] = createSignal<TodoItem[]>([]);
   const [todosOpen, setTodosOpen] = createSignal(true);
+  let pendingTodosOpen: { value: boolean; time: number } | undefined;
+
   function toggleTodosOpen() {
     const next = !todosOpen();
     setTodosOpen(next);
+    pendingTodosOpen = { value: next, time: Date.now() };
     const sid = opts.getSessionId();
     if (sid && opts.isOpen()) {
       opts.send({ type: "set_todos_open", sessionId: sid, open: next });
     }
+  }
+
+  function applyTodosOpenFromRemote(remote: boolean) {
+    if (pendingTodosOpen) {
+      if (pendingTodosOpen.value === remote) {
+        // Confirmed by SignalDB / daemon
+        pendingTodosOpen = undefined;
+        return;
+      }
+      if (Date.now() - pendingTodosOpen.time < 4000) {
+        return;
+      }
+      pendingTodosOpen = undefined;
+    }
+    setTodosOpen(remote);
   }
   const [turnClock, setTurnClock] = createSignal(Date.now());
   createEffect(() => {
@@ -265,8 +284,11 @@ export function createTranscript(opts: {
   function beginLoad(sessionId: string) {
     initialScrollSession = sessionId;
   }
-  function applySessionContent(sessionId: string, rawMsgs: any[]) {
+  function applySessionContent(sessionId: string, rawMsgs: any[], compaction?: any) {
     setMessages(normalizeSessionMessages(rawMsgs));
+    if (compaction !== undefined) {
+      setSessionCompaction(compaction);
+    }
     if (initialScrollSession === sessionId) {
       initialScrollSession = "";
       scrollToBottom(true);
@@ -283,11 +305,12 @@ export function createTranscript(opts: {
   function applySnapshot(sid: string, r: any) {
     if (r.workspace) setWorkspaceSnapshot(r.workspace);
     setSessionStatus(r.status === "running" ? "running" : "idle");
+    setSessionCompaction(r.compaction ?? null);
     setTurnActivity(r.turn || null);
     setTurnClock(Date.now());
     setTodos(r.todos || []);
-    if (typeof r.todosOpen === "boolean") setTodosOpen(r.todosOpen);
-    else if (typeof r.todos_open === "boolean") setTodosOpen(r.todos_open);
+    if (typeof r.todosOpen === "boolean") applyTodosOpenFromRemote(r.todosOpen);
+    else if (typeof r.todos_open === "boolean") applyTodosOpenFromRemote(r.todos_open);
     const em = r.editingMsg ?? r.editing_msg;
     if (em && typeof em.index === "number") {
       applyEditingMsgFromRemote(em.index, em.text || "");
@@ -302,7 +325,7 @@ export function createTranscript(opts: {
     else stopThinkingTimer();
     if (r.usage) applyUsage(sid, r.usage, null);
     setSessionContexts((prev) => ({ ...prev, [sid]: r.context ?? null }));
-    applySessionContent(sid, r.messages || r.Messages || []);
+    applySessionContent(sid, r.messages || r.Messages || [], r.compaction);
   }
 
   // Point-in-time workspace received in the snapshot — redirected by the page via
@@ -753,6 +776,7 @@ export function createTranscript(opts: {
     transcriptScroll.reset();
     resetWindow();
     setMessages([]);
+    setSessionCompaction(null);
     setSessionStatus("idle");
     setPendingApproval(null);
     clearTimeout(editMsgTimer);
@@ -782,6 +806,7 @@ export function createTranscript(opts: {
   }
   function clearMessages() {
     setMessages([]);
+    setSessionCompaction(null);
   }
   /** Optimistic user bubble (composer, before daemon ack). */
   function pushUserMessage(msg: ChatMessage) {
@@ -797,7 +822,8 @@ export function createTranscript(opts: {
   return {
     // state
     messages, sessionStatus, setSessionStatus, turnActivity, setTurnActivity,
-    todos, setTodos, todosOpen, setTodosOpen, toggleTodosOpen, turnClock, turnLabel,
+    todos, setTodos, todosOpen, setTodosOpen, toggleTodosOpen, applyTodosOpenFromRemote, turnClock, turnLabel,
+    sessionCompaction, setSessionCompaction,
     pendingApproval, setPendingApproval, pendingQuestion,
     questionSubmitting, questionError, showQuestion, clearQuestion, answerQuestion,
     sessionUsage, activeUsage, sessionContexts, setSessionContexts,

@@ -124,20 +124,34 @@ type Agent struct {
 	// current and a crash recovers the right cost figure.
 	OnUsage func(cumulative provider.Usage)
 
-	// OnTranscriptCompacted, if set, fires after Compact replaces the
-	// in-memory transcript with the synthetic summary plus kept tail.
-	// Hosts wire this to append an explicit compaction checkpoint to
-	// the session log; per-message append hooks do not fire for this
-	// wholesale transcript replacement.
+	// OnTranscriptCompacted, if set, fires after Compact advances the
+	// chain head, receiving the PROJECTED context (synthetic summary +
+	// kept tail — what the model sees next), NOT a replacement
+	// transcript. History stays append-only; hosts that mirror the
+	// session file must keep their full history and persist the chain
+	// via OnCompactionState. Kept for legacy hosts; new wiring should
+	// prefer OnCompactionState.
 	OnTranscriptCompacted func(messages []provider.Message)
 
-	// OnCompactionState, if set, fires alongside OnTranscriptCompacted
+	// OnCompactionState, if set, fires after every successful Compact
 	// with the new incremental chain head (previous summary + merged
-	// file ops + cut anchor + count). Hosts persist it on the
-	// compaction row so the next summarization — even after a restart —
-	// is an update, not a from-scratch re-summary. Port of pi's
-	// CompactionEntry chaining.
+	// file ops + KeepFrom anchor + count). Hosts persist it on the
+	// session record so the next summarization — even after a restart —
+	// is an update, not a from-scratch re-summary, and so projection
+	// can re-derive the compacted context. Port of pi's CompactionEntry.
+	// This is the ONLY state a host needs to persist for compaction:
+	// the transcript log itself is append-only and unchanged.
 	OnCompactionState func(state *CompactionState)
+
+	// AutoCompact, if set, runs before EVERY model request of the
+	// agent loop — including mid-loop between tool batches — so a
+	// long run compacts proactively instead of burning a failed
+	// overflowing request first (pi: shouldCompactBeforeNextResponse +
+	// prepareNextTurnWithContext). The hook owns the window/threshold
+	// policy (hosts know the model); it typically calls
+	// a.MaybeAutoCompact. Returning an error aborts the loop. Runs
+	// outside a.mu, so the hook may call any Agent method.
+	AutoCompact func(ctx context.Context, sink func(AgentEvent)) error
 
 	// Preparation caches the effective prompt separately from its unmodified
 	// base so a model or session reset cannot stack extension appendices.
@@ -279,8 +293,23 @@ func (a *Agent) appendQueuedAsUser(texts []string, sink func(AgentEvent)) {
 	}
 }
 
-// Messages returns a copy of the current transcript.
+// Messages returns a copy of the effective model context: the
+// append-only history projected through the compaction chain head
+// (latest summary + kept tail). Pi parity: the context view produced
+// by buildContextMessages. Use History for the full log.
 func (a *Agent) Messages() []provider.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := projectMessages(append([]provider.Message(nil), a.messages...), a.compactionStateLocked())
+	return append([]provider.Message(nil), out...)
+}
+
+// History returns a copy of the full append-only transcript — every
+// message ever appended, including ones the compaction chain has
+// summarized away. The history is the source of truth persisted by
+// hosts (pi parity: the session log); the model never sees it
+// directly, only its projection.
+func (a *Agent) History() []provider.Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := make([]provider.Message, len(a.messages))
@@ -291,11 +320,12 @@ func (a *Agent) Messages() []provider.Message {
 // ContextSnapshot returns the provider-neutral inputs that make up the
 // current model context. Hosts use the snapshot for read-only inspection
 // without racing a tool-registry replacement or transcript append.
+// Messages are the projected context (same view Messages returns).
 func (a *Agent) ContextSnapshot() (system string, tools []provider.Tool, messages []provider.Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	messages = make([]provider.Message, len(a.messages))
-	copy(messages, a.messages)
+	messages = append([]provider.Message(nil),
+		projectMessages(append([]provider.Message(nil), a.messages...), a.compactionStateLocked())...)
 	return a.System, a.Tools.Specs(), messages
 }
 
@@ -317,7 +347,10 @@ func (a *Agent) SetTools(reg Registry) {
 	a.mu.Unlock()
 }
 
-// SetMessages replaces the transcript (used when resuming a session).
+// SetMessages replaces the append-only history (used when resuming a
+// session). Pair with SeedCompactionState so projection can re-derive
+// the effective context; the slice must be the full log, not an
+// already-compacted view.
 func (a *Agent) SetMessages(msgs []provider.Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -471,6 +504,22 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		// started yet.
 		if pending := a.drainQueuedMessages(); len(pending) > 0 {
 			a.appendQueuedAsUser(pending, sink)
+		}
+
+		// Proactive in-run compaction, evaluated before EVERY model
+		// response — including mid-run, right after tool results.
+		// Pi parity: shouldCompactBeforeNextResponse +
+		// prepareNextTurnWithContext run inside the loop instead of
+		// only at turn boundaries. The hook owns the window policy;
+		// core provides MaybeAutoCompact as the pi-faithful trigger.
+		a.mu.Lock()
+		autoCompact := a.AutoCompact
+		a.mu.Unlock()
+		if autoCompact != nil {
+			if err := autoCompact(ctx, sink); err != nil {
+				sink(EvDone{})
+				return err
+			}
 		}
 
 		sink(EvTurnStart{Step: step})
@@ -660,7 +709,7 @@ func (a *Agent) dropLastAssistantMessage() {
 // and every step after that works on the copy.
 func (a *Agent) BuildContext() []provider.Message {
 	a.mu.Lock()
-	msgs := append([]provider.Message(nil), a.messages...)
+	msgs := projectMessages(append([]provider.Message(nil), a.messages...), a.compactionStateLocked())
 	transforms := append([]ContextTransformer(nil), a.Transforms...)
 	remindersFn := a.RemindersForTurn
 	clientName := ""
@@ -716,7 +765,7 @@ func (a *Agent) BuildContextLocked() []provider.Message {
 // (collectReminders does); useCollected=true skips in-lock collection.
 // oneTurn pre-collects before locking to avoid self-deadlock.
 func (a *Agent) BuildContextLockedWith(precollected []Reminder, useCollected bool) []provider.Message {
-	msgs := append([]provider.Message(nil), a.messages...)
+	msgs := projectMessages(append([]provider.Message(nil), a.messages...), a.compactionStateLocked())
 	transforms := append([]ContextTransformer(nil), a.Transforms...)
 	remindersFn := a.RemindersForTurn
 	clientName := ""

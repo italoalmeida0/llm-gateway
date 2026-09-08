@@ -1,5 +1,5 @@
 import type { DaemonCommand } from "../daemon-protocol";
-import { createMemo, createSignal, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, Show } from "solid-js";
 import { projectForDirectory } from "../paths";
 import type { Project, SessionSummary } from "../types";
 import type { FoldersEvent, ProjectCreatedEvent, SearchResultsEvent } from "../daemon-protocol";
@@ -140,17 +140,55 @@ export function createProjects(opts: {
     setFolderError(message);
   }
 
-  // Nested sidebar state: expanded projects (mirrored via SignalDB, default expanded).
+  // Nested sidebar state: expanded projects (optimistic overlay + mirrored via SignalDB).
+  const [optimisticCollapsed, setOptimisticCollapsed] = createSignal<Record<string, { collapsed: boolean; time: number }>>({});
+
   function isProjectExpanded(p: { id: string; collapsed?: boolean }) {
+    const opt = optimisticCollapsed()[p.id];
+    if (opt !== undefined) {
+      return !opt.collapsed;
+    }
     return !p.collapsed;
   }
+
   function toggleProjectExpanded(id: string) {
     const p = opts.projects().find((x) => x.id === id);
-    const nextCollapsed = !(p?.collapsed ?? false);
+    const currentlyExpanded = isProjectExpanded(p ?? { id, collapsed: false });
+    const nextCollapsed = currentlyExpanded;
+    setOptimisticCollapsed((prev) => ({
+      ...prev,
+      [id]: { collapsed: nextCollapsed, time: Date.now() },
+    }));
     if (opts.isOpen()) {
       opts.send({ type: "set_project_collapsed", projectId: id, collapsed: nextCollapsed });
     }
   }
+
+  // Re-confirm with SignalDB response: clear optimistic entry once SignalDB reflects it
+  createEffect(() => {
+    const projs = opts.projects();
+    const opt = optimisticCollapsed();
+    const keys = Object.keys(opt);
+    if (keys.length === 0) return;
+
+    const now = Date.now();
+    let changed = false;
+    const next = { ...opt };
+
+    for (const key of keys) {
+      const p = projs.find((x) => x.id === key);
+      const isRemoteConfirmed = p && (p.collapsed ?? false) === opt[key].collapsed;
+      const isExpired = now - opt[key].time > 5000;
+      if (isRemoteConfirmed || isExpired) {
+        delete next[key];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      setOptimisticCollapsed(next);
+    }
+  });
 
   const [expandedSessionLists, setExpandedSessionLists] = createSignal<Record<string, boolean>>({});
   function sortedSessions(list: SessionSummary[]) {

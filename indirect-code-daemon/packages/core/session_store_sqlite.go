@@ -194,18 +194,20 @@ func (s *SQLiteSessionStore) AppendUsage(u, cum provider.Usage) error {
 	return s.appendEvent("usage", string(b))
 }
 
-func (s *SQLiteSessionStore) AppendCompaction(messages []provider.Message, state *CompactionState) error {
+func (s *SQLiteSessionStore) AppendCompaction(state *CompactionState) error {
 	if s == nil {
 		return nil
 	}
-	b, err := json.Marshal(map[string]any{"messages": messages, "compaction": state})
+	b, err := json.Marshal(map[string]any{"compaction": state})
 	if err != nil {
 		return err
 	}
 	if err := s.appendEvent("compaction", string(b)); err != nil {
 		return err
 	}
-	s.messagesAppended = len(messages)
+	// A checkpoint is durable content: counts toward Close()'s
+	// "keep non-empty sessions" policy.
+	s.messagesAppended++
 	s.compaction = state
 	return nil
 }
@@ -266,14 +268,21 @@ func (s *SQLiteSessionStore) readLocked() ([]provider.Message, *CompactionState,
 			if err := json.Unmarshal([]byte(body), &row); err != nil {
 				continue
 			}
-			effective = nil
-			for _, raw := range row.Messages {
-				m, err := HydrateMessageObject(raw)
-				if err != nil {
-					continue
+			if row.Messages != nil {
+				// Legacy destructive checkpoint: it replaced the
+				// transcript up to this event. Honor that while
+				// replaying rows written by pre-projection builds.
+				effective = nil
+				for _, raw := range row.Messages {
+					m, err := HydrateMessageObject(raw)
+					if err != nil {
+						continue
+					}
+					effective = append(effective, m)
 				}
-				effective = append(effective, m)
 			}
+			// Append-only checkpoint (new format): history stays,
+			// only the chain head advances.
 			state = row.Compaction
 		}
 	}
@@ -405,11 +414,11 @@ func importJSONLRows(jsonlPath string, store *SQLiteSessionStore) error {
 				}
 			}
 		case "compaction":
-			cm, st, err := hydrateCompactionWithState(line)
+			_, st, err := hydrateCompactionWithState(line)
 			if err != nil {
 				return nil
 			}
-			if err := store.AppendCompaction(cm, st); err != nil {
+			if err := store.AppendCompaction(st); err != nil {
 				return err
 			}
 		case "meta":

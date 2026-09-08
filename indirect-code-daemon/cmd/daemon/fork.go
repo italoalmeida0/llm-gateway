@@ -80,6 +80,20 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		fail(fmt.Errorf("Could not copy the conversation: %w", err))
 		return
 	}
+	// Carry the compaction chain head when its anchor still resolves
+	// inside the copied prefix (pi parity: a fork keeps the compaction
+	// entries reachable from its point in the log). Legacy states
+	// (Version 0) project pass-through, so they always carry.
+	if st := source.Compaction; st != nil {
+		switch {
+		case st.Version >= core.CompactionProjectionVersion && st.KeepFrom >= 0 && st.KeepFrom <= end:
+			cp := *st
+			rec.Compaction = &cp
+		case st.Version < core.CompactionProjectionVersion:
+			cp := *st
+			rec.Compaction = &cp
+		}
+	}
 	// Copy only attachments referenced by this prefix. Inline images already carry
 	// their bytes in the transcript; textual/binary attachment notes carry names.
 	transcript, _ := json.Marshal(rec.Messages)

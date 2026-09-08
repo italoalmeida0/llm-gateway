@@ -314,7 +314,7 @@ export default function IndirectCodePage() {
       transcript.setSessionStatus(s.status);
       if (s.model) options.setActiveModel(s.model);
       if (s.options) options.applyOptions(s.options);
-      if (typeof s.todosOpen === "boolean") transcript.setTodosOpen(s.todosOpen);
+      if (typeof s.todosOpen === "boolean") transcript.applyTodosOpenFromRemote(s.todosOpen);
       if (s.editingMsg && typeof s.editingMsg.index === "number") {
         transcript.applyEditingMsgFromRemote(s.editingMsg.index, s.editingMsg.text || "");
       } else {
@@ -513,7 +513,7 @@ export default function IndirectCodePage() {
       }
       case "session_content": {
         if (msg.sessionId !== activeSessionId()) break;
-        transcript.applySessionContent(msg.sessionId, msg.messages || []);
+        transcript.applySessionContent(msg.sessionId, msg.messages || [], msg.compaction);
         break;
       }
 
@@ -534,7 +534,10 @@ export default function IndirectCodePage() {
         const sid = msg.sessionId;
         if (sid !== activeSessionId()) break;
         transcript.setSessionContexts((prev) => ({ ...prev, [sid]: msg.context ?? null }));
-        transcript.applySessionContent(sid, msg.messages || []);
+        if (msg.usage) {
+          transcript.applyUsage(sid, msg.usage, null);
+        }
+        transcript.applySessionContent(sid, msg.messages || [], msg.compaction);
         notice.toast(
           msg.auto
             ? "Context auto-compacted — older turns summarized, recent context preserved"
@@ -606,7 +609,6 @@ export default function IndirectCodePage() {
         onPick={(id) => {
           options.setActiveModel(id);
           setModelMenuOpen(false);
-          composer.setAddContextOpen(false);
           options.configureSession();
         }}
         effort={options.effort}
@@ -614,7 +616,6 @@ export default function IndirectCodePage() {
           options.setEffort(lvl);
           options.configureSession();
           setModelMenuOpen(false);
-          composer.setAddContextOpen(false);
         }}
         onRefresh={async () => {
           await loadGatewayModels();
@@ -818,8 +819,8 @@ export default function IndirectCodePage() {
   createEffect(() => {
     const s = activeSession();
     if (!s) return;
-    if (typeof s.todosOpen === "boolean" && s.todosOpen !== transcript.todosOpen()) {
-      transcript.setTodosOpen(s.todosOpen);
+    if (typeof s.todosOpen === "boolean") {
+      transcript.applyTodosOpenFromRemote(s.todosOpen);
     }
     if (s.editingMsg && typeof s.editingMsg.index === "number") {
       transcript.applyEditingMsgFromRemote(s.editingMsg.index, s.editingMsg.text || "");

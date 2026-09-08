@@ -281,7 +281,17 @@ func OpenSession(path string) (*Session, []provider.Message, error) {
 			}
 		case "compaction":
 			if compacted, state, err := hydrateCompactionWithState(line); err == nil {
-				messages = compacted
+				if compacted != nil {
+					// Legacy destructive checkpoint (written by
+					// pre-projection builds): it replaced the
+					// transcript up to this row. Honor that while
+					// replaying old files; the restored state has
+					// Version 0, so projection stays pass-through
+					// for the legacy inline summary.
+					messages = compacted
+				}
+				// Append-only checkpoint (new format): history is
+				// untouched; only the chain head advances.
 				chainHead = state
 			}
 		}
@@ -717,23 +727,21 @@ func (s *Session) AppendMessage(m provider.Message) error {
 	return nil
 }
 
-// AppendCompaction writes a checkpoint that replaces all earlier
-// transcript rows when the session is resumed. The old rows remain in
-// the JSONL file for audit/export, while loaders use the latest
-// compaction row as the effective transcript.
-//
-// state is the incremental chain head (previous summary + merged file
-// ops + cut anchor + count). It is persisted on the row so the next
-// compaction — even after a restart — builds an update prompt instead
-// of re-summarizing from scratch, exactly like pi's CompactionEntry.
-func (s *Session) AppendCompaction(messages []provider.Message, state *CompactionState) error {
+// AppendCompaction appends a non-destructive compaction checkpoint
+// (pi: compaction entry). The row carries only the chain head
+// (summary + file ops + KeepFrom anchor + count); earlier message
+// rows stay in the log and readers derive the compacted view by
+// projection, so the full history survives restarts.
+func (s *Session) AppendCompaction(state *CompactionState) error {
 	if s == nil {
 		return nil
 	}
-	if err := s.writeLine(sessionLine{Type: "compaction", Messages: messages, Compaction: state}); err != nil {
+	if err := s.writeLine(sessionLine{Type: "compaction", Compaction: state}); err != nil {
 		return err
 	}
-	s.messagesAppended = len(messages)
+	// A checkpoint is durable content: counts toward Close()'s
+	// "keep non-empty sessions" policy.
+	s.messagesAppended++
 	s.compaction = state
 	return nil
 }
@@ -836,11 +844,17 @@ func hydrateCompactionWithState(lineBytes []byte) ([]provider.Message, *Compacti
 	if err := json.Unmarshal(lineBytes, &row); err != nil {
 		return nil, nil, err
 	}
-	messages := make([]provider.Message, 0, len(row.Messages))
-	for _, raw := range row.Messages {
-		msg, err := HydrateMessageObject(raw)
-		if err == nil && len(msg.Content) > 0 {
-			messages = append(messages, msg)
+	// nil Messages marks the append-only format: the row carries only
+	// the chain head and replay must NOT touch the accumulated history.
+	// Non-nil (legacy destructive checkpoints) replaces the transcript.
+	var messages []provider.Message
+	if row.Messages != nil {
+		messages = make([]provider.Message, 0, len(row.Messages))
+		for _, raw := range row.Messages {
+			msg, err := HydrateMessageObject(raw)
+			if err == nil && len(msg.Content) > 0 {
+				messages = append(messages, msg)
+			}
 		}
 	}
 	return messages, row.Compaction, nil

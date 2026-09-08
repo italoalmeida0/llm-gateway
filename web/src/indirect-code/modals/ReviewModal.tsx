@@ -89,7 +89,6 @@ export function ReviewModal() {
 
   const totalAdded = () => files().reduce((n, f) => n + (Number(f.added) || 0), 0);
   const totalRemoved = () => files().reduce((n, f) => n + (Number(f.removed) || 0), 0);
-  const hasCounts = () => totalAdded() > 0 || totalRemoved() > 0;
   const allOpen = () => files().length > 0 && files().every((f) => isOpen(f.path));
 
   function expandAll() {

@@ -2,8 +2,6 @@ package core
 
 import (
 	"testing"
-
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 func TestSessionCompactionStateRoundTrip(t *testing.T) {
@@ -13,15 +11,15 @@ func TestSessionCompactionStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &CompactionState{
+		Version:          CompactionProjectionVersion,
 		PreviousSummary:  "did stuff",
 		ReadFiles:        []string{"a.ts"},
 		ModifiedFiles:    []string{"b.ts"},
-		FirstKeptEntryID: "compacted-1",
+		FirstKeptEntryID: "h2",
+		KeepFrom:         2,
 		Count:            3,
 	}
-	if err := s.AppendCompaction([]provider.Message{
-		{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "summary"}}},
-	}, state); err != nil {
+	if err := s.AppendCompaction(state); err != nil {
 		t.Fatal(err)
 	}
 	if s.CompactionState() == nil || s.CompactionState().Count != 3 {
@@ -36,8 +34,11 @@ func TestSessionCompactionStateRoundTrip(t *testing.T) {
 	}
 	defer opened.Close()
 	got := opened.CompactionState()
-	if got == nil || got.PreviousSummary != "did stuff" || got.Count != 3 || got.FirstKeptEntryID != "compacted-1" {
+	if got == nil || got.PreviousSummary != "did stuff" || got.Count != 3 || got.FirstKeptEntryID != "h2" {
 		t.Fatalf("chain head lost across reopen: %+v", got)
+	}
+	if got.Version != CompactionProjectionVersion || got.KeepFrom != 2 {
+		t.Fatalf("projection anchor lost across reopen: %+v", got)
 	}
 	if len(got.ReadFiles) != 1 || len(got.ModifiedFiles) != 1 {
 		t.Fatalf("file ops lost across reopen: %+v", got)

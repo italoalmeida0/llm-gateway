@@ -117,10 +117,10 @@ export type DaemonEvent = EventBase &
     | { type: "attachment_data"; sessionId: string; attachment?: WireRecord }
     | { type: "session_data"; requestId?: string; sessionId?: string; session?: WireRecord }
     | { type: "session_truncated"; sessionId?: string; keepIndex?: number }
-    | { type: "session_content"; sessionId?: string; messages?: unknown[] }
+    | { type: "session_content"; sessionId?: string; messages?: unknown[]; compaction?: unknown }
     | { type: "session_status"; sessionId?: string; status?: string; turn?: WireRecord }
     | { type: "session_cleared"; sessionId?: string }
-    | { type: "session_compacted"; sessionId?: string; context?: SessionContext; messages?: unknown[]; auto?: boolean }
+    | { type: "session_compacted"; sessionId?: string; context?: SessionContext; messages?: unknown[]; auto?: boolean; compaction?: unknown; usage?: unknown }
     | { type: "workspace_status"; requestId?: string; workspace?: WireRecord }
     | { type: "question_request"; sessionId?: string; question?: WireRecord }
     | { type: "question_resolved"; sessionId?: string; questionId: string }

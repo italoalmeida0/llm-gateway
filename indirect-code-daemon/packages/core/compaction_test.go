@@ -131,7 +131,7 @@ func TestPrepareCompactionInitialVsUpdate(t *testing.T) {
 	}
 }
 
-func TestApplyCompactionSpliceAndChain(t *testing.T) {
+func TestAdvanceCompactionChainAndProjection(t *testing.T) {
 	var msgs []provider.Message
 	for i := 0; i < 8; i++ {
 		msgs = append(msgs, textMsg(provider.RoleUser, "msg"))
@@ -139,23 +139,60 @@ func TestApplyCompactionSpliceAndChain(t *testing.T) {
 	r, _ := toolTurn("read", `{"path":"keep.ts"}`, "x")
 	msgs = append(msgs, r)
 	plan := PrepareCompaction(msgs, nil, 100)
-	next, state := applyCompaction(msgs, plan, "did things", nil)
-	if len(next) != 1+(len(msgs)-plan.KeepFrom) {
-		t.Fatalf("splice length = %d, keepFrom=%d", len(next), plan.KeepFrom)
-	}
-	first, ok := next[0].Content[0].(provider.TextBlock)
-	if !ok || !strings.Contains(first.Text, "## Context Summary (compacted)") || !strings.Contains(first.Text, "did things") {
-		t.Fatalf("synthetic summary head wrong: %+v", next[0])
-	}
-	if state == nil || state.PreviousSummary != "did things" || state.Count != 1 {
+
+	// Non-destructive: the chain advances and the anchor maps the
+	// context cut back into history coordinates.
+	state := advanceCompactionChain(plan, "did things", nil)
+	state.KeepFrom = projectionIndexForContext(msgs, nil, plan.KeepFrom)
+	if state.PreviousSummary != "did things" || state.Count != 1 {
 		t.Fatalf("chain head wrong: %+v", state)
 	}
-	// Second compaction chains: count bumps, file ops merge.
-	plan2 := PrepareCompaction(next, state, 100)
-	_, state2 := applyCompaction(next, plan2, "more things", state)
+	if state.Version != CompactionProjectionVersion {
+		t.Fatalf("new chains must carry the projection version, got %+v", state)
+	}
+	// Projection = synthetic summary + kept tail; history untouched.
+	projected := projectMessages(msgs, state)
+	if len(projected) != 1+(len(msgs)-plan.KeepFrom) {
+		t.Fatalf("projection length = %d, keepFrom=%d", len(projected), plan.KeepFrom)
+	}
+	first, ok := projected[0].Content[0].(provider.TextBlock)
+	if !ok || !strings.Contains(first.Text, "## Context Summary (compacted)") || !strings.Contains(first.Text, "did things") {
+		t.Fatalf("synthetic summary head wrong: %+v", projected[0])
+	}
+	if len(msgs) != 9 {
+		t.Fatal("projection must not mutate the history")
+	}
+	// The kept tail maps verbatim from history.
+	for i := 1; i < len(projected); i++ {
+		if extractTestText(projected[i]) != extractTestText(msgs[state.KeepFrom+i-1]) {
+			t.Fatalf("projection tail diverged at %d", i)
+		}
+	}
+
+	// Second compaction chains: summary + tail feeds the next plan; the
+	// context-coordinate cut maps back through the previous anchor.
+	plan2 := PrepareCompaction(projected, state, 100)
+	state2 := advanceCompactionChain(plan2, "more things", state)
+	state2.KeepFrom = projectionIndexForContext(msgs, state, plan2.KeepFrom)
 	if state2.Count != 2 || state2.PreviousSummary != "more things" {
 		t.Fatalf("chained head wrong: %+v", state2)
 	}
+	if state2.KeepFrom < state.KeepFrom {
+		t.Fatalf("anchor must never move backwards: %d -> %d", state.KeepFrom, state2.KeepFrom)
+	}
+	projected2 := projectMessages(msgs, state2)
+	if len(projected2) != 1+(len(msgs)-state2.KeepFrom) {
+		t.Fatalf("second projection length = %d", len(projected2))
+	}
+}
+
+func extractTestText(m provider.Message) string {
+	for _, c := range m.Content {
+		if tb, ok := c.(provider.TextBlock); ok {
+			return tb.Text
+		}
+	}
+	return ""
 }
 
 func TestTrailingTokensOnlyCountsAfterLastAssistant(t *testing.T) {

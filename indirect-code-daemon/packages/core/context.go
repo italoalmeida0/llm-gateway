@@ -26,6 +26,9 @@ import (
 //
 // Ordem do pipeline (BuildContext):
 //
+//	0. projecao - historia append-only + compaction chain head ->
+//	   [resumo sintetico][tail mantido] (pi: buildContextMessages
+//	   resolve "ultima compaction entry + entries posteriores")
 //	1. snapshot do transcript vivo
 //	2. filterHidden  - remove mensagens Meta["hidden"]="true" (pi: isMeta)
 //	3. PruneOldToolResults - trunca outputs antigos mecanicamente

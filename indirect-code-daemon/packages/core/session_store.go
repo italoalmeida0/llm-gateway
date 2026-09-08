@@ -30,9 +30,11 @@ import (
 // OpenSessionStore.
 
 // SessionStore is the persistence contract for a conversation
-// transcript. All writes are append-only checkpoints, mirroring pi's
-// event log: readers always see the latest compaction row as the
-// effective transcript, older rows stay for audit/export.
+// transcript. All writes are append-only, mirroring pi's event log:
+// message rows accumulate and compaction checkpoints only advance the
+// chain head. History is never rewritten — readers replay the full
+// history and derive the effective context by projection
+// (projectMessages over CompactionState).
 type SessionStore interface {
 	// Path returns the backing file path (for logging/display).
 	Path() string
@@ -42,16 +44,18 @@ type SessionStore interface {
 	AppendMessage(m provider.Message) error
 	// AppendUsage persists a usage row.
 	AppendUsage(u, cum provider.Usage) error
-	// AppendCompaction persists a compaction checkpoint: messages
-	// replaces all earlier transcript rows for readers, state keeps
-	// the incremental chain head (previous summary + file ops +
-	// cut anchor + count).
-	AppendCompaction(messages []provider.Message, state *CompactionState) error
+	// AppendCompaction persists a compaction checkpoint: the chain
+	// head (summary + file ops + KeepFrom anchor) appended as one
+	// row. History rows are NOT rewritten — pi parity: the
+	// compaction is just another entry in the append-only log and
+	// context is derived by projection at read time.
+	AppendCompaction(state *CompactionState) error
 	// UpdateModel records a provider/model switch.
 	UpdateModel(providerName, model string) error
-	// ReadTranscript returns the effective transcript: messages
-	// after the latest compaction row (or all messages when no
-	// compaction ran), repaired (orphan tool_use dropped).
+	// ReadTranscript replays the full append-only history from
+	// oldest to newest (pi: readEvents), with orphan tool_use
+	// repaired. The effective model context is the projection of
+	// this history over CompactionState — see projectMessages.
 	ReadTranscript() ([]provider.Message, error)
 	// CompactionState returns the incremental chain head, or nil.
 	CompactionState() *CompactionState

@@ -337,7 +337,6 @@ export function ToolbarContext() {
                 onClick={() => {
                   c.setYoloMode(access.full);
                   c.configureSession();
-                  c.setAddContextOpen(false);
                 }}
                 class="w-full flex items-center gap-3 px-2 py-3 text-left rounded-lg hover:bg-elev cursor-pointer"
               >

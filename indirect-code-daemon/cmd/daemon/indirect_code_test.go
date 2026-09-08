@@ -342,8 +342,20 @@ func TestManualCompactPreservesHistoryUntilSummarySucceeds(t *testing.T) {
 				}
 				return
 			}
-			if (len(saved.Messages) != 8 && len(saved.Messages) != 7) || !strings.Contains(saved.Messages[0].Content[0].(provider.TextBlock).Text, "preserving the project decisions") {
-				t.Fatal("history was dropped without a summary")
+			// Pi parity (non-destructive history + projection): manual
+			// compaction advances the chain head; the on-disk record keeps
+			// the FULL history. The compacted view is derived.
+			if len(saved.Messages) != 10 {
+				t.Fatalf("history must survive compaction, got %d messages", len(saved.Messages))
+			}
+			if saved.Compaction == nil || !strings.Contains(saved.Compaction.PreviousSummary, "preserving the project decisions") {
+				t.Fatalf("chain head missing or summary wrong: %+v", saved.Compaction)
+			}
+			if saved.Compaction.Version != core.CompactionProjectionVersion {
+				t.Fatalf("chain head must carry the projection version: %+v", saved.Compaction)
+			}
+			if saved.Compaction.KeepFrom < 1 || saved.Compaction.KeepFrom > 3 {
+				t.Fatalf("keep-tail ~70%% of 10 messages => anchor 1..3, got %d", saved.Compaction.KeepFrom)
 			}
 			if saved.Context == nil || !saved.Context.Estimated || saved.Context.WindowTokens != 1024000 {
 				t.Fatal("compacted context is not explicitly estimated from configured window")

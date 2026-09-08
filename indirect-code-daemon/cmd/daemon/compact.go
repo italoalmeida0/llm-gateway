@@ -71,6 +71,7 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 	// previous summary instead of re-summarizing from scratch (pi parity).
 	// Explicit keep-tail: manual compaction always honors the request,
 	// even on short transcripts, preserving ~70% as the recent tail.
+	agent.SeedCost(act.record.Usage)
 	agent.SeedCompactionState(act.record.Compaction)
 	_, err := agent.Compact(ctx, max(2, len(messages)*7/10), nil)
 	if err != nil {
@@ -84,10 +85,22 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 	if act.gen != gen {
 		return
 	}
-	act.record.Messages = append([]provider.Message(nil), agent.Messages()...)
+	// History is append-only: manual compaction advances only the chain
+	// head (pi parity). Sync from History (projected Messages() would be
+	// the compacted view; persisting it would lose the log).
+	act.record.Messages = append([]provider.Message(nil), agent.History()...)
 	act.record.Compaction = agent.CompactionChain()
+	act.record.Usage = agent.Cost()
 	act.record.Context = estimateContext(agent, info)
 	act.record.UpdatedAt = time.Now().UnixMilli()
 	_ = d.saveSession(act.record)
-	_ = d.sendWS(map[string]any{"type": "session_compacted", "hostId": cfg.HostID, "sessionId": sid, "messages": act.record.Messages, "context": act.record.Context})
+	_ = d.sendWS(map[string]any{
+		"type":       "session_compacted",
+		"hostId":     cfg.HostID,
+		"sessionId":  sid,
+		"messages":   act.record.Messages,
+		"context":    act.record.Context,
+		"compaction": act.record.Compaction,
+		"usage":      act.record.Usage,
+	})
 }

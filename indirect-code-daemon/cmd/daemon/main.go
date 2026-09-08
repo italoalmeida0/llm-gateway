@@ -230,6 +230,7 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"workspace":  inspectWorkspace(rec.CWD),
 		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages),
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
+		"compaction": rec.Compaction,
 	}
 }
 
@@ -879,8 +880,7 @@ func (d *DaemonServer) purgeSession(id string) {
 	}
 	d.sessionsMu.Unlock()
 	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".json"))
-	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id, "attachments"))
-	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id, "git"))
+	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id))
 	_ = d.sendWS(map[string]any{
 		"type":      "session_deleted",
 		"hostId":    d.config.HostID,
@@ -1556,7 +1556,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		if removed < 0 {
 			removed = 0
 		}
-		broadcastTruncated(d, req.SessionID, req.Index, removed, rec.Messages)
+		broadcastTruncated(d, req.SessionID, req.Index, removed, rec.Messages, rec.Compaction)
 		rec.EditingMsg = nil
 		d.sessionsMu.RLock()
 		if act, ok := d.sessions[req.SessionID]; ok && act != nil {
@@ -1567,10 +1567,11 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		d.sessionsMu.RUnlock()
 		_ = d.saveSession(rec)
 		_ = d.sendWS(map[string]any{
-			"type":      "session_content",
-			"hostId":    d.config.HostID,
-			"sessionId": rec.ID,
-			"messages":  sanitizeMessagesForFrontend(rec.Messages),
+			"type":       "session_content",
+			"hostId":     d.config.HostID,
+			"sessionId":  rec.ID,
+			"messages":   sanitizeMessagesForFrontend(rec.Messages),
+			"compaction": rec.Compaction,
 		})
 		if req.Regen {
 			d.truncateAndRun(req.SessionID, req.Index+1, req.Text, req.Model, req.YOLO, nil)
@@ -1655,10 +1656,11 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		d.sessionsMu.RUnlock()
 		_ = d.sendWS(map[string]any{
-			"type":      "session_content",
-			"hostId":    d.config.HostID,
-			"sessionId": rec.ID,
-			"messages":  rec.Messages,
+			"type":       "session_content",
+			"hostId":     d.config.HostID,
+			"sessionId":  rec.ID,
+			"messages":   rec.Messages,
+			"compaction": rec.Compaction,
 		})
 
 	case "get_attachment":
@@ -2520,10 +2522,11 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 	_ = d.saveSession(act.record)
 
 	_ = d.sendWS(map[string]any{
-		"type":      "session_content",
-		"hostId":    d.config.HostID,
-		"sessionId": act.record.ID,
-		"messages":  act.record.Messages,
+		"type":       "session_content",
+		"hostId":     d.config.HostID,
+		"sessionId":  act.record.ID,
+		"messages":   act.record.Messages,
+		"compaction": act.record.Compaction,
 	})
 }
 
@@ -2532,14 +2535,15 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 // broadcastTruncated tells clients to drop rendered messages below keepIdx
 // (the authoritative cut after edit/regenerate). Clients apply the same cut
 // optimistically; this event reconciles them (and other devices).
-func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int, msgs []provider.Message) {
+func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int, msgs []provider.Message, compaction *core.CompactionState) {
 	_ = d.sendWS(map[string]any{
 		"type": "session_truncated", "hostId": d.config.HostID, "sessionId": sessionID,
 		"keepIndex": keepIdx, "removed": removed,
 	})
 	_ = d.sendWS(map[string]any{
 		"type": "session_content", "hostId": d.config.HostID, "sessionId": sessionID,
-		"messages": sanitizeMessagesForFrontend(msgs),
+		"messages":   sanitizeMessagesForFrontend(msgs),
+		"compaction": compaction,
 	})
 }
 
@@ -2581,6 +2585,18 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 		removed = 0
 	}
 	rec.Messages = append([]provider.Message(nil), rec.Messages[:keep]...)
+	// Projection anchor invalidation: truncating the append-only history
+	// below the compaction cut point (or erasing a legacy inline summary)
+	// would leave the chain head pointing past the end of the log. Drop
+	// it; the next compaction re-anchors.
+	if st := rec.Compaction; st != nil {
+		switch {
+		case st.Version >= core.CompactionProjectionVersion && st.KeepFrom > keep:
+			rec.Compaction = nil
+		case st.Version < core.CompactionProjectionVersion && keep == 0:
+			rec.Compaction = nil
+		}
+	}
 	rec.Status = "idle"
 	rec.UpdatedAt = time.Now().UnixMilli()
 	_ = d.saveSession(rec)
@@ -2588,7 +2604,7 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	act.mu.Unlock()
 	d.sessionsMu.Unlock()
 
-	broadcastTruncated(d, rec.ID, keep-1, removed, rec.Messages)
+	broadcastTruncated(d, rec.ID, keep-1, removed, rec.Messages, rec.Compaction)
 	go d.runAgentTurn(act, promptText, "", yolo, attachmentIDs)
 }
 
@@ -2841,37 +2857,98 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		act.mu.Unlock()
 	}
 
-	// Persistent compaction hook: whenever transcript is auto-compacted, record and broadcast it
+	// Persistent compaction hook: the chain head (pi: CompactionEntry)
+	// advanced — history is append-only and never touched, so the only
+	// state to persist is the anchor + summary + file ops. Broadcasts
+	// the full history; the UI renders older messages as summarized
+	// (pi shows the whole log with a compaction marker).
 	agent.OnCompactionState = func(state *core.CompactionState) {
-		act.mu.Lock()
-		defer act.mu.Unlock()
-		if act.gen != myGen {
+		if state == nil {
 			return
 		}
-		act.record.Compaction = state
-	}
-	agent.OnTranscriptCompacted = func(msgs []provider.Message) {
 		act.mu.Lock()
 		if act.gen != myGen {
 			act.mu.Unlock()
 			return
 		}
-		act.record.Messages = append([]provider.Message(nil), msgs...)
-		act.record.Compaction = agent.CompactionChain()
+		act.record.Compaction = state
+		act.record.Usage = agent.Cost()
 		act.record.UpdatedAt = time.Now().UnixMilli()
 		act.record.Context = estimateContext(agent, modelInfo)
 		rec := *act.record
 		_ = d.saveSession(act.record)
 		act.mu.Unlock()
 		_ = d.sendWS(map[string]any{
-			"type":      "session_compacted",
-			"hostId":    cfg.HostID,
-			"sessionId": rec.ID,
-			"messages":  rec.Messages,
-			"context":   rec.Context,
-			"auto":      true,
+			"type":       "session_compacted",
+			"hostId":     cfg.HostID,
+			"sessionId":  rec.ID,
+			"messages":   rec.Messages,
+			"context":    rec.Context,
+			"compaction": rec.Compaction,
+			"usage":      rec.Usage,
+			"auto":       true,
 		})
 	}
+	agent.OnUsage = func(cumulative provider.Usage) {
+		act.mu.Lock()
+		if act.gen == myGen {
+			act.record.Usage = cumulative
+			_ = d.saveSession(act.record)
+		}
+		act.mu.Unlock()
+	}
+	// Proactive in-run compaction (pi: shouldCompactBeforeNextResponse +
+	// prepareNextTurnWithContext). Checked by the agent loop before EVERY
+	// model request, including mid-run after tool results: long runs
+	// compact without first burning a request that overflows upstream.
+	// The pi-faithful trigger (last-turn usage + trailing estimate vs.
+	// window minus reserve) is authoritative; the configured threshold
+	// (%) and OpenCode's usable-budget formula stay as early-trip wires.
+	agent.WindowForTurn = func() int { return modelInfo.ContextWindow }
+	agent.AutoCompact = func(cctx context.Context, esink func(core.AgentEvent)) error {
+		if cctx.Err() != nil {
+			return nil
+		}
+		window := modelInfo.ContextWindow
+		if window <= 0 {
+			return nil
+		}
+		act.mu.Lock()
+		genOK := act.gen == myGen
+		historyLen := len(act.record.Messages)
+		act.mu.Unlock()
+		if !genOK || historyLen <= 4 {
+			return nil
+		}
+		threshold := cfg.Settings.AutoCompactThreshold
+		usage := agent.LastTurnUsage()
+		msgs := agent.Messages() // projected context (pi: context view)
+		needs := core.ShouldCompact(window, core.UsageTotal(usage), core.TrailingTokens(msgs, usage))
+		if !needs && threshold > 0 {
+			used := core.UsageTotal(usage) + core.TrailingTokens(msgs, usage)
+			needs = used*100 >= threshold*window
+		}
+		if !needs {
+			// OpenCode usable formula stays as a final safety net:
+			// contextWindow - outputBudget - 20,000 buffer.
+			if usable := window - maxOutputTokens(modelInfo) - 20000; usable > 0 {
+				used := core.UsageTotal(usage) + core.TrailingTokens(msgs, usage)
+				needs = used >= usable
+			}
+		}
+		if !needs {
+			return nil
+		}
+		esink(core.EvToolProgress{Text: "Compacting older context…"})
+		_, err := agent.MaybeAutoCompact(cctx, window, func(delta string) {
+			esink(core.EvToolProgress{Text: delta})
+		})
+		return err
+	}
+	// Note: OnTranscriptCompacted stays unset — it fires with the
+	// projected context for legacy hosts that persisted a replacement
+	// transcript. The daemon session record keeps the append-only
+	// history (pi parity), so OnCompactionState carries everything.
 
 	// Stream events to WebSocket
 	sink := func(ev core.AgentEvent) {
@@ -3034,12 +3111,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		fullPrompt = promptText + "\n\n" + strings.Join(contextParts, "\n\n")
 	}
 
-	// Proactive auto-compact: if the conversation is already near the context limit,
-	// compact older history before sending the new turn (matching OpenCode's usable budget).
-	if ctx.Err() == nil {
-		d.maybeAutoCompact(ctx, act, agent, modelInfo, cfg.Settings.AutoCompactThreshold, myGen)
-	}
-
+	// Proactive compaction happens INSIDE the loop now (agent.AutoCompact,
+	// wired above): it is re-evaluated before every model request —
+	// including this turn's first one and every mid-run continuation —
+	// like pi's shouldCompactBeforeNextResponse.
 	if err := agent.Prompt(ctx, fullPrompt, images, sink); err != nil && ctx.Err() == nil {
 		act.mu.Lock()
 		if act.gen == myGen {
@@ -3049,99 +3124,8 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		_ = d.sendWS(map[string]any{"type": "error", "hostId": cfg.HostID, "sessionId": sessionID, "message": err.Error()})
 	}
 
-	// Sliding-window auto-compact: near the context ceiling, summarize the
-	// oldest ~30% so ~70% of recent context is preserved (feels infinite).
-	if ctx.Err() == nil {
-		d.maybeAutoCompact(ctx, act, agent, modelInfo, cfg.Settings.AutoCompactThreshold, myGen)
-	}
-
 }
 
-// maybeAutoCompact triggers an LLM compaction once input usage passes the
-// configured threshold or exceeds OpenCode's usable context headroom.
-func (d *DaemonServer) maybeAutoCompact(ctx context.Context, act *ActiveSession, agent *core.Agent, model provider.Model, threshold, gen int) {
-	if threshold <= 0 || agent == nil {
-		return
-	}
-	act.mu.Lock()
-	if act.gen != gen {
-		act.mu.Unlock()
-		return
-	}
-	n := len(act.record.Messages)
-	act.mu.Unlock()
-	if n <= 4 {
-		return
-	}
-	window := model.ContextWindow
-	if window <= 0 {
-		return
-	}
-	// pi-style trigger port: cumulative usage + trailing-context estimate
-	// (messages after the last usage snapshot) vs window minus reserve.
-	// The configured threshold (default 85) is kept as an additional
-	// early-trip wire; the reserve check is authoritative.
-	used := core.UsageTotal(agent.Cost()) + core.TrailingTokens(agent.Messages(), agent.Cost())
-	if used <= 0 {
-		used = estimateContext(agent, model).UsedTokens
-	}
-	needsCompact := core.ShouldCompact(window, core.UsageTotal(agent.Cost()), core.TrailingTokens(agent.Messages(), agent.Cost()))
-	if !needsCompact && threshold > 0 {
-		needsCompact = (used*100 >= threshold*window)
-	}
-	// OpenCode usable formula stays as a final safety net:
-	// contextWindow - outputBudget - 20,000 buffer.
-	outputCap := maxOutputTokens(model)
-	usable := window - outputCap - 20000
-	if usable > 0 && used >= usable {
-		needsCompact = true
-	}
-	if !needsCompact {
-		return
-	}
-	_ = d.sendWS(map[string]any{
-		"type":      "agent_event",
-		"hostId":    d.config.HostID,
-		"sessionId": act.record.ID,
-		"event":     map[string]any{"type": "compact_progress", "text": "Compacting older context…"},
-	})
-	cctx, cancel := context.WithTimeout(ctx, 180*time.Second)
-	defer cancel()
-	summary, err := agent.Compact(cctx, 0, func(delta string) {
-		_ = d.sendWS(map[string]any{
-			"type":      "agent_event",
-			"hostId":    d.config.HostID,
-			"sessionId": act.record.ID,
-			"event":     map[string]any{"type": "compact_progress", "text": delta},
-		})
-	})
-	_ = summary
-	if err != nil {
-		return
-	}
-	// Compact() rewrote the agent transcript; persist it and update context
-	// occupancy while preserving accumulated usage.
-	act.mu.Lock()
-	if act.gen != gen {
-		act.mu.Unlock()
-		return
-	}
-	act.record.Messages = append([]provider.Message(nil), agent.Messages()...)
-	act.record.Compaction = agent.CompactionChain()
-	act.record.UpdatedAt = time.Now().UnixMilli()
-	act.record.Context = estimateContext(agent, model)
-	rec := *act.record
-	_ = d.saveSession(act.record)
-	act.mu.Unlock()
-	_ = d.sendWS(map[string]any{
-		"type":      "session_compacted",
-		"hostId":    d.config.HostID,
-		"sessionId": rec.ID,
-		"messages":  rec.Messages,
-		"context":   rec.Context,
-		"auto":      true,
-	})
-}
 
 // instantTitle derives an immediate provisional title from the user's own
 // words (first 6 content words, ellipsis when truncated). The LLM-generated

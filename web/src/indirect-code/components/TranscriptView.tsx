@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
-import { Streamdown } from "streamdown-solid";
+import { CompactionBalloon } from "./CompactionBalloon";
 import { FileIcon } from "../presentation";
 import { elapsedLabel } from "../utils/format";
 import type { TranscriptRenderCtx } from "./TranscriptBlocks";
@@ -19,6 +19,16 @@ export function TranscriptView() {
   const c = useComposerCtx();
   const m = useModal();
   const ui = useUI();
+  const hasLegacySystemNotice = () => t.messages().some((m) => m.system);
+  const compaction = () => t.sessionCompaction();
+  const shouldShowCompactionBalloon = () =>
+    Boolean(compaction()?.previousSummary && !hasLegacySystemNotice());
+  const firstKeptBlockIdx = () => {
+    const cp = compaction();
+    if (!cp) return -1;
+    const cut = cp.keepFrom ?? 0;
+    return t.visibleBlocks().findIndex((b) => t.blockRawIdx(b) >= cut);
+  };
   const renderCtx = (): TranscriptRenderCtx => ({
     renderBlocks: t.renderBlocks,
     sessionStatus: t.sessionStatus,
@@ -128,11 +138,22 @@ export function TranscriptView() {
       </button>
     </div>
   </Show>
+  <Show when={t.visibleBlocks().length === 0 && shouldShowCompactionBalloon()}>
+    <div class={`w-full ${ui.convWidthClass()} mx-auto`}>
+      <CompactionBalloon compaction={compaction()} />
+    </div>
+  </Show>
   <For each={t.visibleBlocks()}>
     {(block, bi) => {
       const msg = block.msg;
       const isLast = () => bi() === t.visibleBlocks().length - 1;
       const rawIdx = () => t.blockRawIdx(block);
+      const isFirstKeptBlock = () => {
+        if (!shouldShowCompactionBalloon()) return false;
+        const keptIdx = firstKeptBlockIdx();
+        if (keptIdx !== -1) return bi() === keptIdx;
+        return isLast();
+      };
       const textOf = () =>
         msg.blocks
           .filter((b) => b.type === "text" && b.text)
@@ -141,31 +162,26 @@ export function TranscriptView() {
       const isEditing = () => t.editingMsgIdx() === rawIdx();
       const rctx = renderCtx();
       return (
-        <div
-          class={`group/msg flex flex-col w-full ${ui.convWidthClass()} mx-auto ${
-            msg.role === "user" && !isEditing() ? "items-end" : "items-start"
-          }`}
-        >
-          {/* ===== SYSTEM NOTICE (e.g. auto-compaction) ===== */}
-          <Show when={msg.system}>
-            <div class="w-full flex justify-center">
-              <div class="max-w-xl text-center px-4 py-2.5 rounded-xl border border-line/60 bg-ink-900/60">
-                <div class="flex items-center justify-center gap-1.5 text-xs font-medium text-ink-300">
-                  <Iconify icon="lucide:boxes" size={13} class="text-ink-500" />
-                  <span>Context auto-compacted</span>
-                </div>
-                <details class="mt-1.5 text-left">
-                  <summary class="text-[11px] text-ink-500 hover:text-ink-300 cursor-pointer select-none text-center">
-                    View summary
-                  </summary>
-                  <div class="rc-markdown mt-2 text-left text-xs max-h-48 overflow-y-auto">
-                    <Streamdown class="text-xs">{textOf().replace(/^## Context Summary \(compacted\)\n\n/, "")}</Streamdown>
-                  </div>
-                </details>
-              </div>
+        <>
+          <Show when={isFirstKeptBlock()}>
+            <div class={`w-full ${ui.convWidthClass()} mx-auto`}>
+              <CompactionBalloon compaction={compaction()} />
             </div>
           </Show>
-          <Show when={!msg.system}>
+          <div
+            class={`group/msg flex flex-col w-full ${ui.convWidthClass()} mx-auto ${
+              msg.role === "user" && !isEditing() ? "items-end" : "items-start"
+            }`}
+          >
+            {/* ===== COMPACTION BALLOON (legacy system message) ===== */}
+            <Show when={msg.system}>
+              <CompactionBalloon
+                summary={textOf()}
+                isLegacy={true}
+                compaction={compaction()}
+              />
+            </Show>
+            <Show when={!msg.system}>
           {/* ===== USER ===== */}
           <Show when={msg.role === "user"}>
             <div class={isEditing() ? "w-full" : "flex flex-col items-end max-w-[90%] sm:max-w-[80%]"}>
@@ -288,6 +304,7 @@ export function TranscriptView() {
           </Show>
           </Show>
         </div>
+        </>
       );
     }}
   </For>

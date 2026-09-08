@@ -76,8 +76,8 @@ func (j *JSONLSessionStore) AppendUsage(u, cum provider.Usage) error {
 	return j.s.AppendUsage(u, cum)
 }
 
-func (j *JSONLSessionStore) AppendCompaction(messages []provider.Message, state *CompactionState) error {
-	return j.s.AppendCompaction(messages, state)
+func (j *JSONLSessionStore) AppendCompaction(state *CompactionState) error {
+	return j.s.AppendCompaction(state)
 }
 
 func (j *JSONLSessionStore) UpdateModel(providerName, model string) error {
@@ -126,8 +126,11 @@ func isSQLitePath(path string) bool {
 }
 
 // readJSONLMessages is a backend-agnostic replay helper shared with
-// the SQLite importer: returns the effective transcript for a JSONL
-// file (latest compaction wins, orphan tool_use repaired).
+// the SQLite importer: returns the append-only history plus the
+// compaction chain head for a JSONL file. Legacy destructive
+// checkpoints (rows carrying a message list) still replace the
+// transcript during replay, preserving old files exactly; append-only
+// checkpoints only advance the chain head.
 func readJSONLMessages(path string) ([]provider.Message, *CompactionState, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -135,9 +138,7 @@ func readJSONLMessages(path string) ([]provider.Message, *CompactionState, error
 	}
 	defer f.Close()
 	var msgs []provider.Message
-	var compaction []provider.Message
 	var state *CompactionState
-	hasCompaction := false
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 	for sc.Scan() {
@@ -158,16 +159,16 @@ func readJSONLMessages(path string) ([]provider.Message, *CompactionState, error
 			if err != nil {
 				continue
 			}
-			compaction = cm
+			if cm != nil {
+				// Legacy destructive checkpoint: replace history
+				// (old replay semantics, kept for old files).
+				msgs = cm
+			}
 			state = st
-			hasCompaction = true
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, nil, err
-	}
-	if hasCompaction {
-		return repairToolUseResultPairs(compaction), state, nil
 	}
 	return repairToolUseResultPairs(msgs), state, nil
 }

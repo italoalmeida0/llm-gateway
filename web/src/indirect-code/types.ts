@@ -34,6 +34,27 @@ export interface SessionUsage {
   costUsd: number;
 }
 
+export interface CompactionUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  reasoning_tokens?: number;
+  reasoning_tokens_known?: boolean;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  cost_usd?: number;
+}
+
+export interface CompactionState {
+  previousSummary?: string;
+  readFiles?: string[];
+  modifiedFiles?: string[];
+  firstKeptEntryId?: string;
+  count?: number;
+  version?: number;
+  keepFrom?: number;
+  usage?: CompactionUsage;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "tool";

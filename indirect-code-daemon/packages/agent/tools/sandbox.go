@@ -13,7 +13,7 @@ import (
 // a restricted environment.
 //
 // The value is designed to be shared across tool instances (by pointer).
-// Enable/Disable are atomic so they can be toggled from the TUI.
+// Enable/Disable are atomic so they can be toggled from the UI.
 type Sandbox struct {
 	Root        string
 	Permissions *PermissionSet

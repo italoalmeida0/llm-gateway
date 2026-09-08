@@ -1,8 +1,6 @@
 package core
 
 import (
-	"time"
-
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
@@ -83,19 +81,4 @@ func OpenSessionStore(path, cwd string, meta SessionMeta) (SessionStore, error) 
 // backing file. Exported for hosts that list/route session files.
 func IsSQLitePath(path string) bool {
 	return isSQLitePath(path)
-}
-
-// SessionStoreInfo describes a session file for pickers/listing,
-// independent of backend.
-type SessionStoreInfo struct {
-	Path      string
-	Backend   string // "jsonl" | "sqlite"
-	ID        string
-	Title     string
-	CWD       string
-	Model     string
-	Provider  string
-	Started   time.Time
-	Messages  int
-	HasParent bool
 }

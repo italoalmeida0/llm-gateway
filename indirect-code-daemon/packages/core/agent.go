@@ -163,8 +163,8 @@ type Agent struct {
 	// (SeedCompactionState) and advanced by every Compact call.
 	compactionState *CompactionState
 	// rev increments whenever the transcript slice is replaced or a
-	// message is appended. The TUI uses it as a cheap redraw cache key
-	// so editor-only typing doesn't copy/rebuild a long transcript on
+	// message is appended. The UI uses it as a cheap redraw cache key
+	// so typing doesn't copy/rebuild a long transcript on
 	// every keypress.
 	rev  uint64
 	cost CostTracker

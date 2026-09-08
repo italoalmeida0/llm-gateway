@@ -434,34 +434,3 @@ func importJSONLRows(jsonlPath string, store *SQLiteSessionStore) error {
 	})
 }
 
-// DescribeSQLiteSession returns picker info for a SQLite session file.
-func DescribeSQLiteSession(path string) (SessionStoreInfo, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return SessionStoreInfo{}, err
-	}
-	defer db.Close()
-	var m SessionMeta
-	var hide int
-	var started string
-	err = db.QueryRow(`SELECT id,cwd,provider,model,version,title,parent,fork_point,hide_from_sessions,started
-		FROM sessions LIMIT 1`).Scan(
-		&m.ID, &m.CWD, &m.Provider, &m.Model, &m.Version, &m.Title, &m.Parent, &m.ForkPoint, &hide, &started)
-	if err != nil {
-		return SessionStoreInfo{}, err
-	}
-	var n int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM events WHERE session_id=? AND type='message'`, m.ID).Scan(&n)
-	info := SessionStoreInfo{
-		Path: path, Backend: "sqlite",
-		ID: m.ID, Title: m.Title, CWD: m.CWD,
-		Model: m.Model, Provider: m.Provider,
-		Messages: n, HasParent: m.Parent != "",
-	}
-	if started != "" {
-		if t, err := time.Parse(time.RFC3339Nano, started); err == nil {
-			info.Started = t
-		}
-	}
-	return info, nil
-}

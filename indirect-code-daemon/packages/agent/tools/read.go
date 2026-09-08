@@ -158,7 +158,7 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		Content: []provider.Content{provider.TextBlock{Text: sb.String()}},
 		Details: map[string]any{
 			"path":            path,
-			"start_line":      start + 1, // 1-indexed; TUI draws the gutter
+			"start_line":      start + 1, // 1-indexed; UI draws the gutter
 			"lines_truncated": truncLines,
 			"bytes_truncated": truncBytes,
 			"total_lines":     len(lines),

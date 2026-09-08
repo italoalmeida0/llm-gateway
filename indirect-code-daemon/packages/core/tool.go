@@ -25,13 +25,6 @@ type Tool interface {
 	Execute(ctx context.Context, args json.RawMessage, progress func(string)) (ToolResult, error)
 }
 
-// ToolPreviewer is optionally implemented by tools that can describe their
-// exact effect without applying it. Confirmation UIs use the preview before
-// allowing a side-effecting call to proceed.
-type ToolPreviewer interface {
-	Preview(ctx context.Context, args json.RawMessage) (ToolResult, error)
-}
-
 // ToolResult is the outcome of Tool.Execute.
 type ToolResult struct {
 	StartedAt  int64

@@ -412,6 +412,33 @@ export function createTranscript(opts: {
   let editMsgTimer: ReturnType<typeof setTimeout> | undefined;
   let lastSentEditIdx: number | null = null;
   let lastSentEditText = "";
+  const recentSentEdits = new Map<string, number>();
+  let lastStartedEditAt = 0;
+  let lastClosedEditAt = 0;
+
+  function purgeRecentSentEdits() {
+    const now = Date.now();
+    for (const [key, time] of recentSentEdits.entries()) {
+      if (now - time > 10000) recentSentEdits.delete(key);
+    }
+  }
+
+  function flushPendingEdit() {
+    if (editMsgTimer) {
+      clearTimeout(editMsgTimer);
+      editMsgTimer = undefined;
+      const sid = opts.getSessionId();
+      const idx = editingMsgIdx();
+      const text = editingMsgText();
+      if (sid && idx != null && opts.isOpen()) {
+        lastSentEditIdx = idx;
+        lastSentEditText = text;
+        recentSentEdits.set(`${idx}:${text}`, Date.now());
+        opts.send({ type: "set_editing_msg", sessionId: sid, index: idx, text });
+      }
+    }
+  }
+
   function syncEditingMsg(sid: string, idx: number | null, text: string) {
     clearTimeout(editMsgTimer);
     if (!opts.isOpen()) return;
@@ -425,6 +452,8 @@ export function createTranscript(opts: {
       if (opts.isOpen()) {
         lastSentEditIdx = idx;
         lastSentEditText = text;
+        recentSentEdits.set(`${idx}:${text}`, Date.now());
+        purgeRecentSentEdits();
         opts.send({ type: "set_editing_msg", sessionId: sid, index: idx, text });
       }
     }, 350);
@@ -432,34 +461,64 @@ export function createTranscript(opts: {
   onCleanup(() => clearTimeout(editMsgTimer));
 
   function applyEditingMsgFromRemote(idx: number | null, text: string) {
+    const currentIdx = editingMsgIdx();
+    const currentText = editingMsgText();
+
+    const isFocused = typeof document !== "undefined" && document.activeElement?.id === "rc-editing-msg";
+
     if (idx == null) {
-      if (editingMsgIdx() != null) {
-        lastSentEditIdx = null;
-        lastSentEditText = "";
-        setEditingMsgIdx(null);
-        setEditingMsgText("");
-      }
+      if (currentIdx == null) return;
+      // If user is actively typing in the editing textarea, do not close edit mode
+      if (isFocused) return;
+      // If user just started editing on this device, suppress stale pre-edit nulls
+      if (Date.now() - lastStartedEditAt < 2000) return;
+
+      lastSentEditIdx = null;
+      lastSentEditText = "";
+      setEditingMsgIdx(null);
+      setEditingMsgText("");
       return;
     }
-    if (idx !== editingMsgIdx()) {
-      lastSentEditIdx = idx;
-      lastSentEditText = text;
-      setEditingMsgIdx(idx);
-      setEditingMsgText(text);
-    } else if (idx === lastSentEditIdx && text !== lastSentEditText && text !== editingMsgText()) {
-      lastSentEditText = text;
-      setEditingMsgText(text);
+
+    // Suppress reopening if recently closed on this device
+    if (currentIdx == null && Date.now() - lastClosedEditAt < 2000) return;
+
+    // If identical, nothing to do
+    if (idx === currentIdx && text === currentText) return;
+
+    // If actively focused, local typing has authority: do not overwrite
+    if (isFocused) {
+      if (idx === currentIdx) return;
+      return;
     }
+
+    // Echo suppression
+    purgeRecentSentEdits();
+    if (idx === lastSentEditIdx && (text === lastSentEditText || recentSentEdits.has(`${idx}:${text}`))) {
+      return;
+    }
+
+    // Monotonic prefix guard: if same message and local text already starts with remote and is longer
+    if (idx === currentIdx && currentText.startsWith(text) && currentText.length > text.length) {
+      return;
+    }
+
+    lastSentEditIdx = idx;
+    lastSentEditText = text;
+    setEditingMsgIdx(idx);
+    setEditingMsgText(text);
   }
 
   // Inline edit (chatbot startEditMessage): user edits resubmit, assistant
   // edits just save.
   function startEditMsg(idx: number, m: ChatMessage) {
+    lastStartedEditAt = Date.now();
     setEditingMsgIdx(idx);
     const text = messageText(m);
     setEditingMsgText(text);
     lastSentEditIdx = idx;
     lastSentEditText = text;
+    recentSentEdits.set(`${idx}:${text}`, Date.now());
     const sid = opts.getSessionId();
     if (sid && opts.isOpen()) {
       opts.send({ type: "set_editing_msg", sessionId: sid, index: idx, text });
@@ -474,6 +533,9 @@ export function createTranscript(opts: {
     }
   }
   function cancelEditMsg() {
+    clearTimeout(editMsgTimer);
+    editMsgTimer = undefined;
+    lastClosedEditAt = Date.now();
     const sid = opts.getSessionId();
     if (sid && opts.isOpen() && editingMsgIdx() != null) {
       opts.send({ type: "set_editing_msg", sessionId: sid, index: null, text: "" });
@@ -685,6 +747,7 @@ export function createTranscript(opts: {
    * cleaned up by their own domains; the page orchestrates).
    */
   function resetForSession() {
+    flushPendingEdit();
     setTurnActivity(null); setTodos([]); setToolProgress({}); setToolStarts({});
     showQuestion(null);
     transcriptScroll.reset();
@@ -692,7 +755,12 @@ export function createTranscript(opts: {
     setMessages([]);
     setSessionStatus("idle");
     setPendingApproval(null);
-    cancelEditMsg();
+    clearTimeout(editMsgTimer);
+    editMsgTimer = undefined;
+    lastSentEditIdx = null;
+    lastSentEditText = "";
+    setEditingMsgIdx(null);
+    setEditingMsgText("");
     stopThinkingTimer();
   }
   /** Clears per-session caches when switching hosts (different daemon). */
@@ -739,7 +807,7 @@ export function createTranscript(opts: {
     copiedMsgId, copyMsg,
     thinkingStart, thinkingElapsed, thinkingIndex,
     startThinkingTimer, stopThinkingTimer,
-    editingMsgIdx, setEditingMsgIdx, editingMsgText, setEditingMsgText, updateEditingMsgText, applyEditingMsgFromRemote,
+    editingMsgIdx, setEditingMsgIdx, editingMsgText, setEditingMsgText, updateEditingMsgText, applyEditingMsgFromRemote, flushPendingEdit,
     isAtBottom, setIsAtBottom,
     chatContainerRef, setChatContainerRef, chatContentRef, setChatContentRef,
     transcriptScroll, scrollToBottom, onChatScroll,

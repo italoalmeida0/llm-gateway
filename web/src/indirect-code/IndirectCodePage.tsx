@@ -328,24 +328,18 @@ export default function IndirectCodePage() {
   // Open a centered draft without creating a conversation on the host.
   function startNewConversation(projectId?: string) {
     if (creatingSession()) return;
-    transcript.clearQuestion();
+    transcript.resetForSession();
     setDraftMode(true);
-    transcript.setTurnActivity(null); transcript.setTodos([]); transcript.setToolProgress({}); transcript.setToolStarts({});
     setHistoryView(false);
     setActiveSessionId("");
     try {
       const hid = hosts.activeHostId();
       if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, "new");
     } catch {}
-    transcript.clearMessages();
     composer.setInputPrompt(mirror.configDoc()?.newDraft || "");
-    transcript.setSessionStatus("idle");
-    transcript.setPendingApproval(null);
     review.resetReview();
     notice.setAppNotice(null);
     options.applyOptions(options.getLastLocalSelection() || mirror.configDoc()?.lastSelection);
-    transcript.stopThinkingTimer();
-    transcript.transcriptScroll.reset();
     composer.clearAttachments();
     if (projectId) projects.setActiveProjectId(projectId);
     if (isMobile()) setSidebarOpen(false);
@@ -708,20 +702,13 @@ export default function IndirectCodePage() {
         setCreatingSession(false);
         creationRequestId = "";
         review.resetReview();
-        transcript.setTurnActivity(null); transcript.setTodos([]);
-        transcript.clearQuestion();
+        transcript.resetForSession();
+        transcript.resetCaches();
         notice.setAppNotice(null);
         setActiveSessionId("");
         projects.setActiveProjectId("");
-        transcript.clearMessages();
-        transcript.setSessionStatus("idle");
-        transcript.setPendingApproval(null);
-        transcript.resetCaches();
-        transcript.setToolProgress({}); transcript.setToolStarts({});
         composer.clearAttachments();
         composer.setInputPrompt("");
-        transcript.stopThinkingTimer();
-        transcript.transcriptScroll.reset();
         relay.resetBackoff();
         mirror.dataLayer.disconnect();
         relay.connect(hid);

@@ -66,6 +66,7 @@ export function ComposerInput() {
         : `Start a conversation in ${s.activeProject()?.name || "project"}...`
     }
     value={c.inputPrompt()}
+    onBlur={() => c.flushPendingDraft()}
     onInput={(e) => {
       c.setInputPrompt(e.currentTarget.value);
       const el = e.currentTarget;

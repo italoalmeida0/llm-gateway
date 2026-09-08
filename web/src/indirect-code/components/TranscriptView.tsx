@@ -196,8 +196,10 @@ export function TranscriptView() {
                     <span>Editing message</span>
                   </div>
                   <textarea
+                    id="rc-editing-msg"
                     value={t.editingMsgText()}
                     onInput={(e) => t.updateEditingMsgText(e.currentTarget.value)}
+                    onBlur={() => t.flushPendingEdit()}
                     onKeyDown={(e) => {
                       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
                         e.preventDefault();

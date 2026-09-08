@@ -77,12 +77,40 @@ export function createComposer(opts: {
   // Draft synchronization (via SignalDB mirror & daemon)
   let lastSentDraft = "";
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
+  const recentSentDrafts = new Map<string, number>();
+  let lastPromptSentAt = 0;
+  let lastSentPromptText = "";
+
+  function purgeRecentSentDrafts() {
+    const now = Date.now();
+    for (const [key, time] of recentSentDrafts.entries()) {
+      if (now - time > 10000) recentSentDrafts.delete(key);
+    }
+  }
+
+  function flushPendingDraft() {
+    if (draftTimer) {
+      clearTimeout(draftTimer);
+      draftTimer = undefined;
+      const sid = currentSid ?? opts.getSessionId();
+      const text = inputPrompt();
+      if (lastSentDraft !== text) {
+        lastSentDraft = text;
+        recentSentDrafts.set(`${sid || "new"}:${text}`, Date.now());
+        if (opts.isOpen()) {
+          opts.send({ type: "set_draft", sessionId: sid, draft: text });
+        }
+      }
+    }
+  }
 
   function syncDraftToServer(sid: string, text: string) {
     clearTimeout(draftTimer);
     draftTimer = setTimeout(() => {
       if (lastSentDraft === text) return;
       lastSentDraft = text;
+      recentSentDrafts.set(`${sid || "new"}:${text}`, Date.now());
+      purgeRecentSentDrafts();
       if (opts.isOpen()) {
         opts.send({ type: "set_draft", sessionId: sid, draft: text });
       }
@@ -94,6 +122,7 @@ export function createComposer(opts: {
   createEffect(() => {
     const sid = opts.getSessionId();
     if (sid !== currentSid) {
+      flushPendingDraft();
       currentSid = sid;
       if (sid) {
         const serverDraft = opts.getSessionDraft?.() ?? "";
@@ -113,19 +142,29 @@ export function createComposer(opts: {
 
   createEffect(() => {
     const sid = opts.getSessionId();
-    if (sid) {
-      const remote = opts.getSessionDraft?.() ?? "";
-      if (remote !== inputPrompt() && inputPrompt() === lastSentDraft) {
-        setInputPrompt(remote);
-        lastSentDraft = remote;
-      }
-    } else {
-      const remote = opts.getNewDraft?.() ?? "";
-      if (remote !== inputPrompt() && inputPrompt() === lastSentDraft) {
-        setInputPrompt(remote);
-        lastSentDraft = remote;
-      }
-    }
+    const remote = (sid ? opts.getSessionDraft?.() : opts.getNewDraft?.()) ?? "";
+    const current = inputPrompt();
+
+    // 1. If remote is identical to current, nothing to do
+    if (remote === current) return;
+
+    // 2. Active Focus Guard: if user is actively typing in the composer, NEVER overwrite the DOM
+    const isFocused = typeof document !== "undefined" && document.activeElement?.id === "rc-composer";
+    if (isFocused) return;
+
+    // 3. Echo Suppression: if remote matches what this client recently sent, discard it
+    purgeRecentSentDrafts();
+    if (recentSentDrafts.has(`${sid || "new"}:${remote}`) || remote === lastSentDraft) return;
+
+    // 4. Monotonic Prefix Guard: if local text already starts with remote and is longer, local is ahead
+    if (current.startsWith(remote) && current.length > remote.length) return;
+
+    // 5. Post-Submit Suppression: prevent in-flight draft from resurrecting a prompt that was just sent
+    if (Date.now() - lastPromptSentAt < 2500 && (remote === lastSentPromptText || (remote && lastSentPromptText.startsWith(remote)))) return;
+
+    // Apply remote update cleanly
+    setInputPrompt(remote);
+    lastSentDraft = remote;
   });
 
   createEffect(() => {
@@ -357,7 +396,19 @@ export function createComposer(opts: {
       try {
         if (sid) localStorage.removeItem(`llmgw-draft:${sid}`);
       } catch {}
-      if (routeSlash(text)) { setInputPrompt(""); return; }
+      if (routeSlash(text)) {
+        if (draftTimer) {
+          clearTimeout(draftTimer);
+          draftTimer = undefined;
+        }
+        setInputPrompt("");
+        lastSentDraft = "";
+        recentSentDrafts.set(`${sid || "new"}:`, Date.now());
+        if (sid && opts.isOpen()) {
+          opts.send({ type: "set_draft", sessionId: sid, draft: "" });
+        }
+        return;
+      }
       if (!sid) {
         opts.onBeginConversation();
         return;
@@ -403,9 +454,16 @@ export function createComposer(opts: {
       time: Date.now(),
       attachments: attachmentNames.length > 0 ? attachmentNames : undefined,
     };
+    lastPromptSentAt = Date.now();
+    lastSentPromptText = text;
+    if (draftTimer) {
+      clearTimeout(draftTimer);
+      draftTimer = undefined;
+    }
     opts.t.pushUserMessage(userMsg);
     setInputPrompt("");
     lastSentDraft = "";
+    recentSentDrafts.set(`${sid || "new"}:`, Date.now());
     if (sid && opts.isOpen()) {
       opts.send({ type: "set_draft", sessionId: sid, draft: "" });
     }
@@ -442,6 +500,7 @@ export function createComposer(opts: {
     handleFiles, removePendingAttachment, uploadOneAttachment,
     noteAttachmentUploaded, failUpload, clearAttachments,
     sendPrompt,
+    flushPendingDraft,
   };
 }
 

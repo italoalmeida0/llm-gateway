@@ -148,6 +148,10 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 
 ## Hard rules
 
+- **Write code and files in English.** Code, comments, commit messages, PR
+  descriptions, docs, and user-facing strings must be in English. Chat
+  conversation with the user may be in any language — match the user's language.
+
 - **Never log or serialize secrets**: upstream provider keys (AES-encrypted at rest),
   plaintext gateway keys (SHA-256 hash is the lookup key; an AES-encrypted copy
   `api_keys.token_enc` exists ONLY for the owner/admin `/reveal` endpoints and

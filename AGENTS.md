@@ -117,7 +117,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   script in `web/index.html` picks localStorage `llmgw-theme` else OS;
   `ThemeToggle`/`theme` helpers live in `ui.tsx` (watchSystemTheme keeps
   following the OS until the user picks once).
-- **Remote Code** (`web/src/pages/RemoteCode.tsx` + `remote-code-daemon/` Go
+- **Indirect Code** (`web/src/indirect-code/IndirectCodePage.tsx` + `indirect-code-daemon/` Go
   binary + relay in `server/routes/relay.ts`): the gateway is a dumb fan-out
   pipe (daemon → all of the user's clients; client → target daemon by hostId).
   **The Go daemon owns ALL truth** (sessions/projects/config on its disk). The
@@ -174,7 +174,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   (drag-and-drop ordering, user-sanctioned — only imported
   by `web/src/sortable.ts`; rows carry `data-id` + a `[data-handle]` grip,
   the reordered ids are POSTed to the matching `/reorder` / `PUT …/targets`
-  endpoint), `@signaldb/core|solid|sync|indexeddb` (Remote Code offline
+  endpoint), `@signaldb/core|solid|sync|indexeddb` (Indirect Code offline
   mirror, user-sanctioned — only imported by `web/src/rcStore.ts`) and
   `solid-charts` (charts, user-sanctioned — composable SVG
   `Chart`/`Axis`/`Bar`/`Area`/`Line` components in `web/src/charts.tsx`; colors
@@ -233,7 +233,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 
 - After implementation changes, always leave fresh local builds available for
   the user to test: `bun run build` produces `dist/`, and from
-  `remote-code-daemon/`, `go build -o bin/llmgw-daemon ./cmd/daemon` produces
+  `indirect-code-daemon/`, `go build -o bin/indirect-code ./cmd/daemon` produces
   the daemon. Keep these generated artifacts locally (gitignored). The gateway
   backend runs directly with `bun start`; it does not require a separate build.
 - `bun run dev` / `bun run dev:web` — backend :3000 / frontend dev :5700 (proxies /api,/v1)

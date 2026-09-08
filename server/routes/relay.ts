@@ -25,14 +25,14 @@ export function isHostOnline(hostId: string): boolean {
   return daemons.has(hostId);
 }
 
-export async function handleRemoteUpgrade(
+export async function handleIndirectCodeUpgrade(
   path: string,
   req: Request,
   url: URL,
   server: Server<WsData>,
 ): Promise<Response | undefined> {
-  // Daemon WebSocket: /api/remote/daemon/ws?token=<daemonToken>
-  if (path === "/api/remote/daemon/ws") {
+  // Daemon WebSocket: /api/indirect-code/daemon/ws?token=<daemonToken>
+  if (path === "/api/indirect-code/daemon/ws") {
     let token = url.searchParams.get("token") || "";
     if (!token) {
       const authHeader = req.headers.get("authorization") || "";
@@ -60,8 +60,8 @@ export async function handleRemoteUpgrade(
     return new Response("upgrade failed", { status: 400 });
   }
 
-  // Client Web WebSocket: /api/remote/client/ws?token=<jwtToken> or /api/remote/ws?token=<jwtToken>
-  if (path === "/api/remote/client/ws" || path === "/api/remote/ws") {
+  // Client Web WebSocket: /api/indirect-code/client/ws?token=<jwtToken> or /api/indirect-code/ws?token=<jwtToken>
+  if (path === "/api/indirect-code/client/ws" || path === "/api/indirect-code/ws") {
     let token = url.searchParams.get("token") || "";
     if (!token) {
       const authHeader = req.headers.get("authorization") || "";

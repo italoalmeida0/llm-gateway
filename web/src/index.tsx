@@ -34,7 +34,7 @@ import { usal, usalItems } from "./motion";
 import LoginPage from "./pages/Login";
 import SetPasswordPage from "./pages/SetPassword";
 import DashboardPage from "./pages/Dashboard";
-import RemoteCodePage from "./remote-code/RemoteCodePage";
+import IndirectCodePage from "./indirect-code/IndirectCodePage";
 import KeysPage from "./pages/Keys";
 import UsagePage from "./pages/Usage";
 import SettingsPage from "./pages/Settings";
@@ -72,7 +72,7 @@ interface NavItem {
 
 const USER_NAV: NavItem[] = [
   { path: "/", label: "Overview", icon: Icons.home },
-  { path: "/code", label: "Code Remote", icon: Icons.terminal },
+  { path: "/code", label: "Indirect Code", icon: Icons.terminal },
   { path: "/keys", label: "API Keys", icon: Icons.key },
   { path: "/usage", label: "Usage", icon: Icons.chart },
   { path: "/settings", label: "Settings", icon: Icons.cog },
@@ -382,7 +382,7 @@ function Root() {
           {(() => {
             const p = route().path;
             if (p.startsWith("/code")) {
-              return <RemoteCodePage />;
+              return <IndirectCodePage />;
             }
             return (
               <AppShell>

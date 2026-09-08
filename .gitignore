@@ -7,8 +7,9 @@ data/
 .banyancode
 tmp/
 .codegraph
-remote-code-daemon/bin/
-remote-code-daemon/code-daemon
+indirect-code-daemon/bin/
+indirect-code-daemon/code-daemon
+indirect-code-daemon/indirect-code
 remote-code-ref/
 
 .cache/iconify/

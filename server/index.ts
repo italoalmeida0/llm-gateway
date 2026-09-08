@@ -8,8 +8,8 @@ import { handleMeRoute } from "./routes/me";
 import { handleKeysRoute } from "./routes/keys";
 import { handleUsageRoute } from "./routes/usage";
 import { handleAdminRoute } from "./routes/admin";
-import { handleRemoteRestRoute } from "./routes/remote";
-import { handleRemoteUpgrade, remoteRelayWsHandlers, type WsData } from "./routes/relay";
+import { handleIndirectCodeRestRoute } from "./routes/indirect-code";
+import { handleIndirectCodeUpgrade, remoteRelayWsHandlers, type WsData } from "./routes/relay";
 import { handleProxy } from "./proxy/index";
 import { serveStatic } from "./static";
 import { flushUsage } from "./usage";
@@ -102,12 +102,12 @@ async function route(req: Request, server: any): Promise<Response | undefined> {
   }
 
   if (path.startsWith("/api/")) {
-    // Remote Code WebSocket upgrades (/api/remote/daemon/ws and /api/remote/client/ws)
-    if (path.startsWith("/api/remote/") && path.endsWith("/ws")) {
-      return await handleRemoteUpgrade(path, req, url, server);
+    // Indirect Code WebSocket upgrades (/api/indirect-code/daemon/ws and /api/indirect-code/client/ws)
+    if (path.startsWith("/api/indirect-code/") && path.endsWith("/ws")) {
+      return await handleIndirectCodeUpgrade(path, req, url, server);
     }
-    const viaRemote = await handleRemoteRestRoute(path, req, url);
-    if (viaRemote) return viaRemote;
+    const viaIndirectCode = await handleIndirectCodeRestRoute(path, req, url);
+    if (viaIndirectCode) return viaIndirectCode;
     const viaAuth = await handleAuthRoute(path, req, server);
     if (viaAuth) return viaAuth;
     const viaMe = await handleMeRoute(path, req);

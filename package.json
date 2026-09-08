@@ -9,7 +9,7 @@
     "start": "bun server/index.ts",
     "build": "bun run build:web && bun run build:daemon",
     "build:web": "NODE_ENV=production bun ./build.ts",
-    "build:daemon": "go build -C remote-code-daemon -o bin/llmgw-daemon ./cmd/daemon",
+    "build:daemon": "go build -C indirect-code-daemon -o bin/indirect-code ./cmd/daemon",
     "test": "DATA_DIR=./data/test bun test",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

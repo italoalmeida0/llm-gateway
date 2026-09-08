@@ -204,7 +204,15 @@ function AppShell(props: { children: JSX.Element }) {
           : "text-ink-300 hover:bg-ink-800/60 hover:text-ink-100"
       }`}
     >
-      <Icon name={item.icon} size={20} />
+      <Show when={item.icon == "indirect-code"} fallback={
+         <Icon name={item.icon} size={20} />
+        }>
+          <img
+            src="/indirect-icon.svg"
+            alt="Indirect"
+            class="w-[20px] h-[20px] shrink-0 object-contain rounded"
+          />
+      </Show>
       {item.label}
     </a>
   );

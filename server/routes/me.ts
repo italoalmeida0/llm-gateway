@@ -20,7 +20,7 @@ import { verifyGoogleIdToken } from "../google";
 import { sendSecurityAlert } from "../email";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { bruteforceClear, bruteforceFail, bruteforceLocked, consumeTotpCode } from "../ratelimit";
-import { DEFAULT_MODEL_CONTEXT, routerSnapshot } from "../models";
+import { DEFAULT_MODEL_CONTEXT, DEFAULT_MODEL_OUTPUT, routerSnapshot } from "../models";
 
 /**
  * /api/me/* — profile, password, TOTP, Google linking, session management.
@@ -226,7 +226,7 @@ export async function handleMeRoute(path: string, req: Request): Promise<Respons
           provider: providerName,
           upstreamModel: first?.upstream_model ?? m.upstream_model,
           context: m.context_length ?? DEFAULT_MODEL_CONTEXT,
-          output: m.max_output_length,
+          output: m.max_output_length ?? DEFAULT_MODEL_OUTPUT,
         };
       });
 

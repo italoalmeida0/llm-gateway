@@ -7,7 +7,8 @@ export interface GatewayModel {
   upstreamModel: string;
   /** Context window in tokens (256k when the registry reports none). */
   context: number;
-  output: number | null;
+  /** Max output in tokens (65536 when the registry reports none). */
+  output: number;
 }
 
 export interface SessionContext {

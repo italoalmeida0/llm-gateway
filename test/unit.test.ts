@@ -381,7 +381,7 @@ describe("public /v1/models registry entry", () => {
     expect("reasoning_parameters" in e).toBe(false);
     expect("pricing" in e).toBe(false);
     expect("context_length" in e).toBe(false);
-    expect(e.limit).toEqual({ context: 256_000 });
+    expect(e.limit).toEqual({ context: 262_144, output: 65_536 });
   });
 });
 

@@ -254,10 +254,10 @@ describe("Indirect Code Relay and Pairing", () => {
         method: "PATCH", headers, body: JSON.stringify({ contextLength: null, maxOutputLength: null }),
       });
       expect(patched.status).toBe(200);
-      // unknown context falls back to the 256k API default
-      expect((await read()).models.find((m: any) => m.id === id).limit).toEqual({ context: 256000 });
+      // unknown limits fall back to the API defaults (256Ki context, 64k output)
+      expect((await read()).models.find((m: any) => m.id === id).limit).toEqual({ context: 262144, output: 65536 });
       const dashboard2 = (await (await fetch(`${GW}/api/me/models`, { headers })).json()) as any;
-      expect(dashboard2.models.find((m: any) => m.id === id).context).toBe(256000);
+      expect(dashboard2.models.find((m: any) => m.id === id).context).toBe(262144);
       await fetch(`${GW}/api/admin/models/${encodeURIComponent(id)}`, { method: "PATCH", headers, body: JSON.stringify({ enabled: false }) });
       expect((await read()).models).toEqual([]);
     } finally {

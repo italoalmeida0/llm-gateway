@@ -328,15 +328,18 @@ function modelPricing(m: ModelRow): Record<string, number> | null {
 }
 
 /** Fallback context window (tokens) reported when the upstream advertises none. */
-export const DEFAULT_MODEL_CONTEXT = 256_000;
+export const DEFAULT_MODEL_CONTEXT = 262_144;
 
-/** Shared public metadata. Unknown output limits stay absent; an unknown
- *  context window is reported as DEFAULT_MODEL_CONTEXT. */
+/** Fallback max output (tokens) reported when the upstream advertises none. */
+export const DEFAULT_MODEL_OUTPUT = 65_536;
+
+/** Shared public metadata. Unknown limits are reported as the API defaults
+ *  (DEFAULT_MODEL_CONTEXT / DEFAULT_MODEL_OUTPUT) rather than omitted. */
 export function publicModelSummary(m: ModelRow) {
   const limit: { context?: number; output?: number } = {
     context: m.context_length ?? DEFAULT_MODEL_CONTEXT,
+    output: m.max_output_length ?? DEFAULT_MODEL_OUTPUT,
   };
-  if (m.max_output_length != null) limit.output = m.max_output_length;
   return { id: m.id, name: m.name || m.id, limit };
 }
 

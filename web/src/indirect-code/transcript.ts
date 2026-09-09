@@ -1,4 +1,4 @@
-import type { ChatMessage, RenderBlock, ToolUnit } from "./types";
+import type { ChatMessage, RenderBlock, ToolUnit, TurnBalloon } from "./types";
 import { displayToolArgs, withoutTodoActivity } from "./live";
 
 export function hasVisibleText(message: ChatMessage): boolean {
@@ -332,3 +332,81 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       return { icon: "lucide:wrench", verb: name, target: "" };
   }
 }
+
+/** Determines if a chat message marks the beginning of an agent turn.
+ * User messages initiate a turn by default, unless explicitly marked
+ * as a mid-turn follow-up (midTurn: true or isTurnStart: false). */
+export function isTurnStartMessage(msg: ChatMessage): boolean {
+  if (msg.role !== "user") return false;
+  if (typeof msg.isTurnStart === "boolean") return msg.isTurnStart;
+  if (msg.midTurn) return false;
+  return true;
+}
+
+/** Anchors per-turn file change balloons (both live changes of the current
+ * turn and persistent changes of finished turns) to the final block of
+ * their corresponding turn. If subsequent turns exist, the balloon sits
+ * right above the next turn's initiating message; for the latest turn,
+ * it sits at the bottom of the active conversation. */
+export function mapBalloonsToBlocks(
+  blocks: (RenderBlock & { id?: string })[],
+  balloons: TurnBalloon[],
+): Map<string, TurnBalloon[]> {
+  const result = new Map<string, TurnBalloon[]>();
+  if (!blocks || blocks.length === 0) return result;
+
+  const validBalloons = (balloons || []).filter((b) => (b.files?.length || 0) > 0);
+  if (validBalloons.length === 0) return result;
+
+  // Deduplicate by turnIndex: finished balloon (live === false) supersedes live balloon
+  const byTurn = new Map<number, TurnBalloon>();
+  for (const b of validBalloons) {
+    const existing = byTurn.get(b.turnIndex);
+    if (!existing || (existing.live && !b.live)) {
+      byTurn.set(b.turnIndex, b);
+    }
+  }
+  const turnBalloons = Array.from(byTurn.values());
+
+  let currentTurn = 0;
+  const lastBlockOfTurn = new Map<number, string>();
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    const blockId = (block as any).id || block.msg.id;
+    if (isTurnStartMessage(block.msg)) {
+      currentTurn++;
+    }
+    const tIdx = currentTurn > 0 ? currentTurn : 1;
+    lastBlockOfTurn.set(tIdx, blockId);
+  }
+
+  const lastBlockId = (blocks[blocks.length - 1] as any).id || blocks[blocks.length - 1].msg.id;
+  const firstBlockId = (blocks[0] as any).id || blocks[0].msg.id;
+
+  for (const b of turnBalloons) {
+    const tIdx = typeof b.turnIndex === "number" && b.turnIndex > 0 ? b.turnIndex : 1;
+    let targetId = lastBlockOfTurn.get(tIdx);
+
+    if (!targetId) {
+      if (tIdx >= currentTurn) {
+        targetId = lastBlockId;
+      } else {
+        targetId = firstBlockId;
+      }
+    }
+
+    if (targetId) {
+      const existing = result.get(targetId);
+      if (existing) {
+        existing.push(b);
+        existing.sort((x, y) => x.turnIndex - y.turnIndex);
+      } else {
+        result.set(targetId, [b]);
+      }
+    }
+  }
+
+  return result;
+}
+

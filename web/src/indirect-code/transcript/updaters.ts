@@ -58,12 +58,16 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
       if (rest.length > 0) ensureCarrier(idx).blocks.push(...rest);
       return;
     }
+    const isStart = m.isTurnStart !== undefined ? Boolean(m.isTurnStart) : !m.midTurn;
     const msg: ChatMessage = {
       id: `msg_${idx}`,
       role: "user",
       blocks: rest,
       time: Date.now(),
       srcIdx: idx,
+      isTurnStart: isStart,
+      midTurn: Boolean(m.midTurn),
+      turnIndex: typeof m.turnIndex === "number" ? m.turnIndex : undefined,
     };
     out.push(msg);
     carrier = msg;

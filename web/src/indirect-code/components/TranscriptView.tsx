@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { CompactionBalloon } from "./CompactionBalloon";
 import { FileIcon } from "../presentation";
@@ -12,6 +12,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
 import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges } from "../ctx";
 import { TurnChangesBalloon } from "./TurnChangesBalloon";
+import { mapBalloonsToBlocks } from "../transcript";
 
 export function TranscriptView() {
   const t = useTranscriptCtx();
@@ -21,16 +22,14 @@ export function TranscriptView() {
   const m = useModal();
   const ui = useUI();
   const tc = useTurnChanges();
-  // Balloons anchored after the message index recorded at end of turn
-  // (messageIndex = len(messages) then). Clamp for later edits/truncation:
-  // balloons pointing past the end render after the last message.
-  const balloonsAfter = (rawIdx: number, isLastMsg: boolean) =>
-    tc.balloons().filter((b) => {
-      const at = typeof (b as any).messageIndex === "number" ? (b as any).messageIndex : -1;
-      if (at === rawIdx + 1) return true;
-      if (isLastMsg && (at < 0 || at > t.messages().length)) return true;
-      return false;
-    });
+  // Persistent balloons anchored to the last block of their turn.
+  // When a new turn starts, the previous turn's balloon stays anchored above
+  // the new turn's initiating message, never jumping to the tail.
+  const balloonsByBlockId = createMemo(() =>
+    mapBalloonsToBlocks(t.renderBlocks(), tc.balloons()),
+  );
+  const balloonsForBlock = (block: any) =>
+    balloonsByBlockId().get(block.id || block.msg.id) || [];
   const compaction = () => t.sessionCompaction();
   const shouldShowCompactionBalloon = () =>
     Boolean(compaction()?.previousSummary);
@@ -295,20 +294,6 @@ export function TranscriptView() {
                 <Show when={block.units.length}>{renderAssistantSpecial(rctx, msg.id, block.units, isLast(), block.extras.map((e) => e.srcIdx ?? 0))}</Show>
               </> : renderMessageContent(rctx, msg, isLast())}
 
-              {/* Persistent per-turn file-changes balloon (never deleted) */}
-              <For each={balloonsAfter(rawIdx(), isLast())}>
-                {(b) => (
-                  <div class="w-full">
-                    <TurnChangesBalloon
-                      balloon={b}
-                      expanded={tc.isExpanded(`turn-${b.turnIndex}`)}
-                      onToggle={() => tc.toggleExpanded(`turn-${b.turnIndex}`)}
-                      undoBusy={tc.undoBusy() === b.turnIndex}
-                      onUndo={() => tc.undoTurn(b.turnIndex)}
-                    />
-                  </div>
-                )}
-              </For>
               {/* Hover actions (chatbot-style) */}
               <Show when={(t.sessionStatus() !== "running" || !isLast()) && !isEditing()}>
                 <AssistantMsgActions
@@ -324,6 +309,23 @@ export function TranscriptView() {
             </div>
           </Show>
         </div>
+
+        {/* Persistent per-turn file-changes balloon (never deleted) */}
+        <For each={balloonsForBlock(block)}>
+          {(b) => (
+            <div class={`w-full ${ui.convWidthClass()} mx-auto`}>
+              <TurnChangesBalloon
+                balloon={b}
+                expanded={tc.isExpanded(`turn-${b.turnIndex}`)}
+                onToggle={() => tc.toggleExpanded(`turn-${b.turnIndex}`)}
+                undoBusy={tc.undoBusy() === b.turnIndex}
+                onUndo={() => tc.undoTurn(b.turnIndex)}
+                live={b.live}
+                onReview={() => tc.requestBalloons()}
+              />
+            </div>
+          )}
+        </For>
         </>
       );
     }}

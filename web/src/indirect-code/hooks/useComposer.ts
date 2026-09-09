@@ -453,6 +453,7 @@ export function createComposer(opts: {
       blocks: [{ type: "text", text: displayText }],
       time: Date.now(),
       attachments: attachmentNames.length > 0 ? attachmentNames : undefined,
+      isTurnStart: true,
     };
     lastPromptSentAt = Date.now();
     lastSentPromptText = text;

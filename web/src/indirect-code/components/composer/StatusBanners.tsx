@@ -1,12 +1,11 @@
 import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
-import { useHost, useSession, useTranscriptCtx, useTurnChanges, useUI } from "../../ctx";
+import { useHost, useSession, useTranscriptCtx, useUI } from "../../ctx";
 import { QuestionPanel } from "../QuestionModal";
 
 export function StatusBanners() {
   const s = useSession();
   const t = useTranscriptCtx();
-  const tc = useTurnChanges();
   const h = useHost();
   const ui = useUI();
   return (
@@ -47,11 +46,6 @@ export function StatusBanners() {
       </li>}</For>
     </ol></Show>
   </section>
-</Show>
-<Show when={tc.balloons().some((b) => b.live && (b.files.length || 0) > 0) && s.activeSessionId() && t.sessionStatus() === "running"}>
-  <div class="mb-2 flex flex-wrap items-center justify-end gap-3 text-xs text-ink-400" data-task-changes>
-    <span class="flex items-center gap-1.5"><Iconify icon="lucide:loader-circle" size={14} class="animate-spin" />{tc.balloons().find((b) => b.live)?.files.length} file{(tc.balloons().find((b) => b.live)?.files.length || 0) === 1 ? "" : "s"} changing</span>
-  </div>
 </Show>
 <Show when={ui.appNotice()}>{(notice) =>
   <div role={notice().kind === "err" ? "alert" : "status"} class={`mb-3 flex items-start gap-2 rounded-xl border px-3 py-2.5 text-xs ${notice().kind === "err" ? "border-brand-500/30 bg-brand-500/5 text-ink-200" : "border-line bg-elev text-ink-300"}`}>

@@ -54,6 +54,25 @@ export interface CompactionState {
   usage?: CompactionUsage;
 }
 
+export interface TurnChangedFile {
+  path: string;
+  rel?: string;
+  status: "new" | "modified" | "deleted" | "binary" | "too_large";
+  diff?: string;
+  additions?: number;
+  deletions?: number;
+  undone?: boolean;
+}
+
+export interface TurnBalloon {
+  turnIndex: number;
+  at?: number;
+  files: TurnChangedFile[];
+  messageIndex?: number;
+  /** True while the turn is still running (floats above the composer). */
+  live?: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "tool";
@@ -68,6 +87,10 @@ export interface ChatMessage {
    * must send this index, never the rendered position.
    */
   srcIdx?: number;
+  /** Explicit turn boundary markers (future-proofs mid-turn messages). */
+  isTurnStart?: boolean;
+  midTurn?: boolean;
+  turnIndex?: number;
 }
 
 export interface PendingApproval {

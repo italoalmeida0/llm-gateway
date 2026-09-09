@@ -3,14 +3,16 @@ import { compactTokens, contextDisplay } from "../web/src/indirect-code/context"
 import { createTranscriptScroll } from "../web/src/indirect-code/scroll";
 import { displayToolArgs, withoutTodoActivity } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
-import { buildRenderBlocks, terminalPresentation, toolSummary } from "../web/src/indirect-code/transcript";
+import {
+  buildRenderBlocks, isTurnStartMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
+} from "../web/src/indirect-code/transcript";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
 import { parseDaemonMessage } from "../web/src/indirect-code/daemon-protocol";
 import {
   appendReasoningDelta, appendTextDelta, appendToolArgsDelta, appendToolResult,
   cutTail, finishTurn, mergeUsage, normalizeSessionMessages, upsertToolCall,
 } from "../web/src/indirect-code/transcript/updaters";
-import type { ChatMessage, ToolUnit } from "../web/src/indirect-code/types";
+import type { ChatMessage, ToolUnit, TurnBalloon } from "../web/src/indirect-code/types";
 import { fileIcon } from "../web/src/indirect-code/files";
 
 describe("Indirect Code file presentation", () => {
@@ -402,3 +404,137 @@ describe("Indirect Code daemon protocol", () => {
     expect(parseDaemonMessage([])).toBeNull();
   });
 });
+
+describe("Indirect Code turn balloons anchoring", () => {
+  test("isTurnStartMessage identifies turn initiation correctly", () => {
+    const defaultUser: ChatMessage = { id: "u1", role: "user", blocks: [{ type: "text", text: "hi" }] };
+    expect(isTurnStartMessage(defaultUser)).toBe(true);
+
+    const explicitStart: ChatMessage = { id: "u2", role: "user", blocks: [], isTurnStart: true };
+    expect(isTurnStartMessage(explicitStart)).toBe(true);
+
+    const midTurnUser: ChatMessage = { id: "u3", role: "user", blocks: [], midTurn: true };
+    expect(isTurnStartMessage(midTurnUser)).toBe(false);
+
+    const explicitNonStart: ChatMessage = { id: "u4", role: "user", blocks: [], isTurnStart: false };
+    expect(isTurnStartMessage(explicitNonStart)).toBe(false);
+
+    const asstMsg: ChatMessage = { id: "a1", role: "assistant", blocks: [] };
+    expect(isTurnStartMessage(asstMsg)).toBe(false);
+
+    const toolMsg: ChatMessage = { id: "t1", role: "tool", blocks: [] };
+    expect(isTurnStartMessage(toolMsg)).toBe(false);
+  });
+
+  test("anchors turn 1 balloon to turn 1 last block and does not jump when turn 2 starts", () => {
+    const user1: ChatMessage = { id: "user_1", role: "user", blocks: [{ type: "text", text: "turn 1 prompt" }] };
+    const asst1: ChatMessage = { id: "asst_1", role: "assistant", blocks: [{ type: "text", text: "turn 1 response" }] };
+
+    const blocks1 = buildRenderBlocks([user1, asst1]).map((b) => ({ ...b, id: b.msg.id }));
+    const balloon1: TurnBalloon = { turnIndex: 1, files: [{ path: "fileA.ts", status: "modified" }] };
+
+    // Turn 1 complete: balloon is on asst_1 (the last block of turn 1)
+    const map1 = mapBalloonsToBlocks(blocks1, [balloon1]);
+    expect(map1.get("user_1")).toBeUndefined();
+    expect(map1.get("asst_1")?.map((b) => b.turnIndex)).toEqual([1]);
+
+    // Turn 2 user prompt arrives: balloon 1 MUST stay anchored to asst_1 (above user_2)
+    const user2: ChatMessage = { id: "user_2", role: "user", blocks: [{ type: "text", text: "turn 2 prompt" }] };
+    const blocks2 = buildRenderBlocks([user1, asst1, user2]).map((b) => ({ ...b, id: b.msg.id }));
+
+    const map2 = mapBalloonsToBlocks(blocks2, [balloon1]);
+    expect(map2.get("asst_1")?.map((b) => b.turnIndex)).toEqual([1]);
+    expect(map2.get("user_2")).toBeUndefined();
+
+    // Turn 2 finishes: balloon 2 is on asst_2 (the last block of turn 2)
+    const asst2: ChatMessage = { id: "asst_2", role: "assistant", blocks: [{ type: "text", text: "turn 2 response" }] };
+    const blocks3 = buildRenderBlocks([user1, asst1, user2, asst2]).map((b) => ({ ...b, id: b.msg.id }));
+    const balloon2: TurnBalloon = { turnIndex: 2, files: [{ path: "fileB.ts", status: "new" }] };
+
+    const map3 = mapBalloonsToBlocks(blocks3, [balloon1, balloon2]);
+    expect(map3.get("asst_1")?.map((b) => b.turnIndex)).toEqual([1]);
+    expect(map3.get("asst_2")?.map((b) => b.turnIndex)).toEqual([2]);
+
+    // Turn 3 begins: both balloons stay on their respective turns!
+    const user3: ChatMessage = { id: "user_3", role: "user", blocks: [{ type: "text", text: "turn 3 prompt" }] };
+    const blocks4 = buildRenderBlocks([user1, asst1, user2, asst2, user3]).map((b) => ({ ...b, id: b.msg.id }));
+
+    const map4 = mapBalloonsToBlocks(blocks4, [balloon1, balloon2]);
+    expect(map4.get("asst_1")?.map((b) => b.turnIndex)).toEqual([1]);
+    expect(map4.get("asst_2")?.map((b) => b.turnIndex)).toEqual([2]);
+    expect(map4.get("user_3")).toBeUndefined();
+  });
+
+  test("anchors balloons correctly when a turn has multiple assistant blocks or series", () => {
+    const user1: ChatMessage = { id: "u1", role: "user", blocks: [{ type: "text", text: "p1" }] };
+    const tool1: ChatMessage = { id: "t1", role: "assistant", blocks: [{ type: "tool_call", toolId: "call1", toolName: "bash" }] };
+    const text1: ChatMessage = { id: "a1", role: "assistant", blocks: [{ type: "text", text: "done" }] };
+
+    const blocks = buildRenderBlocks([user1, tool1, text1]).map((b) => ({ ...b, id: b.msg.id }));
+    expect(blocks.length).toBe(3); // user1, tool1 (series), text1 (single)
+
+    const balloon: TurnBalloon = { turnIndex: 1, files: [{ path: "test.ts", status: "modified" }] };
+    const map = mapBalloonsToBlocks(blocks, [balloon]);
+
+    // Must attach to a1 (the final block of turn 1), not the intermediate tool series
+    expect(map.get("a1")?.map((b) => b.turnIndex)).toEqual([1]);
+    expect(map.get("t1")).toBeUndefined();
+    expect(map.get("u1")).toBeUndefined();
+  });
+
+  test("anchors live balloons to active turn and deduplicates when finished", () => {
+    const user1: ChatMessage = { id: "u1", role: "user", blocks: [{ type: "text", text: "p1" }] };
+    const asst1: ChatMessage = { id: "a1", role: "assistant", blocks: [{ type: "text", text: "r1" }] };
+    const user2: ChatMessage = { id: "u2", role: "user", blocks: [{ type: "text", text: "p2" }] };
+    const asst2: ChatMessage = { id: "a2", role: "assistant", blocks: [{ type: "text", text: "r2" }] };
+
+    const blocks = buildRenderBlocks([user1, asst1, user2, asst2]).map((b) => ({ ...b, id: b.msg.id }));
+    // Turn 1 finished; Turn 2 is running live with changes
+    const liveBalloons: TurnBalloon[] = [
+      { turnIndex: 1, files: [{ path: "a.ts", status: "modified" }], live: false },
+      { turnIndex: 2, files: [{ path: "b.ts", status: "new" }], live: true },
+    ];
+
+    const mapLive = mapBalloonsToBlocks(blocks, liveBalloons);
+    expect(mapLive.get("a1")?.map((b) => b.turnIndex)).toEqual([1]);
+    expect(mapLive.get("a2")?.map((b) => b.turnIndex)).toEqual([2]);
+    expect(mapLive.get("a2")?.[0].live).toBe(true);
+
+    // When Turn 2 finishes, persistent balloon (live: false) replaces live balloon
+    const finishedBalloons: TurnBalloon[] = [
+      { turnIndex: 1, files: [{ path: "a.ts", status: "modified" }], live: false },
+      { turnIndex: 2, files: [{ path: "b.ts", status: "new" }], live: true },
+      { turnIndex: 2, files: [{ path: "b.ts", status: "new" }], live: false },
+    ];
+    const mapFinished = mapBalloonsToBlocks(blocks, finishedBalloons);
+    expect(mapFinished.get("a2")?.length).toBe(1);
+    expect(mapFinished.get("a2")?.[0].live).toBe(false);
+  });
+
+  test("ignores balloons with no files", () => {
+    const user1: ChatMessage = { id: "u1", role: "user", blocks: [{ type: "text", text: "p1" }] };
+    const asst1: ChatMessage = { id: "a1", role: "assistant", blocks: [{ type: "text", text: "r1" }] };
+    const blocks = buildRenderBlocks([user1, asst1]).map((b) => ({ ...b, id: b.msg.id }));
+
+    const emptyBalloons: TurnBalloon[] = [{ turnIndex: 1, files: [] }];
+    const map = mapBalloonsToBlocks(blocks, emptyBalloons);
+    expect(map.size).toBe(0);
+  });
+
+  test("handles mid-turn user messages without splitting the turn", () => {
+    const user1: ChatMessage = { id: "u1", role: "user", blocks: [{ type: "text", text: "start" }] };
+    const asst1: ChatMessage = { id: "a1", role: "assistant", blocks: [{ type: "text", text: "working" }] };
+    const midUser: ChatMessage = { id: "u_mid", role: "user", blocks: [{ type: "text", text: "extra info" }], midTurn: true };
+    const asst2: ChatMessage = { id: "a2", role: "assistant", blocks: [{ type: "text", text: "finished" }] };
+
+    const blocks = buildRenderBlocks([user1, asst1, midUser, asst2]).map((b) => ({ ...b, id: b.msg.id }));
+    const balloon1: TurnBalloon = { turnIndex: 1, files: [{ path: "c.ts", status: "modified" }] };
+
+    const map = mapBalloonsToBlocks(blocks, [balloon1]);
+    // The balloon belongs to Turn 1, so it anchors to a2 (the last block of Turn 1)
+    expect(map.get("a2")?.map((b) => b.turnIndex)).toEqual([1]);
+    expect(map.get("u_mid")).toBeUndefined();
+    expect(map.get("a1")).toBeUndefined();
+  });
+});
+

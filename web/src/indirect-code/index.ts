@@ -4,11 +4,14 @@ export { default as IndirectCodePage } from "./IndirectCodePage";
 export type {
   AgentSettings, ChatMessage, ContentBlock, MCPServerConfig, PendingApproval,
   PreviewFile, Project, RenderBlock, RenderBlockSeries, SessionSummary,
-  SessionUsage, SkillConfig, ToolCat, ToolUnit, MsgPart,
+  SessionUsage, SkillConfig, ToolCat, ToolUnit, MsgPart, TurnBalloon, TurnChangedFile,
 } from "./types";
 export { createDataLayer } from "./store/sessions";
 export type { RcProject, RcSession } from "./store/sessions";
-export { buildRenderBlocks, toolSummary, terminalPresentation, baseNameOf, diffStat } from "./transcript";
+export {
+  buildRenderBlocks, toolSummary, terminalPresentation, baseNameOf, diffStat,
+  isTurnStartMessage, mapBalloonsToBlocks,
+} from "./transcript";
 export type { ToolSummary } from "./transcript";
 export {
   normalizeSessionMessages, mergeUsage, appendTextDelta, appendReasoningDelta,

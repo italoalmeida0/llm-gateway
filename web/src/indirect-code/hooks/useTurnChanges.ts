@@ -1,23 +1,7 @@
 import { createSignal } from "solid-js";
+import type { TurnBalloon, TurnChangedFile } from "../types";
 
-export interface TurnChangedFile {
-  path: string;
-  rel?: string;
-  status: "new" | "modified" | "deleted" | "binary" | "too_large";
-  diff?: string;
-  additions?: number;
-  deletions?: number;
-  undone?: boolean;
-}
-
-export interface TurnBalloon {
-  turnIndex: number;
-  at?: number;
-  files: TurnChangedFile[];
-  messageIndex?: number;
-  /** True while the turn is still running (floats above the composer). */
-  live?: boolean;
-}
+export type { TurnBalloon, TurnChangedFile };
 
 export interface UndoFileResult {
   path: string;

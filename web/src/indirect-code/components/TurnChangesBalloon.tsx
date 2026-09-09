@@ -52,7 +52,7 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
             />
             <Iconify icon={props.live ? "lucide:loader-circle" : "lucide:files"} size={14} class={props.live ? "text-accent-400 animate-spin" : "text-accent-400"} />
             <span class="text-xs font-semibold text-ink-100">
-              {props.live ? "Incoming changes" : `File changes · turn ${props.balloon.turnIndex}`}
+              File changes · turn {props.balloon.turnIndex}
             </span>
             <span class="text-[11px] text-ink-500">
               {files().length} file{files().length === 1 ? "" : "s"}

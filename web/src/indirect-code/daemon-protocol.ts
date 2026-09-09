@@ -93,10 +93,11 @@ export type AgentEvent =
   | { type: "tool_execution_start"; id: string; startedAt: number }
   | { type: "tool_progress"; id: string; text?: string }
   | { type: "tool_call"; id: string; name: string; args?: unknown }
-  | { type: "tool_result"; id: string; result?: string; content?: string; isError?: boolean; startedAt?: number; durationMs?: number }
+  | { type: "tool_result"; id: string; result?: string; content?: string; isError?: boolean; startedAt?: number; durationMs?: number; details?: any }
   | { type: "usage"; usage?: unknown; cumulative?: unknown; context?: SessionContext }
   | { type: "compact_progress"; text?: string }
   | { type: "turn_end"; usage?: unknown; cumulative?: unknown; cancelled?: boolean; stop?: string; error?: string }
+  | { type: "turn_file_changes"; sessionId?: string; live?: boolean; balloon?: WireRecord }
   | { type: "done" }
   | { type: "error"; message?: string };
 
@@ -110,6 +111,9 @@ export type DaemonEvent = EventBase &
     | { type: "project_created"; requestId?: string; project?: WireRecord }
     | { type: "folders"; requestId?: string; error?: string; folders?: WireRecord[]; parent?: string; path?: string }
     | { type: "session_changes"; sessionId: string; requestId?: string; error?: string; detail?: boolean; review?: WireRecord }
+    | { type: "turn_file_changes"; sessionId: string; live?: boolean; balloon?: WireRecord }
+    | { type: "turn_changes"; sessionId: string; requestId?: string; balloons?: WireRecord[]; live?: WireRecord }
+    | { type: "turn_changes_undone"; sessionId: string; requestId?: string; turnIndex?: number; results?: WireRecord[]; complete?: boolean; warning?: string; error?: string }
     | { type: "changes_updated"; sessionId: string }
     | { type: "attachment_uploaded"; requestId?: string; sessionId?: string; attachment?: WireRecord }
     | { type: "search_results"; query?: string; results?: WireRecord[] }

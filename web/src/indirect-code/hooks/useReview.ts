@@ -1,8 +1,8 @@
 import type { DaemonCommand } from "../daemon-protocol";
-import { createSignal, onCleanup } from "solid-js";
+import { createSignal } from "solid-js";
 import type { PreviewFile } from "../types";
-import type { AttachmentDataEvent, ChangesUpdatedEvent, SessionChangesEvent } from "../daemon-protocol";
-import type { Review, StoredAttachment } from "../viewTypes";
+import type { AttachmentDataEvent } from "../daemon-protocol";
+import type { StoredAttachment } from "../viewTypes";
 
 /** Review of changes + file preview + session attachments (extracted
  * verbatim from RemoteCodePage — collaborators via params). */
@@ -15,58 +15,9 @@ export function createReview(opts: {
   showConfirm: (o: { title?: string; message?: string; confirmText?: string; cancelText?: string; danger?: boolean }) => Promise<boolean>;
   isHostOnline: () => boolean;
 }) {
-  const [taskReview, setTaskReview] = createSignal<Review | null>(null);
-  const [reviewOpen, setReviewOpen] = createSignal(false);
-  const [reviewLoading, setReviewLoading] = createSignal(false);
-  const [reviewError, setReviewError] = createSignal("");
-  let reviewRequestId = "";
-  let reviewRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-  onCleanup(() => clearTimeout(reviewRefreshTimer));
-  function refreshReview() {
-    clearTimeout(reviewRefreshTimer);
-    reviewRefreshTimer = setTimeout(() => requestReview(reviewOpen(), true), 100);
-  }
-  function requestReview(detail = false, background = false) {
-    if (!opts.getSessionId() || !opts.isOpen()) return;
-    if (detail && !background) { setReviewOpen(true); setReviewLoading(true); setReviewError(""); }
-    reviewRequestId = crypto.randomUUID();
-    opts.send({ type: "get_changes", sessionId: opts.getSessionId(), detail, requestId: reviewRequestId });
-  }
-  function keepChanges() {
-    const review = taskReview();
-    if (!review || opts.isSessionRunning() || !opts.isOpen()) return;
-    setReviewLoading(true); setReviewError("");
-    reviewRequestId = crypto.randomUUID();
-    opts.send({ type: "keep_changes", sessionId: opts.getSessionId(), reviewId: review.id, requestId: reviewRequestId });
-  }
-  async function undoChanges(path = "") {
-    const review = taskReview();
-    if (!review || opts.isSessionRunning() || !opts.isOpen()) return;
-    const yes = await opts.showConfirm({ title: path ? "Undo this file?" : "Undo pending changes?", message: path ? "Restore this file to its state before the pending changes. Later manual edits will be preserved." : "This undoes pending changes for ALL conversations in this project folder, not just this one. Later manual edits will be preserved.", confirmText: "Undo changes" });
-    if (!yes) return;
-    setReviewLoading(true); setReviewError("");
-    reviewRequestId = crypto.randomUUID();
-    opts.send({ type: "undo_changes", sessionId: opts.getSessionId(), reviewId: review.id, path, detail: reviewOpen(), requestId: reviewRequestId });
-  }
-
-  /** session_changes event (with session/requestId guard). */
-  function noteSessionChanges(msg: SessionChangesEvent) {
-    if (msg.sessionId !== opts.getSessionId() || (msg.requestId && msg.requestId !== reviewRequestId)) return;
-    if (msg.requestId) setReviewLoading(false);
-    if (msg.error) { setReviewError(msg.error); if (!reviewOpen()) opts.toast(msg.error, "err"); return; }
-    if (reviewOpen() && !msg.detail && !msg.requestId) { refreshReview(); return; }
-    setTaskReview(msg.review || null);
-  }
-  function noteChangesUpdated(msg: ChangesUpdatedEvent) {
-    if (msg.sessionId === opts.getSessionId()) refreshReview();
-  }
-  function noteReviewError(message: string) {
-    setReviewLoading(false);
-    setReviewError(message);
-  }
   function resetReview() {
-    setTaskReview(null);
-    setReviewOpen(false);
+    // No-op now: per-turn file changes replaced the git review modal.
+    // Kept so session-switch call sites don't change.
   }
 
   // Stored attachments per session (from session_data + uploads).
@@ -225,9 +176,7 @@ export function createReview(opts: {
   }
 
   return {
-    taskReview, reviewOpen, setReviewOpen, reviewLoading, setReviewLoading, reviewError,
-    requestReview, refreshReview, keepChanges, undoChanges,
-    noteSessionChanges, noteChangesUpdated, noteReviewError, resetReview,
+    resetReview,
     sessionFiles, noteSessionFiles, addSessionFile, purgeSessionFiles,
     previewCache, previewFile, setPreviewFile, previewCopied, setPreviewCopied,
     truncateTokens, setTruncateTokens, showTruncateInput, setShowTruncateInput,

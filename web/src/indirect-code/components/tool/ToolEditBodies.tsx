@@ -169,7 +169,10 @@ export function ToolEditBodies(props: ToolPartProps) {
   };
 
   const sections = createMemo(() => {
-    const res = props.u.result?.toolResult || "";
+    // The daemon now sends the rich rendering in details.display (the
+    // AI-visible text is pi's one-line confirmation); fall back to parsing
+    // the result text for sessions recorded before the split.
+    const res = (props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || "";
     return parseEditResults(res, defaultPath());
   });
 
@@ -177,7 +180,7 @@ export function ToolEditBodies(props: ToolPartProps) {
     <>
       {/* Context body per tool kind (scrollable, always inline — the
           collapsible rows already are the "open file/diff" view). */}
-      <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && props.u.result?.toolResult}>
+      <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && props.u.result}>
         <Show when={props.m.args().dryRun === true}>
           <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
             <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
@@ -208,11 +211,11 @@ export function ToolEditBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "read"}>
           <Show
-            when={props.u.result?.toolResult || props.m.prog()}
+            when={props.u.result?.toolDetails?.display || props.u.result?.toolResult || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Reading file…</div>}
           >
             <CodeBlock
-              text={props.u.result?.toolResult || props.m.prog() || ""}
+              text={(props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || props.m.prog() || ""}
               language={languageForPath(String(props.m.args().path || ""))}
               scrollKey={props.m.key()}
             />
@@ -220,7 +223,7 @@ export function ToolEditBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "write"}>
           <CodeBlock
-            text={String(props.u.result?.toolResult || props.m.args().content || "")}
+            text={String((props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || props.m.args().content || "")}
             language={languageForPath(String(props.m.args().path || ""))}
             scrollKey={props.m.key()}
           />

@@ -1,9 +1,14 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +29,15 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	return b
 }
 
+func toolDisplay(t *testing.T, res core.ToolResult) string {
+	t.Helper()
+	d, ok := res.Details.(map[string]any)["display"].(string)
+	if !ok {
+		t.Fatalf("missing display in details: %#v", res.Details)
+	}
+	return d
+}
+
 func TestReadText(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.txt")
@@ -35,20 +49,34 @@ func TestReadText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// pi style: raw content, no line prefixes, no notice.
 	got := res.Content[0].(provider.TextBlock).Text
-	if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
-		t.Fatalf("got %q", got)
+	if got != "hello\nworld\n" {
+		t.Fatalf("want raw content, got %q", got)
+	}
+	// Frontend display keeps the legacy line-prefixed view.
+	display := toolDisplay(t, res)
+	if !strings.HasPrefix(display, LinePrefixNotice) || !strings.Contains(display, "1:hello") {
+		t.Fatalf("display lost legacy rendering:\n%s", display)
 	}
 }
 
 func TestReadImageMimeFromContentNotExtension(t *testing.T) {
 	// A file named .png whose bytes are actually JPEG. The MIME must be
-	// sniffed from the content (image/jpeg), not the extension, or
-	// providers that validate the declared media type reject the request.
+	// sniffed from the content (image/jpeg), not the extension.
 	dir := t.TempDir()
 	p := filepath.Join(dir, "shot.png")
-	jpegBytes := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
-	if err := os.WriteFile(p, jpegBytes, 0o644); err != nil {
+	var encoded bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(x * 30), G: uint8(y * 30), B: 100, A: 255})
+		}
+	}
+	if err := jpeg.Encode(&encoded, img, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, encoded.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	tool := &ReadTool{CWD: dir}
@@ -56,12 +84,52 @@ func TestReadImageMimeFromContentNotExtension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	img, ok := res.Content[0].(provider.ImageBlock)
-	if !ok {
-		t.Fatalf("expected ImageBlock, got %T", res.Content[0])
+	if got := res.Content[0].(provider.TextBlock).Text; got != "Read image file [image/jpeg]" {
+		t.Fatalf("text note = %q", got)
 	}
-	if img.MimeType != "image/jpeg" {
-		t.Fatalf("mime from extension not corrected: got %s want image/jpeg", img.MimeType)
+	imgBlock, ok := res.Content[1].(provider.ImageBlock)
+	if !ok {
+		t.Fatalf("expected ImageBlock, got %T", res.Content[1])
+	}
+	if imgBlock.MimeType != "image/jpeg" {
+		t.Fatalf("mime from extension not corrected: got %s want image/jpeg", imgBlock.MimeType)
+	}
+}
+
+func TestReadLargeImageResizesAndAddsPiHints(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "large.png")
+	img := image.NewRGBA(image.Rect(0, 0, 3000, 1000))
+	for y := 0; y < 1000; y += 25 {
+		for x := 0; x < 3000; x += 25 {
+			img.Set(x, y, color.RGBA{R: uint8(x / 12), G: uint8(y / 4), B: 90, A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, encoded.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := (&ReadTool{CWD: dir}).Execute(context.Background(), mustJSON(t, map[string]any{"path": "large.png"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := res.Content[0].(provider.TextBlock).Text
+	if !strings.Contains(text, "Read image file [image/png]") || !strings.Contains(text, "original 3000x1000, displayed at 2000x667") {
+		t.Fatalf("missing pi resize hint: %q", text)
+	}
+	block, ok := res.Content[1].(provider.ImageBlock)
+	if !ok {
+		t.Fatalf("expected resized ImageBlock, got %T", res.Content[1])
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(block.Data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != "png" || cfg.Width != 2000 || cfg.Height != 667 {
+		t.Fatalf("resized image = %s %dx%d, want png 2000x667", format, cfg.Width, cfg.Height)
 	}
 }
 
@@ -71,13 +139,53 @@ func TestReadOffsetLimit(t *testing.T) {
 	os.WriteFile(p, []byte("1\n2\n3\n4\n5\n"), 0o644)
 	tool := &ReadTool{CWD: dir}
 	res, _ := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "a.txt", "offset": 2, "limit": 2}), nil)
+	// pi style: raw lines plus the actionable continuation notice.
 	got := res.Content[0].(provider.TextBlock).Text
-	wantAI := LinePrefixNotice + "2:2\n3:3\n"
+	wantAI := "2\n3\n\n[3 more lines in file. Use offset=4 to continue.]"
 	if got != wantAI {
 		t.Fatalf("want %q, got %q", wantAI, got)
 	}
+	// Frontend display keeps the legacy line-prefixed view.
+	if display := toolDisplay(t, res); !strings.Contains(display, "2:2\n3:3\n") {
+		t.Fatalf("display lost legacy rendering:\n%s", display)
+	}
 	if start, ok := res.Details.(map[string]any)["start_line"]; !ok || start != 2 {
 		t.Errorf("start_line detail want 2, got %v", start)
+	}
+}
+
+func TestReadTruncationNotice(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "big.txt")
+	var sb strings.Builder
+	for i := 1; i <= 3000; i++ {
+		sb.WriteString("line\n")
+	}
+	os.WriteFile(p, []byte(sb.String()), 0o644)
+	tool := &ReadTool{CWD: dir}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "big.txt"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.Content[0].(provider.TextBlock).Text
+	// 3000 lines + phantom trailing line = 3001 total; head keeps 2000.
+	want := "[Showing lines 1-2000 of 3001. Use offset=2001 to continue.]"
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("want notice suffix %q, got tail %q", want, got[len(got)-120:])
+	}
+	if strings.Contains(got, LinePrefixNotice) || strings.Contains(got, "1:line") {
+		t.Fatalf("AI content must not carry line prefixes: %q", got[:40])
+	}
+}
+
+func TestReadOffsetBeyondEOF(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	os.WriteFile(p, []byte("1\n2\n"), 0o644)
+	tool := &ReadTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "a.txt", "offset": 99}), nil)
+	if err == nil || !strings.Contains(err.Error(), "Offset 99 is beyond end of file (3 lines total)") {
+		t.Fatalf("want pi offset error, got %v", err)
 	}
 }
 
@@ -94,7 +202,7 @@ func TestReadBinaryRejected(t *testing.T) {
 func TestWriteCreatesDirs(t *testing.T) {
 	dir := t.TempDir()
 	tool := &WriteTool{CWD: dir}
-	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "sub/a.txt", "content": "hi"}), nil)
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "sub/a.txt", "content": "hi"}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +213,10 @@ func TestWriteCreatesDirs(t *testing.T) {
 	if string(b) != "hi" {
 		t.Fatalf("got %q", string(b))
 	}
+	// pi style: one-line confirmation.
+	if got := res.Content[0].(provider.TextBlock).Text; got != "Successfully wrote to sub/a.txt" {
+		t.Fatalf("AI content = %q", got)
+	}
 }
 
 func TestEditSingle(t *testing.T) {
@@ -112,7 +224,7 @@ func TestEditSingle(t *testing.T) {
 	p := filepath.Join(dir, "a.txt")
 	os.WriteFile(p, []byte("hello world\n"), 0o644)
 	tool := &EditTool{CWD: dir}
-	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "a.txt",
 		"edits": []map[string]any{{"oldText": "world", "newText": "gopher"}},
 	}), nil)
@@ -123,43 +235,8 @@ func TestEditSingle(t *testing.T) {
 	if string(b) != "hello gopher\n" {
 		t.Fatalf("got %q", string(b))
 	}
-}
-
-func TestEditPreviewReturnsDiffWithoutWriting(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "a.txt")
-	if err := os.WriteFile(p, []byte("hello world\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tool := &EditTool{CWD: dir}
-	args := mustJSON(t, map[string]any{
-		"path":  "a.txt",
-		"edits": []map[string]any{{"oldText": "world", "newText": "gopher"}},
-	})
-	preview, err := tool.Preview(context.Background(), args)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := preview.Content[0].(provider.TextBlock).Text
-	for _, want := range []string{"-hello world", "+hello gopher"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("preview missing %q:\n%s", want, text)
-		}
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != "hello world\n" {
-		t.Fatalf("preview modified file: %q", b)
-	}
-
-	result, err := tool.Execute(context.Background(), args, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := result.Content[0].(provider.TextBlock).Text; got != text {
-		t.Fatalf("executed diff differs from preview:\npreview:\n%s\nresult:\n%s", text, got)
+	if got := res.Content[0].(provider.TextBlock).Text; got != "Successfully replaced 1 block(s) in a.txt." {
+		t.Fatalf("AI content = %q", got)
 	}
 }
 
@@ -184,23 +261,9 @@ func TestEditMultiple(t *testing.T) {
 	}
 }
 
-func TestEditAmbiguous(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "a.txt")
-	os.WriteFile(p, []byte("x\nx\n"), 0o644)
-	tool := &EditTool{CWD: dir}
-	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"path":  "a.txt",
-		"edits": []map[string]any{{"oldText": "x", "newText": "y"}},
-	}), nil)
-	if err == nil {
-		t.Fatal("want ambiguous error")
-	}
-}
-
 func TestEditGuidance(t *testing.T) {
 	desc := (&EditTool{}).Description()
-	for _, want := range []string{"Inspect that file", "directly from its current contents", "short excerpts", "write"} {
+	for _, want := range []string{"exact text replacement", "unique, non-overlapping region of the original file", "merge them into one edit"} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("description missing %q: %q", want, desc)
 		}
@@ -215,47 +278,12 @@ func TestEditGuidance(t *testing.T) {
 	items := edits["items"].(map[string]any)
 	editProperties := items["properties"].(map[string]any)
 	oldText := editProperties["oldText"].(map[string]any)
-	if got, _ := oldText["description"].(string); !strings.Contains(got, "file being modified") {
-		t.Fatalf("oldText schema description missing target-file guidance: %q", got)
+	if got, _ := oldText["description"].(string); !strings.Contains(got, "must be unique in the original file") {
+		t.Fatalf("oldText schema description missing pi guidance: %q", got)
 	}
-}
-
-func TestEditNotFoundGuidesRecovery(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "destination.txt")
-	if err := os.WriteFile(p, []byte("destination content\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tool := &EditTool{CWD: dir}
-	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"path":  "destination.txt",
-		"edits": []map[string]any{{"oldText": "content from another file", "newText": "replacement"}},
-	}), nil)
-	if err == nil {
-		t.Fatal("want oldText not found error")
-	}
-	for _, want := range []string{"oldText not found", "destination.txt", "inspect that file again", "matching spaces and line breaks"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error missing %q: %q", want, err)
-		}
-	}
-}
-
-func TestEditPreservesCRLF(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "a.txt")
-	os.WriteFile(p, []byte("hello\r\nworld\r\n"), 0o644)
-	tool := &EditTool{CWD: dir}
-	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"path":  "a.txt",
-		"edits": []map[string]any{{"oldText": "world", "newText": "gopher"}},
-	}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(p)
-	if string(b) != "hello\r\ngopher\r\n" {
-		t.Fatalf("got %q", string(b))
+	// pi schema: only path and edits, nothing else.
+	if len(properties) != 2 {
+		t.Fatalf("edit schema must expose only path+edits (pi parity), got %d properties", len(properties))
 	}
 }
 
@@ -307,37 +335,6 @@ func TestResolveShell(t *testing.T) {
 	}
 }
 
-func TestShellDescription(t *testing.T) {
-	tests := []struct {
-		name  string
-		shell shellCommand
-		want  string
-	}{
-		{
-			name:  "bash",
-			shell: shellCommand{path: "/opt/bin/bash", flag: "-c", isBash: true},
-			want:  "Run a Bash command via /opt/bin/bash -c. LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), edit (not sed -i), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
-		},
-		{
-			name:  "POSIX fallback",
-			shell: shellCommand{path: "/bin/sh", flag: "-c"},
-			want:  "Run a POSIX sh command via /bin/sh -c (Bash unavailable). LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), edit (not sed -i), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
-		},
-		{
-			name:  "Windows",
-			shell: shellCommand{path: "cmd", flag: "/C"},
-			want:  "Run a Windows Command Prompt command via cmd /C. LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), edit (not sed -i), write (new file), glob (find files), python (scripting), search_web/fetch_url (web). Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams.",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shellDescription(tt.shell); got != tt.want {
-				t.Fatalf("shellDescription() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestBashSuccess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("posix shell only")
@@ -347,12 +344,20 @@ func TestBashSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// pi style: raw merged output, no prompt echo, no [exit N] footer.
 	got := res.Content[0].(provider.TextBlock).Text
-	if !strings.Contains(got, "hi") || !strings.Contains(got, "[exit 0]") {
+	if got != "hi\n" && got != "hi" {
 		t.Fatalf("got %q", got)
 	}
 	if res.IsError {
 		t.Fatal("unexpected error flag")
+	}
+	// Frontend display keeps the legacy terminal-log view.
+	display := toolDisplay(t, res)
+	for _, want := range []string{"$ echo hi", "hi", "[exit 0]", "Took"} {
+		if !strings.Contains(display, want) {
+			t.Fatalf("display missing %q:\n%s", want, display)
+		}
 	}
 }
 
@@ -385,9 +390,77 @@ func TestBashFailure(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("want error")
 	}
+	// pi style: output + status appended, no [exit N] footer.
 	got := res.Content[0].(provider.TextBlock).Text
-	if !strings.Contains(got, "[exit 1]") {
+	if !strings.Contains(got, "Command exited with code 1") {
 		t.Fatalf("got %q", got)
+	}
+	if strings.Contains(got, "[exit 1]") {
+		t.Fatalf("AI content must not carry the legacy footer: %q", got)
+	}
+	// Frontend display keeps the legacy footer.
+	if display := toolDisplay(t, res); !strings.Contains(display, "[exit 1]") {
+		t.Fatalf("display lost legacy footer:\n%s", display)
+	}
+}
+
+func TestBashTailTruncation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	tool := &BashTool{CWD: t.TempDir()}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"command": "seq 1 3000",
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.Content[0].(provider.TextBlock).Text
+	// pi style: keep the LAST 2000 lines and point at the full output file.
+	if !strings.Contains(got, "1001") || strings.Contains(got, "\n1\n") {
+		t.Fatalf("tail truncation must keep the last lines:\n%s", got[:80])
+	}
+	if !strings.Contains(got, "[Showing lines 1001-3000 of 3000. Full output: ") {
+		t.Fatalf("want pi truncation notice, got:\n%s", got[len(got)-200:])
+	}
+	details := res.Details.(map[string]any)
+	if fp, _ := details["full_output_path"].(string); fp == "" {
+		t.Fatal("full output path missing")
+	}
+}
+
+func TestBashTimeoutValidation(t *testing.T) {
+	tool := &BashTool{CWD: t.TempDir()}
+	zero := 0.0
+	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"command": "true", "timeout": zero}), nil); err == nil ||
+		!strings.Contains(err.Error(), "Invalid timeout: must be a finite number of seconds") {
+		t.Fatalf("want pi timeout error, got %v", err)
+	}
+	huge := 3000000.0
+	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"command": "true", "timeout": huge}), nil); err == nil ||
+		!strings.Contains(err.Error(), "Invalid timeout: maximum is 2147483.647 seconds") {
+		t.Fatalf("want pi max-timeout error, got %v", err)
+	}
+}
+
+func TestBashTimeoutExpires(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	tool := &BashTool{CWD: t.TempDir()}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"command": "sleep 5",
+		"timeout": 0.3,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Fatal("timeout must be an error result")
+	}
+	got := res.Content[0].(provider.TextBlock).Text
+	if !strings.Contains(got, "Command timed out after 0.3 seconds") {
+		t.Fatalf("want pi timeout message, got %q", got)
 	}
 }
 
@@ -402,10 +475,15 @@ func TestWriteLineNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// pi style: one-line confirmation only.
 	got := res.Content[0].(provider.TextBlock).Text
-	wantAI := LinePrefixNotice + "1:alpha\n2:beta\n3:gamma\n"
-	if got != wantAI {
-		t.Fatalf("want AI content %q, got %q", wantAI, got)
+	if got != "Successfully wrote to file.txt" {
+		t.Fatalf("AI content = %q", got)
+	}
+	// Frontend display keeps the legacy line-prefixed echo.
+	wantDisplay := LinePrefixNotice + "1:alpha\n2:beta\n3:gamma\n"
+	if display := toolDisplay(t, res); display != wantDisplay {
+		t.Fatalf("display = %q", display)
 	}
 }
 
@@ -421,12 +499,17 @@ func TestEditLineNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := res.Content[0].(provider.TextBlock).Text
-	if !strings.HasPrefix(got, LinePrefixNotice) {
-		t.Fatalf("expected LinePrefixNotice prefix, got %q", got)
+	// pi style: one-line confirmation only.
+	if got := res.Content[0].(provider.TextBlock).Text; got != "Successfully replaced 1 block(s) in e.txt." {
+		t.Fatalf("AI content = %q", got)
 	}
-	if !strings.Contains(got, "2:-line2") || !strings.Contains(got, "2:+replaced") {
-		t.Fatalf("expected 2:-line2 and 2:+replaced in AI output, got %q", got)
+	// Frontend display keeps the legacy numbered diff.
+	display := toolDisplay(t, res)
+	if !strings.HasPrefix(display, LinePrefixNotice) {
+		t.Fatalf("expected LinePrefixNotice prefix, got %q", display)
+	}
+	if !strings.Contains(display, "2:-line2") || !strings.Contains(display, "2:+replaced") {
+		t.Fatalf("expected 2:-line2 and 2:+replaced in display, got %q", display)
 	}
 }
 
@@ -482,4 +565,3 @@ func TestDumpToolsSchema(t *testing.T) {
 
 	t.Logf("\n=== TOOLS SCHEMA JSON ===\n%s\n=== END TOOLS SCHEMA JSON ===", string(data))
 }
-

@@ -6,7 +6,6 @@ import { useModal } from "../ctx";
 import { indirectInstallCommands } from "../install";
 
 export { NewProjectModal } from "./NewProjectModal";
-export { ReviewModal } from "./ReviewModal";
 
 export function ChoiceModal() {
   const m = useModal();

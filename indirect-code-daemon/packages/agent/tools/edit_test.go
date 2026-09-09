@@ -6,140 +6,318 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"llm-gateway/indirect-code-daemon/packages/core"
+	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-func TestEditDryRunThenApply(t *testing.T) {
+func editDisplay(t *testing.T, res core.ToolResult) string {
+	t.Helper()
+	d, ok := res.Details.(map[string]any)["display"].(string)
+	if !ok {
+		t.Fatalf("missing display in details: %#v", res.Details)
+	}
+	return d
+}
+
+// TestEditPreviewReturnsDiffWithoutWriting: Preview validates and diffs
+// without writing; the AI-visible content is pi's one-line confirmation.
+func TestEditPreviewReturnsDiffWithoutWriting(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "f.txt")
-	os.WriteFile(p, []byte("hello world\nsecond line\n"), 0o644)
-	tool := &EditTool{CWD: dir, Sandbox: NewSandbox(dir)}
-
-	// Dry run previews without writing (dryRun: true).
-	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"dryRun": true,
-		"edits":  []map[string]any{{"file": "f.txt", "old": "world", "new": "there"}},
-	}), nil)
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("hello world\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := &EditTool{CWD: dir}
+	args := mustJSON(t, map[string]any{
+		"path":  "a.txt",
+		"edits": []map[string]any{{"oldText": "world", "newText": "gopher"}},
+	})
+	preview, err := tool.Preview(context.Background(), args)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := toolResultText(t, res)
-	if !strings.Contains(got, "DRY RUN") || !strings.Contains(got, "-hello world") || !strings.Contains(got, "+hello there") {
-		t.Fatalf("expected dry-run diff, got:\n%s", got)
+	if got := preview.Content[0].(provider.TextBlock).Text; got != "Successfully replaced 1 block(s) in a.txt." {
+		t.Fatalf("preview AI content = %q", got)
 	}
-	if data, _ := os.ReadFile(p); string(data) != "hello world\nsecond line\n" {
-		t.Fatal("dry run must not write")
+	display := editDisplay(t, preview)
+	for _, want := range []string{"APPLIED.", "-hello world", "+hello gopher"} {
+		if !strings.Contains(display, want) {
+			t.Fatalf("preview display missing %q:\n%s", want, display)
+		}
 	}
-
-	// Default dryRun is false: apply writes directly.
-	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"edits": []map[string]any{{"file": "f.txt", "old": "world", "new": "there"}},
-	}), nil)
+	b, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolResultText(t, res); !strings.Contains(got, "APPLIED") {
-		t.Fatalf("expected APPLIED, got:\n%s", got)
+	if string(b) != "hello world\n" {
+		t.Fatalf("preview modified file: %q", b)
 	}
-	if data, _ := os.ReadFile(p); string(data) != "hello there\nsecond line\n" {
-		t.Fatalf("file not edited: %q", data)
+
+	result, err := tool.Execute(context.Background(), args, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := editDisplay(t, result); got != display {
+		t.Fatalf("executed display differs from preview:\npreview:\n%s\nresult:\n%s", display, got)
 	}
 }
 
-func TestEditRegexReplaceAll(t *testing.T) {
+func TestEditMultipleAgainstOriginal(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "f.txt")
-	os.WriteFile(p, []byte("a1 b2 a3\n"), 0o644)
-	tool := &EditTool{CWD: dir, Sandbox: NewSandbox(dir)}
-	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"dryRun": false,
-		"edits":  []map[string]any{{"file": "f.txt", "old": "[a-z]\\d", "new": "X", "regex": true, "replaceAll": true}},
+	p := filepath.Join(dir, "a.txt")
+	os.WriteFile(p, []byte("a\nb\nc\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.txt",
+		"edits": []map[string]any{
+			{"oldText": "a", "newText": "A"},
+			{"oldText": "c", "newText": "C"},
+		},
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolResultText(t, res); !strings.Contains(got, "3 match") {
-		t.Fatalf("expected 3 matches, got:\n%s", got)
-	}
-	if data, _ := os.ReadFile(p); string(data) != "X X X\n" {
-		t.Fatalf("regex replaceAll failed: %q", data)
+	b, _ := os.ReadFile(p)
+	if string(b) != "A\nb\nC\n" {
+		t.Fatalf("got %q", string(b))
 	}
 }
 
-func TestEditAnchorAndErrors(t *testing.T) {
+func TestEditAmbiguous(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "f.txt")
-	os.WriteFile(p, []byte("line1\nline2\n"), 0o644)
-	tool := &EditTool{CWD: dir, Sandbox: NewSandbox(dir)}
-	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"dryRun": false,
-		"edits":  []map[string]any{{"file": "f.txt", "old": "line1", "new": "inserted", "anchor": true}},
-	}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = res
-	if data, _ := os.ReadFile(p); string(data) != "line1\ninserted\nline2\n" {
-		t.Fatalf("anchor insert failed: %q", data)
-	}
-	// Missing old errors cleanly.
-	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"edits": []map[string]any{{"file": "f.txt", "old": "nope", "new": "x"}},
-	}), nil); err == nil {
-		t.Fatal("expected not-found error")
-	}
-}
-
-func TestEditLineReplacement(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "code.txt")
-	os.WriteFile(p, []byte("alpha\nbeta\ngamma\n"), 0o644)
-	tool := &EditTool{CWD: dir, Sandbox: NewSandbox(dir)}
-
-	// Replace line 2 with newContent
-	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"edits": []map[string]any{{
-			"file":       "code.txt",
-			"line":       2,
-			"newContent": "BETA_MODIFIED",
-		}},
-	}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := toolResultText(t, res)
-	if !strings.Contains(got, "2:-beta") || !strings.Contains(got, "2:+BETA_MODIFIED") {
-		t.Fatalf("expected line 2 diff, got:\n%s", got)
-	}
-	data, _ := os.ReadFile(p)
-	if string(data) != "alpha\nBETA_MODIFIED\ngamma\n" {
-		t.Fatalf("unexpected content after line edit: %q", string(data))
-	}
-
-	// Range replace: lines 1 to 2
-	_, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"path": "code.txt",
-		"edits": []map[string]any{{
-			"line":       1,
-			"endLine":    2,
-			"newContent": "FIRST_LINE",
-		}},
-	}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ = os.ReadFile(p)
-	if string(data) != "FIRST_LINE\ngamma\n" {
-		t.Fatalf("unexpected content after range edit: %q", string(data))
-	}
-
-	// Line out of range errors cleanly
-	_, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"path": "code.txt",
-		"line": 99,
-		"newContent": "foo",
+	p := filepath.Join(dir, "a.txt")
+	os.WriteFile(p, []byte("x\nx\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "a.txt",
+		"edits": []map[string]any{{"oldText": "x", "newText": "y"}},
 	}), nil)
 	if err == nil {
-		t.Fatal("expected out of range error")
+		t.Fatal("want ambiguous error")
+	}
+	want := "Found 2 occurrences of the text in a.txt. The text must be unique."
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("want pi duplicate error, got %q", err)
 	}
 }
 
+func TestEditNotFoundPiError(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "destination.txt")
+	os.WriteFile(p, []byte("destination content\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "destination.txt",
+		"edits": []map[string]any{{"oldText": "content from another file", "newText": "replacement"}},
+	}), nil)
+	if err == nil {
+		t.Fatal("want oldText not found error")
+	}
+	want := "Could not find the exact text in destination.txt. The old text must match exactly including all whitespace and newlines."
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("want pi not-found error, got %q", err)
+	}
+}
+
+func TestEditOverlapPiError(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	os.WriteFile(p, []byte("alpha beta gamma\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.txt",
+		"edits": []map[string]any{
+			{"oldText": "alpha beta", "newText": "one"},
+			{"oldText": "beta gamma", "newText": "two"},
+		},
+	}), nil)
+	if err == nil {
+		t.Fatal("want overlap error")
+	}
+	want := "edits[0] and edits[1] overlap in a.txt. Merge them into one edit or target disjoint regions."
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("want pi overlap error, got %q", err)
+	}
+}
+
+func TestEditNoChangePiError(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	os.WriteFile(p, []byte("same\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "a.txt",
+		"edits": []map[string]any{{"oldText": "same", "newText": "same"}},
+	}), nil)
+	if err == nil {
+		t.Fatal("want no-change error")
+	}
+	want := "No changes made to a.txt. The replacement produced identical content."
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("want pi no-change error, got %q", err)
+	}
+}
+
+func TestEditEmptyOldTextPiError(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	os.WriteFile(p, []byte("x\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "a.txt",
+		"edits": []map[string]any{{"oldText": "", "newText": "y"}},
+	}), nil)
+	if err == nil {
+		t.Fatal("want empty oldText error")
+	}
+	if !strings.Contains(err.Error(), "oldText must not be empty in a.txt.") {
+		t.Fatalf("want pi empty-oldText error, got %q", err)
+	}
+}
+
+func TestEditFuzzyMatchTrailingWhitespace(t *testing.T) {
+	// The model's oldText omits the trailing whitespace the file has.
+	// pi's fuzzy match (per-line trailing-whitespace trim) must recover.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	os.WriteFile(p, []byte("func main() {\n\tfmt.Println(\"hi\")   \n}\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "f.txt",
+		"edits": []map[string]any{{"oldText": "\tfmt.Println(\"hi\")", "newText": "\tfmt.Println(\"bye\")"}},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != "func main() {\n\tfmt.Println(\"bye\")   \n}\n" {
+		t.Fatalf("fuzzy match must preserve the file's trailing whitespace: %q", string(b))
+	}
+}
+
+func TestEditFuzzyMatchSmartQuotes(t *testing.T) {
+	// The model sends ASCII quotes; the file has smart quotes.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "q.txt")
+	os.WriteFile(p, []byte("msg := \"hello\"\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "q.txt",
+		"edits": []map[string]any{{"oldText": "msg := \"hello\"", "newText": "msg := \"bye\""}},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != "msg := \"bye\"\n" {
+		t.Fatalf("got %q", string(b))
+	}
+}
+
+func TestEditPreservesCRLF(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	os.WriteFile(p, []byte("hello\r\nworld\r\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "a.txt",
+		"edits": []map[string]any{{"oldText": "world", "newText": "gopher"}},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != "hello\r\ngopher\r\n" {
+		t.Fatalf("got %q", string(b))
+	}
+}
+
+func TestEditPreservesBOM(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "bom.txt")
+	os.WriteFile(p, []byte("\xEF\xBB\xBFhello\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "bom.txt",
+		"edits": []map[string]any{{"oldText": "hello", "newText": "world"}},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != "\xEF\xBB\xBFworld\n" {
+		t.Fatalf("BOM must be preserved: %q", string(b))
+	}
+}
+
+func TestEditPrepareArgumentsNormalizations(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "n.txt")
+	os.WriteFile(p, []byte("hello world\n"), 0o644)
+	tool := &EditTool{CWD: dir}
+
+	// Legacy top-level oldText/newText (pi prepareEditArguments).
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":    "n.txt",
+		"oldText": "world",
+		"newText": "gopher",
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "hello gopher\n" {
+		t.Fatalf("legacy top-level edit failed: %q", string(b))
+	}
+
+	// edits sent as a JSON string (degenerate model input).
+	os.WriteFile(p, []byte("hello world\n"), 0o644)
+	editsJSON := `[{"oldText":"world","newText":"gopher"}]`
+	_, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "n.txt",
+		"edits": editsJSON,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "hello gopher\n" {
+		t.Fatalf("string-encoded edits failed: %q", string(b))
+	}
+
+	// edits sent as a single object instead of a one-element array.
+	os.WriteFile(p, []byte("hello world\n"), 0o644)
+	_, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "n.txt",
+		"edits": map[string]any{"oldText": "world", "newText": "gopher"},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "hello gopher\n" {
+		t.Fatalf("single-object edits failed: %q", string(b))
+	}
+
+	// Empty edits must fail with pi's validation message.
+	_, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "n.txt",
+		"edits": []map[string]any{},
+	}), nil)
+	if err == nil || !strings.Contains(err.Error(), "Edit tool input is invalid. edits must contain at least one replacement.") {
+		t.Fatalf("want pi validation error, got %v", err)
+	}
+}
+
+func TestEditMissingFilePiError(t *testing.T) {
+	dir := t.TempDir()
+	tool := &EditTool{CWD: dir}
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  "nope.txt",
+		"edits": []map[string]any{{"oldText": "a", "newText": "b"}},
+	}), nil)
+	if err == nil {
+		t.Fatal("want missing file error")
+	}
+	if !strings.Contains(err.Error(), "Could not edit file: nope.txt.") {
+		t.Fatalf("want pi access error, got %q", err)
+	}
+}

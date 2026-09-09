@@ -358,8 +358,8 @@ export function createTranscript(opts: {
     if (!delta) return;
     setMessages((prev) => reduceToolArgs(prev, callId, delta));
   }
-  function appendToolResult(callId: string, result: string | undefined, isError?: boolean, startedAt?: number, durationMs?: number) {
-    setMessages((prev) => reduceToolResult(prev, callId, result, isError, startedAt, durationMs));
+  function appendToolResult(callId: string, result: string | undefined, isError?: boolean, startedAt?: number, durationMs?: number, details?: any) {
+    setMessages((prev) => reduceToolResult(prev, callId, result, isError, startedAt, durationMs, details));
   }
   // Drop rendered messages below a raw keep-index (optimistic edit/regen cut).
   function cutLiveTail(keepRawIdx: number) {
@@ -709,7 +709,7 @@ export function createTranscript(opts: {
         delete next[ev.id];
         return next;
       });
-      appendToolResult(ev.id, ev.result ?? ev.content, ev.isError, ev.startedAt, ev.durationMs);
+      appendToolResult(ev.id, ev.result ?? ev.content, ev.isError, ev.startedAt, ev.durationMs, ev.details);
       setToolStarts((prev) => { const next = { ...prev }; delete next[ev.id]; return next; });
     } else if (ev.type === "usage") {
       applyUsage(sessionId, ev.usage, ev.cumulative);

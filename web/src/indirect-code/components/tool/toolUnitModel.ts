@@ -26,7 +26,7 @@ const bashHeaderCmd = () => {
   }
   return String(a.command || sum().target || "");
 };
-const terminal = createMemo(() => terminalPresentation(u.result?.toolResult || ""));
+const terminal = createMemo(() => terminalPresentation((u.result?.toolDetails?.display ?? u.result?.toolResult) || ""));
 const webDetails = () => {
   const d: any = u.result?.toolDetails;
   if (!d || !Array.isArray(d.results)) return undefined;

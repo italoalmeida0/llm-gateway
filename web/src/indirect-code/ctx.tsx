@@ -109,6 +109,7 @@ function defineCtx<T>() {
 export const [HostCtx, useHost] = defineCtx<HostCtxValue>();
 export const [SessionCtx, useSession] = defineCtx<SessionCtxValue>();
 export const [TranscriptCtx, useTranscriptCtx] = defineCtx<TranscriptCtxValue>();
+export const [TurnChangesCtx, useTurnChanges] = defineCtx<ReturnType<typeof import("./hooks/useTurnChanges").createTurnChanges>>();
 export const [ComposerCtx, useComposerCtx] = defineCtx<ComposerCtxValue>();
 export const [ModalCtx, useModal] = defineCtx<ModalCtxValue>();
 export const [UICtx, useUI] = defineCtx<UICtxValue>();
@@ -117,6 +118,7 @@ export interface RemoteCodeProviderValue {
   host: HostCtxValue;
   session: SessionCtxValue;
   transcript: TranscriptCtxValue;
+  turnChanges: ReturnType<typeof import("./hooks/useTurnChanges").createTurnChanges>;
   composer: ComposerCtxValue;
   modal: ModalCtxValue;
   ui: UICtxValue;
@@ -128,11 +130,13 @@ export function RemoteCodeProvider(props: RemoteCodeProviderValue & { children: 
     <HostCtx.Provider value={props.host}>
       <SessionCtx.Provider value={props.session}>
         <TranscriptCtx.Provider value={props.transcript}>
+          <TurnChangesCtx.Provider value={props.turnChanges}>
           <ComposerCtx.Provider value={props.composer}>
             <ModalCtx.Provider value={props.modal}>
               <UICtx.Provider value={props.ui}>{props.children}</UICtx.Provider>
             </ModalCtx.Provider>
           </ComposerCtx.Provider>
+          </TurnChangesCtx.Provider>
         </TranscriptCtx.Provider>
       </SessionCtx.Provider>
     </HostCtx.Provider>

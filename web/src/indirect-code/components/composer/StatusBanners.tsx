@@ -1,12 +1,12 @@
 import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
-import { useHost, useModal, useSession, useTranscriptCtx, useUI } from "../../ctx";
+import { useHost, useSession, useTranscriptCtx, useTurnChanges, useUI } from "../../ctx";
 import { QuestionPanel } from "../QuestionModal";
 
 export function StatusBanners() {
   const s = useSession();
   const t = useTranscriptCtx();
-  const m = useModal();
+  const tc = useTurnChanges();
   const h = useHost();
   const ui = useUI();
   return (
@@ -48,12 +48,9 @@ export function StatusBanners() {
     </ol></Show>
   </section>
 </Show>
-<Show when={m.taskReview()?.files.length && s.activeSessionId()}>
+<Show when={tc.balloons().some((b) => b.live && (b.files.length || 0) > 0) && s.activeSessionId() && t.sessionStatus() === "running"}>
   <div class="mb-2 flex flex-wrap items-center justify-end gap-3 text-xs text-ink-400" data-task-changes>
-    <span class="flex items-center gap-1.5"><Iconify icon="lucide:files" size={14} />{m.taskReview()?.files.length} file{m.taskReview()?.files.length === 1 ? "" : "s"} changed<Show when={(m.taskReview()?.files || []).some((f) => (f.added || 0) > 0 || (f.removed || 0) > 0)}><span class="font-mono text-emerald-400">+{(m.taskReview()?.files || []).reduce((n, f) => n + (f.added || 0), 0)}</span><span class="font-mono text-rose-400">-{(m.taskReview()?.files || []).reduce((n, f) => n + (f.removed || 0), 0)}</span></Show></span>
-    <button onClick={() => m.undoChanges()} disabled={t.sessionStatus() === "running" || m.reviewLoading() || !h.wsOpen()} class="flex items-center gap-1 hover:text-ink-100 disabled:opacity-40 cursor-pointer"><Iconify icon="lucide:undo-2" size={13} />Undo</button>
-    <button onClick={m.keepChanges} disabled={t.sessionStatus() === "running" || m.reviewLoading() || !h.wsOpen()} class="hover:text-ink-100 disabled:opacity-40 cursor-pointer">Keep</button>
-    <button onClick={() => m.requestReview(true)} disabled={m.reviewLoading() || !h.wsOpen()} class="px-3 py-1.5 rounded-lg border border-line hover:bg-elev text-ink-200 disabled:opacity-40 cursor-pointer">Review</button>
+    <span class="flex items-center gap-1.5"><Iconify icon="lucide:loader-circle" size={14} class="animate-spin" />{tc.balloons().find((b) => b.live)?.files.length} file{(tc.balloons().find((b) => b.live)?.files.length || 0) === 1 ? "" : "s"} changing</span>
   </div>
 </Show>
 <Show when={ui.appNotice()}>{(notice) =>

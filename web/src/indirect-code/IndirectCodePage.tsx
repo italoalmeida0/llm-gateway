@@ -18,7 +18,7 @@ import { TranscriptView } from "./components/TranscriptView";
 import { Composer } from "./components/Composer";
 import { ModelPickerBody } from "./components/ModelPickerBody";
 import {
-  NewProjectModal, ReviewModal, ChoiceModal, ConfirmModal, PairModal,
+  NewProjectModal, ChoiceModal, ConfirmModal, PairModal,
 } from "./modals/SimpleModals";
 import { PreviewModal } from "./modals/PreviewModal";
 import { SettingsModal } from "./modals/SettingsModal";
@@ -35,6 +35,7 @@ import { createMirror } from "./hooks/useMirror";
 import { createTranscript } from "./hooks/useTranscript";
 import { createSessionOptions } from "./hooks/useSessionOptions";
 import { createReview } from "./hooks/useReview";
+import { createTurnChanges } from "./hooks/useTurnChanges";
 import { createComposer } from "./hooks/useComposer";
 import { createProjects } from "./hooks/useProjects";
 import { createWorkspace } from "./hooks/useWorkspace";
@@ -91,7 +92,7 @@ export default function IndirectCodePage() {
           }
         }
       }).catch((e) => console.warn("[rc-sync] syncAll:", e));
-      if (activeSessionId()) { transcript.fetchSession(activeSessionId()); review.requestReview(review.reviewOpen()); }
+      if (activeSessionId()) { transcript.fetchSession(activeSessionId()); turnChanges.requestBalloons(); }
     },
     onClose: () => {
       options.resetPendingChoice();
@@ -99,7 +100,6 @@ export default function IndirectCodePage() {
       transcript.setForking(false);
       setCreatingSession(false);
       projects.setFolderLoading(false);
-      review.setReviewLoading(false);
       mirror.dataLayer.disconnect();
       transcript.stopThinkingTimer();
     },
@@ -122,7 +122,7 @@ export default function IndirectCodePage() {
     toast: notice.toast,
     showChoice: modals.showChoice,
     showConfirm: modals.showConfirm,
-    onTurnIdle: () => review.requestReview(review.reviewOpen()),
+    onTurnIdle: () => turnChanges.requestBalloons(),
     onUsageContext: (ctx) => {
       const configured = gatewayModels().find((m) => m.id === ctx.model)?.limit?.context ?? 0;
       if (configured !== ctx.windowTokens) void loadGatewayModels();
@@ -142,6 +142,12 @@ export default function IndirectCodePage() {
     toast: notice.toast,
     showConfirm: modals.showConfirm,
     isHostOnline,
+  });
+
+  const turnChanges = createTurnChanges({
+    send: (payload) => relay.send(payload),
+    getSessionId: () => activeSessionId(),
+    toast: notice.toast,
   });
 
   const composer = createComposer({
@@ -300,6 +306,7 @@ export default function IndirectCodePage() {
     setDraftMode(false);
     transcript.resetForSession();
     review.resetReview();
+    turnChanges.reset();
     notice.setAppNotice(null);
     transcript.beginLoad(id);
     setActiveSessionId(id);
@@ -322,7 +329,7 @@ export default function IndirectCodePage() {
       }
     }
     transcript.fetchSession(id);
-    review.requestReview();
+    turnChanges.requestBalloons();
   }
 
   // Open a centered draft without creating a conversation on the host.
@@ -338,6 +345,7 @@ export default function IndirectCodePage() {
     } catch {}
     composer.setInputPrompt(mirror.configDoc()?.newDraft || "");
     review.resetReview();
+    turnChanges.reset();
     notice.setAppNotice(null);
     options.applyOptions(options.getLastLocalSelection() || mirror.configDoc()?.lastSelection);
     composer.clearAttachments();
@@ -456,12 +464,25 @@ export default function IndirectCodePage() {
         projects.noteFolders(msg);
         break;
       }
-      case "session_changes": {
-        review.noteSessionChanges(msg);
+      case "turn_file_changes": {
+        // Single event for both states: live=true while the turn runs
+        // (balloon floats above the composer), live=false once finished
+        // (balloon sits below its turn). The frontend only reads changes.
+        if (msg.sessionId && msg.sessionId === activeSessionId() && msg.balloon) {
+          turnChanges.noteBalloon(msg.balloon, msg.live === true);
+        }
         break;
       }
-      case "changes_updated": {
-        review.noteChangesUpdated(msg);
+      case "turn_changes": {
+        if (msg.sessionId && msg.sessionId === activeSessionId()) {
+          turnChanges.noteTurnChanges(msg);
+        }
+        break;
+      }
+      case "turn_changes_undone": {
+        if (msg.sessionId && msg.sessionId === activeSessionId()) {
+          turnChanges.noteUndone(msg);
+        }
         break;
       }
 
@@ -500,6 +521,7 @@ export default function IndirectCodePage() {
         }
         if (sid && sid === activeSessionId()) {
           transcript.applySnapshot(sid, r);
+          turnChanges.applySnapshot(r);
           options.reconcileServerSelection(sid, r.model, r.options, gatewayModels().map((m) => m.id), gatewayModels()[0]?.id || "");
         }
         break;
@@ -581,7 +603,6 @@ export default function IndirectCodePage() {
         if (msg.sessionId && msg.sessionId !== activeSessionId()) break;
         if (composer.failUpload(msg.requestId, msg.message || "Upload failed")) break;
         if (msg.replyTo === "create_session") setCreatingSession(false);
-        if (msg.replyTo && ["get_changes", "undo_changes", "keep_changes"].includes(msg.replyTo)) { review.noteReviewError(msg.message || "Host unavailable"); }
         if (msg.message === "Remote host is offline") {
           hosts.markActiveHostOffline();
           if (msg.replyTo === "browse_folders") { projects.setFolderLoading(false); projects.setFolderError("The host went offline. Reconnect to browse its folders."); }
@@ -705,6 +726,7 @@ export default function IndirectCodePage() {
         setCreatingSession(false);
         creationRequestId = "";
         review.resetReview();
+        turnChanges.reset();
         transcript.resetForSession();
         transcript.resetCaches();
         notice.setAppNotice(null);
@@ -954,6 +976,7 @@ export default function IndirectCodePage() {
       host={hostValue}
       session={sessionValue}
       transcript={transcriptValue}
+      turnChanges={turnChanges}
       composer={composerValue}
       modal={modalValue}
       ui={uiValue}
@@ -975,7 +998,6 @@ export default function IndirectCodePage() {
       </Show>
 
       <NewProjectModal />
-      <ReviewModal />
       <PreviewModal />
       <ChoiceModal />
       <ConfirmModal />

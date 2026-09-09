@@ -1,6 +1,7 @@
 import { Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
-import { useComposerCtx, useSession, useTranscriptCtx, useUI } from "../ctx";
+import { useComposerCtx, useSession, useTranscriptCtx, useTurnChanges, useUI } from "../ctx";
+import { TurnChangesBalloon } from "./TurnChangesBalloon";
 import { ScrollOverlays } from "./composer/ScrollOverlays";
 import { StatusBanners } from "./composer/StatusBanners";
 import { ComposerInput } from "./composer/ComposerInput";
@@ -14,7 +15,11 @@ export function Composer() {
   const c = useComposerCtx();
   const s = useSession();
   const t = useTranscriptCtx();
+  const tc = useTurnChanges();
   const ui = useUI();
+  // The running turn's changes balloon floats right above the composer
+  // while the turn runs; finished balloons sit below their own turn.
+  const liveBalloon = () => tc.balloons().find((b) => b.live);
   return (
 <>
 
@@ -22,6 +27,17 @@ export function Composer() {
 <div class={s.draftMode() ? "flex-1 min-h-0 overflow-y-auto flex items-center justify-center px-4 py-10" : "px-4 pb-4 pt-2 bg-ink-950 relative z-20"}>
   <ScrollOverlays />
   <div class="w-full max-w-2xl mx-auto">
+  <Show when={liveBalloon() && (liveBalloon()?.files.length || 0) > 0}>
+    <TurnChangesBalloon
+      balloon={liveBalloon()!}
+      expanded={tc.isExpanded("live")}
+      onToggle={() => tc.toggleExpanded("live")}
+      undoBusy={false}
+      onUndo={() => {}}
+      live
+      onReview={() => tc.requestBalloons()}
+    />
+  </Show>
   <StatusBanners />
     <Show when={!s.workspaceBlocked()} fallback={
       <div role="status" class="rounded-2xl border border-line bg-elev px-4 py-4 text-sm text-ink-300" data-workspace-unavailable>

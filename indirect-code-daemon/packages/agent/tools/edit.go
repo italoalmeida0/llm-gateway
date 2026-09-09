@@ -1,88 +1,51 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// EditTool applies exact-match substitutions or line-based edits across one or more files.
+// EditTool edits a single file using exact text replacement, mirroring pi's
+// edit tool: every edits[].oldText must match a unique, non-overlapping region
+// of the ORIGINAL file (edits are not applied incrementally), with fuzzy
+// matching (trailing whitespace / smart quotes / dashes / special spaces
+// normalization) as a fallback when an exact match fails.
 type EditTool struct {
 	CWD     string
 	Sandbox *Sandbox
+	Changes ChangeTracker
 }
 
-type EditOp struct {
-	// File is workspace-relative (required if path not set at top level).
-	File string `json:"file,omitempty"`
-	Path string `json:"path,omitempty"`
-
-	// Text-based replacement:
-	Old        string `json:"old,omitempty"`
-	OldText    string `json:"oldText,omitempty"`
-	New        string `json:"new,omitempty"`
-	NewText    string `json:"newText,omitempty"`
-	NewContent string `json:"newContent,omitempty"`
-
-	// Line-based replacement (1-indexed):
-	Line    int `json:"line,omitempty"`
-	EndLine int `json:"endLine,omitempty"`
-
-	// Match options (for text-based replacement):
-	Regex      bool `json:"regex,omitempty"`
-	ReplaceAll bool `json:"replaceAll,omitempty"`
-	Anchor     bool `json:"anchor,omitempty"`
+// piEdit is one targeted replacement, exactly like pi's replaceEditSchema.
+type piEdit struct {
+	OldText string `json:"oldText"`
+	NewText string `json:"newText"`
 }
 
-type EditArgs struct {
-	// Optional top-level path/file if all edits apply to the same file.
-	Path string `json:"path,omitempty"`
-	File string `json:"file,omitempty"`
-
-	// Edits apply in order; later edits see earlier results.
-	Edits []EditOp `json:"edits,omitempty"`
-
-	// Convenience top-level fields for a single edit:
-	Line       int    `json:"line,omitempty"`
-	EndLine    int    `json:"endLine,omitempty"`
-	NewContent string `json:"newContent,omitempty"`
-	Old        string `json:"old,omitempty"`
-	OldText    string `json:"oldText,omitempty"`
-	New        string `json:"new,omitempty"`
-	NewText    string `json:"newText,omitempty"`
-	Regex      bool   `json:"regex,omitempty"`
-	ReplaceAll bool   `json:"replaceAll,omitempty"`
-	Anchor     bool   `json:"anchor,omitempty"`
-
-	// DryRun previews diffs without writing (default false).
-	DryRun *bool `json:"dryRun,omitempty"`
+type editArgs struct {
+	Path  string   `json:"path"`
+	Edits []piEdit `json:"edits"`
+	// Legacy top-level single edit; normalized into Edits like pi's
+	// prepareEditArguments does.
+	OldText string `json:"oldText,omitempty"`
+	NewText string `json:"newText,omitempty"`
 }
 
-type fileEditResult struct {
-	file    string
-	applied bool
-	matches int
-	diff    string
-	aiDiff  string
-	err     string
-}
-
-const editSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Optional file to modify, given as an absolute path or relative to the working directory."},"file":{"type":"string","description":"Alias for path."},"edits":{"type":"array","description":"A list of edit operations to apply in order.","items":{"type":"object","properties":{"file":{"type":"string","description":"File to modify (required if not set at top level)."},"path":{"type":"string","description":"Alias for file."},"line":{"type":"integer","description":"1-indexed line number to replace (e.g. line: 2, newContent: \"...\")."},"endLine":{"type":"integer","description":"1-indexed end line number for range replacement (inclusive). Default is line."},"newContent":{"type":"string","description":"Content that replaces the specified line(s)."},"old":{"type":"string","description":"A verbatim excerpt from the file being modified. Include enough surrounding text to identify exactly one location."},"oldText":{"type":"string","description":"A verbatim excerpt from the file being modified (alias for old)."},"new":{"type":"string","description":"Content that will replace the matched excerpt."},"newText":{"type":"string","description":"Alias for new."},"regex":{"type":"boolean","description":"Treat old as RE2 regex ($1 groups in new)."},"replaceAll":{"type":"boolean","description":"Replace every match instead of requiring a unique one."},"anchor":{"type":"boolean","description":"Insert new after the line matching old instead of replacing."}}}},"line":{"type":"integer","description":"Convenience 1-indexed line number for single edit without edits array."},"endLine":{"type":"integer","description":"Convenience 1-indexed end line number."},"newContent":{"type":"string","description":"Convenience replacement content for line edit."},"old":{"type":"string","description":"Convenience verbatim excerpt from the file for single edit."},"oldText":{"type":"string","description":"Alias for old."},"new":{"type":"string","description":"Convenience replacement content for matched excerpt."},"newText":{"type":"string","description":"Alias for new."},"regex":{"type":"boolean","description":"Treat old as RE2 regex ($1 groups in new)."},"replaceAll":{"type":"boolean","description":"Replace every match instead of requiring a unique one."},"anchor":{"type":"boolean","description":"Insert new after the line matching old instead of replacing."},"dryRun":{"type":"boolean","description":"Preview diffs without writing (default false)."}}}`
+const editSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},"newText":{"type":"string","description":"Replacement text for this targeted edit."}},"required":["oldText","newText"]}}},"required":["path","edits"]}`
 
 func (t *EditTool) Name() string { return "edit" }
-
 func (t *EditTool) Description() string {
-	return "Apply exact substitutions or line-based edits to files (verbatim default; line:N for line replacement; regex:true for patterns; replaceAll:true for mass rename). Inspect that file before editing and take every oldText directly from its current contents. Use short excerpts that identify one location; choose write when replacing most or all of a file. Pass dryRun:true to preview diffs without writing (default false). Edits apply across one or more files in edits list or via top-level single-edit parameters."
+	// Mirrors pi's edit tool description.
+	return "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes."
 }
-
 func (t *EditTool) Schema() json.RawMessage { return json.RawMessage(editSchema) }
 
 // Preview validates the edit against current files and returns the diff without writing.
@@ -94,388 +57,543 @@ func (t *EditTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	return t.executeInternal(ctx, raw, false, progress)
 }
 
-func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isPreview bool, progress func(string)) (core.ToolResult, error) {
-	var a EditArgs
-	if err := unmarshalArgs(raw, &a); err != nil {
-		return core.ToolResult{}, fmt.Errorf("invalid args: %w", err)
+// prepareEditArguments mirrors pi's prepareEditArguments: some models send
+// edits as a JSON string instead of an array, or a single edit object, or a
+// legacy top-level oldText/newText pair. All shapes are normalized into the
+// canonical {path, edits[]} form.
+func prepareEditArguments(raw json.RawMessage) (editArgs, error) {
+	var generic map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return editArgs{}, fmt.Errorf("invalid args: %w", err)
 	}
 
-	// Synthesize edits if provided at top-level
-	if len(a.Edits) == 0 && (a.Line > 0 || a.Old != "" || a.OldText != "" || a.NewContent != "") {
-		a.Edits = []EditOp{{
-			File:       a.File,
-			Path:       a.Path,
-			Line:       a.Line,
-			EndLine:    a.EndLine,
-			NewContent: a.NewContent,
-			Old:        a.Old,
-			OldText:    a.OldText,
-			New:        a.New,
-			NewText:    a.NewText,
-			Regex:      a.Regex,
-			ReplaceAll: a.ReplaceAll,
-			Anchor:     a.Anchor,
-		}}
+	var a editArgs
+	if v, ok := generic["path"]; ok {
+		_ = json.Unmarshal(v, &a.Path)
 	}
 
-	if len(a.Edits) == 0 {
-		return core.ToolResult{}, fmt.Errorf("edit: at least one edit is required")
+	// Legacy top-level single edit (pi: both must be strings to count).
+	var legacyOld, legacyNew string
+	oldIsString, newIsString := false, false
+	if v, ok := generic["oldText"]; ok {
+		oldIsString = json.Unmarshal(v, &legacyOld) == nil
 	}
-	if len(a.Edits) > 50 {
-		return core.ToolResult{}, fmt.Errorf("edit: max 50 edits per call (got %d)", len(a.Edits))
+	if v, ok := generic["newText"]; ok {
+		newIsString = json.Unmarshal(v, &legacyNew) == nil
 	}
+	hasLegacy := oldIsString && newIsString
 
-	dryRun := false
-	if a.DryRun != nil {
-		dryRun = *a.DryRun
-	}
-	if isPreview {
-		dryRun = true
-	}
-
-	topFile := strings.TrimSpace(a.Path)
-	if topFile == "" {
-		topFile = strings.TrimSpace(a.File)
-	}
-
-	for i := range a.Edits {
-		f := strings.TrimSpace(a.Edits[i].File)
-		if f == "" {
-			f = strings.TrimSpace(a.Edits[i].Path)
-		}
-		if f == "" {
-			f = topFile
-		}
-		if f == "" {
-			return core.ToolResult{}, fmt.Errorf("edit %d: missing file path", i+1)
-		}
-		a.Edits[i].File = f
-
-		oldText := a.Edits[i].Old
-		if oldText == "" {
-			oldText = a.Edits[i].OldText
-		}
-		if a.Edits[i].Line <= 0 && oldText == "" && !a.Edits[i].Anchor {
-			return core.ToolResult{}, fmt.Errorf("edit %d: old or line is required", i+1)
-		}
-		newVal := a.Edits[i].New
-		if newVal == "" && a.Edits[i].NewContent != "" {
-			newVal = a.Edits[i].NewContent
-		}
-		if newVal == "" && a.Edits[i].NewText != "" {
-			newVal = a.Edits[i].NewText
-		}
-		if a.Edits[i].Line <= 0 && oldText == newVal && !a.Edits[i].Regex {
-			return core.ToolResult{}, fmt.Errorf("edit %d: oldText equals newText", i+1)
-		}
-	}
-
-	// Group edits per file (order preserved).
-	order := []string{}
-	byFile := map[string][]EditOp{}
-	for _, e := range a.Edits {
-		f := e.File
-		if _, ok := byFile[f]; !ok {
-			order = append(order, f)
-		}
-		byFile[f] = append(byFile[f], e)
-	}
-	sort.Strings(order)
-
-	var results []fileEditResult
-	for _, f := range order {
-		if ctx.Err() != nil {
-			break
-		}
-		r := t.applyFile(f, byFile[f], dryRun)
-		if r.err != "" && len(order) == 1 {
-			return core.ToolResult{}, fmt.Errorf("%s", r.err)
-		}
-		results = append(results, r)
-	}
-
-	var b strings.Builder
-	b.WriteString(LinePrefixNotice)
-	if dryRun && !isPreview {
-		b.WriteString("DRY RUN — no files written. Re-send with dryRun:false to apply.\n")
-	} else if !dryRun || isPreview {
-		b.WriteString("APPLIED.\n")
-	}
-
-	for _, r := range results {
-		if r.err != "" {
-			fmt.Fprintf(&b, "\n✗ %s: %s\n", r.file, r.err)
-			continue
-		}
-		mark := "✓"
-		if dryRun && !isPreview {
-			mark = "○"
-		}
-		fmt.Fprintf(&b, "\n%s %s (%d match%s)\n", mark, r.file, r.matches, plural(r.matches))
-		if r.aiDiff != "" {
-			b.WriteString(r.aiDiff)
-			if !strings.HasSuffix(r.aiDiff, "\n") {
-				b.WriteString("\n")
+	if editsRaw, ok := generic["edits"]; ok {
+		// edits as JSON string (Opus/GLM style degenerate input).
+		var s string
+		if err := json.Unmarshal(editsRaw, &s); err == nil {
+			trimmed := strings.TrimSpace(s)
+			if trimmed != "" {
+				var arr []piEdit
+				if err := json.Unmarshal([]byte(trimmed), &arr); err == nil && len(arr) > 0 {
+					a.Edits = append(a.Edits, arr...)
+				} else {
+					var one piEdit
+					if err := json.Unmarshal([]byte(trimmed), &one); err == nil && (one.OldText != "" || one.NewText != "") {
+						a.Edits = append(a.Edits, one)
+					}
+				}
+				// Unparseable string: leave empty; validation below reports
+				// it with pi's message (validateEditInput equivalent).
 			}
+		} else if err := json.Unmarshal(editsRaw, &a.Edits); err == nil {
+			// edits as array.
+		} else {
+			// edits as a single edit object.
+			var one piEdit
+			if err := json.Unmarshal(editsRaw, &one); err == nil && (one.OldText != "" || one.NewText != "") {
+				a.Edits = append(a.Edits, one)
+			}
+			// Any other shape: leave empty; validation below reports it.
 		}
 	}
-
-	details := map[string]any{
-		"dryRun": dryRun,
-		"edits":  len(a.Edits),
-		"files":  order,
+	if hasLegacy {
+		a.Edits = append(a.Edits, piEdit{OldText: legacyOld, NewText: legacyNew})
 	}
-	if len(results) == 1 {
-		details["path"] = resolvePath(t.CWD, results[0].file)
-		details["diff"] = results[0].diff
-	}
-
-	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
-		Details: details,
-	}, nil
+	return a, nil
 }
 
-func (t *EditTool) applyFile(file string, edits []EditOp, dryRun bool) fileEditResult {
-	abs := resolvePath(t.CWD, file)
-	if t.Sandbox != nil {
-		if err := t.Sandbox.CheckWritePath(abs); err != nil {
-			return fileEditResult{file: file, err: fmt.Sprintf("invalid path: %v", err)}
-		}
+func isJSONObject(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return strings.HasPrefix(s, "{")
+}
+
+func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isPreview bool, progress func(string)) (core.ToolResult, error) {
+	a, err := prepareEditArguments(raw)
+	if err != nil {
+		return core.ToolResult{}, err
+	}
+	if a.Path == "" {
+		return core.ToolResult{}, fmt.Errorf("path is required")
+	}
+	if len(a.Edits) == 0 {
+		// Mirrors pi's validateEditInput.
+		return core.ToolResult{}, fmt.Errorf("Edit tool input is invalid. edits must contain at least one replacement.")
+	}
+
+	path := a.Path
+	abs := resolvePath(t.CWD, path)
+	if err := t.Sandbox.CheckWritePath(abs); err != nil {
+		return core.ToolResult{}, err
+	}
+
+	// Check if file exists and is readable/writable. Mirrors pi's error text.
+	if _, err := os.Stat(abs); err != nil {
+		return core.ToolResult{}, fmt.Errorf("Could not edit file: %s. %s.", path, err)
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
-		return fileEditResult{file: file, err: fmt.Sprintf("cannot read file: %v", err)}
+		return core.ToolResult{}, fmt.Errorf("Could not edit file: %s. %s.", path, err)
 	}
+	// Daemon safety rails (pi reads any file; these guards keep pathological
+	// inputs from corrupting binary files or burning daemon memory).
 	if !isText(data) {
-		return fileEditResult{file: file, err: "binary file rejected"}
+		return core.ToolResult{}, fmt.Errorf("Could not edit file: %s. binary file rejected.", path)
 	}
 	if len(data) > 2*1024*1024 {
-		return fileEditResult{file: file, err: "file too large (>2MB)"}
+		return core.ToolResult{}, fmt.Errorf("Could not edit file: %s. file too large (>2MB).", path)
 	}
 
-	orig := string(data)
-	cur := orig
-	totalMatches := 0
-	for i, e := range edits {
-		var next string
-		var n int
-		var editErr error
-		if e.Line > 0 {
-			next, n, editErr = applyLineEdit(cur, e)
+	// Change tracking: snapshot the content BEFORE the edit (first sighting
+	// only). The tmp content is compared after the edit for the live diff.
+	if t.Changes != nil {
+		if capped, tooLarge := cappedSnapshot(data); tooLarge {
+			t.Changes.NoteBinaryNew(abs)
 		} else {
-			next, n, editErr = applyTextEdit(cur, e)
+			t.Changes.NoteEditBefore(abs, capped)
 		}
-		if editErr != nil {
-			return fileEditResult{file: file, err: fmt.Sprintf("edit %d: %v", i+1, editErr)}
-		}
-		if n == 0 {
-			oldText := e.Old
-			if oldText == "" {
-				oldText = e.OldText
-			}
-			return fileEditResult{file: file, err: fmt.Sprintf("edit %d: oldText not found in %s; inspect that file again and use a verbatim excerpt with matching spaces and line breaks", i+1, file)}
-		}
-		cur = next
-		totalMatches += n
-	}
-	if cur == orig {
-		return fileEditResult{file: file, err: "no changes"}
 	}
 
-	origNorm := strings.ReplaceAll(orig, "\r\n", "\n")
-	curNorm := strings.ReplaceAll(cur, "\r\n", "\n")
-	diff := patchDiff(slash(file), origNorm, curNorm)
-	aiDiff := patchDiffNumbered(slash(file), origNorm, curNorm)
+	// Strip BOM before matching. The model will not include an invisible BOM
+	// in oldText. Mirrors pi.
+	bom := ""
+	content := string(data)
+	if strings.HasPrefix(content, "\uFEFF") {
+		bom = "\uFEFF"
+		content = content[len(bom):]
+	}
+	originalEnding := detectLineEnding(content)
+	normalizedContent := normalizeToLF(content)
 
-	if !dryRun {
-		st, err := os.Stat(abs)
+	baseContent, newContent, err := applyEditsToNormalizedContent(normalizedContent, a.Edits, path)
+	if err != nil {
+		return core.ToolResult{}, err
+	}
+
+	finalContent := bom + restoreLineEndings(newContent, originalEnding)
+	if !isPreview {
+		st, statErr := os.Stat(abs)
 		mode := os.FileMode(0o644)
-		if err == nil {
+		if statErr == nil {
 			mode = st.Mode().Perm()
 		}
-		if err := os.WriteFile(abs, []byte(cur), mode); err != nil {
-			return fileEditResult{file: file, err: fmt.Sprintf("write failed: %v", err)}
+		if err := os.WriteFile(abs, []byte(finalContent), mode); err != nil {
+			return core.ToolResult{}, fmt.Errorf("Could not edit file: %s. %s.", path, err)
 		}
 	}
-	return fileEditResult{file: slash(file), applied: !dryRun, matches: totalMatches, diff: diff, aiDiff: aiDiff}
+
+	// Frontend-only rendering: the legacy APPLIED + numbered-diff view the
+	// UI has always shown, kept identical so the transcript looks unchanged.
+	display := t.renderDisplay(path, baseContent, newContent, len(a.Edits))
+
+	return core.ToolResult{
+		// Mirrors pi: a one-line confirmation; the diff is frontend-only.
+		Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(a.Edits), path)}},
+		Details: map[string]any{
+			"display": display,
+			"diff":    DiffText(baseContent, newContent),
+			"path":    abs,
+			"files":   []string{path},
+			"edits":   len(a.Edits),
+			"dryRun":  isPreview,
+		},
+	}, nil
 }
 
-func applyLineEdit(content string, e EditOp) (string, int, error) {
-	nl := "\n"
-	if strings.Contains(content, "\r\n") {
-		nl = "\r\n"
-	}
-	hasTrailingNewline := strings.HasSuffix(content, "\n")
-
-	normalized := strings.ReplaceAll(content, "\r\n", "\n")
-	lines := strings.Split(normalized, "\n")
-	if hasTrailingNewline && len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-
-	totalLines := len(lines)
-	if totalLines == 0 && e.Line == 1 {
-		newText := e.NewContent
-		if newText == "" {
-			newText = e.New
-		}
-		if newText == "" {
-			newText = e.NewText
-		}
-		newNorm := strings.ReplaceAll(newText, "\r\n", "\n")
-		var newLines []string
-		if newText != "" {
-			newLines = strings.Split(newNorm, "\n")
-		}
-		res := strings.Join(newLines, nl)
-		if hasTrailingNewline && len(newLines) > 0 {
-			res += nl
-		}
-		return res, 1, nil
-	}
-
-	if e.Line < 1 || e.Line > totalLines {
-		return content, 0, fmt.Errorf("line %d out of range (file has %d lines)", e.Line, totalLines)
-	}
-
-	endLine := e.Line
-	if e.EndLine > 0 {
-		if e.EndLine < e.Line {
-			return content, 0, fmt.Errorf("endLine %d cannot be less than line %d", e.EndLine, e.Line)
-		}
-		if e.EndLine > totalLines {
-			return content, 0, fmt.Errorf("endLine %d out of range (file has %d lines)", e.EndLine, totalLines)
-		}
-		endLine = e.EndLine
-	}
-
-	startIdx := e.Line - 1
-	endIdx := endLine
-
-	oldExpected := e.Old
-	if oldExpected == "" {
-		oldExpected = e.OldText
-	}
-	if oldExpected != "" {
-		actualLines := lines[startIdx:endIdx]
-		actualText := strings.Join(actualLines, "\n")
-		actualNorm := strings.TrimSpace(actualText)
-		expNorm := strings.TrimSpace(strings.ReplaceAll(oldExpected, "\r\n", "\n"))
-		expStripped := strings.TrimSpace(stripLinePrefix(expNorm, e.Line))
-		if actualNorm != expNorm && actualNorm != expStripped {
-			return content, 0, fmt.Errorf("line %d content %q does not match expected old %q", e.Line, actualText, oldExpected)
+// renderDisplay rebuilds the legacy presentation: notice, "APPLIED.", the
+// per-file check mark with match count, and the numbered context diff.
+func (t *EditTool) renderDisplay(path, baseContent, newContent string, matches int) string {
+	var b strings.Builder
+	b.WriteString(LinePrefixNotice)
+	b.WriteString("APPLIED.\n")
+	fmt.Fprintf(&b, "\n✓ %s (%d match%s)\n", slash(path), matches, plural(matches))
+	aiDiff := DiffTextNumbered(baseContent, newContent)
+	if aiDiff != "" {
+		b.WriteString(aiDiff)
+		if !strings.HasSuffix(aiDiff, "\n") {
+			b.WriteString("\n")
 		}
 	}
-
-	newText := e.NewContent
-	if newText == "" {
-		newText = e.New
-	}
-	if newText == "" {
-		newText = e.NewText
-	}
-
-	newNorm := strings.ReplaceAll(newText, "\r\n", "\n")
-	var newLines []string
-	if newText != "" {
-		newLines = strings.Split(newNorm, "\n")
-	}
-
-	out := make([]string, 0, len(lines)-(endIdx-startIdx)+len(newLines))
-	out = append(out, lines[:startIdx]...)
-	out = append(out, newLines...)
-	out = append(out, lines[endIdx:]...)
-
-	res := strings.Join(out, nl)
-	if hasTrailingNewline && len(out) > 0 {
-		res += nl
-	}
-	return res, 1, nil
+	return b.String()
 }
 
-func stripLinePrefix(s string, lineNum int) string {
-	prefix := fmt.Sprintf("%d:", lineNum)
-	if strings.HasPrefix(s, prefix) {
-		return strings.TrimPrefix(s, prefix)
-	}
-	return s
+// ---------------------------------------------------------------------------
+// pi edit engine (port of pi's edit-diff.ts applyEditsToNormalizedContent)
+// ---------------------------------------------------------------------------
+
+// normalizeToLF mirrors pi's normalizeToLF.
+func normalizeToLF(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	return strings.ReplaceAll(text, "\r", "\n")
 }
 
-func applyTextEdit(content string, e EditOp) (string, int, error) {
-	oldText := e.Old
-	if oldText == "" {
-		oldText = e.OldText
+// restoreLineEndings mirrors pi's restoreLineEndings.
+func restoreLineEndings(text, ending string) string {
+	if ending == "\r\n" {
+		return strings.ReplaceAll(text, "\n", "\r\n")
 	}
-	newText := e.New
-	if newText == "" && e.NewContent != "" {
-		newText = e.NewContent
-	}
-	if newText == "" && e.NewText != "" {
-		newText = e.NewText
-	}
-
-	if e.Anchor {
-		return anchorInsert(content, oldText, newText, e.Regex)
-	}
-
-	if e.Regex {
-		re, err := regexp.Compile(oldText)
-		if err != nil {
-			return "", 0, fmt.Errorf("invalid regex: %v", err)
-		}
-		locs := re.FindAllStringIndex(content, -1)
-		if len(locs) == 0 {
-			return content, 0, nil
-		}
-		if len(locs) > 1 && !e.ReplaceAll {
-			return "", 0, fmt.Errorf("regex matches %d times (must be unique or set replaceAll)", len(locs))
-		}
-		if e.ReplaceAll {
-			return re.ReplaceAllString(content, newText), len(locs), nil
-		}
-		loc := locs[0]
-		expanded := re.ReplaceAllString(content[loc[0]:loc[1]], newText)
-		return content[:loc[0]] + expanded + content[loc[1]:], 1, nil
-	}
-
-	count := strings.Count(content, oldText)
-	if count == 0 {
-		return content, 0, nil
-	}
-	if count > 1 && !e.ReplaceAll {
-		return "", 0, fmt.Errorf("oldText matches %d times (must be unique or set replaceAll)", count)
-	}
-	if e.ReplaceAll {
-		return strings.ReplaceAll(content, oldText, newText), count, nil
-	}
-	return strings.Replace(content, oldText, newText, 1), 1, nil
+	return text
 }
 
-func anchorInsert(content, oldText, newText string, isRegex bool) (string, int, error) {
-	lines := strings.Split(content, "\n")
-	var re *regexp.Regexp
-	if isRegex {
+// detectLineEnding mirrors pi's detectLineEnding: the first occurrence wins.
+func detectLineEnding(content string) string {
+	crlfIdx := strings.Index(content, "\r\n")
+	lfIdx := strings.Index(content, "\n")
+	if lfIdx == -1 {
+		return "\n"
+	}
+	if crlfIdx == -1 {
+		return "\n"
+	}
+	if crlfIdx < lfIdx {
+		return "\r\n"
+	}
+	return "\n"
+}
+
+// normalizeForFuzzyMatch mirrors pi's normalizeForFuzzyMatch: strip trailing
+// whitespace per line, normalize smart quotes to ASCII, Unicode dashes/hyphens
+// to ASCII hyphen, and special Unicode spaces to regular space. (pi also
+// applies NFKC; the explicit replacements below cover the practical cases.)
+func normalizeForFuzzyMatch(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRightFunc(line, unicode.IsSpace)
+	}
+	text = strings.Join(lines, "\n")
+	return fuzzyReplacer.Replace(text)
+}
+
+var fuzzyReplacer = strings.NewReplacer(
+	// Smart single quotes → '
+	"‘", "'",
+	"’", "'",
+	"‚", "'",
+	"‛", "'",
+	// Smart double quotes → "
+	"“", `"`,
+	"”", `"`,
+	"„", `"`,
+	"‟", `"`,
+	// Various dashes/hyphens → -
+	"‐", "-",
+	"‑", "-",
+	"‒", "-",
+	"–", "-",
+	"—", "-",
+	"―", "-",
+	"−", "-",
+	// Special spaces → regular space
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	" ", " ",
+	"　", " ",
+)
+
+type fuzzyMatchResult struct {
+	found     bool
+	index     int
+	matchLen  int
+	usedFuzzy bool
+}
+
+// fuzzyFindText mirrors pi's fuzzyFindText: exact match first, then fuzzy
+// match in normalized space.
+func fuzzyFindText(content, oldText string) fuzzyMatchResult {
+	if idx := strings.Index(content, oldText); idx != -1 {
+		return fuzzyMatchResult{found: true, index: idx, matchLen: len(oldText), usedFuzzy: false}
+	}
+	fuzzyContent := normalizeForFuzzyMatch(content)
+	fuzzyOldText := normalizeForFuzzyMatch(oldText)
+	idx := strings.Index(fuzzyContent, fuzzyOldText)
+	if idx == -1 {
+		return fuzzyMatchResult{found: false}
+	}
+	return fuzzyMatchResult{found: true, index: idx, matchLen: len(fuzzyOldText), usedFuzzy: true}
+}
+
+func countOccurrences(content, oldText string) int {
+	fuzzyContent := normalizeForFuzzyMatch(content)
+	fuzzyOldText := normalizeForFuzzyMatch(oldText)
+	if fuzzyOldText == "" {
+		return 0
+	}
+	return strings.Count(fuzzyContent, fuzzyOldText)
+}
+
+func getNotFoundError(path string, editIndex, totalEdits int) error {
+	if totalEdits == 1 {
+		return fmt.Errorf("Could not find the exact text in %s. The old text must match exactly including all whitespace and newlines.", path)
+	}
+	return fmt.Errorf("Could not find edits[%d] in %s. The oldText must match exactly including all whitespace and newlines.", editIndex, path)
+}
+
+func getDuplicateError(path string, editIndex, totalEdits, occurrences int) error {
+	if totalEdits == 1 {
+		return fmt.Errorf("Found %d occurrences of the text in %s. The text must be unique. Please provide more context to make it unique.", occurrences, path)
+	}
+	return fmt.Errorf("Found %d occurrences of edits[%d] in %s. Each oldText must be unique. Please provide more context to make it unique.", occurrences, editIndex, path)
+}
+
+func getEmptyOldTextError(path string, editIndex, totalEdits int) error {
+	if totalEdits == 1 {
+		return fmt.Errorf("oldText must not be empty in %s.", path)
+	}
+	return fmt.Errorf("edits[%d].oldText must not be empty in %s.", editIndex, path)
+}
+
+func getNoChangeError(path string, totalEdits int) error {
+	if totalEdits == 1 {
+		return fmt.Errorf("No changes made to %s. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.", path)
+	}
+	return fmt.Errorf("No changes made to %s. The replacements produced identical content.", path)
+}
+
+type matchedEdit struct {
+	editIndex  int
+	matchIndex int
+	matchLen   int
+	newText    string
+}
+
+type textReplacement struct {
+	matchIndex int
+	matchLen   int
+	newText    string
+}
+
+// applyEditsToNormalizedContent ports pi's function of the same name: all
+// edits are matched against the same original content; replacements are then
+// applied in reverse order so offsets stay stable. If any edit needs fuzzy
+// matching, the operation runs in fuzzy-normalized content space and then
+// overlays those line-level changes onto the original content so unchanged
+// line blocks keep their original bytes.
+func applyEditsToNormalizedContent(normalizedContent string, edits []piEdit, path string) (string, string, error) {
+	normalizedEdits := make([]piEdit, len(edits))
+	for i, e := range edits {
+		normalizedEdits[i] = piEdit{
+			OldText: normalizeToLF(e.OldText),
+			NewText: normalizeToLF(e.NewText),
+		}
+	}
+
+	for i, e := range normalizedEdits {
+		if len(e.OldText) == 0 {
+			return "", "", getEmptyOldTextError(path, i, len(normalizedEdits))
+		}
+	}
+
+	usedFuzzyMatch := false
+	for _, e := range normalizedEdits {
+		if m := fuzzyFindText(normalizedContent, e.OldText); m.found && m.usedFuzzy {
+			usedFuzzyMatch = true
+			break
+		}
+	}
+	replacementBaseContent := normalizedContent
+	if usedFuzzyMatch {
+		replacementBaseContent = normalizeForFuzzyMatch(normalizedContent)
+	}
+
+	var matchedEdits []matchedEdit
+	for i, e := range normalizedEdits {
+		matchResult := fuzzyFindText(replacementBaseContent, e.OldText)
+		if !matchResult.found {
+			return "", "", getNotFoundError(path, i, len(normalizedEdits))
+		}
+		occurrences := countOccurrences(replacementBaseContent, e.OldText)
+		if occurrences > 1 {
+			return "", "", getDuplicateError(path, i, len(normalizedEdits), occurrences)
+		}
+		matchedEdits = append(matchedEdits, matchedEdit{
+			editIndex:  i,
+			matchIndex: matchResult.index,
+			matchLen:   matchResult.matchLen,
+			newText:    e.NewText,
+		})
+	}
+
+	sort.SliceStable(matchedEdits, func(x, y int) bool {
+		return matchedEdits[x].matchIndex < matchedEdits[y].matchIndex
+	})
+	for i := 1; i < len(matchedEdits); i++ {
+		previous := matchedEdits[i-1]
+		current := matchedEdits[i]
+		if previous.matchIndex+previous.matchLen > current.matchIndex {
+			return "", "", fmt.Errorf(
+				"edits[%d] and edits[%d] overlap in %s. Merge them into one edit or target disjoint regions.",
+				previous.editIndex, current.editIndex, path)
+		}
+	}
+
+	baseContent := normalizedContent
+	var newContent string
+	if usedFuzzyMatch {
 		var err error
-		re, err = regexp.Compile(oldText)
+		newContent, err = applyReplacementsPreservingUnchangedLines(normalizedContent, replacementBaseContent, toReplacements(matchedEdits))
 		if err != nil {
-			return "", 0, fmt.Errorf("invalid anchor regex: %v", err)
+			return "", "", err
+		}
+	} else {
+		newContent = applyReplacements(replacementBaseContent, toReplacements(matchedEdits), 0)
+	}
+
+	if baseContent == newContent {
+		return "", "", getNoChangeError(path, len(normalizedEdits))
+	}
+	return baseContent, newContent, nil
+}
+
+func toReplacements(matched []matchedEdit) []textReplacement {
+	out := make([]textReplacement, len(matched))
+	for i, m := range matched {
+		out[i] = textReplacement{matchIndex: m.matchIndex, matchLen: m.matchLen, newText: m.newText}
+	}
+	return out
+}
+
+func applyReplacements(content string, replacements []textReplacement, offset int) string {
+	result := content
+	for i := len(replacements) - 1; i >= 0; i-- {
+		r := replacements[i]
+		matchIndex := r.matchIndex - offset
+		result = result[:matchIndex] + r.newText + result[matchIndex+r.matchLen:]
+	}
+	return result
+}
+
+// splitLinesWithEndings splits content into lines that keep their trailing
+// newline (pi's /[^\n]*\n|[^\n]+/g).
+func splitLinesWithEndings(content string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(content); i++ {
+		if content[i] == '\n' {
+			lines = append(lines, content[start:i+1])
+			start = i + 1
 		}
 	}
-	for i, ln := range lines {
-		hit := strings.Contains(ln, oldText)
-		if isRegex {
-			hit = re.MatchString(ln)
-		}
-		if hit {
-			out := make([]string, 0, len(lines)+1)
-			out = append(out, lines[:i+1]...)
-			out = append(out, newText)
-			out = append(out, lines[i+1:]...)
-			return strings.Join(out, "\n"), 1, nil
+	if start < len(content) {
+		lines = append(lines, content[start:])
+	}
+	return lines
+}
+
+type lineSpan struct {
+	start int
+	end   int
+}
+
+func getLineSpans(content string) []lineSpan {
+	offset := 0
+	spans := make([]lineSpan, 0)
+	for _, line := range splitLinesWithEndings(content) {
+		spans = append(spans, lineSpan{start: offset, end: offset + len(line)})
+		offset += len(line)
+	}
+	return spans
+}
+
+func getReplacementLineRange(lines []lineSpan, r textReplacement) (int, int, error) {
+	replacementStart := r.matchIndex
+	replacementEnd := r.matchIndex + r.matchLen
+
+	startLine := -1
+	for i, line := range lines {
+		if replacementStart >= line.start && replacementStart < line.end {
+			startLine = i
+			break
 		}
 	}
-	return content, 0, nil
+	if startLine == -1 {
+		return 0, 0, fmt.Errorf("Replacement range is outside the base content.")
+	}
+
+	endLine := startLine
+	for endLine < len(lines) && lines[endLine].end < replacementEnd {
+		endLine++
+	}
+	if endLine >= len(lines) {
+		return 0, 0, fmt.Errorf("Replacement range is outside the base content.")
+	}
+	return startLine, endLine + 1, nil
+}
+
+// applyReplacementsPreservingUnchangedLines ports pi's function: replacements
+// matched against the normalized base are widened to the lines they touch;
+// touched lines are rewritten from the normalized base and every other line
+// is copied back from the original so unchanged blocks keep their bytes.
+func applyReplacementsPreservingUnchangedLines(originalContent, baseContent string, replacements []textReplacement) (string, error) {
+	originalLines := splitLinesWithEndings(originalContent)
+	baseLines := getLineSpans(baseContent)
+	if len(originalLines) != len(baseLines) {
+		// Mirrors pi's error.
+		return "", fmt.Errorf("Cannot preserve unchanged lines because the base content has a different line count.")
+	}
+
+	type group struct {
+		startLine    int
+		endLine      int
+		replacements []textReplacement
+	}
+	var groups []group
+	sorted := append([]textReplacement(nil), replacements...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].matchIndex < sorted[j].matchIndex })
+	for _, r := range sorted {
+		startLine, endLine, err := getReplacementLineRange(baseLines, r)
+		if err != nil {
+			return "", err
+		}
+		if n := len(groups); n > 0 && startLine < groups[n-1].endLine {
+			g := &groups[n-1]
+			if endLine > g.endLine {
+				g.endLine = endLine
+			}
+			g.replacements = append(g.replacements, r)
+			continue
+		}
+		groups = append(groups, group{startLine: startLine, endLine: endLine, replacements: []textReplacement{r}})
+	}
+
+	originalLineIndex := 0
+	var result strings.Builder
+	for _, g := range groups {
+		result.WriteString(strings.Join(originalLines[originalLineIndex:g.startLine], ""))
+		groupStartOffset := baseLines[g.startLine].start
+		groupEndOffset := baseLines[g.endLine-1].end
+		result.WriteString(applyReplacements(
+			baseContent[groupStartOffset:groupEndOffset],
+			g.replacements,
+			groupStartOffset,
+		))
+		originalLineIndex = g.endLine
+	}
+	result.WriteString(strings.Join(originalLines[originalLineIndex:], ""))
+	return result.String(), nil
 }
 
 func patchDiff(file, before, after string) string {
@@ -488,33 +606,11 @@ func patchDiffNumbered(file, before, after string) string {
 	return DiffTextNumbered(before, after)
 }
 
-
-func detectLineEnding(b []byte) string {
-	if bytes.Contains(b, []byte("\r\n")) {
-		return "\r\n"
-	}
-	return "\n"
-}
-
 // diffContextLines is the number of unchanged lines kept on each
 // side of an edit when rendering the diff. 3 is the git-diff
 // default and balances readability with transcript size.
 const diffContextLines = 3
 
-// unifiedDiff emits a context diff for the edit tool's result.
-//
-// Shape: each output row is either
-//   - " <line>"       unchanged context
-//   - "-<line>"       deletion (from a)
-//   - "+<line>"       addition (to b)
-//   - "..."           context break between hunks
-//
-// The legacy "--- name / +++ name" header is omitted because the
-// tool-call header above the result already shows the path. Only
-// lines within diffContextLines of a +/- row are kept; longer
-// runs of unchanged content collapse into a single "..." row so
-// a one-line edit in a thousand-line file produces a short
-// transcript.
 // DiffText is shared by edit results and the host's pending-change review.
 func DiffText(a, b string) string { return unifiedDiff("", a, b) }
 
@@ -572,7 +668,7 @@ func unifiedDiff(name, a, b string) string {
 }
 
 // DiffTextNumbered returns a context diff with 1-indexed line numbers (<number>:)
-// for AI model consumption.
+// for the frontend display.
 func DiffTextNumbered(a, b string) string { return unifiedDiffNumbered("", a, b) }
 
 func unifiedDiffNumbered(name, a, b string) string {

@@ -59,7 +59,14 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		}
 	}
 	now := time.Now()
-	rec := &SessionRecord{ID: fmt.Sprintf("sess_%d", now.UnixNano()), CWD: resolvePath(source.CWD), Title: source.Title + " (fork)", TitleSource: "manual", Model: source.Model, Options: normalizedOptions(source.Options), Status: "idle", CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()}
+	rec := &SessionRecord{ID: fmt.Sprintf("sess_%d", now.UnixNano()), CWD: resolvePath(source.CWD), Title: source.Title + " (fork)", TitleSource: "manual", Model: source.Model, Options: normalizedOptions(source.Options), Status: "idle", CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli(), TurnSeq: source.TurnSeq}
+	// Carry only balloons anchored inside the copied prefix. Their
+	// MessageIndex still resolves because the prefix is message-identical.
+	for _, b := range source.FileBalloons {
+		if b.MessageIndex > 0 && b.MessageIndex <= end {
+			rec.FileBalloons = append(rec.FileBalloons, b)
+		}
+	}
 	rec.Options.Skills = append([]string{}, rec.Options.Skills...)
 	attachments := append([]AttachmentRef{}, source.Attachments...)
 	for _, msg := range source.Messages[:end] {

@@ -10,7 +10,8 @@ import {
 import { HistoryView } from "./HistoryView";
 import { ApprovalCard } from "./ApprovalCard";
 import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
-import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI } from "../ctx";
+import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges } from "../ctx";
+import { TurnChangesBalloon } from "./TurnChangesBalloon";
 
 export function TranscriptView() {
   const t = useTranscriptCtx();
@@ -19,6 +20,17 @@ export function TranscriptView() {
   const c = useComposerCtx();
   const m = useModal();
   const ui = useUI();
+  const tc = useTurnChanges();
+  // Balloons anchored after the message index recorded at end of turn
+  // (messageIndex = len(messages) then). Clamp for later edits/truncation:
+  // balloons pointing past the end render after the last message.
+  const balloonsAfter = (rawIdx: number, isLastMsg: boolean) =>
+    tc.balloons().filter((b) => {
+      const at = typeof (b as any).messageIndex === "number" ? (b as any).messageIndex : -1;
+      if (at === rawIdx + 1) return true;
+      if (isLastMsg && (at < 0 || at > t.messages().length)) return true;
+      return false;
+    });
   const hasLegacySystemNotice = () => t.messages().some((m) => m.system);
   const compaction = () => t.sessionCompaction();
   const shouldShowCompactionBalloon = () =>
@@ -288,6 +300,20 @@ export function TranscriptView() {
                 <Show when={block.units.length}>{renderAssistantSpecial(rctx, msg.id, block.units, isLast(), block.extras.map((e) => e.srcIdx ?? 0))}</Show>
               </> : renderMessageContent(rctx, msg, isLast())}
 
+              {/* Persistent per-turn file-changes balloon (never deleted) */}
+              <For each={balloonsAfter(rawIdx(), isLast())}>
+                {(b) => (
+                  <div class="w-full">
+                    <TurnChangesBalloon
+                      balloon={b}
+                      expanded={tc.isExpanded(`turn-${b.turnIndex}`)}
+                      onToggle={() => tc.toggleExpanded(`turn-${b.turnIndex}`)}
+                      undoBusy={tc.undoBusy() === b.turnIndex}
+                      onUndo={() => tc.undoTurn(b.turnIndex)}
+                    />
+                  </div>
+                )}
+              </For>
               {/* Hover actions (chatbot-style) */}
               <Show when={(t.sessionStatus() !== "running" || !isLast()) && !isEditing()}>
                 <AssistantMsgActions

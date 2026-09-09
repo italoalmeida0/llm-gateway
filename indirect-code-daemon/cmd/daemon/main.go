@@ -28,6 +28,7 @@ import (
 	"github.com/gorilla/websocket"
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 	"llm-gateway/indirect-code-daemon/packages/core"
+	"llm-gateway/indirect-code-daemon/packages/filetrack"
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
@@ -115,30 +116,37 @@ type EditingMsgState struct {
 
 // SessionRecord is the on-disk format for each local session.
 type SessionRecord struct {
-	Turn        *TurnActivity         `json:"turn,omitempty"`
-	Todos       []tools.TodoItem      `json:"todos,omitempty"`
-	TodosOpen   *bool                 `json:"todos_open,omitempty"`
-	Draft       string                `json:"draft,omitempty"`
-	EditingMsg  *EditingMsgState      `json:"editing_msg,omitempty"`
-	Options     SessionOptions        `json:"options"`
-	ID          string                `json:"id"`
-	CWD         string                `json:"cwd"`
-	Title       string                `json:"title"`
-	TitleSource string                `json:"title_source,omitempty"`
-	Usage       provider.Usage        `json:"usage"`
-	Context     *SessionContext       `json:"context,omitempty"`
-	Model       string                `json:"model"`
-	Status      string                `json:"status"` // "idle" | "running"
-	Pinned      bool                  `json:"pinned,omitempty"`
-	CreatedAt   int64                 `json:"created_at"`
-	UpdatedAt   int64                 `json:"updated_at"`
-	Messages    []provider.Message    `json:"messages"`
-	Attachments []AttachmentRef       `json:"attachments,omitempty"`
+	Turn        *TurnActivity      `json:"turn,omitempty"`
+	Todos       []tools.TodoItem   `json:"todos,omitempty"`
+	TodosOpen   *bool              `json:"todos_open,omitempty"`
+	Draft       string             `json:"draft,omitempty"`
+	EditingMsg  *EditingMsgState   `json:"editing_msg,omitempty"`
+	Options     SessionOptions     `json:"options"`
+	ID          string             `json:"id"`
+	CWD         string             `json:"cwd"`
+	Title       string             `json:"title"`
+	TitleSource string             `json:"title_source,omitempty"`
+	Usage       provider.Usage     `json:"usage"`
+	Context     *SessionContext    `json:"context,omitempty"`
+	Model       string             `json:"model"`
+	Status      string             `json:"status"` // "idle" | "running"
+	Pinned      bool               `json:"pinned,omitempty"`
+	CreatedAt   int64              `json:"created_at"`
+	UpdatedAt   int64              `json:"updated_at"`
+	Messages    []provider.Message `json:"messages"`
+	Attachments []AttachmentRef    `json:"attachments,omitempty"`
 	// Compaction is the incremental chain head (previous summary +
 	// file ops + cut anchor + count). Persisted on every compaction so the
 	// next summarization — even after a daemon restart — builds an update
 	// prompt instead of re-summarizing from scratch. Old frontends ignore it.
 	Compaction *core.CompactionState `json:"compaction,omitempty"`
+	// TurnSeq counts started turns (monotonic per session). It indexes the
+	// per-turn file-change balloons below.
+	TurnSeq int `json:"turn_seq,omitempty"`
+	// FileBalloons holds one persistent file-changes balloon per finished
+	// turn that touched files (snapshot-based, no git). Old frontends
+	// ignore it.
+	FileBalloons []filetrack.TurnChanges `json:"file_balloons,omitempty"`
 }
 
 // SessionSummary is returned to the web client for listing.
@@ -166,8 +174,8 @@ func sessionListItem(s SessionSummary) map[string]any {
 		"pinned":     s.Pinned,
 		"created_at": s.CreatedAt, "updated_at": s.UpdatedAt, "message_count": s.MessageCount,
 		"createdAt": s.CreatedAt, "updatedAt": s.UpdatedAt, "messageCount": s.MessageCount,
-		"draft":      s.Draft,
-		"options":    s.Options,
+		"draft":   s.Draft,
+		"options": s.Options,
 	}
 	if s.TodosOpen != nil {
 		m["todosOpen"] = *s.TodosOpen
@@ -230,6 +238,8 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages),
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
 		"compaction": rec.Compaction,
+		"turnSeq":    rec.TurnSeq, "turn_seq": rec.TurnSeq,
+		"fileBalloons": rec.FileBalloons, "file_balloons": rec.FileBalloons,
 	}
 }
 
@@ -399,8 +409,8 @@ type ActiveSession struct {
 	agent             *core.Agent
 	cancel            context.CancelFunc
 	approvalReqs      map[string]chan bool
-	// gitTracker backs change review (nil when git is unavailable/disabled).
-	gitTracker *gitReviewTracker
+	// fileChanges is the live incoming-changes area of the running turn.
+	fileChanges *turnFileChanges
 	// gen counts started turns; a stale turn's finalizer skips when it no
 	// longer matches, so edit/regenerate can't corrupt the new turn.
 	gen int
@@ -418,13 +428,6 @@ type DaemonServer struct {
 
 	sessionsMu sync.RWMutex
 	sessions   map[string]*ActiveSession
-
-	// reviewMu guards reviewTrackers: one shared gitReviewTracker per
-	// project root (keyed by reviewKeyForRoot), shared by every session
-	// rooted there. The tracker's own mu serializes baseline/collect/undo
-	// within a root so concurrent turns can't corrupt the baseline.
-	reviewMu       sync.Mutex
-	reviewTrackers map[string]*gitReviewTracker
 
 	// Change pings (SignalDB sync): one debounced timer per collection so a
 	// busy turn (a save per appended message) collapses into a single ping.
@@ -873,7 +876,6 @@ func (d *DaemonServer) purgeSession(id string) {
 		if act.cancel != nil {
 			act.cancel()
 		}
-		act.gitTracker = nil
 		act.mu.Unlock()
 		delete(d.sessions, id)
 	}
@@ -1113,11 +1115,18 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		})
 
 	case "get_changes":
-		d.handleGitReview(raw, false)
+		// Legacy git-review protocol: the snapshot system replaced it.
+		// Answer with the persistent per-turn balloons so old frontends
+		// keep working until they migrate to get_turn_changes.
+		d.handleGetTurnChanges(raw)
 	case "undo_changes":
-		d.handleGitReview(raw, true)
+		d.handleGetTurnChanges(raw)
 	case "keep_changes":
-		d.handleGitKeep(raw)
+		d.sendWS(map[string]any{"type": "session_changes", "hostId": d.config.HostID, "review": map[string]any{"files": []any{}}})
+	case "get_turn_changes":
+		d.handleGetTurnChanges(raw)
+	case "undo_turn_changes":
+		d.handleUndoTurnChanges(raw)
 	case "question_response":
 		d.answerQuestions(raw)
 	case "check_workspace":
@@ -1447,9 +1456,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		// Cascade only this project's conversations. A nested project owns
 		// its own sessions, matching the sidebar's deepest-folder grouping.
-		// The project's shared review repo is removed too (keep/undo state
-		// dies with the project); live trackers are detached first so no
-		// session points at a deleted dir.
 		if doomed != nil {
 			target := strings.TrimRight(resolvePath(doomed.Path), "/")
 			if len(target) > 1 {
@@ -1461,16 +1467,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 					d.purgeSession(s.ID)
 				}
 			}
-			root := normalizeReviewRoot(doomed.Path)
-			key := reviewKeyForRoot(root)
-			if t := d.trackerForRoot(key); t != nil {
-				t.destroy()
-				d.detachTrackerKey(key, t)
-			} else {
-				_ = os.RemoveAll(filepath.Join(d.reviewsDir(), key))
-			}
 		}
-		d.gcStaleReviews()
 		_ = d.saveProjects(next)
 		_ = d.sendWS(map[string]any{
 			"type":      "project_deleted",
@@ -2637,6 +2634,8 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 	act.record.Status = "running"
 	act.question = nil
+	act.record.TurnSeq++
+	turnSeq := act.record.TurnSeq
 	act.record.Turn = &TurnActivity{StartedAt: time.Now().UnixMilli(), Status: "running"}
 	act.toolProgress = map[string]string{}
 	act.toolStarts = map[string]int64{}
@@ -2656,6 +2655,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	_ = d.saveSession(act.record)
 	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
+	tfc := beginTurnTracking(act, sessionCWD, turnSeq)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2667,11 +2667,15 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 
 	act.mu.Unlock()
 
-	var tracker *gitReviewTracker
 	defer func() {
-		if tracker != nil {
-			tracker.finalizeTurn()
+		// Snapshot-based file changes: build the final balloon, reset
+		// incoming, persist, and broadcast. The balloon is persistent.
+		if balloon := d.finishTurnTracking(act, tfc); balloon != nil {
+			d.broadcastFileBalloon(cfg.HostID, sessionID, balloon)
 		}
+		act.mu.Lock()
+		act.fileChanges = nil
+		act.mu.Unlock()
 		act.mu.Lock()
 		defer act.mu.Unlock()
 		if act.gen != myGen {
@@ -2726,9 +2730,9 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 
 	baseTools := []core.Tool{
-		&tools.ReadTool{CWD: sessionCWD, Sandbox: sb},
-		&tools.WriteTool{CWD: sessionCWD, Sandbox: sb},
-		&tools.EditTool{CWD: sessionCWD, Sandbox: sb},
+		&tools.ReadTool{CWD: sessionCWD, Sandbox: sb, Changes: tfc.tracker},
+		&tools.WriteTool{CWD: sessionCWD, Sandbox: sb, Changes: tfc.tracker},
+		&tools.EditTool{CWD: sessionCWD, Sandbox: sb, Changes: tfc.tracker},
 		&tools.BashTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.GlobTool{CWD: sessionCWD, Sandbox: sb},
 		&tools.SearchTool{CWD: sessionCWD, Sandbox: sb},
@@ -2759,13 +2763,6 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		return nil
 	}}
 	reg := core.NewRegistry(append(append(baseTools, questionTool), todoTool)...)
-
-	tracker = d.ensureGitTracker(act, sessionID, sessionCWD)
-	for _, name := range []string{"write", "edit", "bash", "python", "patch"} {
-		if tool, ok := reg[name]; ok {
-			reg[name] = &countingTool{Tool: tool, tracker: tracker}
-		}
-	}
 
 	agent := core.NewAgent(client, modelToUse, sessionSystemPrompt(cfg, sessionCWD, options), reg)
 	agent.Reasoning = options.Effort
@@ -2947,6 +2944,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	// transcript. The daemon session record keeps the append-only
 	// history, so OnCompactionState carries everything.
 
+	previewTick := 0
 	// Stream events to WebSocket
 	sink := func(ev core.AgentEvent) {
 		act.mu.Lock()
@@ -2994,6 +2992,14 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 			contentStr := strings.ReplaceAll(sb.String(), tools.LinePrefixNotice, "")
 			ev := map[string]any{
 				"type": "tool_result", "id": e.ID, "content": contentStr, "isError": e.Result.IsError, "startedAt": e.Result.StartedAt, "durationMs": e.Result.DurationMs,
+			}
+			// Live incoming-changes preview: after each finished tool,
+			// broadcast the current changed view. The tracker has its own
+			// mutex, so this is safe under act.mu (sendWS locks wsMu, never
+			// act.mu). Debounced to every 3rd tool result.
+			previewTick++
+			if tfc != nil && tfc.tracker.Count() > 0 && previewTick%5 == 0 {
+				d.broadcastLiveChanges(cfg.HostID, sessionID, tfc)
 			}
 			if e.Details != nil {
 				if raw, err := json.Marshal(e.Details); err == nil {
@@ -3121,7 +3127,6 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 
 }
-
 
 // instantTitle derives an immediate provisional title from the user's own
 // words (first 6 content words, ellipsis when truncated). The LLM-generated
@@ -3289,6 +3294,10 @@ func main() {
 		fmt.Printf("[INFO] Loaded configuration for host '%s' (Gateway: %s)\n", server.config.Name, server.config.GatewayURL)
 		fmt.Println("[INFO] Tip: To switch to another gateway link or user account, run: ./indirect-code -connect <new-url>")
 	}
+
+	// The legacy git-based review system was replaced by snapshot-based
+	// per-turn file changes. Remove any leftover review repos on startup.
+	cleanupLegacyReviewDirs(dataDir)
 
 	// A previous run dying mid-turn must not brick sessions forever.
 	server.resetRunningSessions()

@@ -191,7 +191,9 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       const shown = files.slice(0, 3).join(", ") + (files.length > 3 ? ` +${files.length - 3}` : "");
       const isPreview = args.dryRun === true;
       const verb = isPreview ? (name === "patch" ? "Preview patch" : "Preview edit") : (name === "patch" ? "Patch" : "Edited");
-      const st = diffStat(res);
+      // Prefer the frontend-only display rendering (details.display); the
+      // AI-visible text is pi's one-line confirmation with no diff.
+      const st = diffStat(u.result?.toolDetails?.display ?? res);
       return {
         icon: "lucide:file-diff",
         verb,

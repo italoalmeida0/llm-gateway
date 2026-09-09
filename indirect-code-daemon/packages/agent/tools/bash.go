@@ -3,15 +3,13 @@ package tools
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,12 +17,10 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-const (
-	maxBashLines = 2000
-	maxBashBytes = 50 * 1024
-)
-
-// BashTool runs a shell command in the agent's cwd.
+// BashTool runs a shell command in the agent's cwd, mirroring pi's bash tool:
+// {command, timeout?} with no default timeout, merged stdout+stderr, and
+// tail truncation (keep the LAST 2000 lines / 50KB) with the full output
+// saved to a temp file. Runs synchronously in the turn — no background mode.
 type BashTool struct {
 	CWD     string
 	Sandbox *Sandbox
@@ -32,24 +28,40 @@ type BashTool struct {
 
 type bashArgs struct {
 	Command string `json:"command"`
-	Timeout int    `json:"timeout,omitempty"`
-	// Workdir overrides the run directory (jailed to CWD when sandboxed).
-	Workdir string `json:"workdir,omitempty"`
-	// Env adds extra environment variables (SANDBOX-safe keys only).
-	Env map[string]string `json:"env,omitempty"`
-	// SeparateStreams captures stdout/stderr separately instead of merged.
-	SeparateStreams bool `json:"separateStreams,omitempty"`
-	// Commands runs steps sequentially with stopOnError (default true).
-	Commands []string `json:"commands,omitempty"`
-	// StopOnError stops the sequence at the first non-zero exit (default true).
-	StopOnError *bool `json:"stopOnError,omitempty"`
+	// Timeout is optional and has no default (pi semantics). nil = no timeout.
+	Timeout *float64 `json:"timeout,omitempty"`
 }
 
-const bashSchema = `{"type":"object","properties":{"command":{"type":"string","description":"Single shell command to run."},"timeout":{"type":"integer","description":"Timeout in seconds (default 120, max 600)."},"workdir":{"type":"string","description":"Run directory (defaults to session CWD; jailed when sandboxed)."},"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra environment variables."},"separateStreams":{"type":"boolean","description":"Capture stdout/stderr separately with [stdout]/[stderr] sections."},"commands":{"type":"array","items":{"type":"string"},"description":"Run steps sequentially in one shell session context (same dir/env)."},"stopOnError":{"type":"boolean","description":"Stop the sequence at first non-zero exit (default true)."}},"required":["command"]}`
+const bashSchema = `{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout":{"type":"number","description":"Timeout in seconds (optional, no default timeout)"}},"required":["command"]}`
 
-func (t *BashTool) Name() string            { return "bash" }
-func (t *BashTool) Description() string     { return shellDescription(currentShell()) }
+const (
+	maxTimeoutMs      = 2147483647
+	maxTimeoutSeconds = 2147483.647
+)
+
+func (t *BashTool) Name() string { return "bash" }
+func (t *BashTool) Description() string {
+	// Mirrors pi's bash tool description.
+	return "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds."
+}
 func (t *BashTool) Schema() json.RawMessage { return json.RawMessage(bashSchema) }
+
+// resolveTimeoutMs mirrors pi's resolveTimeoutMs.
+func resolveTimeoutMs(timeout *float64) (*time.Duration, error) {
+	if timeout == nil {
+		return nil, nil
+	}
+	v := *timeout
+	// JSON numbers are always finite in Go; guard the degenerate cases anyway.
+	if v <= 0 || v != v || v > 1e308 {
+		return nil, fmt.Errorf("Invalid timeout: must be a finite number of seconds")
+	}
+	if v*1000 > maxTimeoutMs {
+		return nil, fmt.Errorf("Invalid timeout: maximum is %s seconds", strconv.FormatFloat(maxTimeoutSeconds, 'f', -1, 64))
+	}
+	ms := time.Duration(v * float64(time.Millisecond))
+	return &ms, nil
+}
 
 func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
 	var a bashArgs
@@ -59,89 +71,47 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	if strings.TrimSpace(a.Command) == "" {
 		return core.ToolResult{}, fmt.Errorf("command is required")
 	}
-	// Build the step list: single command, or sequential commands[] sharing
-	// dir/env (stopOnError default true).
-	steps := []string{a.Command}
-	if len(a.Commands) > 0 {
-		if len(a.Commands) > 20 {
-			return core.ToolResult{}, fmt.Errorf("bash: max 20 commands per call")
-		}
-		steps = a.Commands
+	if err := t.Sandbox.CheckCommand(a.Command); err != nil {
+		return core.ToolResult{}, err
 	}
-	stopOnError := true
-	if a.StopOnError != nil {
-		stopOnError = *a.StopOnError
+	if err := t.Sandbox.CheckBashPermission(a.Command); err != nil {
+		return core.ToolResult{}, err
 	}
-	for _, step := range steps {
-		if strings.TrimSpace(step) == "" {
-			return core.ToolResult{}, fmt.Errorf("bash: empty command in sequence")
-		}
-		if err := t.Sandbox.CheckCommand(step); err != nil {
-			return core.ToolResult{}, err
-		}
-		if err := t.Sandbox.CheckBashPermission(step); err != nil {
-			return core.ToolResult{}, err
-		}
+	timeoutMs, err := resolveTimeoutMs(a.Timeout)
+	if err != nil {
+		return core.ToolResult{}, err
 	}
+
 	cwd := t.CWD
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	if w := strings.TrimSpace(a.Workdir); w != "" {
-		cwd = resolvePath(cwd, w)
-		if err := t.Sandbox.CheckPath(cwd); err != nil {
-			return core.ToolResult{}, fmt.Errorf("bash: invalid workdir: %v", err)
-		}
-	}
 
-	timeout := a.Timeout
-	if timeout <= 0 {
-		timeout = 120
+	runCtx := ctx
+	var cancel context.CancelFunc
+	if timeoutMs != nil {
+		runCtx, cancel = context.WithTimeout(ctx, *timeoutMs)
+		defer cancel()
 	}
-	if timeout > 600 {
-		timeout = 600
-	}
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
 
 	start := time.Now()
-	// Join steps with && (stop) or ; (continue) so one shell carries cwd/env.
-	joiner := " && "
-	if !stopOnError {
-		joiner = " ; "
-	}
-	joined := strings.Join(steps, joiner)
-	cmd := newShellCmd(runCtx, joined)
+	cmd := newShellCmd(runCtx, a.Command)
 	cmd.Dir = cwd
-	cmd.Env = bashEnv(a.Env)
+	cmd.Env = os.Environ()
 	setProcessGroup(cmd)
 
-	// Capture with line-by-line streaming. Default merges stdout+stderr
-	// (classic terminal look); separateStreams keeps them apart so failures
-	// are attributable (no more guessing which stream an error came from).
+	// Merged stdout+stderr through one pipe, like pi.
 	pr, pw := io.Pipe()
-	var prErr *io.PipeReader
-	var pwErr *io.PipeWriter
-	var capturedErr *bytes.Buffer
-	var doneErr chan struct{}
-	if a.SeparateStreams {
-		epr, epw := io.Pipe()
-		prErr, pwErr = epr, epw
-		capturedErr = &bytes.Buffer{}
-		doneErr = make(chan struct{})
-		cmd.Stdout = pw
-		cmd.Stderr = epw
-	} else {
-		cmd.Stdout = pw
-		cmd.Stderr = pw
-	}
+	cmd.Stdout = pw
+	cmd.Stderr = pw
 
 	if err := cmd.Start(); err != nil {
 		return core.ToolResult{}, fmt.Errorf("start: %w", err)
 	}
 
-	// Writer to both the buffer (trimmed) and progress callback.
-	captured := &bytes.Buffer{}
+	output := newOutputAccumulator(defaultMaxLines, defaultMaxBytes)
+	// Head buffer for the frontend's legacy terminal-log display.
+	var head bytes.Buffer
 	done := make(chan struct{})
 
 	// Watch for context cancellation and kill the entire process
@@ -152,37 +122,10 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		select {
 		case <-runCtx.Done():
 			killProcessGroup(cmd)
-			// Close the write ends so reader goroutines unblock.
 			pw.Close()
-			if pwErr != nil {
-				pwErr.Close()
-			}
 		case <-done:
 		}
 	}()
-	if a.SeparateStreams {
-		go func() {
-			defer close(doneErr)
-			buf := make([]byte, 4096)
-			for {
-				n, err := prErr.Read(buf)
-				if n > 0 {
-					chunk := buf[:n]
-					if capturedErr.Len() < maxBashBytes {
-						room := maxBashBytes - capturedErr.Len()
-						if n > room {
-							capturedErr.Write(chunk[:room])
-						} else {
-							capturedErr.Write(chunk)
-						}
-					}
-				}
-				if err != nil {
-					return
-				}
-			}
-		}()
-	}
 	go func() {
 		defer close(done)
 		buf := make([]byte, 4096)
@@ -190,12 +133,13 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 			n, err := pr.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
-				if captured.Len() < maxBashBytes {
-					room := maxBashBytes - captured.Len()
+				output.append(chunk)
+				if head.Len() < defaultMaxBytes {
+					room := defaultMaxBytes - head.Len()
 					if n > room {
-						captured.Write(chunk[:room])
+						head.Write(chunk[:room])
 					} else {
-						captured.Write(chunk)
+						head.Write(chunk)
 					}
 				}
 				if progress != nil {
@@ -211,24 +155,6 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	waitErr := cmd.Wait()
 	pw.Close()
 	<-done
-	if a.SeparateStreams {
-		pwErr.Close()
-		<-doneErr
-	}
-
-	output := captured.String()
-	stderrOut := ""
-	if a.SeparateStreams {
-		stderrOut = capturedErr.String()
-	}
-	truncBytes := captured.Len() >= maxBashBytes
-	lines := strings.Split(output, "\n")
-	truncLines := false
-	if len(lines) > maxBashLines {
-		lines = lines[:maxBashLines]
-		truncLines = true
-	}
-	trimmed := strings.Join(lines, "\n")
 
 	exitCode := 0
 	if waitErr != nil {
@@ -238,36 +164,95 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 			exitCode = -1
 		}
 	}
-
 	elapsed := time.Since(start)
 
-	// Terminal-log style: echo the command on the first line with
-	// a shell-prompt prefix, a blank line, the captured output, and
-	// a footer showing exit code + elapsed time. Matches the look
-	// a human would see if they ran the command themselves, which
-	// makes the model's reasoning about it more natural too.
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "$ %s\n", joined)
-	if cwd != t.CWD && t.CWD != "" {
-		if rel, err := filepath.Rel(t.CWD, cwd); err == nil {
-			fmt.Fprintf(&sb, "(in %s)\n", rel)
+	snapshot := output.snapshot(true)
+	output.closeTempFile()
+
+	// pi's formatOutput: tail-truncated content plus an actionable notice
+	// pointing at the temp file with the complete output.
+	outputText := snapshot.content
+	if outputText == "" {
+		outputText = "(no output)"
+	}
+	if snapshot.truncated {
+		startLine := snapshot.totalLines - snapshot.outputLines + 1
+		endLine := snapshot.totalLines
+		switch {
+		case snapshot.lastLinePartial:
+			outputText += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). Full output: %s]",
+				formatSize(snapshot.outputBytes), endLine, formatSize(output.getLastLineBytes()), snapshot.fullOutputPath)
+		case snapshot.truncatedBy == "lines":
+			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Full output: %s]",
+				startLine, endLine, snapshot.totalLines, snapshot.fullOutputPath)
+		default:
+			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Full output: %s]",
+				startLine, endLine, snapshot.totalLines, formatSize(defaultMaxBytes), snapshot.fullOutputPath)
 		}
 	}
-	if a.SeparateStreams {
-		outTrim := strings.TrimRight(trimmed, "\n")
-		errTrim := strings.TrimRight(stderrOut, "\n")
-		if outTrim != "" {
-			sb.WriteString("\n[stdout]\n")
-			sb.WriteString(outTrim + "\n")
+
+	appendStatus := func(text, status string) string {
+		if text != "" {
+			return text + "\n\n" + status
 		}
-		if errTrim != "" {
-			sb.WriteString("\n[stderr]\n")
-			sb.WriteString(errTrim + "\n")
-		}
-		if outTrim == "" && errTrim == "" {
-			sb.WriteString("\n(no output)\n")
-		}
-	} else if trimmed != "" {
+		return status
+	}
+
+	isErr := false
+	// Timeout and abort mirror pi's error messages.
+	switch {
+	case ctx.Err() != nil:
+		isErr = true
+		outputText = appendStatus(outputText, "Command aborted")
+	case runCtx.Err() != nil && timeoutMs != nil:
+		isErr = true
+		outputText = appendStatus(outputText, fmt.Sprintf("Command timed out after %s seconds",
+			strconv.FormatFloat(*a.Timeout, 'f', -1, 64)))
+	case exitCode != 0:
+		isErr = true
+		outputText = appendStatus(outputText, fmt.Sprintf("Command exited with code %d", exitCode))
+	}
+
+	// Frontend-only rendering: the legacy terminal-log view ($ command,
+	// output, [exit N] Took Xs) the UI has always shown.
+	display := renderBashDisplay(a.Command, head.String(), exitCode, elapsed, snapshot.fullOutputPath)
+
+	return core.ToolResult{
+		Content: []provider.Content{provider.TextBlock{Text: outputText}},
+		IsError: isErr,
+		Details: map[string]any{
+			"display":          display,
+			"exit_code":        exitCode,
+			"exitCode":         exitCode,
+			"stdout":           head.String(),
+			"stderr":           "",
+			"truncated":        snapshot.truncated,
+			"full_output_path": snapshot.fullOutputPath,
+			"lines_truncated":  snapshot.truncated && snapshot.truncatedBy == "lines",
+			"bytes_truncated":  snapshot.truncated && snapshot.truncatedBy == "bytes",
+			"duration_ms":      elapsed.Milliseconds(),
+			"workdir":          cwd,
+			"steps":            1,
+		},
+	}, nil
+}
+
+// renderBashDisplay rebuilds the legacy terminal-log presentation for the UI:
+// shell-prompt echo of the command, the captured output (head-truncated like
+// before), and a footer with exit code and elapsed time.
+func renderBashDisplay(command, captured string, exitCode int, elapsed time.Duration, fullPath string) string {
+	lines := strings.Split(captured, "\n")
+	truncLines := false
+	if len(lines) > defaultMaxLines {
+		lines = lines[:defaultMaxLines]
+		truncLines = true
+	}
+	truncBytes := len(captured) >= defaultMaxBytes
+	trimmed := strings.Join(lines, "\n")
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "$ %s\n", command)
+	if trimmed != "" {
 		sb.WriteString("\n")
 		sb.WriteString(trimmed)
 		if !strings.HasSuffix(trimmed, "\n") {
@@ -275,51 +260,22 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		}
 	}
 	if truncLines {
-		fmt.Fprintf(&sb, "... [truncated at %d lines]\n", maxBashLines)
+		fmt.Fprintf(&sb, "... [truncated at %d lines]\n", defaultMaxLines)
 	}
 	if truncBytes {
-		fmt.Fprintf(&sb, "... [truncated at %d bytes]\n", maxBashBytes)
+		fmt.Fprintf(&sb, "... [truncated at %d bytes]\n", defaultMaxBytes)
 	}
 	sb.WriteString("\n")
-	if exitCode == 0 {
-		fmt.Fprintf(&sb, "[exit 0]")
-	} else {
-		fmt.Fprintf(&sb, "[exit %d]", exitCode)
-	}
-
-	var fullPath string
-	if truncBytes || truncLines {
-		fullPath = writeFullOutput(output)
-		if fullPath != "" {
-			fmt.Fprintf(&sb, " (full output: %s)", fullPath)
-		}
+	fmt.Fprintf(&sb, "[exit %d]", exitCode)
+	if fullPath != "" {
+		fmt.Fprintf(&sb, " (full output: %s)", fullPath)
 	}
 	fmt.Fprintf(&sb, "  Took %s", humanDuration(elapsed))
-
-	isErr := exitCode != 0 || ctx.Err() != nil
-	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: sb.String()}},
-		IsError: isErr,
-		Details: map[string]any{
-			"exit_code":        exitCode,
-			"exitCode":         exitCode,
-			"stdout":           stdoutDetail(trimmed, a.SeparateStreams),
-			"stderr":           stderrDetail(stderrOut, a.SeparateStreams),
-			"truncated":        truncLines || truncBytes,
-			"full_output_path": fullPath,
-			"lines_truncated":  truncLines,
-			"bytes_truncated":  truncBytes,
-			"duration_ms":      elapsed.Milliseconds(),
-			"workdir":          cwd,
-			"steps":            len(steps),
-		},
-	}, nil
+	return sb.String()
 }
 
 // humanDuration renders a duration in the "Took X.Ys" style used by
-// the shell-log output: tenths of a second for sub-minute runs,
-// whole seconds once we pass a minute. Trailing zeros dropped so
-// "0.1s" instead of "0.10s".
+// the shell-log display.
 func humanDuration(d time.Duration) string {
 	switch {
 	case d < time.Millisecond:
@@ -338,41 +294,137 @@ func humanDuration(d time.Duration) string {
 	}
 }
 
-// bashEnv starts from the daemon environment plus SANDBOX-safe extras
-// (same key policy as the python tool).
-func bashEnv(extra map[string]string) []string {
-	env := os.Environ()
-	for k, v := range extra {
-		if !validEnvKey(k) {
-			continue
+// ---------------------------------------------------------------------------
+// outputAccumulator: port of pi's OutputAccumulator
+// ---------------------------------------------------------------------------
+
+// outputAccumulator keeps a bounded rolling tail in memory plus the running
+// line/byte counters, and streams the complete output to a temp file once the
+// truncation thresholds are exceeded (so "Full output: <path>" really is full).
+type outputAccumulator struct {
+	maxLines int
+	maxBytes int
+
+	totalBytes    int
+	totalLines    int // complete lines seen
+	lastLineBytes int // bytes of the current (still open) line
+
+	chunks   [][]byte // retained until the temp file opens
+	tail     []byte   // rolling tail (last tailCap bytes)
+	tailCap  int
+	tempPath string
+	tempFile *os.File
+}
+
+func newOutputAccumulator(maxLines, maxBytes int) *outputAccumulator {
+	return &outputAccumulator{maxLines: maxLines, maxBytes: maxBytes, tailCap: 2 * maxBytes}
+}
+
+func (a *outputAccumulator) append(data []byte) {
+	a.totalBytes += len(data)
+	for _, b := range data {
+		if b == '\n' {
+			a.totalLines++
+			a.lastLineBytes = 0
+		} else {
+			a.lastLineBytes++
 		}
-		env = append(env, k+"="+v)
 	}
-	return env
+
+	a.tail = append(a.tail, data...)
+	if len(a.tail) > a.tailCap {
+		copy(a.tail, a.tail[len(a.tail)-a.tailCap:])
+		a.tail = a.tail[:a.tailCap]
+	}
+
+	if a.tempFile != nil {
+		_, _ = a.tempFile.Write(data)
+		return
+	}
+	if a.totalBytes > a.maxBytes || a.totalLines > a.maxLines {
+		a.openTempFile()
+		for _, c := range a.chunks {
+			_, _ = a.tempFile.Write(c)
+		}
+		a.chunks = nil
+		_, _ = a.tempFile.Write(data)
+		return
+	}
+	a.chunks = append(a.chunks, append([]byte(nil), data...))
 }
 
-func stdoutDetail(trimmed string, separated bool) string {
-	if !separated {
-		return trimmed
+func (a *outputAccumulator) openTempFile() {
+	f, err := os.CreateTemp("", "lgrc-bash-*.log")
+	if err != nil {
+		return
 	}
-	return trimmed
+	a.tempFile = f
+	a.tempPath = f.Name()
 }
 
-func stderrDetail(stderrOut string, separated bool) string {
-	if !separated {
-		return ""
-	}
-	return stderrOut
+// getLastLineBytes mirrors pi's getLastLineBytes: byte length of the last
+// (possibly still open) line.
+func (a *outputAccumulator) getLastLineBytes() int {
+	return a.lastLineBytes
 }
 
-func writeFullOutput(s string) string {
-	b := make([]byte, 6)
-	_, _ = rand.Read(b)
-	name := filepath.Join(os.TempDir(), "lgrc-bash-"+hex.EncodeToString(b)+".log")
-	if err := os.WriteFile(name, []byte(s), 0o600); err != nil {
-		return ""
+type outputSnapshot struct {
+	content         string
+	truncated       bool
+	truncatedBy     string
+	totalLines      int
+	totalBytes      int
+	outputLines     int
+	outputBytes     int
+	lastLinePartial bool
+	fullOutputPath  string
+}
+
+// snapshot mirrors pi's snapshot({persistIfTruncated}): tail-truncate the
+// rolling tail, then overlay the true running totals.
+func (a *outputAccumulator) snapshot(persistIfTruncated bool) outputSnapshot {
+	tailText := string(a.tail)
+	tr := truncateTail(tailText, a.maxLines, a.maxBytes)
+	truncated := a.totalLines > a.maxLines || a.totalBytes > a.maxBytes
+	truncatedBy := ""
+	if truncated {
+		truncatedBy = tr.truncatedBy
+		if truncatedBy == "" {
+			if a.totalBytes > a.maxBytes {
+				truncatedBy = "bytes"
+			} else {
+				truncatedBy = "lines"
+			}
+		}
 	}
-	return name
+	if persistIfTruncated && truncated && a.tempFile == nil {
+		// Thresholds were crossed without append seeing it (cannot happen in
+		// practice, but keep the guarantee): open the file with what we have.
+		a.openTempFile()
+		for _, c := range a.chunks {
+			_, _ = a.tempFile.Write(c)
+		}
+		a.chunks = nil
+		_, _ = a.tempFile.Write(a.tail)
+	}
+	return outputSnapshot{
+		content:         tr.content,
+		truncated:       truncated,
+		truncatedBy:     truncatedBy,
+		totalLines:      a.totalLines,
+		totalBytes:      a.totalBytes,
+		outputLines:     tr.outputLines,
+		outputBytes:     tr.outputBytes,
+		lastLinePartial: tr.lastLinePartial,
+		fullOutputPath:  a.tempPath,
+	}
+}
+
+func (a *outputAccumulator) closeTempFile() {
+	if a.tempFile != nil {
+		_ = a.tempFile.Close()
+		a.tempFile = nil
+	}
 }
 
 type shellCommand struct {
@@ -401,21 +453,6 @@ func resolveShell(goos string, executable func(string) bool, lookPath func(strin
 func isExecutableFile(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
-}
-
-func shellDescription(shell shellCommand) string {
-	base := "Run a shell command"
-	if shell.flag == "/C" {
-		base = "Run a Windows Command Prompt command via cmd /C"
-	} else if shell.isBash {
-		base = fmt.Sprintf("Run a Bash command via %s -c", shell.path)
-	} else {
-		base = "Run a POSIX sh command via /bin/sh -c (Bash unavailable)"
-	}
-	return base + ". LAST RESORT for things no builtin covers (compilers, test runners, package managers, git, one-off pipes). " +
-		"Prefer builtins: search (not grep/rg), inspect (not ls/cat/head/wc), read (not cat/sed), edit (not sed -i), " +
-		"write (new file), glob (find files), python (scripting), search_web/fetch_url (web). " +
-		"Params: command, commands[] (sequential, stopOnError), workdir, env, timeout, separateStreams."
 }
 
 func newShellCmd(ctx context.Context, command string) *exec.Cmd {

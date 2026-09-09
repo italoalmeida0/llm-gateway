@@ -244,6 +244,7 @@ export function appendToolResult(
   isError?: boolean,
   startedAt?: number,
   durationMs?: number,
+  details?: any,
 ): ChatMessage[] {
   const last = prev[prev.length - 1];
   const resBlock: ContentBlock = {
@@ -253,6 +254,7 @@ export function appendToolResult(
     toolStartedAt: startedAt,
     toolDurationMs: startedAt ? durationMs || 0 : undefined,
     isError: !!isError,
+    toolDetails: details,
   };
 
   if (last && last.role === "assistant") {

@@ -65,6 +65,12 @@ type ToolResultBlock struct {
 	CallID     string    `json:"call_id"`
 	Content    []Content `json:"content"`
 	IsError    bool      `json:"is_error"`
+	// Details carries frontend-only rendering data (e.g. the rich display
+	// text for read/write/edit/bash). It is persisted with the transcript so
+	// reloaded sessions keep the same UI, but it is never serialized into
+	// provider requests — request payloads are built field-by-field from
+	// Content/CallID/IsError only.
+	Details any `json:"details,omitempty"`
 }
 
 func (ToolResultBlock) isContent() {}

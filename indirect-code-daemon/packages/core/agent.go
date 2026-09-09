@@ -1012,6 +1012,7 @@ func (a *Agent) executeTools(ctx context.Context, msg provider.Message, sink fun
 			CallID:  tc.ID,
 			Content: res.Content,
 			IsError: res.IsError,
+			Details: res.Details,
 		})
 		for _, name := range res.ActivateTools {
 			if _, err := a.Tools.Get(name); err == nil && !containsString(addedTools, name) {

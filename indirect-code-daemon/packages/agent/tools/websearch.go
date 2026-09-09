@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/html"
 	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/provider"
-	"golang.org/x/net/html"
 )
 
 type WebSearchArgs struct {

@@ -37,6 +37,8 @@ func WithHTTPClient(c Client, httpClient *http.Client) Client {
 	switch v := c.(type) {
 	case *openaiClient:
 		v.http = httpClient
+	case *anthropicClient:
+		v.http = httpClient
 	}
 	return c
 }

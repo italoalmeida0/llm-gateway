@@ -1,8 +1,10 @@
 // Package provider defines the LLM client abstraction.
 //
-// It supports exactly two providers: Anthropic (Messages API) and
-// OpenAI (Chat Completions API). Everything above this package operates
-// on the types declared here and does not know about HTTP or SSE.
+// The daemon speaks the Anthropic Messages API exclusively (against the
+// gateway's forced Anthropic surface); the OpenAI chat-completions client
+// remains for direct OpenAI-compatible endpoints. Everything above this
+// package operates on the types declared here and does not know about
+// HTTP or SSE.
 package provider
 
 import (

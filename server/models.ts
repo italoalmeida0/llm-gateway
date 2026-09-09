@@ -649,11 +649,23 @@ export function providerHasCapability(row: ProviderRow, proto: "openai" | "anthr
 }
 
 /** One attempt of the failover chain: a concrete provider key plus the
- *  upstream model id to send (null in passthrough mode — body untouched). */
+ *  upstream model id to send (null in passthrough mode — body untouched).
+ *  `translated` marks an Anthropic-protocol request served by an
+ *  OpenAI-only provider through the Anthropic→OpenAI bridge. */
 export interface RouteCandidate {
   provider: RoutedProvider;
   key: RoutedKey;
   upstreamModel: string;
+  translated: boolean;
+}
+
+/** Capability match for a candidate, including bridge translation: an
+ *  Anthropic request may use an OpenAI-only provider (translated); the
+ *  reverse is never translated. */
+function candidateUsable(provider: RoutedProvider, proto: "openai" | "anthropic"): "direct" | "translated" | null {
+  if (providerHasCapability(provider.row, proto)) return "direct";
+  if (proto === "anthropic" && provider.row.openai_base_url) return "translated";
+  return null;
 }
 
 /** Resolve a requested public model id against the registry (router mode). */
@@ -710,9 +722,11 @@ export function resolveModelRoute(
   const candidates: RouteCandidate[] = [];
   for (const t of enabledTargets) {
     const provider = snap.providers.get(t.provider_id);
-    if (!provider || !providerHasCapability(provider.row, proto)) continue;
+    if (!provider) continue;
+    const usable = candidateUsable(provider, proto);
+    if (!usable) continue;
     for (const key of usableKeys(provider)) {
-      candidates.push({ provider, key, upstreamModel: t.upstream_model });
+      candidates.push({ provider, key, upstreamModel: t.upstream_model, translated: usable === "translated" });
     }
   }
   if (candidates.length === 0) {
@@ -734,9 +748,10 @@ export function passthroughCandidates(
 ): RouteCandidate[] {
   const out: RouteCandidate[] = [];
   for (const provider of snap.providers.values()) {
-    if (!providerHasCapability(provider.row, proto)) continue;
+    const usable = candidateUsable(provider, proto);
+    if (!usable) continue;
     for (const key of usableKeys(provider)) {
-      out.push({ provider, key, upstreamModel: "" });
+      out.push({ provider, key, upstreamModel: "", translated: usable === "translated" });
     }
   }
   return out;
@@ -752,7 +767,7 @@ export function listableModels(snap: RouterSnapshot, proto: "openai" | "anthropi
     const servable = ts.some((t) => {
       if (!t.enabled) return false;
       const p = snap.providers.get(t.provider_id);
-      return !!p && providerHasCapability(p.row, proto);
+      return !!p && candidateUsable(p, proto) !== null;
     });
     if (servable) out.push(m);
   }

@@ -14,7 +14,7 @@ import (
 // Limits come from the gateway registry, including for renamed/custom models.
 // An unavailable or unset limit stays unknown (zero); never guess by model name.
 func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provider.Model {
-	model := provider.Model{ID: id, Provider: "openai"}
+	model := provider.Model{ID: id, Provider: "anthropic"}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(gatewayURL, "/")+"/api/indirect-code/models", nil)
@@ -49,13 +49,12 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 	if json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&catalog) != nil {
 		return model
 	}
-	// A removed model falls back to the first compatible gateway entry.
+	// A removed model falls back to the first gateway entry. Every enabled
+	// registry model is servable on the Anthropic surface (OpenAI-only
+	// providers via gateway translation), so no proto is skipped.
 	found := false
 	first := ""
 	for _, entry := range catalog.Models {
-		if entry.Proto == "anthropic" {
-			continue
-		}
 		if first == "" {
 			first = entry.ID
 		}

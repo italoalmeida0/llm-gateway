@@ -649,8 +649,54 @@ describe("failover: candidate chains", () => {
       ]),
     };
     expect(passthroughCandidates(snap, "openai").map((c) => c.key.id)).toEqual(["k2", "k3"]);
-    // anthropic capability missing on both
-    expect(passthroughCandidates(snap, "anthropic")).toEqual([]);
+    // anthropic capability missing on both → served translated via the bridge
+    const tr = passthroughCandidates(snap, "anthropic");
+    expect(tr.map((c) => c.key.id)).toEqual(["k2", "k3"]);
+    expect(tr.every((c) => c.translated)).toBe(true);
+  });
+
+  test("anthropic request on an OpenAI-only provider resolves as translated", () => {
+    const snap: RouterSnapshot = {
+      mode: "router",
+      models: new Map([["m", model("m")]]),
+      targets: new Map([["m", [target("m", "p1", "m", 0)]]]),
+      providers: new Map([["p1", { row: provider, keys: [key("k1", 0)] }]]),
+    };
+    // registry proto is openai → 404 on the anthropic surface (registry gate)
+    expect(resolveModelRoute(snap, "anthropic", "m")).toMatchObject({ ok: false, status: 404 });
+    const both = { ...model("m"), proto: "both" as const };
+    const snapBoth: RouterSnapshot = {
+      ...snap,
+      models: new Map([["m", both]]),
+    };
+    const r = resolveModelRoute(snapBoth, "anthropic", "m");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.candidates.map((c) => c.key.id)).toEqual(["k1"]);
+      expect(r.candidates[0]!.translated).toBe(true);
+    }
+    // openai surface on the same provider stays direct
+    const r2 = resolveModelRoute(snap, "openai", "m");
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.candidates[0]!.translated).toBe(false);
+  });
+
+  test("listableModels shows translated models on the anthropic surface", () => {
+    const both = { ...model("m-both"), proto: "both" as const };
+    const snap: RouterSnapshot = {
+      mode: "router",
+      models: new Map([
+        ["m-both", both],
+        ["m-openai", model("m-openai")],
+      ]),
+      targets: new Map([
+        ["m-both", [target("m-both", "p1", "m-both", 0)]],
+        ["m-openai", [target("m-openai", "p1", "m-openai", 0)]],
+      ]),
+      providers: new Map([["p1", { row: provider, keys: [key("k1", 0)] }]]),
+    };
+    // provider is OpenAI-only: 'both' is servable translated, pure-openai is not
+    expect(listableModels(snap, "anthropic").map((m) => m.id)).toEqual(["m-both"]);
   });
 });
 

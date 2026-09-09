@@ -159,15 +159,18 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 			fmt.Fprint(w, `{"models":[{"id":"custom/alias","limit":{"context":1024000,"output":16384},"reasoning_parameters":{"efforts":["high"]}}]}`)
 			return
 		}
+		if r.URL.Path != "/anthropic/v1/messages" {
+			t.Errorf("wrong path %s", r.URL.Path)
+		}
 		var req struct {
-			Reasoning   string  `json:"reasoning_effort"`
-			MaxOutput   int     `json:"max_completion_tokens"`
-			Temperature float64 `json:"temperature"`
+			MaxTokens int `json:"max_tokens"`
 		}
 		if json.NewDecoder(r.Body).Decode(&req) != nil {
 			t.Error("bad model request")
 		}
-		if req.Reasoning != "high" || req.MaxOutput != 16384 {
+		// The Anthropic wire carries no reasoning-effort knob; effort stays a
+		// daemon-side option. Only the output budget is asserted on the wire.
+		if req.MaxTokens != 16384 {
 			t.Errorf("settings not forwarded: %+v", req)
 		}
 		mu.Lock()
@@ -175,21 +178,36 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 		step := normalCalls
 		mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
-		event := func(data any) { encoded, _ := json.Marshal(data); fmt.Fprintf(w, "data: %s\n\n", encoded) }
-		event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"reasoning": "Inspecting the workspace."}}}})
-		if step%2 == 1 {
-			event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "I will read the file now."}}}})
-			args, _ := json.Marshal(map[string]any{"path": "hello.txt"})
-			event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{
-				map[string]any{"index": 0, "id": fmt.Sprintf("read-%d", step), "type": "function", "function": map[string]any{"name": "read", "arguments": string(args)}},
-				map[string]any{"index": 1, "id": fmt.Sprintf("todo-%d", step), "type": "function", "function": map[string]any{"name": "todo", "arguments": `{"items":[{"id":"read","text":"Read hello.txt","status":"completed"}]}`}},
-				map[string]any{"index": 2, "id": fmt.Sprintf("question-%d", step), "type": "function", "function": map[string]any{"name": "question", "arguments": `{"questions":[{"header":"Next step","question":"How should I proceed?","options":[{"label":"Continue"}]}]}`}},
-			}}, "finish_reason": "tool_calls"}}})
-		} else {
-			event(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "The file is readable."}, "finish_reason": "stop"}}})
+		emit := func(event string, data any) {
+			encoded, _ := json.Marshal(data)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
 		}
-		event(map[string]any{"choices": []any{}, "usage": map[string]any{"prompt_tokens": 432000, "completion_tokens": 500, "prompt_tokens_details": map[string]any{"cached_tokens": 32000}}})
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		emit("message_start", map[string]any{"type": "message_start", "message": map[string]any{"model": "custom/alias", "usage": map[string]any{"input_tokens": 400000, "cache_read_input_tokens": 32000}}})
+		emit("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "thinking", "thinking": ""}})
+		emit("content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "thinking_delta", "thinking": "Inspecting the workspace."}})
+		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+		text := func(index int, s string) {
+			emit("content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": map[string]any{"type": "text", "text": ""}})
+			emit("content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "text_delta", "text": s}})
+			emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+		}
+		toolUse := func(index int, id, name, args string) {
+			emit("content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}}})
+			emit("content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "input_json_delta", "partial_json": args}})
+			emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+		}
+		if step%2 == 1 {
+			text(1, "I will read the file now.")
+			args, _ := json.Marshal(map[string]any{"path": "hello.txt"})
+			toolUse(2, fmt.Sprintf("read-%d", step), "read", string(args))
+			toolUse(3, fmt.Sprintf("todo-%d", step), "todo", `{"items":[{"id":"read","text":"Read hello.txt","status":"completed"}]}`)
+			toolUse(4, fmt.Sprintf("question-%d", step), "question", `{"questions":[{"header":"Next step","question":"How should I proceed?","options":[{"label":"Continue"}]}]}`)
+			emit("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "tool_use"}, "usage": map[string]any{"output_tokens": 500}})
+		} else {
+			text(1, "The file is readable.")
+			emit("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"}, "usage": map[string]any{"output_tokens": 500}})
+		}
+		emit("message_stop", map[string]any{"type": "message_stop"})
 	}))
 	defer upstream.Close()
 	d.config.GatewayURL = upstream.URL
@@ -311,7 +329,12 @@ func TestManualCompactPreservesHistoryUntilSummarySucceeds(t *testing.T) {
 					return
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"A summary preserving the project decisions.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+				fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"alias\",\"usage\":{\"input_tokens\":0}}}\n\n")
+				fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+				fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"A summary preserving the project decisions.\"}}\n\n")
+				fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+				fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\n")
+				fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 			}))
 			defer upstream.Close()
 			d.config.GatewayURL = upstream.URL

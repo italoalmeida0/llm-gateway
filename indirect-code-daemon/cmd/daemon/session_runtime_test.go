@@ -31,17 +31,15 @@ func TestLiveChoicesApplyToNextRequestAndToolWithinSameTask(t *testing.T) {
 			fmt.Fprint(w, `{"models":[{"id":"model-a","limit":{"context":100000,"output":4096}},{"id":"model-b","limit":{"context":200000,"output":8192}}]}`)
 			return
 		}
+		if r.URL.Path != "/anthropic/v1/messages" {
+			t.Errorf("wrong path %s", r.URL.Path)
+		}
 		var req struct {
-			Model    string `json:"model"`
-			Effort   string `json:"reasoning_effort"`
-			Max      int    `json:"max_completion_tokens"`
-			Messages []struct {
-				Content any `json:"content"`
-			} `json:"messages"`
-			Tools []struct {
-				Function struct {
-					Name string `json:"name"`
-				} `json:"function"`
+			Model  string `json:"model"`
+			Max    int    `json:"max_tokens"`
+			System string `json:"system"`
+			Tools  []struct {
+				Name string `json:"name"`
 			} `json:"tools"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -51,43 +49,58 @@ func TestLiveChoicesApplyToNextRequestAndToolWithinSameTask(t *testing.T) {
 		step := calls.Add(1)
 		hasWrite := false
 		for _, tool := range req.Tools {
-			if tool.Function.Name == "write" {
+			if tool.Name == "write" {
 				hasWrite = true
 			}
 		}
-		model, effort, mode, maxTokens := "model-a", "medium", "Build", 4096
+		// The Anthropic wire carries no reasoning-effort knob; effort stays a
+		// daemon-side option and is not asserted here.
+		model, mode, maxTokens := "model-a", "Build", 4096
 		switch step {
 		case 2:
-			model, effort, mode, maxTokens = "model-b", "low", "Plan", 8192
+			model, mode, maxTokens = "model-b", "Plan", 8192
 		case 3:
-			effort, mode = "high", "patient Socratic"
-		case 4:
-			effort = "low"
+			mode = "patient Socratic"
 		}
-		system, _ := req.Messages[0].Content.(string)
-		if req.Model != model || req.Effort != effort || req.Max != maxTokens || !strings.Contains(system, mode) || hasWrite != (step == 1 || step == 4) {
-			t.Errorf("request %d: model=%s effort=%s max=%d write=%t system=%s", step, req.Model, req.Effort, req.Max, hasWrite, system)
+		if req.Model != model || req.Max != maxTokens || !strings.Contains(req.System, mode) || hasWrite != (step == 1 || step == 4) {
+			t.Errorf("request %d: model=%s max=%d write=%t system=%s", step, req.Model, req.Max, hasWrite, req.System)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		event := func(delta any, finish string) {
-			b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}})
-			fmt.Fprintf(w, "data: %s\n\n", b)
+		emit := func(event string, payload any) {
+			b, _ := json.Marshal(payload)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		}
-		tool := func(index int, id, name, args string) any {
-			return map[string]any{"index": index, "id": id, "type": "function", "function": map[string]any{"name": name, "arguments": args}}
+		emit("message_start", map[string]any{"type": "message_start", "message": map[string]any{"model": req.Model, "usage": map[string]any{"input_tokens": 100}}})
+		toolUse := func(index int, id, name, args string) {
+			emit("content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": map[string]any{"type": "tool_use", "id": id, "name": name}})
+			emit("content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "input_json_delta", "partial_json": args}})
+			emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+		}
+		text := func(index int, s string) {
+			emit("content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": map[string]any{"type": "text", "text": ""}})
+			emit("content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "text_delta", "text": s}})
+			emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+		}
+		stop := func(reason string) {
+			emit("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": reason}, "usage": map[string]any{"output_tokens": 10}})
+			emit("message_stop", map[string]any{"type": "message_stop"})
 		}
 		switch step {
 		case 1:
-			event(map[string]any{"tool_calls": []any{tool(0, "shell", "bash", `{"command":"printf started > started; while [ ! -e release ]; do sleep 0.01; done; printf done"}`), tool(1, "blocked", "write", `{"path":"must-not-exist","content":"no"}`)}}, "tool_calls")
+			toolUse(0, "shell", "bash", `{"command":"printf started > started; while [ ! -e release ]; do sleep 0.01; done; printf done"}`)
+			toolUse(1, "blocked", "write", `{"path":"must-not-exist","content":"no"}`)
+			stop("tool_use")
 		case 2:
-			event(map[string]any{"tool_calls": []any{tool(0, "read", "read", `{"path":"started"}`)}}, "tool_calls")
+			toolUse(0, "read", "read", `{"path":"started"}`)
+			stop("tool_use")
 		case 3:
 			configure("model-a", "low", "build", "full")
-			event(map[string]any{"tool_calls": []any{tool(0, "read-again", "read", `{"path":"started"}`)}}, "tool_calls")
+			toolUse(0, "read-again", "read", `{"path":"started"}`)
+			stop("tool_use")
 		default:
-			event(map[string]any{"content": "Done"}, "stop")
+			text(0, "Done")
+			stop("end_turn")
 		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 	d.config.GatewayURL = upstream.URL

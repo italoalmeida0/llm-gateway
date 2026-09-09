@@ -2632,13 +2632,15 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		"turn":      turnStarted,
 	})
 
-	// Create OpenAI client pointing to Gateway's /v1 proxy endpoint
-	apiBase := strings.TrimRight(cfg.GatewayURL, "/") + "/v1"
+	// Anthropic client pointing at the Gateway's forced Anthropic surface.
+	// OpenAI-only providers are served by the gateway's Anthropic→OpenAI
+	// translation — the daemon never speaks the OpenAI wire.
+	apiBase := strings.TrimRight(cfg.GatewayURL, "/") + "/anthropic/v1"
 	modelInfo := gatewayModel(ctx, cfg.GatewayURL, cfg.DaemonToken, modelToUse)
 	if effort := canonicalReasoning(options.Effort); effort != "" && effort != "none" {
 		modelInfo.Reasoning = true
 	}
-	client := provider.NewGatewayOpenAI(cfg.APIKey, apiBase, modelInfo)
+	client := provider.NewGatewayAnthropic(cfg.APIKey, apiBase, modelInfo)
 	defer func() {
 		if !cfg.Settings.NoAutoTitle && ctx.Err() == nil {
 			go d.maybeAutoTitle(act, myGen, client, modelToUse)
@@ -2724,7 +2726,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 			if nextOptions.Effort != "none" {
 				requestModel.Reasoning = true
 			}
-			client = provider.NewGatewayOpenAI(cfg.APIKey, apiBase, requestModel)
+			client = provider.NewGatewayAnthropic(cfg.APIKey, apiBase, requestModel)
 			modelToUse = modelInfo.ID
 			agent.Client, agent.Model, agent.Reasoning = client, modelToUse, nextOptions.Effort
 			agent.MaxTokens = maxOutputTokens(modelInfo)

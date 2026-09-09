@@ -63,7 +63,7 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 		_ = d.sendWS(map[string]any{"type": "session_status", "hostId": cfg.HostID, "sessionId": sid, "status": "idle"})
 	}()
 	info := gatewayModel(ctx, cfg.GatewayURL, cfg.DaemonToken, model)
-	client := provider.NewGatewayOpenAI(cfg.APIKey, strings.TrimRight(cfg.GatewayURL, "/")+"/v1", info)
+	client := provider.NewGatewayAnthropic(cfg.APIKey, strings.TrimRight(cfg.GatewayURL, "/")+"/anthropic/v1", info)
 	agent := core.NewAgent(client, model, "", core.NewRegistry())
 	agent.MaxTokens = maxOutputTokens(info)
 	agent.SetMessages(messages)

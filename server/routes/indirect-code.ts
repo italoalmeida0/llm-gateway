@@ -31,8 +31,10 @@ export async function handleIndirectCodeRestRoute(
     ).get(sha256Hex(token));
     if (!host) return err(401, "unauthorized daemon token", req);
     const snap = await routerSnapshot();
+    // The daemon speaks Anthropic exclusively; every enabled registry model
+    // is servable on that surface (OpenAI-only providers via translation).
     const models = Array.from(snap.models.values())
-      .filter((m) => m.enabled && m.proto !== "anthropic")
+      .filter((m) => m.enabled)
       .map((m) => publicModelEntry(m, "gateway"));
     return json({ success: true, models }, { req });
   }

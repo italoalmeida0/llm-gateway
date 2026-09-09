@@ -31,6 +31,13 @@ import {
   liveKeyClear,
   type FailClass,
 } from "../failover";
+import {
+  anthropicToOpenAI,
+  openAIToAnthropicBody,
+  openAIErrorToAnthropic,
+  translatedUsageFromOpenAI,
+  OpenAIToAnthropicStream,
+} from "./anthropic-bridge";
 
 /**
  * The gateway itself: OpenAI- and Anthropic-compatible pass-through proxy.
@@ -821,11 +828,17 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       }
     };
 
-    const parseBufferedUsage = (contentType: string, text: string): UsageResult =>
+    const parseBufferedUsage = (
+      contentType: string,
+      text: string,
+      translated: boolean,
+    ): UsageResult =>
       contentType.includes("application/json")
-        ? proto === "openai"
-          ? parseOpenAiJson(text)
-          : parseAnthropicJson(text)
+        ? translated
+          ? translatedUsageFromOpenAI(text)
+          : proto === "openai"
+            ? parseOpenAiJson(text)
+            : parseAnthropicJson(text)
         : { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false };
 
     let lastFailure:
@@ -840,22 +853,52 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     for (const cand of candidates.slice(0, LIMITS.maxFailoverAttempts)) {
       if (keyBlockedNow(cand.key.id)) continue;
       lastAttempted = cand;
+      // Translated candidates serve Anthropic-protocol requests through the
+      // provider's OpenAI endpoint (Anthropic→OpenAI bridge); everything else
+      // is byte-faithful pass-through on its own capability URL.
+      const upstreamProto = cand.translated ? "openai" : proto;
       // Trailing "/" would produce "//chat/completions" — new rows are
       // stripped at write time, this covers legacy rows still carrying one.
-      const base = (proto === "openai" ? cand.provider.row.openai_base_url : cand.provider.row.anthropic_base_url)!
+      const base = (upstreamProto === "openai" ? cand.provider.row.openai_base_url : cand.provider.row.anthropic_base_url)!
         .replace(/\/+$/, "");
-      const breakerId = `${cand.provider.row.id}:${proto}`;
+      const breakerId = `${cand.provider.row.id}:${upstreamProto}`;
       if (breakerState(breakerId) === "open") continue;
+
+      // `/messages/count_tokens` has no OpenAI equivalent: answer translated
+      // attempts locally from the request-body size estimate.
+      if (cand.translated && route.upstreamPath === "/messages/count_tokens" && bodyJson) {
+        const h = baseHeaders(req);
+        h.set("Content-Type", "application/json; charset=utf-8");
+        markProviderKeyOk(cand.key);
+        record(
+          { inTok: estimateBodyTokens(bodyJson), cacheTok: 0, outTok: 0, model: "", estimated: true },
+          200,
+          Math.round(performance.now() - started),
+          false,
+          cand,
+        );
+        return new Response(
+          JSON.stringify({ input_tokens: estimateBodyTokens(bodyJson) }),
+          { status: 200, headers: h },
+        );
+      }
 
       // Byte-fidelity rule: the original request bytes go upstream untouched;
       // the only per-attempt mutation is the router-mode model rewrite
-      // (each failover target may name the model differently).
+      // (each failover target may name the model differently). Translated
+      // attempts instead carry the bridge-converted OpenAI body.
       let attemptBody = bodyText;
-      if (bodyJson && cand.upstreamModel && (bodyJson as any).model !== cand.upstreamModel) {
+      if (cand.translated && bodyJson) {
+        const withModel =
+          cand.upstreamModel && (bodyJson as any).model !== cand.upstreamModel
+            ? { ...bodyJson, model: cand.upstreamModel }
+            : bodyJson;
+        attemptBody = JSON.stringify(anthropicToOpenAI(withModel as Record<string, unknown>));
+      } else if (bodyJson && cand.upstreamModel && (bodyJson as any).model !== cand.upstreamModel) {
         attemptBody = JSON.stringify({ ...bodyJson, model: cand.upstreamModel });
       }
 
-      const upstreamUrl = `${base}${route.upstreamPath}`;
+      const upstreamUrl = `${base}${cand.translated ? "/chat/completions" : route.upstreamPath}`;
       const controller = new AbortController();
       const headerTimeout = setTimeout(
         () => controller.abort(new Error("upstream header timeout")),
@@ -870,9 +913,9 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
           method: req.method,
           headers: buildUpstreamHeaders(
             req,
-            proto,
+            upstreamProto,
             cand.key.key,
-            proto === "openai" ? cand.provider.row.openai_auth_style : cand.provider.row.anthropic_auth_style,
+            upstreamProto === "openai" ? cand.provider.row.openai_auth_style : cand.provider.row.anthropic_auth_style,
           ),
           body: req.method === "POST" ? attemptBody : undefined,
           signal: controller.signal,
@@ -939,10 +982,19 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // Client-caused rejection (bad request, too large, ...): every other
         // candidate would answer the same — deliver as-is, no failover. The
         // key itself clearly works, so its transient counters reset.
+        // Translated attempts are re-enveloped so the client still sees the
+        // protocol it asked for.
         markProviderKeyOk(cand.key);
         const ct = upstream.headers.get("content-type") || "";
-        record(parseBufferedUsage(ct, errBody), upstream.status, Math.round(performance.now() - started), false, cand);
-        return new Response(errBody, {
+        record(
+          parseBufferedUsage(ct, errBody, cand.translated),
+          upstream.status,
+          Math.round(performance.now() - started),
+          false,
+          cand,
+        );
+        const errOut = cand.translated ? openAIErrorToAnthropic(upstream.status, errBody) : errBody;
+        return new Response(errOut, {
           status: upstream.status,
           headers: buildClientHeaders(upstream.headers, requestId, req),
         });
@@ -960,12 +1012,26 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // the outer finally must not free it when we hand back the Response.
         slotHeldByStream = true;
 
-        const meter = new StreamMeter(proto);
+        // Translated streams convert OpenAI SSE to Anthropic SSE on the fly;
+        // usage comes from the translator (OpenAI terminal chunk), with the
+        // request-body estimate as the input fallback.
+        const translator = cand.translated
+          ? new OpenAIToAnthropicStream(
+              routedPublicModel ?? String((bodyJson as any)?.model ?? ""),
+            )
+          : null;
+        const meter = translator ? null : new StreamMeter(proto);
         let counted = false;
         const finalize = (status: number) => {
           if (counted) return;
           counted = true;
-          record(meter.result(), status, Math.round(performance.now() - started), true, cand);
+          if (translator) {
+            const u = translator.result();
+            if (u.estimated && bodyJson) u.inTok = estimateBodyTokens(bodyJson);
+            record(u, status, Math.round(performance.now() - started), true, cand);
+          } else {
+            record(meter!.result(), status, Math.round(performance.now() - started), true, cand);
+          }
         };
 
         const idleLimit = LIMITS.proxyStreamIdleMs;
@@ -1007,6 +1073,13 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
             try {
               const { done, value } = await reader.read();
               if (done) {
+                if (translator) {
+                  try {
+                    for (const piece of translator.flush()) sink.enqueue(piece);
+                  } catch {
+                    /* terminal flush is best-effort */
+                  }
+                }
                 finalize(req.signal.aborted ? 499 : upstream.status);
                 cleanup();
                 closeSink(sink);
@@ -1014,8 +1087,12 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
               }
               if (value && value.length) {
                 resetIdle();
-                meter.feed(value); // stats only — the chunk itself goes out as-is
-                sink.enqueue(value);
+                if (translator) {
+                  for (const piece of translator.feed(value)) sink.enqueue(piece);
+                } else {
+                  meter!.feed(value); // stats only — the chunk itself goes out as-is
+                  sink.enqueue(value);
+                }
               }
             } catch {
               finalize(req.signal.aborted ? 499 : 502);
@@ -1067,8 +1144,23 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       let offset = 0;
       for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
       const respText = decoder.decode(body);
-      record(parseBufferedUsage(contentType, respText), upstream.status, Math.round(performance.now() - started), false, cand);
+      record(
+        parseBufferedUsage(contentType, respText, cand.translated),
+        upstream.status,
+        Math.round(performance.now() - started),
+        false,
+        cand,
+      );
 
+      if (cand.translated) {
+        const anthropicText = openAIToAnthropicBody(
+          respText,
+          routedPublicModel ?? String((bodyJson as any)?.model ?? ""),
+        );
+        const h = buildClientHeaders(upstream.headers, requestId, req);
+        h.set("Content-Type", "application/json; charset=utf-8");
+        return new Response(anthropicText, { status: upstream.status, headers: h });
+      }
       return new Response(respText, { status: upstream.status, headers: clientHeaders });
     }
 
@@ -1077,9 +1169,18 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     if (lastFailure?.kind === "upstream") {
       // Deliver the most recent UPSTREAM error (sanitized headers as always):
       // clients want the real cause (e.g. insufficient_quota), not a 503.
+      // Translated failures are re-enveloped to the requested protocol.
       const f = lastFailure;
-      record(parseBufferedUsage(f.headers.get("content-type") || "", f.body), f.status, finalLatency, false, lastAttempted!);
-      return new Response(f.body, { status: f.status, headers: buildClientHeaders(f.headers, requestId, req) });
+      const wasTranslated = lastAttempted?.translated ?? false;
+      record(
+        parseBufferedUsage(f.headers.get("content-type") || "", f.body, wasTranslated),
+        f.status,
+        finalLatency,
+        false,
+        lastAttempted!,
+      );
+      const outBody = wasTranslated ? openAIErrorToAnthropic(f.status, f.body) : f.body;
+      return new Response(outBody, { status: f.status, headers: buildClientHeaders(f.headers, requestId, req) });
     }
     if (lastFailure?.kind === "network") {
       recordUsage({

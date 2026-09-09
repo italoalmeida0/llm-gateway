@@ -78,7 +78,6 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
                 props.onReview!();
               }}
               class="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg border border-line/70 text-ink-300 hover:text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer"
-              title="Refresh the live changes view right now"
             >
               <Iconify icon="lucide:refresh-cw" size={13} />
               Review changes
@@ -93,7 +92,6 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
                 props.onUndo();
               }}
               class="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg border border-line/70 text-ink-300 hover:text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer disabled:opacity-50"
-              title="Restore files to the snapshot taken at the start of this turn (reverse patches). The balloon stays."
             >
               <Iconify icon={props.undoBusy ? "lucide:loader-circle" : "lucide:undo-2"} size={13} class={props.undoBusy ? "animate-spin" : ""} />
               {props.undoBusy ? "Undoing…" : "Undo"}
@@ -110,7 +108,7 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
                   <div class="rounded-lg border border-line/50 overflow-hidden">
                     <div class="flex items-center gap-2 px-2.5 py-1.5 bg-ink-900/60">
                       <FileIcon path={f.rel || f.path} size={13} />
-                      <span class="text-[11px] font-mono text-ink-200 truncate" title={f.path}>
+                      <span class="text-[11px] font-mono text-ink-200 truncate">
                         {f.rel || f.path}
                       </span>
                       <span class={`text-[10px] uppercase tracking-wide flex items-center gap-1 ${meta.cls}`}>

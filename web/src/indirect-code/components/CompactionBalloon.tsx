@@ -85,7 +85,6 @@ export function CompactionBalloon(props: CompactionBalloonProps) {
             <Show when={hasUsage()}>
               <div
                 class="hidden sm:flex items-center gap-1.5 text-[11px] font-mono text-ink-400 bg-elev/70 px-2 py-0.5 rounded-md border border-line/50"
-                title="Tokens used to generate compaction summary"
               >
                 <Iconify icon="lucide:cpu" size={11} class="text-ink-500" />
                 <span>
@@ -102,7 +101,6 @@ export function CompactionBalloon(props: CompactionBalloonProps) {
                 type="button"
                 onClick={handleCopy}
                 class="p-1 rounded-md text-ink-400 hover:text-ink-200 hover:bg-elev transition-colors cursor-pointer"
-                title="Copy compaction summary"
                 aria-label="Copy compaction summary"
               >
                 <Iconify icon={copied() ? "lucide:check" : "lucide:copy"} size={13} />

@@ -142,7 +142,9 @@ export function ComposerInput() {
         }
       }
 
-      if (e.key === "Enter" && !e.shiftKey) {
+      // On desktop, Enter sends the message (Shift+Enter for newline).
+      // On mobile, Enter never sends — it inserts a line break and user must tap send.
+      if (!ui.isMobile() && e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         if (textareaRef) textareaRef.style.height = "";
         c.sendPrompt();

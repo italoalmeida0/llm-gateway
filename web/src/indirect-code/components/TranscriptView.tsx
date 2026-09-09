@@ -217,7 +217,7 @@ export function TranscriptView() {
                     onInput={(e) => t.updateEditingMsgText(e.currentTarget.value)}
                     onBlur={() => t.flushPendingEdit()}
                     onKeyDown={(e) => {
-                      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                      if (!ui.isMobile() && (e.ctrlKey || e.metaKey) && e.key === "Enter") {
                         e.preventDefault();
                         t.saveEditMsg(rawIdx(), msg);
                       } else if (e.key === "Escape") {

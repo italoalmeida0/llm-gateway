@@ -43,7 +43,7 @@ export function WorkspaceSidebar() {
   class={`border-r border-line/70 bg-ink-950 flex flex-col shrink-0 transition-all duration-200 ${
     ui.sidebarOpen()
       ? ui.isMobile()
-        ? "fixed inset-y-0 left-0 z-40 w-72 shadow-2xl"
+        ? "fixed inset-0 z-40 w-full shadow-2xl border-r-0"
         : "w-64"
       : "w-0 overflow-hidden border-r-0"
   }`}
@@ -63,10 +63,10 @@ export function WorkspaceSidebar() {
     <Show when={ui.isMobile()}>
       <button
         onClick={() => ui.setSidebarOpen(false)}
-        class="p-1 rounded-md text-ink-400 hover:text-ink-200 hover:bg-ink-900 cursor-pointer md:hidden"
+        class="p-1.5 rounded-lg text-ink-400 hover:text-ink-200 hover:bg-ink-900 cursor-pointer md:hidden"
         aria-label="Close sidebar"
       >
-        <Iconify icon="lucide:x" size={14} />
+        <Iconify icon="lucide:x" size={16} />
       </button>
     </Show>
   </div>

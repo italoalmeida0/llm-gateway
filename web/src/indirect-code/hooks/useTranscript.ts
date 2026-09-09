@@ -43,6 +43,7 @@ export function createTranscript(opts: {
   onTurnIdle: () => void;
   /** Context received in usage: the page compares it with the catalog. */
   onUsageContext: (ctx: SessionContext) => void;
+  isHideToolMessages?: () => boolean;
 }) {
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
@@ -140,7 +141,7 @@ export function createTranscript(opts: {
     setToolOpen((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }));
   }
   function toggleToolGroup(key: string) {
-    setToolGroupOpen((prev) => ({ ...prev, [key]: !(prev[key] ?? true) }));
+    setToolGroupOpen((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }));
   }
   // Expanded thinking blocks: reasoning never starts open by itself —
   // the exception is the live one (auto-opens while it streams, then keeps
@@ -212,7 +213,8 @@ export function createTranscript(opts: {
   // Render blocks (reconciled store to preserve DOM identity across deltas)
   const [renderState, setRenderState] = createStore<{ blocks: (RenderBlock & { id: string })[] }>({ blocks: [] });
   createEffect(() => {
-    const blocks = buildRenderBlocks(messages()).map((block) => ({ ...block, id: block.msg.id }));
+    const hide = opts.isHideToolMessages ? opts.isHideToolMessages() : true;
+    const blocks = buildRenderBlocks(messages(), { hideToolMessages: hide }).map((block) => ({ ...block, id: block.msg.id }));
     setRenderState("blocks", reconcile(blocks));
   });
   const renderBlocks = () => renderState.blocks;

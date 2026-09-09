@@ -74,6 +74,27 @@ test("groups tools and thinking until non-whitespace assistant text intervenes",
   expect(list[1].blocks).toHaveLength(3);
 });
 
+test("fuses all intermediate tool messages and thoughts into one series when hideToolMessages is true", () => {
+  const list: ChatMessage[] = [
+    {id:"one",role:"assistant",srcIdx:1,thinkingDuration:3,blocks:[{type:"reasoning",reasoning:"Inspect"},{type:"tool_call",toolId:"a",toolName:"read"}]},
+    {id:"two",role:"assistant",srcIdx:3,thinkingDuration:1,blocks:[{type:"text",text:"Checking file"},{type:"reasoning",reasoning:"Verify"},{type:"tool_call",toolId:"b",toolName:"bash"}]},
+    {id:"three",role:"assistant",srcIdx:5,blocks:[{type:"text",text:"I found an issue."},{type:"tool_call",toolId:"c",toolName:"edit"}]},
+    {id:"four",role:"assistant",srcIdx:7,blocks:[{type:"reasoning",reasoning:"Testing"},{type:"tool_call",toolId:"d",toolName:"bash"}]},
+    {id:"five",role:"assistant",srcIdx:9,blocks:[{type:"text",text:"All issues resolved."}]},
+  ];
+  const blocks = buildRenderBlocks(list, { hideToolMessages: true });
+  expect(blocks).toHaveLength(2);
+  expect(blocks[0].kind).toBe("series");
+  if (blocks[0].kind === "series") {
+    expect(blocks[0].units.map((u) => u.call?.toolId)).toEqual(["a","b","c","d"]);
+    expect(blocks[0].extras.map((m) => m.id)).toEqual(["two","three","four"]);
+  }
+  expect(blocks[1].kind).toBe("single");
+  if (blocks[1].kind === "single") {
+    expect(blocks[1].msg.id).toBe("five");
+  }
+});
+
 test("terminal footer becomes a duration without removing real output", () => {
   expect(terminalPresentation("$ printf hello\n\nhello\n\n[exit 0]  Took 2.5s")).toEqual({output:"$ printf hello\n\nhello",durationMs:2500});
   expect(terminalPresentation("output\n[exit 1] (full output: /tmp/output.log)  Took 1h2m")).toEqual({output:"output\n\nFull output: /tmp/output.log",durationMs:3720000});

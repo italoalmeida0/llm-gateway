@@ -86,6 +86,8 @@ export interface UICtxValue extends Notice {
   closeMenus: () => void;
   verboseChat: () => boolean;
   setVerboseChat: (v: boolean) => void;
+  hideToolMessages: () => boolean;
+  setHideToolMessages: (v: boolean) => void;
   convWidth: () => "narrow" | "default" | "wide";
   setConvWidth: (v: "narrow" | "default" | "wide") => void;
   convWidthClass: () => string;

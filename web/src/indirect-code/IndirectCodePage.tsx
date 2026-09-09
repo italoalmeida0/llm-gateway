@@ -115,6 +115,25 @@ export default function IndirectCodePage() {
     getHostId: () => hosts.activeHostId(),
   });
 
+  const [verboseChat, setVerboseChat] = createSignal(
+    (() => {
+      try {
+        return localStorage.getItem("llmgw-rc-verbose") !== "0";
+      } catch {
+        return true;
+      }
+    })(),
+  );
+  const [hideToolMessages, setHideToolMessages] = createSignal(
+    (() => {
+      try {
+        return localStorage.getItem("llmgw-rc-hide-tool-messages") !== "0";
+      } catch {
+        return true;
+      }
+    })(),
+  );
+
   const transcript = createTranscript({
     send: (payload) => relay.send(payload),
     isOpen: () => relay.wsOpen(),
@@ -127,6 +146,7 @@ export default function IndirectCodePage() {
       const configured = gatewayModels().find((m) => m.id === ctx.model)?.limit?.context ?? 0;
       if (configured !== ctx.windowTokens) void loadGatewayModels();
     },
+    isHideToolMessages: () => !verboseChat() || hideToolMessages(),
   });
 
   const options = createSessionOptions({
@@ -221,16 +241,7 @@ export default function IndirectCodePage() {
     gatewayModels().find((model) => model.id === options.activeModel()),
   ));
 
- 
-  const [verboseChat, setVerboseChat] = createSignal(
-    (() => {
-      try {
-        return localStorage.getItem("llmgw-rc-verbose") !== "0";
-      } catch {
-        return true;
-      }
-    })(),
-  );
+
   const [convWidth, setConvWidth] = createSignal<"narrow" | "default" | "wide">(
     (() => {
       try {
@@ -958,6 +969,8 @@ export default function IndirectCodePage() {
     closeMenus,
     verboseChat,
     setVerboseChat,
+    hideToolMessages,
+    setHideToolMessages,
     convWidth,
     setConvWidth,
     convWidthClass,

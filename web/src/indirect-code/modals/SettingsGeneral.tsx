@@ -1,4 +1,4 @@
-import { For } from "solid-js";
+import { For, Show } from "solid-js";
 import { ThemeToggle } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { useModal, useUI } from "../ctx";
@@ -28,7 +28,7 @@ export function SettingsGeneralSection() {
       <div>
         <div class="font-semibold text-ink-200">Verbose Agent Chat</div>
         <div class="text-[11px] text-ink-500 mt-0.5">
-          Display intermediate thinking steps and tool calls.
+          Display intermediate thinking steps.
         </div>
       </div>
       <button
@@ -49,6 +49,33 @@ export function SettingsGeneralSection() {
         />
       </button>
     </div>
+    <Show when={ui.verboseChat()}>
+      <div class="py-2 pl-4 border-l-2 border-line/60 flex items-center justify-between gap-4">
+        <div>
+          <div class="font-semibold text-ink-200">Hide Tool Call Messages</div>
+          <div class="text-[11px] text-ink-500 mt-0.5">
+            Hide intermediate messages sent alongside tool calls to group actions and thoughts during the turn.
+          </div>
+        </div>
+        <button
+          onClick={() => {
+            const v = !ui.hideToolMessages();
+            ui.setHideToolMessages(v);
+            try { localStorage.setItem("llmgw-rc-hide-tool-messages", v ? "1" : "0"); } catch {}
+          }}
+          class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${ui.hideToolMessages() ? "bg-accent-500" : "bg-ink-700"}`}
+          style={{ height: "22px" }}
+          role="switch"
+          aria-checked={ui.hideToolMessages()}
+          aria-label="Hide tool call messages"
+        >
+          <span
+            class={`block w-4 h-4 rounded-full bg-accent-fg transition-transform ${ui.hideToolMessages() ? "translate-x-[18px]" : "translate-x-0"}`}
+            style={{ height: "16px", width: "16px" }}
+          />
+        </button>
+      </div>
+    </Show>
     <div class="py-2">
       <div class="font-semibold text-ink-200">Conversation Width</div>
       <div class="text-[11px] text-ink-500 mt-0.5 mb-2">

@@ -29,6 +29,7 @@ export interface TranscriptRenderCtx {
   thinkingIndex: () => number;
   setExpandedThinking: (v: Record<string, boolean> | ((p: Record<string, boolean>) => Record<string, boolean>)) => void;
   verboseChat: () => boolean;
+  hideToolMessages: () => boolean;
   setPreviewFile: (v: import("../types").PreviewFile | null) => void;
   turnClock: () => number;
   toolStarts: () => Record<string, number>;
@@ -47,12 +48,13 @@ export function renderThinkingBlock(
   const openNow = () => ctx.messages().at(-1)?.id === msg.id && ctx.sessionStatus() === "running";
   const live = () =>
     openNow() && ctx.thinkingStart() !== null && ctx.thinkingIndex() === nth;
-  const open = () => ctx.expandedThinking()[thinkKey()] ?? live();
+  const open = () => ctx.expandedThinking()[thinkKey()] ?? false;
   return (
-    <div class="w-full">
-      <button
-        aria-expanded={open()}
-        onClick={() => ctx.setExpandedThinking((prev) => ({ ...prev, [thinkKey()]: !open() }))}
+    <Show when={ctx.verboseChat()}>
+      <div class="w-full">
+        <button
+          aria-expanded={open()}
+          onClick={() => ctx.setExpandedThinking((prev) => ({ ...prev, [thinkKey()]: !open() }))}
         class={`flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
           openNow() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
         }`}
@@ -86,6 +88,7 @@ export function renderThinkingBlock(
         </div>
       </Show>
     </div>
+    </Show>
   );
 }
 
@@ -110,47 +113,45 @@ export function renderAssistantSpecial(
   const running = createMemo(() => ctx.renderBlocks().at(-1)?.msg.id === msgId && ctx.sessionStatus() === "running");
   const summary = createMemo(() => specialTitle(units));
   const key = `${msgId}:special`;
-  const open = () => ctx.toolGroupOpen()[key] ?? true;
+  const open = () => ctx.toolGroupOpen()[key] ?? false;
   return (
-    <Show when={ctx.verboseChat()}>
-      <Show when={units.every((u) => u.call?.toolName === "question")} fallback={
-      <div class="w-full rounded-xl border border-line/60 bg-ink-900/40 overflow-hidden mt-1">
-        <button
-          onClick={() => ctx.toggleToolGroup(key)}
-          class="w-full flex items-center gap-2 px-3 py-2 hover:bg-ink-900/60 transition-colors cursor-pointer text-left"
+    <Show when={units.every((u) => u.call?.toolName === "question")} fallback={
+    <div class="w-full rounded-xl border border-line/60 bg-ink-900/40 overflow-hidden mt-1">
+      <button
+        onClick={() => ctx.toggleToolGroup(key)}
+        class="w-full flex items-center gap-2 px-3 py-2 hover:bg-ink-900/60 transition-colors cursor-pointer text-left"
+      >
+        <Show
+          when={!running()}
+          fallback={
+            <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
+          }
         >
-          <Show
-            when={!running()}
-            fallback={
-              <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
-            }
-          >
-            <Iconify icon="lucide:bot" size={14} class="shrink-0 text-ink-500" />
-          </Show>
-          <span class="text-[13px] font-medium text-ink-300 truncate flex-1 min-w-0">
-            {summary()}
-          </span>
-          <Show when={ctx.specialProgress(units)}>
-            {(t) => (
-              <span class="font-mono text-[11px] text-ink-600 truncate max-w-[40%] shrink-0">
-                {t()}
-              </span>
-            )}
-          </Show>
-          <Iconify
-            icon="lucide:chevron-down"
-            size={12}
-            class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
-          />
-        </button>
-        <Show when={open()}>
-          <div class="border-t border-line/60 px-2 py-1.5 space-y-0.5">
-            {renderToolSegs(ctx, msgId, extraSrcIds.join(",") || "lead", units, running())}
-          </div>
+          <Iconify icon="lucide:bot" size={14} class="shrink-0 text-ink-500" />
         </Show>
-      </div>
-      }><For each={units}>{(unit, index) => renderToolUnit(ctx, msgId, unit, index(), running())}</For></Show>
-    </Show>
+        <span class="text-[13px] font-medium text-ink-300 truncate flex-1 min-w-0">
+          {summary()}
+        </span>
+        <Show when={ctx.specialProgress(units)}>
+          {(t) => (
+            <span class="font-mono text-[11px] text-ink-600 truncate max-w-[40%] shrink-0">
+              {t()}
+            </span>
+          )}
+        </Show>
+        <Iconify
+          icon="lucide:chevron-down"
+          size={12}
+          class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
+        />
+      </button>
+      <Show when={open()}>
+        <div class="border-t border-line/60 px-2 py-1.5 space-y-0.5">
+          {renderToolSegs(ctx, msgId, extraSrcIds.join(",") || "lead", units, running())}
+        </div>
+      </Show>
+    </div>
+    }><For each={units}>{(unit, index) => renderToolUnit(ctx, msgId, unit, index(), running())}</For></Show>
   );
 }
 
@@ -212,6 +213,8 @@ export function renderMessageContent(ctx: TranscriptRenderCtx, msg: ChatMessage,
             <For each={part.blocks}>
               {(block) => {
                 if (block.type === "text" && block.text) {
+                  const hasTools = msg.blocks.some((b) => b.type === "tool_call" || b.type === "tool_result");
+                  if (ctx.hideToolMessages() && hasTools) return null;
                   return (
                     <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
                       <Streamdown>{block.text}</Streamdown>
@@ -238,9 +241,8 @@ export function renderMessageContent(ctx: TranscriptRenderCtx, msg: ChatMessage,
 export function renderSeriesLead(ctx: TranscriptRenderCtx, series: RenderBlockSeries) {
   const all = () => [series.msg, ...series.extras];
   const thoughts = createMemo(() => all().flatMap((msg) => msg.blocks.filter((b) => b.type === "reasoning" && !!b.reasoning?.trim()).map((block, nth) => ({msg, block, nth}))));
-  const live = () => thoughts().some((entry) => entry.msg.id === ctx.messages().at(-1)?.id && ctx.thinkingStart() !== null && ctx.sessionStatus() === "running");
   const key = `${series.msg.id}:group-thinking`;
-  const open = () => ctx.expandedThinking()[key] ?? live();
+  const open = () => ctx.expandedThinking()[key] ?? false;
   const entryDuration = (entry: { msg: ChatMessage }) => {
     if (entry.msg.id === ctx.messages().at(-1)?.id && ctx.thinkingStart() !== null) {
       return `${ctx.thinkingElapsed()}s`;
@@ -265,7 +267,7 @@ export function renderSeriesLead(ctx: TranscriptRenderCtx, series: RenderBlockSe
         </div>
       </Show>
     </Show>
-    <For each={all()}>{(message) => <For each={message.blocks.filter((b) => b.type === "image" || b.type === "text" && !!b.text?.trim())}>{(block) => block.type === "image" ? renderImageBlock(ctx, block) : <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto"><Streamdown>{block.text}</Streamdown></div>}</For>}</For>
+    <For each={all()}>{(message) => <For each={message.blocks.filter((b) => b.type === "image" || (!(ctx.hideToolMessages() && series.units.length > 0) && b.type === "text" && !!b.text?.trim()))}>{(block) => block.type === "image" ? renderImageBlock(ctx, block) : <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto"><Streamdown>{block.text}</Streamdown></div>}</For>}</For>
   </div>;
 }
 /**
@@ -296,7 +298,7 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
               </div>
             );
           const gkey = `${msgId}:${keySalt}:${segKey(seg)}`;
-          const open = () => ctx.toolGroupOpen()[gkey] ?? true;
+          const open = () => ctx.toolGroupOpen()[gkey] ?? false;
           return (
             <div class="w-full" data-toolseg={segKey(seg)} style={{ "overflow-anchor": "none" }}>
               <button

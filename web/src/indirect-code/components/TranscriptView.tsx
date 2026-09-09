@@ -57,6 +57,7 @@ export function TranscriptView() {
     thinkingIndex: t.thinkingIndex,
     setExpandedThinking: t.setExpandedThinking,
     verboseChat: ui.verboseChat,
+    hideToolMessages: () => !ui.verboseChat() || ui.hideToolMessages(),
     setPreviewFile: m.setPreviewFile,
     turnClock: t.turnClock,
     toolStarts: t.toolStarts,
@@ -165,13 +166,17 @@ export function TranscriptView() {
         if (keptIdx !== -1) return bi() === keptIdx;
         return isLast();
       };
-      const textOf = () =>
-        msg.blocks
+      const rctx = renderCtx();
+      const textOf = () => {
+        if (block.kind === "series" && rctx.hideToolMessages() && block.units.length > 0) {
+          return "";
+        }
+        return msg.blocks
           .filter((b) => b.type === "text" && b.text)
           .map((b) => b.text as string)
           .join("\n");
+      };
       const isEditing = () => t.editingMsgIdx() === rawIdx();
-      const rctx = renderCtx();
       return (
         <>
           <Show when={isFirstKeptBlock()}>

@@ -5,29 +5,102 @@ export function hasVisibleText(message: ChatMessage): boolean {
   return message.blocks.some((b) => b.type === "text" && !!b.text?.trim());
 }
 
+export function hasToolActivity(message: ChatMessage): boolean {
+  return message.blocks.some((b) => b.type === "tool_call" || b.type === "tool_result");
+}
+
 /** Only visible assistant text starts a new response group. Keep the raw
- * transcript and source indices intact, including while a new step streams. */
-export function buildRenderBlocks(messages: ChatMessage[]): RenderBlock[] {
+ * transcript and source indices intact, including while a new step streams.
+ * When hideToolMessages is true, messages sent alongside tool calls in a turn
+ * are grouped into the series so intermediate actions and thoughts can form
+ * a single mega group during the turn. */
+export function buildRenderBlocks(
+  messages: ChatMessage[],
+  options?: { hideToolMessages?: boolean },
+): RenderBlock[] {
   const list = withoutTodoActivity(messages);
   const result: RenderBlock[] = [];
+  const hideTools = !!options?.hideToolMessages;
+
   for (let i = 0; i < list.length; i++) {
     const head = list[i];
     if (head.role === "user") { result.push({kind:"single", msg:head}); continue; }
-    const extras: ChatMessage[] = [];
-    while (i+1 < list.length && list[i+1].role !== "user" && !hasVisibleText(list[i+1])) extras.push(list[++i]);
-    const units: ToolUnit[] = [];
-    const byId = new Map<string, ToolUnit>();
-    for (const message of [head, ...extras]) for (const block of message.blocks) {
-      if (block.type === "tool_call") {
-        const unit = {call:block}; units.push(unit);
-        if (block.toolId) byId.set(block.toolId, unit);
-      } else if (block.type === "tool_result") {
-        const unit = block.toolId ? byId.get(block.toolId) : undefined;
-        if (unit && !unit.result) unit.result = block;
-        else units.push({result:block});
+
+    if (!hideTools) {
+      const extras: ChatMessage[] = [];
+      while (i+1 < list.length && list[i+1].role !== "user" && !hasVisibleText(list[i+1])) extras.push(list[++i]);
+      const units: ToolUnit[] = [];
+      const byId = new Map<string, ToolUnit>();
+      for (const message of [head, ...extras]) for (const block of message.blocks) {
+        if (block.type === "tool_call") {
+          const unit = {call:block}; units.push(unit);
+          if (block.toolId) byId.set(block.toolId, unit);
+        } else if (block.type === "tool_result") {
+          const unit = block.toolId ? byId.get(block.toolId) : undefined;
+          if (unit && !unit.result) unit.result = block;
+          else units.push({result:block});
+        }
+      }
+      result.push(units.length || extras.length ? {kind:"series", msg:head, extras, units} : {kind:"single", msg:head});
+      continue;
+    }
+
+    // When hideToolMessages is enabled:
+    // Look ahead to find all consecutive assistant messages in this turn
+    let turnEnd = i;
+    while (turnEnd + 1 < list.length && list[turnEnd + 1].role !== "user") {
+      turnEnd++;
+    }
+    const turnMsgs = list.slice(i, turnEnd + 1);
+
+    // Find the last assistant message in this turn with tool activity
+    let lastToolRelIdx = -1;
+    for (let k = turnMsgs.length - 1; k >= 0; k--) {
+      if (hasToolActivity(turnMsgs[k])) {
+        lastToolRelIdx = k;
+        break;
       }
     }
-    result.push(units.length || extras.length ? {kind:"series", msg:head, extras, units} : {kind:"single", msg:head});
+
+    if (lastToolRelIdx >= 0) {
+      // Fuse messages up to lastToolRelIdx into one mega tool series
+      const seriesMsgs = turnMsgs.slice(0, lastToolRelIdx + 1);
+      const units: ToolUnit[] = [];
+      const byId = new Map<string, ToolUnit>();
+      for (const message of seriesMsgs) {
+        for (const block of message.blocks) {
+          if (block.type === "tool_call") {
+            const unit = { call: block };
+            units.push(unit);
+            if (block.toolId) byId.set(block.toolId, unit);
+          } else if (block.type === "tool_result") {
+            const unit = block.toolId ? byId.get(block.toolId) : undefined;
+            if (unit && !unit.result) unit.result = block;
+            else units.push({ result: block });
+          }
+        }
+      }
+
+      result.push({
+        kind: "series",
+        msg: seriesMsgs[0],
+        extras: seriesMsgs.slice(1),
+        units,
+      });
+
+      i += lastToolRelIdx;
+    } else {
+      // No tools in this turn; group by visible text as normal
+      const extras: ChatMessage[] = [];
+      while (i + 1 < list.length && list[i + 1].role !== "user" && !hasVisibleText(list[i + 1])) {
+        extras.push(list[++i]);
+      }
+      result.push(
+        extras.length
+          ? { kind: "series", msg: head, extras, units: [] }
+          : { kind: "single", msg: head }
+      );
+    }
   }
   return result;
 }

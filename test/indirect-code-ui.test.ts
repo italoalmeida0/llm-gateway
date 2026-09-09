@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compactTokens, contextDisplay } from "../web/src/indirect-code/context";
+import { compactTokens, contextDisplay, groupModelsByProvider } from "../web/src/indirect-code/context";
 import { createTranscriptScroll } from "../web/src/indirect-code/scroll";
 import { displayToolArgs, withoutTodoActivity } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
@@ -120,10 +120,24 @@ test("hides checklist calls and results while preserving text, other tools and s
 describe("Indirect Code context", () => {
   test("uses configured gateway limits and keeps context separate from cumulative usage", () => {
     const context = { usedTokens: 432500, windowTokens: 200000, model: "custom/alias", estimated: false };
-    expect(contextDisplay(context, { id: context.model, name: "Alias", limit: { context: 1024000 } }).label).toBe("432.5K (42%)");
-    expect(contextDisplay(context, { id: context.model, name: "Alias", limit: {} }).percent).toBeNull();
+    expect(contextDisplay(context, { id: context.model, name: "Alias", provider: "Test", upstreamModel: "alias", context: 1024000, output: null }).label).toBe("432.5K (42%)");
+    expect(contextDisplay(context, { id: context.model, name: "Alias", provider: "", upstreamModel: "", context: 0, output: null }).percent).toBeNull();
     expect(contextDisplay(null).label).toBe("Context —");
     expect(compactTokens(128000)).toBe("128K");
+    expect(compactTokens(1000000)).toBe("1M");
+  });
+
+  test("groups models by provider in first-appearance order", () => {
+    const mk = (id: string, provider: string) => ({
+      id, name: id, provider, upstreamModel: id, context: 256000, output: null,
+    });
+    const groups = groupModelsByProvider([
+      mk("a", "Anthropic"), mk("b", "OpenAI"), mk("c", "Anthropic"), mk("d", ""),
+    ]);
+    expect(groups.map((g) => g.provider)).toEqual(["Anthropic", "OpenAI", "Other"]);
+    expect(groups[0]!.models.map((m) => m.id)).toEqual(["a", "c"]);
+    expect(groups[1]!.models.map((m) => m.id)).toEqual(["b"]);
+    expect(groupModelsByProvider([])).toEqual([]);
   });
 });
 

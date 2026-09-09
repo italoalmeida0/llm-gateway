@@ -20,7 +20,7 @@ import { verifyGoogleIdToken } from "../google";
 import { sendSecurityAlert } from "../email";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { bruteforceClear, bruteforceFail, bruteforceLocked, consumeTotpCode } from "../ratelimit";
-import { publicModelSummary, routerSnapshot } from "../models";
+import { DEFAULT_MODEL_CONTEXT, routerSnapshot } from "../models";
 
 /**
  * /api/me/* — profile, password, TOTP, Google linking, session management.
@@ -213,9 +213,22 @@ export async function handleMeRoute(path: string, req: Request): Promise<Respons
   if (path === "/api/me/models" && req.method === "GET") {
     await requireAuth(req);
     const snap = await routerSnapshot();
+    // Provider display data comes from the FIRST routing target (fallback
+    // order); unknown context windows report DEFAULT_MODEL_CONTEXT.
     const models = Array.from(snap.models.values())
       .filter((m) => m.enabled)
-      .map(publicModelSummary);
+      .map((m) => {
+        const first = (snap.targets.get(m.id) ?? []).find((t) => t.enabled);
+        const providerName = first ? (snap.providers.get(first.provider_id)?.row.name ?? "") : "";
+        return {
+          id: m.id,
+          name: m.name || m.id,
+          provider: providerName,
+          upstreamModel: first?.upstream_model ?? m.upstream_model,
+          context: m.context_length ?? DEFAULT_MODEL_CONTEXT,
+          output: m.max_output_length,
+        };
+      });
 
     return ok({ models }, req);
   }

@@ -33,7 +33,6 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 	var catalog struct {
 		Models []struct {
 			ID    string `json:"id"`
-			Proto string `json:"proto"`
 			Limit struct {
 				Context int `json:"context"`
 				Output  int `json:"output"`

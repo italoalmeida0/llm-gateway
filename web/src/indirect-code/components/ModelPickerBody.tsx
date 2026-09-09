@@ -2,7 +2,7 @@ import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { REASONING_LEVELS } from "../constants";
 import { formatEffort } from "../utils/format";
-import type { GatewayModel } from "../context";
+import { compactTokens, groupModelsByProvider, type GatewayModel } from "../context";
 
 /** Session choices, also remembered by the daemon for the next draft.
  * (Extracted verbatim from RemoteCodePage.modelPickerBody — narrow props
@@ -18,6 +18,8 @@ export function ModelPickerBody(props: {
   onEffort: (lvl: string) => void;
   onRefresh: () => void;
 }) {
+  /** Filtered models grouped by provider (first routing target). */
+  const groups = () => groupModelsByProvider(props.filtered());
   return (
     <>
       <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider flex items-center justify-between">
@@ -46,27 +48,42 @@ export function ModelPickerBody(props: {
       <div class="max-h-56 overflow-y-auto overflow-x-auto [scrollbar-gutter:stable]">
         <div class="min-w-full w-max flex flex-col">
           <For
-            each={props.filtered()}
+            each={groups()}
             fallback={
               <div class="px-2.5 py-2 text-[11px] text-ink-600 whitespace-nowrap">
                 {props.models().length ? "No models match." : "No compatible models configured in the gateway."}
               </div>
             }
           >
-            {(m) => (
-              <button
-                onClick={() => props.onPick(m.id)}
-                class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-3 cursor-pointer ${
-                  m.id === props.activeModelId()
-                    ? "bg-ink-800 text-ink-100"
-                    : "text-ink-300 hover:bg-ink-800/60"
-                }`}
-              >
-                <span class="whitespace-nowrap">{m.name || m.id}</span>
-                <Show when={m.id === props.activeModelId()}>
-                  <Iconify icon="lucide:check" size={13} class="shrink-0" />
-                </Show>
-              </button>
+            {(g) => (
+              <>
+                <div class="px-2.5 pt-1.5 pb-0.5 text-[10px] uppercase font-bold text-ink-600 tracking-wider whitespace-nowrap">
+                  {g.provider}
+                </div>
+                <For each={g.models}>
+                  {(m) => (
+                    <button
+                      onClick={() => props.onPick(m.id)}
+                      class={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between gap-3 cursor-pointer ${
+                        m.id === props.activeModelId()
+                          ? "bg-ink-800 text-ink-100"
+                          : "text-ink-300 hover:bg-ink-800/60"
+                      }`}
+                    >
+                      <span class="whitespace-nowrap">
+                        {m.name || m.id}
+                        <Show when={m.upstreamModel && m.upstreamModel !== (m.name || m.id)}>
+                          <span class="text-ink-500"> ({m.upstreamModel})</span>
+                        </Show>
+                        <span class="text-ink-500"> {compactTokens(m.context ?? 0)}</span>
+                      </span>
+                      <Show when={m.id === props.activeModelId()}>
+                        <Iconify icon="lucide:check" size={13} class="shrink-0" />
+                      </Show>
+                    </button>
+                  )}
+                </For>
+              </>
             )}
           </For>
         </div>

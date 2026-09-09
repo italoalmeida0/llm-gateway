@@ -246,12 +246,18 @@ describe("Indirect Code Relay and Pairing", () => {
       const catalog = await read();
       expect(catalog.models.find((m: any) => m.id === id).limit).toEqual({ context: 1024000, output: 16384 });
       const dashboard = (await (await fetch(`${GW}/api/me/models`, { headers })).json()) as any;
-      expect(dashboard.models.find((m: any) => m.id === id).limit.context).toBe(1024000);
+      const entry = dashboard.models.find((m: any) => m.id === id);
+      expect(entry.context).toBe(1024000);
+      expect(entry.provider).toBe("");
+      expect(entry.upstreamModel).toBe(id);
       const patched = await fetch(`${GW}/api/admin/models/${encodeURIComponent(id)}`, {
         method: "PATCH", headers, body: JSON.stringify({ contextLength: null, maxOutputLength: null }),
       });
       expect(patched.status).toBe(200);
-      expect((await read()).models.find((m: any) => m.id === id).limit).toEqual({});
+      // unknown context falls back to the 256k API default
+      expect((await read()).models.find((m: any) => m.id === id).limit).toEqual({ context: 256000 });
+      const dashboard2 = (await (await fetch(`${GW}/api/me/models`, { headers })).json()) as any;
+      expect(dashboard2.models.find((m: any) => m.id === id).context).toBe(256000);
       await fetch(`${GW}/api/admin/models/${encodeURIComponent(id)}`, { method: "PATCH", headers, body: JSON.stringify({ enabled: false }) });
       expect((await read()).models).toEqual([]);
     } finally {

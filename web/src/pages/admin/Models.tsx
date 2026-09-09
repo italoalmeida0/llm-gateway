@@ -1,6 +1,6 @@
 import { createSignal, For, Show, createResource, createMemo, createEffect } from "solid-js";
 
-import { api, type ModelDto, type ModelProto, type ProviderDto, type RoutingMode, type SyncOutcome } from "../../api";
+import { api, type ModelDto, type ProviderDto, type RoutingMode, type SyncOutcome } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
@@ -19,18 +19,6 @@ const ROUTING_OPTIONS = [
   { value: "passthrough", label: "Pass-through" },
   { value: "router", label: "Router" },
 ] as Array<{ value: RoutingMode; label: string }>;
-
-const PROTO_OPTIONS = [
-  { value: "both", label: "Both" },
-  { value: "openai", label: "OpenAI" },
-  { value: "anthropic", label: "Anthropic" },
-] as Array<{ value: ModelProto; label: string }>;
-
-const PROTO_TONE: Record<ModelProto, "zinc" | "blue" | "indigo"> = {
-  openai: "zinc",
-  anthropic: "blue",
-  both: "indigo",
-};
 
 const USER_SELECTION_SOURCES = new Set([
   "checkboxSelected",
@@ -85,10 +73,7 @@ export function syncSummary(sync?: Partial<Record<string, SyncOutcome>>): string
   for (const [cap, r] of Object.entries(sync)) {
     if (!r) continue;
     parts.push(
-      r.error
-        ? `${cap}: sync failed (${r.error})`
-        : `${cap}: ${r.added} added, ${r.skipped} skipped` +
-            (r.merged ? `, ${r.merged} upgraded to both` : ""),
+      r.error ? `${cap}: sync failed (${r.error})` : `${cap}: ${r.added} added, ${r.skipped} skipped`,
     );
   }
   return parts.join(" · ");
@@ -240,23 +225,16 @@ export default function AdminModelsPage() {
   // ---- editor form ----
   const [fId, setFId] = createSignal("");
   const [fTargets, setFTargets] = createSignal<TargetDraft[]>([]);
-  const [fProto, setFProto] = createSignal<ModelProto>("both");
   const [fEnabled, setFEnabled] = createSignal(true);
-  const [fAlwaysOn, setFAlwaysOn] = createSignal(true);
   const [fName, setFName] = createSignal("");
   const [fDesc, setFDesc] = createSignal("");
-  const [fHf, setFHf] = createSignal("");
-  const [fQuant, setFQuant] = createSignal("");
-  const [fSlug, setFSlug] = createSignal("");
   const [fContext, setFContext] = createSignal("");
   const [fMaxOut, setFMaxOut] = createSignal("");
-  const [fCreated, setFCreated] = createSignal("");
   const [fInMod, setFInMod] = createSignal("");
   const [fOutMod, setFOutMod] = createSignal("");
   const [fSampling, setFSampling] = createSignal("");
   const [fFeatures, setFFeatures] = createSignal("");
   const [fEfforts, setFEfforts] = createSignal("");
-  const [fDatacenters, setFDatacenters] = createSignal("");
   const [fPricing, setFPricing] = createSignal<Record<string, string>>({});
 
   const providerOptions = createMemo(() =>
@@ -290,12 +268,11 @@ export default function AdminModelsPage() {
     if (m === "new") {
       setFId("");
       setFTargets([{ providerId: providers()?.[0]?.id ?? "", upstreamModel: "", enabled: true }]);
-      setFProto("both");
-      setFEnabled(true); setFAlwaysOn(true);
-      setFName(""); setFDesc(""); setFHf(""); setFQuant(""); setFSlug("");
-      setFContext(""); setFMaxOut(""); setFCreated("");
+      setFEnabled(true);
+      setFName(""); setFDesc("");
+      setFContext(""); setFMaxOut("");
       setFInMod("text"); setFOutMod("text"); setFSampling(""); setFFeatures(""); setFEfforts("");
-      setFDatacenters(""); setFPricing({});
+      setFPricing({});
     } else {
       setFId(m.id);
       setFTargets(
@@ -307,17 +284,13 @@ export default function AdminModelsPage() {
             }))
           : [{ providerId: "", upstreamModel: "", enabled: true }],
       );
-      setFProto(m.proto);
-      setFEnabled(m.enabled); setFAlwaysOn(m.alwaysOn);
-      setFName(m.name); setFDesc(m.description); setFHf(m.huggingFaceId); setFQuant(m.quantization);
-      setFSlug(m.openrouterSlug);
+      setFEnabled(m.enabled);
+      setFName(m.name); setFDesc(m.description);
       setFContext(m.contextLength == null ? "" : String(m.contextLength));
       setFMaxOut(m.maxOutputLength == null ? "" : String(m.maxOutputLength));
-      setFCreated(m.created == null ? "" : String(m.created));
       setFInMod(m.inputModalities.join(", ")); setFOutMod(m.outputModalities.join(", "));
       setFSampling(m.samplingParams.join(", ")); setFFeatures(m.features.join(", "));
       setFEfforts((m.reasoningEfforts ?? []).join(", "));
-      setFDatacenters((m.datacenters ?? []).map((d) => d.country_code).join(", "));
       setFPricing(
         Object.fromEntries(
           Object.entries(m.pricing ?? {}).map(([key, value]) => [key, perTokenInput(Number(value))]),
@@ -345,23 +318,16 @@ export default function AdminModelsPage() {
         if (pv) pricing[k] = pv;
       }
       const body: Record<string, unknown> = {
-        proto: fProto(),
         enabled: fEnabled(),
-        alwaysOn: fAlwaysOn(),
         name: fName().trim(),
         description: fDesc(),
-        huggingFaceId: fHf().trim(),
-        quantization: fQuant().trim(),
-        openrouterSlug: fSlug().trim(),
         contextLength: numOrNull(fContext()),
         maxOutputLength: numOrNull(fMaxOut()),
-        created: numOrNull(fCreated()),
         inputModalities: csv(fInMod()),
         outputModalities: csv(fOutMod()),
         samplingParams: csv(fSampling()),
         features: csv(fFeatures()),
         reasoningEfforts: csv(fEfforts()),
-        datacenters: csv(fDatacenters()).map((cc) => ({ country_code: cc })),
         pricing: Object.keys(pricing).length ? pricing : null,
         // Ordered failover chain; "" upstream = defaults to the public id.
         targets: fTargets().map((t) => ({
@@ -466,11 +432,6 @@ export default function AdminModelsPage() {
     );
   }
 
-  function ProtoBadgeCell(props: { value?: string }) {
-    const p = (props.value ?? "openai") as ModelProto;
-    return <Badge tone={PROTO_TONE[p]}>{p}</Badge>;
-  }
-
   function SourceCell(props: { value?: string }) {
     return (
       <Badge tone={props.value === "manual" ? "indigo" : "zinc"}>{props.value}</Badge>
@@ -527,7 +488,6 @@ export default function AdminModelsPage() {
         <code class="text-ink-400 truncate block">{p.value}</code>
       ),
     },
-    { field: "proto", headerName: "Protocol", width: 130, cellRenderer: ProtoBadgeCell },
     {
       field: "contextLength",
       headerName: "Context",
@@ -797,23 +757,11 @@ export default function AdminModelsPage() {
             </p>
           </div>
 
-          <div>
-            <span class="block text-xs font-medium text-ink-300 mb-1.5">Protocol</span>
-            <Segmented value={fProto()} onChange={(p) => setFProto(p as ModelProto)} options={PROTO_OPTIONS} />
-            <p class="text-[11px] text-ink-500 mt-1.5">
-              Which API surface(s) serve this model — the provider needs the matching base URL.
-            </p>
-          </div>
           <div class="flex items-center gap-6">
             <label class="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" checked={fEnabled()} onChange={(e) => setFEnabled(e.currentTarget.checked)}
                 class="w-4 h-4 rounded border-line bg-elev accent-brand-500" />
               <span class="text-sm">Enabled</span>
-            </label>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={fAlwaysOn()} onChange={(e) => setFAlwaysOn(e.currentTarget.checked)}
-                class="w-4 h-4 rounded border-line bg-elev accent-brand-500" />
-              <span class="text-sm">Always on</span>
             </label>
           </div>
 
@@ -832,19 +780,11 @@ export default function AdminModelsPage() {
             </button>
             <Show when={showAdvanced()}>
               <div class="mt-3 space-y-3">
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Input label="Display name" value={fName()} onInput={setFName} placeholder="defaults to id" />
-                  <Input label="Hugging Face id" value={fHf()} onInput={setFHf} placeholder="zai-org/GLM-5.2" />
-                </div>
+                <Input label="Display name" value={fName()} onInput={setFName} placeholder="defaults to id" />
                 <Input label="Description" value={fDesc()} onInput={setFDesc} />
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Input label="Quantization" value={fQuant()} onInput={setFQuant} placeholder="fp8" />
-                  <Input label="OpenRouter slug" value={fSlug()} onInput={setFSlug} placeholder="z-ai/glm-5" />
-                </div>
-                <div class="grid grid-cols-3 gap-3">
                   <Input label="Context length" type="number" value={fContext()} onInput={setFContext} />
                   <Input label="Max output" type="number" value={fMaxOut()} onInput={setFMaxOut} />
-                  <Input label="Created (unix s)" type="number" value={fCreated()} onInput={setFCreated} />
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <Input label="Input modalities (csv)" value={fInMod()} onInput={setFInMod} placeholder="text, image" />
@@ -854,10 +794,7 @@ export default function AdminModelsPage() {
                   <Input label="Sampling params (csv)" value={fSampling()} onInput={setFSampling} placeholder="temperature, top_p" />
                   <Input label="Features (csv)" value={fFeatures()} onInput={setFFeatures} placeholder="tools, reasoning" />
                 </div>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Input label="Reasoning efforts (csv)" value={fEfforts()} onInput={setFEfforts} placeholder="low, medium, high" />
-                  <Input label="Datacenters (csv country codes)" value={fDatacenters()} onInput={setFDatacenters} placeholder="US, IS" />
-                </div>
+                <Input label="Reasoning efforts (csv)" value={fEfforts()} onInput={setFEfforts} placeholder="low, medium, high" />
                 <div>
                   <div class="text-xs font-medium text-ink-300 mb-1.5">Pricing (per token, USD strings)</div>
                   <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">

@@ -143,7 +143,7 @@ export default function IndirectCodePage() {
     showConfirm: modals.showConfirm,
     onTurnIdle: () => turnChanges.requestBalloons(),
     onUsageContext: (ctx) => {
-      const configured = gatewayModels().find((m) => m.id === ctx.model)?.limit?.context ?? 0;
+      const configured = gatewayModels().find((m) => m.id === ctx.model)?.context ?? 0;
       if (configured !== ctx.windowTokens) void loadGatewayModels();
     },
     isHideToolMessages: () => !verboseChat() || hideToolMessages(),
@@ -272,7 +272,10 @@ export default function IndirectCodePage() {
     if (!q) return all;
     return all.filter(
       (m) =>
-        m.id.toLowerCase().includes(q) || (m.name || "").toLowerCase().includes(q),
+        m.id.toLowerCase().includes(q) ||
+        (m.name || "").toLowerCase().includes(q) ||
+        (m.provider || "").toLowerCase().includes(q) ||
+        (m.upstreamModel || "").toLowerCase().includes(q),
     );
   });
 
@@ -296,7 +299,7 @@ export default function IndirectCodePage() {
     try {
       const res = await api<{ models: GatewayModel[] }>("GET", "/api/me/models");
       if (relay.isDisposed()) return;
-      const models = (res.models || []).filter((m) => m.proto !== "anthropic");
+      const models = res.models || [];
       setGatewayModels(models);
       if (!models.some((m) => m.id === options.activeModel())) {
         options.setActiveModel(models[0]?.id || "");

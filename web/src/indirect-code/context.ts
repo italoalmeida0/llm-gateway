@@ -1,8 +1,13 @@
 export interface GatewayModel {
   id: string;
   name: string;
-  proto?: "openai" | "anthropic" | "both";
-  limit?: { context?: number; output?: number };
+  /** Provider of the first routing target (fallback order). */
+  provider: string;
+  /** Upstream model id of the first routing target. */
+  upstreamModel: string;
+  /** Context window in tokens (256k when the registry reports none). */
+  context: number;
+  output: number | null;
 }
 
 export interface SessionContext {
@@ -10,6 +15,23 @@ export interface SessionContext {
   windowTokens: number;
   model: string;
   estimated: boolean;
+}
+
+/** Group models by provider (first routing target), keeping first-appearance order. */
+export function groupModelsByProvider(models: GatewayModel[]): Array<{ provider: string; models: GatewayModel[] }> {
+  const out: Array<{ provider: string; models: GatewayModel[] }> = [];
+  const byName = new Map<string, GatewayModel[]>();
+  for (const m of models) {
+    const p = m.provider || "Other";
+    let list = byName.get(p);
+    if (!list) {
+      list = [];
+      byName.set(p, list);
+      out.push({ provider: p, models: list });
+    }
+    list.push(m);
+  }
+  return out;
 }
 
 export function compactTokens(n: number): string {
@@ -20,7 +42,7 @@ export function compactTokens(n: number): string {
 
 export function contextDisplay(context: SessionContext | null, model?: GatewayModel) {
   // Prefer the current gateway configuration, including when its limit was removed.
-  const window = model ? (model.limit?.context ?? 0) : (context?.windowTokens ?? 0);
+  const window = model ? (model.context ?? 0) : (context?.windowTokens ?? 0);
   const used = context?.usedTokens ?? null;
   const percent = used !== null && window > 0 ? Math.round(used * 100 / window) : null;
   return {

@@ -1,5 +1,5 @@
 import { LIMITS, SMTP_ENABLED } from "../config";
-import { db, stmts, type ProviderRow, type ProviderKeyRow, type ModelTargetRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow, type ModelProto } from "../db";
+import { db, stmts, type ProviderRow, type ProviderKeyRow, type ModelTargetRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow } from "../db";
 import { encryptSecret, decryptSecret, randomToken, sha256Hex } from "../crypto";
 import { requireAdmin, revokeAllUserSessions, auditAdmin } from "../auth";
 import { publicKey, revokeKey } from "../keys";
@@ -228,31 +228,9 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
       output: columns.output,
     };
   };
-  const datacentersOpt = (): string | null | undefined => {
-    if (!("datacenters" in body)) return undefined;
-    const val = body.datacenters;
-    if (val === null) return null;
-    if (!Array.isArray(val) || val.length > 24) {
-      throw new ApiError(400, "datacenters must be an array of {country_code}");
-    }
-    for (const d of val) {
-      const cc = (d as Record<string, unknown> | null)?.country_code;
-      if (typeof cc !== "string" || !/^[A-Za-z0-9-]{1,8}$/.test(cc)) {
-        throw new ApiError(400, "each datacenter needs a short country_code");
-      }
-    }
-    return JSON.stringify(val.map((d) => ({ country_code: (d as any).country_code })));
-  };
   const boolOpt = (key: string): number | undefined => {
     if (!(key in body)) return undefined;
     return body[key] ? 1 : 0;
-  };
-  const protoOpt = (): ModelProto | undefined => {
-    if (!("proto" in body)) return undefined;
-    if (body.proto !== "openai" && body.proto !== "anthropic" && body.proto !== "both") {
-      throw new ApiError(400, 'proto must be "openai", "anthropic" or "both"');
-    }
-    return body.proto;
   };
   const jsonOr = (arr: string[] | undefined, prev: string): string =>
     arr === undefined ? prev : JSON.stringify(arr);
@@ -261,24 +239,16 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
   // which would turn an explicit clear into "keep").
   const cl = intOpt("contextLength", 1e10);
   const mol = intOpt("maxOutputLength", 1e10);
-  const created = intOpt("created", 4_102_444_800);
   const pricing = pricingOpt();
-  const datacenters = datacentersOpt();
   const efforts = arrOpt("reasoningEfforts");
 
   return {
-    proto: protoOpt() ?? existing?.proto,
     upstream_model: strOpt("upstreamModel", 256) ?? existing?.upstream_model,
     name: strOpt("name", 256) ?? existing?.name ?? "",
     description: strOpt("description", 2000) ?? existing?.description ?? "",
-    hugging_face_id: strOpt("huggingFaceId", 256) ?? existing?.hugging_face_id ?? "",
-    quantization: strOpt("quantization", 64) ?? existing?.quantization ?? "",
-    openrouter_slug: strOpt("openrouterSlug", 256) ?? existing?.openrouter_slug ?? "",
-    always_on: boolOpt("alwaysOn") ?? existing?.always_on ?? 1,
     enabled: boolOpt("enabled") ?? existing?.enabled ?? 1,
     context_length: cl === undefined ? (existing?.context_length ?? null) : cl,
     max_output_length: mol === undefined ? (existing?.max_output_length ?? null) : mol,
-    created: created === undefined ? (existing?.created ?? null) : created,
     input_modalities: jsonOr(arrOpt("inputModalities"), existing?.input_modalities ?? '["text"]'),
     output_modalities: jsonOr(arrOpt("outputModalities"), existing?.output_modalities ?? '["text"]'),
     sampling_params: jsonOr(arrOpt("samplingParams"), existing?.sampling_params ?? "[]"),
@@ -294,7 +264,6 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
     pricing_input_cache: pricing === undefined ? (existing?.pricing_input_cache ?? null) : pricing?.inputCache ?? null,
     pricing_input_cache_write: pricing === undefined ? (existing?.pricing_input_cache_write ?? null) : pricing?.inputCacheWrite ?? null,
     pricing_output: pricing === undefined ? (existing?.pricing_output ?? null) : pricing?.output ?? null,
-    datacenters: datacenters === undefined ? (existing?.datacenters ?? null) : datacenters,
   };
 }
 
@@ -446,8 +415,8 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     invalidateModelCache();
     const row = db.prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?").get(id)!;
     // Dual-capability provider: don't import yet — preview both /models lists
-    // and let the dashboard ask how to import (sync-models with mode
-    // "both"|"separate"). Single-capability: auto-import right away.
+    // and let the dashboard confirm the import. Single-capability:
+    // auto-import right away.
     const dual = !!row.openai_base_url && !!row.anthropic_base_url;
     if (plainApiKey && dual) {
       const preview = await previewProviderModels(row, plainApiKey);
@@ -669,21 +638,12 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
 
     if (req.method === "POST" && isSync) {
       // Re-run the registry import on demand (models added upstream since the
-      // provider was created). Duplicates are skipped; admin edits survive.
-      // Optional body { mode: "both" | "separate" } (default "both") — see
-      // syncProviderModels.
-      let body: Record<string, unknown> = {};
-      if ((req.headers.get("content-type") ?? "").includes("application/json")) {
-        body = await readJsonBody(req, LIMITS.apiBodyBytes);
-      }
-      const mode = v.str(body, "mode", { max: 16, optional: true });
-      if (mode && mode !== "both" && mode !== "separate") {
-        return err(400, 'mode must be "both" or "separate"', req);
-      }
+      // provider was created). Imports the union of the configured lists;
+      // duplicates are skipped; admin edits survive.
       const key = await primaryAdminKey(providerId);
       if (!key) return err(400, "provider has no upstream key", req);
-      const sync = await syncProviderModels(existing, key, (mode ?? "both") as "both" | "separate");
-      auditAdmin(ctx.user, "provider.models_synced", providerId, { mode: mode ?? "both", sync }, ip);
+      const sync = await syncProviderModels(existing, key);
+      auditAdmin(ctx.user, "provider.models_synced", providerId, { sync }, ip);
       return ok({ sync }, req);
     }
 
@@ -853,7 +813,6 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
             providerId: { col: "provider_id" },
             providerName: { col: "provider_name" },
             upstreamModel: { col: "upstream_model" },
-            proto: { col: "proto" },
             name: { col: "name" },
             source: { col: "source" },
             enabled: { col: "enabled", kind: "number" },
@@ -933,14 +892,6 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       .get(providerId);
     if (!provider) throw new ApiError(400, "providerId does not match any provider");
     const f = modelFields(body);
-    // Default to every capability the provider exposes (both when dual-surface).
-    const proto: ModelProto =
-      f.proto ??
-      (provider.openai_base_url
-        ? provider.anthropic_base_url
-          ? "both"
-          : "openai"
-        : "anthropic");
     const upstreamModel =
       targets?.[0]?.upstreamModel ?? f.upstream_model ?? id;
     const now = Date.now();
@@ -948,21 +899,17 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     db.transaction(() => {
       db.prepare(
         `INSERT INTO models
-           (id, provider_id, upstream_model, proto, name, description, hugging_face_id,
-            quantization, openrouter_slug, always_on, enabled, context_length,
-             max_output_length, created, input_modalities, output_modalities,
+           (id, provider_id, upstream_model, name, description, enabled, context_length,
+             max_output_length, input_modalities, output_modalities,
              sampling_params, features, reasoning_efforts, pricing,
              pricing_input, pricing_input_cache, pricing_input_cache_write, pricing_output,
-             datacenters,
              source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
       ).run(
-        id, providerId, upstreamModel, proto, f.name, f.description, f.hugging_face_id,
-        f.quantization, f.openrouter_slug, f.always_on, f.enabled, f.context_length,
-        f.max_output_length, f.created, f.input_modalities, f.output_modalities,
+        id, providerId, upstreamModel, f.name, f.description, f.enabled, f.context_length,
+        f.max_output_length, f.input_modalities, f.output_modalities,
         f.sampling_params, f.features, f.reasoning_efforts, f.pricing,
         f.pricing_input, f.pricing_input_cache, f.pricing_input_cache_write, f.pricing_output,
-        f.datacenters,
         now, now,
       );
       const ins = db.prepare(
@@ -972,7 +919,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       refreshModelMirror(id);
     })();
     invalidateModelCache();
-    auditAdmin(ctx.user, "model.created", id, { providerId, upstreamModel, proto, targets: chain.length }, ip);
+    auditAdmin(ctx.user, "model.created", id, { providerId, upstreamModel, targets: chain.length }, ip);
     const row = db
       .prepare<ModelRow & { provider_name: string | null }, [string]>(
         `SELECT m.*, p.name AS provider_name FROM models m LEFT JOIN providers p ON p.id = m.provider_id WHERE m.id = ?`,
@@ -1096,23 +1043,21 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       const finalId = newId ?? modelId;
       db.transaction(() => {
         db.prepare(
-          `UPDATE models SET provider_id = ?, upstream_model = ?, proto = ?, name = ?,
-             description = ?, hugging_face_id = ?, quantization = ?, openrouter_slug = ?,
-             always_on = ?, enabled = ?, context_length = ?, max_output_length = ?,
-              created = ?, input_modalities = ?, output_modalities = ?, sampling_params = ?,
+          `UPDATE models SET provider_id = ?, upstream_model = ?, name = ?,
+             description = ?, enabled = ?, context_length = ?, max_output_length = ?,
+              input_modalities = ?, output_modalities = ?, sampling_params = ?,
               features = ?, reasoning_efforts = ?, pricing = ?, pricing_input = ?,
               pricing_input_cache = ?, pricing_input_cache_write = ?, pricing_output = ?,
-              datacenters = ?, updated_at = ?
+              updated_at = ?
            WHERE id = ?`,
         ).run(
           targets ? existing.provider_id : providerId,
           targets ? existing.upstream_model : (f.upstream_model ?? existing.upstream_model),
-          f.proto ?? existing.proto,
-          f.name, f.description, f.hugging_face_id, f.quantization, f.openrouter_slug,
-          f.always_on, f.enabled, f.context_length, f.max_output_length, f.created,
+          f.name, f.description,
+          f.enabled, f.context_length, f.max_output_length,
           f.input_modalities, f.output_modalities, f.sampling_params, f.features,
           f.reasoning_efforts, f.pricing, f.pricing_input, f.pricing_input_cache,
-          f.pricing_input_cache_write, f.pricing_output, f.datacenters, Date.now(), modelId,
+          f.pricing_input_cache_write, f.pricing_output, Date.now(), modelId,
         );
         if (targets) {
           replaceModelTargets(modelId, targets);

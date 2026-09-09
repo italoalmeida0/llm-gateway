@@ -161,28 +161,19 @@ describe("gateway end-to-end", () => {
     const providerId0 = r.json.provider.id as string;
 
     // dual-surface creation does NOT import: it previews both /models lists
-    // and the admin picks the import mode afterwards
+    // and the admin confirms the import afterwards
     expect(r.json.sync).toBeUndefined();
     expect(r.json.preview.openai.count).toBe(1);
     expect(r.json.preview.anthropic.count).toBe(1);
     expect(r.json.preview.common).toBe(1);
 
-    // an invalid import mode is rejected
-    expect(
-      (
-        await api(`/api/admin/providers/${providerId0}/sync-models`, {
-          token: adminToken, method: "POST", body: { mode: "junk" },
-        })
-      ).status,
-    ).toBe(400);
-
-    // mode "both": every listed model serves both protocol surfaces
+    // the import takes the union of the configured lists (no mode to pick)
     const imp = await api(`/api/admin/providers/${providerId0}/sync-models`, {
-      token: adminToken, method: "POST", body: { mode: "both" },
+      token: adminToken, method: "POST",
     });
     expect(imp.status).toBe(200);
-    expect(imp.json.sync.openai).toEqual({ added: 1, skipped: 0, merged: 0 });
-    expect(imp.json.sync.anthropic).toEqual({ added: 0, skipped: 1, merged: 0 });
+    expect(imp.json.sync.openai).toEqual({ added: 1, skipped: 0 });
+    expect(imp.json.sync.anthropic).toEqual({ added: 0, skipped: 1 });
 
     const t = await api(`/api/admin/providers/${r.json.provider.id}/test`, { token: adminToken, method: "POST" });
     expect(t.status).toBe(200);
@@ -1456,11 +1447,11 @@ describe("gateway end-to-end", () => {
 describe("model registry & routing mode", () => {
   let providerId = "";
 
-  test("provider creation previewed its /models lists, then imported as 'both'", async () => {
+  test("provider creation previewed its /models lists, then imported the union", async () => {
     const provs = await api("/api/admin/providers", { token: adminToken });
     providerId = provs.json.providers[0].id;
-    // the earlier describe imported with mode "both" right after creation:
-    // fake-llm-1 (listed by both surfaces) landed as a single proto "both" row.
+    // the earlier describe imported right after creation: fake-llm-1 (listed
+    // by both surfaces) landed as a single registry row.
     expect(provs.json.providers[0].modelCount).toBe(1);
 
     const r = await api("/api/admin/models", { token: adminToken });
@@ -1469,7 +1460,6 @@ describe("model registry & routing mode", () => {
     expect(m).toBeTruthy();
     expect(m.source).toBe("auto");
     expect(m.upstreamModel).toBe("fake-llm-1");
-    expect(m.proto).toBe("both");
     expect(m.providerName).toBe("provider");
     expect(m.enabled).toBe(true);
   });
@@ -1487,7 +1477,6 @@ describe("model registry & routing mode", () => {
         id: "alias-fast",
         providerId,
         upstreamModel: "fake-llm-1",
-        proto: "openai",
         name: "Alias Fast",
         description: "Public alias for the fake model",
         contextLength: 128000,
@@ -1497,7 +1486,6 @@ describe("model registry & routing mode", () => {
         outputModalities: ["text"],
         samplingParams: ["temperature", "top_p"],
         reasoningEfforts: ["low", "high"],
-        datacenters: [{ country_code: "US" }],
       },
     });
     expect(c.status).toBe(200);
@@ -1505,7 +1493,6 @@ describe("model registry & routing mode", () => {
     expect(c.json.model.pricing.prompt).toBe(0.000001);
     expect(c.json.model.pricingInput).toBe(0.000001);
     expect(c.json.model.pricingOutput).toBe(0.000002);
-    expect(c.json.model.datacenters).toEqual([{ country_code: "US" }]);
 
     const priced = await api(`/api/admin/models?limit=50&filters=${encodeURIComponent(JSON.stringify({
       pricing_input: { filterType: "number", type: "greaterThan", filter: 0 },
@@ -1655,20 +1642,18 @@ describe("model registry & routing mode", () => {
     expect(ids).toEqual(["alias-fast", "fake-llm-1"]);
     const alias = j.data.find((m: any) => m.id === "alias-fast");
     expect(alias.provider).toBe("provider");
-    expect(alias.always_on).toBe(true);
     expect(alias.context_length).toBe(128000);
     expect(alias.max_output_length).toBe(4096);
     expect(alias.pricing).toEqual({ prompt: 0.000001, completion: 0.000002 });
     expect(alias.reasoning_parameters).toEqual({ efforts: ["low", "high"] });
-    expect(alias.datacenters).toEqual([{ country_code: "US" }]);
     expect(alias.supported_sampling_parameters).toEqual(["temperature", "top_p"]);
     expect(alias.input_modalities).toEqual(["text"]);
 
-    // forced anthropic listing: only anthropic-serving models — fake-llm-1 is
-    // proto "both" so it shows up; alias-fast (openai-only) does not
+    // forced anthropic listing: every model serves both surfaces now
+    // (alias-fast via translation)
     const a = await fetch(`${GW}/anthropic/v1/models`, { headers: { "x-api-key": gatewayKey } });
     expect(a.status).toBe(200);
-    expect((await a.json()).data.map((m: any) => m.id)).toEqual(["fake-llm-1"]);
+    expect((await a.json()).data.map((m: any) => m.id).sort()).toEqual(["alias-fast", "fake-llm-1"]);
 
     // single-model retrieval + 404
     const one = await fetch(`${GW}/v1/models/alias-fast`, {
@@ -1689,8 +1674,8 @@ describe("model registry & routing mode", () => {
     ).toBe(401);
   });
 
-  test("router mode: disabled model 404s; proto gates each surface", async () => {
-    // fake-llm-1 is proto "both" → it answers on the anthropic surface too
+  test("router mode: disabled model 404s on both surfaces", async () => {
+    // every model answers on both surfaces (translation when needed)
     const both = await llm(
       "/anthropic/v1/messages", gatewayKey,
       { model: "fake-llm-1", max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
@@ -1699,13 +1684,13 @@ describe("model registry & routing mode", () => {
     expect(both.status).toBe(200);
     await both.text();
 
-    // alias-fast is openai-only → unknown on the anthropic surface
     const cross = await llm(
       "/anthropic/v1/messages", gatewayKey,
       { model: "alias-fast", max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
       true,
     );
-    expect(cross.status).toBe(404);
+    expect(cross.status).toBe(200);
+    await cross.text();
 
     const d = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
       token: adminToken, method: "PATCH", body: { enabled: false },
@@ -1715,6 +1700,12 @@ describe("model registry & routing mode", () => {
 
     const r = await llm("/v1/chat/completions", gatewayKey, { model: "alias-fast", messages: [] });
     expect(r.status).toBe(404);
+    const r2 = await llm(
+      "/anthropic/v1/messages", gatewayKey,
+      { model: "alias-fast", max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+      true,
+    );
+    expect(r2.status).toBe(404);
 
     // re-enable for the next tests
     const e = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
@@ -1739,7 +1730,7 @@ describe("model registry & routing mode", () => {
 
     // re-create the provider: dual-capability creation only previews (no
     // import yet), and the follow-up sync skips the orphaned duplicate (no
-    // clobber, no 'both' merge — the orphan belongs to no provider anymore)
+    // clobber — the orphan belongs to no provider anymore)
     const re = await api("/api/admin/providers", {
       token: adminToken,
       body: {
@@ -1755,10 +1746,10 @@ describe("model registry & routing mode", () => {
     expect(re.json.sync).toBeUndefined();
     expect(re.json.preview.openai.count).toBe(1);
     const imp = await api(`/api/admin/providers/${newId}/sync-models`, {
-      token: adminToken, method: "POST", body: { mode: "both" },
+      token: adminToken, method: "POST",
     });
-    expect(imp.json.sync.openai).toEqual({ added: 0, skipped: 1, merged: 0 });
-    expect(imp.json.sync.anthropic).toEqual({ added: 0, skipped: 1, merged: 0 });
+    expect(imp.json.sync.openai).toEqual({ added: 0, skipped: 1 });
+    expect(imp.json.sync.anthropic).toEqual({ added: 0, skipped: 1 });
 
     // re-link the alias to the new provider → routes again
     const relink = await api(`/api/admin/models/${encodeURIComponent("alias-fast")}`, {
@@ -1781,32 +1772,32 @@ describe("model registry & routing mode", () => {
     });
     expect(r.status).toBe(200);
     // fake-llm-1 stays orphaned (INSERT OR IGNORE) — edits/links are never clobbered
-    expect(r.json.sync.openai).toEqual({ added: 0, skipped: 1, merged: 0 });
+    expect(r.json.sync.openai).toEqual({ added: 0, skipped: 1 });
   });
 
-  test("sync never re-merges a proto the admin restricted manually", async () => {
-    // re-link the orphan to provider-b and restrict it to openai on purpose
+  test("sync never clobbers a row the admin edited manually", async () => {
+    // re-link the orphan to provider-b and rename it on purpose
     await api(`/api/admin/models/${encodeURIComponent("fake-llm-1")}`, {
-      token: adminToken, method: "PATCH", body: { providerId, proto: "openai" },
+      token: adminToken, method: "PATCH", body: { providerId, name: "Hand-edited" },
     });
     const r = await api(`/api/admin/providers/${providerId}/sync-models`, {
       token: adminToken, method: "POST",
     });
     expect(r.status).toBe(200);
-    // the row was edited by hand → no 'both' upgrade, proto stays openai
-    expect(r.json.sync.openai).toEqual({ added: 0, skipped: 1, merged: 0 });
-    expect(r.json.sync.anthropic).toEqual({ added: 0, skipped: 1, merged: 0 });
+    // the row was edited by hand → sync skips it, the name survives
+    expect(r.json.sync.openai).toEqual({ added: 0, skipped: 1 });
+    expect(r.json.sync.anthropic).toEqual({ added: 0, skipped: 1 });
     const list = await api("/api/admin/models", { token: adminToken });
-    expect(list.json.models.find((x: any) => x.id === "fake-llm-1").proto).toBe("openai");
+    expect(list.json.models.find((x: any) => x.id === "fake-llm-1").name).toBe("Hand-edited");
 
     // restore the orphaned state the following tests expect
     await api(`/api/admin/models/${encodeURIComponent("fake-llm-1")}`, {
-      token: adminToken, method: "PATCH", body: { providerId: null, proto: "both" },
+      token: adminToken, method: "PATCH", body: { providerId: null },
     });
   });
 
-  test("import mode 'separate' keeps each model on its listing protocol", async () => {
-    // the anthropic surface now also lists an anthropic-only model
+  test("union import adds models listed by only one capability", async () => {
+    // the anthropic list now also carries an anthropic-only model
     await fetch(`${UP}/__models`, {
       method: "POST",
       body: JSON.stringify({ anthropic: ["fake-llm-1", "fake-llm-anth"] }),
@@ -1828,24 +1819,15 @@ describe("model registry & routing mode", () => {
       const sepId = c.json.provider.id as string;
 
       const s = await api(`/api/admin/providers/${sepId}/sync-models`, {
-        token: adminToken, method: "POST", body: { mode: "separate" },
+        token: adminToken, method: "POST",
       });
       // fake-llm-1 already exists (orphaned) → skipped on both caps;
-      // fake-llm-anth is new and listed only by anthropic → proto anthropic
-      expect(s.json.sync.openai).toEqual({ added: 0, skipped: 1, merged: 0 });
-      expect(s.json.sync.anthropic).toEqual({ added: 1, skipped: 1, merged: 0 });
+      // fake-llm-anth is new → one entry serving both surfaces
+      expect(s.json.sync.openai).toEqual({ added: 0, skipped: 1 });
+      expect(s.json.sync.anthropic).toEqual({ added: 1, skipped: 1 });
       const list = await api("/api/admin/models", { token: adminToken });
       const anth = list.json.models.find((x: any) => x.id === "fake-llm-anth");
-      expect(anth.proto).toBe("anthropic");
       expect(anth.providerId).toBe(sepId);
-
-      // a later "both"-mode sync upgrades the pristine auto row
-      const b = await api(`/api/admin/providers/${sepId}/sync-models`, {
-        token: adminToken, method: "POST", body: { mode: "both" },
-      });
-      expect(b.json.sync.anthropic).toEqual({ added: 0, skipped: 1, merged: 1 });
-      const list2 = await api("/api/admin/models", { token: adminToken });
-      expect(list2.json.models.find((x: any) => x.id === "fake-llm-anth").proto).toBe("both");
 
       // cleanup: provider + its model go away, upstream lists back to default
       const del = await api(`/api/admin/providers/${sepId}?deleteModels=true`, {
@@ -2137,7 +2119,6 @@ describe("upstream failover", () => {
       token: adminToken,
       body: {
         id: "fb-model",
-        proto: "openai",
         targets: [
           { providerId: provA, upstreamModel: "fb-model-on-a" },
           { providerId: provB, upstreamModel: "fb-model-on-b" },
@@ -2173,7 +2154,7 @@ describe("upstream failover", () => {
   test("PUT targets replaces the chain and re-prioritizes it", async () => {
     const created = await api("/api/admin/models", {
       token: adminToken,
-      body: { id: "fb-model2", proto: "openai", targets: [{ providerId: provA }] },
+      body: { id: "fb-model2", targets: [{ providerId: provA }] },
     });
     expect(created.status).toBe(200);
     expect(created.json.model.providerId).toBe(provA);

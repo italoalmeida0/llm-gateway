@@ -458,6 +458,22 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_remote_pairing_user ON remote_pairing_tokens(user_id);
     `,
   },
+  {
+    name: "016_model_registry_trim",
+    // The registry no longer tracks per-model protocol or upstream catalog
+    // trivia: every model serves both surfaces (Anthropic-only providers via
+    // translation), always_on is implicitly true, and the hugging-face /
+    // quantization / openrouter / created / datacenters metadata is gone.
+    up: `
+      ALTER TABLE models DROP COLUMN proto;
+      ALTER TABLE models DROP COLUMN always_on;
+      ALTER TABLE models DROP COLUMN hugging_face_id;
+      ALTER TABLE models DROP COLUMN quantization;
+      ALTER TABLE models DROP COLUMN openrouter_slug;
+      ALTER TABLE models DROP COLUMN created;
+      ALTER TABLE models DROP COLUMN datacenters;
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -535,9 +551,6 @@ export interface ProviderRow {
  *    registered upstream_model of its provider. */
 export type RoutingMode = "passthrough" | "router";
 
-/** Protocol surface(s) a registry entry serves: one of them, or 'both'. */
-export type ModelProto = "openai" | "anthropic" | "both";
-
 /** A registered public model id (Model Registry). `upstream_model` is what the
  *  provider actually receives; `id` is what gateway clients send. */
 export interface ModelRow {
@@ -545,18 +558,11 @@ export interface ModelRow {
   /** NULL = orphaned (its provider was deleted without cascade). */
   provider_id: string | null;
   upstream_model: string;
-  proto: ModelProto;
   name: string;
   description: string;
-  hugging_face_id: string;
-  quantization: string;
-  openrouter_slug: string;
-  always_on: number;
   enabled: number;
   context_length: number | null;
   max_output_length: number | null;
-  /** Unix seconds (upstream creation time), NULL when unknown. */
-  created: number | null;
   /** JSON arrays/objects (validated on write). */
   input_modalities: string;
   output_modalities: string;
@@ -568,7 +574,6 @@ export interface ModelRow {
   pricing_input_cache: number | null;
   pricing_input_cache_write: number | null;
   pricing_output: number | null;
-  datacenters: string | null;
   source: "auto" | "manual";
   created_at: number;
   updated_at: number;

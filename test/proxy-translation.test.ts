@@ -4,23 +4,33 @@ import { tmpdir } from "os";
 import path from "path";
 
 /**
- * In-process translation suite: the real `handleProxy` against a fresh
- * SQLite DB, with the upstream fetch stubbed as an OpenAI-only provider.
- * No sockets — runs anywhere. The stub records what the gateway sent
- * upstream so the Anthropic→OpenAI conversion is asserted on the wire.
+ * In-process translation suite: the real `handleProxy` with the upstream
+ * fetch stubbed as an OpenAI-only provider. No sockets — runs anywhere.
+ * The stub records what the gateway sent upstream so the Anthropic→OpenAI
+ * conversion is asserted on the wire.
+ *
+ * Hermeticity: test files share the server module registry, so the backing
+ * DB depends on import order. Ids are unique per run and afterAll removes
+ * every row created here (and restores the routing mode).
  */
 
 process.env.GATEWAY_SECRET = "test-secret-that-is-long-enough-32+";
 process.env.DATA_DIR = mkdtempSync(path.join(tmpdir(), "gw-px-"));
 
 const { db } = await import("../server/db");
-const { encryptSecret, sha256Hex } = await import("../server/crypto");
+const { encryptSecret, sha256Hex, randomToken } = await import("../server/crypto");
 const { GATEWAY_SECRET } = await import("../server/config");
 const { handleProxy } = await import("../server/proxy/index");
 const { flushUsage } = await import("../server/usage");
 const { invalidateModelCache } = await import("../server/models");
 
-const GW_KEY = "gw_" + "a".repeat(48);
+const RUN = randomToken(6);
+const UID = `u-px-${RUN}`;
+const PID = `p-px-${RUN}`;
+const KID = `k-px-${RUN}`;
+const KEYID = `key-px-${RUN}`;
+const ALIAS = `alias-px-${RUN}`;
+const GW_KEY = `gw_${RUN}${"a".repeat(48 - RUN.length)}`;
 const UP_KEY = "sk-upstream-test";
 
 interface Seen {
@@ -83,22 +93,32 @@ globalThis.fetch = (async (input: any, init: any) => {
 
 afterAll(() => {
   globalThis.fetch = realFetch;
+  flushUsage();
+  db.transaction(() => {
+    db.prepare("DELETE FROM usage_daily WHERE key_id = ?").run(KEYID);
+    db.prepare("DELETE FROM usage_events WHERE key_id = ?").run(KEYID);
+    db.prepare("DELETE FROM models WHERE id = ?").run(ALIAS);
+    db.prepare("DELETE FROM providers WHERE id = ?").run(PID);
+    db.prepare("DELETE FROM users WHERE id = ?").run(UID);
+    db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'passthrough') ON CONFLICT(key) DO UPDATE SET value='passthrough'").run();
+  })();
+  invalidateModelCache();
 });
 
 const now = Date.now();
 let enc: string;
 beforeAll(async () => {
   enc = await encryptSecret(UP_KEY, GATEWAY_SECRET);
-  db.prepare("INSERT INTO users (id, email, status, created_at) VALUES ('u1', 'u@x.com', 'active', ?)").run(now);
+  db.prepare("INSERT INTO users (id, email, status, created_at) VALUES (?, 'u@x.com', 'active', ?)").run(UID, now);
   db.prepare(
-    "INSERT INTO providers (id, name, openai_base_url, anthropic_base_url, api_key_enc, enabled, priority, created_at) VALUES ('p1', 'openai-only', 'http://up.test/openai/v1', NULL, ?, 1, 100, ?)",
-  ).run(enc, now);
+    "INSERT INTO providers (id, name, openai_base_url, anthropic_base_url, api_key_enc, enabled, priority, created_at) VALUES (?, 'openai-only', 'http://up.test/openai/v1', NULL, ?, 1, 100, ?)",
+  ).run(PID, enc, now);
   db.prepare(
-    "INSERT INTO provider_keys (id, provider_id, label, api_key_enc, priority, status, created_at, updated_at) VALUES ('k1', 'p1', 'primary', ?, 0, 'active', ?, ?)",
-  ).run(enc, now, now);
+    "INSERT INTO provider_keys (id, provider_id, label, api_key_enc, priority, status, created_at, updated_at) VALUES (?, ?, 'primary', ?, 0, 'active', ?, ?)",
+  ).run(KID, PID, enc, now, now);
   db.prepare(
-    "INSERT INTO api_keys (id, user_id, name, prefix, hash, status, created_at) VALUES ('key1', 'u1', 't', ?, ?, 'active', ?)",
-  ).run(GW_KEY.slice(0, 8), sha256Hex(GW_KEY), now);
+    "INSERT INTO api_keys (id, user_id, name, prefix, hash, status, created_at) VALUES (?, ?, 't', ?, ?, 'active', ?)",
+  ).run(KEYID, UID, GW_KEY.slice(0, 8), sha256Hex(GW_KEY), now);
 });
 
 function anthReq(pathname: string, body: unknown): { req: Request; url: URL } {
@@ -143,7 +163,7 @@ describe("proxy Anthropic→OpenAI translation (in-process)", () => {
     expect(seen[0]!.body.model).toBe("fake-llm-1");
 
     flushUsage();
-    const row = db.query("SELECT proto, model, in_tok, out_tok, status FROM usage_events ORDER BY id DESC LIMIT 1").get() as any;
+    const row = db.query("SELECT proto, model, in_tok, out_tok, status FROM usage_events WHERE key_id = ? ORDER BY id DESC LIMIT 1").get(KEYID) as any;
     expect(row).toMatchObject({ proto: "anthropic", model: "fake-llm-1", in_tok: 40, out_tok: 10, status: 200 });
   });
 
@@ -201,7 +221,7 @@ describe("proxy Anthropic→OpenAI translation (in-process)", () => {
     }
     expect(text).not.toContain("[DONE]");
     flushUsage();
-    const row = db.query("SELECT proto, out_tok, stream FROM usage_events ORDER BY id DESC LIMIT 1").get() as any;
+    const row = db.query("SELECT proto, out_tok, stream FROM usage_events WHERE key_id = ? ORDER BY id DESC LIMIT 1").get(KEYID) as any;
     expect(row).toMatchObject({ proto: "anthropic", out_tok: 10, stream: 1 });
   });
 
@@ -249,15 +269,15 @@ describe("proxy Anthropic→OpenAI translation (in-process)", () => {
   test("router mode serves a translated model under its public id", async () => {
     db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'router') ON CONFLICT(key) DO UPDATE SET value='router'").run();
     db.prepare(
-      "INSERT INTO models (id, provider_id, upstream_model, proto, enabled, created_at, updated_at) VALUES ('alias-tr', 'p1', 'fake-llm-1', 'both', 1, ?, ?)",
-    ).run(now, now);
+      "INSERT INTO models (id, provider_id, upstream_model, enabled, created_at, updated_at) VALUES (?, ?, 'fake-llm-1', 1, ?, ?)",
+    ).run(ALIAS, PID, now, now);
     db.prepare(
-      "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES ('alias-tr', 'p1', 'fake-llm-1', 0, 1, ?)",
-    ).run(now);
+      "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES (?, ?, 'fake-llm-1', 0, 1, ?)",
+    ).run(ALIAS, PID, now);
     invalidateModelCache();
 
     const { req, url } = anthReq("/v1/messages", {
-      model: "alias-tr",
+      model: ALIAS,
       max_tokens: 50,
       messages: [{ role: "user", content: "routed please" }],
     });
@@ -268,14 +288,14 @@ describe("proxy Anthropic→OpenAI translation (in-process)", () => {
     expect(j.content[0].text).toContain("stub upstream");
 
     flushUsage();
-    const row = db.query("SELECT model FROM usage_events ORDER BY id DESC LIMIT 1").get() as any;
-    expect(row.model).toBe("alias-tr");
+    const row = db.query("SELECT model FROM usage_events WHERE key_id = ? ORDER BY id DESC LIMIT 1").get(KEYID) as any;
+    expect(row.model).toBe(ALIAS);
 
     const listReq = new Request("http://gw/v1/models", {
       headers: { "x-api-key": GW_KEY, "anthropic-version": "2023-06-01" },
     });
     const list = await handleProxy(listReq, new URL("http://gw/v1/models"), undefined);
     const listed = await list.json();
-    expect(listed.data.map((m: any) => m.id)).toContain("alias-tr");
+    expect(listed.data.map((m: any) => m.id)).toContain(ALIAS);
   });
 });

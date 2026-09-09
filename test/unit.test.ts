@@ -268,7 +268,6 @@ describe("model sync payload parsing", () => {
       ],
     });
     expect(out.map((m) => m.id)).toEqual(["gpt-4o", "gpt-4o-mini"]);
-    expect(out[0]!.created).toBe(1715367049);
     expect(out[0]!.input_modalities).toEqual(["text"]);
     expect(out[0]!.pricing).toBeNull();
   });
@@ -283,7 +282,6 @@ describe("model sync payload parsing", () => {
     expect(out).toHaveLength(1);
     expect(out[0]!.id).toBe("claude-opus-4-5");
     expect(out[0]!.name).toBe("Claude Opus 4.5");
-    expect(out[0]!.created).toBe(Math.floor(Date.parse("2025-11-24T00:00:00Z") / 1000));
   });
 
   test("rich OpenRouter-style shape", () => {
@@ -295,13 +293,10 @@ describe("model sync payload parsing", () => {
           description: "A model",
           context_length: 202752,
           max_completion_tokens: 131072,
-          hugging_face_id: "zai-org/GLM-5.2",
           supported_parameters: ["max_tokens", "temperature"],
           supported_features: ["tools"],
           reasoning_parameters: { efforts: ["low", "high"] },
           pricing: { prompt: "$0.0000004 per token", completion: "USD 0.000002", junk: { nested: true } },
-          datacenters: [{ country_code: "US" }, { country_code: "not valid!" }, { bad: 1 }],
-          openrouter: { slug: "z-ai/glm-5.2" },
           architecture: { modality: "text+image->text" },
         },
       ],
@@ -314,8 +309,6 @@ describe("model sync payload parsing", () => {
     expect(m.features).toEqual(["tools"]);
     expect(m.reasoning_efforts).toEqual(["low", "high"]);
     expect(m.pricing).toEqual({ prompt: 0.0000004, completion: 0.000002 });
-    expect(m.datacenters).toEqual([{ country_code: "US" }]);
-    expect(m.openrouter_slug).toBe("z-ai/glm-5.2");
     expect(m.input_modalities).toEqual(["text", "image"]);
     expect(m.output_modalities).toEqual(["text"]);
   });
@@ -335,17 +328,11 @@ describe("public /v1/models registry entry", () => {
     id: "alias-fast",
     provider_id: "p1",
     upstream_model: "real-id",
-    proto: "openai",
     name: "Alias Fast",
     description: "d",
-    hugging_face_id: "org/x",
-    quantization: "fp8",
-    openrouter_slug: "org/x",
-    always_on: 1,
     enabled: 1,
     context_length: 100_000,
     max_output_length: 4096,
-    created: 1700000000,
     input_modalities: '["text","image"]',
     output_modalities: '["text"]',
     sampling_params: '["temperature"]',
@@ -356,7 +343,6 @@ describe("public /v1/models registry entry", () => {
     pricing_input_cache: null,
     pricing_input_cache_write: null,
     pricing_output: 0.2,
-    datacenters: '[{"country_code":"US"}]',
     source: "manual",
     created_at: 1,
     updated_at: 1,
@@ -366,31 +352,25 @@ describe("public /v1/models registry entry", () => {
     const e = publicModelEntry(row, "my-provider") as any;
     expect(e.provider).toBe("my-provider");
     expect(e.id).toBe("alias-fast");
-    expect(e.always_on).toBe(true);
     expect(e.name).toBe("Alias Fast");
     expect(e.reasoning_parameters).toEqual({ efforts: ["low", "high"] });
     expect(e.input_modalities).toEqual(["text", "image"]);
     expect(e.context_length).toBe(100_000);
     expect(e.max_output_length).toBe(4096);
     expect(e.pricing).toEqual({ prompt: 0.1, completion: 0.2 });
-    expect(e.created).toBe(1700000000);
     expect(e.supported_sampling_parameters).toEqual(["temperature"]);
     expect(e.supported_features).toEqual(["tools"]);
-    expect(e.openrouter).toEqual({ slug: "org/x" });
-    expect(e.datacenters).toEqual([{ country_code: "US" }]);
+    expect(e.limit).toEqual({ context: 100_000, output: 4096 });
   });
 
-  test("omits unknown optional fields", () => {
+  test("omits unknown optional fields, defaults context to 256k", () => {
     const sparse: ModelRow = {
       ...row,
       name: "",
       reasoning_efforts: null,
       pricing: null,
-      datacenters: null,
       context_length: null,
       max_output_length: null,
-      created: null,
-      openrouter_slug: "",
       pricing_input: null,
       pricing_input_cache: null,
       pricing_input_cache_write: null,
@@ -400,13 +380,12 @@ describe("public /v1/models registry entry", () => {
     expect(e.name).toBe("alias-fast"); // falls back to id
     expect("reasoning_parameters" in e).toBe(false);
     expect("pricing" in e).toBe(false);
-    expect("datacenters" in e).toBe(false);
     expect("context_length" in e).toBe(false);
-    expect("openrouter" in e).toBe(false);
+    expect(e.limit).toEqual({ context: 256_000 });
   });
 });
 
-describe("model routing with proto 'both'", () => {
+describe("model routing without registry protos", () => {
   const provider = {
     id: "p1",
     name: "dual",
@@ -419,21 +398,15 @@ describe("model routing with proto 'both'", () => {
     openai_auth_style: "bearer",
     anthropic_auth_style: "x-api-key",
   } as ProviderRow;
-  const mk = (id: string, proto: ModelRow["proto"]): ModelRow => ({
+  const mk = (id: string): ModelRow => ({
     id,
     provider_id: "p1",
     upstream_model: id,
-    proto,
     name: "",
     description: "",
-    hugging_face_id: "",
-    quantization: "",
-    openrouter_slug: "",
-    always_on: 1,
     enabled: 1,
     context_length: null,
     max_output_length: null,
-    created: null,
     input_modalities: '["text"]',
     output_modalities: '["text"]',
     sampling_params: "[]",
@@ -444,7 +417,6 @@ describe("model routing with proto 'both'", () => {
     pricing_input_cache: null,
     pricing_input_cache_write: null,
     pricing_output: null,
-    datacenters: null,
     source: "auto",
     created_at: 1,
     updated_at: 1,
@@ -466,28 +438,26 @@ describe("model routing with proto 'both'", () => {
   const snap: RouterSnapshot = {
     mode: "router",
     models: new Map([
-      ["m-both", mk("m-both", "both")],
-      ["m-openai", mk("m-openai", "openai")],
-      ["m-anthropic", mk("m-anthropic", "anthropic")],
+      ["m-a", mk("m-a")],
+      ["m-b", mk("m-b")],
     ]),
     targets: new Map([
-      ["m-both", [target("m-both")]],
-      ["m-openai", [target("m-openai")]],
-      ["m-anthropic", [target("m-anthropic")]],
+      ["m-a", [target("m-a")]],
+      ["m-b", [target("m-b")]],
     ]),
     providers: new Map([["p1", routedProvider]]),
   };
 
-  test("'both' resolves on either surface; single-proto stays gated", () => {
-    expect(resolveModelRoute(snap, "openai", "m-both")).toMatchObject({ ok: true });
-    expect(resolveModelRoute(snap, "anthropic", "m-both")).toMatchObject({ ok: true });
-    expect(resolveModelRoute(snap, "anthropic", "m-openai")).toMatchObject({ ok: false, status: 404 });
-    expect(resolveModelRoute(snap, "openai", "m-anthropic")).toMatchObject({ ok: false, status: 404 });
+  test("every registered model resolves on both surfaces", () => {
+    expect(resolveModelRoute(snap, "openai", "m-a")).toMatchObject({ ok: true });
+    expect(resolveModelRoute(snap, "anthropic", "m-a")).toMatchObject({ ok: true });
+    expect(resolveModelRoute(snap, "openai", "missing")).toMatchObject({ ok: false, status: 404 });
+    expect(resolveModelRoute(snap, "anthropic", "missing")).toMatchObject({ ok: false, status: 404 });
   });
 
-  test("listings include 'both' on their own surface only", () => {
-    expect(listableModels(snap, "openai").map((m) => m.id)).toEqual(["m-both", "m-openai"]);
-    expect(listableModels(snap, "anthropic").map((m) => m.id)).toEqual(["m-anthropic", "m-both"]);
+  test("listings cover every enabled model on both surfaces", () => {
+    expect(listableModels(snap, "openai").map((m) => m.id)).toEqual(["m-a", "m-b"]);
+    expect(listableModels(snap, "anthropic").map((m) => m.id)).toEqual(["m-a", "m-b"]);
   });
 });
 
@@ -582,13 +552,12 @@ describe("failover: candidate chains", () => {
     id, key: `secret-${id}`, label: id, priority, status: "active", cooldownUntil: null, exhaustedReason: null, ...over,
   });
   const model = (id: string): ModelRow => ({
-    id, provider_id: "p1", upstream_model: id, proto: "openai",
-    name: "", description: "", hugging_face_id: "", quantization: "", openrouter_slug: "",
-    always_on: 1, enabled: 1, context_length: null, max_output_length: null, created: null,
+    id, provider_id: "p1", upstream_model: id,
+    name: "", description: "",
+    enabled: 1, context_length: null, max_output_length: null,
     input_modalities: '["text"]', output_modalities: '["text"]', sampling_params: "[]",
     features: "[]", reasoning_efforts: null, pricing: null,
     pricing_input: null, pricing_input_cache: null, pricing_input_cache_write: null, pricing_output: null,
-    datacenters: null,
     source: "manual", created_at: 1, updated_at: 1,
   });
   const target = (modelId: string, providerId: string, upstream: string, priority: number, enabled = 1): ModelTargetRow =>
@@ -662,14 +631,8 @@ describe("failover: candidate chains", () => {
       targets: new Map([["m", [target("m", "p1", "m", 0)]]]),
       providers: new Map([["p1", { row: provider, keys: [key("k1", 0)] }]]),
     };
-    // registry proto is openai → 404 on the anthropic surface (registry gate)
-    expect(resolveModelRoute(snap, "anthropic", "m")).toMatchObject({ ok: false, status: 404 });
-    const both = { ...model("m"), proto: "both" as const };
-    const snapBoth: RouterSnapshot = {
-      ...snap,
-      models: new Map([["m", both]]),
-    };
-    const r = resolveModelRoute(snapBoth, "anthropic", "m");
+    // no registry gate: the model resolves on both surfaces
+    const r = resolveModelRoute(snap, "anthropic", "m");
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.candidates.map((c) => c.key.id)).toEqual(["k1"]);
@@ -681,22 +644,22 @@ describe("failover: candidate chains", () => {
     if (r2.ok) expect(r2.candidates[0]!.translated).toBe(false);
   });
 
-  test("listableModels shows translated models on the anthropic surface", () => {
-    const both = { ...model("m-both"), proto: "both" as const };
+  test("listableModels shows every enabled model on both surfaces", () => {
     const snap: RouterSnapshot = {
       mode: "router",
       models: new Map([
-        ["m-both", both],
-        ["m-openai", model("m-openai")],
+        ["m-a", model("m-a")],
+        ["m-b", model("m-b")],
       ]),
       targets: new Map([
-        ["m-both", [target("m-both", "p1", "m-both", 0)]],
-        ["m-openai", [target("m-openai", "p1", "m-openai", 0)]],
+        ["m-a", [target("m-a", "p1", "m-a", 0)]],
+        ["m-b", [target("m-b", "p1", "m-b", 0)]],
       ]),
       providers: new Map([["p1", { row: provider, keys: [key("k1", 0)] }]]),
     };
-    // provider is OpenAI-only: 'both' is servable translated, pure-openai is not
-    expect(listableModels(snap, "anthropic").map((m) => m.id)).toEqual(["m-both"]);
+    // provider is OpenAI-only: everything is servable translated on anthropic
+    expect(listableModels(snap, "anthropic").map((m) => m.id)).toEqual(["m-a", "m-b"]);
+    expect(listableModels(snap, "openai").map((m) => m.id)).toEqual(["m-a", "m-b"]);
   });
 });
 

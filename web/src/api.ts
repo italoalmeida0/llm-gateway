@@ -247,13 +247,8 @@ export interface ModelTargetDto {
 export interface SyncOutcome {
   added: number;
   skipped: number;
-  /** Rows upgraded to proto "both" by a "both"-mode sync. */
-  merged: number;
   error?: string;
 }
-
-/** How a sync maps listed models to registry protos. */
-export type SyncMode = "both" | "separate";
 
 /** Per-capability peek at a provider's GET /models (before importing). */
 export interface CapPreview {
@@ -271,26 +266,17 @@ export interface SyncPreview {
 
 export type RoutingMode = "passthrough" | "router";
 
-/** Protocol surface(s) a registry entry serves. */
-export type ModelProto = "openai" | "anthropic" | "both";
-
 /** Admin view of a registered model (camelCase mirror of the models table). */
 export interface ModelDto {
   id: string;
   providerId: string | null;
   providerName: string | null;
   upstreamModel: string;
-  proto: ModelProto;
   name: string;
   description: string;
-  huggingFaceId: string;
-  quantization: string;
-  openrouterSlug: string;
-  alwaysOn: boolean;
   enabled: boolean;
   contextLength: number | null;
   maxOutputLength: number | null;
-  created: number | null;
   inputModalities: string[];
   outputModalities: string[];
   samplingParams: string[];
@@ -301,7 +287,6 @@ export interface ModelDto {
   pricingInputCache: number | null;
   pricingInputCacheWrite: number | null;
   pricingOutput: number | null;
-  datacenters: Array<{ country_code: string }> | null;
   source: "auto" | "manual";
   createdAt: number;
   updatedAt: number;

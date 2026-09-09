@@ -1,6 +1,6 @@
 import { createSignal, For, Show, createResource, createMemo } from "solid-js";
 
-import { api, type AuthStyle, type ProviderDto, type ProviderKeyDto, type SyncMode, type SyncOutcome, type SyncPreview } from "../../api";
+import { api, type AuthStyle, type ProviderDto, type ProviderKeyDto, type SyncOutcome, type SyncPreview } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
@@ -58,7 +58,7 @@ export default function AdminProvidersPage() {
 
   // ---- import-mode dialog (shown after creating a dual-capability provider) ----
   const [importFor, setImportFor] = createSignal<{ id: string; name: string; preview: SyncPreview } | null>(null);
-  const [importMode, setImportMode] = createSignal<SyncMode>("both");
+
   const [importBusy, setImportBusy] = createSignal(false);
 
   // ---- editor form ----
@@ -121,10 +121,9 @@ export default function AdminProvidersPage() {
           preview?: SyncPreview;
         }>("POST", "/api/admin/providers", body);
         if (j.preview) {
-          // Dual-capability: nothing imported yet — ask how below.
-          setImportMode("both");
+          // Dual-capability: nothing imported yet — confirm below.
           setImportFor({ id: j.provider.id, name: j.provider.name, preview: j.preview });
-          toast("Provider created — choose how to import its models");
+          toast("Provider created — confirm the model import");
         } else {
           const summary = syncSummary(j.sync);
           toast(summary ? `Provider created — models: ${summary}` : "Provider created");
@@ -308,7 +307,6 @@ export default function AdminProvidersPage() {
       const j = await api<{ sync: Partial<Record<string, SyncOutcome>> }>(
         "POST",
         `/api/admin/providers/${t.id}/sync-models`,
-        { mode: importMode() },
       );
       const summary = syncSummary(j.sync);
       toast(summary || "Model sync done");
@@ -647,7 +645,7 @@ export default function AdminProvidersPage() {
       >
         <div class="space-y-4">
           <p class="text-sm text-ink-300">
-            This provider has both protocol surfaces. The upstream model lists:
+            The upstream model lists (duplicates merge into one entry):
           </p>
           <div class="flex flex-wrap gap-2">
             <For each={(["openai", "anthropic"] as Cap[]).filter((c) => !!importFor()?.preview[c])}>
@@ -663,22 +661,6 @@ export default function AdminProvidersPage() {
             <Show when={importFor()?.preview.common != null}>
               <Badge tone="indigo">{importFor()!.preview.common} listed by both</Badge>
             </Show>
-          </div>
-          <div>
-            <span class="block text-xs font-medium text-ink-300 mb-1.5">Import as</span>
-            <Segmented
-              value={importMode()}
-              onChange={(m) => setImportMode(m as SyncMode)}
-              options={[
-                { value: "both", label: "Both" },
-                { value: "separate", label: "Separate" },
-              ]}
-            />
-            <p class="text-[11px] text-ink-500 mt-1.5">
-              {importMode() === "both"
-                ? "One entry per model, served on the OpenAI and Anthropic endpoints."
-                : "Each model keeps the protocol of the list it came from (duplicates go to OpenAI)."}
-            </p>
           </div>
           <div class="flex justify-end gap-2 pt-2">
             <Btn variant="ghost" onClick={() => setImportFor(null)}>Skip for now</Btn>

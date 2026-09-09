@@ -311,7 +311,7 @@ export function TranscriptView() {
         </div>
 
         {/* Persistent per-turn file-changes balloon (never deleted) */}
-        <For each={balloonsForBlock(block)}>
+        <For each={balloonsForBlock(block).filter((b) => (b.files?.length || 0) > 0)}>
           {(b) => (
             <div class={`w-full ${ui.convWidthClass()} mx-auto`}>
               <TurnChangesBalloon

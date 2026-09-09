@@ -37,8 +37,9 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
   const undoneCount = () => files().filter((f) => f.undone).length;
 
   return (
-    <div class="w-full flex justify-center my-3 select-text">
-      <div class="w-full max-w-2xl rounded-xl border border-line/70 bg-card p-3 shadow-xs transition-all">
+    <Show when={files().length > 0}>
+      <div class="w-full flex justify-center my-3 select-text">
+        <div class="w-full max-w-2xl rounded-xl border border-line/70 bg-card p-3 shadow-xs transition-all">
         <div class="flex items-center justify-between gap-2 flex-wrap">
           <button
             type="button"
@@ -144,5 +145,6 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
         </Show>
       </div>
     </div>
+    </Show>
   );
 }

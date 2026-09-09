@@ -34,16 +34,23 @@ export function createTurnChanges(opts: {
   function applySnapshot(r: any) {
     const list = r?.fileBalloons ?? [];
     setBalloons(
-      (Array.isArray(list) ? list : []).map((b: any) => ({ ...b, live: false })),
+      (Array.isArray(list) ? list : [])
+        .filter((b: any) => (b?.files?.length || 0) > 0)
+        .map((b: any) => ({ ...b, live: false })),
     );
   }
 
   function upsert(balloon: any, live: boolean) {
     if (!balloon || typeof balloon.turnIndex !== "number") return;
+    const files = balloon.files || [];
+    if (files.length === 0) {
+      setBalloons((prev) => prev.filter((b) => b.turnIndex !== balloon.turnIndex));
+      return;
+    }
     const next: TurnBalloon = {
       turnIndex: balloon.turnIndex,
       at: balloon.at,
-      files: balloon.files || [],
+      files,
       messageIndex: balloon.messageIndex,
       live,
     };
@@ -72,10 +79,12 @@ export function createTurnChanges(opts: {
 
   function noteTurnChanges(msg: any) {
     if (Array.isArray(msg?.balloons)) {
-      const list = msg.balloons.filter((b: any) => typeof b?.turnIndex === "number");
+      const list = msg.balloons.filter(
+        (b: any) => typeof b?.turnIndex === "number" && (b?.files?.length || 0) > 0,
+      );
       list.sort((a: any, b: any) => a.turnIndex - b.turnIndex);
       setBalloons((prev) => {
-        const live = prev.filter((b) => b.live);
+        const live = prev.filter((b) => b.live && (b.files?.length || 0) > 0);
         const merged = [...list.map((b: any) => ({ ...b, live: false })), ...live];
         merged.sort((a, b) => a.turnIndex - b.turnIndex);
         return merged;

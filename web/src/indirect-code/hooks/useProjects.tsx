@@ -244,12 +244,12 @@ export function createProjects(opts: {
     const raw = Array.isArray(msg.results) ? msg.results : [];
     setSearchResults(
       raw.map((r: any) => ({
-        sessionId: r.sessionId || r.session_id,
+        sessionId: r.sessionId || "",
         title: r.title || "",
         cwd: r.cwd || "",
-        updatedAt: r.updatedAt ?? r.updated_at ?? 0,
+        updatedAt: r.updatedAt ?? 0,
         snippet: r.snippet || "",
-        matchCount: r.matchCount ?? r.match_count ?? 0,
+        matchCount: r.matchCount ?? 0,
       })),
     );
   }

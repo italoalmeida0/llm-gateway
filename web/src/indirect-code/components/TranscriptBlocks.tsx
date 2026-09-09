@@ -231,7 +231,7 @@ export function renderMessageContent(ctx: TranscriptRenderCtx, msg: ChatMessage,
 /**
  * Renders ONE render block: either a series (lead text/thinking in wire
  * order, then the aggregate card of the whole fused run) or a single
- * message with the legacy per-bubble chrome (edit/copy/regenerate/delete
+ * message with its per-bubble chrome (edit/copy/regenerate/delete
  * on its own rendered position).
  */
 

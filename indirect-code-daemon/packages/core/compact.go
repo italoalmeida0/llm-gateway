@@ -204,10 +204,8 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	a.mu.Lock()
 	a.setCompactionStateLocked(nextState)
 	a.rev++
-	onCompacted := a.OnTranscriptCompacted
 	onState := a.OnCompactionState
 	store := a.store
-	projected := projectMessages(append([]provider.Message(nil), a.messages...), a.compactionStateLocked())
 	a.mu.Unlock()
 
 	// Record token usage for compaction in the session store and agent cost
@@ -222,9 +220,9 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	}
 
 	// Compaction checkpoints are first-class persistence rows,
-	// not best-effort callbacks. The store
-	// write is mandatory when a store is attached; the legacy hooks
-	// stay for hosts that mirror to their own session file.
+	// not best-effort callbacks. The store write is mandatory when
+	// a store is attached; OnCompactionState keeps hosts that mirror
+	// the state to their own session record in sync.
 	if store != nil {
 		if err := store.AppendCompaction(nextState); err != nil {
 			return "", fmt.Errorf("persist compaction checkpoint: %w", err)
@@ -232,9 +230,6 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	}
 	if onState != nil {
 		onState(a.CompactionChain())
-	}
-	if onCompacted != nil {
-		onCompacted(projected)
 	}
 
 	return summary, nil
@@ -354,7 +349,6 @@ func advanceCompactionChain(plan *CompactionPlan, summary string, prev *Compacti
 		count = prev.Count + 1
 	}
 	return &CompactionState{
-		Version:         CompactionProjectionVersion,
 		PreviousSummary: summary,
 		ReadFiles:       readFiles,
 		ModifiedFiles:   modFiles,
@@ -366,15 +360,12 @@ func advanceCompactionChain(plan *CompactionPlan, summary string, prev *Compacti
 // context coordinates (what PrepareCompaction/FindCutPoint produce)
 // back to a history index for the new chain head.
 //
-// Layouts:
-//   - pass-through context (no/legacy state): context[i] == history[i]
-//   - active projection: context[0] is the old synthetic summary and
-//     context[i>=1] == history[state.KeepFrom+i-1]
+// Layout: context[0] is the old synthetic summary and
+// context[i>=1] == history[state.KeepFrom+i-1].
 //
 // The old synthetic summary (context index 0 of an active projection)
 // is never a keep candidate — the new summary supersedes it — so a cut
-// at 0 clamps to 1. Legacy inline summaries (Meta compaction=true,
-// spliced by old builds at history index 0) get the same treatment.
+// at 0 clamps to 1.
 func projectionIndexForContext(history []provider.Message, state *CompactionState, ctxKeepFrom int) int {
 	active, base := projectionAnchor(state, len(history))
 	if active {
@@ -392,10 +383,6 @@ func projectionIndexForContext(history []provider.Message, state *CompactionStat
 	}
 	if ctxKeepFrom > len(history) {
 		return len(history)
-	}
-	if ctxKeepFrom == 0 && len(history) > 0 && isCompactionSynthetic(history[0]) {
-		// The old inline summary is superseded by the new one.
-		return 1
 	}
 	return ctxKeepFrom
 }

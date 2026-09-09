@@ -15,11 +15,6 @@ export function createReview(opts: {
   showConfirm: (o: { title?: string; message?: string; confirmText?: string; cancelText?: string; danger?: boolean }) => Promise<boolean>;
   isHostOnline: () => boolean;
 }) {
-  function resetReview() {
-    // No-op now: per-turn file changes replaced the git review modal.
-    // Kept so session-switch call sites don't change.
-  }
-
   // Stored attachments per session (from session_data + uploads).
   const [sessionFiles, setSessionFiles] = createSignal<Record<string, StoredAttachment[]>>({});
   function noteSessionFiles(sid: string, atts: any[]) {
@@ -176,7 +171,6 @@ export function createReview(opts: {
   }
 
   return {
-    resetReview,
     sessionFiles, noteSessionFiles, addSessionFile, purgeSessionFiles,
     previewCache, previewFile, setPreviewFile, previewCopied, setPreviewCopied,
     truncateTokens, setTruncateTokens, showTruncateInput, setShowTruncateInput,

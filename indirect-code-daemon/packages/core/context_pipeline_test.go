@@ -72,22 +72,6 @@ func TestBuildContextFiltersHidden(t *testing.T) {
 	}
 }
 
-func TestBuildContextFiltersLegacyMirror(t *testing.T) {
-	a := NewAgent(nil, "m", "", nil)
-	// Legacy builds persisted the mirror; new builds derive it per-turn.
-	mirror := testMsg(provider.RoleUser, imageMirrorPrefix+" <img>")
-	a.messages = []provider.Message{
-		testMsg(provider.RoleUser, "q"),
-		mirror,
-	}
-	ctx := a.BuildContext()
-	for _, m := range ctx {
-		if strings.HasPrefix(extractText(m), imageMirrorPrefix) {
-			t.Fatalf("legacy mirror leaked into context")
-		}
-	}
-}
-
 func TestRemindersAreRequestOnly(t *testing.T) {
 	a := NewAgent(nil, "m", "", nil)
 	a.messages = []provider.Message{testMsg(provider.RoleUser, "hi")}
@@ -167,43 +151,6 @@ func TestSnapCutToUserBoundary(t *testing.T) {
 	}
 }
 
-func TestJSONLStoreRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := dir + "/s.jsonl"
-	st, err := OpenJSONLSessionStore(path, dir, SessionMeta{Provider: "p", Model: "m", Version: "v"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AppendMessage(testMsg(provider.RoleUser, "hello")); err != nil {
-		t.Fatal(err)
-	}
-	call, res := testToolTurn("c1")
-	if err := st.AppendMessage(call); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AppendMessage(res); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AppendUsage(provider.Usage{InputTokens: 10}, provider.Usage{InputTokens: 10}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
-	st2, err := OpenJSONLSessionStore(path, dir, SessionMeta{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st2.Close()
-	msgs, err := st2.ReadTranscript()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(msgs) != 3 {
-		t.Fatalf("expected 3 messages, got %d", len(msgs))
-	}
-}
-
 func TestSQLiteStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/s.db"
@@ -264,7 +211,6 @@ func TestSQLiteCompactionCheckpoint(t *testing.T) {
 	// Append-only checkpoint: history untouched, chain head advances;
 	// projection derives the compacted view.
 	state := &CompactionState{
-		Version:         CompactionProjectionVersion,
 		PreviousSummary: "s",
 		ModifiedFiles:   []string{"a.go"},
 		KeepFrom:        3,
@@ -292,36 +238,9 @@ func TestSQLiteCompactionCheckpoint(t *testing.T) {
 	}
 }
 
-func TestImportJSONLToSQLite(t *testing.T) {
-	dir := t.TempDir()
-	jsonl := dir + "/s.jsonl"
-	jst, err := OpenJSONLSessionStore(jsonl, dir, SessionMeta{Provider: "p", Model: "m", Version: "v"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := jst.AppendMessage(testMsg(provider.RoleUser, "hello")); err != nil {
-		t.Fatal(err)
-	}
-	if err := jst.Close(); err != nil {
-		t.Fatal(err)
-	}
-	sst, err := ImportJSONL(jsonl, dir+"/s.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sst.Close()
-	msgs, err := sst.ReadTranscript()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(msgs) != 1 || extractText(msgs[0]) != "hello" {
-		t.Fatalf("import mismatch: %+v", msgs)
-	}
-}
-
 func TestAgentPersistsThroughStore(t *testing.T) {
 	dir := t.TempDir()
-	st, err := OpenSessionStore(dir+"/s.jsonl", dir, SessionMeta{Provider: "p", Model: "m"})
+	st, err := OpenSQLiteSessionStore(dir+"/s.db", dir, SessionMeta{Provider: "p", Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,29 +254,6 @@ func TestAgentPersistsThroughStore(t *testing.T) {
 	}
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 persisted message, got %d", len(msgs))
-	}
-}
-
-func TestOpenSessionStoreDispatch(t *testing.T) {
-	dir := t.TempDir()
-	j, err := OpenSessionStore(dir+"/a.jsonl", dir, SessionMeta{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := j.(*JSONLSessionStore); !ok {
-		t.Fatalf("expected JSONL backend, got %T", j)
-	}
-	j.Close()
-	s, err := OpenSessionStore(dir+"/b.db", dir, SessionMeta{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := s.(*SQLiteSessionStore); !ok {
-		t.Fatalf("expected SQLite backend, got %T", s)
-	}
-	s.Close()
-	if !IsSQLitePath("x.db") || IsSQLitePath("x.jsonl") {
-		t.Fatalf("extension dispatch wrong")
 	}
 }
 

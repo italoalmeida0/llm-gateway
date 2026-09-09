@@ -9,7 +9,6 @@ import type { CompactionState } from "../types";
 export interface CompactionBalloonProps {
   compaction?: CompactionState | null;
   summary?: string;
-  isLegacy?: boolean;
 }
 
 export function CompactionBalloon(props: CompactionBalloonProps) {
@@ -26,30 +25,13 @@ export function CompactionBalloon(props: CompactionBalloonProps) {
     cleanedSummary().includes("**Turn Context (split turn):**");
 
   const usage = () => props.compaction?.usage;
-  const inTok = () =>
-    usage()?.input_tokens ??
-    (usage() as any)?.inTok ??
-    (usage() as any)?.inputTokens ??
-    0;
-  const outTok = () =>
-    usage()?.output_tokens ??
-    (usage() as any)?.outTok ??
-    (usage() as any)?.outputTokens ??
-    0;
+  const inTok = () => usage()?.input_tokens ?? 0;
+  const outTok = () => usage()?.output_tokens ?? 0;
   const cacheTok = () =>
     (usage()?.cache_read_tokens ?? 0) +
-    (usage()?.cache_write_tokens ?? 0) +
-    ((usage() as any)?.cacheTok ?? 0);
-  const reasoningTok = () =>
-    usage()?.reasoning_tokens ??
-    (usage() as any)?.reasoningTok ??
-    (usage() as any)?.reasoningTokens ??
-    0;
-  const costUsd = () =>
-    usage()?.cost_usd ??
-    (usage() as any)?.costUsd ??
-    (usage() as any)?.costUSD ??
-    0;
+    (usage()?.cache_write_tokens ?? 0);
+  const reasoningTok = () => usage()?.reasoning_tokens ?? 0;
+  const costUsd = () => usage()?.cost_usd ?? 0;
 
   const hasUsage = () => inTok() > 0 || outTok() > 0;
 

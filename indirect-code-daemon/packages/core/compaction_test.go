@@ -147,9 +147,6 @@ func TestAdvanceCompactionChainAndProjection(t *testing.T) {
 	if state.PreviousSummary != "did things" || state.Count != 1 {
 		t.Fatalf("chain head wrong: %+v", state)
 	}
-	if state.Version != CompactionProjectionVersion {
-		t.Fatalf("new chains must carry the projection version, got %+v", state)
-	}
 	// Projection = synthetic summary + kept tail; history untouched.
 	projected := projectMessages(msgs, state)
 	if len(projected) != 1+(len(msgs)-plan.KeepFrom) {

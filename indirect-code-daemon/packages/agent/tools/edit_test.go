@@ -257,23 +257,10 @@ func TestEditPrepareArgumentsNormalizations(t *testing.T) {
 	os.WriteFile(p, []byte("hello world\n"), 0o644)
 	tool := &EditTool{CWD: dir}
 
-	// Legacy top-level oldText/newText (pi prepareEditArguments).
-	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"path":    "n.txt",
-		"oldText": "world",
-		"newText": "gopher",
-	}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := os.ReadFile(p); string(b) != "hello gopher\n" {
-		t.Fatalf("legacy top-level edit failed: %q", string(b))
-	}
-
 	// edits sent as a JSON string (degenerate model input).
 	os.WriteFile(p, []byte("hello world\n"), 0o644)
 	editsJSON := `[{"oldText":"world","newText":"gopher"}]`
-	_, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
+	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "n.txt",
 		"edits": editsJSON,
 	}), nil)

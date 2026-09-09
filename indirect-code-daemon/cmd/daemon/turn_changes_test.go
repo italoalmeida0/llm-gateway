@@ -148,26 +148,3 @@ func TestUndoRefusesToDeleteChangedNewFile(t *testing.T) {
 	}
 }
 
-// TestLegacyReviewDirsCleaned: startup cleanup removes old git review dirs
-// but never touches the user's own .git.
-func TestLegacyReviewDirsCleaned(t *testing.T) {
-	dataDir := t.TempDir()
-	legacy := filepath.Join(dataDir, "reviews", "abc123", "git")
-	if err := os.MkdirAll(legacy, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(legacy, "HEAD"), []byte("ref"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	userGit := filepath.Join(dataDir, "proj", ".git")
-	if err := os.MkdirAll(userGit, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cleanupLegacyReviewDirs(dataDir)
-	if _, err := os.Stat(filepath.Join(dataDir, "reviews")); !os.IsNotExist(err) {
-		t.Fatal("legacy reviews dir must be gone")
-	}
-	if _, err := os.Stat(userGit); err != nil {
-		t.Fatal("user .git must never be touched")
-	}
-}

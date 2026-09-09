@@ -54,10 +54,10 @@ func TestReadText(t *testing.T) {
 	if got != "hello\nworld\n" {
 		t.Fatalf("want raw content, got %q", got)
 	}
-	// Frontend display keeps the legacy line-prefixed view.
+	// Frontend display keeps the line-prefixed view.
 	display := toolDisplay(t, res)
 	if !strings.HasPrefix(display, LinePrefixNotice) || !strings.Contains(display, "1:hello") {
-		t.Fatalf("display lost legacy rendering:\n%s", display)
+		t.Fatalf("display lost rendering:\n%s", display)
 	}
 }
 
@@ -145,9 +145,9 @@ func TestReadOffsetLimit(t *testing.T) {
 	if got != wantAI {
 		t.Fatalf("want %q, got %q", wantAI, got)
 	}
-	// Frontend display keeps the legacy line-prefixed view.
+	// Frontend display keeps the line-prefixed view.
 	if display := toolDisplay(t, res); !strings.Contains(display, "2:2\n3:3\n") {
-		t.Fatalf("display lost legacy rendering:\n%s", display)
+		t.Fatalf("display lost rendering:\n%s", display)
 	}
 	if start, ok := res.Details.(map[string]any)["start_line"]; !ok || start != 2 {
 		t.Errorf("start_line detail want 2, got %v", start)
@@ -352,7 +352,7 @@ func TestBashSuccess(t *testing.T) {
 	if res.IsError {
 		t.Fatal("unexpected error flag")
 	}
-	// Frontend display keeps the legacy terminal-log view.
+	// Frontend display keeps the terminal-log view.
 	display := toolDisplay(t, res)
 	for _, want := range []string{"$ echo hi", "hi", "[exit 0]", "Took"} {
 		if !strings.Contains(display, want) {
@@ -396,11 +396,11 @@ func TestBashFailure(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 	if strings.Contains(got, "[exit 1]") {
-		t.Fatalf("AI content must not carry the legacy footer: %q", got)
+		t.Fatalf("AI content must not carry the footer: %q", got)
 	}
-	// Frontend display keeps the legacy footer.
+	// Frontend display keeps the footer.
 	if display := toolDisplay(t, res); !strings.Contains(display, "[exit 1]") {
-		t.Fatalf("display lost legacy footer:\n%s", display)
+		t.Fatalf("display lost footer:\n%s", display)
 	}
 }
 
@@ -480,7 +480,7 @@ func TestWriteLineNumbers(t *testing.T) {
 	if got != "Successfully wrote to file.txt" {
 		t.Fatalf("AI content = %q", got)
 	}
-	// Frontend display keeps the legacy line-prefixed echo.
+	// Frontend display keeps the line-prefixed echo.
 	wantDisplay := LinePrefixNotice + "1:alpha\n2:beta\n3:gamma\n"
 	if display := toolDisplay(t, res); display != wantDisplay {
 		t.Fatalf("display = %q", display)
@@ -503,7 +503,7 @@ func TestEditLineNumbers(t *testing.T) {
 	if got := res.Content[0].(provider.TextBlock).Text; got != "Successfully replaced 1 block(s) in e.txt." {
 		t.Fatalf("AI content = %q", got)
 	}
-	// Frontend display keeps the legacy numbered diff.
+	// Frontend display keeps the numbered diff.
 	display := toolDisplay(t, res)
 	if !strings.HasPrefix(display, LinePrefixNotice) {
 		t.Fatalf("expected LinePrefixNotice prefix, got %q", display)

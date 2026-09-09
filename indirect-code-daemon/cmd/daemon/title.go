@@ -26,8 +26,7 @@ func needsAutoTitle(rec *SessionRecord) bool {
 	if rec.TitleSource != "" {
 		return rec.TitleSource == "pending"
 	}
-	// Migrate old provisional titles by matching the prompt, not punctuation.
-	return rec.Title == "" || rec.Title == "New conversation" || rec.Title == instantTitle(firstUserText(rec))
+	return rec.Title == ""
 }
 
 func (d *DaemonServer) maybeAutoTitle(act *ActiveSession, gen int, client provider.Client, model string) {

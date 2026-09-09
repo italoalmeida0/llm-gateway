@@ -305,7 +305,6 @@ export default function IndirectCodePage() {
     options.resetPending();
     setDraftMode(false);
     transcript.resetForSession();
-    review.resetReview();
     turnChanges.reset();
     notice.setAppNotice(null);
     transcript.beginLoad(id);
@@ -344,7 +343,6 @@ export default function IndirectCodePage() {
       if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, "new");
     } catch {}
     composer.setInputPrompt(mirror.configDoc()?.newDraft || "");
-    review.resetReview();
     turnChanges.reset();
     notice.setAppNotice(null);
     options.applyOptions(options.getLastLocalSelection() || mirror.configDoc()?.lastSelection);
@@ -725,7 +723,6 @@ export default function IndirectCodePage() {
         setDraftMode(true);
         setCreatingSession(false);
         creationRequestId = "";
-        review.resetReview();
         turnChanges.reset();
         transcript.resetForSession();
         transcript.resetCaches();

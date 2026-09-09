@@ -1,6 +1,8 @@
 package core
 
 import (
+	"time"
+
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
@@ -11,15 +13,11 @@ import (
 //	AppendMessage / AppendUsage / AppendCompaction / UpdateModel /
 //	ReadTranscript / CompactionState / Close
 //
-// Implementations:
-//   - JSONLSessionStore (session_store_jsonl.go): JSONL format,
-//     byte-compatible with existing sessions.
-//   - SQLiteSessionStore (session_store_sqlite.go): SQLite backend
-//     (sessions + events), with append-only semantics.
+// Implementation: SQLiteSessionStore (session_store_sqlite.go) —
+// SQLite backend (sessions + events), with append-only semantics.
 //
 // The Agent accepts a SessionStore via AttachStore and persists through it.
-// Hosts choose the backend by path extension (.jsonl -> JSONL,
-// .db/.sqlite* -> SQLite) via OpenSessionStore.
+// Hosts open the backend via OpenSQLiteSessionStore.
 
 // SessionStore is the persistence contract for a conversation
 // transcript. All writes are append-only:
@@ -61,24 +59,24 @@ type SessionStore interface {
 	Close() error
 }
 
-// OpenSessionStore opens (or creates) the store backing path,
-// dispatching on extension like the daemon's session loader:
-//
-//	.db, .sqlite, .sqlite3 -> SQLiteSessionStore
-//	anything else          -> JSONLSessionStore (legacy default)
-//
-// meta is used only when creating a new store (first line /
-// sessions row). Reopening an existing path ignores meta except
-// for CWD fallback.
-func OpenSessionStore(path, cwd string, meta SessionMeta) (SessionStore, error) {
-	if IsSQLitePath(path) {
-		return OpenSQLiteSessionStore(path, cwd, meta)
-	}
-	return OpenJSONLSessionStore(path, cwd, meta)
-}
+// SessionMeta identifies a session: written once on creation and
+// returned by Meta().
+type SessionMeta struct {
+	ID       string    `json:"id"`
+	CWD      string    `json:"cwd"`
+	Model    string    `json:"model"`
+	Provider string    `json:"provider"`
+	Started  time.Time `json:"started"`
+	Version  string    `json:"version"`
+	Title    string    `json:"title,omitempty"`
 
-// MustJSONLPathForSQLite reports whether path looks like a SQLite
-// backing file. Exported for hosts that list/route session files.
-func IsSQLitePath(path string) bool {
-	return isSQLitePath(path)
+	// Parent is the ID of the session this one was forked from, or
+	// empty for top-level sessions.
+	Parent string `json:"parent,omitempty"`
+	// ForkPoint is the 0-indexed message position within the parent
+	// transcript where this branch diverges.
+	ForkPoint int `json:"fork_point,omitempty"`
+	// HideFromSessions hides internal tree-navigation branches from the
+	// flat /sessions picker while keeping them available for the tree.
+	HideFromSessions bool `json:"hide_from_sessions,omitempty"`
 }

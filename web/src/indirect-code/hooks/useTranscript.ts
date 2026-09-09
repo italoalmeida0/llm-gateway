@@ -310,8 +310,7 @@ export function createTranscript(opts: {
     setTurnClock(Date.now());
     setTodos(r.todos || []);
     if (typeof r.todosOpen === "boolean") applyTodosOpenFromRemote(r.todosOpen);
-    else if (typeof r.todos_open === "boolean") applyTodosOpenFromRemote(r.todos_open);
-    const em = r.editingMsg ?? r.editing_msg;
+    const em = r.editingMsg;
     if (em && typeof em.index === "number") {
       applyEditingMsgFromRemote(em.index, em.text || "");
     } else {

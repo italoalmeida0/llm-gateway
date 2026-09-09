@@ -92,8 +92,8 @@ type AttachmentRef struct {
 	Mime      string `json:"mime"`
 	Size      int64  `json:"size"`
 	Path      string `json:"path"`
-	TextPath  string `json:"text_path,omitempty"`
-	TextChars int    `json:"text_chars,omitempty"` // chars inlined as context (0 = binary/image)
+	TextPath  string `json:"textPath,omitempty"`
+	TextChars int    `json:"textChars,omitempty"` // chars inlined as context (0 = binary/image)
 }
 
 // ProjectEntry groups sessions by host folder. Stored in projects.json next
@@ -118,35 +118,34 @@ type EditingMsgState struct {
 type SessionRecord struct {
 	Turn        *TurnActivity      `json:"turn,omitempty"`
 	Todos       []tools.TodoItem   `json:"todos,omitempty"`
-	TodosOpen   *bool              `json:"todos_open,omitempty"`
+	TodosOpen   *bool              `json:"todosOpen,omitempty"`
 	Draft       string             `json:"draft,omitempty"`
-	EditingMsg  *EditingMsgState   `json:"editing_msg,omitempty"`
+	EditingMsg  *EditingMsgState   `json:"editingMsg,omitempty"`
 	Options     SessionOptions     `json:"options"`
 	ID          string             `json:"id"`
 	CWD         string             `json:"cwd"`
 	Title       string             `json:"title"`
-	TitleSource string             `json:"title_source,omitempty"`
+	TitleSource string             `json:"titleSource,omitempty"`
 	Usage       provider.Usage     `json:"usage"`
 	Context     *SessionContext    `json:"context,omitempty"`
 	Model       string             `json:"model"`
 	Status      string             `json:"status"` // "idle" | "running"
 	Pinned      bool               `json:"pinned,omitempty"`
-	CreatedAt   int64              `json:"created_at"`
-	UpdatedAt   int64              `json:"updated_at"`
+	CreatedAt   int64              `json:"createdAt"`
+	UpdatedAt   int64              `json:"updatedAt"`
 	Messages    []provider.Message `json:"messages"`
 	Attachments []AttachmentRef    `json:"attachments,omitempty"`
 	// Compaction is the incremental chain head (previous summary +
 	// file ops + cut anchor + count). Persisted on every compaction so the
 	// next summarization — even after a daemon restart — builds an update
-	// prompt instead of re-summarizing from scratch. Old frontends ignore it.
+	// prompt instead of re-summarizing from scratch.
 	Compaction *core.CompactionState `json:"compaction,omitempty"`
 	// TurnSeq counts started turns (monotonic per session). It indexes the
 	// per-turn file-change balloons below.
-	TurnSeq int `json:"turn_seq,omitempty"`
+	TurnSeq int `json:"turnSeq,omitempty"`
 	// FileBalloons holds one persistent file-changes balloon per finished
-	// turn that touched files (snapshot-based, no git). Old frontends
-	// ignore it.
-	FileBalloons []filetrack.TurnChanges `json:"file_balloons,omitempty"`
+	// turn that touched files (snapshot-based, no git).
+	FileBalloons []filetrack.TurnChanges `json:"fileBalloons,omitempty"`
 }
 
 // SessionSummary is returned to the web client for listing.
@@ -157,35 +156,26 @@ type SessionSummary struct {
 	Model        string           `json:"model"`
 	Status       string           `json:"status"`
 	Pinned       bool             `json:"pinned"`
-	CreatedAt    int64            `json:"created_at"`
-	UpdatedAt    int64            `json:"updated_at"`
-	MessageCount int              `json:"message_count"`
+	CreatedAt    int64            `json:"createdAt"`
+	UpdatedAt    int64            `json:"updatedAt"`
+	MessageCount int              `json:"messageCount"`
 	Draft        string           `json:"draft,omitempty"`
-	TodosOpen    *bool            `json:"todos_open,omitempty"`
-	EditingMsg   *EditingMsgState `json:"editing_msg,omitempty"`
+	TodosOpen    *bool            `json:"todosOpen,omitempty"`
+	EditingMsg   *EditingMsgState `json:"editingMsg,omitempty"`
 	Options      *SessionOptions  `json:"options,omitempty"`
 }
 
-// sessionListItem serializes a summary for the web client. It carries BOTH
-// snake_case (historic) and camelCase keys so old and new frontends parse it.
+// sessionListItem serializes a summary for the web client.
 func sessionListItem(s SessionSummary) map[string]any {
-	m := map[string]any{
+	return map[string]any{
 		"id": s.ID, "cwd": s.CWD, "title": s.Title, "model": s.Model, "status": s.Status,
-		"pinned":     s.Pinned,
-		"created_at": s.CreatedAt, "updated_at": s.UpdatedAt, "message_count": s.MessageCount,
-		"createdAt": s.CreatedAt, "updatedAt": s.UpdatedAt, "messageCount": s.MessageCount,
-		"draft":   s.Draft,
-		"options": s.Options,
+		"pinned":       s.Pinned,
+		"createdAt":    s.CreatedAt,
+		"updatedAt":    s.UpdatedAt,
+		"messageCount": s.MessageCount,
+		"draft":        s.Draft,
+		"options":      s.Options,
 	}
-	if s.TodosOpen != nil {
-		m["todosOpen"] = *s.TodosOpen
-		m["todos_open"] = *s.TodosOpen
-	}
-	if s.EditingMsg != nil {
-		m["editingMsg"] = s.EditingMsg
-		m["editing_msg"] = s.EditingMsg
-	}
-	return m
 }
 
 func sanitizeMessagesForFrontend(msgs []provider.Message) []provider.Message {
@@ -227,26 +217,26 @@ func sanitizeMessagesForFrontend(msgs []provider.Message) []provider.Message {
 	return out
 }
 
-// sessionPayload serializes a full record for the web client (both key styles).
+// sessionPayload serializes a full record for the web client.
 func sessionPayload(rec *SessionRecord) map[string]any {
 	return map[string]any{
 		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
 		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
-		"turn": rec.Turn, "todos": rec.Todos, "todosOpen": rec.TodosOpen, "todos_open": rec.TodosOpen,
-		"draft": rec.Draft, "editingMsg": rec.EditingMsg, "editing_msg": rec.EditingMsg,
+		"turn": rec.Turn, "todos": rec.Todos, "todosOpen": rec.TodosOpen,
+		"draft": rec.Draft, "editingMsg": rec.EditingMsg,
 		"workspace":  inspectWorkspace(rec.CWD),
-		"created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages),
-		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "attachments": rec.Attachments,
+		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages),
+		"attachments": rec.Attachments,
 		"compaction": rec.Compaction,
-		"turnSeq":    rec.TurnSeq, "turn_seq": rec.TurnSeq,
-		"fileBalloons": rec.FileBalloons, "file_balloons": rec.FileBalloons,
+		"turnSeq":    rec.TurnSeq,
+		"fileBalloons": rec.FileBalloons,
 	}
 }
 
 func projectPayload(p ProjectEntry) map[string]any {
 	return map[string]any{
 		"id": p.ID, "name": p.Name, "path": p.Path,
-		"created_at": p.CreatedAt, "createdAt": p.CreatedAt,
+		"createdAt": p.CreatedAt,
 		"protected":    p.Protected,
 		"collapsed":    p.Collapsed,
 		"folderStatus": inspectWorkspace(p.Path).Status,
@@ -751,54 +741,34 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		return nil, err
 	}
 	var rawRec struct {
-		Turn            *TurnActivity         `json:"turn"`
-		Todos           []tools.TodoItem      `json:"todos"`
-		TodosOpen       *bool                 `json:"todos_open"`
-		TodosOpenCamel  *bool                 `json:"todosOpen"`
-		Draft           string                `json:"draft"`
-		EditingMsg      *EditingMsgState      `json:"editing_msg"`
-		EditingMsgCamel *EditingMsgState      `json:"editingMsg"`
-		Options         SessionOptions        `json:"options"`
-		ID              string                `json:"id"`
-		CWD             string                `json:"cwd"`
-		Title           string                `json:"title"`
-		TitleSource     string                `json:"title_source"`
-		Usage           provider.Usage        `json:"usage"`
-		Context         *SessionContext       `json:"context"`
-		Model           string                `json:"model"`
-		Status          string                `json:"status"`
-		Pinned          bool                  `json:"pinned"`
-		CreatedAt       int64                 `json:"createdAt"`
-		UpdatedAt       int64                 `json:"updatedAt"`
-		CreatedAtSnake  int64                 `json:"created_at"`
-		UpdatedAtSnake  int64                 `json:"updated_at"`
-		Messages        []json.RawMessage     `json:"messages"`
-		Attachments     []AttachmentRef       `json:"attachments"`
-		Compaction      *core.CompactionState `json:"compaction,omitempty"`
+		Turn        *TurnActivity         `json:"turn"`
+		Todos       []tools.TodoItem      `json:"todos"`
+		TodosOpen   *bool                 `json:"todosOpen"`
+		Draft       string                `json:"draft"`
+		EditingMsg  *EditingMsgState      `json:"editingMsg"`
+		Options     SessionOptions        `json:"options"`
+		ID          string                `json:"id"`
+		CWD         string                `json:"cwd"`
+		Title       string                `json:"title"`
+		TitleSource string                `json:"titleSource"`
+		Usage       provider.Usage        `json:"usage"`
+		Context     *SessionContext       `json:"context"`
+		Model       string                `json:"model"`
+		Status      string                `json:"status"`
+		Pinned      bool                  `json:"pinned"`
+		CreatedAt   int64                 `json:"createdAt"`
+		UpdatedAt   int64                 `json:"updatedAt"`
+		Messages    []json.RawMessage     `json:"messages"`
+		Attachments []AttachmentRef       `json:"attachments"`
+		Compaction  *core.CompactionState `json:"compaction,omitempty"`
 	}
 	if err := json.Unmarshal(data, &rawRec); err != nil {
 		return nil, err
 	}
-	createdAt := rawRec.CreatedAt
-	if createdAt == 0 {
-		createdAt = rawRec.CreatedAtSnake
-	}
-	updatedAt := rawRec.UpdatedAt
-	if updatedAt == 0 {
-		updatedAt = rawRec.UpdatedAtSnake
-	}
-	todosOpen := rawRec.TodosOpen
-	if todosOpen == nil {
-		todosOpen = rawRec.TodosOpenCamel
-	}
-	editingMsg := rawRec.EditingMsg
-	if editingMsg == nil {
-		editingMsg = rawRec.EditingMsgCamel
-	}
 	rec := &SessionRecord{
-		Turn: rawRec.Turn, Todos: rawRec.Todos, TodosOpen: todosOpen,
+		Turn: rawRec.Turn, Todos: rawRec.Todos, TodosOpen: rawRec.TodosOpen,
 		Draft:       rawRec.Draft,
-		EditingMsg:  editingMsg,
+		EditingMsg:  rawRec.EditingMsg,
 		Options:     rawRec.Options,
 		ID:          rawRec.ID,
 		CWD:         resolvePath(rawRec.CWD),
@@ -807,8 +777,8 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		Model:       rawRec.Model,
 		Status:      rawRec.Status,
 		Pinned:      rawRec.Pinned,
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		CreatedAt:   rawRec.CreatedAt,
+		UpdatedAt:   rawRec.UpdatedAt,
 		Attachments: rawRec.Attachments,
 		Compaction:  rawRec.Compaction,
 	}
@@ -866,8 +836,7 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 // then the JSON record and the attachment folder are wiped from disk and a
 // session_deleted event goes out. Deletions are always 100%, never hides.
 // The shared per-project review repo is KEPT: sibling sessions of the same
-// root still need it. Only the legacy per-session git dir (pre-project
-// layout) is removed if still present.
+// root still need it.
 func (d *DaemonServer) purgeSession(id string) {
 	d.sessionsMu.Lock()
 	if act, ok := d.sessions[id]; ok {
@@ -893,52 +862,20 @@ func (d *DaemonServer) purgeSession(id string) {
 // sessionRaw mirrors the on-disk record without hydrating message content —
 // pull/list sweeps must stay cheap even with fat transcripts on disk.
 type sessionRaw struct {
-	ID              string            `json:"id"`
-	CWD             string            `json:"cwd"`
-	Title           string            `json:"title"`
-	Model           string            `json:"model"`
-	Status          string            `json:"status"`
-	Pinned          bool              `json:"pinned"`
-	CreatedAt       int64             `json:"createdAt"`
-	UpdatedAt       int64             `json:"updatedAt"`
-	CreatedAtSnake  int64             `json:"created_at"`
-	UpdatedAtSnake  int64             `json:"updated_at"`
-	Messages        []json.RawMessage `json:"messages"`
-	Attachments     []AttachmentRef   `json:"attachments"`
-	Draft           string            `json:"draft"`
-	TodosOpen       *bool             `json:"todos_open"`
-	TodosOpenCamel  *bool             `json:"todosOpen"`
-	EditingMsg      *EditingMsgState  `json:"editing_msg"`
-	EditingMsgCamel *EditingMsgState  `json:"editingMsg"`
-	Options         *SessionOptions   `json:"options"`
-}
-
-func (r *sessionRaw) created() int64 {
-	if r.CreatedAt != 0 {
-		return r.CreatedAt
-	}
-	return r.CreatedAtSnake
-}
-
-func (r *sessionRaw) updated() int64 {
-	if r.UpdatedAt != 0 {
-		return r.UpdatedAt
-	}
-	return r.UpdatedAtSnake
-}
-
-func (r *sessionRaw) getTodosOpen() *bool {
-	if r.TodosOpen != nil {
-		return r.TodosOpen
-	}
-	return r.TodosOpenCamel
-}
-
-func (r *sessionRaw) getEditingMsg() *EditingMsgState {
-	if r.EditingMsg != nil {
-		return r.EditingMsg
-	}
-	return r.EditingMsgCamel
+	ID         string            `json:"id"`
+	CWD        string            `json:"cwd"`
+	Title      string            `json:"title"`
+	Model      string            `json:"model"`
+	Status     string            `json:"status"`
+	Pinned     bool              `json:"pinned"`
+	CreatedAt  int64             `json:"createdAt"`
+	UpdatedAt  int64             `json:"updatedAt"`
+	Messages   []json.RawMessage `json:"messages"`
+	Attachments []AttachmentRef  `json:"attachments"`
+	Draft      string            `json:"draft"`
+	TodosOpen  *bool             `json:"todosOpen"`
+	EditingMsg *EditingMsgState  `json:"editingMsg"`
+	Options    *SessionOptions   `json:"options"`
 }
 
 // listSessionSummaries reads every session record but parses messages only
@@ -970,12 +907,12 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 			Model:        r.Model,
 			Status:       r.Status,
 			Pinned:       r.Pinned,
-			CreatedAt:    r.created(),
-			UpdatedAt:    r.updated(),
+			CreatedAt:    r.CreatedAt,
+			UpdatedAt:    r.UpdatedAt,
 			MessageCount: len(r.Messages),
 			Draft:        r.Draft,
-			TodosOpen:    r.getTodosOpen(),
-			EditingMsg:   r.getEditingMsg(),
+			TodosOpen:    r.TodosOpen,
+			EditingMsg:   r.EditingMsg,
 			Options:      r.Options,
 		})
 	}
@@ -1114,15 +1051,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"sessions": items,
 		})
 
-	case "get_changes":
-		// Legacy git-review protocol: the snapshot system replaced it.
-		// Answer with the persistent per-turn balloons so old frontends
-		// keep working until they migrate to get_turn_changes.
-		d.handleGetTurnChanges(raw)
-	case "undo_changes":
-		d.handleGetTurnChanges(raw)
-	case "keep_changes":
-		d.sendWS(map[string]any{"type": "session_changes", "hostId": d.config.HostID, "review": map[string]any{"files": []any{}}})
 	case "get_turn_changes":
 		d.handleGetTurnChanges(raw)
 	case "undo_turn_changes":
@@ -2582,16 +2510,10 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	}
 	rec.Messages = append([]provider.Message(nil), rec.Messages[:keep]...)
 	// Projection anchor invalidation: truncating the append-only history
-	// below the compaction cut point (or erasing a legacy inline summary)
-	// would leave the chain head pointing past the end of the log. Drop
-	// it; the next compaction re-anchors.
-	if st := rec.Compaction; st != nil {
-		switch {
-		case st.Version >= core.CompactionProjectionVersion && st.KeepFrom > keep:
-			rec.Compaction = nil
-		case st.Version < core.CompactionProjectionVersion && keep == 0:
-			rec.Compaction = nil
-		}
+	// below the compaction cut point would leave the chain head pointing
+	// past the end of the log. Drop it; the next compaction re-anchors.
+	if st := rec.Compaction; st != nil && st.KeepFrom > keep {
+		rec.Compaction = nil
 	}
 	rec.Status = "idle"
 	rec.UpdatedAt = time.Now().UnixMilli()
@@ -2939,10 +2861,6 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		})
 		return err
 	}
-	// Note: OnTranscriptCompacted stays unset — it fires with the
-	// projected context for legacy hosts that persisted a replacement
-	// transcript. The daemon session record keeps the append-only
-	// history, so OnCompactionState carries everything.
 
 	previewTick := 0
 	// Stream events to WebSocket
@@ -3294,10 +3212,6 @@ func main() {
 		fmt.Printf("[INFO] Loaded configuration for host '%s' (Gateway: %s)\n", server.config.Name, server.config.GatewayURL)
 		fmt.Println("[INFO] Tip: To switch to another gateway link or user account, run: ./indirect-code -connect <new-url>")
 	}
-
-	// The legacy git-based review system was replaced by snapshot-based
-	// per-turn file changes. Remove any leftover review repos on startup.
-	cleanupLegacyReviewDirs(dataDir)
 
 	// A previous run dying mid-turn must not brick sessions forever.
 	server.resetRunningSessions()

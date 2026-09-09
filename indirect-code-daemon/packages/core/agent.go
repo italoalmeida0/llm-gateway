@@ -123,15 +123,6 @@ type Agent struct {
 	// current and a crash recovers the right cost figure.
 	OnUsage func(cumulative provider.Usage)
 
-	// OnTranscriptCompacted, if set, fires after Compact advances the
-	// chain head, receiving the PROJECTED context (synthetic summary +
-	// kept tail — what the model sees next), NOT a replacement
-	// transcript. History stays append-only; hosts that mirror the
-	// session file must keep their full history and persist the chain
-	// via OnCompactionState. Kept for legacy hosts; new wiring should
-	// prefer OnCompactionState.
-	OnTranscriptCompacted func(messages []provider.Message)
-
 	// OnCompactionState, if set, fires after every successful Compact
 	// with the new incremental chain head (previous summary + merged
 	// file ops + KeepFrom anchor + count). Hosts persist it on the
@@ -572,9 +563,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			a.fireMessageAppended(toolMsg)
 			// Note: the provider image mirror (openai/openai-codex) is
 			// derived per-turn inside BuildContext now — it is request-only
-			// and never appended to the transcript. filterHidden drops
-			// legacy mirrors persisted by older builds so they are not
-			// duplicated in the request.
+			// and never appended to the transcript.
 			// If context was cancelled during tool execution, bail out.
 			if err := ctx.Err(); err != nil {
 				sink(EvDone{})
@@ -787,8 +776,8 @@ func (a *Agent) AddTransform(t ContextTransformer) {
 
 // AttachStore sets the persistence backend for the agent loop and
 // compaction checkpoints. Safe for concurrent use. A nil store
-// detaches (legacy callback-only mode: OnMessageAppended /
-// OnTranscriptCompacted keep working, nothing is written by core).
+// detaches (nothing is written by core; OnMessageAppended /
+// OnCompactionState keep working).
 func (a *Agent) AttachStore(st SessionStore) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

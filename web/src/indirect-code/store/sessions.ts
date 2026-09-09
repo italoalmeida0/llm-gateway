@@ -123,7 +123,7 @@ export function createDataLayer(opts: {
   }
 
   function normalizeSession(r: any, hostId: string): RcSession {
-    const rawEditing = r.editingMsg ?? r.editing_msg;
+    const rawEditing = r.editingMsg;
     const editingMsg = rawEditing && typeof rawEditing.index === "number"
       ? { index: rawEditing.index, text: String(rawEditing.text || "") }
       : null;
@@ -135,18 +135,16 @@ export function createDataLayer(opts: {
       model: r.model || "",
       status: r.status === "running" ? "running" : "idle",
       pinned: !!r.pinned,
-      createdAt: r.createdAt ?? r.created_at ?? Date.now(),
-      updatedAt: r.updatedAt ?? r.updated_at ?? Date.now(),
+      createdAt: r.createdAt ?? Date.now(),
+      updatedAt: r.updatedAt ?? Date.now(),
       messageCount:
         typeof r.messageCount === "number"
           ? r.messageCount
-          : typeof r.message_count === "number"
-            ? r.message_count
-            : Array.isArray(r.messages)
-              ? r.messages.length
-              : 0,
+          : Array.isArray(r.messages)
+            ? r.messages.length
+            : 0,
       draft: r.draft || "",
-      todosOpen: typeof r.todosOpen === "boolean" ? r.todosOpen : typeof r.todos_open === "boolean" ? r.todos_open : undefined,
+      todosOpen: typeof r.todosOpen === "boolean" ? r.todosOpen : undefined,
       editingMsg,
       options: r.options ? {
         effort: r.options.effort || "medium",
@@ -165,7 +163,7 @@ export function createDataLayer(opts: {
       hostId,
       name: p.name || fallback,
       path: rawPath,
-      createdAt: p.createdAt ?? p.created_at ?? Date.now(),
+      createdAt: p.createdAt ?? Date.now(),
       protected: !!p.protected,
       folderStatus: p.folderStatus,
       collapsed: !!p.collapsed,

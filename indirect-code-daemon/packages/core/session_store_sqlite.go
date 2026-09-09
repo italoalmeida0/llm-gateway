@@ -3,7 +3,6 @@ package core
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -260,26 +259,12 @@ func (s *SQLiteSessionStore) readLocked() ([]provider.Message, *CompactionState,
 			effective = append(effective, m)
 		case "compaction":
 			var row struct {
-				Messages   []json.RawMessage `json:"messages"`
-				Compaction *CompactionState  `json:"compaction"`
+				Compaction *CompactionState `json:"compaction"`
 			}
 			if err := json.Unmarshal([]byte(body), &row); err != nil {
 				continue
 			}
-			if row.Messages != nil {
-				// Legacy destructive checkpoint: it replaced the
-				// transcript up to this event. Honor that while
-				// replaying rows written by pre-projection builds.
-				effective = nil
-				for _, raw := range row.Messages {
-					m, err := HydrateMessageObject(raw)
-					if err != nil {
-						continue
-					}
-					effective = append(effective, m)
-				}
-			}
-			// Append-only checkpoint (new format): history stays,
+			// Append-only checkpoint: history stays,
 			// only the chain head advances.
 			state = row.Compaction
 		}
@@ -337,100 +322,9 @@ func (s *SQLiteSessionStore) Close() error {
 	}
 	err := s.db.Close()
 	if s.freshFile && s.messagesAppended == 0 {
-		// Same policy as Session.Close: drop empty stubs.
+		// Drop empty stubs.
 		_ = os.Remove(s.path)
 	}
 	return err
-}
-
-// ImportJSONL migrates a JSONL session file into a SQLite store at
-// sqlitePath, preserving transcript order, usage rows and the
-// compaction chain head. Model/meta rows become meta events; message
-// rows become message events; compaction rows become compaction
-// events. The JSONL file is left untouched.
-func ImportJSONL(jsonlPath, sqlitePath string) (*SQLiteSessionStore, error) {
-	meta, msgs, err := replayJSONL(jsonlPath)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := os.Stat(sqlitePath); err == nil {
-		return nil, fmt.Errorf("sqlite target already exists: %s", sqlitePath)
-	}
-	store, err := OpenSQLiteSessionStore(sqlitePath, meta.CWD, meta)
-	if err != nil {
-		return nil, err
-	}
-	// Replay raw rows in order so usage/compaction history survives.
-	if err := importJSONLRows(jsonlPath, store); err != nil {
-		store.Close()
-		_ = os.Remove(sqlitePath)
-		return nil, err
-	}
-	_ = msgs
-	return store, nil
-}
-
-// replayJSONL returns session meta + effective transcript for import.
-func replayJSONL(path string) (SessionMeta, []provider.Message, error) {
-	s, msgs, err := OpenSession(path)
-	if err != nil {
-		return SessionMeta{}, nil, err
-	}
-	meta := s.Meta
-	_ = s.Close()
-	return meta, msgs, nil
-}
-
-func importJSONLRows(jsonlPath string, store *SQLiteSessionStore) error {
-	f, err := os.Open(jsonlPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return forEachJSONLLine(f, func(line []byte) error {
-		var head sessionLineHead
-		if err := json.Unmarshal(line, &head); err != nil {
-			return nil
-		}
-		switch head.Type {
-		case "message":
-			m, err := hydrateMessage(line)
-			if err != nil {
-				return nil
-			}
-			if err := store.AppendMessage(m); err != nil {
-				return err
-			}
-		case "usage":
-			var row sessionLine
-			if err := json.Unmarshal(line, &row); err != nil {
-				return nil
-			}
-			if row.Usage != nil && row.Cumulative != nil {
-				if err := store.AppendUsage(*row.Usage, *row.Cumulative); err != nil {
-					return err
-				}
-			}
-		case "compaction":
-			_, st, err := hydrateCompactionWithState(line)
-			if err != nil {
-				return nil
-			}
-			if err := store.AppendCompaction(st); err != nil {
-				return err
-			}
-		case "meta":
-			var row sessionLine
-			if err := json.Unmarshal(line, &row); err != nil {
-				return nil
-			}
-			if row.Meta != nil && (row.Meta.Model != "" || row.Meta.Provider != "") {
-				_ = store.UpdateModel(row.Meta.Provider, row.Meta.Model)
-			}
-		case "title":
-			// Titles live in the sessions row; nothing to import.
-		}
-		return nil
-	})
 }
 

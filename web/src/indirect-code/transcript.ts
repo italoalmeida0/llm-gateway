@@ -12,9 +12,9 @@ export function buildRenderBlocks(messages: ChatMessage[]): RenderBlock[] {
   const result: RenderBlock[] = [];
   for (let i = 0; i < list.length; i++) {
     const head = list[i];
-    if (head.role === "user" || head.system) { result.push({kind:"single", msg:head}); continue; }
+    if (head.role === "user") { result.push({kind:"single", msg:head}); continue; }
     const extras: ChatMessage[] = [];
-    while (i+1 < list.length && list[i+1].role !== "user" && !list[i+1].system && !hasVisibleText(list[i+1])) extras.push(list[++i]);
+    while (i+1 < list.length && list[i+1].role !== "user" && !hasVisibleText(list[i+1])) extras.push(list[++i]);
     const units: ToolUnit[] = [];
     const byId = new Map<string, ToolUnit>();
     for (const message of [head, ...extras]) for (const block of message.blocks) {

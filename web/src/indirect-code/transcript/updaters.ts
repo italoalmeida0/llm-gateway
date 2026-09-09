@@ -6,8 +6,6 @@ import type { TurnActivity } from "../viewTypes";
  * with no Solid dependency — covered by tests). Each function receives the
  * previous list and returns the next; Solid hook/threading lives in useTranscript. */
 
-const TOOLS_IMAGE_MARKER = "Tool output included the following image content:";
-
 /** Normalizes the raw daemon transcript into renderable bubbles: tool
  * results are hoisted onto the assistant carrier (with srcIdx for
  * edit/delete/regenerate ops); "tool" envelopes never become a bubble. */
@@ -29,10 +27,6 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
   };
   (rawMsgs || []).forEach((m: any, idx: number) => {
     const blocks = parseContentBlocks(m);
-    const firstText = blocks.find((b) => b.type === "text")?.text || "";
-    const system =
-      m?.meta?.compaction === "true" ||
-      firstText.startsWith("## Context Summary (compacted)");
     const role = m.role === "assistant" ? "assistant" : m.role === "tool" ? "tool" : "user";
     if (role === "assistant") {
       const reason: ContentBlock[] = [];
@@ -46,7 +40,6 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
         blocks: [...reason, ...rest],
         thinkingDuration: Number(m.meta?.thinking_ms) > 0 ? Math.max(1, Math.ceil(Number(m.meta.thinking_ms) / 1000)) : undefined,
         time: Date.now(),
-        system,
         srcIdx: idx,
       };
       out.push(msg);
@@ -59,18 +52,6 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
       if (b.type === "tool_result") ensureCarrier(idx).blocks.push(b);
       else rest.push(b);
     }
-    // Daemon's image mirror: the tool already shows a collapsible row with
-    // its output — the mirror carries the SAME bytes, so drop it (keeping
-    // a duplicate caption under the tool would just repeat the tool). The
-    // image blocks here and the ones folded from tool results both die
-    // together with their carrier row.
-    if (
-      rest.length > 0 &&
-      rest[0].type === "text" &&
-      (rest[0].text || "").trim().startsWith(TOOLS_IMAGE_MARKER)
-    ) {
-      return;
-    }
     if (role === "tool" || rest.length === 0) {
       // "tool" envelopes never become bubbles; a user envelope holding
       // only tool results must not render as an empty user bubble.
@@ -82,7 +63,6 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
       role: "user",
       blocks: rest,
       time: Date.now(),
-      system,
       srcIdx: idx,
     };
     out.push(msg);

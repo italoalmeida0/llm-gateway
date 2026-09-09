@@ -31,10 +31,9 @@ export function TranscriptView() {
       if (isLastMsg && (at < 0 || at > t.messages().length)) return true;
       return false;
     });
-  const hasLegacySystemNotice = () => t.messages().some((m) => m.system);
   const compaction = () => t.sessionCompaction();
   const shouldShowCompactionBalloon = () =>
-    Boolean(compaction()?.previousSummary && !hasLegacySystemNotice());
+    Boolean(compaction()?.previousSummary);
   const firstKeptBlockIdx = () => {
     const cp = compaction();
     if (!cp) return -1;
@@ -185,15 +184,6 @@ export function TranscriptView() {
               msg.role === "user" && !isEditing() ? "items-end" : "items-start"
             }`}
           >
-            {/* ===== COMPACTION BALLOON (legacy system message) ===== */}
-            <Show when={msg.system}>
-              <CompactionBalloon
-                summary={textOf()}
-                isLegacy={true}
-                compaction={compaction()}
-              />
-            </Show>
-            <Show when={!msg.system}>
           {/* ===== USER ===== */}
           <Show when={msg.role === "user"}>
             <div class={isEditing() ? "w-full" : "flex flex-col items-end max-w-[90%] sm:max-w-[80%]"}>
@@ -327,7 +317,6 @@ export function TranscriptView() {
                 />
               </Show>
             </div>
-          </Show>
           </Show>
         </div>
         </>

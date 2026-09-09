@@ -50,7 +50,6 @@ export interface CompactionState {
   modifiedFiles?: string[];
   firstKeptEntryId?: string;
   count?: number;
-  version?: number;
   keepFrom?: number;
   usage?: CompactionUsage;
 }
@@ -62,8 +61,6 @@ export interface ChatMessage {
   time?: number;
   attachments?: string[];
   thinkingDuration?: number;
-  /** Synthetic transcript notices (e.g. auto-compaction summaries). */
-  system?: boolean;
   /**
    * Index of the source message in the daemon's raw transcript. Display
    * normalization merges/drops raw messages (tool results are hoisted onto

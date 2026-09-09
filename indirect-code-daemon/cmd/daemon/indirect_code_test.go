@@ -351,9 +351,6 @@ func TestManualCompactPreservesHistoryUntilSummarySucceeds(t *testing.T) {
 			if saved.Compaction == nil || !strings.Contains(saved.Compaction.PreviousSummary, "preserving the project decisions") {
 				t.Fatalf("chain head missing or summary wrong: %+v", saved.Compaction)
 			}
-			if saved.Compaction.Version != core.CompactionProjectionVersion {
-				t.Fatalf("chain head must carry the projection version: %+v", saved.Compaction)
-			}
 			if saved.Compaction.KeepFrom < 1 || saved.Compaction.KeepFrom > 3 {
 				t.Fatalf("keep-tail ~70%% of 10 messages => anchor 1..3, got %d", saved.Compaction.KeepFrom)
 			}

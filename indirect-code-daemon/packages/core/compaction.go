@@ -30,13 +30,6 @@ const (
 	CompactionImageTokenEstimate = 1500
 )
 
-// CompactionProjectionVersion is the projection schema version written
-// by new compactions. States restored from older session files lack the
-// field (decoded as 0) and keep the legacy inline-summary layout: the
-// synthetic summary message was spliced INTO the transcript by the old
-// destructive applyCompaction, so projection is a pass-through for them.
-const CompactionProjectionVersion = 1
-
 // CompactionState is the incremental state chained across compactions
 // (summary + firstKeptEntryId + file ops).
 // It is persisted on the session record so a restart does not break the
@@ -61,10 +54,6 @@ type CompactionState struct {
 	FirstKeptEntryID string `json:"firstKeptEntryId,omitempty"`
 	// Count tracks how many compactions have run in this session.
 	Count int `json:"count,omitempty"`
-	// Version marks states that carry a projection anchor. Absent (0) in
-	// legacy rows: those sessions embed the summary inline and project
-	// as pass-through.
-	Version int `json:"version,omitempty"`
 	// KeepFrom is the index into the append-only history of the first
 	// message kept verbatim by this compaction.
 	// Context derivation = synthetic summary message + history[KeepFrom:].
@@ -80,7 +69,7 @@ func summaryMessageText(summary string) string {
 }
 
 // isCompactionSynthetic reports whether m is a synthetic compaction
-// summary message (produced by projection or spliced by a legacy build).
+// summary message produced by projection.
 func isCompactionSynthetic(m provider.Message) bool {
 	return m.Meta != nil && m.Meta["compaction"] == "true"
 }
@@ -89,12 +78,10 @@ func isCompactionSynthetic(m provider.Message) bool {
 // effective projection layout: whether a synthetic summary precedes the
 // kept tail and where the kept tail starts in the history.
 //
-// Legacy states (Version 0, restored from pre-projection session files)
-// project as pass-through: their summary lives inline in the transcript.
-// Corrupted/out-of-range anchors fail open to pass-through too — never
+// Corrupted/out-of-range anchors fail open to pass-through — never
 // hide user messages from the model because of a bad anchor.
 func projectionAnchor(state *CompactionState, historyLen int) (synthetic bool, keepFrom int) {
-	if state == nil || state.Version < CompactionProjectionVersion || state.PreviousSummary == "" {
+	if state == nil || state.PreviousSummary == "" {
 		return false, 0
 	}
 	if state.KeepFrom < 0 || state.KeepFrom > historyLen {
@@ -229,8 +216,8 @@ func TrailingTokens(msgs []provider.Message, usage provider.Usage) int {
 // ShouldCompact reports whether the session should auto-compact before the
 // next model call: usage + trailing estimate vs window minus reserve.
 //
-// window <= 0 means unknown: fall back to false and let the caller apply
-// its own legacy heuristic.
+// window <= 0 means unknown: fall back to false and let the caller
+// apply its own heuristic.
 func ShouldCompact(window int, usageTotal, trailingEstimate int) bool {
 	if window <= 0 {
 		return false
@@ -578,7 +565,7 @@ func FindCutPoint(msgs []provider.Message, keepRecent int) CutPoint {
 // snapCutToUserBoundary moves a pair-safe cut forward to the next user
 // message so the kept tail never starts mid-turn (orphan tool result,
 // bare assistant continuation). Hidden/internal messages (MetaHidden)
-// and legacy image mirrors do not count as boundaries: they are
+// and ephemeral pipeline messages do not count as boundaries: they are
 // filtered from the request context anyway, so starting the tail at
 // one would still read as mid-turn to the model.
 func snapCutToUserBoundary(msgs []provider.Message, idx int) int {
@@ -597,19 +584,15 @@ func snapCutToUserBoundary(msgs []provider.Message, idx int) int {
 }
 
 // isUserBoundary reports whether m is a genuine user turn start: role
-// user, visible to the model (not hidden), and not a legacy image
-// mirror (request-derived now, filtered by filterHidden).
+// user, visible to the model (not hidden, not ephemeral).
 func isUserBoundary(m provider.Message) bool {
 	if m.Role != provider.RoleUser {
 		return false
 	}
-	if m.Meta != nil && m.Meta[MetaHidden] == "true" {
+	if m.Meta != nil && (m.Meta[MetaHidden] == "true" || m.Meta[MetaEphemeral] == "true") {
 		return false
 	}
-	if m.Meta != nil && m.Meta[MetaEphemeral] == "true" {
-		return false
-	}
-	return !isLegacyImageMirror(m)
+	return true
 }
 
 // isToolCallTail reports whether m is an assistant message ending in (or

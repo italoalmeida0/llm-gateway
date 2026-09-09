@@ -48,7 +48,7 @@ export function createTurnChanges(opts: {
   }
 
   function applySnapshot(r: any) {
-    const list = r?.fileBalloons ?? r?.file_balloons ?? [];
+    const list = r?.fileBalloons ?? [];
     setBalloons(
       (Array.isArray(list) ? list : []).map((b: any) => ({ ...b, live: false })),
     );

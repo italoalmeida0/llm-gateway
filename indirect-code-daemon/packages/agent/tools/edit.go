@@ -33,10 +33,6 @@ type piEdit struct {
 type editArgs struct {
 	Path  string   `json:"path"`
 	Edits []piEdit `json:"edits"`
-	// Legacy top-level single edit; normalized into Edits like pi's
-	// prepareEditArguments does.
-	OldText string `json:"oldText,omitempty"`
-	NewText string `json:"newText,omitempty"`
 }
 
 const editSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},"newText":{"type":"string","description":"Replacement text for this targeted edit."}},"required":["oldText","newText"]}}},"required":["path","edits"]}`
@@ -58,9 +54,8 @@ func (t *EditTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 }
 
 // prepareEditArguments mirrors pi's prepareEditArguments: some models send
-// edits as a JSON string instead of an array, or a single edit object, or a
-// legacy top-level oldText/newText pair. All shapes are normalized into the
-// canonical {path, edits[]} form.
+// edits as a JSON string instead of an array, or a single edit object. All
+// shapes are normalized into the canonical {path, edits[]} form.
 func prepareEditArguments(raw json.RawMessage) (editArgs, error) {
 	var generic map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &generic); err != nil {
@@ -71,17 +66,6 @@ func prepareEditArguments(raw json.RawMessage) (editArgs, error) {
 	if v, ok := generic["path"]; ok {
 		_ = json.Unmarshal(v, &a.Path)
 	}
-
-	// Legacy top-level single edit (pi: both must be strings to count).
-	var legacyOld, legacyNew string
-	oldIsString, newIsString := false, false
-	if v, ok := generic["oldText"]; ok {
-		oldIsString = json.Unmarshal(v, &legacyOld) == nil
-	}
-	if v, ok := generic["newText"]; ok {
-		newIsString = json.Unmarshal(v, &legacyNew) == nil
-	}
-	hasLegacy := oldIsString && newIsString
 
 	if editsRaw, ok := generic["edits"]; ok {
 		// edits as JSON string (Opus/GLM style degenerate input).
@@ -111,9 +95,6 @@ func prepareEditArguments(raw json.RawMessage) (editArgs, error) {
 			}
 			// Any other shape: leave empty; validation below reports it.
 		}
-	}
-	if hasLegacy {
-		a.Edits = append(a.Edits, piEdit{OldText: legacyOld, NewText: legacyNew})
 	}
 	return a, nil
 }
@@ -197,8 +178,8 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 		}
 	}
 
-	// Frontend-only rendering: the legacy APPLIED + numbered-diff view the
-	// UI has always shown, kept identical so the transcript looks unchanged.
+	// Frontend-only rendering: the APPLIED + numbered-diff view shown
+	// by the UI transcript.
 	display := t.renderDisplay(path, baseContent, newContent, len(a.Edits))
 
 	return core.ToolResult{
@@ -215,7 +196,7 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 	}, nil
 }
 
-// renderDisplay rebuilds the legacy presentation: notice, "APPLIED.", the
+// renderDisplay builds the presentation for the UI: notice, "APPLIED.", the
 // per-file check mark with match count, and the numbered context diff.
 func (t *EditTool) renderDisplay(path, baseContent, newContent string, matches int) string {
 	var b strings.Builder

@@ -31,23 +31,17 @@ import (
 const (
 	// MetaHidden marks messages that exist in the transcript (and in
 	// persistence) but should never reach the LLM: internal status,
-	// legacy mirrors, control lines.
+	// control lines.
 	MetaHidden = "hidden"
 	// MetaEphemeral marks synthetic messages produced by the
 	// pipeline (reminders, mirrors). They exist only in the request;
 	// they should never be persisted or re-injected into the transcript.
 	MetaEphemeral = "ephemeral"
 	// MetaImageMirror marks the image mirror generated for
-	// text-centric providers (openai/openai-codex). Older sessions
-	// may have persisted mirrors in the transcript; the filter handles
-	// those cases by text prefix (see filterHidden).
+	// text-centric providers (openai/openai-codex). The mirror is
+	// derived per turn and never persists.
 	MetaImageMirror = "image_mirror"
 )
-
-// imageMirrorPrefix is the historical prefix of mirrors persisted in the
-// transcript (see mirrorToolImagesAsUser). Kept to filter legacy mirrors
-// in older sessions; newer mirrors are derived per turn and never persist.
-const imageMirrorPrefix = "Tool output included the following image content:"
 
 // ContextTransformer receives assembled messages up to this point and
 // returns transformed messages. Typical transforms: AGENTS.md injection,
@@ -81,39 +75,15 @@ type Reminder struct {
 //
 // Filters:
 //   - Meta[MetaHidden]=="true"
-//   - legacy persisted image mirrors (MetaImageMirror or historical
-//     prefix), because mirrors are now derived per turn via
-//     mirrorImagesForProvider and would otherwise duplicate in the request.
 func filterHidden(msgs []provider.Message) []provider.Message {
 	out := make([]provider.Message, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Meta != nil && m.Meta[MetaHidden] == "true" {
 			continue
 		}
-		if m.Meta != nil && m.Meta[MetaImageMirror] == "true" {
-			continue
-		}
-		if m.Role == provider.RoleUser && isLegacyImageMirror(m) {
-			continue
-		}
 		out = append(out, m)
 	}
 	return out
-}
-
-// isLegacyImageMirror detects image mirrors persisted by older builds
-// (runLoop used to append mirrorToolImagesAsUser to the transcript).
-// The historical mirror is a user message whose text starts with the
-// canonical prefix.
-func isLegacyImageMirror(m provider.Message) bool {
-	for _, c := range m.Content {
-		if tb, ok := c.(provider.TextBlock); ok {
-			if strings.HasPrefix(tb.Text, imageMirrorPrefix) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // mirrorImagesForProvider derives the image mirror from tool results

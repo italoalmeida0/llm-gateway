@@ -6,7 +6,7 @@
     "access": ""
   },
   "id": "s1",
-  "cwd": "/tmp/TestTurnTrackingEndToEnd1719917028/001",
+  "cwd": "/tmp/TestTurnTrackingEndToEnd2692352265/001",
   "title": "",
   "usage": {
     "input_tokens": 0,
@@ -18,16 +18,16 @@
   },
   "model": "",
   "status": "",
-  "created_at": 0,
-  "updated_at": 1788948563900,
+  "createdAt": 0,
+  "updatedAt": 1788954458935,
   "messages": null,
-  "file_balloons": [
+  "fileBalloons": [
     {
       "turn_index": 1,
       "at": 0,
       "files": [
         {
-          "path": "/tmp/TestTurnTrackingEndToEnd1719917028/001/main.go",
+          "path": "/tmp/TestTurnTrackingEndToEnd2692352265/001/main.go",
           "rel": "main.go",
           "status": "modified",
           "diff": "--- main.go\n+++ main.go\n@@ -1,4 +1,6 @@\n package main\n \n func main() {\n+\n+\tprintln(\"hi\")\n }\n",
@@ -39,7 +39,7 @@
           "undone": true
         },
         {
-          "path": "/tmp/TestTurnTrackingEndToEnd1719917028/001/new.txt",
+          "path": "/tmp/TestTurnTrackingEndToEnd2692352265/001/new.txt",
           "rel": "new.txt",
           "status": "new",
           "diff": "--- new.txt\n+++ new.txt\n@@ -1,0 +1,1 @@\n+created\n",
@@ -49,7 +49,7 @@
           "undone": true
         },
         {
-          "path": "/tmp/TestTurnTrackingEndToEnd1719917028/001/touched.go",
+          "path": "/tmp/TestTurnTrackingEndToEnd2692352265/001/touched.go",
           "rel": "touched.go",
           "status": "modified",
           "diff": "--- touched.go\n+++ touched.go\n@@ -1,1 +1,3 @@\n package main\n+\n+// touched\n",

@@ -110,7 +110,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	}
 
 	output := newOutputAccumulator(defaultMaxLines, defaultMaxBytes)
-	// Head buffer for the frontend's legacy terminal-log display.
+	// Head buffer for the frontend's terminal-log display.
 	var head bytes.Buffer
 	done := make(chan struct{})
 
@@ -213,8 +213,8 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		outputText = appendStatus(outputText, fmt.Sprintf("Command exited with code %d", exitCode))
 	}
 
-	// Frontend-only rendering: the legacy terminal-log view ($ command,
-	// output, [exit N] Took Xs) the UI has always shown.
+	// Frontend-only rendering: the terminal-log view ($ command,
+	// output, [exit N] Took Xs) shown by the UI transcript.
 	display := renderBashDisplay(a.Command, head.String(), exitCode, elapsed, snapshot.fullOutputPath)
 
 	return core.ToolResult{
@@ -222,7 +222,6 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		IsError: isErr,
 		Details: map[string]any{
 			"display":          display,
-			"exit_code":        exitCode,
 			"exitCode":         exitCode,
 			"stdout":           head.String(),
 			"stderr":           "",
@@ -237,7 +236,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	}, nil
 }
 
-// renderBashDisplay rebuilds the legacy terminal-log presentation for the UI:
+// renderBashDisplay builds the terminal-log presentation for the UI:
 // shell-prompt echo of the command, the captured output (head-truncated like
 // before), and a footer with exit code and elapsed time.
 func renderBashDisplay(command, captured string, exitCode int, elapsed time.Duration, fullPath string) string {

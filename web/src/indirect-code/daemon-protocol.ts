@@ -47,9 +47,6 @@ export type DaemonCommand = CommandBase &
   | { type: "create_project"; path: string; requestId: string }
   | { type: "delete_project"; projectId: string }
   | { type: "browse_folders"; path: string; requestId: string }
-  | { type: "get_changes"; sessionId: string; detail: boolean; requestId: string }
-  | { type: "keep_changes"; sessionId: string; reviewId: string; requestId: string }
-  | { type: "undo_changes"; sessionId: string; reviewId: string; path: string; detail: boolean; requestId: string }
   | { type: "upload_attachment"; requestId: string; sessionId: string; name: string; mime: string; data: string; text?: string }
   | { type: "get_attachment"; sessionId: string; attachmentId: string }
   | { type: "search"; query: string; limit: number }
@@ -110,7 +107,6 @@ export type DaemonEvent = EventBase &
     | { type: "session_created"; requestId?: string; session?: WireRecord }
     | { type: "project_created"; requestId?: string; project?: WireRecord }
     | { type: "folders"; requestId?: string; error?: string; folders?: WireRecord[]; parent?: string; path?: string }
-    | { type: "session_changes"; sessionId: string; requestId?: string; error?: string; detail?: boolean; review?: WireRecord }
     | { type: "turn_file_changes"; sessionId: string; live?: boolean; balloon?: WireRecord }
     | { type: "turn_changes"; sessionId: string; requestId?: string; balloons?: WireRecord[]; live?: WireRecord }
     | { type: "turn_changes_undone"; sessionId: string; requestId?: string; turnIndex?: number; results?: WireRecord[]; complete?: boolean; warning?: string; error?: string }
@@ -152,7 +148,6 @@ export type ToolApprovalRequestEvent = Extract<DaemonEvent, { type: "tool_approv
 export type ProjectCreatedEvent = Extract<DaemonEvent, { type: "project_created" }>;
 export type FoldersEvent = Extract<DaemonEvent, { type: "folders" }>;
 export type SearchResultsEvent = Extract<DaemonEvent, { type: "search_results" }>;
-export type SessionChangesEvent = Extract<DaemonEvent, { type: "session_changes" }>;
 export type AttachmentDataEvent = Extract<DaemonEvent, { type: "attachment_data" }>;
 export type ChangesUpdatedEvent = Extract<DaemonEvent, { type: "changes_updated" }>;
 export type WorkspaceStatusEvent = Extract<DaemonEvent, { type: "workspace_status" }>;

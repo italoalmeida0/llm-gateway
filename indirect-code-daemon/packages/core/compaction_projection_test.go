@@ -10,8 +10,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -72,7 +70,6 @@ func TestProjectionActiveHidesSummarizedPrefix(t *testing.T) {
 		t.Fatalf("History = %d, want full log %d", len(a.History()), len(history))
 	}
 	state := &CompactionState{
-		Version:         CompactionProjectionVersion,
 		PreviousSummary: "did stuff",
 		KeepFrom:        8,
 		Count:           1,
@@ -93,26 +90,12 @@ func TestProjectionActiveHidesSummarizedPrefix(t *testing.T) {
 	}
 }
 
-// Legacy states (Version 0, inline summary spliced by old builds) are
-// pass-through: no synthetic head, transcript returned as-is.
-func TestProjectionLegacyIsPassThrough(t *testing.T) {
-	history := bigHistory(4)
-	a := NewAgent(nil, "m", "", nil)
-	a.SetMessages(history)
-	a.SeedCompactionState(&CompactionState{PreviousSummary: "old inline", Count: 1})
-	msgs := a.Messages()
-	if len(msgs) != len(history) {
-		t.Fatalf("legacy state must pass through: got %d, want %d", len(msgs), len(history))
-	}
-}
-
 // Corrupted anchors fail open: never hide user messages from the model.
 func TestProjectionCorruptAnchorFailsOpen(t *testing.T) {
 	history := bigHistory(4)
 	a := NewAgent(nil, "m", "", nil)
 	a.SetMessages(history)
 	a.SeedCompactionState(&CompactionState{
-		Version:         CompactionProjectionVersion,
 		PreviousSummary: "s",
 		KeepFrom:        len(history) + 100, // past the end
 		Count:           1,
@@ -130,7 +113,7 @@ func TestCompactNonDestructiveEndToEnd(t *testing.T) {
 	a.SetMessages(history)
 
 	dir := t.TempDir()
-	st, err := OpenSessionStore(dir+"/s.jsonl", dir, SessionMeta{Provider: "p", Model: "m"})
+	st, err := OpenSQLiteSessionStore(dir+"/s.db", dir, SessionMeta{Provider: "p", Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,8 +129,6 @@ func TestCompactNonDestructiveEndToEnd(t *testing.T) {
 
 	var hookState *CompactionState
 	a.OnCompactionState = func(s *CompactionState) { hookState = s }
-	var legacyView []provider.Message
-	a.OnTranscriptCompacted = func(msgs []provider.Message) { legacyView = msgs }
 
 	summary, err := a.Compact(context.Background(), 4, nil)
 	if err != nil {
@@ -164,7 +145,7 @@ func TestCompactNonDestructiveEndToEnd(t *testing.T) {
 		t.Fatalf("projected context = %d, want 5 (summary + 4 kept)", len(a.Messages()))
 	}
 	chain := a.CompactionChain()
-	if chain == nil || chain.Count != 1 || chain.Version != CompactionProjectionVersion {
+	if chain == nil || chain.Count != 1 {
 		t.Fatalf("chain head wrong: %+v", chain)
 	}
 	if chain.KeepFrom != len(history)-4 {
@@ -172,9 +153,6 @@ func TestCompactNonDestructiveEndToEnd(t *testing.T) {
 	}
 	if hookState == nil || hookState.Count != 1 {
 		t.Fatalf("OnCompactionState not fired: %+v", hookState)
-	}
-	if len(legacyView) != 1+4 {
-		t.Fatalf("OnTranscriptCompacted must receive the projected view, got %d", len(legacyView))
 	}
 	// Store checkpoint: history rows intact, head persisted.
 	rows, err := st.ReadTranscript()
@@ -244,95 +222,6 @@ func TestMaybeAutoCompactTriggerAndNoop(t *testing.T) {
 	if len(b.History()) != before {
 		t.Fatalf("no-op must not touch history")
 	}
-}
-
-// Legacy JSONL migration: a destructive checkpoint row (messages +
-// state, Version 0) still replaces history on replay; a new
-// append-only row only advances the head.
-func TestLegacyJSONLMigrationVsAppendOnly(t *testing.T) {
-	dir := t.TempDir()
-
-	// Legacy file: 2 messages then a destructive compaction row.
-	legacy := dir + "/legacy.jsonl"
-	st, err := OpenJSONLSessionStore(legacy, dir, SessionMeta{Provider: "p", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AppendMessage(textMsg(provider.RoleUser, "before")); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AppendMessage(textMsg(provider.RoleAssistant, "before-ans")); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate a pre-projection build by writing the legacy row shape
-	// directly: messages replace history, state has no version.
-	if err := appendLegacyCompactionRow(legacy,
-		[]provider.Message{textMsg(provider.RoleUser, "inline summary")},
-		&CompactionState{PreviousSummary: "inline summary", Count: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
-	msgs, state, err := readJSONLMessages(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(msgs) != 1 || extractText(msgs[0]) != "inline summary" {
-		t.Fatalf("legacy replay must replace history: %+v", msgs)
-	}
-	if state == nil || state.Version != 0 {
-		t.Fatalf("legacy state must stay versionless: %+v", state)
-	}
-	// Legacy projection is pass-through (summary lives inline).
-	if got := projectMessages(msgs, state); len(got) != 1 {
-		t.Fatalf("legacy projection must pass through, got %d", len(got))
-	}
-
-	// New file: messages + append-only checkpoint keep full history.
-	fresh := dir + "/fresh.jsonl"
-	st2, err := OpenJSONLSessionStore(fresh, dir, SessionMeta{Provider: "p", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range bigHistory(3) {
-		if err := st2.AppendMessage(m); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := st2.AppendCompaction(&CompactionState{
-		Version:         CompactionProjectionVersion,
-		PreviousSummary: "s",
-		KeepFrom:        4,
-		Count:           1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	rows, err := st2.ReadTranscript()
-	if err != nil {
-		t.Fatal(err)
-	}
-	st2.Close()
-	if len(rows) != 6 {
-		t.Fatalf("append-only replay must keep all rows, got %d", len(rows))
-	}
-}
-
-// appendLegacyCompactionRow writes a pre-projection checkpoint row
-// (messages + versionless state) straight to a JSONL file, simulating
-// what old destructive builds persisted.
-func appendLegacyCompactionRow(path string, msgs []provider.Message, state *CompactionState) error {
-	b, err := json.Marshal(sessionLine{Type: "compaction", Messages: msgs, Compaction: state})
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.Write(append(b, '\n'))
-	return err
 }
 
 // Proactive run-loop compaction: the AutoCompact hook fires before the

@@ -8,6 +8,7 @@ import {
 } from "../web/src/indirect-code/transcript";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
 import { parseDaemonMessage } from "../web/src/indirect-code/daemon-protocol";
+import { parseContentBlocks } from "../web/src/indirect-code/utils/wire";
 import {
   appendReasoningDelta, appendTextDelta, appendToolArgsDelta, appendToolResult,
   cutTail, finishTurn, mergeUsage, normalizeSessionMessages, upsertToolCall,
@@ -125,6 +126,21 @@ describe("Indirect Code context", () => {
     expect(contextDisplay(null).label).toBe("Context —");
     expect(compactTokens(128000)).toBe("128K");
     expect(compactTokens(1000000)).toBe("1M");
+  });
+
+  test("skips encrypted-only thinking blobs (replay-only, nothing to display)", () => {
+    const blocks = parseContentBlocks({
+      role: "assistant",
+      content: [
+        { summary: "", encrypted_content: "Q-PaDgFwOh2" },
+        { text: "Entendido" },
+        { summary: "Checking files", encrypted_content: "" },
+      ],
+    });
+    expect(blocks.filter((b) => b.type === "reasoning").map((b: any) => b.reasoning)).toEqual([
+      "Checking files",
+    ]);
+    expect(blocks.some((b) => b.type === "text")).toBe(true);
   });
 
   test("groups models by provider in first-appearance order", () => {

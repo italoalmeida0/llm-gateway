@@ -56,6 +56,11 @@ export function parseContentBlocks(m: any): ContentBlock[] {
       typeof c.reasoning_id === "string" ||
       typeof c.encrypted_content === "string"
     ) {
+      // Encrypted-only blobs (redacted_thinking) have no readable text and
+      // stay in daemon history for replay — nothing to display.
+      if (typeof c.encrypted_content === "string" && !c.summary && !c.thinking && !c.reasoning && !c.text && !c.reasoning_id) {
+        return;
+      }
       const txt = c.summary || c.thinking || c.reasoning || c.text || "";
       if (txt || typeof c.reasoning_id === "string" || typeof c.encrypted_content === "string") {
         blocks.push({ type: "reasoning", reasoning: txt });

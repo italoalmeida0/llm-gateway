@@ -114,7 +114,10 @@ export function anthropicToOpenAI(body: Record<string, unknown>): Record<string,
             },
           });
         }
-        // thinking/redacted blocks have no OpenAI equivalent — dropped.
+        // thinking/redacted_thinking blocks have no OpenAI equivalent and the
+        // upstream would reject unknown block types — dropped. Consequence:
+        // on translated paths the encrypted-thinking chain restarts every
+        // turn; native Anthropic paths pass it through untouched.
       }
       if (typeof m.content === "string") text = m.content;
       const msg: Record<string, unknown> = { role: "assistant" };

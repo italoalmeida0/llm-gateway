@@ -144,7 +144,8 @@ func EstimateMessageTokens(m provider.Message) int {
 		case provider.TextBlock:
 			tokens += (len(b.Text) + 3) / 4
 		case provider.ReasoningBlock:
-			tokens += (len(b.Summary) + 3) / 4
+			// Encrypted blobs ride the wire verbatim — count them too.
+			tokens += (len(b.Summary) + len(b.Encrypted) + 3) / 4
 		case provider.ToolCallBlock:
 			tokens += (len(b.Name) + len(b.Arguments) + 3) / 4
 		case provider.ToolResultBlock:
@@ -266,6 +267,11 @@ func SerializeConversation(msgs []provider.Message) string {
 					sb.WriteString(b.Text)
 					sb.WriteString("\n")
 				case provider.ReasoningBlock:
+					// Encrypted-only blobs have no readable text — the
+					// summary model cannot use them, so leave them out.
+					if b.Summary == "" {
+						continue
+					}
 					sb.WriteString("[thinking: ")
 					sb.WriteString(truncateForSummary(b.Summary, 500))
 					sb.WriteString("]\n")

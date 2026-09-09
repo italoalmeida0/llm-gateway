@@ -73,6 +73,13 @@ type anthToolUseBlock struct {
 	Input json.RawMessage `json:"input"`
 }
 
+// anthRedactedThinkingBlock is replayed verbatim: the encrypted payload the
+// provider emitted must come back unchanged on the next turn, in position.
+type anthRedactedThinkingBlock struct {
+	Type string `json:"type"` // "redacted_thinking"
+	Data string `json:"data"`
+}
+
 type anthToolResultBlock struct {
 	Type      string      `json:"type"` // "tool_result"
 	ToolUseID string      `json:"tool_use_id"`
@@ -188,8 +195,15 @@ func (c *anthropicClient) buildRequest(req Request) (*anthRequest, error) {
 						Type: "tool_use", ID: v.ID, Name: v.Name, Input: args,
 					})
 				case ReasoningBlock:
-					// Thinking blocks need a provider signature to replay;
-					// the summary is transcript-only, never sent.
+					// A redacted thinking blob replays verbatim, in position;
+					// a bare human-readable summary has no signature and is
+					// transcript-only, never sent.
+					if v.Encrypted != "" {
+						flushText()
+						blocks = append(blocks, anthRedactedThinkingBlock{
+							Type: "redacted_thinking", Data: v.Encrypted,
+						})
+					}
 				}
 			}
 			flushText()
@@ -338,12 +352,15 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 	go readSSE(resp.Body, raw)
 
 	type blockEntry struct {
-		kind      string // "text" | "tool_use"
+		kind      string // "text" | "tool_use" | "redacted"
 		textBuf   strings.Builder
 		toolID    string
 		toolName  string
 		toolArgs  strings.Builder
 		announced bool
+		// redacted holds the whole encrypted thinking payload, which arrives
+		// complete inside content_block_start (redacted blocks have no deltas).
+		redacted string
 	}
 	blocks := map[int]*blockEntry{}
 	var (
@@ -375,6 +392,8 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 		content := []Content{}
 		for _, b := range ordered() {
 			switch b.kind {
+			case "redacted":
+				content = append(content, ReasoningBlock{Encrypted: b.redacted})
 			case "text":
 				if b.textBuf.Len() > 0 {
 					content = append(content, TextBlock{Text: b.textBuf.String()})
@@ -462,12 +481,20 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 						Type string `json:"type"`
 						ID   string `json:"id"`
 						Name string `json:"name"`
+						Data string `json:"data"`
 					} `json:"content_block"`
 				}
 				if err := json.Unmarshal([]byte(ev.Data), &st); err != nil {
 					continue
 				}
 				switch st.ContentBlock.Type {
+				case "redacted_thinking":
+					// Encrypted thinking arrives whole in the start event —
+					// there are no deltas to wait for. Keep it verbatim so
+					// the next turn replays it in position.
+					if st.ContentBlock.Data != "" {
+						blocks[st.Index] = &blockEntry{kind: "redacted", redacted: st.ContentBlock.Data}
+					}
 				case "tool_use":
 					b := &blockEntry{kind: "tool_use"}
 					b.toolID = st.ContentBlock.ID

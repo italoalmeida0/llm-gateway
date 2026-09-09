@@ -686,6 +686,9 @@ func estimateRequestTokens(req Request) int {
 			switch v := c.(type) {
 			case TextBlock:
 				totalChars += len(v.Text)
+			case ReasoningBlock:
+				// Summaries and replayed encrypted blobs both ride the wire.
+				totalChars += len(v.Summary) + len(v.Encrypted)
 			case ToolCallBlock:
 				totalChars += len(v.Name) + len(v.Arguments)
 			case ToolResultBlock:

@@ -155,6 +155,81 @@ func TestAnthropicStreamHappyPath(t *testing.T) {
 	}
 }
 
+func TestAnthropicRedactedThinkingRoundTrip(t *testing.T) {
+	const blob = "Q-PaDgFwOh2-a9QtXVxufcTIhYxZYEDDmu2n2cDsKwkH"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		write := func(s string) {
+			_, _ = w.Write([]byte(s))
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		write("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":10}}}\n\n")
+		// Encrypted thinking arrives whole in content_block_start (no deltas).
+		write("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"" + blob + "\"}}\n\n")
+		write("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		write("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		write("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Entendido\"}}\n\n")
+		write("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n")
+		write("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	c := NewAnthropic("x", srv.URL)
+	evs, err := c.Stream(context.Background(), Request{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var done EventDone
+	for ev := range evs {
+		if e, ok := ev.(EventDone); ok {
+			done = e
+		}
+	}
+	if len(done.Message.Content) != 2 {
+		t.Fatalf("content blocks=%d want 2 (redacted + text)", len(done.Message.Content))
+	}
+	rb, ok := done.Message.Content[0].(ReasoningBlock)
+	if !ok || rb.Encrypted != blob {
+		t.Fatalf("first block=%+v want ReasoningBlock with blob", done.Message.Content[0])
+	}
+	if tb, ok := done.Message.Content[1].(TextBlock); !ok || tb.Text != "Entendido" {
+		t.Fatalf("second block=%+v", done.Message.Content[1])
+	}
+
+	// Replay: the next turn must carry the blob verbatim, in position.
+	ac := c.(*anthropicClient)
+	wire, err := ac.buildRequest(Request{
+		Model: "m",
+		Messages: []Message{
+			{Role: RoleUser, Content: []Content{TextBlock{Text: "Escolha uma palavra secreta."}}},
+			done.Message,
+			{Role: RoleUser, Content: []Content{TextBlock{Text: "Qual foi?"}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(wire.Messages[1].Content)
+	var blocks []struct {
+		Type string `json:"type"`
+		Data string `json:"data"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 2 || blocks[0].Type != "redacted_thinking" || blocks[0].Data != blob {
+		t.Fatalf("replayed blocks=%s", raw)
+	}
+	if blocks[1].Type != "text" || blocks[1].Text != "Entendido" {
+		t.Fatalf("replayed blocks=%s", raw)
+	}
+}
+
 func TestAnthropicErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

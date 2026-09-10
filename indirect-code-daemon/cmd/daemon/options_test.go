@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -46,6 +47,73 @@ func TestBrainInstructionsModes(t *testing.T) {
 	}
 	if got := brainInstructions("build", ""); got != "" {
 		t.Fatalf("empty brain dir should yield no instructions: %q", got)
+	}
+}
+
+func TestProjectContextSection(t *testing.T) {
+	t.Run("agents preferred with claude fallback", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("# agents rules"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := projectContextSection(dir)
+		if !strings.Contains(got, "# agents rules") || !strings.Contains(got, "Project context (AGENTS.md)") {
+			t.Fatalf("missing agents content:\n%s", got)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "claude.md"), []byte("# claude rules"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got = projectContextSection(dir)
+		if !strings.Contains(got, "# claude rules") {
+			t.Fatalf("claude.md should also load when both exist:\n%s", got)
+		}
+		if strings.Index(got, "AGENTS.md") > strings.Index(got, "claude.md") {
+			t.Fatalf("AGENTS.md should come first:\n%s", got)
+		}
+	})
+	t.Run("case insensitive", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "Agents.MD"), []byte("# mixed case"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := projectContextSection(dir); !strings.Contains(got, "# mixed case") {
+			t.Fatalf("case-insensitive match failed:\n%s", got)
+		}
+	})
+	t.Run("missing is silent", func(t *testing.T) {
+		if got := projectContextSection(t.TempDir()); got != "" {
+			t.Fatalf("want empty, got %q", got)
+		}
+		if got := projectContextSection(""); got != "" {
+			t.Fatalf("want empty, got %q", got)
+		}
+		if got := projectContextSection(filepath.Join(t.TempDir(), "nope")); got != "" {
+			t.Fatalf("want empty, got %q", got)
+		}
+	})
+	t.Run("truncated when huge", func(t *testing.T) {
+		dir := t.TempDir()
+		big := strings.Repeat("x", maxProjectContextBytes+100)
+		if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(big), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := projectContextSection(dir)
+		if !strings.Contains(got, "[... truncated ...]") || len(got) > maxProjectContextBytes+512 {
+			t.Fatalf("huge file should be capped, len=%d", len(got))
+		}
+	})
+}
+
+func TestSystemPromptIncludesProjectContextInBuildOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("# proj rules"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := systemPromptWithBrain(DaemonConfig{}, dir, SessionOptions{Mode: "build"}, ""); !strings.Contains(got, "# proj rules") {
+		t.Fatalf("build prompt should include project context:\n%s", got)
+	}
+	if got := systemPromptWithBrain(DaemonConfig{}, dir, SessionOptions{Mode: "talk"}, ""); strings.Contains(got, "# proj rules") {
+		t.Fatalf("talk prompt should not include project context:\n%s", got)
 	}
 }
 

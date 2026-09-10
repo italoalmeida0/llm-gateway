@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -120,12 +123,62 @@ func brainInstructions(mode, brainDir string) string {
 	return b.String()
 }
 
-// systemPromptWithBrain builds the base system prompt plus the session
-// memory section for file-work modes. Rebuilt per request, so mode
-// switches mid-turn take effect on the next model call.
+// systemPromptWithBrain builds the base system prompt plus the extras for
+// file-work modes (plan/build): the session memory section and the
+// project's agent context file. Rebuilt per request, so mode switches
+// mid-turn take effect on the next model call.
 func systemPromptWithBrain(cfg DaemonConfig, cwd string, options SessionOptions, brainDir string) string {
 	system := sessionSystemPrompt(cfg, cwd, options)
-	return system + brainInstructions(options.Mode, brainDir)
+	if options.Mode != "plan" && options.Mode != "build" {
+		return system
+	}
+	return system + brainInstructions(options.Mode, brainDir) + projectContextSection(cwd)
+}
+
+// maxProjectContextBytes caps each injected project context file. Read
+// failures (missing file, permissions, directories) are silently ignored:
+// a project without agent docs just gets no extra section.
+const maxProjectContextBytes = 50 * 1024
+
+// projectContextSection loads the workspace's agent context files for
+// file-work modes (AGENTS.md then CLAUDE.md when both exist), matched
+// case-insensitively. Returns "" when neither exists or nothing is readable.
+func projectContextSection(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	entries, err := os.ReadDir(cwd)
+	if err != nil {
+		return ""
+	}
+	names := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch strings.ToLower(e.Name()) {
+		case "agents.md", "claude.md":
+			if _, ok := names[strings.ToLower(e.Name())]; !ok {
+				names[strings.ToLower(e.Name())] = e.Name()
+			}
+		}
+	}
+	var b strings.Builder
+	for _, key := range []string{"agents.md", "claude.md"} {
+		name, ok := names[key]
+		if !ok {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(cwd, name))
+		if err != nil || len(bytes.TrimSpace(data)) == 0 {
+			continue
+		}
+		if len(data) > maxProjectContextBytes {
+			data = append(data[:maxProjectContextBytes], "\n\n[... truncated ...]"...)
+		}
+		fmt.Fprintf(&b, "\n### Project context (%s)\n%s\n", name, data)
+	}
+	return b.String()
 }
 
 func restrictModeTools(reg core.Registry, mode string) {

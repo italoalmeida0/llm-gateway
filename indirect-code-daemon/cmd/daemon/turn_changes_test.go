@@ -86,7 +86,10 @@ func TestTurnTrackingEndToEnd(t *testing.T) {
 	}
 
 	// Undo everything via reverse patches + new-file removal.
-	d := &DaemonServer{sessions: map[string]*ActiveSession{}}
+	// dataDir points at a temp dir: undoTurnChanges persists the undone
+	// balloon via saveSession, which would otherwise write sessions/s1.json
+	// relative to the package dir (empty dataDir).
+	d := &DaemonServer{dataDir: t.TempDir(), sessions: map[string]*ActiveSession{}}
 	act := &ActiveSession{record: &SessionRecord{
 		ID: "s1", CWD: dir,
 		FileBalloons: []filetrack.TurnChanges{{TurnIndex: 1, Files: files}},

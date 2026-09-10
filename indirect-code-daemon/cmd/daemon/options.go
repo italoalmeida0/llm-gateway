@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
@@ -81,27 +80,8 @@ func (d *DaemonServer) configureSession(raw []byte) {
 	d.rememberSelection(req.Model, req.Options)
 }
 
-// modeCapabilities declares what each agent mode can do. The frontend
-// renders these as capability badges in the mode picker (10/10 visibility),
-// and restrictModeTools enforces the write/patch side below.
-var modeCapabilities = map[string][]string{
-	"build":    {"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "question", "todo", "search_web", "fetch_url"},
-	"plan":     {"read", "search", "inspect", "bash", "glob", "question", "todo", "search_web", "fetch_url"},
-	"learning": {"read", "search", "inspect", "bash", "glob", "question", "todo", "search_web", "fetch_url"},
-	"talk":     {"question", "search_web", "fetch_url", "todo"},
-}
-
-// ModeCapabilities returns the tool names available in a mode (sorted).
-func ModeCapabilities(mode string) []string {
-	caps, ok := modeCapabilities[mode]
-	if !ok {
-		caps = modeCapabilities["build"]
-	}
-	out := append([]string{}, caps...)
-	sort.Strings(out)
-	return out
-}
-
+// Mode tool access is enforced by restrictModeTools below (registry
+// filtering); modeInstructions carries the behavioral prompt per mode.
 func modeInstructions(mode string) string {
 	switch mode {
 	case "plan":

@@ -132,8 +132,5 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 		if modeInstructions(mode) == "" {
 			t.Fatal("missing mode instructions")
 		}
-		if len(ModeCapabilities(mode)) == 0 {
-			t.Fatal("missing mode capability list")
-		}
 	}
 }

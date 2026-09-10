@@ -2,11 +2,50 @@ package core
 
 import (
 	"context"
+	"encoding/json"
+	"sync/atomic"
 	"testing"
+
+	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
+// startFakeClient answers the first model call with a tool use (resolves
+// to no client results against the empty registry) and every later call
+// with a plain text stop: two Prompts then run three BeforeTurn steps.
+type startFakeClient struct {
+	calls int32
+}
+
+func (c *startFakeClient) Name() string { return "start-fake" }
+
+func (c *startFakeClient) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	call := atomic.AddInt32(&c.calls, 1)
+	out := make(chan provider.Event, 4)
+	go func() {
+		defer close(out)
+		out <- provider.EventStart{Provider: "start-fake", Model: req.Model}
+		if call == 1 {
+			out <- provider.EventToolStart{ID: "t1", Name: "echo"}
+			out <- provider.EventToolEnd{ID: "t1"}
+			out <- provider.EventDone{Stop: provider.StopToolUse, Message: provider.Message{
+				Role: provider.RoleAssistant,
+				Content: []provider.Content{
+					provider.TextBlock{Text: "using tool"},
+					provider.ToolCallBlock{ID: "t1", Name: "echo", Arguments: json.RawMessage(`{}`)},
+				},
+			}}
+			return
+		}
+		out <- provider.EventDone{Stop: provider.StopEnd, Message: provider.Message{
+			Role:    provider.RoleAssistant,
+			Content: []provider.Content{provider.TextBlock{Text: "done"}},
+		}}
+	}()
+	return out, nil
+}
+
 func TestBeforeStartLifecycle(t *testing.T) {
-	a := NewAgent(&queueFakeClient{}, "model", "base", Registry{})
+	a := NewAgent(&startFakeClient{}, "model", "base", Registry{})
 	calls, turns := 0, 0
 	a.BeforeStart = func(ctx context.Context, system string) string {
 		calls++

@@ -415,6 +415,16 @@ describe("Indirect Code transcript updaters", () => {
     expect(out[1].blocks.some((b) => b.type === "tool_result")).toBe(true);
     expect(out[1].srcIdx).toBe(1);
   });
+  test("normalizeSessionMessages carries wire turnIndex as metadata", () => {
+    const raw = [
+      { role: "user", turnIndex: 7, content: [{ type: "text", text: "hi" }] },
+      { role: "assistant", turnIndex: 7, content: [{ type: "text", text: "yo" }] },
+      { role: "tool", turnIndex: 7, content: [{ type: "tool_result", tool_use_id: "t", content: "bytes" }] },
+      { role: "user", content: [{ type: "text", text: "old" }] },
+    ];
+    const out = normalizeSessionMessages(raw);
+    expect(out.map((m) => m.turnIndex)).toEqual([7, 7, undefined]);
+  });
   test("finishTurn closes open turns, keeps the rest", () => {
     const open = finishTurn({ startedAt: 1, status: "running" });
     expect(open?.status).toBe("completed");

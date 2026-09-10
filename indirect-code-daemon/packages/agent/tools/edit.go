@@ -99,11 +99,6 @@ func prepareEditArguments(raw json.RawMessage) (editArgs, error) {
 	return a, nil
 }
 
-func isJSONObject(raw json.RawMessage) bool {
-	s := strings.TrimSpace(string(raw))
-	return strings.HasPrefix(s, "{")
-}
-
 func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isPreview bool, progress func(string)) (core.ToolResult, error) {
 	a, err := prepareEditArguments(raw)
 	if err != nil {
@@ -575,16 +570,6 @@ func applyReplacementsPreservingUnchangedLines(originalContent, baseContent stri
 	}
 	result.WriteString(strings.Join(originalLines[originalLineIndex:], ""))
 	return result.String(), nil
-}
-
-func patchDiff(file, before, after string) string {
-	_ = file
-	return DiffText(before, after)
-}
-
-func patchDiffNumbered(file, before, after string) string {
-	_ = file
-	return DiffTextNumbered(before, after)
 }
 
 // diffContextLines is the number of unchanged lines kept on each

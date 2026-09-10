@@ -8,11 +8,13 @@ import type { TurnActivity } from "../viewTypes";
 
 /** Normalizes the raw daemon transcript into renderable bubbles: tool
  * results are hoisted onto the assistant carrier (with srcIdx for
- * edit/delete/regenerate ops); "tool" envelopes never become a bubble. */
+ * edit/delete/regenerate ops); "tool" envelopes never become a bubble.
+ * The daemon stamps `turnIndex` (session turn sequence) on every message;
+ * it is metadata only, nothing renders from it. */
 export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
   const out: ChatMessage[] = [];
   let carrier: ChatMessage | null = null;
-  const ensureCarrier = (srcIdx: number): ChatMessage => {
+  const ensureCarrier = (srcIdx: number, wire: any): ChatMessage => {
     if (!carrier || carrier.role !== "assistant") {
       carrier = {
         id: `tools_${srcIdx}`,
@@ -20,6 +22,7 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
         blocks: [],
         time: Date.now(),
         srcIdx,
+        turnIndex: typeof wire?.turnIndex === "number" ? wire.turnIndex : undefined,
       };
       out.push(carrier);
     }
@@ -41,6 +44,7 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
         thinkingDuration: Number(m.meta?.thinking_ms) > 0 ? Math.max(1, Math.ceil(Number(m.meta.thinking_ms) / 1000)) : undefined,
         time: Date.now(),
         srcIdx: idx,
+        turnIndex: typeof m.turnIndex === "number" ? m.turnIndex : undefined,
       };
       out.push(msg);
       carrier = msg;
@@ -49,13 +53,13 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
     // user / tool envelope: split tool results away from real content.
     const rest: ContentBlock[] = [];
     for (const b of blocks) {
-      if (b.type === "tool_result") ensureCarrier(idx).blocks.push(b);
+      if (b.type === "tool_result") ensureCarrier(idx, m).blocks.push(b);
       else rest.push(b);
     }
     if (role === "tool" || rest.length === 0) {
       // "tool" envelopes never become bubbles; a user envelope holding
       // only tool results must not render as an empty user bubble.
-      if (rest.length > 0) ensureCarrier(idx).blocks.push(...rest);
+      if (rest.length > 0) ensureCarrier(idx, m).blocks.push(...rest);
       return;
     }
     const isStart = m.isTurnStart !== undefined ? Boolean(m.isTurnStart) : !m.midTurn;

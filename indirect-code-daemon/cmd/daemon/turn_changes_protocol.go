@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"path/filepath"
+
+	"llm-gateway/indirect-code-daemon/packages/filetrack"
 )
 
 // Snapshot-based turn changes protocol (no git):
@@ -45,11 +47,23 @@ func (d *DaemonServer) handleGetTurnChanges(raw []byte) {
 	}
 	// Live view of the running turn, computed from the incoming snapshot.
 	// Same shape as a balloon; the frontend renders it above the composer.
+	// When the tracker is not in memory (fresh boot, turn not yet resumed),
+	// rebuild the same view from the persisted crash journal: the frontend
+	// always receives changes, never daemon-internal incoming.
 	var live any
+	journal, _ := d.readTurnJournal(req.SessionID)
 	if act.fileChanges != nil && act.fileChanges.tracker.Count() > 0 {
 		if files := previewIncoming(act.fileChanges); len(files) > 0 {
 			live = map[string]any{
 				"turnIndex": act.fileChanges.turnIndex,
+				"files":     files,
+			}
+		}
+	}
+	if live == nil && journal != nil && len(journal.Incoming) > 0 {
+		if files := filetrack.PreviewChanged(journal.Incoming, act.record.CWD); len(files) > 0 {
+			live = map[string]any{
+				"turnIndex": journal.TurnIndex,
 				"files":     files,
 			}
 		}

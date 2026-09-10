@@ -1,7 +1,6 @@
 package core
 
 import (
-	"strings"
 	"testing"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
@@ -40,21 +39,12 @@ func TestBuildContextKeepsTranscriptUntouched(t *testing.T) {
 	}
 	before := len(a.messages)
 
-	a.AddTransform(func(msgs []provider.Message) []provider.Message {
-		out := append([]provider.Message(nil), msgs...)
-		out = append(out, testMsg(provider.RoleUser, "injected AGENTS.md"))
-		return out
-	})
-
 	ctx := a.BuildContext()
 	if len(a.messages) != before {
 		t.Fatalf("BuildContext mutated transcript: %d -> %d", before, len(a.messages))
 	}
-	if len(ctx) != before+1 {
-		t.Fatalf("expected injected message in context, got %d msgs (transcript %d)", len(ctx), before)
-	}
-	if extractText(ctx[len(ctx)-1]) != "injected AGENTS.md" {
-		t.Fatalf("injected message not last: %q", extractText(ctx[len(ctx)-1]))
+	if len(ctx) != before {
+		t.Fatalf("expected context to mirror transcript, got %d msgs (transcript %d)", len(ctx), before)
 	}
 }
 
@@ -69,42 +59,6 @@ func TestBuildContextFiltersHidden(t *testing.T) {
 	ctx := a.BuildContext()
 	if len(ctx) != 1 || extractText(ctx[0]) != "visible" {
 		t.Fatalf("hidden message leaked into context: %+v", ctx)
-	}
-}
-
-func TestRemindersAreRequestOnly(t *testing.T) {
-	a := NewAgent(nil, "m", "", nil)
-	a.messages = []provider.Message{testMsg(provider.RoleUser, "hi")}
-	a.RemindersForTurn = func() []Reminder {
-		return []Reminder{{Text: "[system reminder] queued follow-up", Meta: map[string]string{"reminder": "queued"}}}
-	}
-	ctx := a.BuildContext()
-	if len(ctx) != 2 {
-		t.Fatalf("expected reminder appended, got %d", len(ctx))
-	}
-	last := ctx[1]
-	if last.Meta[MetaEphemeral] != "true" {
-		t.Fatalf("reminder must be ephemeral: %+v", last.Meta)
-	}
-	if len(a.messages) != 1 {
-		t.Fatalf("reminder leaked into transcript")
-	}
-}
-
-func TestQueuedReminderFires(t *testing.T) {
-	a := NewAgent(nil, "m", "", nil)
-	a.messages = []provider.Message{testMsg(provider.RoleUser, "hi")}
-	if rs := queuedReminder(a); len(rs) != 0 {
-		t.Fatalf("no queued messages: expected no reminder, got %v", rs)
-	}
-	a.QueueMessage("follow-up")
-	rs := queuedReminder(a)
-	if len(rs) != 1 || !strings.Contains(rs[0].Text, "follow-up message") {
-		t.Fatalf("expected queued reminder, got %+v", rs)
-	}
-	// Queue untouched: delivery still happens via appendQueuedAsUser.
-	if a.QueuedMessageCount() != 1 {
-		t.Fatalf("reminder must not consume the queue")
 	}
 }
 
@@ -151,62 +105,10 @@ func TestSnapCutToUserBoundary(t *testing.T) {
 	}
 }
 
-func TestSQLiteStoreRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := dir + "/s.db"
-	st, err := OpenSQLiteSessionStore(path, dir, SessionMeta{Provider: "p", Model: "m", Version: "v"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AppendMessage(testMsg(provider.RoleUser, "hello")); err != nil {
-		t.Fatal(err)
-	}
-	call, res := testToolTurn("c7")
-	if err := st.AppendMessage(call); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AppendMessage(res); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AppendUsage(provider.Usage{InputTokens: 5}, provider.Usage{InputTokens: 5}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
-	st2, err := OpenSQLiteSessionStore(path, dir, SessionMeta{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st2.Close()
-	msgs, err := st2.ReadTranscript()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(msgs) != 3 {
-		t.Fatalf("expected 3 messages, got %d", len(msgs))
-	}
-	cum, _, err := st2.Usage()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cum.InputTokens != 5 {
-		t.Fatalf("expected cumulative 5 input tokens, got %+v", cum)
-	}
-}
-
-func TestSQLiteCompactionCheckpoint(t *testing.T) {
-	dir := t.TempDir()
-	path := dir + "/s.db"
-	st, err := OpenSQLiteSessionStore(path, dir, SessionMeta{Provider: "p", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+func TestCompactionCheckpointIsAppendOnly(t *testing.T) {
+	var msgs []provider.Message
 	for i := 0; i < 5; i++ {
-		if err := st.AppendMessage(testMsg(provider.RoleUser, "old")); err != nil {
-			t.Fatal(err)
-		}
+		msgs = append(msgs, testMsg(provider.RoleUser, "old"))
 	}
 	// Append-only checkpoint: history untouched, chain head advances;
 	// projection derives the compacted view.
@@ -216,53 +118,14 @@ func TestSQLiteCompactionCheckpoint(t *testing.T) {
 		KeepFrom:        3,
 		Count:           1,
 	}
-	if err := st.AppendCompaction(state); err != nil {
-		t.Fatal(err)
-	}
-	msgs, err := st.ReadTranscript()
-	if err != nil {
-		t.Fatal(err)
-	}
 	if len(msgs) != 5 {
 		t.Fatalf("compaction must be append-only; full history = 5 rows, got %d", len(msgs))
 	}
-	projected := projectMessages(msgs, st.CompactionState())
+	projected := projectMessages(msgs, state)
 	if len(projected) != 3 || extractText(projected[1]) != "old" {
 		t.Fatalf("projection must be [summary][3 kept rows], got %+v", projected)
 	}
 	if tb, ok := projected[0].Content[0].(provider.TextBlock); !ok || tb.Text != summaryMessageText("s") {
 		t.Fatalf("projected summary head wrong: %+v", projected[0])
 	}
-	if st.CompactionState() == nil || st.CompactionState().Count != 1 {
-		t.Fatalf("chain head not kept: %+v", st.CompactionState())
-	}
-}
-
-func TestAgentPersistsThroughStore(t *testing.T) {
-	dir := t.TempDir()
-	st, err := OpenSQLiteSessionStore(dir+"/s.db", dir, SessionMeta{Provider: "p", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	a := NewAgent(nil, "m", "", nil)
-	a.AttachStore(st)
-	a.AppendUserContextForTest(testMsg(provider.RoleAssistant, "hi"))
-	msgs, err := st.ReadTranscript()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 persisted message, got %d", len(msgs))
-	}
-}
-
-// AppendUserContextForTest appends msg to the transcript through the
-// same path as the live loop (fireMessageAppended -> store + hook).
-func (a *Agent) AppendUserContextForTest(msg provider.Message) {
-	a.mu.Lock()
-	a.messages = append(a.messages, msg)
-	a.rev++
-	a.mu.Unlock()
-	a.fireMessageAppended(msg)
 }

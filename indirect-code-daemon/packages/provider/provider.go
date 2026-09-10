@@ -135,6 +135,7 @@ type Message struct {
 	Time           time.Time         `json:"time"`
 	Meta           map[string]string `json:"meta,omitempty"`
 	AddedToolNames []string          `json:"added_tool_names,omitempty"`
+	TurnIndex      int               `json:"turnIndex,omitempty"`
 }
 
 // Tool is a tool definition advertised to the LLM.

@@ -22,11 +22,12 @@ func HydrateMessageObject(rawMessage []byte) (provider.Message, error) {
 		Time           time.Time         `json:"time"`
 		Meta           map[string]string `json:"meta,omitempty"`
 		AddedToolNames []string          `json:"added_tool_names,omitempty"`
+		TurnIndex      int               `json:"turnIndex,omitempty"`
 	}
 	if err := json.Unmarshal(rawMessage, &row); err != nil {
 		return provider.Message{}, err
 	}
-	msg := provider.Message{Role: row.Role, Time: row.Time, Meta: row.Meta, AddedToolNames: row.AddedToolNames}
+	msg := provider.Message{Role: row.Role, Time: row.Time, Meta: row.Meta, AddedToolNames: row.AddedToolNames, TurnIndex: row.TurnIndex}
 	for _, raw := range row.Content {
 		var head struct {
 			Text             string `json:"text"`
@@ -183,9 +184,10 @@ func repairToolUseResultPairs(msgs []provider.Message) []provider.Message {
 			continue
 		}
 		out = append(out, provider.Message{
-			Role:    provider.RoleTool,
-			Content: stubs,
-			Time:    m.Time,
+			Role:      provider.RoleTool,
+			Content:   stubs,
+			Time:      m.Time,
+			TurnIndex: m.TurnIndex,
 		})
 	}
 	return out

@@ -438,9 +438,15 @@ func (d *DaemonServer) notifyChange(collection string) {
 		t.Stop()
 	}
 	d.pingTimers[collection] = time.AfterFunc(300*time.Millisecond, func() {
+		d.configMu.RLock()
+		cfg := d.config
+		d.configMu.RUnlock()
+		if cfg == nil {
+			return
+		}
 		_ = d.sendWS(map[string]any{
 			"type":       "change",
-			"hostId":     d.config.HostID,
+			"hostId":     cfg.HostID,
 			"collection": collection,
 		})
 	})
@@ -761,6 +767,11 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		Messages    []json.RawMessage     `json:"messages"`
 		Attachments []AttachmentRef       `json:"attachments"`
 		Compaction  *core.CompactionState `json:"compaction,omitempty"`
+		TurnSeq     int                   `json:"turnSeq,omitempty"`
+		// FileBalloons must round-trip: dropping them here wipes the
+		// persistent per-turn balloons (and resets TurnSeq) on every
+		// load→save cycle — restart, edit, delete, pin.
+		FileBalloons []filetrack.TurnChanges `json:"fileBalloons,omitempty"`
 	}
 	if err := json.Unmarshal(data, &rawRec); err != nil {
 		return nil, err
@@ -774,13 +785,15 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		CWD:         resolvePath(rawRec.CWD),
 		Title:       rawRec.Title,
 		TitleSource: rawRec.TitleSource, Usage: rawRec.Usage, Context: rawRec.Context,
-		Model:       rawRec.Model,
-		Status:      rawRec.Status,
-		Pinned:      rawRec.Pinned,
-		CreatedAt:   rawRec.CreatedAt,
-		UpdatedAt:   rawRec.UpdatedAt,
-		Attachments: rawRec.Attachments,
-		Compaction:  rawRec.Compaction,
+		Model:        rawRec.Model,
+		Status:       rawRec.Status,
+		Pinned:       rawRec.Pinned,
+		CreatedAt:    rawRec.CreatedAt,
+		UpdatedAt:    rawRec.UpdatedAt,
+		Attachments:  rawRec.Attachments,
+		Compaction:   rawRec.Compaction,
+		TurnSeq:      rawRec.TurnSeq,
+		FileBalloons: rawRec.FileBalloons,
 	}
 	for _, mBytes := range rawRec.Messages {
 		msg, err := core.HydrateMessageObject(mBytes)
@@ -851,6 +864,7 @@ func (d *DaemonServer) purgeSession(id string) {
 	d.sessionsMu.Unlock()
 	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".json"))
 	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id))
+	d.deleteTurnJournal(id)
 	_ = d.sendWS(map[string]any{
 		"type":      "session_deleted",
 		"hostId":    d.config.HostID,
@@ -2433,13 +2447,19 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 		reply = fmt.Sprintf("❓ Unknown command `%s`. Type `/help` for available commands.", head)
 	}
 
+	// Slash exchanges are turns like any other: fresh sequence number so
+	// the user/assistant pair groups under its own turn index.
+	act.record.TurnSeq++
+	slashTurn := act.record.TurnSeq
 	userMsg := provider.Message{
-		Role:    provider.RoleUser,
-		Content: []provider.Content{provider.TextBlock{Text: cmdText}},
+		Role:      provider.RoleUser,
+		Content:   []provider.Content{provider.TextBlock{Text: cmdText}},
+		TurnIndex: slashTurn,
 	}
 	asstMsg := provider.Message{
-		Role:    provider.RoleAssistant,
-		Content: []provider.Content{provider.TextBlock{Text: reply}},
+		Role:      provider.RoleAssistant,
+		Content:   []provider.Content{provider.TextBlock{Text: reply}},
+		TurnIndex: slashTurn,
 	}
 	act.record.Messages = append(act.record.Messages, userMsg, asstMsg)
 	act.record.UpdatedAt = time.Now().UnixMilli()
@@ -2549,6 +2569,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		return
 	}
 
+
 	if act.record.CWD != "" && inspectWorkspace(act.record.CWD).Status != "available" {
 		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": sessionPayload(act.record)})
 		act.mu.Unlock()
@@ -2578,6 +2599,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
 	tfc := beginTurnTracking(act, sessionCWD, turnSeq)
+	d.writeTurnJournal(sessionID, &TurnJournal{TurnIndex: turnSeq, StartedAt: act.record.Turn.StartedAt, Model: modelToUse})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2588,41 +2610,13 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	turnStarted := *act.record.Turn
 
 	act.mu.Unlock()
-
-	defer func() {
-		// Snapshot-based file changes: build the final balloon, reset
-		// incoming, persist, and broadcast. The balloon is persistent.
-		if balloon := d.finishTurnTracking(act, tfc); balloon != nil {
-			d.broadcastFileBalloon(cfg.HostID, sessionID, balloon)
-		}
-		act.mu.Lock()
-		act.fileChanges = nil
-		act.mu.Unlock()
-		act.mu.Lock()
-		defer act.mu.Unlock()
-		if act.gen != myGen {
-			return
-		}
-		act.record.Status = "idle"
-		finishTurnActivity(act, ctx.Err() != nil)
-		act.pendingApproval = nil
-		act.question = nil
-		act.toolProgress = nil
-		act.toolStarts = nil
-		act.thinkingStartedAt = 0
-		act.live = nil
-		act.record.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(act.record)
-		act.cancel = nil
-		// Publish completion before a new turn can acquire this session.
-		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": sessionPayload(act.record)})
-		_ = d.sendWS(map[string]any{
-			"type":      "session_status",
-			"hostId":    cfg.HostID,
-			"sessionId": sessionID,
-			"status":    "idle",
-		})
-	}()
+	r := &turnRun{
+		d: d, cfg: cfg, act: act,
+		sessionID: sessionID, sessionCWD: sessionCWD,
+		modelToUse: modelToUse, turnIndex: turnSeq, tfc: tfc,
+		ctx: ctx, myGen: myGen, options: options, turnStarted: turnStarted,
+	}
+	defer r.finishTurn()
 
 	_ = d.sendWS(map[string]any{
 		"type":      "session_status",
@@ -2632,340 +2626,18 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		"turn":      turnStarted,
 	})
 
-	// Anthropic client pointing at the Gateway's forced Anthropic surface.
-	// OpenAI-only providers are served by the gateway's Anthropic→OpenAI
-	// translation — the daemon never speaks the OpenAI wire.
-	apiBase := strings.TrimRight(cfg.GatewayURL, "/") + "/anthropic/v1"
-	modelInfo := gatewayModel(ctx, cfg.GatewayURL, cfg.DaemonToken, modelToUse)
-	if effort := canonicalReasoning(options.Effort); effort != "" && effort != "none" {
-		modelInfo.Reasoning = true
-	}
-	client := provider.NewGatewayAnthropic(cfg.APIKey, apiBase, modelInfo)
-	defer func() {
-		if !cfg.Settings.NoAutoTitle && ctx.Err() == nil {
-			go d.maybeAutoTitle(act, myGen, client, modelToUse)
-		}
-	}()
-
-	// Setup local filesystem tools rooted at session's CWD
-	sb := tools.NewSandbox(sessionCWD)
-	if cfg.Settings.JailByDefault {
-		sb.Lock()
-	}
-
-	baseTools := []core.Tool{
-		&tools.ReadTool{CWD: sessionCWD, Sandbox: sb, Changes: tfc.tracker},
-		&tools.WriteTool{CWD: sessionCWD, Sandbox: sb, Changes: tfc.tracker},
-		&tools.EditTool{CWD: sessionCWD, Sandbox: sb, Changes: tfc.tracker},
-		&tools.BashTool{CWD: sessionCWD, Sandbox: sb},
-		&tools.GlobTool{CWD: sessionCWD, Sandbox: sb},
-		&tools.SearchTool{CWD: sessionCWD, Sandbox: sb},
-		&tools.InspectTool{CWD: sessionCWD, Sandbox: sb},
-		&tools.SearchWebTool{CWD: sessionCWD, Sandbox: sb},
-		&tools.FetchURLTool{CWD: sessionCWD, Sandbox: sb},
-	}
-	// The python tool is only advertised when a Python 3 interpreter exists
-	// on this machine (PythonAvailable probes PATH once and caches).
-	if _, err := tools.PythonAvailable(); err == nil {
-		baseTools = append(baseTools, &tools.PythonTool{CWD: sessionCWD, Sandbox: sb})
-	}
-
-	questionTool := &tools.QuestionTool{Ask: func(ctx context.Context, req tools.QuestionRequest) ([][]string, error) {
-		return d.askQuestions(ctx, act, myGen, cfg.HostID, req)
-	}}
-	todoTool := &tools.TodoTool{Update: func(items []tools.TodoItem) error {
-		act.mu.Lock()
-		defer act.mu.Unlock()
-		if act.gen != myGen || ctx.Err() != nil {
-			return context.Canceled
-		}
-		act.record.Todos = append([]tools.TodoItem{}, items...)
-		if err := d.saveSession(act.record); err != nil {
-			return err
-		}
-		_ = d.sendWS(map[string]any{"type": "agent_event", "hostId": cfg.HostID, "sessionId": sessionID, "event": map[string]any{"type": "todo_update", "items": items}})
-		return nil
-	}}
-	reg := core.NewRegistry(append(append(baseTools, questionTool), todoTool)...)
-
-	agent := core.NewAgent(client, modelToUse, sessionSystemPrompt(cfg, sessionCWD, options), reg)
-	agent.Reasoning = options.Effort
-	// Only the agent goroutine changes runtime fields. Commands write the session;
-	// each request reads a fresh snapshot, after the preceding tool batch finishes.
-	agent.BeforeRequest = func(requestCtx context.Context) error {
-		for {
-			act.mu.Lock()
-			if act.gen != myGen || requestCtx.Err() != nil {
-				act.mu.Unlock()
-				return context.Canceled
-			}
-			nextModel := act.record.Model
-			nextOptions := normalizedOptions(act.record.Options)
-			act.mu.Unlock()
-			if nextModel != modelInfo.ID {
-				modelInfo = gatewayModel(requestCtx, cfg.GatewayURL, cfg.DaemonToken, nextModel)
-			}
-			// Metadata lookup may take time: re-read choices before building the request.
-			act.mu.Lock()
-			if act.gen != myGen || requestCtx.Err() != nil {
-				act.mu.Unlock()
-				return context.Canceled
-			}
-			if act.record.Model != nextModel {
-				act.mu.Unlock()
-				continue
-			}
-			nextOptions = normalizedOptions(act.record.Options)
-			if modelInfo.ID != nextModel {
-				act.record.Model = modelInfo.ID
-				_ = d.saveSession(act.record)
-				_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": liveSessionPayload(act)})
-			}
-			act.mu.Unlock()
-			requestModel := modelInfo
-			if nextOptions.Effort != "none" {
-				requestModel.Reasoning = true
-			}
-			client = provider.NewGatewayAnthropic(cfg.APIKey, apiBase, requestModel)
-			modelToUse = modelInfo.ID
-			agent.Client, agent.Model, agent.Reasoning = client, modelToUse, nextOptions.Effort
-			agent.MaxTokens = maxOutputTokens(modelInfo)
-			d.configMu.RLock()
-			system := sessionSystemPrompt(*d.config, sessionCWD, nextOptions)
-			d.configMu.RUnlock()
-			agent.SetSystem(system)
-			available := core.Registry{}
-			for name, tool := range reg {
-				available[name] = tool
-			}
-			restrictModeTools(available, nextOptions.Mode)
-			agent.SetTools(available)
-			return nil
-		}
-	}
-	agent.Temperature = &cfg.Settings.Temperature
-	agent.MaxTokens = maxOutputTokens(modelInfo)
-	act.mu.Lock()
-	if act.gen != myGen || ctx.Err() != nil {
-		act.mu.Unlock()
+	// Provider client (forced Anthropic surface; OpenAI-only providers via
+	// gateway translation), tools, agent and all turn hooks.
+	if !r.setupAgent() {
 		return
 	}
-	if len(act.record.Messages) > 0 {
-		agent.SetMessages(act.record.Messages)
-	}
-	agent.SeedCost(act.record.Usage)
-	agent.SeedCompactionState(act.record.Compaction)
-	act.agent = agent
-	act.mu.Unlock()
-
-	// Read the live session access policy before every tool, including reads.
-	agent.BeforeToolExecute = d.toolApprovalHook(ctx, act, myGen, cfg.HostID)
-
-	// Persistent transcript hook: whenever a message is added, record it
-	agent.OnMessageAppended = func(m provider.Message) {
-		act.mu.Lock()
-		if act.gen != myGen {
-			act.mu.Unlock()
-			return
+	defer func() {
+		if !r.cfg.Settings.NoAutoTitle && r.ctx.Err() == nil {
+			go r.d.maybeAutoTitle(r.act, r.myGen, r.client, r.modelToUse)
 		}
-		if m.Role == provider.RoleAssistant {
-			act.live = nil
-		}
-		act.record.Messages = append(act.record.Messages, m)
-		act.record.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(act.record)
-		act.mu.Unlock()
-	}
-
-	// Persistent compaction hook: the chain head
-	// advanced — history is append-only and never touched, so the only
-	// state to persist is the anchor + summary + file ops. Broadcasts
-	// the full history; the UI renders older messages as summarized.
-	agent.OnCompactionState = func(state *core.CompactionState) {
-		if state == nil {
-			return
-		}
-		act.mu.Lock()
-		if act.gen != myGen {
-			act.mu.Unlock()
-			return
-		}
-		act.record.Compaction = state
-		act.record.Usage = agent.Cost()
-		act.record.UpdatedAt = time.Now().UnixMilli()
-		act.record.Context = estimateContext(agent, modelInfo)
-		rec := *act.record
-		_ = d.saveSession(act.record)
-		act.mu.Unlock()
-		_ = d.sendWS(map[string]any{
-			"type":       "session_compacted",
-			"hostId":     cfg.HostID,
-			"sessionId":  rec.ID,
-			"messages":   rec.Messages,
-			"context":    rec.Context,
-			"compaction": rec.Compaction,
-			"usage":      rec.Usage,
-			"auto":       true,
-		})
-	}
-	agent.OnUsage = func(cumulative provider.Usage) {
-		act.mu.Lock()
-		if act.gen == myGen {
-			act.record.Usage = cumulative
-			_ = d.saveSession(act.record)
-		}
-		act.mu.Unlock()
-	}
-	// Proactive in-run compaction. Checked by the agent loop before EVERY
-	// model request, including mid-run after tool results: long runs
-	// compact without first burning a request that overflows upstream.
-	// The trigger (last-turn usage + trailing estimate vs.
-	// window minus reserve) is authoritative; the configured threshold
-	// (%) and usable-budget formula stay as early-trip wires.
-	agent.WindowForTurn = func() int { return modelInfo.ContextWindow }
-	agent.AutoCompact = func(cctx context.Context, esink func(core.AgentEvent)) error {
-		if cctx.Err() != nil {
-			return nil
-		}
-		window := modelInfo.ContextWindow
-		if window <= 0 {
-			return nil
-		}
-		act.mu.Lock()
-		genOK := act.gen == myGen
-		historyLen := len(act.record.Messages)
-		act.mu.Unlock()
-		if !genOK || historyLen <= 4 {
-			return nil
-		}
-		threshold := cfg.Settings.AutoCompactThreshold
-		usage := agent.LastTurnUsage()
-		msgs := agent.Messages() // projected context
-		needs := core.ShouldCompact(window, core.UsageTotal(usage), core.TrailingTokens(msgs, usage))
-		if !needs && threshold > 0 {
-			used := core.UsageTotal(usage) + core.TrailingTokens(msgs, usage)
-			needs = used*100 >= threshold*window
-		}
-		if !needs {
-			// Usable formula stays as a final safety net:
-			// contextWindow - outputBudget - 20,000 buffer.
-			if usable := window - maxOutputTokens(modelInfo) - 20000; usable > 0 {
-				used := core.UsageTotal(usage) + core.TrailingTokens(msgs, usage)
-				needs = used >= usable
-			}
-		}
-		if !needs {
-			return nil
-		}
-		esink(core.EvToolProgress{Text: "Compacting older context…"})
-		_, err := agent.MaybeAutoCompact(cctx, window, func(delta string) {
-			esink(core.EvToolProgress{Text: delta})
-		})
-		return err
-	}
-
-	previewTick := 0
+	}()
 	// Stream events to WebSocket
-	sink := func(ev core.AgentEvent) {
-		act.mu.Lock()
-		defer act.mu.Unlock()
-		if act.gen != myGen {
-			return
-		}
-		trackLiveEvent(act, ev)
-		payload := map[string]any{
-			"type":      "agent_event",
-			"hostId":    cfg.HostID,
-			"sessionId": sessionID,
-		}
-
-		switch e := ev.(type) {
-		case core.EvTurnStart:
-			payload["event"] = map[string]any{"type": "turn_start", "step": e.Step}
-		case core.EvAssistantMessage:
-			payload["event"] = map[string]any{"type": "assistant_message", "message": e.Message, "index": len(act.record.Messages) - 1}
-		case core.EvAssistantStart:
-			payload["event"] = map[string]any{"type": "assistant_start"}
-		case core.EvTextDelta:
-			payload["event"] = map[string]any{"type": "text_delta", "delta": e.Delta}
-		case core.EvReasoningDelta:
-			payload["event"] = map[string]any{"type": "reasoning_delta", "delta": e.Delta}
-		case core.EvToolUseStart:
-			payload["event"] = map[string]any{"type": "tool_use_start", "id": e.ID, "name": e.Name}
-		case core.EvToolUseArgs:
-			payload["event"] = map[string]any{"type": "tool_use_args", "id": e.ID, "delta": e.Delta}
-		case core.EvToolUseEnd:
-			payload["event"] = map[string]any{"type": "tool_use_end", "id": e.ID}
-		case core.EvToolProgress:
-			payload["event"] = map[string]any{"type": "tool_progress", "id": e.ID, "text": e.Text}
-		case core.EvToolCall:
-			payload["event"] = map[string]any{
-				"type": "tool_call", "id": e.ID, "name": e.Name, "args": e.Args,
-			}
-		case core.EvToolResult:
-			var sb strings.Builder
-			for _, c := range e.Result.Content {
-				if tb, ok := c.(provider.TextBlock); ok {
-					sb.WriteString(tb.Text)
-				}
-			}
-			contentStr := strings.ReplaceAll(sb.String(), tools.LinePrefixNotice, "")
-			ev := map[string]any{
-				"type": "tool_result", "id": e.ID, "content": contentStr, "isError": e.Result.IsError, "startedAt": e.Result.StartedAt, "durationMs": e.Result.DurationMs,
-			}
-			// Live incoming-changes preview: after each finished tool,
-			// broadcast the current changed view. The tracker has its own
-			// mutex, so this is safe under act.mu (sendWS locks wsMu, never
-			// act.mu). Debounced to every 3rd tool result.
-			previewTick++
-			if tfc != nil && tfc.tracker.Count() > 0 && previewTick%5 == 0 {
-				d.broadcastLiveChanges(cfg.HostID, sessionID, tfc)
-			}
-			if e.Details != nil {
-				if raw, err := json.Marshal(e.Details); err == nil {
-					ev["details"] = json.RawMessage(raw)
-				}
-			}
-			payload["event"] = ev
-		case core.EvToolExecutionStart:
-			payload["event"] = map[string]any{"type": "tool_execution_start", "id": e.ID, "startedAt": e.StartedAt}
-		case core.EvUsage:
-			contextUsage := contextFromUsage(e.Usage, modelInfo)
-			act.record.Usage = e.Cumulative
-			act.record.Context = contextUsage
-			_ = d.saveSession(act.record)
-			payload["event"] = map[string]any{
-				"type": "usage", "usage": e.Usage, "cumulative": e.Cumulative, "context": contextUsage,
-			}
-		case core.EvTurnEnd:
-			evMap := map[string]any{"type": "turn_end", "stop": string(e.Stop)}
-			if ctx.Err() != nil {
-				evMap["cancelled"] = true
-			} else if e.Err != nil {
-				evMap["error"] = e.Err.Error()
-			}
-			if agent != nil {
-				evMap["usage"] = agent.LastTurnUsage()
-				evMap["cumulative"] = agent.Cost()
-			}
-			payload["event"] = evMap
-		case core.EvDone:
-			return // Task completion is emitted only after compaction and persistence.
-		case core.EvError:
-			if ctx.Err() != nil {
-				return
-			}
-			msg := "agent error"
-			if e.Err != nil {
-				msg = e.Err.Error()
-			}
-			payload["event"] = map[string]any{"type": "error", "message": msg}
-		default:
-			return
-		}
-
-		_ = d.sendWS(payload)
-	}
+	sink := func(ev core.AgentEvent) { r.handleEvent(ev) }
 
 	// Resolve attachments: images ride as ImageBlocks, text files are inlined
 	// as context (capped), anything else becomes a short pointer note.
@@ -3037,13 +2709,10 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	// Proactive compaction happens INSIDE the loop now (agent.AutoCompact,
 	// wired above): it is re-evaluated before every model request —
 	// including this turn's first one and every mid-run continuation.
-	if err := agent.Prompt(ctx, fullPrompt, images, sink); err != nil && ctx.Err() == nil {
-		act.mu.Lock()
-		if act.gen == myGen {
-			act.record.Turn.Status = "failed"
-		}
-		act.mu.Unlock()
-		_ = d.sendWS(map[string]any{"type": "error", "hostId": cfg.HostID, "sessionId": sessionID, "message": err.Error()})
+	// Prompt only returns on AI conclusion or context cancellation;
+	// provider errors retry inside the loop, never surfacing here.
+	if err := r.agent.Prompt(r.ctx, fullPrompt, images, sink); err != nil && ctx.Err() == nil {
+		fmt.Printf("[WARN] turn %d of session %s exited with live context: %v\n", turnSeq, sessionID, err)
 	}
 
 }
@@ -3217,6 +2886,10 @@ func main() {
 
 	// A previous run dying mid-turn must not brick sessions forever.
 	server.resetRunningSessions()
+	// Turns interrupted by the death resume where they died: same index,
+	// restored incoming tracker, transcript replayed from disk. A turn is
+	// only ever finished by the AI or by user cancel.
+	server.resumeInterruptedTurns()
 
 	// Track the background process so install scripts and --stop can find it.
 	server.writePidFile()

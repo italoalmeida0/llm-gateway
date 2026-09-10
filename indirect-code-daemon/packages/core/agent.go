@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +18,6 @@ type Agent struct {
 	Model       string
 	System      string
 	Tools       Registry
-	MaxSteps    int
 	Reasoning   string
 	Temperature *float32
 
@@ -64,41 +62,17 @@ type Agent struct {
 	// Kept as-is: it mutates runtime config, not message context.
 	BeforeRequest func(context.Context) error
 
-	// Transforms shapes the derived request context every turn without
-	// touching the live transcript. Typical uses: AGENTS.md/skills/memory
-	// injection, project-context rewrites. Runs inside BuildContext
-	// after prune+repair, before provider mirror and reminders.
-	//
-	// Rules: do not mutate the input slice; keep tool_call/tool_result
-	// pairs intact; never persist the result (request-only).
-	Transforms []ContextTransformer
-
 	// AssistantTextTransforms rewrites visible assistant text
 	// (suppress or replace) for UI emission. Replaces the removed
 	// BeforeAssistantMessage hook as a stackable transform: the
 	// transcript always keeps the model's original output.
 	AssistantTextTransforms []AssistantTextTransform
 
-	// RemindersForTurn, if set, returns synthetic non-persisted
-	// reminders appended to the request context (system
-	// reminders — pending approvals, compaction notices, queued
-	// messages). Called on the agent goroutine per model call.
-	// Defaults to collectReminders (registered ReminderProviders);
-	// hosts may override for custom reminder sets.
-	RemindersForTurn func() []Reminder
-
-	// WindowForTurn, if set, returns the active model context window
-	// in tokens. The host owns the provider.Model; core only reads
-	// the window for pressure-driven reminders (compactionReminder)
-	// via compactionPressure. Nil/0 disables window-based reminders.
-	WindowForTurn func() int
-
-	// MaxRetries controls agent-level retries for transient provider
-	// failures that arrive after the HTTP stream opens (for example
-	// Anthropic overloaded_error). Zero disables this retry layer.
-	// RetryBaseDelay is doubled for each attempt; zero uses 2s.
-	MaxRetries     int
-	RetryBaseDelay time.Duration
+	// RetrySchedule overrides the backoff between upstream attempts (nil
+	// selects the default schedule). The last entry repeats forever: a
+	// retryable upstream failure never ends the turn — only success or
+	// context cancellation (user stop / shutdown) does.
+	RetrySchedule []time.Duration
 
 	// OnEvent, if set, mirrors every AgentEvent the loop emits to
 	// this callback in addition to the per-Prompt sink. Used by the
@@ -110,12 +84,18 @@ type Agent struct {
 	// appended to the in-memory transcript by the agent loop — the
 	// initial user prompt, each finalised assistant message, and
 	// each tool-results message. Derived context (provider image
-	// mirrors, reminders, transform output) never fires this hook:
-	// it exists only in the request, never in the transcript.
+	// mirrors) never fires this hook: it exists only in the
+	// request, never in the transcript.
 	// Hosts wire this to the on-disk session so that turns are
 	// durable as soon as they happen, instead of only being
 	// flushed on a clean exit.
 	OnMessageAppended func(provider.Message)
+
+	// TurnIndex is the host's current turn sequence, stamped onto every
+	// message the agent appends (user, assistant, tool). Unique per
+	// session only. Hosts set it before each turn; zero leaves
+	// messages unstamped (readers derive boundaries).
+	TurnIndex int
 
 	// OnUsage, if set, fires after every turn's usage row arrives,
 	// carrying the cumulative usage for the session. Hosts wire
@@ -159,124 +139,17 @@ type Agent struct {
 	// every keypress.
 	rev  uint64
 	cost CostTracker
-
-	// queued holds user messages submitted while the agent is busy.
-	// The loop appends them as normal user messages at safe
-	// boundaries: before the next model call after a tool batch, or
-	// after a text-only assistant turn finishes. It never interrupts
-	// a running tool or cancels an in-flight provider request.
-	queued []string
-
-	// reminderProviders produce synthetic non-persisted reminders
-	// consumed by BuildContext (see reminders.go).
-	reminderProviders []ReminderProvider
-	// store, when attached via AttachStore, is the persistence
-	// backend (SessionStore). The agent loop writes messages, usage
-	// and compaction checkpoints through it; Compact persists its
-	// checkpoint through it mandatorily.
-	store SessionStore
-	// defaultRemindersWired guards WireDefaultReminders idempotency.
-	defaultRemindersWired bool
 }
 
 // NewAgent returns an Agent with sensible defaults.
 func NewAgent(client provider.Client, model, system string, tools Registry) *Agent {
 	a := &Agent{
-		Client:         client,
-		Model:          model,
-		System:         system,
-		Tools:          tools,
-		MaxSteps:       0, // 0 = unlimited
-		MaxRetries:     3,
-		RetryBaseDelay: 2 * time.Second,
+		Client: client,
+		Model:  model,
+		System: system,
+		Tools:  tools,
 	}
-	// Default wiring: derive RemindersForTurn from registered
-	// providers unless the host overrides it explicitly.
-	a.RemindersForTurn = a.collectReminders
 	return a
-}
-
-// QueueMessage queues text to be injected as a user message at the
-// next safe boundary of the active agent loop. It is non-blocking in
-// the sense that it never waits for model/tool work; it only takes
-// the transcript mutex briefly. Empty/whitespace-only messages are
-// ignored.
-func (a *Agent) QueueMessage(text string) bool {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return false
-	}
-	a.mu.Lock()
-	a.queued = append(a.queued, text)
-	a.mu.Unlock()
-	return true
-}
-
-// PendingQueuedMessages returns a snapshot of user messages waiting
-// to be injected. Used by hosts to render the visible "sliding in"
-// chips without consuming them.
-func (a *Agent) PendingQueuedMessages() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make([]string, len(a.queued))
-	copy(out, a.queued)
-	return out
-}
-
-// QueuedMessageCount returns the number of messages waiting to be
-// injected at the next safe boundary.
-func (a *Agent) QueuedMessageCount() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return len(a.queued)
-}
-
-// PopQueuedMessage removes and returns the most recently queued
-// message. Hosts use this for the slide-back keybinding.
-func (a *Agent) PopQueuedMessage() (string, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	n := len(a.queued)
-	if n == 0 {
-		return "", false
-	}
-	text := a.queued[n-1]
-	a.queued = a.queued[:n-1]
-	return text, true
-}
-
-// DrainQueuedMessages discards and returns every queued message.
-// Hosts use this on explicit cancel/clear so stale follow-ups do
-// not run after the user aborted the turn.
-func (a *Agent) DrainQueuedMessages() []string {
-	return a.drainQueuedMessages()
-}
-
-func (a *Agent) drainQueuedMessages() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make([]string, len(a.queued))
-	copy(out, a.queued)
-	a.queued = nil
-	return out
-}
-
-func (a *Agent) appendQueuedAsUser(texts []string, sink func(AgentEvent)) {
-	for _, text := range texts {
-		msg := provider.Message{
-			Role:    provider.RoleUser,
-			Content: []provider.Content{provider.TextBlock{Text: text}},
-			Time:    time.Now(),
-		}
-		a.mu.Lock()
-		a.messages = append(a.messages, msg)
-		a.rev++
-		a.mu.Unlock()
-		a.fireMessageAppended(msg)
-		if sink != nil {
-			sink(EvUserMessage{Message: msg})
-		}
-	}
 }
 
 // Messages returns a copy of the effective model context: the
@@ -356,6 +229,7 @@ func (a *Agent) AppendUserContext(text string, meta map[string]string) {
 		Time:    time.Now(),
 		Meta:    meta,
 	}
+	a.stampTurn(&msg)
 	a.mu.Lock()
 	a.messages = append(a.messages, msg)
 	a.rev++
@@ -397,30 +271,25 @@ func (a *Agent) SeedLastTurnUsage(u provider.Usage) {
 	a.cost.LastTurn = u
 }
 
-// fireMessageAppended persists through the attached store (if any)
-// and invokes OnMessageAppended without holding the agent mutex, so
-// the host's persistence callback can take its own locks without
-// deadlocking the agent loop. Tolerates a nil hook so non-persisting
-// callers (tests, RPC mode) don't have to set it. Ephemeral rows
-// (MetaEphemeral, e.g. reminders/mirrors) never reach here: they
-// exist only in the derived request context, never in a.messages.
-func (a *Agent) fireMessageAppended(m provider.Message) {
-	a.mu.Lock()
-	cb := a.OnMessageAppended
-	store := a.store
-	a.mu.Unlock()
-	if store != nil && !isEphemeralRow(m) {
-		_ = store.AppendMessage(m)
-	}
-	if cb != nil {
-		cb(m)
+// stampTurn tags m with the current turn before it joins the transcript.
+// An already-stamped message keeps its id (fork prefixes, repairs).
+func (a *Agent) stampTurn(m *provider.Message) {
+	if m.TurnIndex == 0 {
+		m.TurnIndex = a.TurnIndex
 	}
 }
 
-// isEphemeralRow reports whether m is request-only derived context
-// (reminder, provider mirror) that must never persist.
-func isEphemeralRow(m provider.Message) bool {
-	return m.Meta != nil && m.Meta[MetaEphemeral] == "true"
+// fireMessageAppended invokes OnMessageAppended without holding the
+// agent mutex, so the host's persistence callback can take its own
+// locks without deadlocking the agent loop. Tolerates a nil hook so
+// non-persisting callers (tests, RPC mode) don't have to set it.
+func (a *Agent) fireMessageAppended(m provider.Message) {
+	a.mu.Lock()
+	cb := a.OnMessageAppended
+	a.mu.Unlock()
+	if cb != nil {
+		cb(m)
+	}
 }
 
 // Prompt sends a user message and runs the agent loop until the model
@@ -439,6 +308,7 @@ func (a *Agent) Prompt(ctx context.Context, text string, images []provider.Image
 		content = append(content, img)
 	}
 	user := provider.Message{Role: provider.RoleUser, Content: content, Time: time.Now()}
+	a.stampTurn(&user)
 
 	a.mu.Lock()
 	a.messages = append(a.messages, user)
@@ -475,22 +345,17 @@ func (a *Agent) wrapSink(sink func(AgentEvent)) func(AgentEvent) {
 }
 
 func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
-	for step := 1; a.MaxSteps <= 0 || step <= a.MaxSteps; step++ {
+	// Unbounded by design: a turn runs until the model stops asking
+	// for more work or the context is cancelled. Provider errors
+	// retry forever on the backoff schedule — only AI conclusion or
+	// user cancel (context cancellation) ends a turn.
+	for step := 1; ; step++ {
 		// Preparation is cached across steps and user messages. Only an
 		// explicit prompt/model/session change invokes BeforeStart again.
 		if err := a.prepareStart(ctx); err != nil {
 			sink(EvDone{})
 			return err
 		}
-		// Messages queued while the agent was busy are delivered
-		// before the next model call. This is the safe boundary:
-		// any previous tool batch has already completed and its
-		// results have been appended, but no new provider request has
-		// started yet.
-		if pending := a.drainQueuedMessages(); len(pending) > 0 {
-			a.appendQueuedAsUser(pending, sink)
-		}
-
 		// Proactive in-run compaction, evaluated before EVERY model
 		// response — including mid-run, right after tool results.
 		// Evaluated inside the loop instead of
@@ -541,7 +406,9 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 				break
 			}
 			a.dropLastAssistantMessage()
-			if sleepErr := sleepRetry(ctx, a.retryDelay(attempt)); sleepErr != nil {
+			delay := a.retryDelay(attempt)
+			sink(EvRetry{Attempt: attempt + 1, Delay: delay, Err: err})
+			if sleepErr := sleepRetry(ctx, delay); sleepErr != nil {
 				return sleepErr
 			}
 		}
@@ -556,6 +423,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 				// Provider-executed (server) tools need no client results.
 				continue
 			}
+			a.stampTurn(&toolMsg)
 			a.mu.Lock()
 			a.messages = append(a.messages, toolMsg)
 			a.rev++
@@ -573,84 +441,55 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			continue
 		}
 
-		// If the assistant stopped without tool calls but a message was
-		// queued while it was speaking, loop once more so that message
-		// is appended and answered instead of waiting until a later
-		// top-level prompt.
-		if ctx.Err() == nil && a.QueuedMessageCount() > 0 {
-			continue
-		}
-
 		// Terminal stop (end, length, error, aborted).
 		sink(EvDone{})
 		return nil
 	}
-	if a.MaxSteps > 0 {
-		sink(EvDone{})
-		return fmt.Errorf("max steps (%d) exceeded", a.MaxSteps)
-	}
-	return nil
 }
 
-func (a *Agent) canRetryError(err error, attempt int) bool {
-	if err == nil || a.MaxRetries <= 0 || attempt >= a.MaxRetries {
+// canRetryError reports whether a failed model call is worth another
+// attempt. Everything is retryable except context cancellation (user
+// stop / shutdown): only those end a turn. A 400, a dead key, a quota
+// wall — all keep retrying on the backoff schedule until success or
+// cancel, so no provider error ever feels like "failed, I'll stop".
+func (a *Agent) canRetryError(err error, _ int) bool {
+	if err == nil {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	if msg == "" || isNonRetryableProviderLimit(msg) {
-		return false
-	}
-	needles := []string{
-		"overloaded", "provider returned error", "rate limit", "ratelimit", "too many requests",
-		"429", "http 429", "500", "http 500", "502", "http 502", "503", "http 503", "504", "http 504",
-		"service unavailable", "server error", "internal error", "network error", "connection error",
-		"connection refused", "connection lost", "fetch failed", "upstream connect", "reset before headers",
-		"socket hang up", "ended without", "stream ended before", "did not get a response", "timed out",
-		"timeout", "terminated", "unexpected eof", "transport failure",
-		// OpenAI's ChatGPT/Codex backend returns this generic message (with a
-		// request ID) for transient server failures and explicitly says
-		// "You can retry your request".
-		"an error occurred while processing your request",
-		// Explicit retry guidance emitted by provider backends (OpenAI
-		// Responses, AWS Bedrock stream exceptions) with varying prefixes.
-		"you can retry your request", "try your request again", "please retry your request",
-		// Capacity messages from the ChatGPT/Codex backend, e.g.
-		// "Our servers are currently overloaded. Please try again later."
-		// The trailing advice also shows up on its own for transient
-		// capacity failures; usage/quota limits are filtered out above by
-		// isNonRetryableProviderLimit before this list is consulted.
-		"servers are currently overloaded", "servers are busy", "try again later",
-	}
-	for _, needle := range needles {
-		if strings.Contains(msg, needle) {
-			return true
-		}
-	}
-	return false
+	return true
 }
 
-func isNonRetryableProviderLimit(msg string) bool {
-	needles := []string{
-		"usage limit", "monthly usage limit", "freeusagelimit", "gousagelimit",
-		"available balance", "insufficient_quota", "out of budget", "quota exceeded", "billing",
-	}
-	for _, needle := range needles {
-		if strings.Contains(msg, needle) {
-			return true
-		}
-	}
-	return false
+// defaultRetrySchedule is the backoff between upstream attempts: 1s x3,
+// 5s x2, 10s x2, 30s x2, 1m x2, 5m x2, 10m x2, 30m x2, then hourly
+// forever. Attempts never stop on error — only success or context
+// cancellation (user stop / shutdown) ends the turn.
+var defaultRetrySchedule = []time.Duration{
+	time.Second, time.Second, time.Second,
+	5 * time.Second, 5 * time.Second,
+	10 * time.Second, 10 * time.Second,
+	30 * time.Second, 30 * time.Second,
+	time.Minute, time.Minute,
+	5 * time.Minute, 5 * time.Minute,
+	10 * time.Minute, 10 * time.Minute,
+	30 * time.Minute, 30 * time.Minute,
 }
+
+const retryScheduleSteady = time.Hour
 
 func (a *Agent) retryDelay(attempt int) time.Duration {
-	base := a.RetryBaseDelay
-	if base <= 0 {
-		base = 2 * time.Second
+	if sched := a.RetrySchedule; len(sched) > 0 {
+		if attempt < len(sched) {
+			return sched[attempt]
+		}
+		return sched[len(sched)-1]
 	}
-	return base * time.Duration(1<<attempt)
+	if attempt < len(defaultRetrySchedule) {
+		return defaultRetrySchedule[attempt]
+	}
+	return retryScheduleSteady
 }
 
 func sleepRetry(ctx context.Context, d time.Duration) error {
@@ -680,50 +519,35 @@ func (a *Agent) dropLastAssistantMessage() {
 // from the live transcript without mutating it.
 //
 // Pipeline: snapshot -> filterHidden ->
-// PruneOldToolResults -> repairToolUseResultPairs -> Transforms[] ->
-// provider image mirror -> RemindersForTurn.
+// PruneOldToolResults -> repairToolUseResultPairs ->
+// provider image mirror.
 //
-// Steps after the snapshot are request-only: mirrors, transform
-// output and reminders never persist and never feed back into
-// a.messages. Callers hold no lock; the snapshot is taken under mu
-// and every step after that works on the copy.
+// Steps after the snapshot are request-only: mirrors never persist
+// and never feed back into a.messages. Callers hold no lock; the
+// snapshot is taken under mu and every step after that works on the
+// copy.
 func (a *Agent) BuildContext() []provider.Message {
 	a.mu.Lock()
 	msgs := projectMessages(append([]provider.Message(nil), a.messages...), a.compactionStateLocked())
-	transforms := append([]ContextTransformer(nil), a.Transforms...)
-	remindersFn := a.RemindersForTurn
 	clientName := ""
 	if a.Client != nil {
 		clientName = a.Client.Name()
 	}
 	a.mu.Unlock()
 
-	var reminders []Reminder
-	if remindersFn != nil {
-		reminders = remindersFn()
-	}
-	return a.buildContextFromLocked(msgs, transforms, reminders, clientName)
+	return a.buildContextFromLocked(msgs, clientName)
 }
 
 // buildContextFromLocked runs the derivation pipeline over an
 // already-snapshotted transcript. Both BuildContext (unlocked) and
 // BuildContextLocked share it so the pipeline exists in one place.
-func (a *Agent) buildContextFromLocked(msgs []provider.Message, transforms []ContextTransformer, reminders []Reminder, clientName string) []provider.Message {
+func (a *Agent) buildContextFromLocked(msgs []provider.Message, clientName string) []provider.Message {
 	msgs = filterHidden(msgs)
 	msgs = PruneOldToolResults(msgs)
 	msgs = repairToolUseResultPairs(msgs)
-	for _, t := range transforms {
-		if t == nil {
-			continue
-		}
-		if out := t(msgs); out != nil {
-			msgs = out
-		}
-	}
 	if mirror := mirrorImagesForProvider(clientName, msgs); mirror != nil {
 		msgs = append(msgs, *mirror)
 	}
-	msgs = injectReminders(msgs, reminders)
 	return msgs
 }
 
@@ -732,64 +556,12 @@ func (a *Agent) buildContextFromLocked(msgs []provider.Message, transforms []Con
 // snapshot stay under the same lock; external callers use
 // BuildContext.
 func (a *Agent) BuildContextLocked() []provider.Message {
-	// No pre-collected reminders available and the caller holds mu:
-	// skip reminder collection (collectReminders needs mu). oneTurn
-	// uses BuildContextLockedWith with reminders collected before
-	// locking. External locked callers that need reminders should
-	// collect them before taking mu.
-	return a.BuildContextLockedWith(nil, true)
-}
-
-// BuildContextLockedWith derives context while the caller holds mu.
-// Pass pre-collected reminders when the reminder fn needs the lock
-// (collectReminders does); useCollected=true skips in-lock collection.
-// oneTurn pre-collects before locking to avoid self-deadlock.
-func (a *Agent) BuildContextLockedWith(precollected []Reminder, useCollected bool) []provider.Message {
 	msgs := projectMessages(append([]provider.Message(nil), a.messages...), a.compactionStateLocked())
-	transforms := append([]ContextTransformer(nil), a.Transforms...)
-	remindersFn := a.RemindersForTurn
 	clientName := ""
 	if a.Client != nil {
 		clientName = a.Client.Name()
 	}
-	var reminders []Reminder
-	if useCollected {
-		reminders = precollected
-	} else if remindersFn != nil {
-		// Only safe when remindersFn never touches a.mu.
-		reminders = remindersFn()
-	}
-	return a.buildContextFromLocked(msgs, transforms, reminders, clientName)
-}
-
-// AddTransform appends a ContextTransformer to the agent's pipeline.
-// Safe for concurrent use; takes effect on the next model call.
-func (a *Agent) AddTransform(t ContextTransformer) {
-	if t == nil {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.Transforms = append(a.Transforms, t)
-	a.rev++
-}
-
-// AttachStore sets the persistence backend for the agent loop and
-// compaction checkpoints. Safe for concurrent use. A nil store
-// detaches (nothing is written by core; OnMessageAppended /
-// OnCompactionState keep working).
-func (a *Agent) AttachStore(st SessionStore) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.store = st
-	a.rev++
-}
-
-// Store returns the attached SessionStore, or nil.
-func (a *Agent) Store() SessionStore {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.store
+	return a.buildContextFromLocked(msgs, clientName)
 }
 
 // AddAssistantTextTransform appends an AssistantTextTransform used
@@ -818,15 +590,6 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		if err := a.prepareStart(ctx); err != nil {
 			return provider.StopError, provider.Message{}, err
 		}
-		// Collect reminders BEFORE locking: the default fn
-		// (collectReminders) takes a.mu itself. Request-only output.
-		a.mu.Lock()
-		remindersFn := a.RemindersForTurn
-		a.mu.Unlock()
-		var turnReminders []Reminder
-		if remindersFn != nil {
-			turnReminders = remindersFn()
-		}
 		a.mu.Lock()
 		// A reset can also arrive after runLoop's preparation, for example
 		// while BeforeTurn waits. Validate and snapshot under the same lock
@@ -840,10 +603,9 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			System: a.System,
 			// Derived request context: BuildContext snapshots the live
 			// transcript and runs the context pipeline (hidden
-			// filter -> prune -> repair -> Transforms -> provider
-			// mirror -> reminders). Request-only output never
-			// feeds back into a.messages.
-			Messages:     a.BuildContextLockedWith(turnReminders, true),
+			// filter -> prune -> repair -> provider mirror).
+			// Request-only output never feeds back into a.messages.
+			Messages:     a.BuildContextLocked(),
 			Tools:        a.Tools.Specs(),
 			Reasoning:    a.Reasoning,
 			MaxTokens:    a.MaxTokens,
@@ -898,12 +660,6 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			sink(EvToolUseEnd{ID: e.ID})
 		case provider.EventUsage:
 			cum := a.cost.Add(e.Usage)
-			a.mu.Lock()
-			usageStore := a.store
-			a.mu.Unlock()
-			if usageStore != nil {
-				_ = usageStore.AppendUsage(e.Usage, cum)
-			}
 			sink(EvUsage{Usage: e.Usage, Cumulative: cum})
 			if a.OnUsage != nil {
 				a.OnUsage(cum)
@@ -960,6 +716,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		emit, suppressed := applyAssistantTextTransforms(finalMsg, textTransforms)
 		suppress = suppressed
 
+		a.stampTurn(&finalMsg)
 		a.mu.Lock()
 		a.messages = append(a.messages, finalMsg)
 		a.rev++

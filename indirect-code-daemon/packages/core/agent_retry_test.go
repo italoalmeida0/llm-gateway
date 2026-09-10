@@ -40,7 +40,7 @@ func (c *retryFakeClient) Stream(ctx context.Context, req provider.Request) (<-c
 func TestAgentRetriesOverloadedStreamError(t *testing.T) {
 	client := &retryFakeClient{}
 	a := NewAgent(client, "fake-model", "system", Registry{})
-	a.RetryBaseDelay = time.Millisecond
+	a.RetrySchedule = []time.Duration{time.Millisecond}
 
 	var turnErrs []string
 	err := a.Prompt(context.Background(), "hello", nil, func(ev AgentEvent) {
@@ -115,7 +115,7 @@ func TestAgentRetriesCodexProcessingError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &codexRetryFakeClient{firstErr: tc.err}
 			a := NewAgent(client, "gpt-5.6-sol", "system", Registry{})
-			a.RetryBaseDelay = time.Millisecond
+			a.RetrySchedule = []time.Duration{time.Millisecond}
 
 			if err := a.Prompt(context.Background(), "hello", nil, nil); err != nil {
 				t.Fatalf("Prompt returned %v; want retry to succeed", err)
@@ -131,10 +131,11 @@ func TestAgentRetriesCodexProcessingError(t *testing.T) {
 	}
 }
 
-// TestCanRetryErrorCapacityMessages pins the classification of Codex
-// capacity wording and makes sure quota/usage limits stay terminal even
-// when they carry "try again later" style advice.
-func TestCanRetryErrorCapacityMessages(t *testing.T) {
+// TestCanRetryErrorOnlyRefusesCancel pins the turn-stop contract: every
+// provider error retries forever — capacity, quota, billing, malformed
+// requests alike. Only context cancellation (user stop / shutdown) and
+// nil refuse another attempt.
+func TestCanRetryErrorOnlyRefusesCancel(t *testing.T) {
 	a := NewAgent(nil, "gpt-5.6-sol", "system", Registry{})
 	cases := []struct {
 		msg  string
@@ -143,14 +144,25 @@ func TestCanRetryErrorCapacityMessages(t *testing.T) {
 		{"codex error: Our servers are currently overloaded. Please try again later.", true},
 		{"codex error: Our servers are busy right now.", true},
 		{"codex error: Please try again later.", true},
-		{"codex error: You have hit your monthly usage limit. Try again later.", false},
-		{"codex error: quota exceeded, try again later", false},
-		{"codex error: unsupported parameter: reasoning", false},
+		{"codex error: You have hit your monthly usage limit. Try again later.", true},
+		{"codex error: quota exceeded, try again later", true},
+		{"codex error: unsupported parameter: reasoning", true},
+		{"anthropic: http 400: bad request", true},
+		{"anthropic: http 401: unauthorized", true},
 	}
 	for _, tc := range cases {
 		if got := a.canRetryError(errors.New(tc.msg), 0); got != tc.want {
 			t.Errorf("canRetryError(%q) = %v; want %v", tc.msg, got, tc.want)
 		}
+	}
+	if a.canRetryError(nil, 0) {
+		t.Error("canRetryError(nil) = true; want false")
+	}
+	if a.canRetryError(context.Canceled, 0) {
+		t.Error("canRetryError(context.Canceled) = true; want false")
+	}
+	if a.canRetryError(context.DeadlineExceeded, 0) {
+		t.Error("canRetryError(context.DeadlineExceeded) = true; want false")
 	}
 }
 
@@ -185,7 +197,7 @@ func (c *partialRetryFakeClient) Stream(ctx context.Context, req provider.Reques
 func TestAgentDropsPartialAssistantBeforeRetry(t *testing.T) {
 	client := &partialRetryFakeClient{}
 	a := NewAgent(client, "fake-model", "system", Registry{})
-	a.RetryBaseDelay = time.Millisecond
+	a.RetrySchedule = []time.Duration{time.Millisecond}
 
 	if err := a.Prompt(context.Background(), "hello", nil, nil); err != nil {
 		t.Fatalf("Prompt returned %v", err)
@@ -258,5 +270,32 @@ func TestAgentPropagatesTemperature(t *testing.T) {
 	}
 	if client.lastReq.Temperature == nil || *client.lastReq.Temperature != temp {
 		t.Fatalf("request Temperature = %v; want %v", client.lastReq.Temperature, temp)
+	}
+}
+
+// TestRetryScheduleShape pins the upstream retry cadence: 1s x3, 5s x2,
+// 10s x2, 30s x2, 1m x2, 5m x2, 10m x2, 30m x2, then hourly forever.
+func TestRetryScheduleShape(t *testing.T) {
+	a := NewAgent(nil, "m", "", Registry{})
+	s, m, h := time.Second, time.Minute, time.Hour
+	want := []time.Duration{
+		s, s, s,
+		5 * s, 5 * s,
+		10 * s, 10 * s,
+		30 * s, 30 * s,
+		m, m,
+		5 * m, 5 * m,
+		10 * m, 10 * m,
+		30 * m, 30 * m,
+	}
+	for i, w := range want {
+		if got := a.retryDelay(i); got != w {
+			t.Fatalf("retryDelay(%d) = %v; want %v", i, got, w)
+		}
+	}
+	for _, i := range []int{len(want), len(want) + 1, 10000} {
+		if got := a.retryDelay(i); got != h {
+			t.Fatalf("retryDelay(%d) = %v; want steady %v", i, got, h)
+		}
 	}
 }

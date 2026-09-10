@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
@@ -131,12 +132,17 @@ type EvTurnEnd struct {
 
 func (EvTurnEnd) Type() string { return "turn_end" }
 
+// EvRetry fires before each scheduled upstream retry sleep. Hosts may
+// surface it (reconnecting notice); consumers that do not know it ignore
+// it. Attempt counts failed upstream calls in the current turn.
+type EvRetry struct {
+	Attempt int
+	Delay   time.Duration
+	Err     error
+}
+
+func (EvRetry) Type() string { return "retry" }
+
 type EvDone struct{}
 
 func (EvDone) Type() string { return "done" }
-
-type EvError struct {
-	Err error
-}
-
-func (EvError) Type() string { return "error" }

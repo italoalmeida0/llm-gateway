@@ -105,27 +105,12 @@ func TestProjectionCorruptAnchorFailsOpen(t *testing.T) {
 	}
 }
 
-// Compact end-to-end: non-destructive, chain advances, store + hooks fire.
+// Compact end-to-end: non-destructive, chain advances, hooks fire.
 func TestCompactNonDestructiveEndToEnd(t *testing.T) {
 	client := &scriptableFakeClient{summaries: []string{"summary one"}}
 	a := NewAgent(client, "m", "", nil)
 	history := bigHistory(8) // 16 messages, well above the minimum
 	a.SetMessages(history)
-
-	dir := t.TempDir()
-	st, err := OpenSQLiteSessionStore(dir+"/s.db", dir, SessionMeta{Provider: "p", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	a.AttachStore(st)
-	// AttachStore only persists NEW appends; seed the store with the
-	// history rows so the checkpoint test sees the append-only log.
-	for _, m := range history {
-		if err := st.AppendMessage(m); err != nil {
-			t.Fatal(err)
-		}
-	}
 
 	var hookState *CompactionState
 	a.OnCompactionState = func(s *CompactionState) { hookState = s }
@@ -153,17 +138,6 @@ func TestCompactNonDestructiveEndToEnd(t *testing.T) {
 	}
 	if hookState == nil || hookState.Count != 1 {
 		t.Fatalf("OnCompactionState not fired: %+v", hookState)
-	}
-	// Store checkpoint: history rows intact, head persisted.
-	rows, err := st.ReadTranscript()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != len(history) {
-		t.Fatalf("store history = %d, want append-only %d", len(rows), len(history))
-	}
-	if st.CompactionState() == nil || st.CompactionState().PreviousSummary != "summary one" {
-		t.Fatalf("store chain head lost: %+v", st.CompactionState())
 	}
 }
 
@@ -225,8 +199,8 @@ func TestMaybeAutoCompactTriggerAndNoop(t *testing.T) {
 }
 
 // Proactive run-loop compaction: the AutoCompact hook fires before the
-// model request (after queued drain), so a mid-run tool batch that
-// blows the window still compacts before the next response.
+// model request, so a mid-run tool batch that blows the window still
+// compacts before the next response.
 func TestRunLoopAutoCompactBeforeNextResponse(t *testing.T) {
 	client := &scriptableFakeClient{summaries: []string{"run summary"}}
 	a := NewAgent(client, "m", "", nil)

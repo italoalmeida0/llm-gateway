@@ -1,7 +1,6 @@
 package core
 
 import (
-	"strings"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
@@ -17,14 +16,10 @@ import (
 //	2. filterHidden  - drop messages with Meta["hidden"]="true"
 //	3. PruneOldToolResults - mechanically truncate older tool outputs
 //	4. repairToolUseResultPairs - stub orphan tool_use (aborts)
-//	5. Transforms[] - derived injection per turn (AGENTS.md, skills,
-//	   memory). Never persisted: the transcript retains the original.
-//	6. mirrorImagesForProvider - image mirror for text-centric providers (openai/openai-codex)
-//	7. injectReminders - non-persisted synthetic notices (queued,
-//	   compaction, approvals)
+//	5. mirrorImagesForProvider - image mirror for text-centric providers (openai/openai-codex)
 //
-// Everything produced in steps 5-7 exists only in the request.
-// Persistence (SessionStore / OnMessageAppended) continues to store
+// Everything produced in step 5 exists only in the request.
+// Persistence (OnMessageAppended) continues to store
 // the unmodified live transcript.
 
 // Meta keys with semantics in the context pipeline.
@@ -34,7 +29,7 @@ const (
 	// control lines.
 	MetaHidden = "hidden"
 	// MetaEphemeral marks synthetic messages produced by the
-	// pipeline (reminders, mirrors). They exist only in the request;
+	// pipeline (mirrors). They exist only in the request;
 	// they should never be persisted or re-injected into the transcript.
 	MetaEphemeral = "ephemeral"
 	// MetaImageMirror marks the image mirror generated for
@@ -43,16 +38,6 @@ const (
 	MetaImageMirror = "image_mirror"
 )
 
-// ContextTransformer receives assembled messages up to this point and
-// returns transformed messages. Typical transforms: AGENTS.md injection,
-// skills, project memory, visible text rewrites.
-//
-// Rules:
-//   - Do not mutate the input slice; return a new slice or the same one.
-//   - Never persist: the result exists only in the request.
-//   - Keep tool_call/tool_result pairs intact (do not remove one side of a pair).
-type ContextTransformer func(msgs []provider.Message) []provider.Message
-
 // AssistantTextTransform rewrites the visible text of an assistant message
 // (suppression or replacement).
 //
@@ -60,16 +45,6 @@ type ContextTransformer func(msgs []provider.Message) []provider.Message
 // replacement != "" replaces emitted text. The transcript (and what
 // the model sees in subsequent turns) always keeps the original.
 type AssistantTextTransform func(text string) (replacement string, ok bool)
-
-// Reminder is a synthetic notice injected into the turn context without
-// persisting (pending approvals, compaction reminders, queued messages).
-type Reminder struct {
-	// Text is the notice body.
-	Text string
-	// Meta carries tags (e.g. {"reminder": "queued"}).
-	// MetaEphemeral=true is enforced on emission.
-	Meta map[string]string
-}
 
 // filterHidden removes messages marked as internal from the context.
 //
@@ -111,34 +86,6 @@ func mirrorImagesForProvider(clientName string, msgs []provider.Message) *provid
 	mirror.Meta = map[string]string{MetaEphemeral: "true", MetaImageMirror: "true"}
 	mirror.Time = time.Now()
 	return &mirror
-}
-
-// injectReminders appends reminders as synthetic user messages at the end
-// of the context, marked MetaEphemeral. Never persisted, does not mutate
-// the transcript, does not affect compaction cut points.
-func injectReminders(msgs []provider.Message, reminders []Reminder) []provider.Message {
-	if len(reminders) == 0 {
-		return msgs
-	}
-	out := make([]provider.Message, 0, len(msgs)+len(reminders))
-	out = append(out, msgs...)
-	now := time.Now()
-	for _, r := range reminders {
-		if strings.TrimSpace(r.Text) == "" {
-			continue
-		}
-		meta := map[string]string{MetaEphemeral: "true"}
-		for k, v := range r.Meta {
-			meta[k] = v
-		}
-		out = append(out, provider.Message{
-			Role:    provider.RoleUser,
-			Content: []provider.Content{provider.TextBlock{Text: r.Text}},
-			Time:    now,
-			Meta:    meta,
-		})
-	}
-	return out
 }
 
 // applyAssistantTextTransforms applies AssistantTextTransforms on the

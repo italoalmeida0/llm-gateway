@@ -205,29 +205,18 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 	a.setCompactionStateLocked(nextState)
 	a.rev++
 	onState := a.OnCompactionState
-	store := a.store
 	a.mu.Unlock()
 
-	// Record token usage for compaction in the session store and agent cost
+	// Record token usage for compaction in the agent cost ledger.
 	if totalUsage.InputTokens > 0 || totalUsage.OutputTokens > 0 {
 		cum := a.cost.Add(totalUsage)
-		if store != nil {
-			_ = store.AppendUsage(totalUsage, cum)
-		}
 		if a.OnUsage != nil {
 			a.OnUsage(cum)
 		}
 	}
 
-	// Compaction checkpoints are first-class persistence rows,
-	// not best-effort callbacks. The store write is mandatory when
-	// a store is attached; OnCompactionState keeps hosts that mirror
-	// the state to their own session record in sync.
-	if store != nil {
-		if err := store.AppendCompaction(nextState); err != nil {
-			return "", fmt.Errorf("persist compaction checkpoint: %w", err)
-		}
-	}
+	// Hosts persist the checkpoint through OnCompactionState (their
+	// own session record); core keeps no persistence backend.
 	if onState != nil {
 		onState(a.CompactionChain())
 	}
@@ -241,7 +230,7 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 //
 // Trigger semantics: the LAST turn's usage approximates the size
 // of the prompt the model just saw; adding the trailing estimate for
-// messages appended since (tool results, queued user text) yields the
+// messages appended since (tool results) yields the
 // next request's projected size. It never uses the cumulative session
 // usage — a cumulative trigger would fire forever once crossed, even
 // right after a successful compaction. The state is evaluated over
@@ -427,13 +416,4 @@ func hybridKeepFloor(msgs []provider.Message) int {
 		floor = thirty
 	}
 	return floor
-}
-
-// repairOrphanedToolResults removes tool_result content blocks (and
-// entire messages that become empty) when the matching tool_use ID
-// does not appear anywhere in the given messages. This happens after
-// compaction when the tail preserves a tool_result but the tool_use
-// that produced it was summarized away.
-func repairOrphanedToolResults(msgs []provider.Message) []provider.Message {
-	return provider.RepairOrphanedToolResults(msgs)
 }

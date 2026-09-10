@@ -14,22 +14,26 @@ const MaxSnapshotBytes = 2 << 20 // 2MB
 
 // TrackedFile is the per-file snapshot for one turn. Only the FIRST sighting
 // of a path inside a turn is stored; later touches are ignored.
+//
+// JSON tags exist for the daemon's crash-recovery journal: the incoming
+// snapshot is persisted to disk while the turn runs so a restart can
+// continue tracking (and rebuild the live changes view) from it.
 type TrackedFile struct {
 	// Path is the absolute, cleaned path.
-	Path string
+	Path string `json:"path"`
 	// Before holds the content as first seen in the turn. Empty when the
 	// file did not exist yet (HasBefore == false).
-	Before string
+	Before string `json:"before,omitempty"`
 	// HasBefore is false when the file was marked as new (write to a path
 	// that did not exist on disk at write time).
-	HasBefore bool
+	HasBefore bool `json:"hasBefore,omitempty"`
 	// CreatedWithWrite mirrors the user's vocabulary: the entry was first
 	// seen via write. Kept for debugging/display; the source of truth for
 	// "new" is !HasBefore.
-	CreatedWithWrite bool
+	CreatedWithWrite bool `json:"createdWithWrite,omitempty"`
 	// Binary/TooLarge files are listed but never diffed textually.
-	Binary   bool
-	TooLarge bool
+	Binary   bool `json:"binary,omitempty"`
+	TooLarge bool `json:"tooLarge,omitempty"`
 }
 
 // TurnTracker is the per-turn hashmap: path -> first-seen snapshot.
@@ -45,12 +49,6 @@ func NewTurnTracker() *TurnTracker {
 
 func cleanPath(p string) string {
 	return filepath.Clean(p)
-}
-
-// has returns true when the path is already tracked.
-func (t *TurnTracker) has(path string) bool {
-	_, ok := t.files[cleanPath(path)]
-	return ok
 }
 
 // NoteRead records the content of a file seen via read. First sighting only.
@@ -130,6 +128,19 @@ func (t *TurnTracker) Reset() {
 	t.files = make(map[string]*TrackedFile)
 }
 
+// RestoreTurnTracker rebuilds a tracker from a persisted incoming snapshot
+// (crash recovery). Entries already carry first-sighting semantics, so new
+// touches to the same paths keep being ignored, exactly as if the turn had
+// never been interrupted.
+func RestoreTurnTracker(files []TrackedFile) *TurnTracker {
+	t := NewTurnTracker()
+	for _, f := range files {
+		f := f
+		t.files[cleanPath(f.Path)] = &f
+	}
+	return t
+}
+
 // CapContent truncates snapshot content beyond MaxSnapshotBytes and flags it.
 func CapContent(content string) (string, bool) {
 	if len(content) > MaxSnapshotBytes {
@@ -137,8 +148,6 @@ func CapContent(content string) (string, bool) {
 	}
 	return content, false
 }
-
-
 
 // ReadTextSnapshot reads a file for snapshotting. Binary files return
 // ok=false so callers can mark them instead of storing bytes.

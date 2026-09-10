@@ -298,4 +298,48 @@ describe("proxy Anthropic→OpenAI translation (in-process)", () => {
     const listed = await list.json();
     expect(listed.data.map((m: any) => m.id)).toContain(ALIAS);
   });
+
+  test("translates Google-style tool call stream omitting [DONE] and preserves thought signature", async () => {
+    const { OpenAIToAnthropicStream, anthropicToOpenAI } = await import("../server/proxy/anthropic-bridge");
+    const stream = new OpenAIToAnthropicStream("test-model");
+    const chunk1 = new TextEncoder().encode(
+      'data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"extra_content":{"google":{"thought_signature":"sig123"}},"function":{"name":"run","arguments":"{\\"cmd\\":\\"ls\\"}"},"id":"call_1","type":"function"}]},"index":0}],"usage":{"prompt_tokens":50,"completion_tokens":20}}\n\n',
+    );
+    const chunk2 = new TextEncoder().encode(
+      'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":50,"completion_tokens":20}}\n\n',
+    );
+    const p1 = stream.feed(chunk1);
+    const p2 = stream.feed(chunk2);
+    expect(stream.isDone).toBe(true);
+
+    const fullSse = [...p1, ...p2].map((p) => new TextDecoder().decode(p)).join("");
+    expect(fullSse).toContain('"type":"redacted_thinking","data":"sig123"');
+    expect(fullSse).toContain('"type":"tool_use","id":"call_1","name":"run"');
+    expect(fullSse).toContain('"stop_reason":"tool_use"');
+    expect(fullSse).toContain('"type":"message_stop"');
+
+    // Test multi-turn replay attaching thought signature to tool_calls
+    const req = {
+      model: "test-model",
+      messages: [
+        { role: "user", content: "hello" },
+        {
+          role: "assistant",
+          content: [
+            { type: "redacted_thinking", data: "sig123" },
+            { type: "tool_use", id: "call_1", name: "run", input: { cmd: "ls" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "call_1", content: "file.txt" }],
+        },
+      ],
+    };
+    const translated = anthropicToOpenAI(req);
+    const assistantMsg = (translated.messages as any[])[1];
+    expect(assistantMsg.extra_content?.google?.thought_signature).toBe("sig123");
+    expect(assistantMsg.tool_calls?.[0]?.extra_content?.google?.thought_signature).toBe("sig123");
+  });
 });
+

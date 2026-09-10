@@ -129,6 +129,13 @@ export function anthropicToOpenAI(body: Record<string, unknown>): Record<string,
             thought_signature: googleThoughtSignature,
           },
         };
+        for (const tc of toolCalls) {
+          tc.extra_content = {
+            google: {
+              thought_signature: googleThoughtSignature,
+            },
+          };
+        }
       }
       if (text || toolCalls.length || googleThoughtSignature) messages.push(msg);
     } else {
@@ -235,7 +242,16 @@ export function openAIToAnthropicBody(openaiText: string, fallbackModel: string)
   const first = asRecord(choices[0]);
   const message = asRecord(first.message);
   const content: Record<string, unknown>[] = [];
-  const googleSig = asRecord(asRecord(message.extra_content).google).thought_signature;
+  let googleSig = asRecord(asRecord(message.extra_content).google).thought_signature;
+  if (!googleSig) {
+    for (const tc of asArr(message.tool_calls)) {
+      const s = asRecord(asRecord(asRecord(tc).extra_content).google).thought_signature;
+      if (typeof s === "string" && s) {
+        googleSig = s;
+        break;
+      }
+    }
+  }
   if (typeof googleSig === "string" && googleSig) {
     content.push({ type: "redacted_thinking", data: googleSig });
   }
@@ -261,7 +277,9 @@ export function openAIToAnthropicBody(openaiText: string, fallbackModel: string)
     role: "assistant",
     model: typeof j.model === "string" && j.model ? j.model : fallbackModel,
     content,
-    stop_reason: openAIFinishToAnthropic(first.finish_reason),
+    stop_reason: content.some((c) => c.type === "tool_use")
+      ? "tool_use"
+      : openAIFinishToAnthropic(first.finish_reason),
     stop_sequence: null,
     usage: openAIUsageToAnthropic(j.usage),
   };
@@ -332,7 +350,7 @@ export class OpenAIToAnthropicStream {
   private tools = new Map<number, { index: number; id: string; name: string; announced: boolean }>();
   private model = "";
   private upstreamId = "";
-  private finishReason: unknown = "stop";
+  private finishReason: unknown = null;
   private promptTokens = 0;
   private cachedTokens = 0;
   private completionTokens = 0;
@@ -432,14 +450,28 @@ export class OpenAIToAnthropicStream {
       this.promptTokens = Number(usage.prompt_tokens) || 0;
       this.cachedTokens = Number(asRecord(usage.prompt_tokens_details).cached_tokens) || 0;
       this.completionTokens = Number(usage.completion_tokens) || 0;
-      // A terminal usage chunk may ride along with finish_reason choices —
-      // keep processing them below instead of returning early.
+      // If choices already supplied finishReason in a prior chunk, this is the terminal usage chunk.
+      if (this.finishReason) {
+        out.push(...this.finish());
+        return out;
+      }
     }
     for (const ch of asArr(j.choices)) {
       const c = asRecord(ch);
       const delta = asRecord(c.delta);
 
-      const googleSig = asRecord(asRecord(delta.extra_content).google).thought_signature;
+      let googleSig =
+        asRecord(asRecord(delta.extra_content).google).thought_signature ??
+        asRecord(asRecord(c.extra_content).google).thought_signature;
+      if (!googleSig) {
+        for (const rawTc of asArr(delta.tool_calls)) {
+          const s = asRecord(asRecord(asRecord(rawTc).extra_content).google).thought_signature;
+          if (typeof s === "string" && s) {
+            googleSig = s;
+            break;
+          }
+        }
+      }
       if (typeof googleSig === "string" && googleSig && !this.thoughtSigSent) {
         this.thoughtSigSent = true;
         this.closeText(out);
@@ -470,9 +502,10 @@ export class OpenAIToAnthropicStream {
           }),
         );
       }
-      for (const rawTc of asArr(delta.tool_calls)) {
-        const tc = asRecord(rawTc);
-        const idx = Number(tc.index ?? 0) || 0;
+      const rawToolCalls = asArr(delta.tool_calls);
+      for (let i = 0; i < rawToolCalls.length; i++) {
+        const tc = asRecord(rawToolCalls[i]);
+        const idx = typeof tc.index === "number" ? tc.index : i;
         let t = this.tools.get(idx);
         if (!t) {
           t = { index: this.nextIndex++, id: "", name: "", announced: false };
@@ -505,7 +538,14 @@ export class OpenAIToAnthropicStream {
           );
         }
       }
-      if (c.finish_reason) this.finishReason = c.finish_reason;
+      if (c.finish_reason) {
+        this.finishReason = c.finish_reason;
+        const hasTools = Array.from(this.tools.values()).some((t) => t.announced);
+        if (usage.prompt_tokens !== undefined || this.promptTokens > 0 || hasTools) {
+          out.push(...this.finish());
+          break;
+        }
+      }
     }
     return out;
   }
@@ -520,20 +560,24 @@ export class OpenAIToAnthropicStream {
         out.push(sseEvent("content_block_stop", { type: "content_block_stop", index: t.index }));
       }
     }
-    const inTok = Math.max(0, this.promptTokens - this.cachedTokens);
+    const hasTools = Array.from(this.tools.values()).some((t) => t.announced);
+    const stopReason = hasTools
+      ? "tool_use"
+      : this.finishReason === "error"
+        ? "end_turn"
+        : openAIFinishToAnthropic(this.finishReason);
+
     out.push(
       sseEvent("message_delta", {
         type: "message_delta",
         delta: {
-          stop_reason:
-            this.finishReason === "error" ? "end_turn" : openAIFinishToAnthropic(this.finishReason),
+          stop_reason: stopReason,
           stop_sequence: null,
         },
         usage: { output_tokens: this.completionTokens || 0 },
       }),
       sseEvent("message_stop", { type: "message_stop" }),
     );
-    void inTok;
     return out;
   }
 

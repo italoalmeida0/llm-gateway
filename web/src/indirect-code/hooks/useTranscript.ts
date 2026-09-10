@@ -209,6 +209,8 @@ export function createTranscript(opts: {
   });
   onCleanup(() => transcriptScroll.dispose());
   function scrollToBottom(force = false) { transcriptScroll.schedule(force); }
+  /** Explicit "Pin at bottom": jump to the tail and follow streaming again. */
+  function pinAtBottom() { transcriptScroll.pin(); }
 
   // Render blocks (reconciled store to preserve DOM identity across deltas)
   const [renderState, setRenderState] = createStore<{ blocks: (RenderBlock & { id: string })[] }>({ blocks: [] });
@@ -816,6 +818,9 @@ export function createTranscript(opts: {
   /** Marks turn start in composer (status + activity + tail). */
   function beginTurn() {
     setSessionStatus("running");
+    // Sending a message re-engages the pin: the reader expects to follow
+    // their own turn even while reading further up.
+    transcriptScroll.reset();
     setIsAtBottom(true);
     setTurnActivity({ startedAt: Date.now(), status: "running" });
   }
@@ -837,7 +842,7 @@ export function createTranscript(opts: {
     editingMsgIdx, setEditingMsgIdx, editingMsgText, setEditingMsgText, updateEditingMsgText, applyEditingMsgFromRemote, flushPendingEdit,
     isAtBottom, setIsAtBottom,
     chatContainerRef, setChatContainerRef, chatContentRef, setChatContentRef,
-    transcriptScroll, scrollToBottom, onChatScroll,
+    transcriptScroll, scrollToBottom, pinAtBottom, onChatScroll,
     renderBlocks, visibleBlocks, hiddenCount, growWindow, resetWindow,
     rawIdx, blockRawIdx, specialProgress,
     // session

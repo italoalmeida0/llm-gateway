@@ -40,6 +40,18 @@ export function createTurnChanges(opts: {
     );
   }
 
+  /** Authoritative tail cut (edit/regenerate): drop balloons anchored
+   * past the kept message prefix, mirroring the daemon's
+   * dropBalloonsAbove. Unanchored balloons (no messageIndex) are kept. */
+  function dropAbove(keepIndex: number) {
+    setBalloons((prev) =>
+      prev.filter(
+        (b) =>
+          typeof b.messageIndex !== "number" || b.messageIndex <= 0 || b.messageIndex <= keepIndex,
+      ),
+    );
+  }
+
   function upsert(balloon: any, live: boolean) {
     if (!balloon || typeof balloon.turnIndex !== "number") return;
     const files = balloon.files || [];
@@ -152,6 +164,7 @@ export function createTurnChanges(opts: {
     balloons,
     undoBusy,
     reset,
+    dropAbove,
     applySnapshot,
     noteBalloon,
     requestBalloons,

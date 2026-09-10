@@ -193,6 +193,38 @@ describe("Indirect Code transcript following", () => {
     expect(h.el.scrollTop).toBe(200);
     expect(h.bottom()).toBe(false);
   });
+  test("measure is report-only: sitting at the bottom never re-pins", () => {
+    const h = harness();
+    h.scroll.detach();
+    h.el.scrollTop = 600; // back at the bottom by hand (600 = 1000-400)
+    h.scroll.measure();
+    expect(h.bottom()).toBe(true);
+    h.el.scrollHeight = 4000; // new content arrives while unpinned
+    h.flush(); // any stale queued frame must be a no-op
+    h.scroll.measure();
+    expect(h.el.scrollTop).toBe(600);
+    expect(h.bottom()).toBe(false);
+  });
+  test("pin() jumps to the tail and follows again", () => {
+    const h = harness();
+    h.scroll.detach();
+    h.el.scrollHeight = 4000;
+    h.scroll.pin();
+    h.flush();
+    expect(h.el.scrollTop).toBe(3600);
+    expect(h.bottom()).toBe(true);
+    h.el.scrollHeight += 200;
+    h.scroll.schedule(); // streaming keeps following after an explicit pin
+    h.flush();
+    expect(h.el.scrollTop).toBe(3800);
+  });
+  test("detach() cancels an explicit jump queued before the gesture", () => {
+    const h = harness();
+    h.scroll.pin();
+    h.scroll.detach();
+    h.flush();
+    expect(h.el.scrollTop).toBe(600);
+  });
   test("idle layout changes and queued streaming frames never move the reader", () => {
     const h = harness();
     h.el.scrollHeight = 4000;
@@ -763,5 +795,23 @@ describe("unified diff parsing (edit results and turn-change balloons)", () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual({ lineNum: "12", marker: "+", code: "const x = 1;", kind: "add" });
+  });
+});
+
+describe("balloon tail cuts", () => {
+  test("dropAbove removes balloons anchored past the kept prefix", async () => {
+    const { createTurnChanges } = await import("../web/src/indirect-code/hooks/useTurnChanges");
+    const tc = createTurnChanges({ send: () => {}, getSessionId: () => "s", toast: () => {} });
+    tc.applySnapshot({ fileBalloons: [
+      { turnIndex: 1, messageIndex: 2, files: [{ path: "a" }] },
+      { turnIndex: 2, messageIndex: 4, files: [{ path: "b" }] },
+      { turnIndex: 3, files: [{ path: "c" }] },
+    ] });
+    expect(tc.balloons().map((b) => b.turnIndex)).toEqual([1, 2, 3]);
+    tc.dropAbove(2);
+    // Turn 2 (anchored at 4) drops; unanchored turn 3 stays.
+    expect(tc.balloons().map((b) => b.turnIndex)).toEqual([1, 3]);
+    tc.dropAbove(0);
+    expect(tc.balloons().map((b) => b.turnIndex)).toEqual([3]);
   });
 });

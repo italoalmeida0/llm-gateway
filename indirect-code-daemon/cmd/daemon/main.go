@@ -1476,6 +1476,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		before := len(rec.Messages)
 		rec.Messages[req.Index] = msg
 		rec.Messages = append([]provider.Message(nil), rec.Messages[:req.Index+1]...)
+		rec.FileBalloons = dropBalloonsAbove(rec.FileBalloons, req.Index+1)
 		rec.Messages = provider.RepairOrphanedToolResults(rec.Messages)
 		rec.UpdatedAt = time.Now().UnixMilli()
 		removed := before - len(rec.Messages)
@@ -2212,6 +2213,26 @@ func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int,
 	})
 }
 
+// dropBalloonsAbove discards balloons anchored past the kept message
+// prefix. Tail cuts (edit/regenerate) must take the discarded turns'
+// balloons with them — otherwise the sidebar keeps showing file changes
+// for turns that no longer exist. Unanchored balloons (MessageIndex <= 0,
+// pre-anchor records) are kept: they may belong to surviving turns.
+// (fork.go filters the same way when copying the prefix.)
+func dropBalloonsAbove(in []filetrack.TurnChanges, keep int) []filetrack.TurnChanges {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]filetrack.TurnChanges, 0, len(in))
+	for _, b := range in {
+		if b.MessageIndex > keep {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
 // truncateAndRun replaces the transcript tail (keeping the first `keep`
 // messages) and starts a fresh turn. It powers edit & regenerate: any
 // in-flight turn is cancelled first and a generation counter keeps the old
@@ -2250,6 +2271,7 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 		removed = 0
 	}
 	rec.Messages = append([]provider.Message(nil), rec.Messages[:keep]...)
+	rec.FileBalloons = dropBalloonsAbove(rec.FileBalloons, keep)
 	// Projection anchor invalidation: truncating the append-only history
 	// below the compaction cut point would leave the chain head pointing
 	// past the end of the log. Drop it; the next compaction re-anchors.

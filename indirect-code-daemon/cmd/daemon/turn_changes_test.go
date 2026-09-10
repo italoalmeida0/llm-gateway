@@ -9,6 +9,7 @@ import (
 
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 	"llm-gateway/indirect-code-daemon/packages/filetrack"
+	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 func mustJSON(t *testing.T, v any) json.RawMessage {
@@ -151,3 +152,68 @@ func TestUndoRefusesToDeleteChangedNewFile(t *testing.T) {
 	}
 }
 
+
+func TestDropBalloonsAboveKeepsPrefix(t *testing.T) {
+	in := []filetrack.TurnChanges{
+		{TurnIndex: 1, MessageIndex: 2},
+		{TurnIndex: 2, MessageIndex: 5},
+		{TurnIndex: 3}, // unanchored legacy record: kept
+	}
+	got := dropBalloonsAbove(in, 2)
+	if len(got) != 2 || got[0].TurnIndex != 1 || got[1].TurnIndex != 3 {
+		t.Fatalf("want turns [1 3], got %+v", got)
+	}
+	if out := dropBalloonsAbove(nil, 0); out != nil {
+		t.Fatalf("nil must stay nil, got %+v", out)
+	}
+}
+
+func TestEditMessageTrimsDiscardedBalloons(t *testing.T) {
+	d := testDaemon(t)
+	userMsg := func(text string) provider.Message {
+		return provider.Message{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: text}}}
+	}
+	asstMsg := func(text string) provider.Message {
+		return provider.Message{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: text}}}
+	}
+	rec := &SessionRecord{
+		ID: "s-balloon", CWD: t.TempDir(), Title: "T", Model: "m", Status: "idle",
+		Messages: []provider.Message{userMsg("q1"), asstMsg("a1"), userMsg("q2"), asstMsg("a2")},
+		FileBalloons: []filetrack.TurnChanges{
+			{TurnIndex: 1, MessageIndex: 2, Files: []filetrack.ChangedFile{{Path: "a"}}},
+			{TurnIndex: 2, MessageIndex: 4, Files: []filetrack.ChangedFile{{Path: "b"}}},
+		},
+	}
+	if err := d.saveSession(rec); err != nil {
+		t.Fatal(err)
+	}
+	// Plain edit (no regenerate) at message 2: keeps 3 messages, so the
+	// turn-1 balloon (anchored at 2) survives while turn-2 (anchored at
+	// 4) goes with the discarded tail.
+	raw, _ := json.Marshal(map[string]any{
+		"type": "edit_message", "sessionId": "s-balloon", "index": 2, "text": "q2 edited",
+	})
+	d.handleMessage(raw)
+	after, err := d.loadSession("s-balloon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Messages) != 3 {
+		t.Fatalf("want 3 messages kept, got %d", len(after.Messages))
+	}
+	if len(after.FileBalloons) != 1 || after.FileBalloons[0].TurnIndex != 1 {
+		t.Fatalf("want only turn-1 balloon, got %+v", after.FileBalloons)
+	}
+	// Deeper cut at message 0: every balloon anchored past it drops too.
+	raw, _ = json.Marshal(map[string]any{
+		"type": "edit_message", "sessionId": "s-balloon", "index": 0, "text": "q1 edited",
+	})
+	d.handleMessage(raw)
+	after, err = d.loadSession("s-balloon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.FileBalloons) != 0 {
+		t.Fatalf("want no balloons after full cut, got %+v", after.FileBalloons)
+	}
+}

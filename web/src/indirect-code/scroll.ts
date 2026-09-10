@@ -1,4 +1,4 @@
-/** Follow streamed content only while a task runs and the reader stays at the end. */
+/** Follow streamed content while pinned to the bottom. */
 export function createTranscriptScroll(opts: {
   element: () => Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight"> | null;
   running: () => boolean;
@@ -9,42 +9,56 @@ export function createTranscriptScroll(opts: {
   const frame = opts.frame ?? requestAnimationFrame;
   const cancelFrame = opts.cancelFrame ?? cancelAnimationFrame;
   let pending = 0;
-  let following = true;
+  /** Pinned: the reader wants the tail; streaming keeps scrolling them down. */
+  let pinned = true;
   let forced = false;
 
   function measure() {
     const el = opts.element();
     if (!el) return;
-    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-    // Markdown layout can shrink and grow in one update, changing scrollTop
-    // without user input. Only explicit gestures call detach().
-    if (bottom) following = true;
-    opts.atBottom(bottom);
+    // Report-only: the button visibility tracks the real position, but the
+    // pin never re-engages by itself — only an explicit pin() does.
+    opts.atBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 48);
   }
 
   function schedule(force = false) {
-    if (!force && (!opts.running() || !following)) return;
+    if (!force && (!opts.running() || !pinned)) return;
     forced ||= force;
     if (pending) return;
     pending = frame(() => {
       pending = 0;
-      const explicit = forced;
-      forced = false;
       // Check again: a queued frame must not override a scroll-up or a task ending.
-      if (!explicit && (!opts.running() || !following)) return;
+      if (!explicit() && (!opts.running() || !pinned)) return;
       const el = opts.element();
       if (!el) return;
       el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-      following = true;
       opts.atBottom(true);
     });
+  }
+
+  function explicit() {
+    const value = forced;
+    forced = false;
+    return value;
   }
 
   return {
     schedule,
     measure,
-    detach() { following = false; forced = false; },
-    reset() { following = true; forced = false; if (pending) cancelFrame(pending); pending = 0; },
+    /** Any explicit scroll gesture: unpin immediately. */
+    detach() { pinned = false; forced = false; },
+    /** Explicit "Pin at bottom": jump to the tail and follow again. */
+    pin() {
+      pinned = true;
+      schedule(true);
+    },
+    /** Session switch / fresh transcript: pin without a jump. */
+    reset() {
+      pinned = true;
+      forced = false;
+      if (pending) cancelFrame(pending);
+      pending = 0;
+    },
     dispose() { if (pending) cancelFrame(pending); pending = 0; },
   };
 }

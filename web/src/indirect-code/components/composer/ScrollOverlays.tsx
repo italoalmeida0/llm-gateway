@@ -7,18 +7,15 @@ export function ScrollOverlays() {
   const t = useTranscriptCtx();
   return (
 <>
-{/* Floating scroll-to-bottom (chatbot FEAT-06) */}
+{/* Floating pin-at-bottom (unlocks on any scroll gesture) */}
 <Show when={!t.isAtBottom() && t.messages().length > 0}>
   <div class="flex justify-center pb-2">
     <button
-      onClick={() => {
-        t.setIsAtBottom(true);
-        t.scrollToBottom(true);
-      }}
+      onClick={() => t.pinAtBottom()}
       class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-ink-900 border border-line/70 text-ink-300 shadow-lg hover:text-ink-100 cursor-pointer"
     >
-      <Iconify icon="lucide:arrow-down" size={13} />
-      <span>Scroll to bottom</span>
+      <Iconify icon="lucide:pin" size={13} />
+      <span>Pin at bottom</span>
     </button>
   </div>
 </Show>

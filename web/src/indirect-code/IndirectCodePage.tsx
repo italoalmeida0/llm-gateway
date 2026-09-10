@@ -543,6 +543,7 @@ export default function IndirectCodePage() {
         // Authoritative tail cut after edit/regenerate (daemon broadcast).
         const keep = typeof msg.keepIndex === "number" ? msg.keepIndex : -1;
         transcript.handleTruncated(msg.sessionId, keep);
+        if (msg.sessionId === activeSessionId() && keep >= 0) turnChanges.dropAbove(keep);
         break;
       }
       case "session_content": {

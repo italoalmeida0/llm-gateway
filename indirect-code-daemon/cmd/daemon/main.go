@@ -913,6 +913,19 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 		if err := json.Unmarshal(data, &r); err != nil {
 			continue
 		}
+		// Ghost guard: turn-journal sidecars (<id>.turn.json) are
+		// crash-recovery records, not sessions — they carry no
+		// id/title/cwd/updatedAt. Neither are corrupt leftovers (empty id
+		// or content id ≠ filename; every save writes rec.ID+".json").
+		// Listing any of them shows a blank row in the sidebar whose
+		// click always fails with "Session not found", since loadSession
+		// reads id+".json".
+		if strings.HasSuffix(e.Name(), ".turn.json") {
+			continue
+		}
+		if r.ID == "" || strings.TrimSuffix(e.Name(), ".json") != r.ID {
+			continue
+		}
 		summaries = append(summaries, SessionSummary{
 			ID:           r.ID,
 			CWD:          r.CWD,

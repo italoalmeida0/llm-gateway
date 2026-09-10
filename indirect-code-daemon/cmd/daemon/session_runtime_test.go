@@ -173,3 +173,38 @@ func TestSwitchingModeRejectsAnAlreadyPendingWrite(t *testing.T) {
 		t.Fatal("pending write unresolved")
 	}
 }
+
+func TestListSessionSummariesSkipsGhosts(t *testing.T) {
+	d := testDaemon(t)
+	dir := filepath.Join(d.dataDir, "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Healthy session: listed.
+	write("sess_ok.json", `{"id":"sess_ok","cwd":"/tmp","title":"Hi","createdAt":1,"updatedAt":2}`)
+	// Turn-journal sidecar: valid JSON, no session fields — must never
+	// appear as a blank sidebar row.
+	write("sess_old.turn.json", `{"turnIndex":3,"startedAt":1,"model":"m"}`)
+	// Valid JSON but no id: ghost (blank row, unopenable).
+	write("empty.json", `{}`)
+	// Content id does not match the filename: loadSession(id+".json")
+	// would fail, so listing it only produces "Session not found".
+	write("stale.json", `{"id":"sess_other","title":"Ghost"}`)
+	// Corrupt JSON: skipped as before.
+	write("broken.json", `{"id":`)
+
+	got := d.listSessionSummaries()
+	if len(got) != 1 || got[0].ID != "sess_ok" {
+		ids := make([]string, 0, len(got))
+		for _, s := range got {
+			ids = append(ids, s.ID)
+		}
+		t.Fatalf("want only [sess_ok], got %v", ids)
+	}
+}

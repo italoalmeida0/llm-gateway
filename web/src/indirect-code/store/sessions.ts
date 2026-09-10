@@ -131,12 +131,14 @@ export function createDataLayer(opts: {
       id: r.id,
       hostId,
       cwd: r.cwd || "",
-      title: r.title || r.cwd || "",
+      title: r.title || r.cwd || "New conversation",
       model: r.model || "",
       status: r.status === "running" ? "running" : "idle",
       pinned: !!r.pinned,
-      createdAt: r.createdAt ?? Date.now(),
-      updatedAt: r.updatedAt ?? Date.now(),
+      // Zero/negative timestamps are corruption, not 1970: fall back to
+      // now instead of rendering "20706d" via timeAgo.
+      createdAt: typeof r.createdAt === "number" && r.createdAt > 0 ? r.createdAt : Date.now(),
+      updatedAt: typeof r.updatedAt === "number" && r.updatedAt > 0 ? r.updatedAt : Date.now(),
       messageCount:
         typeof r.messageCount === "number"
           ? r.messageCount

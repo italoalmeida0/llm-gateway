@@ -2,6 +2,8 @@ import type { ChatMessage } from "../types";
 import { REASONING_LABELS } from "../constants";
 
 export function timeAgo(ts: number) {
+  // Zero/missing timestamps used to render as "20706d" (epoch vs now).
+  if (!Number.isFinite(ts) || ts <= 0) return "—";
   const d = Date.now() - ts;
   const m = Math.floor(d / 60000);
   if (m < 1) return "now";

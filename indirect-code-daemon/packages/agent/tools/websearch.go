@@ -158,7 +158,7 @@ func (t *SearchWebTool) queryDDG(ctx context.Context, query string, count, offse
 		if offset > 0 {
 			lite.Set("s", fmt.Sprintf("%d", offset))
 		}
-		body, err = t.getHTML(ctx, "https://lite.duckgo.com/lite/?"+lite.Encode())
+		body, err = t.getHTML(ctx, "https://lite.duckduckgo.com/lite/?"+lite.Encode())
 		if err != nil {
 			return nil, fmt.Errorf("search_web: duckduckgo request failed: %v", err)
 		}

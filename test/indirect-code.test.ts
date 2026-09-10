@@ -290,7 +290,7 @@ describe("Indirect Code Relay and Pairing", () => {
     const hostsJson = (await hostListRes.json()) as any;
     expect(hostsJson.hosts[0].status).toBe("online");
 
-    // 3. Client sends a command for Daemon: list_sessions
+    // 3. Client sends a command for Daemon: pull (SignalDB sync)
     const daemonReceivedPromise = new Promise<any>((resolve) => {
       daemonWs.onmessage = (ev) => {
         resolve(JSON.parse(String(ev.data)));
@@ -299,28 +299,31 @@ describe("Indirect Code Relay and Pairing", () => {
 
     clientWs.send(
       JSON.stringify({
-        type: "list_sessions",
+        type: "pull",
+        id: 7,
+        collection: "sessions",
         hostId,
       }),
     );
 
     const daemonReceived = await daemonReceivedPromise;
-    expect(daemonReceived.type).toBe("list_sessions");
+    expect(daemonReceived.type).toBe("pull");
     expect(daemonReceived.hostId).toBe(hostId);
 
-    // 4. Daemon replies with session_list
+    // 4. Daemon replies with a pull-response correlated by id
     const clientReceivedPromise = new Promise<any>((resolve) => {
       clientWs.onmessage = (ev) => {
         const msg = JSON.parse(String(ev.data));
-        if (msg.type === "session_list") resolve(msg);
+        if (msg.id === 7) resolve(msg);
       };
     });
 
     daemonWs.send(
       JSON.stringify({
-        type: "session_list",
+        id: 7,
         hostId,
-        sessions: [
+        collection: "sessions",
+        items: [
           {
             id: "sess_test_1",
             cwd: "/home/user/project",
@@ -334,9 +337,9 @@ describe("Indirect Code Relay and Pairing", () => {
     );
 
     const clientReceived = await clientReceivedPromise;
-    expect(clientReceived.type).toBe("session_list");
-    expect(clientReceived.sessions.length).toBe(1);
-    expect(clientReceived.sessions[0].id).toBe("sess_test_1");
+    expect(clientReceived.id).toBe(7);
+    expect(clientReceived.items.length).toBe(1);
+    expect(clientReceived.items[0].id).toBe("sess_test_1");
 
     daemonWs.close();
     clientWs.close();
@@ -416,25 +419,27 @@ describe("Indirect Code Relay and Pairing", () => {
       expect(createdMsg.session.title).toBe("Real Go Session");
       expect(createdMsg.session.cwd).toBe(workDir);
 
-      // List sessions via WebSocket
+      // List sessions via WebSocket (SignalDB pull)
       const listPromise = new Promise<any>((resolve) => {
         clientWs.onmessage = (ev) => {
           const msg = JSON.parse(String(ev.data));
-          if (msg.type === "sessions_list") resolve(msg);
+          if (msg.type === "pull-response" && msg.id === 11) resolve(msg);
         };
       });
 
       clientWs.send(
         JSON.stringify({
           hostId: realHostId,
-          type: "list_sessions",
+          type: "pull",
+          id: 11,
+          collection: "sessions",
         }),
       );
 
       const listMsg = await listPromise;
-      expect(listMsg.type).toBe("sessions_list");
-      expect(listMsg.sessions.length).toBeGreaterThanOrEqual(1);
-      expect(listMsg.sessions.some((s: any) => s.id === createdMsg.session.id)).toBe(true);
+      expect(listMsg.type).toBe("pull-response");
+      expect(listMsg.items.length).toBeGreaterThanOrEqual(1);
+      expect(listMsg.items.some((s: any) => s.id === createdMsg.session.id)).toBe(true);
 
       // Clean up host
       clientWs.close();
@@ -552,9 +557,9 @@ describe("Indirect Code Relay and Pairing", () => {
       // Seed a transcript via slash-free edit path: use /help to create messages
       send({ type: "prompt", sessionId: sid, text: "/help", model: "gpt-4o" });
       await waitFor((m) => m.type === "session_content" && m.sessionId === sid);
-      send({ type: "list_sessions" });
-      const listed = await waitFor((m) => m.type === "sessions_list");
-      expect(listed.sessions.some((s: any) => s.id === sid && s.pinned === true)).toBe(true);
+      send({ type: "pull", id: 5555, collection: "sessions" });
+      const listed = await waitFor((m) => m.type === "pull-response" && m.id === 5555);
+      expect(listed.items.some((s: any) => s.id === sid && s.pinned === true)).toBe(true);
 
       // Forks are daemon-owned independent prefixes, with an action ack and a
       // normal mirrored listing; both user and assistant boundaries are valid.
@@ -624,15 +629,15 @@ describe("Indirect Code Relay and Pairing", () => {
       const pullProjects = await waitFor((m) => m.type === "pull-response" && m.collection === "projects" && m.id === 4646);
       expect(pullProjects.items.some((p: any) => p.id === projCreated.project.id)).toBe(true);
 
-      // Reasoning effort levels are canonicalized on write
-      send({ type: "set_reasoning", effort: "xhigh" });
+      // Reasoning effort levels are canonicalized on write (via configure_session)
+      send({ type: "configure_session", sessionId: sid, model: "gpt-4o", options: { effort: "xhigh", mode: "build", skills: [], access: "ask" } });
       send({ type: "pull", id: 4747, collection: "config" });
       const pullReason = await waitFor((m) => m.type === "pull-response" && m.collection === "config" && m.id === 4747);
-      expect(pullReason.items[0].settings.reasoning).toBe("xhigh");
-      send({ type: "set_reasoning", effort: "off" });
+      expect(pullReason.items[0].lastSelection.effort).toBe("xhigh");
+      send({ type: "configure_session", sessionId: sid, model: "gpt-4o", options: { effort: "off", mode: "build", skills: [], access: "ask" } });
       send({ type: "pull", id: 4848, collection: "config" });
       const pullReasonOff = await waitFor((m) => m.type === "pull-response" && m.collection === "config" && m.id === 4848);
-      expect(pullReasonOff.items[0].settings.reasoning).toBe("none");
+      expect(pullReasonOff.items[0].lastSelection.effort).toBe("none");
 
       // Protected Home project: cannot be deleted, neither directly nor by
       // path-cycling (create with "~" re-acks the same entry)
@@ -670,9 +675,9 @@ describe("Indirect Code Relay and Pairing", () => {
       }
       expect(hasCascade()).toBe(true);
 
-      send({ type: "list_sessions" });
-      const afterCascade = await waitFor((m) => m.type === "sessions_list");
-      expect(afterCascade.sessions.length).toBe(0);
+      send({ type: "pull", id: 5959, collection: "sessions" });
+      const afterCascade = await waitFor((m) => m.type === "pull-response" && m.id === 5959);
+      expect(afterCascade.items.length).toBe(0);
       // No trace left on the daemon's disk: record file AND attachment folders
       const sessDir = path.join(daemonData, "sessions");
       expect(existsSync(path.join(sessDir, `${sid}.json`))).toBe(false);

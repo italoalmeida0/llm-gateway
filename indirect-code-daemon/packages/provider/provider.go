@@ -147,20 +147,6 @@ type Tool struct {
 	Deferred bool `json:"deferred,omitempty"`
 }
 
-// activeToolDefinitions returns eager tools plus deferred tools activated by
-// prior tool results. Providers with a native position-sensitive deferred-tool
-// format can use the activation markers directly instead.
-func activeToolDefinitions(tools []Tool, messages []Message) []Tool {
-	activated := activatedToolNames(messages)
-	active := make([]Tool, 0, len(tools))
-	for _, tool := range tools {
-		if !tool.Deferred || activated[tool.Name] {
-			active = append(active, tool)
-		}
-	}
-	return active
-}
-
 func activatedToolNames(messages []Message) map[string]bool {
 	activated := make(map[string]bool)
 	for _, message := range messages {

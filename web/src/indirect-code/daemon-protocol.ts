@@ -30,7 +30,6 @@ export interface SessionChoice {
 
 export type DaemonCommand = CommandBase &
   (
-    | { type: "ping"; ts: number }
   | { type: "get_session"; sessionId: string; requestId?: string }
   | { type: "pull"; collection: string }
   | { type: "configure_session"; sessionId: string; model: string; options: Omit<SessionChoice, "model"> }

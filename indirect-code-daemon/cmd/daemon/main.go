@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -1053,18 +1052,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		d.configMu.Unlock()
 		d.gracefulShutdown("[REMOTE] Host removed from gateway, shutting down.")
 		return
-	case "list_sessions":
-		summaries := d.listSessions()
-		items := make([]map[string]any, 0, len(summaries))
-		for _, s := range summaries {
-			items = append(items, sessionListItem(s))
-		}
-		_ = d.sendWS(map[string]any{
-			"type":     "sessions_list",
-			"hostId":   d.config.HostID,
-			"sessions": items,
-		})
-
 	case "get_turn_changes":
 		d.handleGetTurnChanges(raw)
 	case "undo_turn_changes":
@@ -1142,18 +1129,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"hostId":    d.config.HostID,
 			"sessionId": sid,
 			"title":     title,
-		})
-
-	case "list_projects":
-		list := d.loadProjects()
-		items := make([]map[string]any, 0, len(list))
-		for _, p := range list {
-			items = append(items, projectPayload(p))
-		}
-		_ = d.sendWS(map[string]any{
-			"type":     "projects_list",
-			"hostId":   d.config.HostID,
-			"projects": items,
 		})
 
 	case "pull":
@@ -1965,190 +1940,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			act.mu.Unlock()
 		}
 
-	case "list_dir":
-		var req struct {
-			RequestID string `json:"requestId"`
-			Path      string `json:"path"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		targetPath := resolvePath(req.Path)
-
-		type DirEntry struct {
-			Name      string `json:"name"`
-			IsDir     bool   `json:"isDir"`
-			Path      string `json:"path"`
-			SizeBytes int64  `json:"sizeBytes,omitempty"`
-		}
-
-		var entries []DirEntry
-		files, err := os.ReadDir(targetPath)
-		if err == nil {
-			for _, f := range files {
-				if strings.HasPrefix(f.Name(), ".") && f.Name() != ".env" && f.Name() != ".gitignore" {
-					continue
-				}
-				info, _ := f.Info()
-				size := int64(0)
-				if info != nil {
-					size = info.Size()
-				}
-				entries = append(entries, DirEntry{
-					Name:      f.Name(),
-					IsDir:     f.IsDir(),
-					Path:      filepath.Join(targetPath, f.Name()),
-					SizeBytes: size,
-				})
-			}
-		}
-
-		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].IsDir != entries[j].IsDir {
-				return entries[i].IsDir
-			}
-			return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
-		})
-
-		_ = d.sendWS(map[string]any{
-			"type":      "dir_list",
-			"hostId":    d.config.HostID,
-			"requestId": req.RequestID,
-			"path":      targetPath,
-			"entries":   entries,
-		})
-
-	case "read_file":
-		var req struct {
-			RequestID string `json:"requestId"`
-			Path      string `json:"path"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		targetPath := resolvePath(req.Path)
-		content, err := os.ReadFile(targetPath)
-		errMsg := ""
-		if err != nil {
-			errMsg = err.Error()
-		}
-		_ = d.sendWS(map[string]any{
-			"type":      "file_content",
-			"hostId":    d.config.HostID,
-			"requestId": req.RequestID,
-			"path":      targetPath,
-			"content":   string(content),
-			"error":     errMsg,
-		})
-
-	case "write_file":
-		var req struct {
-			RequestID string `json:"requestId"`
-			Path      string `json:"path"`
-			Content   string `json:"content"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		targetPath := resolvePath(req.Path)
-		_ = os.MkdirAll(filepath.Dir(targetPath), 0o755)
-		err := os.WriteFile(targetPath, []byte(req.Content), 0o644)
-		errMsg := ""
-		if err != nil {
-			errMsg = err.Error()
-		}
-		_ = d.sendWS(map[string]any{
-			"type":      "file_saved",
-			"hostId":    d.config.HostID,
-			"requestId": req.RequestID,
-			"path":      targetPath,
-			"error":     errMsg,
-		})
-
-	case "exec_command":
-		var req struct {
-			RequestID string `json:"requestId"`
-			Command   string `json:"command"`
-			CWD       string `json:"cwd"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		cwd := resolvePath(req.CWD)
-		cmd := exec.Command("bash", "-c", req.Command)
-		cmd.Dir = cwd
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		exitCode := 0
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				exitCode = 1
-			}
-		}
-		_ = d.sendWS(map[string]any{
-			"type":      "command_result",
-			"hostId":    d.config.HostID,
-			"requestId": req.RequestID,
-			"stdout":    stdout.String(),
-			"stderr":    stderr.String(),
-			"exitCode":  exitCode,
-		})
-
-	case "git_status":
-		var req struct {
-			RequestID string `json:"requestId"`
-			CWD       string `json:"cwd"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		cwd := resolvePath(req.CWD)
-		branchCmd := exec.Command("git", "branch", "--show-current")
-		branchCmd.Dir = cwd
-		branchOut, _ := branchCmd.Output()
-		branch := strings.TrimSpace(string(branchOut))
-
-		statusCmd := exec.Command("git", "status", "--porcelain")
-		statusCmd.Dir = cwd
-		statusOut, _ := statusCmd.Output()
-
-		type GitFile struct {
-			Status string `json:"status"`
-			Path   string `json:"path"`
-		}
-		var gitFiles []GitFile
-		for _, line := range strings.Split(string(statusOut), "\n") {
-			line = strings.TrimRight(line, "\r")
-			if len(line) < 4 {
-				continue
-			}
-			statusCode := strings.TrimSpace(line[:2])
-			filename := strings.TrimSpace(line[3:])
-			gitFiles = append(gitFiles, GitFile{
-				Status: statusCode,
-				Path:   filename,
-			})
-		}
-
-		_ = d.sendWS(map[string]any{
-			"type":      "git_status_result",
-			"hostId":    d.config.HostID,
-			"requestId": req.RequestID,
-			"branch":    branch,
-			"files":     gitFiles,
-		})
-
-	case "get_config":
-		var req struct {
-			RequestID string `json:"requestId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		_ = d.sendWS(map[string]any{
-			"type":          "config_data",
-			"hostId":        d.config.HostID,
-			"requestId":     req.RequestID,
-			"settings":      d.config.Settings,
-			"lastSelection": d.config.LastSelection,
-			"mcpServers":    d.config.MCPServers,
-			"skills":        d.config.Skills,
-			"name":          d.config.Name,
-			"gatewayUrl":    d.config.GatewayURL,
-		})
-
 	case "update_config":
 		var req struct {
 			RequestID  string                     `json:"requestId"`
@@ -2176,61 +1967,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"mcpServers":    d.config.MCPServers,
 			"skills":        d.config.Skills,
 		})
-
-	case "compact_session":
-		var req struct {
-			SessionID string `json:"sessionId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		d.handleSlashCommand(req.SessionID, "/compact")
-
-	case "clear_session":
-		var req struct {
-			SessionID string `json:"sessionId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		d.handleSlashCommand(req.SessionID, "/clear")
-
-	case "set_model":
-		var req struct {
-			SessionID string `json:"sessionId"`
-			Model     string `json:"model"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		if req.SessionID == "" || strings.TrimSpace(req.Model) == "" {
-			return
-		}
-		rec, err := d.loadSession(req.SessionID)
-		if err != nil {
-			return
-		}
-		rec.Model = strings.TrimSpace(req.Model)
-		rec.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(rec)
-		d.sessionsMu.RLock()
-		if act, ok := d.sessions[req.SessionID]; ok {
-			act.mu.Lock()
-			act.record.Model = rec.Model
-			act.record.UpdatedAt = rec.UpdatedAt
-			act.mu.Unlock()
-		}
-		d.sessionsMu.RUnlock()
-		_ = d.sendWS(map[string]any{
-			"type":      "session_model",
-			"hostId":    d.config.HostID,
-			"sessionId": rec.ID,
-			"model":     rec.Model,
-		})
-
-	case "set_reasoning":
-		var req struct {
-			Effort string `json:"effort"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		if lvl := canonicalReasoning(strings.TrimSpace(req.Effort)); lvl != "" {
-			d.config.Settings.Reasoning = lvl
-			_ = d.saveConfig()
-		}
 
 	case "prompt":
 		var req struct {
@@ -2312,7 +2048,6 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 		return
 	}
 	head := strings.ToLower(parts[0])
-	arg := strings.TrimSpace(strings.TrimPrefix(cmdText, parts[0]))
 
 	act.mu.Lock()
 	defer act.mu.Unlock()
@@ -2369,35 +2104,6 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 		})
 		return
 
-	case "/model":
-		if arg != "" {
-			act.record.Model = arg
-			d.config.Settings.Model = arg
-			_ = d.saveConfig()
-			_ = d.saveSession(act.record)
-			reply = fmt.Sprintf("🤖 Switched model to `%s`.", arg)
-		} else {
-			cur := act.record.Model
-			if cur == "" {
-				cur = d.config.Settings.Model
-			}
-			reply = fmt.Sprintf("🤖 Current model: `%s`", cur)
-		}
-
-	case "/reasoning":
-		if arg != "" {
-			lvl := canonicalReasoning(arg)
-			if lvl == "" {
-				reply = fmt.Sprintf("🧠 Unknown effort `%s`. Use one of: none, minimum, low, medium, high, xhigh, max.", arg)
-			} else {
-				d.config.Settings.Reasoning = lvl
-				_ = d.saveConfig()
-				reply = fmt.Sprintf("🧠 Reasoning effort set to `%s`.", lvl)
-			}
-		} else {
-			reply = fmt.Sprintf("🧠 Current reasoning: `%s`", d.config.Settings.Reasoning)
-		}
-
 	case "/skills":
 		var b strings.Builder
 		b.WriteString("### 🛠️ Configured Skills & Built-in Tools\n\n")
@@ -2438,9 +2144,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 			"- `/compact` — Summarize and compact conversation to free up context\n" +
 			"- `/clear` — Start a fresh blank session (history is kept)\n" +
 			"- `/jail` — Confine agent tools strictly to session directory\n" +
-			"- `/unjail` — Allow agent tools to read/write external paths\n" +
-			"- `/model <name>` — Switch the active model\n" +
-			"- `/reasoning <none|minimum|low|medium|high|xhigh|max>` — Adjust reasoning effort\n\n" +
+			"- `/unjail` — Allow agent tools to read/write external paths\n\n" +
 			"*Choose model, effort and skills in the composer. Manage custom skills and MCP servers in Settings.*"
 
 	default:

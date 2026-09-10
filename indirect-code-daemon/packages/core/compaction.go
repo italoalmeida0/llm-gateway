@@ -68,12 +68,6 @@ func summaryMessageText(summary string) string {
 	return "## Context Summary (compacted)\n\n" + summary
 }
 
-// isCompactionSynthetic reports whether m is a synthetic compaction
-// summary message produced by projection.
-func isCompactionSynthetic(m provider.Message) bool {
-	return m.Meta != nil && m.Meta["compaction"] == "true"
-}
-
 // projectionAnchor resolves a chain head against a history length to the
 // effective projection layout: whether a synthetic summary precedes the
 // kept tail and where the kept tail starts in the history.
@@ -224,15 +218,6 @@ func ShouldCompact(window int, usageTotal, trailingEstimate int) bool {
 		return false
 	}
 	return usageTotal+trailingEstimate > window-CompactionReserveTokens
-}
-
-// NeedsCompaction is the convenience wrapper over the live transcript: it
-// combines the cumulative usage with the trailing estimate.
-func NeedsCompaction(window int, msgs []provider.Message, usage provider.Usage) bool {
-	if window <= 0 || len(msgs) < CompactionMinMessages {
-		return false
-	}
-	return ShouldCompact(window, UsageTotal(usage), TrailingTokens(msgs, usage))
 }
 
 // SerializeConversation renders messages into a <conversation> XML-ish

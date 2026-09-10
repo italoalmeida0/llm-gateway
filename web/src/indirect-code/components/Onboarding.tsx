@@ -36,7 +36,7 @@ export function Onboarding() {
       fallback={
         <div class="pt-2">
           <button
-            onClick={m.generatePairingToken}
+            onClick={() => m.generatePairingToken({ silent: true })}
             disabled={m.pairingLoading()}
             class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-sm transition-all shadow-lg shadow-brand-500/20 hover:shadow-brand-500/30 cursor-pointer disabled:opacity-50"
           >
@@ -128,7 +128,7 @@ export function Onboarding() {
             Check Connection
           </button>
           <button
-            onClick={m.generatePairingToken}
+            onClick={() => m.generatePairingToken({ silent: true })}
             class="px-3.5 py-1.5 rounded-lg bg-ink-800 hover:bg-ink-700 text-ink-200 transition-colors cursor-pointer"
           >
             Regenerate Token

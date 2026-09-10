@@ -39,12 +39,15 @@ export function createModals(opts: { toast: (message: string, kind?: "ok" | "err
   const [pairingData, setPairingData] = createSignal<RemotePairDto | null>(null);
   const [pairingLoading, setPairingLoading] = createSignal(false);
 
-  async function generatePairingToken() {
+  async function generatePairingToken(call?: { silent?: boolean }) {
     setPairingLoading(true);
     try {
       const res = await api<RemotePairDto>("POST", "/api/indirect-code/pair");
       setPairingData(res);
-      setShowPairModal(true);
+      // Silent (zero-host onboarding card): the card already shows the same
+      // commands, so popping the modal on top would duplicate them. The
+      // modal is reserved for explicit "+ connect another host" clicks.
+      if (!call?.silent) setShowPairModal(true);
     } catch (err: any) {
       opts.toast("Pairing request failed: " + (err?.message || err), "err");
     } finally {

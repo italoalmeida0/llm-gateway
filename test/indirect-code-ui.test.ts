@@ -643,3 +643,31 @@ describe("collapseCwd", () => {
     expect(collapseCwd("ls /", "/")).toBe("ls /");
   });
 });
+
+describe("pairing modal visibility", () => {
+  test("silent token generation fills the card without popping the modal", async () => {
+    const store = new Map<string, string>();
+    (globalThis as any).localStorage ??= {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => void store.set(k, String(v)),
+      removeItem: (k: string) => void store.delete(k),
+    };
+    const { createModals } = await import("../web/src/indirect-code/hooks/useModals");
+    const realFetch = globalThis.fetch;
+    (globalThis as any).fetch = async () =>
+      new Response(JSON.stringify({ connectUrl: "http://x/pair/abc" }), { status: 200 });
+    try {
+      const toasts: string[] = [];
+      const modals = createModals({ toast: (m) => void toasts.push(m) });
+      await modals.generatePairingToken({ silent: true });
+      expect(modals.pairingData()).toMatchObject({ connectUrl: "http://x/pair/abc" });
+      expect(modals.showPairModal()).toBe(false);
+
+      await modals.generatePairingToken();
+      expect(modals.showPairModal()).toBe(true);
+      expect(toasts).toEqual([]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});

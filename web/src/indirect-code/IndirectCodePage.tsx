@@ -661,7 +661,7 @@ export default function IndirectCodePage() {
   // Mount logic
   onMount(() => {
     void Promise.allSettled([loadGatewayModels(), hosts.loadHosts()]).then(() => {
-      if (!relay.isDisposed() && hosts.hosts().length === 0) modals.generatePairingToken();
+      if (!relay.isDisposed() && hosts.hosts().length === 0) modals.generatePairingToken({ silent: true });
     });
     // Sidebar starts closed on mobile (chatbot useMobile).
     if (isMobile()) setSidebarOpen(false);

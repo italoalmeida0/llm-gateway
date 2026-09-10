@@ -51,10 +51,20 @@ func newDMP() *diffmatchpatch.DiffMatchPatch {
 
 // UnifiedDiff renders a unified-style -/+ diff with 3 lines of context,
 // using sergi/go-diff for the underlying diff computation.
+//
+// The diff runs in LINE mode (DiffLinesToChars): a mid-line edit renders
+// as a full old-line del row plus a full new-line add row, like git.
+// Char mode would instead split the changed line into fragment rows
+// ("+ word,") that look like independent lines and corrupt hunk headers.
 func UnifiedDiff(path, before, after string) (diff string, additions, deletions int) {
 	dmp := newDMP()
-	diffs := dmp.DiffMain(before, after, false)
-	dmp.DiffCleanupSemantic(diffs)
+	chars1, chars2, lineArray := dmp.DiffLinesToChars(before, after)
+	diffs := dmp.DiffMain(chars1, chars2, false)
+	// No DiffCleanupSemantic here: in line mode every line is a single
+	// encoded char, so the semantic pass mistakes real common lines for
+	// "trivial equalities" and merges them into the edit. DiffMain on
+	// line symbols is already exact.
+	diffs = dmp.DiffCharsToLines(diffs, lineArray)
 	return unifiedFromDiffs(path, diffs)
 }
 

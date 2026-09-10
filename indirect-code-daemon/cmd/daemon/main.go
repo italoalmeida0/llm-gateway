@@ -1460,6 +1460,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		if msg.Role != provider.RoleUser {
 			return
 		}
+		req.Text = core.SanitizeUserText(req.Text)
 		replaced := false
 		for i, c := range msg.Content {
 			if tb, ok := c.(provider.TextBlock); ok {
@@ -2175,7 +2176,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 	slashTurn := act.record.TurnSeq
 	userMsg := provider.Message{
 		Role:      provider.RoleUser,
-		Content:   []provider.Content{provider.TextBlock{Text: cmdText}},
+		Content:   []provider.Content{provider.TextBlock{Text: core.SanitizeUserText(cmdText)}},
 		TurnIndex: slashTurn,
 	}
 	asstMsg := provider.Message{
@@ -2290,6 +2291,9 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 }
 
 func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string) {
+	// A user message identical to the synthetic continue nudge must stay
+	// visible: strip the brackets so it no longer matches the hidden form.
+	promptText = core.SanitizeUserText(promptText)
 	d.configMu.RLock()
 	cfg := *d.config
 	d.configMu.RUnlock()

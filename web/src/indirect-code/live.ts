@@ -29,6 +29,20 @@ export function displayToolArgs(raw?: string): Record<string, any> {
   if (values.oldText !== undefined || values.newText !== undefined) values.edits = [{oldText:values.oldText || "", newText:values.newText || ""}];
   return values;
 }
+/** Synthetic daemon nudge re-prompting the model after an empty terminal
+ * response. Transcript-real (it is sent to the provider) but never shown
+ * as a user bubble. Must match core.ContinueNudgeText in the daemon. */
+export const CONTINUE_NUDGE_TEXT = "[You should continue what you are doing.]";
+export function withoutContinueNudges(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((m) => {
+    if (m.role !== "user") return true;
+    const text = m.blocks
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("");
+    return text.trim() !== CONTINUE_NUDGE_TEXT;
+  });
+}
 /** Keep canonical messages untouched; the checklist has its own live panel. */
 export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
   const ids = new Set(messages.flatMap((m) => m.blocks.filter((b) => b.type === "tool_call" && b.toolName === "todo").map((b) => b.toolId)));

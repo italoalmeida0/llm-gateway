@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
+	"time"
 
+	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 	"llm-gateway/indirect-code-daemon/packages/core"
 )
 
@@ -157,6 +160,8 @@ func sessionSystemPrompt(cfg DaemonConfig, cwd string, options SessionOptions) s
 	var prompt strings.Builder
 	prompt.WriteString("You are an expert autonomous AI software engineering agent running directly on the user's machine.\n")
 	fmt.Fprintf(&prompt, "Working Directory: %s\n", cwd)
+	fmt.Fprintf(&prompt, "Current date and time: %s\n", time.Now().Format("Monday, 2006-01-02 15:04:05 MST"))
+	fmt.Fprintf(&prompt, "OS: %s/%s, Shell: %s\n", runtime.GOOS, runtime.GOARCH, tools.ShellDescription())
 	prompt.WriteString(modeInstructions(options.Mode) + "\n")
 	prompt.WriteString("File tools (read, write, edit) prefix lines with \"<number>:\" for line identification. This prefix is NOT part of the file content. When using edit, never include \"<number>:\" in oldText or newText.\n")
 	prompt.WriteString("Use the todo tool to maintain a visible checklist for multi-step work. Update it as steps start and finish.\n")

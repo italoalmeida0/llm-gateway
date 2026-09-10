@@ -436,6 +436,14 @@ func currentShell() shellCommand {
 	return resolveShell(runtime.GOOS, isExecutableFile, exec.LookPath)
 }
 
+// ShellDescription reports the shell used to run commands (e.g.
+// "/bin/bash -c", "cmd /C"). Surfaced in the system prompt so the model
+// writes compatible commands on the first try.
+func ShellDescription() string {
+	s := currentShell()
+	return s.path + " " + s.flag
+}
+
 func resolveShell(goos string, executable func(string) bool, lookPath func(string) (string, error)) shellCommand {
 	if goos == "windows" {
 		return shellCommand{path: "cmd", flag: "/C"}

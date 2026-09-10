@@ -30,6 +30,7 @@ func (d *DaemonServer) forkSession(raw []byte) {
 	if json.Unmarshal(raw, &req) != nil {
 		return
 	}
+	req.EditText = core.SanitizeUserText(req.EditText)
 	fail := func(err error) {
 		_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "requestId": req.RequestID, "message": err.Error()})
 	}

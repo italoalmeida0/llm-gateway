@@ -5,11 +5,38 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
+
+// ContinueNudgeText is the synthetic user message the agent loop appends
+// when the model returns a terminal stop with no visible text and no tool
+// calls (typically a thinking-only early stop): instead of ending the
+// turn, the loop nudges the model to continue. Frontends hide user
+// messages whose trimmed text equals this (same idea as TODO activity,
+// which is also transcript-real but display-hidden). Keep the frontend
+// CONTINUE_NUDGE_TEXT constant in sync.
+const ContinueNudgeText = "[You should continue what you are doing.]"
+
+// maxContinueNudges caps consecutive empty-response nudges per turn so a
+// model stuck returning nothing cannot burn requests forever; the turn
+// then ends normally.
+const maxContinueNudges = 3
+
+// SanitizeUserText keeps a user-authored message distinguishable from the
+// synthetic continue nudge: when the trimmed text equals ContinueNudgeText
+// the surrounding brackets are stripped, so the frontend's nudge filter
+// (exact match on the bracketed form) never hides a real user message.
+func SanitizeUserText(s string) string {
+	t := strings.TrimSpace(s)
+	if t == ContinueNudgeText {
+		return t[1 : len(t)-1]
+	}
+	return s
+}
 
 // Agent is a stateful conversation bound to a provider client, a model,
 // and a set of tools.
@@ -349,6 +376,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 	// for more work or the context is cancelled. Provider errors
 	// retry forever on the backoff schedule — only AI conclusion or
 	// user cancel (context cancellation) ends a turn.
+	nudges := 0
 	for step := 1; ; step++ {
 		// Preparation is cached across steps and user messages. Only an
 		// explicit prompt/model/session change invokes BeforeStart again.
@@ -417,6 +445,9 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		}
 
 		if stop == provider.StopToolUse {
+			// Real progress: the model asked for more work, so the
+			// empty-response nudge budget renews from here.
+			nudges = 0
 			// Execute each client tool call, append a single tool-results message, continue.
 			toolMsg, hadError := a.executeTools(ctx, assistantMsg, sink)
 			if len(toolMsg.Content) == 0 {
@@ -441,7 +472,29 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			continue
 		}
 
-		// Terminal stop (end, length, error, aborted).
+		// Terminal stop (end, length, error, aborted). An empty terminal
+		// response — no tool calls and no visible text after trim,
+		// typically a thinking-only early stop — does NOT end the turn:
+		// append a hidden user nudge and ask the model again, so the
+		// turn only completes on real output. Capped per turn; cancelled
+		// and aborted turns still end immediately.
+		if ctx.Err() == nil && stop != provider.StopAborted &&
+			strings.TrimSpace(extractText(assistantMsg)) == "" && nudges < maxContinueNudges {
+			nudges++
+			nudge := provider.Message{
+				Role:    provider.RoleUser,
+				Content: []provider.Content{provider.TextBlock{Text: ContinueNudgeText}},
+				Time:    time.Now(),
+			}
+			a.stampTurn(&nudge)
+			a.mu.Lock()
+			a.messages = append(a.messages, nudge)
+			a.rev++
+			a.mu.Unlock()
+			a.fireMessageAppended(nudge)
+			sink(EvUserMessage{Message: nudge})
+			continue
+		}
 		sink(EvDone{})
 		return nil
 	}

@@ -137,6 +137,27 @@ func TestReversePatchRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUnifiedDiffSingleLineChangeIsLineOriented(t *testing.T) {
+	before := "import { displayToolArgs, withoutTodoActivity } from \"./live\";\n"
+	after := "import { displayToolArgs, withoutContinueNudges, withoutTodoActivity } from \"./live\";\n"
+	diff, adds, dels := UnifiedDiff("transcript.ts", before, after)
+	if adds != 1 || dels != 1 {
+		t.Fatalf("adds=%d dels=%d, want 1/1:\n%s", adds, dels, diff)
+	}
+	if !strings.Contains(diff, "-"+strings.TrimSuffix(before, "\n")+"\n") {
+		t.Fatalf("missing full old line as del row:\n%s", diff)
+	}
+	if !strings.Contains(diff, "+"+strings.TrimSuffix(after, "\n")+"\n") {
+		t.Fatalf("missing full new line as add row:\n%s", diff)
+	}
+	if strings.Contains(diff, "+ withoutContinueNudges,\n") {
+		t.Fatalf("mid-line fragment rendered as its own row:\n%s", diff)
+	}
+	if !strings.Contains(diff, "@@ -1,1 +1,1 @@") {
+		t.Fatalf("wrong hunk header for a single-line change:\n%s", diff)
+	}
+}
+
 func TestUnifiedDiffCounts(t *testing.T) {
 	diff, adds, dels := UnifiedDiff("f.txt", "a\nb\nc\n", "a\nB\nc\nd\n")
 	if adds != 2 || dels != 1 {

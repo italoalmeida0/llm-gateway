@@ -1,5 +1,5 @@
 import type { ChatMessage, RenderBlock, ToolUnit, TurnBalloon } from "./types";
-import { displayToolArgs, withoutTodoActivity } from "./live";
+import { displayToolArgs, withoutContinueNudges, withoutTodoActivity } from "./live";
 
 export function hasVisibleText(message: ChatMessage): boolean {
   return message.blocks.some((b) => b.type === "text" && !!b.text?.trim());
@@ -18,7 +18,7 @@ export function buildRenderBlocks(
   messages: ChatMessage[],
   options?: { hideToolMessages?: boolean },
 ): RenderBlock[] {
-  const list = withoutTodoActivity(messages);
+  const list = withoutContinueNudges(withoutTodoActivity(messages));
   const result: RenderBlock[] = [];
   const hideTools = !!options?.hideToolMessages;
 

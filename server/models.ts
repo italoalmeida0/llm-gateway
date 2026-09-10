@@ -583,7 +583,7 @@ export interface RouteCandidate {
 /** Capability match for a candidate, including bridge translation: an
  *  Anthropic request may use an OpenAI-only provider (translated); the
  *  reverse is never translated. */
-function candidateUsable(provider: RoutedProvider, proto: "openai" | "anthropic"): "direct" | "translated" | null {
+export function candidateUsable(provider: RoutedProvider, proto: "openai" | "anthropic"): "direct" | "translated" | null {
   if (providerHasCapability(provider.row, proto)) return "direct";
   if (proto === "anthropic" && provider.row.openai_base_url) return "translated";
   return null;

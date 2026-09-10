@@ -98,6 +98,7 @@ export function anthropicToOpenAI(body: Record<string, unknown>): Record<string,
     if (m.role === "assistant") {
       flushUser();
       let text = "";
+      let googleThoughtSignature = "";
       const toolCalls: Record<string, unknown>[] = [];
       for (const b of asArr(m.content)) {
         const block = asRecord(b);
@@ -113,17 +114,23 @@ export function anthropicToOpenAI(body: Record<string, unknown>): Record<string,
               arguments: JSON.stringify(block.input ?? {}),
             },
           });
+        } else if (block.type === "redacted_thinking" && typeof block.data === "string" && block.data) {
+          // Replay Google Gemini thought_signature when available
+          googleThoughtSignature = block.data;
         }
-        // thinking/redacted_thinking blocks have no OpenAI equivalent and the
-        // upstream would reject unknown block types — dropped. Consequence:
-        // on translated paths the encrypted-thinking chain restarts every
-        // turn; native Anthropic paths pass it through untouched.
       }
       if (typeof m.content === "string") text = m.content;
       const msg: Record<string, unknown> = { role: "assistant" };
       if (text) msg.content = text;
       if (toolCalls.length) msg.tool_calls = toolCalls;
-      if (text || toolCalls.length) messages.push(msg);
+      if (googleThoughtSignature) {
+        msg.extra_content = {
+          google: {
+            thought_signature: googleThoughtSignature,
+          },
+        };
+      }
+      if (text || toolCalls.length || googleThoughtSignature) messages.push(msg);
     } else {
       // user role (tool_result blocks arrive nested here)
       if (typeof m.content === "string") {
@@ -176,6 +183,11 @@ export function anthropicToOpenAI(body: Record<string, unknown>): Record<string,
   if (typeof body.max_tokens === "number") out.max_tokens = body.max_tokens;
   if (typeof body.temperature === "number") out.temperature = body.temperature;
   if (typeof body.top_p === "number") out.top_p = body.top_p;
+  if (typeof body.reasoning_effort === "string") {
+    out.reasoning_effort = body.reasoning_effort;
+  } else if (asRecord(body.thinking).type === "enabled") {
+    out.reasoning_effort = "high";
+  }
   const stop = asArr(body.stop_sequences).filter((s): s is string => typeof s === "string");
   if (stop.length) out.stop = stop;
   if (out.stream === true) out.stream_options = { include_usage: true };
@@ -223,6 +235,10 @@ export function openAIToAnthropicBody(openaiText: string, fallbackModel: string)
   const first = asRecord(choices[0]);
   const message = asRecord(first.message);
   const content: Record<string, unknown>[] = [];
+  const googleSig = asRecord(asRecord(message.extra_content).google).thought_signature;
+  if (typeof googleSig === "string" && googleSig) {
+    content.push({ type: "redacted_thinking", data: googleSig });
+  }
   if (typeof message.content === "string" && message.content) {
     content.push({ type: "text", text: message.content });
   }
@@ -274,7 +290,8 @@ export function translatedUsageFromOpenAI(openaiText: string): TranslatedUsage {
 export function openAIErrorToAnthropic(status: number, bodyText: string): string {
   let message = bodyText.slice(0, 2000);
   try {
-    const j = asRecord(JSON.parse(bodyText));
+    const parsed = JSON.parse(bodyText);
+    const j = asRecord(Array.isArray(parsed) ? parsed[0] : parsed);
     const err = asRecord(j.error);
     if (typeof err.message === "string" && err.message) message = err.message;
     else if (typeof j.message === "string" && j.message) message = j.message;
@@ -310,7 +327,8 @@ export class OpenAIToAnthropicStream {
   private headerSent = false;
   private textOpen = false;
   private textIndex = 0;
-  private nextIndex = 1;
+  private nextIndex = 0;
+  private thoughtSigSent = false;
   private tools = new Map<number, { index: number; id: string; name: string; announced: boolean }>();
   private model = "";
   private upstreamId = "";
@@ -323,6 +341,10 @@ export class OpenAIToAnthropicStream {
   private outChars = 0;
 
   constructor(private fallbackModel: string) {}
+
+  get isDone(): boolean {
+    return this.done;
+  }
 
   feed(chunk: Uint8Array): Uint8Array[] {
     if (this.done) return [];
@@ -364,11 +386,6 @@ export class OpenAIToAnthropicStream {
           stop_sequence: null,
           usage: { input_tokens: 0, output_tokens: 0 },
         },
-      }),
-      sseEvent("content_block_start", {
-        type: "content_block_start",
-        index: 0,
-        content_block: { type: "text", text: "" },
       }),
     ];
   }
@@ -421,6 +438,26 @@ export class OpenAIToAnthropicStream {
     for (const ch of asArr(j.choices)) {
       const c = asRecord(ch);
       const delta = asRecord(c.delta);
+
+      const googleSig = asRecord(asRecord(delta.extra_content).google).thought_signature;
+      if (typeof googleSig === "string" && googleSig && !this.thoughtSigSent) {
+        this.thoughtSigSent = true;
+        this.closeText(out);
+        out.push(...this.header());
+        const sigIndex = this.nextIndex++;
+        out.push(
+          sseEvent("content_block_start", {
+            type: "content_block_start",
+            index: sigIndex,
+            content_block: { type: "redacted_thinking", data: googleSig },
+          }),
+          sseEvent("content_block_stop", {
+            type: "content_block_stop",
+            index: sigIndex,
+          }),
+        );
+      }
+
       const text = delta.content;
       if (typeof text === "string" && text) {
         this.ensureText(out);

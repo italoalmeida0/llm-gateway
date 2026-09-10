@@ -18,6 +18,7 @@ import {
   passthroughCandidates,
   listableModels,
   publicModelEntry,
+  candidateUsable,
   type RouterSnapshot,
   type RouteCandidate,
   type RoutedKey,
@@ -779,6 +780,18 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       candidates = passthroughCandidates(snap, proto);
     }
     if (candidates.length === 0) {
+      const hasMatchingProvider = Array.from(snap.providers.values()).some(
+        (p) => candidateUsable(p, proto) !== null,
+      );
+      if (hasMatchingProvider) {
+        return envelopeError(
+          proto,
+          503,
+          "no upstream candidate is currently available (keys cooling down or providers circuit-broken)",
+          "api_error",
+          req,
+        );
+      }
       console.error(`[PROXY] no usable upstream candidate for capability "${proto}"`);
       return envelopeError(proto, 503, "gateway is not configured for this API protocol", "api_error", req);
     }
@@ -1089,6 +1102,13 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
                 resetIdle();
                 if (translator) {
                   for (const piece of translator.feed(value)) sink.enqueue(piece);
+                  if (translator.isDone) {
+                    finalize(upstream.status);
+                    cleanup();
+                    closeSink(sink);
+                    reader.cancel().catch(() => {});
+                    return;
+                  }
                 } else {
                   meter!.feed(value); // stats only — the chunk itself goes out as-is
                   sink.enqueue(value);

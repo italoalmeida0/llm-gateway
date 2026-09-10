@@ -29,7 +29,7 @@ export type FailClass = "billing" | "auth" | "rate_limit" | "transient" | "model
 /** Quota/billing phrases seen across OpenAI, Anthropic and OpenRouter-style
  *  providers (matched against a ≤16KB error-body peek, case-insensitive). */
 const BILLING_RE =
-  /insufficient_?quota|insufficient[ _-]credits?|credit balance|out of credits|billing|payment[ _-]required|quota[ _-]exceeded|exceeded your (current )?quota|account is not active/i;
+  /insufficient_?quota|insufficient[ _-]credits?|credit balance|out of credits|out[ _-]of[ _-]budget|available balance|billing|payment[ _-]required|quota[ _-]exceeded|exceeded your (current )?quota|account is not active|(monthly[ _-])?usage[ _-]limit|(?:go|free)usagelimiterror/i;
 
 /** 404 is fail-able when it means "this provider doesn't have the model"
  *  (classic cross-provider fallback trigger), not a bad URL of ours. */
@@ -45,7 +45,10 @@ export function classifyHttpError(status: number, bodyPeek: string): FailClass |
 
   if (status === 402) return "billing";
   if (status === 401 || status === 403) return BILLING_RE.test(hint) ? "billing" : "auth";
-  if (status === 429) return BILLING_RE.test(hint) ? "billing" : "rate_limit";
+  if (status === 429) {
+    if (/retry[- ]?(?:in|after)|retrydelay|rate[- ]?limits/i.test(hint)) return "rate_limit";
+    return BILLING_RE.test(hint) ? "billing" : "rate_limit";
+  }
   if (status === 400) return BILLING_RE.test(hint) ? "billing" : null;
   if (status === 404) {
     if (BILLING_RE.test(hint)) return "billing";

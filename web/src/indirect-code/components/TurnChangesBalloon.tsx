@@ -1,6 +1,6 @@
-import { For, Show } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
-import { CodeBlock } from "./CodeBlock";
+import { DiffView } from "./CodeBlock";
 import { FileIcon } from "../presentation";
 import type { TurnBalloon, TurnChangedFile } from "../hooks/useTurnChanges";
 
@@ -28,6 +28,62 @@ function statusMeta(status: TurnChangedFile["status"]) {
     default:
       return { icon: "lucide:file-warning", label: "too large", cls: "text-ink-400" };
   }
+}
+
+/** One file row inside the balloon: collapsed header by default, click to
+ *  reveal the highlighted diff (like edit tool results). */
+function FileChangesRow(props: { f: TurnChangedFile; scrollKey: string }) {
+  const [open, setOpen] = createSignal(false);
+  const meta = statusMeta(props.f.status);
+  const hasDiff = () => Boolean(props.f.diff);
+
+  return (
+    <div class="rounded-lg border border-line/50 overflow-hidden">
+      <div
+        onClick={() => setOpen(!open())}
+        class={`flex items-center gap-2 px-2.5 py-1.5 bg-ink-900/60 transition-colors select-none ${
+          hasDiff() ? "cursor-pointer hover:bg-ink-900" : ""
+        }`}
+      >
+        <Show when={hasDiff()}>
+          <Iconify
+            icon="lucide:chevron-right"
+            size={12}
+            class={`shrink-0 text-ink-500 transition-transform ${open() ? "rotate-90" : ""}`}
+          />
+        </Show>
+        <FileIcon path={props.f.rel || props.f.path} size={13} />
+        <span class="text-[11px] font-mono text-ink-200 truncate" title={props.f.path}>
+          {props.f.rel || props.f.path}
+        </span>
+        <span class={`text-[10px] uppercase tracking-wide flex items-center gap-1 shrink-0 ${meta.cls}`}>
+          <Iconify icon={meta.icon} size={12} />
+          {meta.label}
+        </span>
+        <Show when={(props.f.additions || 0) > 0 || (props.f.deletions || 0) > 0}>
+          <span class="text-[10px] font-mono ml-auto shrink-0">
+            <span class="text-emerald-400">+{props.f.additions || 0}</span>{" "}
+            <span class="text-red-400">-{props.f.deletions || 0}</span>
+          </span>
+        </Show>
+        <Show when={props.f.undone}>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-ink-800 text-ink-300 border border-line/60 shrink-0">
+            undone
+          </span>
+        </Show>
+      </div>
+      <Show when={open() && hasDiff()}>
+        <div class="border-t border-line/30 bg-ink-950/40">
+          <DiffView text={props.f.diff || ""} name={props.f.rel || props.f.path} scrollKey={props.scrollKey} />
+        </div>
+      </Show>
+      <Show when={open() && !hasDiff()}>
+        <div class="px-2.5 py-1.5 text-[11px] text-ink-500 border-t border-line/30">
+          {props.f.status === "binary" ? "Binary file — no textual diff." : "File too large for a textual diff."}
+        </div>
+      </Show>
+    </div>
+  );
 }
 
 export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
@@ -102,42 +158,12 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
         <Show when={props.expanded}>
           <div class="mt-2 flex flex-col gap-2">
             <For each={files()}>
-              {(f) => {
-                const meta = statusMeta(f.status);
-                return (
-                  <div class="rounded-lg border border-line/50 overflow-hidden">
-                    <div class="flex items-center gap-2 px-2.5 py-1.5 bg-ink-900/60">
-                      <FileIcon path={f.rel || f.path} size={13} />
-                      <span class="text-[11px] font-mono text-ink-200 truncate">
-                        {f.rel || f.path}
-                      </span>
-                      <span class={`text-[10px] uppercase tracking-wide flex items-center gap-1 ${meta.cls}`}>
-                        <Iconify icon={meta.icon} size={12} />
-                        {meta.label}
-                      </span>
-                      <Show when={(f.additions || 0) > 0 || (f.deletions || 0) > 0}>
-                        <span class="text-[10px] font-mono ml-auto">
-                          <span class="text-emerald-400">+{f.additions || 0}</span>{" "}
-                          <span class="text-red-400">-{f.deletions || 0}</span>
-                        </span>
-                      </Show>
-                      <Show when={f.undone}>
-                        <span class="text-[10px] px-1.5 py-0.5 rounded bg-ink-800 text-ink-300 border border-line/60 ml-auto">
-                          undone
-                        </span>
-                      </Show>
-                    </div>
-                    <Show when={f.diff}>
-                      <CodeBlock text={f.diff || ""} language="diff" scrollKey={`turn-${props.balloon.turnIndex}:${f.path}`} />
-                    </Show>
-                    <Show when={!f.diff}>
-                      <div class="px-2.5 py-1.5 text-[11px] text-ink-500">
-                        {f.status === "binary" ? "Binary file — no textual diff." : "File too large for a textual diff."}
-                      </div>
-                    </Show>
-                  </div>
-                );
-              }}
+              {(f) => (
+                <FileChangesRow
+                  f={f}
+                  scrollKey={`turn-${props.balloon.turnIndex}:${f.path}`}
+                />
+              )}
             </For>
           </div>
         </Show>

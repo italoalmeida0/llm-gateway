@@ -1,11 +1,14 @@
 import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
 import { escapeHtml, highlightCode, languageForPath } from "../../utils/lang";
+import { diffRows, type ParsedDiffLine } from "../../utils/diffLines";
 import { recordToolScroll, restoreToolScroll } from "../../utils/scrollMemory";
 
 /**
- * Renders a unified context diff (daemon edit results). Diff marker lines
- * (+/-) keep their red/green lane so added/removed still jump out; the line
- * BODY is syntax-highlighted per the file extension, and a truncate
+ * Renders a unified context diff (daemon edit results and turn-change
+ * balloons). Diff marker lines (+/-) keep their red/green lane so
+ * added/removed still jump out; the line BODY is syntax-highlighted per the
+ * file extension. Line numbers come embedded ("<n>:[ +-]code") or are
+ * derived from the @@ hunk headers of plain unified diffs; a truncate
  * control caps long diffs exactly like the file preview.
  */
 export interface DiffRow {
@@ -13,57 +16,20 @@ export interface DiffRow {
   marker: string;
   codeHtml: string;
   rawCode: string;
-  kind: "add" | "del" | "context" | "header" | "ellipsis";
-}
-
-function cleanNotice(text: string): string {
-  return (text || "").replace(
-    /^\[Note: The line prefix "[^"]+" is for line identification only and is not part of the file content\.\]\n?/,
-    "",
-  );
-}
-
-export function parseDiffLine(line: string): {
-  lineNum: string;
-  marker: string;
-  code: string;
-  kind: "add" | "del" | "context" | "header" | "ellipsis";
-} {
-  if (line.startsWith("---") || line.startsWith("+++")) {
-    return { lineNum: "", marker: "", code: line, kind: "header" };
-  }
-  if (line === "..." || line.startsWith("@@")) {
-    return { lineNum: "", marker: "", code: line, kind: "ellipsis" };
-  }
-  const numMatch = line.match(/^(\d+):([ +-])?(.*)$/);
-  if (numMatch) {
-    const marker = numMatch[2] || "";
-    const kind = marker === "+" ? "add" : marker === "-" ? "del" : "context";
-    return { lineNum: numMatch[1], marker, code: numMatch[3], kind };
-  }
-  const standardMatch = line.match(/^([ +-])(.*)$/);
-  if (standardMatch) {
-    const marker = standardMatch[1];
-    const kind = marker === "+" ? "add" : marker === "-" ? "del" : "context";
-    return { lineNum: "", marker, code: standardMatch[2], kind };
-  }
-  return { lineNum: "", marker: "", code: line, kind: "context" };
+  kind: ParsedDiffLine["kind"];
 }
 
 /**
- * Renders a unified context diff (daemon edit results). Diff marker lines
- * (+/-) keep their red/green lane with an isolated line-number gutter;
- * the line BODY is syntax-highlighted per the file extension without marker/number
- * interference.
+ * Renders a unified context diff (daemon edit results and turn-change
+ * balloons). Diff marker lines (+/-) keep their red/green lane with an
+ * isolated line-number gutter; the line BODY is syntax-highlighted per the
+ * file extension without marker/number interference.
  */
 export function DiffView(props: { text: string; max?: number; name?: string; scrollKey?: string }) {
   let containerRef: HTMLDivElement | null = null;
   const [expanded, setExpanded] = createSignal(false);
   const [rows, setRows] = createSignal<DiffRow[] | null>(null);
-  const lines = () =>
-    cleanNotice(props.text || "")
-      .split("\n")
-      .filter((l) => !l.startsWith("---") && !l.startsWith("+++"));
+  const lines = () => diffRows(props.text || "");
   const max = () => props.max ?? 80;
   const shown = () => {
     const all = lines();
@@ -76,9 +42,8 @@ export function DiffView(props: { text: string; max?: number; name?: string; scr
     const lang = languageForPath(props.name);
     let cancelled = false;
 
-    const parsed = currentLines.map(parseDiffLine);
     void Promise.all(
-      parsed.map(async (p) => {
+      currentLines.map(async (p) => {
         let codeHtml: string;
         if (p.kind === "header" || p.kind === "ellipsis") {
           codeHtml = escapeHtml(p.code);
@@ -101,7 +66,7 @@ export function DiffView(props: { text: string; max?: number; name?: string; scr
     }).catch(() => {
       if (!cancelled) {
         setRows(
-          parsed.map((p) => ({
+          currentLines.map((p) => ({
             lineNum: p.lineNum,
             marker: p.marker,
             codeHtml: escapeHtml(p.code),
@@ -118,7 +83,7 @@ export function DiffView(props: { text: string; max?: number; name?: string; scr
     });
   });
 
-  const hasGutter = () => shown().some((l) => /^\d+:/.test(l));
+  const hasGutter = () => shown().some((r) => r.lineNum !== "");
 
   return (
     <div
@@ -134,7 +99,7 @@ export function DiffView(props: { text: string; max?: number; name?: string; scr
         <Show
           when={rows() !== null}
           fallback={
-            <For each={shown().map(parseDiffLine)}>
+            <For each={shown()}>
               {(r) => (
                 <div
                   class={`flex items-start px-2 py-0.5 whitespace-pre ${

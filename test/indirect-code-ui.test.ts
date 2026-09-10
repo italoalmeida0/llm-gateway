@@ -671,3 +671,97 @@ describe("pairing modal visibility", () => {
     }
   });
 });
+
+describe("ghost session display guards", () => {
+  test("timeAgo never renders epoch-scale day counts", async () => {
+    const { timeAgo } = await import("../web/src/indirect-code/utils/format");
+    expect(timeAgo(0)).toBe("—");
+    expect(timeAgo(-5)).toBe("—");
+    expect(timeAgo(NaN)).toBe("—");
+    expect(timeAgo(Date.now() - 60000)).toBe("1m");
+  });
+});
+
+describe("unified diff parsing (edit results and turn-change balloons)", () => {
+  test("parses daemon-numbered edit rows and plain unified markers", async () => {
+    const { parseDiffLine } = await import("../web/src/indirect-code/utils/diffLines");
+
+    // Edit-tool format: "<number>:[ +-]<code>"
+    expect(parseDiffLine("12:+const x = 1;")).toEqual({
+      lineNum: "12", marker: "+", code: "const x = 1;", kind: "add",
+    });
+    expect(parseDiffLine("13:-old line")).toEqual({
+      lineNum: "13", marker: "-", code: "old line", kind: "del",
+    });
+    expect(parseDiffLine("14: kept context")).toEqual({
+      lineNum: "14", marker: " ", code: "kept context", kind: "context",
+    });
+    // Numbered row without a marker (read/write output) stays plain context.
+    expect(parseDiffLine("7:plain numbered line")).toEqual({
+      lineNum: "7", marker: "", code: "plain numbered line", kind: "context",
+    });
+
+    // Plain unified markers without numbers.
+    expect(parseDiffLine("+added")).toEqual({ lineNum: "", marker: "+", code: "added", kind: "add" });
+    expect(parseDiffLine("-removed")).toEqual({ lineNum: "", marker: "-", code: "removed", kind: "del" });
+    expect(parseDiffLine(" unchanged")).toEqual({ lineNum: "", marker: " ", code: "unchanged", kind: "context" });
+    expect(parseDiffLine("no marker at all")).toEqual({
+      lineNum: "", marker: "", code: "no marker at all", kind: "context",
+    });
+
+    // Headers and hunk markers.
+    expect(parseDiffLine("--- a/f.txt").kind).toBe("header");
+    expect(parseDiffLine("+++ b/f.txt").kind).toBe("header");
+    expect(parseDiffLine("@@ -1,3 +1,4 @@").kind).toBe("ellipsis");
+    expect(parseDiffLine("...").kind).toBe("ellipsis");
+  });
+
+  test("derives line numbers from @@ hunk headers for balloon diffs", async () => {
+    const { deriveLineNumbers, diffRows } = await import("../web/src/indirect-code/utils/diffLines");
+
+    const unified = [
+      "--- src/app.ts",
+      "+++ src/app.ts",
+      "@@ -10,7 +10,7 @@ function main() {",
+      "   ctx = 1;",
+      "-  old = 2;",
+      "+  neu = 2;",
+      "   tail = 3;",
+      "@@ -40,3 +40,4 @@",
+      "+  fresh = 4;",
+      "   more = 5;",
+      "-  gone = 6;",
+    ].join("\n");
+
+    expect(deriveLineNumbers(unified)).toEqual([
+      "", "10", "11", "11", "12", "", "40", "40", "41",
+    ]);
+
+    // diffRows attaches the derived numbers and drops file headers.
+    const rows = diffRows(unified);
+    expect(rows.map((r) => r.code)).not.toContain("+++ src/app.ts");
+    expect(rows.map((r) => r.lineNum)).toEqual([
+      "", "10", "11", "11", "12", "", "40", "40", "41",
+    ]);
+    expect(rows.map((r) => r.kind)).toEqual([
+      "ellipsis", "context", "del", "add", "context", "ellipsis", "add", "context", "del",
+    ]);
+
+    // New-file diffs (@@ -0,0 +1,N @@) count context from the new side.
+    expect(deriveLineNumbers("@@ -0,0 +1,3 @@\n+first\n+second\n+third")).toEqual([
+      "", "1", "2", "3",
+    ]);
+
+    // No @@ headers (edit-tool numbered format) -> null, numbers kept as parsed.
+    expect(deriveLineNumbers("12:+const x = 1;\n13:-old")).toBeNull();
+  });
+
+  test("diffRows strips the daemon line-prefix notice", async () => {
+    const { diffRows } = await import("../web/src/indirect-code/utils/diffLines");
+    const rows = diffRows(
+      '[Note: The line prefix "12:" is for line identification only and is not part of the file content.]\n12:+const x = 1;',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({ lineNum: "12", marker: "+", code: "const x = 1;", kind: "add" });
+  });
+});

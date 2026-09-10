@@ -93,10 +93,6 @@ export function ToolSearchBodies(props: ToolPartProps) {
                       )}
                     </For>
                   </ul>
-                  <details class="border-t border-line/50">
-                    <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
-                    <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || ""} language={undefined} scrollKey={`${props.m.key()}:raw`} />
-                  </details>
                 </>
               )}
             </Show>
@@ -168,12 +164,8 @@ export function ToolSearchBodies(props: ToolPartProps) {
                 }</For>
               </ol>
               <Show when={(props.m.webDetails()?.results || []).length > 10}>
-                <p class="px-3 pb-2 text-[10px] text-ink-600">+{(props.m.webDetails()?.results || []).length - 10} more in raw output below</p>
+                <p class="px-3 pb-2 text-[10px] text-ink-600">+{(props.m.webDetails()?.results || []).length - 10} more matches</p>
               </Show>
-              <details class="border-t border-line/50">
-                <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
-                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || ""} language={undefined} scrollKey={`${props.m.key()}:raw`} />
-              </details>
             </Show>
           </Show>
         </Show>
@@ -209,12 +201,8 @@ export function ToolSearchBodies(props: ToolPartProps) {
                 <Streamdown>{String(props.m.fetchDetails()?.content || "")}</Streamdown>
               </div>
               <Show when={props.m.fetchDetails()?.truncated}>
-                <p class="px-3 pb-1 text-[10px] text-ink-600">Truncated — full text in raw output below</p>
+                <p class="px-3 pb-1 text-[10px] text-ink-600">Truncated</p>
               </Show>
-              <details class="border-t border-line/50">
-                <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
-                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || ""} language="markdown" scrollKey={`${props.m.key()}:raw`} />
-              </details>
             </Show>
           </Show>
         </Show>

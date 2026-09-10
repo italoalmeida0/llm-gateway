@@ -248,7 +248,8 @@ describe("Indirect Code Relay and Pairing", () => {
       const dashboard = (await (await fetch(`${GW}/api/me/models`, { headers })).json()) as any;
       const entry = dashboard.models.find((m: any) => m.id === id);
       expect(entry.context).toBe(1024000);
-      expect(entry.provider).toBe("");
+      // provider/upstreamModel mirror the first routing target
+      expect(entry.provider).toBe("remote-metadata");
       expect(entry.upstreamModel).toBe(id);
       const patched = await fetch(`${GW}/api/admin/models/${encodeURIComponent(id)}`, {
         method: "PATCH", headers, body: JSON.stringify({ contextLength: null, maxOutputLength: null }),

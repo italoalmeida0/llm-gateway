@@ -133,6 +133,7 @@ func (d *DaemonServer) forkSession(raw []byte) {
 	// The fork ends at the edited message (user) or includes it, so it is
 	// always the last user message of the copy.
 	resent := false
+	resentIdx := -1
 	if strings.TrimSpace(req.EditText) != "" {
 		for i := len(rec.Messages) - 1; i >= 0; i-- {
 			if rec.Messages[i].Role != provider.RoleUser {
@@ -149,6 +150,7 @@ func (d *DaemonServer) forkSession(raw []byte) {
 			if replaced {
 				rec.Messages[i].Time = time.Now()
 				resent = true
+				resentIdx = i
 			}
 			break
 		}
@@ -162,12 +164,20 @@ func (d *DaemonServer) forkSession(raw []byte) {
 	committed = true
 	_ = d.sendWS(map[string]any{"type": "session_forked", "requestId": req.RequestID, "hostId": d.config.HostID, "session": sessionPayload(rec), "resent": resent})
 	if resent {
-		// Re-run the turn on the copy from the edited text.
+		// Re-run the turn on the copy from the edited text, dropping the
+		// edited boundary message itself: the turn re-sends it, so keeping
+		// it would duplicate it.
 		model := req.EditModel
 		if model == "" {
 			model = rec.Model
 		}
-		d.truncateAndRun(rec.ID, len(rec.Messages), req.EditText, model, req.EditYOLO, nil)
+		// Drop the edited boundary message itself: the turn re-sends
+		// it, so keeping it would duplicate it.
+		keep := resentIdx
+		if keep < 0 {
+			keep = len(rec.Messages)
+		}
+		d.truncateAndRun(rec.ID, keep, req.EditText, model, req.EditYOLO, nil)
 	}
 }
 

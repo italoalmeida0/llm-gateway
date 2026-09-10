@@ -702,6 +702,133 @@ describe("Indirect Code Relay and Pairing", () => {
     }
   }, 30000);
 
+  test("Real Go Daemon: edit+resend and regenerate do not duplicate the user message", async () => {
+    const pairRes = await fetch(`${GW}/api/indirect-code/pair`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const pairJson = (await pairRes.json()) as any;
+    expect(pairJson.success).toBe(true);
+
+    const daemonData = mkdtempSync(path.join(tmpdir(), "llmgw-daemon-dedup-"));
+    const workDir = mkdtempSync(path.join(tmpdir(), "llmgw-daemon-dedup-work-"));
+    const daemonBin = path.join(import.meta.dir, "../indirect-code-daemon/bin/indirect-code");
+    const daemonSubproc = Bun.spawn(
+      [daemonBin, "--connect", pairJson.connectUrl, "--data-dir", daemonData, "--name", "Dedup Daemon"],
+      { stdout: "inherit", stderr: "inherit" },
+    );
+
+    let dupHostId = "";
+    try {
+      const started = Date.now();
+      while (Date.now() - started < 10_000) {
+        const hRes = await fetch(`${GW}/api/indirect-code/hosts`, {
+          headers: { Authorization: `Bearer ${userToken}` },
+        });
+        const hJson = (await hRes.json()) as any;
+        const found = hJson.hosts.find((h: any) => h.name === "Dedup Daemon" && h.status === "online");
+        if (found) {
+          dupHostId = found.id;
+          break;
+        }
+        await Bun.sleep(100);
+      }
+      expect(dupHostId).not.toBeEmpty();
+
+      const clientWs = new WebSocket(`${GW_WS}/api/indirect-code/client/ws?token=${userToken}`);
+      const recv: any[] = [];
+      clientWs.onmessage = (ev) => {
+        try {
+          recv.push(JSON.parse(String(ev.data)));
+        } catch {}
+      };
+      await new Promise<void>((resolve, reject) => {
+        clientWs.onopen = () => resolve();
+        clientWs.onerror = (e) => reject(e);
+      });
+
+      const waitFor = (pred: (m: any) => boolean, timeout = 5000): Promise<any> =>
+        new Promise((resolve, reject) => {
+          const startIdx = recv.length;
+          const poll = setInterval(() => {
+            for (let i = startIdx; i < recv.length; i++) {
+              if (pred(recv[i])) {
+                clearInterval(poll);
+                clearTimeout(timer);
+                resolve(recv[i]);
+                return;
+              }
+            }
+          }, 25);
+          const timer = setTimeout(() => {
+            clearInterval(poll);
+            reject(new Error("timed out waiting for daemon message"));
+          }, timeout);
+        });
+      const send = (obj: any) => clientWs.send(JSON.stringify({ hostId: dupHostId, ...obj }));
+
+      const userTexts = async (sid: string): Promise<string[]> => {
+        send({ type: "get_session", sessionId: sid, requestId: `gs-${Date.now()}` });
+        const data = await waitFor((m) => m.type === "session_data" && m.session?.id === sid);
+        // Raw Go structs ({text}) and Anthropic-style blocks ({type:"text",text}).
+        return ((data.session.messages || []) as any[])
+          .filter((m: any) => m.role === "user")
+          .map((m: any) => ((m.content || []) as any[]).filter((b: any) => typeof b?.text === "string").map((b: any) => b.text).join(""));
+      };
+      // The resent turn retries its model call forever (no provider here);
+      // observe the worst case over a few seconds instead of waiting for idle.
+      const maxUserTextCount = async (sid: string, text: string): Promise<number> => {
+        let max = 0;
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          const texts = await userTexts(sid);
+          max = Math.max(max, texts.filter((t) => t === text).length);
+          if (max >= 2) break;
+          await Bun.sleep(150);
+        }
+        return max;
+      };
+
+      // Part 1: editing the first message and resending keeps it exactly once.
+      send({ type: "create_session", cwd: workDir, title: "Dedup", model: "gpt-4o" });
+      const created = await waitFor((m) => m.type === "session_created");
+      const sid = created.session.id;
+      // /help seeds [user, assistant] with no model call.
+      send({ type: "prompt", sessionId: sid, text: "/help", model: "gpt-4o" });
+      await waitFor((m) => m.type === "session_content" && m.sessionId === sid);
+      send({ type: "edit_message", sessionId: sid, index: 0, text: "edited hello", regenerate: true });
+      expect(await maxUserTextCount(sid, "edited hello")).toBe(1);
+
+      // Part 2: regenerating from the assistant message resends the same user text once.
+      send({ type: "create_session", cwd: workDir, title: "Dedup2", model: "gpt-4o" });
+      const created2 = await waitFor((m) => m.type === "session_created" && m.session.id !== sid);
+      const sid2 = created2.session.id;
+      send({ type: "prompt", sessionId: sid2, text: "/help", model: "gpt-4o" });
+      await waitFor((m) => m.type === "session_content" && m.sessionId === sid2);
+      send({ type: "regenerate", sessionId: sid2, index: 1, model: "gpt-4o" });
+      expect(await maxUserTextCount(sid2, "/help")).toBe(1);
+
+      clientWs.close();
+    } finally {
+      // Always remove the host row so later tests see a clean slate.
+      try {
+        if (dupHostId) {
+          await fetch(`${GW}/api/indirect-code/hosts/${dupHostId}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${userToken}` },
+          });
+        }
+      } catch {}
+      try {
+        daemonSubproc.kill();
+      } catch {}
+      try {
+        rmSync(daemonData, { recursive: true, force: true });
+        rmSync(workDir, { recursive: true, force: true });
+      } catch {}
+    }
+  }, 60000);
+
   test("DELETE /api/indirect-code/hosts/:id removes host", async () => {
     const res = await fetch(`${GW}/api/indirect-code/hosts/${hostId}`, {
       method: "DELETE",

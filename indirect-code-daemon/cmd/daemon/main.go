@@ -1487,7 +1487,9 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"compaction": rec.Compaction,
 		})
 		if req.Regen {
-			d.truncateAndRun(req.SessionID, req.Index+1, req.Text, req.Model, req.YOLO, nil)
+			// Drop the edited message itself (and everything below): the
+			// turn re-sends the new text, so keeping it would duplicate it.
+			d.truncateAndRun(req.SessionID, req.Index, req.Text, req.Model, req.YOLO, nil)
 		} else {
 			d.sessionsMu.RLock()
 			if act, ok := d.sessions[req.SessionID]; ok {
@@ -1535,7 +1537,9 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		if userIdx < 0 || userText == "" {
 			return
 		}
-		d.truncateAndRun(req.SessionID, userIdx+1, userText, req.Model, req.YOLO, nil)
+		// Drop the resent user message itself (and everything below): the
+		// turn re-sends its text, so keeping it would duplicate it.
+		d.truncateAndRun(req.SessionID, userIdx, userText, req.Model, req.YOLO, nil)
 
 	case "delete_message":
 		var req struct {

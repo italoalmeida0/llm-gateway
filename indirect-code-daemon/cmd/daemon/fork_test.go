@@ -96,49 +96,76 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 	if err := d.saveSession(rec); err != nil {
 		t.Fatal(err)
 	}
-	// Fork at the first user message carrying edited text. truncateAndRun
-	// would start a live turn — neutralize by pre-cancelling: instead assert
-	// the fork content + resent flag path via a daemon with no provider.
-	// (Full resend is covered by truncateAndRun tests; here we check the
-	// boundary rewrite happened before the turn starts.)
+	// Fork at the first user message carrying edited text. The resent
+	// turn re-appends the edited text via Prompt (setupAgent needs no
+	// provider for the append; the model call retries in background
+	// until cancelled below).
 	command, _ := json.Marshal(map[string]any{"type": "fork_session", "sessionId": "src-edit", "index": 0, "editText": "edited question"})
-	done := make(chan struct{})
-	go func() {
-		// Let forkSession reach truncateAndRun then cancel the turn fast.
-		// runAgentTurn with no provider fails fast; we only care the fork
-		// was persisted with the edited text.
-		defer close(done)
-		d.handleMessage(command)
-	}()
-	<-done
-	var fork *SessionRecord
+	srcSeq := rec.TurnSeq
+	d.handleMessage(command)
+	var forkID string
 	for _, summary := range d.listSessions() {
 		if summary.ID != "src-edit" {
-			fork, _ = d.loadSession(summary.ID)
+			forkID = summary.ID
 		}
 	}
-	if fork == nil || len(fork.Messages) == 0 {
-		t.Fatalf("no fork created: %+v", fork)
+	if forkID == "" {
+		t.Fatal("no fork created")
 	}
-	lastUser := ""
-	for i := len(fork.Messages) - 1; i >= 0; i-- {
-		if fork.Messages[i].Role == provider.RoleUser {
-			if tb, ok := fork.Messages[i].Content[0].(provider.TextBlock); ok {
-				lastUser = tb.Text
+	countEdited := func() int {
+		fork, _ := d.loadSession(forkID)
+		if fork == nil {
+			return 0
+		}
+		n := 0
+		for _, m := range fork.Messages {
+			if m.Role != provider.RoleUser {
+				continue
 			}
-			break
+			for _, c := range m.Content {
+				if tb, ok := c.(provider.TextBlock); ok && tb.Text == "edited question" {
+					n++
+				}
+			}
 		}
+		return n
 	}
-	if lastUser != "edited question" {
-		t.Fatalf("boundary not rewritten: %q", lastUser)
+	// The resent turn stamps its appended message with the new turn seq.
+	// Waiting for that exact stamp proves Prompt ran, so a later cancel
+	// cannot hide the append (and the pre-truncation save, stamped older,
+	// can never satisfy it).
+	targetSeq := srcSeq + 1
+	stamped := func() bool {
+		fork, _ := d.loadSession(forkID)
+		if fork == nil {
+			return false
+		}
+		for _, m := range fork.Messages {
+			if m.Role == provider.RoleUser && m.TurnIndex == targetSeq {
+				for _, c := range m.Content {
+					if tb, ok := c.(provider.TextBlock); ok && tb.Text == "edited question" {
+						return true
+					}
+				}
+			}
+		}
+		return false
 	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !stamped() {
+		if time.Now().After(deadline) {
+			t.Fatal("resent append never happened")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	// Source keeps the original text.
 	src, _ := d.loadSession("src-edit")
 	if src.Messages[0].Content[0].(provider.TextBlock).Text != "original question" {
 		t.Fatal("source mutated")
 	}
 
-	// Wait for background turn to settle before temp dir cleanup
+	// Wait for background turn to settle before asserting the final count.
 	for i := 0; i < 100; i++ {
 		d.sessionsMu.RLock()
 		running := false
@@ -157,5 +184,8 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if n := countEdited(); n != 1 {
+		t.Fatalf("edited text duplicated by resend: %d copies", n)
 	}
 }

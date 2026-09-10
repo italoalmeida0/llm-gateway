@@ -110,25 +110,39 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	}
 
 	textContent := string(data)
-	allLines := strings.Split(textContent, "\n")
+	// True line count: a trailing newline terminates the last line, it is
+	// not a phantom extra line. Counting it inflated every
+	// newline-terminated file by one, so continuation notices overcounted
+	// ("3 more lines" with 2 left) and the suggested final offset returned
+	// an empty page instead of terminating pagination.
+	allLines := splitLinesForCounting(textContent)
 	totalFileLines := len(allLines)
+
+	if a.Limit < 0 {
+		return core.ToolResult{}, fmt.Errorf("limit must be a positive number of lines")
+	}
 
 	startLine := 0
 	if a.Offset > 0 {
 		startLine = a.Offset - 1
 	}
 	startLineDisplay := startLine + 1
-	if startLine >= len(allLines) {
+	if totalFileLines == 0 {
+		if a.Offset > 1 {
+			return core.ToolResult{}, fmt.Errorf("Offset %d is beyond end of file (0 lines total)", a.Offset)
+		}
+	} else if startLine >= totalFileLines {
 		return core.ToolResult{}, fmt.Errorf("Offset %d is beyond end of file (%d lines total)", a.Offset, totalFileLines)
 	}
 
 	var selectedContent string
 	userLimitedLines := 0
 	userLimited := false
+	reachedEOF := true
 	if a.Limit != 0 {
 		endLine := startLine + a.Limit
-		if endLine > len(allLines) {
-			endLine = len(allLines)
+		if endLine > totalFileLines {
+			endLine = totalFileLines
 		}
 		if endLine < startLine {
 			endLine = startLine
@@ -136,17 +150,26 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		selectedContent = strings.Join(allLines[startLine:endLine], "\n")
 		userLimitedLines = endLine - startLine
 		userLimited = true
+		reachedEOF = endLine == totalFileLines
 	} else {
 		selectedContent = strings.Join(allLines[startLine:], "\n")
+	}
+	// Keep the trailing newline when the window reaches EOF so the
+	// AI-visible content matches the file tail byte-for-byte.
+	if reachedEOF && strings.HasSuffix(textContent, "\n") {
+		selectedContent += "\n"
 	}
 
 	truncation := truncateHead(selectedContent, defaultMaxLines, defaultMaxBytes)
 	var outputText string
 	switch {
 	case truncation.firstLineExceeds:
+		// Deliver the head of the long line instead of refusing: the model
+		// stays on read instead of falling back to terminal commands.
+		head := truncateStringToBytesFromStart(allLines[startLine], defaultMaxBytes)
 		firstLineSize := formatSize(len(allLines[startLine]))
-		outputText = fmt.Sprintf("[Line %d is %s, exceeds %s limit. Use bash: sed -n '%dp' %s | head -c %d]",
-			startLineDisplay, firstLineSize, formatSize(defaultMaxBytes), startLineDisplay, a.Path, defaultMaxBytes)
+		outputText = head + fmt.Sprintf("\n\n[Line %d is %s; showing the first %s. The rest of the line is only reachable via bash: sed -n '%dp' %s | tail -c +%d]",
+			startLineDisplay, firstLineSize, formatSize(len(head)), startLineDisplay, a.Path, len(head)+1)
 	case truncation.truncated:
 		endLineDisplay := startLineDisplay + truncation.outputLines - 1
 		nextOffset := endLineDisplay + 1
@@ -158,8 +181,8 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Use offset=%d to continue.]",
 				startLineDisplay, endLineDisplay, totalFileLines, formatSize(defaultMaxBytes), nextOffset)
 		}
-	case userLimited && startLine+userLimitedLines < len(allLines):
-		remaining := len(allLines) - (startLine + userLimitedLines)
+	case userLimited && startLine+userLimitedLines < totalFileLines:
+		remaining := totalFileLines - (startLine + userLimitedLines)
 		nextOffset := startLine + userLimitedLines + 1
 		outputText = fmt.Sprintf("%s\n\n[%d more lines in file. Use offset=%d to continue.]",
 			truncation.content, remaining, nextOffset)

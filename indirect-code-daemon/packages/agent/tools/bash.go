@@ -59,8 +59,8 @@ func resolveTimeoutMs(timeout *float64) (*time.Duration, error) {
 	if v*1000 > maxTimeoutMs {
 		return nil, fmt.Errorf("Invalid timeout: maximum is %s seconds", strconv.FormatFloat(maxTimeoutSeconds, 'f', -1, 64))
 	}
-	ms := time.Duration(v * float64(time.Millisecond))
-	return &ms, nil
+	timeoutDur := time.Duration(v * float64(time.Second))
+	return &timeoutDur, nil
 }
 
 func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {

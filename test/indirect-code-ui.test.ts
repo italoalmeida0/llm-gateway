@@ -2,11 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { compactTokens, contextDisplay, groupModelsByProvider } from "../web/src/indirect-code/context";
 import { createTranscriptScroll } from "../web/src/indirect-code/scroll";
 import { displayToolArgs, withoutTodoActivity } from "../web/src/indirect-code/live";
-import { absoluteRemotePath, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
+import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
   buildRenderBlocks, isTurnStartMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
 } from "../web/src/indirect-code/transcript";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
+import { parseGlobList, parseInspectTree, parseQuestionQA } from "../web/src/indirect-code/utils/toolTrees";
 import { parseDaemonMessage } from "../web/src/indirect-code/daemon-protocol";
 import { parseContentBlocks } from "../web/src/indirect-code/utils/wire";
 import {
@@ -304,8 +305,8 @@ describe("Indirect Code toolSummary", () => {
       call: { type: "tool_call", toolId: "s1", toolName: "search", toolArgs: JSON.stringify({ pattern: "from \"../", path: "web/src" }) }
     })).toEqual({ icon: "lucide:search", verb: "Search", target: "from \"../ in src" });
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "s2", toolName: "search", toolArgs: JSON.stringify({ pattern: "foo\\d", isRegex: true }) }
-    })).toEqual({ icon: "lucide:search", verb: "Regex search", target: "foo\\d" });
+      call: { type: "tool_call", toolId: "s2", toolName: "search", toolArgs: JSON.stringify({ pattern: "foo\\d" }) }
+    })).toEqual({ icon: "lucide:search", verb: "Search", target: "foo\\d" });
     expect(toolSummary({
       call: { type: "tool_call", toolId: "i1", toolName: "inspect", toolArgs: JSON.stringify({ path: "server/routes" }) }
     })).toEqual({ icon: "lucide:folder-tree", verb: "Inspect", target: "server/routes" });
@@ -578,3 +579,67 @@ describe("Indirect Code turn balloons anchoring", () => {
   });
 });
 
+
+describe("Tool mini-UI parsers", () => {
+  test("parseInspectTree reads the daemon tree format", () => {
+    const raw = "./ (6 entries)\n    bin/\n    cmd/\n[M] main.go (38B, 4 lines)\n      helper.ts (2B, 1 lines)\n";
+    const t = parseInspectTree(raw);
+    expect(t?.scope).toBe("./");
+    expect(t?.count).toBe(6);
+    expect(t?.entries.length).toBe(4);
+    expect(t?.entries[0]).toMatchObject({ depth: 0, name: "bin", isDir: true, flag: "" });
+    expect(t?.entries[2]).toMatchObject({ depth: 0, name: "main.go", isDir: false, flag: "M", size: "38B", lines: 4 });
+    expect(t?.entries[3]).toMatchObject({ depth: 1, name: "helper.ts", flag: "" });
+  });
+
+  test("parseInspectTree handles capped headers and single files", () => {
+    const capped = parseInspectTree("src/ (200 entries, capped at 200)\n    a.ts (1B, 1 lines)\n");
+    expect(capped?.capped).toBe(200);
+    const single = parseInspectTree("[A]   src/util.go (64B, 6 lines)\n");
+    expect(single?.count).toBe(1);
+    expect(single?.entries[0]).toMatchObject({ depth: 0, name: "src/util.go", flag: "A", size: "64B", lines: 6 });
+    expect(parseInspectTree("garbage without structure")).toBeNull();
+  });
+
+  test("parseGlobList reads file lists and truncation", () => {
+    expect(parseGlobList("No files matched the pattern.")).toMatchObject({ none: true, files: [] });
+    const g = parseGlobList("g/a.ts\ng/b.ts\n\n(Truncated: showing first 500 matches)");
+    expect(g).toMatchObject({ none: false, truncated: true, files: ["g/a.ts", "g/b.ts"] });
+    expect(parseGlobList("")).toBeNull();
+  });
+
+  test("parseQuestionQA joins questions with recorded answers", () => {
+    const args = {
+      questions: [
+        { header: "Theme", question: "Pick one", options: [{ label: "dark" }, { label: "light", description: "Bright" }], multiple: false },
+        { header: "Scope", question: "Pick many", options: [{ label: "a" }, { label: "b" }], multiple: true },
+      ],
+    };
+    const items = parseQuestionQA(args, JSON.stringify({ answers: [["dark"], ["a", "custom thing"]] }), undefined);
+    expect(items.length).toBe(2);
+    expect(items[0].answers).toEqual(["dark"]);
+    expect(items[1]).toMatchObject({ multiple: true, answers: ["a", "custom thing"] });
+    // Pending (no result yet) yields empty answers.
+    expect(parseQuestionQA(args, "", undefined)[0].answers).toEqual([]);
+    // Singular question field still parses.
+    expect(parseQuestionQA({ question: "Do you agree?" }, "", undefined)[0].question).toBe("Do you agree?");
+  });
+});
+
+describe("collapseCwd", () => {
+  test("replaces the session cwd with a dot", () => {
+    expect(collapseCwd(
+      "cd /home/user/workspace/llm-gateway/indirect-code-daemon && go test ./...",
+      "/home/user/workspace/llm-gateway",
+    )).toBe("cd ./indirect-code-daemon && go test ./...");
+    expect(collapseCwd("cd /home/user/workspace/llm-gateway", "/home/user/workspace/llm-gateway")).toBe("cd .");
+    expect(collapseCwd("go build ./...", "/home/user/workspace/llm-gateway")).toBe("go build ./...");
+  });
+
+  test("handles trailing slashes, windows separators and degenerate cwd", () => {
+    expect(collapseCwd("cd /a/b && make", "/a/b/")).toBe("cd . && make");
+    expect(collapseCwd("cd C:\\work\\TAP && build", "C:\\work\\TAP")).toBe("cd . && build");
+    expect(collapseCwd("echo hi", "")).toBe("echo hi");
+    expect(collapseCwd("ls /", "/")).toBe("ls /");
+  });
+});

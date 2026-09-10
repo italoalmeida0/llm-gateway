@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/provider"
@@ -141,7 +142,7 @@ func TestReadOffsetLimit(t *testing.T) {
 	res, _ := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "a.txt", "offset": 2, "limit": 2}), nil)
 	// pi style: raw lines plus the actionable continuation notice.
 	got := res.Content[0].(provider.TextBlock).Text
-	wantAI := "2\n3\n\n[3 more lines in file. Use offset=4 to continue.]"
+	wantAI := "2\n3\n\n[2 more lines in file. Use offset=4 to continue.]"
 	if got != wantAI {
 		t.Fatalf("want %q, got %q", wantAI, got)
 	}
@@ -168,8 +169,9 @@ func TestReadTruncationNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := res.Content[0].(provider.TextBlock).Text
-	// 3000 lines + phantom trailing line = 3001 total; head keeps 2000.
-	want := "[Showing lines 1-2000 of 3001. Use offset=2001 to continue.]"
+	// 3000 newline-terminated lines count as 3000 (no phantom extra line);
+	// head keeps 2000.
+	want := "[Showing lines 1-2000 of 3000. Use offset=2001 to continue.]"
 	if !strings.HasSuffix(got, want) {
 		t.Fatalf("want notice suffix %q, got tail %q", want, got[len(got)-120:])
 	}
@@ -184,7 +186,7 @@ func TestReadOffsetBeyondEOF(t *testing.T) {
 	os.WriteFile(p, []byte("1\n2\n"), 0o644)
 	tool := &ReadTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "a.txt", "offset": 99}), nil)
-	if err == nil || !strings.Contains(err.Error(), "Offset 99 is beyond end of file (3 lines total)") {
+	if err == nil || !strings.Contains(err.Error(), "Offset 99 is beyond end of file (2 lines total)") {
 		t.Fatalf("want pi offset error, got %v", err)
 	}
 }
@@ -564,4 +566,108 @@ func TestDumpToolsSchema(t *testing.T) {
 	}
 
 	t.Logf("\n=== TOOLS SCHEMA JSON ===\n%s\n=== END TOOLS SCHEMA JSON ===", string(data))
+}
+
+func TestResolveTimeoutMsSeconds(t *testing.T) {
+	// The timeout arg is documented in seconds; the resolved duration must
+	// match. (Regression: the multiplier used time.Millisecond, so every
+	// timeout fired 1000x too early.)
+	for _, tc := range []struct {
+		in   float64
+		want time.Duration
+	}{
+		{2, 2 * time.Second},
+		{0.5, 500 * time.Millisecond},
+		{0.3, 300 * time.Millisecond},
+		{120, 2 * time.Minute},
+	} {
+		got, err := resolveTimeoutMs(&tc.in)
+		if err != nil {
+			t.Fatalf("timeout %v: unexpected error: %v", tc.in, err)
+		}
+		if *got != tc.want {
+			t.Errorf("timeout %v: got %v, want %v", tc.in, *got, tc.want)
+		}
+	}
+	if got, err := resolveTimeoutMs(nil); err != nil || got != nil {
+		t.Errorf("nil timeout: got %v, %v; want nil, nil", got, err)
+	}
+}
+
+func TestReadPaginationTerminates(t *testing.T) {
+	// Regression: the trailing newline used to count as a phantom line, so
+	// the last suggested offset returned an empty page and the model looped.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	os.WriteFile(p, []byte("1\n2\n3\n4\n5\n"), 0o644)
+	tool := &ReadTool{CWD: dir}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.txt", "offset": 4, "limit": 2,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Lines 4-5 are the whole tail: no continuation notice.
+	if got := res.Content[0].(provider.TextBlock).Text; got != "4\n5\n" {
+		t.Fatalf("tail page must be complete without notice, got %q", got)
+	}
+	// One past the end errors instead of returning an empty page.
+	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.txt", "offset": 6,
+	}), nil); err == nil {
+		t.Fatal("offset past EOF must error, not return an empty page")
+	}
+}
+
+func TestReadNegativeLimit(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	os.WriteFile(p, []byte("1\n2\n"), 0o644)
+	tool := &ReadTool{CWD: dir}
+	// A negative limit used to return an empty body WITH a continuation
+	// notice pointing back at offset=1 (pagination loop). Now it errors.
+	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.txt", "limit": -3,
+	}), nil); err == nil || !strings.Contains(err.Error(), "limit must be a positive number of lines") {
+		t.Fatalf("want limit validation error, got %v", err)
+	}
+}
+
+func TestReadLongLineDeliversHead(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "huge.txt")
+	os.WriteFile(p, []byte(strings.Repeat("z", 60000)+"\nsecond\n"), 0o644)
+	tool := &ReadTool{CWD: dir}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "huge.txt"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.Content[0].(provider.TextBlock).Text
+	// The model gets content (head of the line), not just a "use bash" note.
+	if !strings.HasPrefix(got, strings.Repeat("z", 100)) {
+		t.Fatalf("long line head not delivered, got %q...", got[:80])
+	}
+	if !strings.Contains(got, "[Line 1 is 58.6KB; showing the first 50.0KB.") {
+		t.Fatalf("missing partial-line notice, got tail %q", got[len(got)-160:])
+	}
+}
+
+func TestBashTimeoutIsSeconds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	// End-to-end regression: `sleep 1` with timeout 30 must succeed. Before
+	// the seconds fix, 30 was interpreted as 30ms and this timed out.
+	tool := &BashTool{CWD: t.TempDir()}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"command": "sleep 1",
+		"timeout": 30,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("sleep 1 with timeout 30 must succeed, got: %q",
+			res.Content[0].(provider.TextBlock).Text)
+	}
 }

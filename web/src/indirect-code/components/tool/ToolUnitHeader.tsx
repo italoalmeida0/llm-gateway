@@ -1,6 +1,6 @@
 import { Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
-import { absoluteRemotePath } from "../../paths";
+import { absoluteRemotePath, collapseCwd } from "../../paths";
 import { ShellCmd } from "../CodeBlock";
 import { FileIcon } from "../../presentation";
 import type { ToolPartProps } from "./toolUnitModel";
@@ -40,7 +40,7 @@ export function ToolUnitHeader(props: ToolPartProps) {
           <Show when={props.m.name() === "bash" || props.m.name() === "python"} fallback={
             <span class="truncate text-ink-200 font-medium min-w-0">{props.m.sum().target}</span>
           }>
-            <span class="truncate text-ink-200 min-w-0 text-[12.5px]"><ShellCmd text={props.m.bashHeaderCmd()} /></span>
+            <span class="truncate text-ink-200 min-w-0 text-[12.5px]"><ShellCmd text={collapseCwd(props.m.bashHeaderCmd(), props.ctx.activeSession()?.cwd || "")} /></span>
           </Show>
         </span>
       </span>

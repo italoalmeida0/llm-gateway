@@ -183,3 +183,17 @@ func truncateStringToBytesFromEnd(str string, maxBytes int) string {
 	}
 	return str[start:]
 }
+
+// truncateStringToBytesFromStart keeps the first maxBytes bytes of str,
+// snapping to a valid UTF-8 character boundary (never splits a rune).
+func truncateStringToBytesFromStart(str string, maxBytes int) string {
+	if len(str) <= maxBytes {
+		return str
+	}
+	end := maxBytes
+	// Back off to the start of a multi-byte character.
+	for end > 0 && str[end]&0xC0 == 0x80 {
+		end--
+	}
+	return str[:end]
+}

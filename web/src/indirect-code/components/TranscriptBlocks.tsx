@@ -10,6 +10,7 @@ import { useToolUnitModel } from "./tool/toolUnitModel";
 import { ToolUnitHeader } from "./tool/ToolUnitHeader";
 import { ToolEditBodies } from "./tool/ToolEditBodies";
 import { ToolSearchBodies } from "./tool/ToolSearchBodies";
+import { ToolQuestionBodies } from "./tool/ToolQuestionBodies";
 
 /** Closures da página que os blocos de transcript precisam para renderizar. */
 export interface TranscriptRenderCtx {
@@ -346,7 +347,6 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
 export function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean) {
   const m = useToolUnitModel(ctx, msgId, u, ui, running);
   const part = { ctx, msgId, u, m, running };
-  if (m.name() === "question") return <div class="flex items-center gap-2 pl-1 py-1 text-[13px]" data-question-summary><Iconify icon="lucide:message-circle" size={14} class="text-ink-500 shrink-0" /><span class="text-ink-500">{m.sum().verb}</span><span class="text-ink-200 truncate">{m.sum().target}</span></div>;
   return (
     <div class="w-full">
       <ToolUnitHeader {...part} />
@@ -354,6 +354,7 @@ export function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolU
         <div class="ml-5 mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 overflow-hidden">
           <ToolEditBodies {...part} />
           <ToolSearchBodies {...part} />
+          <ToolQuestionBodies {...part} />
         </div>
       </Show>
     </div>

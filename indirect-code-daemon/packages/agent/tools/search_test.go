@@ -8,6 +8,33 @@ import (
 	"testing"
 )
 
+func TestSearchAlwaysRegex(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.ts")
+	os.WriteFile(p, []byte("const foo1 = 1;\nconst bar = 2;\n"), 0o644)
+	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
+	// Regex metacharacters work with no flag: pattern is always a regex.
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"pattern": `foo\d`,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := toolResultText(t, res); !strings.Contains(got, "a.ts:1:") {
+		t.Fatalf("expected regex hit with no flag, got:\n%s", got)
+	}
+	// A plain string is also a valid regex and matches literally.
+	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "const bar",
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := toolResultText(t, res); !strings.Contains(got, "a.ts:2:") {
+		t.Fatalf("expected literal hit, got:\n%s", got)
+	}
+}
+
 func TestSearchLiteral(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, content string) {
@@ -44,7 +71,7 @@ func TestSearchRegexIncludeExclude(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "b.js"), []byte("const foo2 = 1;\n"), 0o644)
 	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
 	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"pattern": "foo\\d", "isRegex": true, "include": []string{"*.ts"},
+		"pattern": "foo\\d", "include": []string{"*.ts"},
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +128,7 @@ func TestSearchBadRegex(t *testing.T) {
 	dir := t.TempDir()
 	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
 	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"pattern": "([", "isRegex": true,
+		"pattern": "([",
 	}), nil); err == nil {
 		t.Fatal("expected invalid regex error")
 	}

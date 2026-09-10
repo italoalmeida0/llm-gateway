@@ -16,12 +16,10 @@ import (
 )
 
 type SearchArgs struct {
-	// Pattern is a regex (isRegex=true) or literal substring.
+	// Pattern is always an RE2 regular expression.
 	Pattern string `json:"pattern"`
 	// Path scopes the search (workspace-relative file or dir, default ".").
 	Path string `json:"path,omitempty"`
-	// IsRegex enables RE2 regex; default is literal substring search.
-	IsRegex bool `json:"isRegex,omitempty"`
 	// Include limits files by glob(s), e.g. ["*.ts", "*.tsx"].
 	Include []string `json:"include,omitempty"`
 	// Exclude skips files by glob(s), e.g. ["dist/**", "*.min.js"].
@@ -57,10 +55,10 @@ type SearchTool struct {
 func (t *SearchTool) Name() string { return "search" }
 
 func (t *SearchTool) Description() string {
-	return "Search file contents with regex or literal match. Params: `pattern` (required), `path` (file/dir scope, default '.'), `isRegex` (default false), `include`/`exclude` globs, `maxResults` (default 50, max 200), `contextLines` (default 0, max 5), `caseSensitive` (default false), `respectGitignore` (default true). Returns structured matches [{file, line, col, text}] — open hits with read."
+	return "Search file contents with an RE2 regular expression. Params: `pattern` (required regex), `path` (file/dir scope, default '.'), `include`/`exclude` globs, `maxResults` (default 50, max 200), `contextLines` (default 0, max 5), `caseSensitive` (default false), `respectGitignore` (default true). Returns structured matches [{file, line, col, text}] — open hits with read."
 }
 
-const searchSchema = `{"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"Regex (isRegex=true) or literal substring to find."},"path":{"type":"string","description":"Workspace-relative file or dir scope (default '.')."},"isRegex":{"type":"boolean","description":"Treat pattern as an RE2 regular expression (default false)."},"include":{"type":"array","items":{"type":"string"},"description":"File glob patterns to include (e.g. ['*.ts', '*.tsx'])."},"exclude":{"type":"array","items":{"type":"string"},"description":"File glob patterns to exclude (e.g. ['dist/**', '*.min.js'])."},"maxResults":{"type":"number","description":"Maximum number of matches to return (default 50, max 200)."},"contextLines":{"type":"number","description":"Number of context lines before and after each match (default 0, max 5)."},"caseSensitive":{"type":"boolean","description":"Case-sensitive search (default false)."},"respectGitignore":{"type":"boolean","description":"Skip files ignored by git (default true)."},"maxFileBytes":{"type":"number","description":"Skip files larger than this size in bytes (default 1MB)."}}}`
+const searchSchema = `{"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"RE2 regular expression to find."},"path":{"type":"string","description":"Workspace-relative file or dir scope (default '.')."},"include":{"type":"array","items":{"type":"string"},"description":"File glob patterns to include (e.g. ['*.ts', '*.tsx'])."},"exclude":{"type":"array","items":{"type":"string"},"description":"File glob patterns to exclude (e.g. ['dist/**', '*.min.js'])."},"maxResults":{"type":"number","description":"Maximum number of matches to return (default 50, max 200)."},"contextLines":{"type":"number","description":"Number of context lines before and after each match (default 0, max 5)."},"caseSensitive":{"type":"boolean","description":"Case-sensitive search (default false)."},"respectGitignore":{"type":"boolean","description":"Skip files ignored by git (default true)."},"maxFileBytes":{"type":"number","description":"Skip files larger than this size in bytes (default 1MB)."}}}`
 
 func (t *SearchTool) Schema() json.RawMessage { return json.RawMessage(searchSchema) }
 
@@ -96,22 +94,14 @@ func (t *SearchTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		respectIgnore = *a.RespectGitignore
 	}
 
-	// Compile matcher.
-	var re *regexp.Regexp
-	literal := pattern
+	// Compile matcher: pattern is always an RE2 regex.
+	src := pattern
 	if !a.CaseSensitive {
-		literal = strings.ToLower(pattern)
+		src = "(?i)" + src
 	}
-	if a.IsRegex {
-		src := pattern
-		if !a.CaseSensitive {
-			src = "(?i)" + src
-		}
-		var err error
-		re, err = regexp.Compile(src)
-		if err != nil {
-			return core.ToolResult{}, fmt.Errorf("search: invalid regex: %v", err)
-		}
+	re, err := regexp.Compile(src)
+	if err != nil {
+		return core.ToolResult{}, fmt.Errorf("search: invalid regex: %v", err)
 	}
 
 	// Resolve scope.
@@ -197,29 +187,11 @@ outer:
 		}
 		lines := strings.Split(string(data), "\n")
 		for i, ln := range lines {
-			var col int
-			var ok bool
-			if re != nil {
-				loc := re.FindStringIndex(ln)
-				if loc == nil {
-					continue
-				}
-				col, ok = loc[0]+1, true
-			} else {
-				hay := ln
-				if !a.CaseSensitive {
-					hay = strings.ToLower(ln)
-				}
-				idx := strings.Index(hay, literal)
-				if idx < 0 {
-					continue
-				}
-				col, ok = idx+1, true
-			}
-			if !ok {
+			loc := re.FindStringIndex(ln)
+			if loc == nil {
 				continue
 			}
-			m := SearchMatch{File: slash(rel), Line: i + 1, Col: col, Text: trimLine(ln)}
+			m := SearchMatch{File: slash(rel), Line: i + 1, Col: loc[0] + 1, Text: trimLine(ln)}
 			if ctxLines > 0 {
 				for k := i - ctxLines; k <= i+ctxLines; k++ {
 					if k < 0 || k >= len(lines) || k == i {

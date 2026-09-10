@@ -1,11 +1,36 @@
-import { For, Show } from "solid-js";
+import { For, Show, createMemo } from "solid-js";
 import { Streamdown } from "streamdown-solid";
 import { Icon as Iconify } from "../../../components/icon";
 import { CodeBlock } from "../CodeBlock";
+import { FileIcon } from "../../presentation";
 import { recordToolScroll, restoreToolScroll } from "../../utils/scrollMemory";
+import { parseGlobList, parseInspectTree } from "../../utils/toolTrees";
 import type { ToolPartProps } from "./toolUnitModel";
 
+function flagBadge(flag: string) {
+  if (!flag || flag === "•") return null;
+  const color =
+    flag === "M"
+      ? "bg-amber-500/15 text-amber-300"
+      : flag === "A"
+        ? "bg-emerald-500/15 text-emerald-300"
+        : flag === "D" || flag === "R"
+          ? "bg-rose-500/15 text-rose-300"
+          : "bg-ink-800 text-ink-300";
+  return (
+    <span class={`shrink-0 rounded px-1 py-px font-mono text-[10px] ${color}`}>{flag}</span>
+  );
+}
+
 export function ToolSearchBodies(props: ToolPartProps) {
+  const inspectTree = createMemo(() => {
+    if (props.m.name() !== "inspect") return null;
+    return parseInspectTree(props.m.terminal().output || props.u.result?.toolResult || "");
+  });
+  const globList = createMemo(() => {
+    if (props.m.name() !== "glob") return null;
+    return parseGlobList(props.u.result?.toolResult || "");
+  });
   return (
 <>
         <Show when={props.m.name() === "search"}>
@@ -15,7 +40,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
           >
             <div class="px-3 py-1.5 text-[11px] text-ink-500 font-mono">
               <span class="text-ink-300">/{String(props.m.args().pattern || "")}/</span>
-              {props.m.args().isRegex ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">regex</span> : null}
+              <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">regex</span>
               {props.m.args().path && String(props.m.args().path) !== "." ? <span class="ml-1.5">in {String(props.m.args().path)}</span> : null}
             </div>
             <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
@@ -26,7 +51,94 @@ export function ToolSearchBodies(props: ToolPartProps) {
             when={props.u.result?.toolResult || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Listing…</div>}
           >
-            <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+            <Show
+              when={inspectTree()}
+              fallback={
+                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+              }
+            >
+              {(t) => (
+                <>
+                  <div class="px-3 pt-2 pb-1 font-mono text-[11px] text-ink-500">
+                    {t().scope && t().scope !== "./" ? t().scope : "workspace"} · {t().count} {t().count === 1 ? "entry" : "entries"}
+                    {t().capped ? ` (capped at ${t().capped})` : ""}
+                  </div>
+                  <ul class="px-1.5 pb-1.5">
+                    <For each={t().entries}>
+                      {(e) => (
+                        <li class="flex items-center gap-1.5 rounded-md px-1.5 py-[3px] hover:bg-ink-900/70 text-[12px]">
+                          <span style={{ "padding-left": `${e.depth * 14}px` }} class="flex min-w-0 flex-1 items-center gap-1.5">
+                            <Show
+                              when={e.isDir}
+                              fallback={<FileIcon path={e.name} size={13} />}
+                            >
+                              <Iconify icon="lucide:folder" size={13} class="shrink-0 text-ink-500" />
+                            </Show>
+                            <span class="truncate font-mono text-ink-200">
+                              {e.name}
+                              {e.isDir ? "/" : ""}
+                            </span>
+                          </span>
+                          {flagBadge(e.flag)}
+                          <Show when={e.flag === "•"}>
+                            <span class="h-1 w-1 shrink-0 rounded-full bg-ink-600" />
+                          </Show>
+                          <Show when={e.size}>
+                            <span class="shrink-0 font-mono text-[10.5px] text-ink-500">
+                              {e.size}
+                              {e.lines !== undefined ? ` · ${e.lines} lines` : ""}
+                            </span>
+                          </Show>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                  <details class="border-t border-line/50">
+                    <summary class="px-3 py-1 text-[10px] text-ink-600 hover:text-ink-300 cursor-pointer select-none">Raw output</summary>
+                    <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || ""} language={undefined} scrollKey={`${props.m.key()}:raw`} />
+                  </details>
+                </>
+              )}
+            </Show>
+          </Show>
+        </Show>
+        <Show when={props.m.name() === "glob"}>
+          <Show
+            when={props.u.result?.toolResult || props.m.prog()}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Finding files…</div>}
+          >
+            <Show
+              when={globList()}
+              fallback={
+                <CodeBlock text={props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+              }
+            >
+              {(g) => (
+                <>
+                  <Show
+                    when={!g().none}
+                    fallback={<div class="px-3 py-2 text-[11px] text-ink-600">No files matched the pattern.</div>}
+                  >
+                    <div class="px-3 pt-2 pb-1 font-mono text-[11px] text-ink-500">
+                      {g().files.length} {g().files.length === 1 ? "file" : "files"}
+                    </div>
+                    <ul class="px-1.5 pb-1.5 max-h-64 overflow-y-auto">
+                      <For each={g().files}>
+                        {(f) => (
+                          <li class="flex items-center gap-1.5 rounded-md px-1.5 py-[3px] hover:bg-ink-900/70 text-[12px]">
+                            <FileIcon path={f} size={13} />
+                            <span class="truncate font-mono text-ink-200">{f}</span>
+                          </li>
+                        )}
+                      </For>
+                    </ul>
+                    <Show when={g().truncated}>
+                      <p class="px-3 pb-2 text-[10px] text-ink-600">Truncated: showing first {g().files.length} matches — narrow the pattern</p>
+                    </Show>
+                  </Show>
+                </>
+              )}
+            </Show>
           </Show>
         </Show>
         <Show when={props.m.name() === "search_web"}>
@@ -106,7 +218,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
             </Show>
           </Show>
         </Show>
-        <Show when={props.m.name() !== "edit" && props.m.name() !== "read" && props.m.name() !== "write" && props.m.name() !== "python" && props.m.name() !== "search" && props.m.name() !== "inspect" && props.m.name() !== "patch" && props.m.name() !== "search_web" && props.m.name() !== "fetch_url"}>
+        <Show when={props.m.name() !== "edit" && props.m.name() !== "read" && props.m.name() !== "write" && props.m.name() !== "python" && props.m.name() !== "search" && props.m.name() !== "inspect" && props.m.name() !== "glob" && props.m.name() !== "question" && props.m.name() !== "patch" && props.m.name() !== "search_web" && props.m.name() !== "fetch_url"}>
           <Show
             when={props.u.result?.toolResult || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.m.name() === "question" ? "Waiting for your answers…" : props.ctx.pendingApproval()?.callId === props.u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}

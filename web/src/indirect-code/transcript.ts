@@ -245,7 +245,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       const target = `${pat.length > 80 ? pat.slice(0, 80) + "…" : pat}${scope}`;
       return {
         icon: "lucide:search",
-        verb: args.isRegex ? "Regex search" : "Search",
+        verb: "Search",
         target: target || "pattern",
       };
     }

@@ -33,6 +33,30 @@ type TurnJournal struct {
 	Incoming  []filetrack.TrackedFile `json:"incoming,omitempty"`
 }
 
+// brainDir resolves the per-session private scratch space
+// (<dataDir>/brain/<sessionID>), refusing traversal. It is created lazily
+// and allowed through the jail so the model always has somewhere to put
+// temporary files, test scripts and experiment output.
+func (d *DaemonServer) brainDir(sessionID string) string {
+	if sessionID == "" || filepath.Base(sessionID) != sessionID {
+		return ""
+	}
+	return filepath.Join(d.dataDir, "brain", sessionID)
+}
+
+// ensureBrainDir creates the scratch space (0700, like the data dir).
+// Returns "" when the session id is unusable.
+func (d *DaemonServer) ensureBrainDir(sessionID string) string {
+	dir := d.brainDir(sessionID)
+	if dir == "" {
+		return ""
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	return dir
+}
+
 // turnJournalPath resolves the sidecar path, refusing traversal.
 func (d *DaemonServer) turnJournalPath(sessionID string) string {
 	if sessionID == "" || filepath.Base(sessionID) != sessionID {
@@ -148,13 +172,18 @@ func (r *turnRun) setupAgent() bool {
 
 	// Setup local filesystem tools rooted at session's CWD
 	sb := tools.NewSandbox(r.sessionCWD)
+	// Per-session scratch space: always writable, jail or not.
+	brainDir := r.d.ensureBrainDir(r.sessionID)
+	if brainDir != "" {
+		sb.AllowExtra(brainDir)
+	}
 	if r.cfg.Settings.JailByDefault {
 		sb.Lock()
 	}
 
 	baseTools := []core.Tool{
 		&tools.ReadTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker},
-		&tools.WriteTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker},
+		&tools.WriteTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir},
 		&tools.EditTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker},
 		&tools.BashTool{CWD: r.sessionCWD, Sandbox: sb},
 		&tools.GlobTool{CWD: r.sessionCWD, Sandbox: sb},
@@ -187,7 +216,7 @@ func (r *turnRun) setupAgent() bool {
 	}}
 	r.reg = core.NewRegistry(append(append(baseTools, questionTool), todoTool)...)
 
-	r.agent = core.NewAgent(r.client, r.modelToUse, sessionSystemPrompt(r.cfg, r.sessionCWD, r.options), r.reg)
+	r.agent = core.NewAgent(r.client, r.modelToUse, systemPromptWithBrain(r.cfg, r.sessionCWD, r.options, brainDir), r.reg)
 	r.agent.TurnIndex = r.turnIndex
 	r.agent.Reasoning = r.options.Effort
 	// Only the agent goroutine changes runtime fields. Commands write the session;
@@ -231,7 +260,7 @@ func (r *turnRun) setupAgent() bool {
 			r.agent.Client, r.agent.Model, r.agent.Reasoning = r.client, r.modelToUse, nextOptions.Effort
 			r.agent.MaxTokens = maxOutputTokens(r.modelInfo)
 			r.d.configMu.RLock()
-			system := sessionSystemPrompt(*r.d.config, r.sessionCWD, nextOptions)
+			system := systemPromptWithBrain(*r.d.config, r.sessionCWD, nextOptions, brainDir)
 			r.d.configMu.RUnlock()
 			r.agent.SetSystem(system)
 			available := core.Registry{}

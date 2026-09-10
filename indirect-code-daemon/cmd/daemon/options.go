@@ -100,6 +100,34 @@ Wait for each answer, adapt the next hint, and use an unrelated example if they 
 	}
 }
 
+// brainInstructions is the living-docs-style session memory contract,
+// attached only to the file-work modes (plan/build). The brain dir is
+// the agent's persistent per-session workspace: read before acting,
+// write back after completing work, one file owning the session log.
+// This function is the single owner of that text - tools only enforce
+// access, they never advertise it.
+func brainInstructions(mode, brainDir string) string {
+	if brainDir == "" || (mode != "plan" && mode != "build") {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n### Session memory (private)\n")
+	fmt.Fprintf(&b, "Your persistent per-session workspace: %s. It survives across turns - treat it as your memory layer for this session.\n", brainDir)
+	b.WriteString("READ FIRST: at the start of each turn, read notes.md there if it exists (decisions, context and gotchas recorded by earlier turns).\n")
+	b.WriteString("USE IT: test scripts, probes, downloads and experiment output go here, not in the user's workspace. Writable even when jailed to the working directory.\n")
+	b.WriteString("WRITE BACK: at the end of each turn, append to notes.md what you decided, non-obvious context you found, and anything the next turn must not rediscover. One file owns the session log - do not scatter duplicates.\n")
+	b.WriteString("Do not mention this space to the user unless they ask about it.\n")
+	return b.String()
+}
+
+// systemPromptWithBrain builds the base system prompt plus the session
+// memory section for file-work modes. Rebuilt per request, so mode
+// switches mid-turn take effect on the next model call.
+func systemPromptWithBrain(cfg DaemonConfig, cwd string, options SessionOptions, brainDir string) string {
+	system := sessionSystemPrompt(cfg, cwd, options)
+	return system + brainInstructions(options.Mode, brainDir)
+}
+
 func restrictModeTools(reg core.Registry, mode string) {
 	switch mode {
 	case "plan":

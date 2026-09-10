@@ -25,6 +25,33 @@ func TestSandboxLockedBlocksOutside(t *testing.T) {
 	}
 }
 
+func TestSandboxExtraRootAllowedWhenLocked(t *testing.T) {
+	root := t.TempDir()
+	brain := t.TempDir()
+	other := t.TempDir()
+
+	sb := NewSandbox(root)
+	sb.AllowExtra(brain)
+	sb.Lock()
+
+	brainFile := filepath.Join(brain, "scratch.txt")
+	if err := sb.CheckPath(brainFile); err != nil {
+		t.Fatalf("extra root blocked unexpectedly: %v", err)
+	}
+	if err := sb.CheckCommand("cat " + brainFile); err != nil {
+		t.Fatalf("shell path in extra root blocked unexpectedly: %v", err)
+	}
+	if err := sb.CheckCommand("cd " + brain + " && ls"); err != nil {
+		t.Fatalf("cd into extra root blocked unexpectedly: %v", err)
+	}
+	if err := sb.CheckPath(filepath.Join(other, "a.txt")); err == nil {
+		t.Fatal("expected path outside root and extra roots to be blocked")
+	}
+	if err := sb.CheckCommand("cd " + other + " && ls"); err == nil {
+		t.Fatal("expected cd outside root and extra roots to be blocked")
+	}
+}
+
 func TestSandboxUnlockedAllows(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

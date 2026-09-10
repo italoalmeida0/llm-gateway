@@ -17,6 +17,27 @@ type WriteTool struct {
 	CWD     string
 	Sandbox *Sandbox
 	Changes ChangeTracker
+	// BrainDir is the absolute path of the per-session private workspace.
+	// Access-only: the sandbox allowlists it and scratch writes skip
+	// change tracking. It is advertised through the mode instructions,
+	// never through this tool's description.
+	BrainDir string
+}
+
+// isBrainPath reports whether an absolute path lives in the scratch space.
+func (t *WriteTool) isBrainPath(abs string) bool {
+	if t.BrainDir == "" {
+		return false
+	}
+	target, err := canonicalOrParent(abs)
+	if err != nil {
+		return false
+	}
+	brain, err := canonicalOrParent(t.BrainDir)
+	if err != nil {
+		return false
+	}
+	return isUnder(brain, target)
 }
 
 type writeArgs struct {
@@ -48,8 +69,9 @@ func (t *WriteTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 
 	// Change tracking (first sighting only): if the file existed, snapshot
 	// its old content; if not, mark it as new without storing content
-	// (the final content is read at end of turn).
-	if t.Changes != nil {
+	// (the final content is read at end of turn). Scratch-space writes
+	// are never tracked: they are not user-facing changes.
+	if t.Changes != nil && !t.isBrainPath(path) {
 		if old, err := os.ReadFile(path); err == nil {
 			if looksBinary(old) {
 				t.Changes.NoteBinaryNew(path)

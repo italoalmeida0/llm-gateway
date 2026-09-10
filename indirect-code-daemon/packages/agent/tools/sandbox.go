@@ -18,6 +18,38 @@ type Sandbox struct {
 	Root        string
 	Permissions *PermissionSet
 	locked      atomic.Bool
+	// extraRoots are additional allowed subtrees outside Root (e.g. the
+	// per-session brain scratch space). Set once via AllowExtra during
+	// setup, before Lock and before any tool runs.
+	extraRoots []string
+}
+
+// AllowExtra permits one more subtree outside Root. Fail-closed on
+// unresolvable paths: an extra root that cannot be canonicalized is
+// ignored at check time.
+func (s *Sandbox) AllowExtra(path string) {
+	if s == nil || path == "" {
+		return
+	}
+	s.extraRoots = append(s.extraRoots, path)
+}
+
+// isAllowed reports whether a canonicalized target sits under the root
+// or any extra root. rootAbs must already be canonicalized.
+func (s *Sandbox) isAllowed(rootAbs, target string) bool {
+	if isUnder(rootAbs, target) {
+		return true
+	}
+	for _, extra := range s.extraRoots {
+		extraAbs, err := canonicalOrParent(extra)
+		if err != nil {
+			continue
+		}
+		if isUnder(extraAbs, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewSandbox returns a Sandbox rooted at cwd. It starts unlocked.
@@ -52,7 +84,7 @@ func (s *Sandbox) CheckPath(path string) error {
 	if err != nil {
 		return fmt.Errorf("sandbox path: %w", err)
 	}
-	if !isUnder(rootAbs, target) {
+	if !s.isAllowed(rootAbs, target) {
 		return fmt.Errorf("jailed: path %q is outside sandbox root %q (use /unjail to disable)", path, s.Root)
 	}
 	return nil
@@ -270,7 +302,7 @@ func (s *Sandbox) checkCommandPath(path string) error {
 	if err != nil {
 		return fmt.Errorf("sandbox path: %w", err)
 	}
-	if !isUnder(rootAbs, target) {
+	if !s.isAllowed(rootAbs, target) {
 		return fmt.Errorf("jailed: path %q is outside sandbox root %q (use /unjail to disable)", path, s.Root)
 	}
 	return nil
@@ -302,7 +334,7 @@ func (s *Sandbox) checkCDTarget(dir string) error {
 	if err != nil {
 		return fmt.Errorf("sandbox path: %w", err)
 	}
-	if !isUnder(rootAbs, target) {
+	if !s.isAllowed(rootAbs, target) {
 		return fmt.Errorf("jailed: cd outside sandbox root is not allowed (use /unjail to disable)")
 	}
 	return nil

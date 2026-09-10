@@ -221,6 +221,40 @@ func TestWriteCreatesDirs(t *testing.T) {
 	}
 }
 
+func TestWriteDescriptionOmitsBrain(t *testing.T) {
+	// The session memory space is advertised through the plan/build mode
+	// instructions, never through the write tool description.
+	want := "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories."
+	for _, tool := range []*WriteTool{{CWD: t.TempDir()}, {CWD: t.TempDir(), BrainDir: t.TempDir()}} {
+		if got := tool.Description(); got != want {
+			t.Fatalf("Description() = %q; want base text only", got)
+		}
+	}
+}
+
+type countTracker struct{ writes int }
+
+func (c *countTracker) NoteRead(absPath, content string)                   {}
+func (c *countTracker) NoteWrite(absPath string, existed bool, old string) { c.writes++ }
+func (c *countTracker) NoteEditBefore(absPath, beforeContent string)       {}
+func (c *countTracker) NoteBinaryNew(absPath string)                       { c.writes++ }
+
+func TestWriteBrainSkipsChangeTracking(t *testing.T) {
+	dir := t.TempDir()
+	brain := t.TempDir()
+	tracker := &countTracker{}
+	tool := &WriteTool{CWD: dir, BrainDir: brain, Changes: tracker}
+	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": filepath.Join(brain, "s.txt"), "content": "x"}), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "w.txt", "content": "y"}), nil); err != nil {
+		t.Fatal(err)
+	}
+	if tracker.writes != 1 {
+		t.Fatalf("tracked writes = %d; want 1 (brain write must be skipped)", tracker.writes)
+	}
+}
+
 func TestEditSingle(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.txt")

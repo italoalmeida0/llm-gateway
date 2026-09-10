@@ -223,11 +223,11 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
 		"turn": rec.Turn, "todos": rec.Todos, "todosOpen": rec.TodosOpen,
 		"draft": rec.Draft, "editingMsg": rec.EditingMsg,
-		"workspace":  inspectWorkspace(rec.CWD),
+		"workspace": inspectWorkspace(rec.CWD),
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages),
-		"attachments": rec.Attachments,
-		"compaction": rec.Compaction,
-		"turnSeq":    rec.TurnSeq,
+		"attachments":  rec.Attachments,
+		"compaction":   rec.Compaction,
+		"turnSeq":      rec.TurnSeq,
 		"fileBalloons": rec.FileBalloons,
 	}
 }
@@ -235,7 +235,7 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 func projectPayload(p ProjectEntry) map[string]any {
 	return map[string]any{
 		"id": p.ID, "name": p.Name, "path": p.Path,
-		"createdAt": p.CreatedAt,
+		"createdAt":    p.CreatedAt,
 		"protected":    p.Protected,
 		"collapsed":    p.Collapsed,
 		"folderStatus": inspectWorkspace(p.Path).Status,
@@ -863,6 +863,7 @@ func (d *DaemonServer) purgeSession(id string) {
 	d.sessionsMu.Unlock()
 	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".json"))
 	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id))
+	_ = os.RemoveAll(d.brainDir(id))
 	d.deleteTurnJournal(id)
 	_ = d.sendWS(map[string]any{
 		"type":      "session_deleted",
@@ -875,20 +876,20 @@ func (d *DaemonServer) purgeSession(id string) {
 // sessionRaw mirrors the on-disk record without hydrating message content —
 // pull/list sweeps must stay cheap even with fat transcripts on disk.
 type sessionRaw struct {
-	ID         string            `json:"id"`
-	CWD        string            `json:"cwd"`
-	Title      string            `json:"title"`
-	Model      string            `json:"model"`
-	Status     string            `json:"status"`
-	Pinned     bool              `json:"pinned"`
-	CreatedAt  int64             `json:"createdAt"`
-	UpdatedAt  int64             `json:"updatedAt"`
-	Messages   []json.RawMessage `json:"messages"`
-	Attachments []AttachmentRef  `json:"attachments"`
-	Draft      string            `json:"draft"`
-	TodosOpen  *bool             `json:"todosOpen"`
-	EditingMsg *EditingMsgState  `json:"editingMsg"`
-	Options    *SessionOptions   `json:"options"`
+	ID          string            `json:"id"`
+	CWD         string            `json:"cwd"`
+	Title       string            `json:"title"`
+	Model       string            `json:"model"`
+	Status      string            `json:"status"`
+	Pinned      bool              `json:"pinned"`
+	CreatedAt   int64             `json:"createdAt"`
+	UpdatedAt   int64             `json:"updatedAt"`
+	Messages    []json.RawMessage `json:"messages"`
+	Attachments []AttachmentRef   `json:"attachments"`
+	Draft       string            `json:"draft"`
+	TodosOpen   *bool             `json:"todosOpen"`
+	EditingMsg  *EditingMsgState  `json:"editingMsg"`
+	Options     *SessionOptions   `json:"options"`
 }
 
 // listSessionSummaries reads every session record but parses messages only
@@ -2315,7 +2316,6 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		})
 		return
 	}
-
 
 	if act.record.CWD != "" && inspectWorkspace(act.record.CWD).Status != "available" {
 		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": sessionPayload(act.record)})

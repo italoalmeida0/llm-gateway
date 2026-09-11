@@ -1,13 +1,14 @@
 import type { JSX } from "solid-js";
 import { Icon } from "../../components/icon";
-import { fileIcon, hasFileIcon } from "../files";
+import { commandIcon, fileIcon, hasFileIcon } from "../files";
 
 /**
  * Streamdown `code` override for the chat transcript: inline code that names
  * a file with a known icon (e.g. `server.ts`, `src/api/routes.ts`,
- * `Dockerfile`) renders with the file icon on its left. Anything else —
- * identifiers, commands, prose with dots — renders as plain <code>,
- * byte-identical to the streamdown default. Fenced code blocks are untouched.
+ * `Dockerfile`) or a known shell command (e.g. `git push`, `bun run dev`)
+ * renders with the icon on its left. Anything else — identifiers, prose —
+ * renders as plain <code>, byte-identical to the streamdown default.
+ * Fenced code blocks are untouched.
  */
 
 function codeText(children: unknown): string | null {
@@ -38,8 +39,25 @@ export function FileInlineCode(props: any): JSX.Element {
   const endLine = node?.position?.end?.line;
   const inline = startLine === undefined || endLine === undefined || startLine === endLine;
   const text = codeText(props?.children);
-  if (!inline || text === null || !hasFileIcon(text)) {
+  if (!inline || text === null) {
     // Default streamdown inline rendering (same classes + data attribute).
+    return (
+      <code class={`rounded bg-muted px-1.5 py-0.5 font-mono text-sm ${props?.className ?? ""}`} data-streamdown="inline-code">
+        {props?.children}
+      </code>
+    );
+  }
+  // Shell command (`git push`): icon for the leading command word.
+  const cmd = commandIcon(text);
+  if (cmd) {
+    return (
+      <code class={`rounded bg-muted px-1.5 py-0.5 font-mono text-sm ${props?.className ?? ""}`} data-streamdown="inline-code" data-cmd={text.trim().split(/\s+/)[0]}>
+        <Icon icon={cmd.icon} size={12} class={cmd.class} />
+        {props?.children}
+      </code>
+    );
+  }
+  if (!hasFileIcon(text)) {
     return (
       <code class={`rounded bg-muted px-1.5 py-0.5 font-mono text-sm ${props?.className ?? ""}`} data-streamdown="inline-code">
         {props?.children}

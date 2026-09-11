@@ -987,7 +987,7 @@ describe("File icon in inline code (hasFileIcon)", () => {
     expect(hasFileIcon("v1.0")).toBe(false);
     expect(hasFileIcon("foo.xyzabc")).toBe(false);
     expect(hasFileIcon("")).toBe(false);
-    expect(hasFileIcon(".gitignore")).toBe(false);
+    expect(hasFileIcon(".dockerignore")).toBe(false);
     // Bare extension words are not files (no dot in the basename).
     expect(hasFileIcon("ts")).toBe(false);
     expect(hasFileIcon("tsx")).toBe(false);
@@ -1002,5 +1002,24 @@ describe("File icon in inline code (hasFileIcon)", () => {
     expect(hasFileIcon(".env")).toBe(true);
     expect(hasFileIcon(".env.local")).toBe(true);
     expect(hasFileIcon("bun.lock")).toBe(true);
+    // Every .git* file gets the git icon.
+    expect(hasFileIcon(".gitignore")).toBe(true);
+    expect(hasFileIcon(".gitmodules")).toBe(true);
+    expect(hasFileIcon(".gitattributes")).toBe(true);
+  });
+
+  test("commandIcon matches leading command word + space", async () => {
+    const { commandIcon } = await import("../web/src/indirect-code/files");
+    expect(commandIcon("git push")?.icon).toBe("mdi:git");
+    expect(commandIcon("GIT STATUS")?.icon).toBe("mdi:git");
+    expect(commandIcon("bun run dev")?.icon).toBe("lucide:zap");
+    expect(commandIcon("npm install")?.icon).toBe("mdi:npm");
+    expect(commandIcon("docker ps")?.icon).toBe("mdi:docker");
+    expect(commandIcon("ls -la")?.icon).toBe("lucide:terminal");
+    expect(commandIcon("ssh u@h")?.icon).toBe("mdi:ssh");
+    expect(commandIcon("kubectl get pods")?.icon).toBe("mdi:kubernetes");
+    expect(commandIcon("foobar baz")).toBeNull();
+    expect(commandIcon("git")).toBeNull(); // no trailing space, not a command
+    expect(commandIcon("useState x")).toBeNull();
   });
 });

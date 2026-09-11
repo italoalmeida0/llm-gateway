@@ -57,10 +57,43 @@ for (const group of groups) for (const ext of group.extensions.split(" ")) {
 }
 const named = (icon: string, tone = "type"): FileIconSpec => ({ icon, class: tones[tone] });
 
+/**
+ * Shell command -> icon, matched on the first word followed by a space
+ * (e.g. `git push`, `bun run dev`). Only icons present in the build-time
+ * registry are listed — unknown commands stay plain text.
+ */
+const commandIcons: Array<[RegExp, FileIconSpec]> = [
+  [/^git\s/, named("mdi:git", "meta")],
+  [/^docker\s/, named("mdi:docker")],
+  [/^kubectl\s/, named("mdi:kubernetes")],
+  [/^terraform\s/, named("mdi:terraform")],
+  [/^npm\s/, named("mdi:npm", "meta")],
+  [/^(yarn|pnpm)\s/, named("lucide:package", "meta")],
+  [/^(node|npx)\s/, named("mdi:nodejs", "str")],
+  [/^(bun|deno)\s/, named("lucide:zap", "str")],
+  [/^(python[\d.]*|pip|pipx|poetry|uv)\s/, named("mdi:language-python", "builtin")],
+  [/^(go|gofmt)\s/, named("mdi:language-go", "type")],
+  [/^(cargo|rustc)\s/, named("lucide:cog", "meta")],
+  [/^(make|cmake)\s/, named("lucide:hammer", "str")],
+  [/^ssh\s/, named("mdi:ssh", "comment")],
+  [/^(curl|wget)\s/, named("lucide:globe", "builtin")],
+  [/^(vim|nvim|nano|emacs)\s/, named("lucide:pen", "comment")],
+  [/^(code|zed)\s/, named("lucide:code", "type")],
+  [/^(ls|cd|pwd|cat|less|head|tail|cp|mv|rm|mkdir|touch|chmod|chown|ln|find|grep|sed|awk|tar|zip|unzip|echo)\s/, named("lucide:terminal", "comment")],
+];
+
+/** Icon for a shell command (`git push`), or null when unknown. */
+export function commandIcon(text: string): FileIconSpec | null {
+  const line = text.trim().toLowerCase();
+  if (!/\s/.test(line)) return null;
+  for (const [re, spec] of commandIcons) if (re.test(line)) return spec;
+  return null;
+}
+
 export function fileIcon(path: string): FileIconSpec {
   const name = path.split(/[\\/]/).pop()?.toLowerCase() || "";
   if (/^(dockerfile|containerfile)(\.|$)/.test(name) || /^(docker-)?compose[.]/.test(name)) return named("mdi:docker");
-  if (/^\.git|^\.gitattributes$/.test(name)) return named("mdi:git", "meta");
+  if (/^\.git/.test(name)) return named("mdi:git", "meta");
   if (/^\.env($|\.)/.test(name)) return named("mdi:file-key", "num");
   if (/^(package(-lock)?\.json|npm-shrinkwrap\.json|\.npmrc|\.yarnrc.*|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/.test(name)) return named("mdi:npm", "meta");
   if (/^(makefile|gnumakefile|justfile|cmakelists\.txt|.*\.cmake)$/.test(name)) return named("lucide:hammer", "str");
@@ -89,9 +122,9 @@ export function hasFileIcon(text: string): boolean {
     return spec.icon !== "lucide:file-text";
   }
   if (dot === 0) {
-    // Dotfile without extension: icon only for the known config names
-    // (.gitignore, .dockerignore and friends stay plain text).
-    return /^\.(git|gitattributes|env|npmrc|editorconfig|prettier.*|eslint.*)$/.test(lower);
+    // Any .git* file gets the git icon; other known dotfiles (.env,
+    // .npmrc, ...) match too. The rest stays plain text.
+    return /^\.git/.test(lower) || /^\.(env|npmrc|editorconfig|prettier.*|eslint.*)$/.test(lower);
   }
   // Extensionless: only the special names fileIcon knows by heart.
   return fileIcon(base).icon !== "lucide:file-text" && !byExtension.has(lower);

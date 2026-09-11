@@ -1151,3 +1151,24 @@ describe("Wait-state notifications (approval/question/stalled error)", () => {
     delete (globalThis as any).Notification;
   });
 });
+
+describe("Notification tags are unique per event", () => {
+  test("notifyTag keeps prefix and appends a 6-hex suffix", async () => {
+    const { notifyTag } = await import("../web/src/indirect-code/hooks/useTurnNotify");
+    const a = notifyTag("turn", "h1", "s1");
+    const b = notifyTag("turn", "h1", "s1");
+    expect(a).toMatch(/^turn-h1-s1-[0-9a-f]{6}$/);
+    expect(b).toMatch(/^turn-h1-s1-[0-9a-f]{6}$/);
+    expect(a).not.toBe(b);
+    expect(notifyTag("wait", "h1", "s1")).toMatch(/^wait-h1-s1-[0-9a-f]{6}$/);
+  });
+
+  test("push payload tag is unique per event", async () => {
+    const { buildTurnPayload } = await import("../server/push");
+    const p1 = JSON.parse(buildTurnPayload({ title: "T", host: "H", disposition: "done", url: "/#/code" }));
+    const p2 = JSON.parse(buildTurnPayload({ title: "T", host: "H", disposition: "done", url: "/#/code" }));
+    expect(p1.tag).toMatch(/^turn-H-T-[0-9a-f]{6}$/);
+    expect(p2.tag).toMatch(/^turn-H-T-[0-9a-f]{6}$/);
+    expect(p1.tag).not.toBe(p2.tag);
+  });
+});

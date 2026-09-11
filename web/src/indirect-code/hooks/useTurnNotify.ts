@@ -78,7 +78,15 @@ export function turnNotifyText(t: Pick<TurnNotifyTarget, "title" | "hostName" | 
   return { title, body: `${t.hostName} · tap to open` };
 }
 
-/** Short WebAudio chime (hand-rolled: zero deps, zero assets). */
+/** Short random suffix so each notification is a NEW one (reusing a tag
+ * would replace the previous instead of stacking). Keeps the
+ * host:session prefix for grouping. */
+export function notifyTag(prefix: string, hostId: string, sessionId: string): string {
+  const rand = Math.floor(Math.random() * 0xffffff)
+    .toString(16)
+    .padStart(6, "0");
+  return `${prefix}-${hostId}-${sessionId}-${rand}`;
+}
 function playChime(): void {
   try {
     const Ctx = window.AudioContext || (window as any).webkitAudioContext;
@@ -200,8 +208,8 @@ export function createTurnNotify(opts: {
       try {
         const tag =
           target.disposition === "approval" || target.disposition === "question"
-            ? `wait-${target.hostId}-${target.sessionId}`
-            : `turn-${target.hostId}-${target.sessionId}`;
+            ? notifyTag("wait", target.hostId, target.sessionId)
+            : notifyTag("turn", target.hostId, target.sessionId);
         const n = new Notification(title, { body, tag });
         n.onclick = () => {
           try {

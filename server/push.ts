@@ -106,7 +106,11 @@ export function buildTurnPayload(push: TurnPush): string {
     title,
     body: `${push.host} · tap to open`,
     url: push.url || `${PUBLIC_URL}/#/code`,
-    tag: `turn-${push.host}-${push.title}`,
+    // Unique per event so the OS stacks instead of replacing (same
+    // behavior as the in-tab Notification tag).
+    tag: `turn-${push.host}-${push.title}-${Math.floor(Math.random() * 0xffffff)
+      .toString(16)
+      .padStart(6, "0")}`,
   });
 }
 

@@ -55,10 +55,12 @@ export function StatusBanners() {
   </div>
 }</Show>
 <Show when={h.activeHost() && (h.connectionState() !== "connected" || h.activeHost()?.status !== "online")}>
-  <div role="status" class="mb-3 rounded-xl border border-line bg-elev p-3 text-xs text-ink-300 flex items-start gap-2">
-    <Iconify icon="lucide:unplug" size={15} class="text-ink-500" />
-    <div class="flex-1"><p class="font-medium">{h.connectionState() !== "connected" ? "Reconnecting to the gateway…" : `${h.activeHost()?.name || "Host"} is offline`}</p><p class="mt-1 text-ink-500">Your draft is kept here. Start the daemon on this host to continue.</p></div>
-    <button onClick={h.loadHosts} class="text-ink-200 hover:underline cursor-pointer">Retry</button>
+  <div class="rc-delayed-banner">
+    <div role="status" class="rounded-xl border border-line bg-elev p-3 text-xs text-ink-300 flex items-start gap-2">
+      <Iconify icon="lucide:unplug" size={15} class="text-ink-500" />
+      <div class="flex-1"><p class="font-medium">{h.connectionState() !== "connected" ? "Reconnecting to the gateway…" : `${h.activeHost()?.name || "Host"} is offline`}</p><p class="mt-1 text-ink-500">Your draft is kept here. Start the daemon on this host to continue.</p></div>
+      <button onClick={h.loadHosts} class="text-ink-200 hover:underline cursor-pointer">Retry</button>
+    </div>
   </div>
 </Show>
 </>

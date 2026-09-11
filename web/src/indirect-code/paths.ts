@@ -36,7 +36,9 @@ export function projectForDirectory<T extends { id: string; path: string; protec
 }
 
 /** Compact display: replace the session working directory with "." so
- * headers show `cd ./sub && build` instead of the full remote path. */
+ * headers show `cd ./sub && build` instead of the full remote path.
+ * A leading `cd . &&` left over by the collapse is redundant noise, so it
+ * is stripped (`cd . && build` -> `build`). */
 export function collapseCwd(cmd: string, cwd: string): string {
   if (!cmd || !cwd) return cmd;
   const base = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -48,7 +50,7 @@ export function collapseCwd(cmd: string, cwd: string): string {
   for (const v of variants) {
     if (v) out = out.split(v).join(".");
   }
-  return out;
+  return out.replace(/^\s*cd\s+\.\s*&&\s*/, "").trimStart() || out.trimStart();
 }
 
 export function absoluteRemotePath(path: string, cwd: string, home = ""): string {

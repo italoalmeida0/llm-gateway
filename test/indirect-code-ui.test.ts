@@ -675,10 +675,18 @@ describe("collapseCwd", () => {
   });
 
   test("handles trailing slashes, windows separators and degenerate cwd", () => {
-    expect(collapseCwd("cd /a/b && make", "/a/b/")).toBe("cd . && make");
-    expect(collapseCwd("cd C:\\work\\TAP && build", "C:\\work\\TAP")).toBe("cd . && build");
+    expect(collapseCwd("cd /a/b && make", "/a/b/")).toBe("make");
+    expect(collapseCwd("cd C:\\work\\TAP && build", "C:\\work\\TAP")).toBe("build");
     expect(collapseCwd("echo hi", "")).toBe("echo hi");
     expect(collapseCwd("ls /", "/")).toBe("ls /");
+  });
+
+  test("strips a redundant leading cd . && left by the collapse", () => {
+    expect(collapseCwd("cd /proj && bun run dev", "/proj")).toBe("bun run dev");
+    expect(collapseCwd("cd /proj && cd /proj/sub && make", "/proj")).toBe("cd ./sub && make");
+    expect(collapseCwd("  cd . && echo hi", "/proj")).toBe("echo hi");
+    // A cd into a DIFFERENT directory is meaningful: keep it.
+    expect(collapseCwd("cd /other && ls", "/proj")).toBe("cd /other && ls");
   });
 });
 

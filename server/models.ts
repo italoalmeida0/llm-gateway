@@ -1,5 +1,6 @@
 import {
   db,
+  type Proto,
   type ModelRow,
   type ModelTargetRow,
   type ProviderKeyRow,
@@ -145,8 +146,13 @@ export interface SyncOutcome {
   error?: string;
 }
 
-function authHeaders(provider: ProviderRow, proto: "openai" | "anthropic", key: string): Record<string, string> {
-  const style = proto === "openai" ? provider.openai_auth_style : provider.anthropic_auth_style;
+function authHeaders(provider: ProviderRow, proto: Proto, key: string): Record<string, string> {
+  const style =
+    proto === "openai"
+      ? provider.openai_auth_style
+      : proto === "responses"
+        ? provider.responses_auth_style
+        : provider.anthropic_auth_style;
   return style === "bearer"
     ? { Authorization: `Bearer ${key}` }
     : proto === "openai"
@@ -246,6 +252,8 @@ export async function syncProviderModels(
   plaintextKey: string,
 ): Promise<Partial<Record<"openai" | "anthropic", SyncOutcome>>> {
   const out: Partial<Record<"openai" | "anthropic", SyncOutcome>> = {};
+  // Only chat-completions and Messages expose GET /models; a
+  // responses-only provider shares its ids through the sibling lists.
   const caps: Array<["openai" | "anthropic", string | null]> = [
     ["openai", provider.openai_base_url],
     ["anthropic", provider.anthropic_base_url],
@@ -565,27 +573,47 @@ export function invalidateModelCache(): void {
   snapCache = null;
 }
 
-export function providerHasCapability(row: ProviderRow, proto: "openai" | "anthropic"): boolean {
-  return proto === "openai" ? !!row.openai_base_url : !!row.anthropic_base_url;
+export function providerHasCapability(row: ProviderRow, proto: Proto): boolean {
+  return proto === "openai"
+    ? !!row.openai_base_url
+    : proto === "responses"
+      ? !!row.responses_base_url
+      : !!row.anthropic_base_url;
+}
+
+/**
+ * Ordered upstream preference per requesting surface: the native
+ * capability first, then the others (served through the protocol
+ * bridge). Every ordered pair has a translator, so any provider with
+ * any capability can serve any surface.
+ */
+export function upstreamPreference(proto: Proto): Proto[] {
+  if (proto === "responses") return ["responses", "openai", "anthropic"];
+  if (proto === "openai") return ["openai", "anthropic", "responses"];
+  return ["anthropic", "openai", "responses"];
 }
 
 /** One attempt of the failover chain: a concrete provider key plus the
- *  upstream model id to send (null in passthrough mode — body untouched).
- *  `translated` marks an Anthropic-protocol request served by an
- *  OpenAI-only provider through the Anthropic→OpenAI bridge. */
+ *  upstream model id to send ("" in passthrough mode — body untouched).
+ *  `via` is the upstream capability serving this attempt (the first of
+ *  `upstreamPreference` the provider exposes); `translated` marks bridge
+ *  translation (via !== requesting protocol, either direction). */
 export interface RouteCandidate {
   provider: RoutedProvider;
   key: RoutedKey;
   upstreamModel: string;
   translated: boolean;
+  via: Proto;
 }
 
-/** Capability match for a candidate, including bridge translation: an
- *  Anthropic request may use an OpenAI-only provider (translated); the
- *  reverse is never translated. */
-export function candidateUsable(provider: RoutedProvider, proto: "openai" | "anthropic"): "direct" | "translated" | null {
-  if (providerHasCapability(provider.row, proto)) return "direct";
-  if (proto === "anthropic" && provider.row.openai_base_url) return "translated";
+/** Capability match for a candidate, including bridge translation: a
+ *  request may use a provider exposing any capability, served natively
+ *  or through the protocol bridge. Returns the upstream capability to
+ *  use (native first), or null when the provider exposes nothing. */
+export function candidateUsable(provider: RoutedProvider, proto: Proto): Proto | null {
+  for (const via of upstreamPreference(proto)) {
+    if (providerHasCapability(provider.row, via)) return via;
+  }
   return null;
 }
 
@@ -608,11 +636,7 @@ export function usableKeys(provider: RoutedProvider, now = Date.now()): RoutedKe
   );
 }
 
-export function resolveModelRoute(
-  snap: RouterSnapshot,
-  proto: "openai" | "anthropic",
-  model: string,
-): ModelResolution {
+export function resolveModelRoute(snap: RouterSnapshot, proto: Proto, model: string): ModelResolution {
   const m = snap.models.get(model);
   if (!m) {
     return {
@@ -639,10 +663,10 @@ export function resolveModelRoute(
   for (const t of enabledTargets) {
     const provider = snap.providers.get(t.provider_id);
     if (!provider) continue;
-    const usable = candidateUsable(provider, proto);
-    if (!usable) continue;
+    const via = candidateUsable(provider, proto);
+    if (!via) continue;
     for (const key of usableKeys(provider)) {
-      candidates.push({ provider, key, upstreamModel: t.upstream_model, translated: usable === "translated" });
+      candidates.push({ provider, key, upstreamModel: t.upstream_model, translated: via !== proto, via });
     }
   }
   if (candidates.length === 0) {
@@ -658,25 +682,22 @@ export function resolveModelRoute(
 
 /** Passthrough-mode candidates: every enabled provider exposing this
  *  capability (priority order), each contributing its usable keys. */
-export function passthroughCandidates(
-  snap: RouterSnapshot,
-  proto: "openai" | "anthropic",
-): RouteCandidate[] {
+export function passthroughCandidates(snap: RouterSnapshot, proto: Proto): RouteCandidate[] {
   const out: RouteCandidate[] = [];
   for (const provider of snap.providers.values()) {
-    const usable = candidateUsable(provider, proto);
-    if (!usable) continue;
+    const via = candidateUsable(provider, proto);
+    if (!via) continue;
     for (const key of usableKeys(provider)) {
-      out.push({ provider, key, upstreamModel: "", translated: usable === "translated" });
+      out.push({ provider, key, upstreamModel: "", translated: via !== proto, via });
     }
   }
   return out;
 }
 
 /** Models visible in /v1/models for a protocol: enabled, with at least
- *  one enabled target whose provider is enabled and capable (translated
- *  for Anthropic requests to OpenAI-only providers). */
-export function listableModels(snap: RouterSnapshot, proto: "openai" | "anthropic"): ModelRow[] {
+ *  one enabled target whose provider is enabled and capable (directly
+ *  or through bridge translation). */
+export function listableModels(snap: RouterSnapshot, proto: Proto): ModelRow[] {
   const out: ModelRow[] = [];
   for (const m of snap.models.values()) {
     if (!m.enabled) continue;

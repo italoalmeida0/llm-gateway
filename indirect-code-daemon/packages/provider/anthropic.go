@@ -368,6 +368,11 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 		usage        Usage
 		stop         StopReason = StopEnd
 		finalErr     error
+		// sawStop tracks a clean message_stop. Without it the stream was
+		// cut (connection closed, gateway abort): any tool_use block in
+		// the wreckage is incomplete and must error, never pass as a
+		// finished turn.
+		sawStop bool
 	)
 
 	ordered := func() []*blockEntry {
@@ -415,9 +420,22 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 	}
 
 	sendDone := func() {
+		msg := assembleMsg()
+		if !sawStop && stop != StopAborted && finalErr == nil {
+			for _, blk := range msg.Content {
+				if tc, ok := blk.(ToolCallBlock); ok {
+					stop = StopError
+					finalErr = fmt.Errorf(
+						"%s: truncated response: stream ended without message_stop with incomplete tool_use %q (%s)",
+						c.Name(), tc.ID, tc.Name,
+					)
+					break
+				}
+			}
+		}
 		usage.CostUSD = ComputeCost(model, usage)
 		out <- EventUsage{Usage: usage}
-		out <- EventDone{Stop: stop, Err: finalErr, Message: assembleMsg()}
+		out <- EventDone{Stop: stop, Err: finalErr, Message: msg}
 	}
 
 	for {
@@ -595,6 +613,7 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 					stop = StopEnd
 				}
 			case "message_stop":
+				sawStop = true
 				sendDone()
 				return
 			}

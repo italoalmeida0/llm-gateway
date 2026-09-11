@@ -16,5 +16,5 @@ dist/
 !indirect-code-daemon/dist/indirect-code-*
 !indirect-code-daemon/dist/indirect-install.*
 !indirect-code-daemon/dist/SHA256SUMS.txt
-
+/tmp
 .cache/iconify/

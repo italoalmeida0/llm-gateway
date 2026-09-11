@@ -230,6 +230,52 @@ func TestAnthropicRedactedThinkingRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAnthropicTruncatedToolCallErrors(t *testing.T) {
+	// The stream announces a tool_use block and then dies: connection
+	// closed, no message_delta, no message_stop. The turn must fail
+	// loudly (retryable) instead of passing an empty-arguments tool
+	// call as a clean end_turn.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		write := func(s string) {
+			_, _ = w.Write([]byte(s))
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		write("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":10}}}\n\n")
+		write("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu9\",\"name\":\"write\"}}\n\n")
+	}))
+	defer srv.Close()
+
+	c := NewAnthropic("x", srv.URL)
+	evs, err := c.Stream(context.Background(), Request{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var done EventDone
+	var starts int
+	for ev := range evs {
+		switch e := ev.(type) {
+		case EventToolStart:
+			starts++
+		case EventDone:
+			done = e
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("starts=%d want 1", starts)
+	}
+	if done.Stop != StopError || done.Err == nil {
+		t.Fatalf("stop=%v err=%v want StopError with truncated-response error", done.Stop, done.Err)
+	}
+	if got := done.Err.Error(); !strings.Contains(got, "truncated") {
+		t.Fatalf("err=%q want truncated-response error", got)
+	}
+}
+
 func TestAnthropicErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

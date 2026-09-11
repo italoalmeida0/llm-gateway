@@ -474,6 +474,79 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE models DROP COLUMN datacenters;
     `,
   },
+  {
+    name: "017_responses_capability",
+    // Third protocol surface: OpenAI Responses API. Providers gain a
+    // `responses_base_url` capability (+ auth style, default bearer like
+    // OpenAI); usage `proto` widens to 'responses' on both tables carrying
+    // the CHECK (usage_model_daily never had one). SQLite can't alter a
+    // CHECK, so both tables are rebuilt (same precedent as 008).
+    up: `
+      ALTER TABLE providers ADD COLUMN responses_base_url TEXT;
+      ALTER TABLE providers ADD COLUMN responses_auth_style TEXT NOT NULL DEFAULT 'bearer';
+
+      CREATE TABLE usage_events_new (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        key_id     TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        ts         INTEGER NOT NULL,
+        proto      TEXT NOT NULL CHECK (proto IN ('openai','anthropic','responses')),
+        model      TEXT NOT NULL DEFAULT '',
+        in_tok     INTEGER NOT NULL DEFAULT 0,
+        out_tok    INTEGER NOT NULL DEFAULT 0,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        status     INTEGER NOT NULL DEFAULT 200,
+        stream     INTEGER NOT NULL DEFAULT 0,
+        estimated  INTEGER NOT NULL DEFAULT 0,
+        cache_tok  INTEGER NOT NULL DEFAULT 0,
+        provider_id TEXT NOT NULL DEFAULT '',
+        provider_key_id TEXT NOT NULL DEFAULT '',
+        upstream_model TEXT NOT NULL DEFAULT ''
+      );
+      INSERT INTO usage_events_new
+        (id, key_id, user_id, ts, proto, model, in_tok, out_tok, latency_ms,
+         status, stream, estimated, cache_tok, provider_id, provider_key_id, upstream_model)
+        SELECT id, key_id, user_id, ts, proto, model, in_tok, out_tok, latency_ms,
+         status, stream, estimated, cache_tok, provider_id, provider_key_id, upstream_model
+        FROM usage_events;
+      DROP TABLE usage_events;
+      ALTER TABLE usage_events_new RENAME TO usage_events;
+      CREATE INDEX idx_usage_key_ts ON usage_events(key_id, ts);
+      CREATE INDEX idx_usage_user_ts ON usage_events(user_id, ts);
+      CREATE INDEX idx_usage_ts ON usage_events(ts);
+      CREATE INDEX idx_usage_user_ts_id ON usage_events(user_id, ts, id);
+      CREATE INDEX idx_usage_user_in_tok_id ON usage_events(user_id, in_tok, id);
+
+      CREATE TABLE usage_model_provider_daily_new (
+        key_id          TEXT NOT NULL,
+        user_id         TEXT NOT NULL,
+        date            TEXT NOT NULL,
+        proto           TEXT NOT NULL CHECK (proto IN ('openai','anthropic','responses')),
+        provider_id     TEXT NOT NULL DEFAULT '',
+        provider_key_id TEXT NOT NULL DEFAULT '',
+        model           TEXT NOT NULL,
+        upstream_model  TEXT NOT NULL DEFAULT '',
+        in_tok          INTEGER NOT NULL DEFAULT 0,
+        cache_tok       INTEGER NOT NULL DEFAULT 0,
+        out_tok         INTEGER NOT NULL DEFAULT 0,
+        reqs            INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (key_id, date, proto, provider_id, provider_key_id, model, upstream_model)
+      ) WITHOUT ROWID;
+      INSERT INTO usage_model_provider_daily_new SELECT * FROM usage_model_provider_daily;
+      DROP TABLE usage_model_provider_daily;
+      ALTER TABLE usage_model_provider_daily_new RENAME TO usage_model_provider_daily;
+      CREATE INDEX idx_usage_mpd_user ON usage_model_provider_daily(user_id, date);
+    `,
+  },
+  {
+    name: "018_provider_strip_params",
+    // Per-provider upstream parameter blocklist: top-level request-body keys
+    // the provider rejects (e.g. reasoning-only models refusing `temperature`
+    // or `max_tokens`). Stored as a JSON string array, default empty.
+    up: `
+      ALTER TABLE providers ADD COLUMN strip_params TEXT NOT NULL DEFAULT '[]';
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -532,17 +605,38 @@ export interface SessionRow {
 
 export type AuthStyle = "bearer" | "x-api-key";
 
+/** Every protocol surface the gateway speaks, and every upstream
+ *  capability a provider may expose. "openai" is chat-completions,
+ *  "responses" is the OpenAI Responses API, "anthropic" is Messages. */
+export type Proto = "openai" | "anthropic" | "responses";
+
 export interface ProviderRow {
   id: string;
   name: string;
   openai_base_url: string | null;
   anthropic_base_url: string | null;
+  responses_base_url: string | null;
   api_key_enc: string;
   enabled: number;
   priority: number;
   created_at: number;
   openai_auth_style: AuthStyle;
   anthropic_auth_style: AuthStyle;
+  responses_auth_style: AuthStyle;
+  /** JSON string array of top-level request-body keys withheld upstream. */
+  strip_params: string;
+}
+
+/** Tolerant parse of `providers.strip_params` (admin-validated on write). */
+export function parseStripParams(raw: unknown): string[] {
+  if (typeof raw !== "string") return [];
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (!Array.isArray(v)) return [];
+    return v.filter((x): x is string => typeof x === "string" && x.length > 0).slice(0, 32);
+  } catch {
+    return [];
+  }
 }
 
 /** How the proxy maps `body.model` to an upstream provider.

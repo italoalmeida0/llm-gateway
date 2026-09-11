@@ -16,7 +16,7 @@ import { buildGridWhere, buildGridOrder, gridPage, type ColSpec, type GridFilter
 export interface UsageEvent {
   keyId: string;
   userId: string;
-  proto: "openai" | "anthropic";
+  proto: "openai" | "anthropic" | "responses";
   model: string;
   /** Cache-free input tokens (providers charge full price for these). */
   inTok: number;
@@ -314,7 +314,7 @@ export interface UsageBreakdownRow {
   key_id: string;
   key_name: string;
   model: string;
-  proto: "openai" | "anthropic";
+  proto: "openai" | "anthropic" | "responses";
   provider_id: string;
   provider_name: string | null;
   provider_key_id: string;

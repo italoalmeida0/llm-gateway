@@ -1,5 +1,5 @@
 import { LIMITS, SMTP_ENABLED } from "../config";
-import { db, stmts, type ProviderRow, type ProviderKeyRow, type ModelTargetRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow } from "../db";
+import { db, stmts, parseStripParams, type ProviderRow, type ProviderKeyRow, type ModelTargetRow, type ApiKeyRow, type UserRow, type AuthStyle, type ModelRow } from "../db";
 import { encryptSecret, decryptSecret, randomToken, sha256Hex } from "../crypto";
 import { requireAdmin, revokeAllUserSessions, auditAdmin } from "../auth";
 import { publicKey, revokeKey } from "../keys";
@@ -37,6 +37,9 @@ function publicProvider(p: ProviderRow, modelCount?: number, keys?: ProviderKeyR
     openaiAuthStyle: p.openai_auth_style,
     anthropicBaseUrl: p.anthropic_base_url,
     anthropicAuthStyle: p.anthropic_auth_style,
+    responsesBaseUrl: p.responses_base_url,
+    responsesAuthStyle: p.responses_auth_style,
+    stripParams: parseStripParams(p.strip_params),
     enabled: !!p.enabled,
     priority: p.priority,
     createdAt: p.created_at,
@@ -146,16 +149,22 @@ async function providerWrite(body: Record<string, unknown>, existing?: ProviderR
     "anthropicBaseUrl" in body
       ? validBaseUrl(v.str(body, "anthropicBaseUrl", { max: 512, optional: true }), "anthropicBaseUrl")
       : (existing?.anthropic_base_url ?? null);
+  const responsesBaseUrl =
+    "responsesBaseUrl" in body
+      ? validBaseUrl(v.str(body, "responsesBaseUrl", { max: 512, optional: true }), "responsesBaseUrl")
+      : (existing?.responses_base_url ?? null);
   const openaiAuthStyle =
     authStyleField(body, "openaiAuthStyle") ?? existing?.openai_auth_style ?? "bearer";
   const anthropicAuthStyle =
     authStyleField(body, "anthropicAuthStyle") ?? existing?.anthropic_auth_style ?? "x-api-key";
+  const responsesAuthStyle =
+    authStyleField(body, "responsesAuthStyle") ?? existing?.responses_auth_style ?? "bearer";
   const enabled = "enabled" in body ? !!body.enabled : existing ? !!existing.enabled : true;
   const priority =
     v.int(body, "priority", { min: 0, max: 10_000, optional: true }) ?? existing?.priority ?? 100;
 
-  if (!openaiBaseUrl && !anthropicBaseUrl) {
-    throw new ApiError(400, "configure at least one base URL (openaiBaseUrl or anthropicBaseUrl)");
+  if (!openaiBaseUrl && !anthropicBaseUrl && !responsesBaseUrl) {
+    throw new ApiError(400, "configure at least one base URL (openaiBaseUrl, anthropicBaseUrl or responsesBaseUrl)");
   }
 
   // apiKey: required on create; on update, only replaced when a non-empty value is sent.
@@ -164,7 +173,25 @@ async function providerWrite(body: Record<string, unknown>, existing?: ProviderR
   if (apiKey) apiKeyEnc = await encryptSecret(apiKey, GATEWAY_SECRET);
   if (!apiKeyEnc) throw new ApiError(400, "apiKey is required");
 
-  return { name, openaiBaseUrl, anthropicBaseUrl, openaiAuthStyle, anthropicAuthStyle, enabled, priority, apiKeyEnc };
+  // stripParams: top-level upstream body keys the provider rejects (e.g.
+  // reasoning-only models refusing `temperature`). Absent PATCH fields keep
+  // the existing value.
+  let stripParams: string[] | undefined;
+  if ("stripParams" in body) {
+    const val = body.stripParams;
+    if (
+      !Array.isArray(val) ||
+      val.length > 32 ||
+      val.some((x) => typeof x !== "string" || x.length === 0 || x.length > 64)
+    ) {
+      throw new ApiError(400, "stripParams must be an array of up to 32 strings (1-64 chars each)");
+    }
+    stripParams = [...new Set(val as string[])];
+  }
+  const stripParamsJson =
+    stripParams !== undefined ? JSON.stringify(stripParams) : (existing?.strip_params ?? "[]");
+
+  return { name, openaiBaseUrl, anthropicBaseUrl, responsesBaseUrl, openaiAuthStyle, anthropicAuthStyle, responsesAuthStyle, enabled, priority, apiKeyEnc, stripParamsJson };
 }
 
 /** Validated model-registry column values for create/update. Absent PATCH
@@ -393,15 +420,18 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     const plainApiKey = v.str(body, "apiKey", { max: 512, optional: true });
     const id = randomToken(12);
     db.prepare(
-      `INSERT INTO providers (id, name, openai_base_url, anthropic_base_url, openai_auth_style, anthropic_auth_style, api_key_enc, enabled, priority, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO providers (id, name, openai_base_url, anthropic_base_url, responses_base_url, openai_auth_style, anthropic_auth_style, responses_auth_style, strip_params, api_key_enc, enabled, priority, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       data.name,
       data.openaiBaseUrl,
       data.anthropicBaseUrl,
+      data.responsesBaseUrl,
       data.openaiAuthStyle,
       data.anthropicAuthStyle,
+      data.responsesAuthStyle,
+      data.stripParamsJson,
       data.apiKeyEnc!,
       data.enabled ? 1 : 0,
       data.priority,
@@ -582,14 +612,17 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       const data = await providerWrite(body, existing);
       const priKeyRotated = !!v.str(body, "apiKey", { max: 512, optional: true });
       db.prepare(
-        `UPDATE providers SET name = ?, openai_base_url = ?, anthropic_base_url = ?, openai_auth_style = ?, anthropic_auth_style = ?, api_key_enc = ?, enabled = ?, priority = ?
+        `UPDATE providers SET name = ?, openai_base_url = ?, anthropic_base_url = ?, responses_base_url = ?, openai_auth_style = ?, anthropic_auth_style = ?, responses_auth_style = ?, strip_params = ?, api_key_enc = ?, enabled = ?, priority = ?
          WHERE id = ?`,
       ).run(
         data.name,
         data.openaiBaseUrl,
         data.anthropicBaseUrl,
+        data.responsesBaseUrl,
         data.openaiAuthStyle,
         data.anthropicAuthStyle,
+        data.responsesAuthStyle,
+        data.stripParamsJson,
         data.apiKeyEnc!,
         data.enabled ? 1 : 0,
         data.priority,
@@ -679,8 +712,13 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         key = await primaryAdminKey(providerId);
       }
       if (!key) return err(400, "provider has no usable upstream key", req);
-      const headersFor = (cap: "openai" | "anthropic"): Record<string, string> => {
-        const style = cap === "openai" ? existing.openai_auth_style : existing.anthropic_auth_style;
+      const headersFor = (cap: "openai" | "anthropic" | "responses"): Record<string, string> => {
+        const style =
+          cap === "openai"
+            ? existing.openai_auth_style
+            : cap === "responses"
+              ? existing.responses_auth_style
+              : existing.anthropic_auth_style;
         const h: Record<string, string> =
           style === "x-api-key" ? { "x-api-key": key } : { Authorization: `Bearer ${key}` };
         if (cap === "anthropic") h["anthropic-version"] = "2023-06-01";
@@ -691,29 +729,48 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       const results: Record<string, unknown> = {};
 
       if (model) {
-        const cap = (capReq ?? (existing.openai_base_url ? "openai" : "anthropic")) as
+        const cap = (capReq ?? (existing.openai_base_url ? "openai" : existing.responses_base_url ? "responses" : "anthropic")) as
           | "openai"
-          | "anthropic";
-        const base = cap === "openai" ? existing.openai_base_url : existing.anthropic_base_url;
+          | "anthropic"
+          | "responses";
+        const base =
+          cap === "openai" ? existing.openai_base_url : cap === "responses" ? existing.responses_base_url : existing.anthropic_base_url;
         if (!base) return err(400, `provider has no ${cap} base URL configured`, req);
         const started = performance.now();
         try {
-          const res = await fetch(`${base}${cap === "openai" ? "/chat/completions" : "/messages"}`, {
-            method: "POST",
-            signal: AbortSignal.timeout(20_000),
-            headers: headersFor(cap),
-            body: JSON.stringify({
-              model,
-              max_tokens: 16,
-              messages: [{ role: "user", content: "Say hello in one short sentence." }],
-            }),
-          });
+          const res = await fetch(
+            `${base}${cap === "openai" ? "/chat/completions" : cap === "responses" ? "/responses" : "/messages"}`,
+            {
+              method: "POST",
+              signal: AbortSignal.timeout(20_000),
+              headers: headersFor(cap),
+              body: JSON.stringify(
+                cap === "responses"
+                  ? { model, input: "Say hello in one short sentence.", max_output_tokens: 16 }
+                  : cap === "openai"
+                    ? {
+                        model,
+                        max_tokens: 16,
+                        messages: [{ role: "user", content: "Say hello in one short sentence." }],
+                      }
+                    : {
+                        model,
+                        max_tokens: 16,
+                        messages: [{ role: "user", content: "Say hello in one short sentence." }],
+                      },
+              ),
+            },
+          );
           const text = await res.text();
           let reply: string | undefined;
           try {
             const j = JSON.parse(text);
             reply = (
-              cap === "openai" ? j?.choices?.[0]?.message?.content : j?.content?.[0]?.text
+              cap === "openai"
+                ? j?.choices?.[0]?.message?.content
+                : cap === "responses"
+                  ? j?.output?.find((o: any) => o?.type === "message")?.content?.[0]?.text
+                  : j?.content?.[0]?.text
             )?.slice(0, 240);
           } catch {}
           results[cap] = {
@@ -728,6 +785,8 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
           results[cap] = { reachable: false, model, error: (e as Error).message.slice(0, 160) };
         }
       } else {
+        // Only chat and Messages expose GET /models; a responses-only
+        // provider is covered by the sibling lists.
         for (const cap of ["openai", "anthropic"] as const) {
           const base = cap === "openai" ? existing.openai_base_url : existing.anthropic_base_url;
           if (!base) continue;

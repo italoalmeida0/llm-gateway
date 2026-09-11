@@ -26,7 +26,7 @@ const AUTH_STYLE_OPTIONS = [
   { value: "x-api-key", label: "x-api-key" },
 ] as Array<{ value: AuthStyle; label: string }>;
 
-type Cap = "openai" | "anthropic";
+type Cap = "openai" | "anthropic" | "responses";
 
 interface SmokeResult {
   reachable: boolean;
@@ -67,6 +67,9 @@ export default function AdminProvidersPage() {
   const [openaiAuth, setOpenaiAuth] = createSignal<AuthStyle>("bearer");
   const [anthropicUrl, setAnthropicUrl] = createSignal("");
   const [anthropicAuth, setAnthropicAuth] = createSignal<AuthStyle>("x-api-key");
+  const [responsesUrl, setResponsesUrl] = createSignal("");
+  const [responsesAuth, setResponsesAuth] = createSignal<AuthStyle>("bearer");
+  const [stripParams, setStripParams] = createSignal("");
   const [apiKey, setApiKey] = createSignal("");
   const [priority, setPriority] = createSignal("100");
   const [enabled, setEnabled] = createSignal(true);
@@ -85,7 +88,7 @@ export default function AdminProvidersPage() {
 
   const openEditor = (p: ProviderDto | "new") => {
     if (p === "new") {
-      setName(""); setOpenaiUrl(""); setOpenaiAuth("bearer"); setAnthropicUrl(""); setAnthropicAuth("x-api-key");
+      setName(""); setOpenaiUrl(""); setOpenaiAuth("bearer"); setAnthropicUrl(""); setAnthropicAuth("x-api-key"); setResponsesUrl(""); setResponsesAuth("bearer"); setStripParams("");
       setApiKey(""); setPriority("100"); setEnabled(true);
     } else {
       setName(p.name);
@@ -93,6 +96,9 @@ export default function AdminProvidersPage() {
       setOpenaiAuth(p.openaiAuthStyle ?? "bearer");
       setAnthropicUrl(p.anthropicBaseUrl ?? "");
       setAnthropicAuth(p.anthropicAuthStyle ?? "x-api-key");
+      setResponsesUrl(p.responsesBaseUrl ?? "");
+      setResponsesAuth(p.responsesAuthStyle ?? "bearer");
+      setStripParams((p.stripParams ?? []).join(", "));
       setApiKey("");
       setPriority(String(p.priority));
       setEnabled(p.enabled);
@@ -109,6 +115,9 @@ export default function AdminProvidersPage() {
         openaiAuthStyle: openaiAuth(),
         anthropicBaseUrl: anthropicUrl().trim() || null,
         anthropicAuthStyle: anthropicAuth(),
+        responsesBaseUrl: responsesUrl().trim() || null,
+        responsesAuthStyle: responsesAuth(),
+        stripParams: stripParams().split(",").map((s) => s.trim()).filter((s) => s.length > 0),
         priority: Number(priority()) || 100,
         enabled: enabled(),
       };
@@ -149,7 +158,7 @@ export default function AdminProvidersPage() {
     setProbe(null);
     setModelSel("");
     setModelFree("");
-    setProbeCap(p.openaiBaseUrl ? "openai" : "anthropic");
+    setProbeCap(p.openaiBaseUrl ? "openai" : p.responsesBaseUrl ? "responses" : "anthropic");
     setProbe(null);
     setProbeBusy(false);
     setSmokeBusy(true);
@@ -394,6 +403,7 @@ export default function AdminProvidersPage() {
                           <Badge tone={p.enabled ? "green" : "zinc"}>{p.enabled ? "Enabled" : "Disabled"}</Badge>
                           {p.openaiBaseUrl && <Badge tone="blue">OpenAI</Badge>}
                           {p.anthropicBaseUrl && <Badge tone="amber">Anthropic</Badge>}
+                          {p.responsesBaseUrl && <Badge tone="indigo">Responses</Badge>}
                           <span class="text-[11px] text-ink-500">priority {p.priority} · {p.modelCount} model{p.modelCount === 1 ? "" : "s"} · added {fmtDate(p.createdAt)}</span>
                         </div>
                         <div class="mt-2 space-y-1 text-xs text-ink-400">
@@ -407,6 +417,12 @@ export default function AdminProvidersPage() {
                             <div>
                               Anthropic: <code class="text-ink-300">{p.anthropicBaseUrl}</code>
                               <span class="text-ink-600"> · key via {p.anthropicAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
+                            </div>
+                          </Show>
+                          <Show when={p.responsesBaseUrl}>
+                            <div>
+                              Responses: <code class="text-ink-300">{p.responsesBaseUrl}</code>
+                              <span class="text-ink-600"> · key via {p.responsesAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
                             </div>
                           </Show>
                         </div>
@@ -519,11 +535,21 @@ export default function AdminProvidersPage() {
               <Segmented value={anthropicAuth()} onChange={setAnthropicAuth} options={AUTH_STYLE_OPTIONS} />
             </div>
           </div>
+          <div>
+            <Input label="Responses API base URL" value={responsesUrl()} onInput={setResponsesUrl}
+              placeholder="https://provider.example.com/v1" hint="Leave empty if it has no Responses surface" />
+            <div class="mt-2 flex items-center justify-between gap-3">
+              <span class="text-xs text-ink-500">Send the key as</span>
+              <Segmented value={responsesAuth()} onChange={setResponsesAuth} options={AUTH_STYLE_OPTIONS} />
+            </div>
+          </div>
           <Show when={editing() === "new"}>
             <Input label="Upstream API key" type="password" value={apiKey()} onInput={setApiKey}
               placeholder="sk-…" autocomplete="off"
               hint="Becomes the primary key — add fallback keys on the provider card after creating" />
           </Show>
+          <Input label="Blocked upstream params" value={stripParams()} onInput={setStripParams}
+            placeholder="temperature, max_tokens" hint="Comma-separated top-level request keys never sent upstream (for providers that reject them)" />
           <div class="grid grid-cols-2 gap-3 items-end">
             <Input label="Priority (lower = preferred)" type="number" min={0} max={10000} value={priority()} onInput={setPriority} />
             <label class="flex items-center gap-2 pb-2 cursor-pointer">
@@ -534,7 +560,7 @@ export default function AdminProvidersPage() {
           </div>
           <div class="flex justify-end gap-2 pt-2">
             <Btn variant="ghost" onClick={() => setEditing(null)}>Cancel</Btn>
-            <Btn onClick={save} disabled={busy() || !name().trim() || (!openaiUrl().trim() && !anthropicUrl().trim())}>
+            <Btn onClick={save} disabled={busy() || !name().trim() || (!openaiUrl().trim() && !anthropicUrl().trim() && !responsesUrl().trim())}>
               {busy() ? "Saving…" : "Save provider"}
             </Btn>
           </div>
@@ -568,14 +594,13 @@ export default function AdminProvidersPage() {
           <div class="border-t border-line pt-5">
             <div class="text-xs font-medium text-ink-300 mb-2">Chat probe (sends a real "Hello")</div>
             <div class="space-y-3">
-              <Show when={testFor()?.openaiBaseUrl && testFor()?.anthropicBaseUrl}>
+              <Show when={(["openai", "anthropic", "responses"] as const).filter((c) => testFor()?.[`${c}BaseUrl` as const]).length > 1}>
                 <Segmented
                   value={probeCap()}
                   onChange={changeProbeCap}
-                  options={[
-                    { value: "openai", label: "OpenAI" },
-                    { value: "anthropic", label: "Anthropic" },
-                  ]}
+                  options={(["openai", "anthropic", "responses"] as const)
+                    .filter((c) => testFor()?.[`${c}BaseUrl` as const])
+                    .map((c) => ({ value: c, label: c === "openai" ? "OpenAI" : c === "anthropic" ? "Anthropic" : "Responses" }))}
                 />
               </Show>
               <Show when={listedModels().length > 0}>
@@ -648,7 +673,7 @@ export default function AdminProvidersPage() {
             The upstream model lists (duplicates merge into one entry):
           </p>
           <div class="flex flex-wrap gap-2">
-            <For each={(["openai", "anthropic"] as Cap[]).filter((c) => !!importFor()?.preview[c])}>
+            <For each={(["openai", "anthropic"] as const).filter((c) => !!importFor()?.preview[c])}>
               {(c) => {
                 const r = () => importFor()!.preview[c]!;
                 return (

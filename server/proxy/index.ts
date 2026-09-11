@@ -1,5 +1,5 @@
 import { LIMITS } from "../config";
-import { stmts, audit, type AuthStyle } from "../db";
+import { stmts, audit, parseStripParams, type AuthStyle, type Proto } from "../db";
 import { randomToken, sha256Hex } from "../crypto";
 import { clientIp, baseHeaders } from "../http";
 import { estimateTokenCount } from "tokenx";
@@ -38,10 +38,33 @@ import {
   openAIErrorToAnthropic,
   translatedUsageFromOpenAI,
   OpenAIToAnthropicStream,
+  openAIChatToAnthropic,
+  anthropicToOpenAIBody,
+  anthropicErrorToOpenAI,
+  AnthropicToOpenAIStream,
 } from "./anthropic-bridge";
+import {
+  responsesToChat,
+  chatToResponsesRequest,
+  responsesToAnthropic,
+  anthropicToResponsesRequest,
+  chatToResponsesBody,
+  anthropicToResponsesBody,
+  responsesToChatBody,
+  responsesToAnthropicBody,
+  parseResponsesJson,
+  translatedUsageFromResponses,
+  anthropicErrorToResponses,
+  responsesErrorToAnthropic,
+  ChatToResponsesStream,
+  AnthropicToResponsesStream,
+  ResponsesToChatStream,
+  ResponsesToAnthropicStream,
+} from "./responses-bridge";
 
 /**
- * The gateway itself: OpenAI- and Anthropic-compatible pass-through proxy.
+ * The gateway itself: OpenAI-, Responses- and Anthropic-compatible
+ * pass-through proxy.
  *
  *   client --(gw_ key)--> this --(real key)--> configured upstream provider
  *
@@ -49,8 +72,6 @@ import {
  * streaming with incremental usage parsing, sanitized failures, and usage
  * accounting per key/user — including client aborts.
  */
-
-type Proto = "openai" | "anthropic";
 
 interface RouteMatch {
   proto: Proto;
@@ -91,6 +112,8 @@ function matchRoute(pathname: string, method: string, req: Request): RouteResult
   if (forced !== "anthropic") {
     if (p === "/v1/chat/completions" && method === "POST")
       return { match: { proto: "openai", upstreamPath: "/chat/completions" }, hint };
+    if (p === "/v1/responses" && method === "POST")
+      return { match: { proto: "responses", upstreamPath: "/responses" }, hint };
     if (p === "/v1/completions" && method === "POST")
       return { match: { proto: "openai", upstreamPath: "/completions" }, hint };
     if (p === "/v1/embeddings" && method === "POST")
@@ -140,7 +163,9 @@ function matchRoute(pathname: string, method: string, req: Request): RouteResult
 function envelopeError(proto: Proto, status: number, message: string, type?: string, req?: Request): Response {
   const h = baseHeaders(req);
   h.set("Content-Type", "application/json; charset=utf-8");
-  if (proto === "openai") {
+  // Responses errors share the OpenAI `{error:{…}}` envelope — clients
+  // (codex) depend on it.
+  if (proto === "openai" || proto === "responses") {
     return new Response(
       JSON.stringify({
         error: { message: message, type: type ?? (status === 401 ? "authentication_error" : "invalid_request_error"), code: null },
@@ -336,6 +361,29 @@ const STRIP_RES_HEADERS = new Set([
 /** Only API-ish payloads may be rendered by clients; anything else becomes JSON. */
 const SAFE_RES_CT = new Set(["application/json", "text/event-stream", "text/plain"]);
 const MAX_BUFFERED_UPSTREAM_BYTES = 16 * 1024 * 1024;
+/** SSE comment: ignored by every event-stream client dialect. */
+const SSE_KEEPALIVE = new TextEncoder().encode(": ping\n\n");
+
+/** Drop the provider's blocked top-level body params, if any configured. */
+function stripBlockedParams(attemptBody: string, provider: { strip_params?: unknown }): string {
+  const blocked = parseStripParams(provider.strip_params);
+  if (blocked.length === 0) return attemptBody;
+  let j: Record<string, unknown>;
+  try {
+    j = JSON.parse(attemptBody) as Record<string, unknown>;
+  } catch {
+    return attemptBody;
+  }
+  if (j === null || typeof j !== "object" || Array.isArray(j)) return attemptBody;
+  let changed = false;
+  for (const k of blocked) {
+    if (k in j) {
+      delete j[k];
+      changed = true;
+    }
+  }
+  return changed ? JSON.stringify(j) : attemptBody;
+}
 
 function safeResponseContentType(upstream: Headers): string {
   const raw = upstream.get("content-type") || "";
@@ -376,6 +424,33 @@ function registryModelsResponse(
   modelId?: string,
 ): Response {
   const rows = listableModels(snap, proto);
+  // Responses clients (codex) expect the OpenAI list shape — and some
+  // versions require a top-level `models` array — while the rich
+  // registry format stays on the chat/anthropic surfaces.
+  if (proto === "responses") {
+    const providerName = (m: (typeof rows)[number]) =>
+      snap.providers.get(m.provider_id!)?.row.name ?? "";
+    const h = baseHeaders(req);
+    h.set("Content-Type", "application/json; charset=utf-8");
+    if (modelId !== undefined) {
+      const m = rows.find((r) => r.id === modelId);
+      if (!m) {
+        return envelopeError(proto, 404, `unknown model '${modelId}'`, "model_not_found", req);
+      }
+      return new Response(
+        JSON.stringify({ id: m.id, object: "model", created: 0, owned_by: providerName(m) }),
+        { headers: h },
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        object: "list",
+        data: rows.map((m) => ({ id: m.id, object: "model", created: 0, owned_by: providerName(m) })),
+        models: rows.map((m) => ({ id: m.id, slug: m.id })),
+      }),
+      { headers: h },
+    );
+  }
   const providerName = (m: (typeof rows)[number]) =>
     snap.providers.get(m.provider_id!)?.row.name ?? "";
   if (modelId !== undefined) {
@@ -389,8 +464,13 @@ function registryModelsResponse(
   }
   const h = baseHeaders(req);
   h.set("Content-Type", "application/json; charset=utf-8");
+  // Extra top-level `models` id list: some clients (codex) require it
+  // alongside `data` and ignore unknown shapes otherwise.
   return new Response(
-    JSON.stringify({ data: rows.map((m) => publicModelEntry(m, providerName(m))) }),
+    JSON.stringify({
+      data: rows.map((m) => publicModelEntry(m, providerName(m))),
+      models: rows.map((m) => ({ id: m.id, slug: m.id })),
+    }),
     { headers: h },
   );
 }
@@ -574,6 +654,30 @@ export class StreamMeter {
       return;
     }
 
+    // responses: terminal usage arrives in response.completed; text deltas
+    // feed the tokenx fallback estimate.
+    if (this.proto === "responses") {
+      if (!data.includes('"type"')) return;
+      try {
+        const j = JSON.parse(data);
+        const t = j?.type;
+        if (t === "response.output_text.delta" && typeof j.delta === "string") {
+          this.addOutText(j.delta);
+        } else if ((t === "response.completed" || t === "response.incomplete") && j?.response) {
+          const u = j.response.usage ?? {};
+          const input = Number(u.input_tokens ?? 0) || 0;
+          const cached = Number(u.input_tokens_details?.cached_tokens ?? 0) || 0;
+          this.inTok = Math.max(0, input - cached);
+          this.cacheTok = Math.max(0, cached);
+          this.outTok = Number(u.output_tokens ?? 0) || this.outTok;
+          const rm = j.response.model;
+          if (typeof rm === "string" && rm && !this.model) this.model = rm;
+          this.sawUsage = true;
+        }
+      } catch {}
+      return;
+    }
+
     // anthropic
     if (this.currentEvent === "message_start") {
       try {
@@ -627,6 +731,45 @@ export class StreamMeter {
 
 // ===== Main handler =====
 
+/**
+ * Ask a chat-completions upstream to include a terminal usage chunk so
+ * accounting stays exact (Anthropic and Responses always stream usage
+ * events). This and the router-mode per-attempt model rewrite are the
+ * ONLY fields ever mutated — otherwise the original bytes go untouched.
+ */
+function withChatStreamOptions(attemptBody: string): string {
+  try {
+    const j = JSON.parse(attemptBody) as Record<string, unknown>;
+    if (j && typeof j === "object" && (j as any).stream === true) {
+      const so = ((j as any).stream_options ?? {}) as Record<string, unknown>;
+      if (so.include_usage !== true) {
+        so.include_usage = true;
+        (j as any).stream_options = so;
+        return JSON.stringify(j);
+      }
+    }
+  } catch {
+    /* unparseable body goes upstream untouched */
+  }
+  return attemptBody;
+}
+
+/**
+ * Re-envelope an upstream error to the client's protocol. Chat and
+ * Responses share the OpenAI `{error:{…}}` envelope (passthrough either
+ * way); only the Anthropic direction converts.
+ */
+function reEnvelopeError(proto: Proto, via: Proto, status: number, body: string): string {
+  if (via === proto) return body;
+  if (proto === "anthropic") {
+    return via === "openai" ? openAIErrorToAnthropic(status, body) : responsesErrorToAnthropic(status, body);
+  }
+  if (via === "anthropic") {
+    return proto === "responses" ? anthropicErrorToResponses(status, body) : anthropicErrorToOpenAI(status, body);
+  }
+  return body;
+}
+
 export async function handleProxy(req: Request, url: URL, server: any): Promise<Response> {
   const { match: route, hint } = matchRoute(url.pathname, req.method, req);
   if (!route) {
@@ -638,7 +781,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
   // ---- authenticate the gateway API key ----
   let token: string;
   const authz = req.headers.get("authorization");
-  if (proto === "openai") {
+  if (proto === "openai" || proto === "responses") {
     token = authz?.startsWith("Bearer ") ? authz.slice(7).trim() : (req.headers.get("x-api-key") ?? "");
   } else {
     token = req.headers.get("x-api-key") ?? (authz?.startsWith("Bearer ") ? authz.slice(7).trim() : "");
@@ -737,29 +880,9 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     // ---- model registry (routing mode + router-backed /v1/models) ----
     const snap = await routerSnapshot();
     let routedPublicModel: string | null = null;
-    let bodyDirty = false;
 
     if (snap.mode === "router" && route.isModelsList) {
       return registryModelsResponse(req, snap, proto, route.modelId);
-    }
-
-    // OpenAI streams: ask upstream to include a terminal usage chunk so
-    // accounting stays exact (Anthropic always streams usage events). This
-    // and the router-mode per-attempt model rewrite are the ONLY fields we
-    // ever mutate, and only when needed — otherwise the original bytes are
-    // forwarded untouched.
-    if (
-      bodyJson &&
-      proto === "openai" &&
-      (bodyJson as any).stream === true &&
-      route.upstreamPath === "/chat/completions"
-    ) {
-      const so = ((bodyJson as any).stream_options ?? {}) as Record<string, unknown>;
-      if (so.include_usage !== true) {
-        so.include_usage = true;
-        (bodyJson as any).stream_options = so;
-        bodyDirty = true;
-      }
     }
 
     // ---- build the failover chain ----
@@ -795,8 +918,6 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       console.error(`[PROXY] no usable upstream candidate for capability "${proto}"`);
       return envelopeError(proto, 503, "gateway is not configured for this API protocol", "api_error", req);
     }
-    if (bodyDirty && bodyJson) bodyText = JSON.stringify(bodyJson);
-
     const wantsStream = (bodyJson as any)?.stream === true;
 
     const record = (u: UsageResult, status: number, latencyMs: number, stream: boolean, cand: RouteCandidate) => {
@@ -841,17 +962,27 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       }
     };
 
+    // Usage is parsed from the UPSTREAM body shape: chat bodies (native
+    // or translated-to) via the OpenAI parser, Messages bodies via the
+    // Anthropic parser, Responses bodies via the Responses parser.
     const parseBufferedUsage = (
       contentType: string,
       text: string,
       translated: boolean,
+      via: Proto,
     ): UsageResult =>
       contentType.includes("application/json")
-        ? translated
-          ? translatedUsageFromOpenAI(text)
-          : proto === "openai"
+        ? !translated
+          ? proto === "openai"
             ? parseOpenAiJson(text)
-            : parseAnthropicJson(text)
+            : proto === "responses"
+              ? parseResponsesJson(text)
+              : parseAnthropicJson(text)
+          : via === "openai"
+            ? translatedUsageFromOpenAI(text)
+            : via === "responses"
+              ? translatedUsageFromResponses(text)
+              : parseAnthropicJson(text)
         : { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false };
 
     let lastFailure:
@@ -866,14 +997,21 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     for (const cand of candidates.slice(0, LIMITS.maxFailoverAttempts)) {
       if (keyBlockedNow(cand.key.id)) continue;
       lastAttempted = cand;
-      // Translated candidates serve Anthropic-protocol requests through the
-      // provider's OpenAI endpoint (Anthropic→OpenAI bridge); everything else
-      // is byte-faithful pass-through on its own capability URL.
-      const upstreamProto = cand.translated ? "openai" : proto;
+      // Translated candidates serve requests through the provider's
+      // other-protocol endpoint (the protocol bridge, every direction);
+      // everything else is byte-faithful pass-through on its own
+      // capability URL.
+      const via = cand.via;
+      const upstreamProto = via;
       // Trailing "/" would produce "//chat/completions" — new rows are
       // stripped at write time, this covers legacy rows still carrying one.
-      const base = (upstreamProto === "openai" ? cand.provider.row.openai_base_url : cand.provider.row.anthropic_base_url)!
-        .replace(/\/+$/, "");
+      const base = (
+        via === "openai"
+          ? cand.provider.row.openai_base_url
+          : via === "responses"
+            ? cand.provider.row.responses_base_url
+            : cand.provider.row.anthropic_base_url
+      )!.replace(/\/+$/, "");
       const breakerId = `${cand.provider.row.id}:${upstreamProto}`;
       if (breakerState(breakerId) === "open") continue;
 
@@ -899,19 +1037,65 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // Byte-fidelity rule: the original request bytes go upstream untouched;
       // the only per-attempt mutation is the router-mode model rewrite
       // (each failover target may name the model differently). Translated
-      // attempts instead carry the bridge-converted OpenAI body.
+      // attempts instead carry the bridge-converted body.
+      const upstreamPath = cand.translated
+        ? via === "anthropic"
+          ? "/messages"
+          : via === "responses"
+            ? "/responses"
+            : "/chat/completions"
+        : route.upstreamPath;
+      // Byte-fidelity rule: the original request bytes go upstream untouched;
+      // the only per-attempt mutation is the router-mode model rewrite
+      // (each failover target may name the model differently). Translated
+      // attempts instead carry the bridge-converted body.
       let attemptBody = bodyText;
       if (cand.translated && bodyJson) {
         const withModel =
           cand.upstreamModel && (bodyJson as any).model !== cand.upstreamModel
             ? { ...bodyJson, model: cand.upstreamModel }
             : bodyJson;
-        attemptBody = JSON.stringify(anthropicToOpenAI(withModel as Record<string, unknown>));
+        try {
+          const req43 = withModel as Record<string, unknown>;
+          const converted =
+            proto === "responses"
+              ? via === "openai"
+                ? responsesToChat(req43)
+                : await responsesToAnthropic(req43)
+              : proto === "openai"
+                ? via === "anthropic"
+                  ? await openAIChatToAnthropic(req43)
+                  : chatToResponsesRequest(req43)
+                : via === "openai"
+                  ? anthropicToOpenAI(req43)
+                  : anthropicToResponsesRequest(req43);
+          attemptBody = JSON.stringify(converted);
+        } catch (e) {
+          // Client-caused conversion failure (bad image URL, missing
+          // tool_call_id): fail fast as 400 with no failover.
+          markProviderKeyOk(cand.key);
+          record(
+            { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false },
+            400,
+            Math.round(performance.now() - started),
+            false,
+            cand,
+          );
+          return envelopeError(proto, 400, (e as Error).message || "invalid request", "invalid_request_error", req);
+        }
       } else if (bodyJson && cand.upstreamModel && (bodyJson as any).model !== cand.upstreamModel) {
         attemptBody = JSON.stringify({ ...bodyJson, model: cand.upstreamModel });
       }
+      // Chat upstreams need the terminal usage chunk for exact accounting.
+      if (via === "openai" && upstreamPath === "/chat/completions" && (bodyJson as any)?.stream === true) {
+        attemptBody = withChatStreamOptions(attemptBody);
+      }
+      // Provider-level parameter blocklist (e.g. reasoning-only models that
+      // reject `temperature`): drop top-level keys from the final upstream
+      // body — native and translated attempts alike.
+      attemptBody = stripBlockedParams(attemptBody, cand.provider.row);
 
-      const upstreamUrl = `${base}${cand.translated ? "/chat/completions" : route.upstreamPath}`;
+      const upstreamUrl = `${base}${upstreamPath}`;
       const controller = new AbortController();
       const headerTimeout = setTimeout(
         () => controller.abort(new Error("upstream header timeout")),
@@ -928,7 +1112,11 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
             req,
             upstreamProto,
             cand.key.key,
-            upstreamProto === "openai" ? cand.provider.row.openai_auth_style : cand.provider.row.anthropic_auth_style,
+            upstreamProto === "openai"
+              ? cand.provider.row.openai_auth_style
+              : upstreamProto === "responses"
+                ? cand.provider.row.responses_auth_style
+                : cand.provider.row.anthropic_auth_style,
           ),
           body: req.method === "POST" ? attemptBody : undefined,
           signal: controller.signal,
@@ -1000,13 +1188,13 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         markProviderKeyOk(cand.key);
         const ct = upstream.headers.get("content-type") || "";
         record(
-          parseBufferedUsage(ct, errBody, cand.translated),
+          parseBufferedUsage(ct, errBody, cand.translated, cand.via),
           upstream.status,
           Math.round(performance.now() - started),
           false,
           cand,
         );
-        const errOut = cand.translated ? openAIErrorToAnthropic(upstream.status, errBody) : errBody;
+        const errOut = reEnvelopeError(proto, cand.via, upstream.status, errBody);
         return new Response(errOut, {
           status: upstream.status,
           headers: buildClientHeaders(upstream.headers, requestId, req),
@@ -1025,14 +1213,23 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // the outer finally must not free it when we hand back the Response.
         slotHeldByStream = true;
 
-        // Translated streams convert OpenAI SSE to Anthropic SSE on the fly;
-        // usage comes from the translator (OpenAI terminal chunk), with the
+        // Translated streams convert between SSE dialects on the fly;
+        // usage comes from the translator (terminal chunk), with the
         // request-body estimate as the input fallback.
-        const translator = cand.translated
-          ? new OpenAIToAnthropicStream(
-              routedPublicModel ?? String((bodyJson as any)?.model ?? ""),
-            )
-          : null;
+        const modelName = routedPublicModel ?? String((bodyJson as any)?.model ?? "");
+        const translator = !cand.translated
+          ? null
+          : proto === "responses"
+            ? cand.via === "openai"
+              ? new ChatToResponsesStream(modelName)
+              : new AnthropicToResponsesStream(modelName)
+            : proto === "openai"
+              ? cand.via === "anthropic"
+                ? new AnthropicToOpenAIStream(modelName)
+                : new ResponsesToChatStream(modelName)
+              : cand.via === "openai"
+                ? new OpenAIToAnthropicStream(modelName)
+                : new ResponsesToAnthropicStream(modelName);
         const meter = translator ? null : new StreamMeter(proto);
         let counted = false;
         const finalize = (status: number) => {
@@ -1101,7 +1298,20 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
               if (value && value.length) {
                 resetIdle();
                 if (translator) {
-                  for (const piece of translator.feed(value)) sink.enqueue(piece);
+                  let emitted = 0;
+                  for (const piece of translator.feed(value)) {
+                    sink.enqueue(piece);
+                    emitted++;
+                  }
+                  if (emitted === 0 && !translator.isDone) {
+                    // Bun.serve stops pulling a response stream whose pulls
+                    // enqueue nothing, which would starve the upstream read
+                    // while the translator is still buffering (e.g. long
+                    // reasoning head with no client-visible events yet).
+                    // An SSE comment keeps the pump alive and is ignored by
+                    // every SSE client dialect.
+                    sink.enqueue(SSE_KEEPALIVE);
+                  }
                   if (translator.isDone) {
                     finalize(upstream.status);
                     cleanup();
@@ -1165,7 +1375,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
       const respText = decoder.decode(body);
       record(
-        parseBufferedUsage(contentType, respText, cand.translated),
+        parseBufferedUsage(contentType, respText, cand.translated, cand.via),
         upstream.status,
         Math.round(performance.now() - started),
         false,
@@ -1173,13 +1383,22 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       );
 
       if (cand.translated) {
-        const anthropicText = openAIToAnthropicBody(
-          respText,
-          routedPublicModel ?? String((bodyJson as any)?.model ?? ""),
-        );
+        const modelName = routedPublicModel ?? String((bodyJson as any)?.model ?? "");
+        const converted =
+          proto === "responses"
+            ? cand.via === "openai"
+              ? chatToResponsesBody(respText, modelName)
+              : anthropicToResponsesBody(respText, modelName)
+            : proto === "openai"
+              ? cand.via === "anthropic"
+                ? anthropicToOpenAIBody(respText, modelName)
+                : responsesToChatBody(respText, modelName)
+              : cand.via === "openai"
+                ? openAIToAnthropicBody(respText, modelName)
+                : responsesToAnthropicBody(respText, modelName);
         const h = buildClientHeaders(upstream.headers, requestId, req);
         h.set("Content-Type", "application/json; charset=utf-8");
-        return new Response(anthropicText, { status: upstream.status, headers: h });
+        return new Response(converted, { status: upstream.status, headers: h });
       }
       return new Response(respText, { status: upstream.status, headers: clientHeaders });
     }
@@ -1193,13 +1412,13 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       const f = lastFailure;
       const wasTranslated = lastAttempted?.translated ?? false;
       record(
-        parseBufferedUsage(f.headers.get("content-type") || "", f.body, wasTranslated),
+        parseBufferedUsage(f.headers.get("content-type") || "", f.body, wasTranslated, lastAttempted!.via),
         f.status,
         finalLatency,
         false,
         lastAttempted!,
       );
-      const outBody = wasTranslated ? openAIErrorToAnthropic(f.status, f.body) : f.body;
+      const outBody = reEnvelopeError(proto, lastAttempted!.via, f.status, f.body);
       return new Response(outBody, { status: f.status, headers: buildClientHeaders(f.headers, requestId, req) });
     }
     if (lastFailure?.kind === "network") {

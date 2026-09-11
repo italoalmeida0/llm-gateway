@@ -1,11 +1,12 @@
 /**
  * Fake LLM upstream for development, tests and benchmarks.
  *
- * Exposes BOTH surfaces the gateway may target:
+ * Exposes ALL surfaces the gateway may target:
  *   POST /openai/v1/chat/completions    (stream + non-stream, usage incl.)
  *   GET  /openai/v1/models
  *   POST /anthropic/v1/messages         (stream + non-stream, usage incl.)
  *   GET  /anthropic/v1/models
+ *   POST /responses/v1/responses        (stream + non-stream, usage incl.)
  *
  * Auth: any request must carry `Authorization: Bearer sk-fake-secret`
  * (or `x-api-key: sk-fake-secret`), otherwise it answers like a real
@@ -70,7 +71,7 @@ const MODEL = "fake-llm-1";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function promptGuess(body: any): { inTok: number; reply: string } {
-  const s = JSON.stringify(body?.messages ?? body?.prompt ?? "");
+  const s = JSON.stringify(body?.messages ?? body?.input ?? body?.prompt ?? "");
   const inTok = Math.max(1, Math.ceil(s.length / 4));
   return { inTok, reply: "Hello from the fake upstream. This is a deterministic test answer." };
 }
@@ -163,6 +164,109 @@ async function openAiChat(req: Request, raw: string): Promise<Response> {
     ],
     usage: openAiUsage(inTok, outTok, cached),
   });
+}
+
+function responsesUsage(inTok: number, outTok: number, cached: number) {
+  return {
+    input_tokens: inTok,
+    input_tokens_details: { cached_tokens: cached },
+    output_tokens: outTok,
+    output_tokens_details: { reasoning_tokens: 0 },
+    total_tokens: inTok + outTok,
+  };
+}
+
+async function responsesCreate(req: Request, raw: string): Promise<Response> {
+  const body = JSON.parse(raw || "null");
+  if (!body || !body.model) {
+    return Response.json(
+      { error: { message: "model is required", type: "invalid_request_error", code: null } },
+      { status: 400 },
+    );
+  }
+  await sleep(LATENCY_MS);
+  const { inTok, reply } = promptGuess(body);
+  const outTok = Math.ceil(reply.length / 4);
+  const cached = cachedTokens(body);
+  const response = (status: string) => ({
+    id: "resp_fake",
+    object: "response",
+    created_at: Math.floor(Date.now() / 1000),
+    model: body.model,
+    status,
+    error: null,
+    output: [
+      {
+        type: "message",
+        id: "msg_fake",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: reply, annotations: [] }],
+      },
+    ],
+    usage: responsesUsage(inTok, outTok, cached),
+  });
+
+  if (body.stream) {
+    const words = reply.split(" ");
+    const perChunk = Math.max(1, Math.ceil(words.length / CHUNKS));
+    const full = response("completed");
+    const stream = new ReadableStream<string>({
+      async start(c) {
+        const ev = (event: string, o: unknown) => `event: ${event}\ndata: ${JSON.stringify(o)}\n\n`;
+        let seq = 0;
+        const skeleton = { ...full, status: "in_progress", output: [] };
+        c.enqueue(ev("response.created", { type: "response.created", sequence_number: seq++, response: skeleton }));
+        c.enqueue(ev("response.in_progress", { type: "response.in_progress", sequence_number: seq++, response: skeleton }));
+        c.enqueue(
+          ev("response.output_item.added", {
+            type: "response.output_item.added",
+            sequence_number: seq++,
+            output_index: 0,
+            item: { id: "msg_fake", type: "message", role: "assistant", status: "in_progress", content: [] },
+          }),
+        );
+        c.enqueue(
+          ev("response.content_part.added", {
+            type: "response.content_part.added",
+            sequence_number: seq++,
+            item_id: "msg_fake",
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text", text: "", annotations: [] },
+          }),
+        );
+        for (let i = 0; i < words.length; i += perChunk) {
+          c.enqueue(
+            ev("response.output_text.delta", {
+              type: "response.output_text.delta",
+              sequence_number: seq++,
+              item_id: "msg_fake",
+              output_index: 0,
+              content_index: 0,
+              delta: words.slice(i, i + perChunk).join(" ") + " ",
+            }),
+          );
+          await sleep(CHUNK_INTERVAL_MS);
+        }
+        c.enqueue(
+          ev("response.output_item.done", {
+            type: "response.output_item.done",
+            sequence_number: seq++,
+            output_index: 0,
+            item: full.output[0],
+          }),
+        );
+        c.enqueue(ev("response.completed", { type: "response.completed", sequence_number: seq, response: full }));
+        c.close();
+      },
+    });
+    return new Response(stream.pipeThrough(new TextEncoderStream()), {
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  }
+
+  return Response.json(response("completed"));
 }
 
 async function anthropicMessages(req: Request, raw: string): Promise<Response> {
@@ -333,6 +437,18 @@ const server = Bun.serve({
           model: body?.model ?? MODEL,
           usage: { prompt_tokens: n, total_tokens: n },
         });
+      }
+    }
+
+    if (p.startsWith("/responses/v1/")) {
+      const secret = authorized(req);
+      if (!secret) return openai401();
+      if (p === "/responses/v1/responses" && req.method === "POST") {
+        hits.set(secret, (hits.get(secret) ?? 0) + 1);
+        const forced = forcedResponse(secret, "openai");
+        if (forced) return forced;
+        lastBody = raw;
+        return responsesCreate(req, raw);
       }
     }
 

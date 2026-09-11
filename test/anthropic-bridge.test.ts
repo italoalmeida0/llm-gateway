@@ -6,6 +6,10 @@ import {
   openAIErrorToAnthropic,
   translatedUsageFromOpenAI,
   OpenAIToAnthropicStream,
+  openAIChatToAnthropic,
+  anthropicToOpenAIBody,
+  anthropicErrorToOpenAI,
+  AnthropicToOpenAIStream,
 } from "../server/proxy/anthropic-bridge";
 
 describe("Anthropic → OpenAI request translation", () => {
@@ -167,11 +171,188 @@ describe("OpenAI SSE → Anthropic SSE translator", () => {
     expect(u).toMatchObject({ inTok: 50, outTok: 7, estimated: false });
   });
 
-  test("close without [DONE] still terminates the sequence", () => {
+  test("close without [DONE] surfaces an error instead of a clean stop", () => {
     const t = new OpenAIToAnthropicStream("public-m");
     feedLines(t, ['data: {"choices":[{"delta":{"content":"x"}}]}\n\n']);
     let s = "";
     for (const piece of t.flush()) s += new TextDecoder().decode(piece);
+    expect(s).toContain("event: error");
+    expect(s).toContain("without completing the response");
+    expect(s).not.toContain("event: message_stop");
+  });
+
+  test("close with an unfinished tool call closes the block and errors", () => {
+    const t = new OpenAIToAnthropicStream("public-m");
+    feedLines(t, [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call1","function":{"name":"write"}}]}}]}\n\n',
+    ]);
+    let s = "";
+    for (const piece of t.flush()) s += new TextDecoder().decode(piece);
+    expect(s).toContain("event: content_block_stop");
+    expect(s).toContain("event: error");
+    expect(s).not.toContain('"stop_reason":"tool_use"');
+  });
+
+  test("reasoning deltas become a thinking block without duplicating details", () => {
+    const t = new OpenAIToAnthropicStream("public-m");
+    const s = feedLines(t, [
+      'data: {"choices":[{"delta":{"reasoning":"We","reasoning_details":[{"type":"reasoning.text","text":"We"}]}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+      'data: {"choices":[{"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":9,"completion_tokens":10}}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    expect(s).toContain('"type":"thinking"');
+    expect(s).toContain('"type":"thinking_delta"');
+    // "We" once from `reasoning`, not twice via reasoning_details.
+    expect(s.match(/We/g)?.length).toBe(1);
     expect(s).toContain("event: message_stop");
+  });
+
+  test("reasoning_content deltas become thinking deltas", () => {
+    const t = new OpenAIToAnthropicStream("public-m");
+    const s = feedLines(t, [
+      'data: {"choices":[{"delta":{"reasoning_content":"hmm"}}]}\n\n',
+      'data: {"choices":[{"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":9,"completion_tokens":10}}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    expect(s).toContain('"thinking":"hmm"');
+    expect(s).toContain("event: message_stop");
+  });
+});
+
+describe("OpenAI → Anthropic request translation (reverse)", () => {
+  test("system, history, tools and tool results map to messages", async () => {
+    const out = await openAIChatToAnthropic({
+      model: "up-m",
+      temperature: 0.5,
+      stop: ["END"],
+      tool_choice: "required",
+      messages: [
+        { role: "system", content: "Be brief." },
+        { role: "user", content: "Hi" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call1", type: "function", function: { name: "bash", arguments: '{"cmd":"ls"}' } }],
+        },
+        { role: "tool", tool_call_id: "call1", content: "a\nb" },
+      ],
+      tools: [{ type: "function", function: { name: "bash", description: "run", parameters: { type: "object" } } }],
+    });
+    expect(out.model).toBe("up-m");
+    expect(out.system).toBe("Be brief.");
+    expect(out.temperature).toBe(0.5);
+    expect(out.stop_sequences).toEqual(["END"]);
+    expect(out.tool_choice).toEqual({ type: "any" });
+    expect(out.max_tokens).toBe(4096);
+    const msgs = out.messages as Record<string, unknown>[];
+    expect(msgs.length).toBe(3);
+    expect(msgs[1]).toMatchObject({
+      role: "assistant",
+      content: [{ type: "tool_use", id: "call1", name: "bash", input: { cmd: "ls" } }],
+    });
+    expect(msgs[2]).toMatchObject({
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "call1", content: "a\nb" }],
+    });
+    const tools = out.tools as Record<string, unknown>[];
+    expect(tools[0]).toMatchObject({ name: "bash", input_schema: { type: "object" } });
+  });
+
+  test("data: image URLs become base64 image blocks; bad tool message throws", async () => {
+    const out = await openAIChatToAnthropic({
+      model: "m",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "see?" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } },
+        ],
+      }],
+    });
+    const blocks = (out.messages as Record<string, unknown>[])[0].content as Record<string, unknown>[];
+    expect(blocks[1]).toEqual({ type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } });
+    await expect(openAIChatToAnthropic({
+      model: "m",
+      messages: [{ role: "tool", content: "x" }],
+    })).rejects.toThrow("tool_call_id");
+  });
+});
+
+describe("Anthropic → OpenAI response translation (reverse)", () => {
+  test("text, tool_use, stop reason and usage map to chat completion", () => {
+    const s = anthropicToOpenAIBody(
+      JSON.stringify({
+        id: "msg1",
+        model: "up-m",
+        content: [
+          { type: "text", text: "Run " },
+          { type: "tool_use", id: "tu1", name: "bash", input: { cmd: "ls" } },
+        ],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 3 },
+      }),
+      "public-m",
+    );
+    const j = JSON.parse(s);
+    expect(j.object).toBe("chat.completion");
+    expect(j.model).toBe("up-m");
+    expect(j.choices[0].finish_reason).toBe("tool_calls");
+    expect(j.choices[0].message.tool_calls[0]).toMatchObject({
+      id: "tu1",
+      function: { name: "bash", arguments: '{"cmd":"ls"}' },
+    });
+    expect(j.usage).toMatchObject({ prompt_tokens: 13, completion_tokens: 5, total_tokens: 18 });
+  });
+
+  test("errors are re-enveloped per status", () => {
+    expect(JSON.parse(anthropicErrorToOpenAI(429, '{"error":{"type":"rate_limit_error","message":"slow"}}')).error).toMatchObject({
+      message: "slow",
+      type: "rate_limit_error",
+    });
+    expect(JSON.parse(anthropicErrorToOpenAI(400, "nope")).error.type).toBe("invalid_request_error");
+  });
+});
+
+describe("Anthropic SSE → OpenAI SSE translator (reverse)", () => {
+  const enc = new TextEncoder();
+  const feedLines = (t: AnthropicToOpenAIStream, lines: string[]): string => {
+    let s = "";
+    for (const line of lines) {
+      for (const piece of t.feed(enc.encode(line))) s += new TextDecoder().decode(piece);
+    }
+    return s;
+  };
+
+  test("text + tool call + usage produce OpenAI chunks ending in [DONE]", () => {
+    const t = new AnthropicToOpenAIStream("public-m");
+    const s = feedLines(t, [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg1","model":"up-m","usage":{"input_tokens":10,"cache_read_input_tokens":2}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu1","name":"bash"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"cmd\\""}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":":\\"ls\\"}"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    expect(s).toContain('"role":"assistant"');
+    expect(s).toContain('"content":"hi"');
+    expect(s).toContain('"name":"bash"');
+    expect(s).toContain('{\\"cmd\\"');
+    expect(s).toContain('"finish_reason":"tool_calls"');
+    expect(s).toContain('"completion_tokens":7');
+    expect(s.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    expect(t.result()).toMatchObject({ inTok: 10, cacheTok: 2, outTok: 7, estimated: false });
+  });
+
+  test("close without message_stop surfaces an error chunk", () => {
+    const t = new AnthropicToOpenAIStream("public-m");
+    feedLines(t, [
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu1","name":"w"}}\n\n',
+    ]);
+    let s = "";
+    for (const piece of t.flush()) s += new TextDecoder().decode(piece);
+    expect(s).toContain('"error"');
+    expect(s.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
 });

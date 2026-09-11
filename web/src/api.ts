@@ -225,6 +225,9 @@ export interface ProviderDto {
   openaiAuthStyle: AuthStyle;
   anthropicBaseUrl: string | null;
   anthropicAuthStyle: AuthStyle;
+  responsesBaseUrl: string | null;
+  responsesAuthStyle: AuthStyle;
+  stripParams: string[];
   enabled: boolean;
   priority: number;
   createdAt: number;

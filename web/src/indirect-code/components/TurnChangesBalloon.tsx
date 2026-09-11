@@ -18,15 +18,15 @@ export interface TurnChangesBalloonProps {
 function statusMeta(status: TurnChangedFile["status"]) {
   switch (status) {
     case "new":
-      return { icon: "lucide:file-plus-2", label: "new", cls: "text-emerald-400" };
+      return { icon: "lucide:file-plus-2", cls: "text-emerald-400" };
     case "modified":
-      return { icon: "lucide:file-diff", label: "modified", cls: "text-amber-800 dark:text-amber-200" };
+      return { icon: "lucide:file-diff", cls: "text-amber-800 dark:text-amber-200" };
     case "deleted":
-      return { icon: "lucide:file-minus-2", label: "deleted", cls: "text-red-400" };
+      return { icon: "lucide:file-minus-2", cls: "text-red-400" };
     case "binary":
-      return { icon: "lucide:file-warning", label: "binary", cls: "text-ink-400" };
+      return { icon: "lucide:file-warning", cls: "text-ink-400" };
     default:
-      return { icon: "lucide:file-warning", label: "too large", cls: "text-ink-400" };
+      return { icon: "lucide:file-warning", cls: "text-ink-400" };
   }
 }
 
@@ -58,7 +58,6 @@ function FileChangesRow(props: { f: TurnChangedFile; scrollKey: string }) {
         </span>
         <span class={`text-[10px] uppercase tracking-wide flex items-center gap-1 shrink-0 ${meta.cls}`}>
           <Iconify icon={meta.icon} size={12} />
-          {meta.label}
         </span>
         <Show when={(props.f.additions || 0) > 0 || (props.f.deletions || 0) > 0}>
           <span class="text-[10px] font-mono ml-auto shrink-0">

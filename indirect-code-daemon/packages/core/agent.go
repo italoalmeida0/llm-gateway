@@ -19,13 +19,13 @@ import (
 // messages whose trimmed text equals this (same idea as TODO activity,
 // which is also transcript-real but display-hidden). Keep the frontend
 // CONTINUE_NUDGE_TEXT constant in sync.
-const ContinueNudgeText = "[You should continue what you are doing.]"
+const ContinueNudgeText = "[<system_prompt>You should continue what you are doing.</system_prompt>]"
 
 // CompletionNudgeTextBuild and CompletionNudgeTextPlan prompt the model
 // when it returns visible text without calling a completion tool in build/plan modes.
 const (
-	CompletionNudgeTextBuild = "[Automatic system message: If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.]"
-	CompletionNudgeTextPlan  = "[Automatic system message: If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.]"
+	CompletionNudgeTextBuild = "[<system_prompt>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>]"
+	CompletionNudgeTextPlan  = "[<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>]"
 )
 
 // maxContinueNudges caps consecutive empty-response nudges per turn so a

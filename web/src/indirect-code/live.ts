@@ -32,9 +32,9 @@ export function displayToolArgs(raw?: string): Record<string, any> {
 /** Synthetic daemon nudge re-prompting the model after an empty terminal
  * response or when prompting for completion. Transcript-real (sent to the provider)
  * but never shown as a user bubble. Must match core constants in the daemon. */
-export const CONTINUE_NUDGE_TEXT = "[You should continue what you are doing.]";
-export const COMPLETION_NUDGE_BUILD = "[Automatic system message: If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.]";
-export const COMPLETION_NUDGE_PLAN = "[Automatic system message: If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.]";
+export const CONTINUE_NUDGE_TEXT = "[<system_prompt>You should continue what you are doing.</system_prompt>]";
+export const COMPLETION_NUDGE_BUILD = "[<system_prompt>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>]";
+export const COMPLETION_NUDGE_PLAN = "[<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>]";
 
 export const SIGNAL_TOOL_NAMES = new Set(["todo", "mark_task_as_complete", "mark_plan_as_ready_to_execute"]);
 export const COMPLETION_TOOL_NAMES = new Set(["mark_task_as_complete", "mark_plan_as_ready_to_execute"]);

@@ -152,25 +152,34 @@ func TestNudgeBudgetResetsOnToolUse(t *testing.T) {
 }
 
 func TestSanitizeUserText(t *testing.T) {
-	if got := SanitizeUserText(ContinueNudgeText); got != "<system_prompt>You should continue what you are doing.</system_prompt>" {
-		t.Fatalf("bracketed nudge = %q; want brackets stripped", got)
+	if got := SanitizeUserText(ContinueNudgeText); got != "You should continue what you are doing." {
+		t.Fatalf("continue nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("  " + ContinueNudgeText + "  "); got != "<system_prompt>You should continue what you are doing.</system_prompt>" {
-		t.Fatalf("padded nudge = %q; want brackets stripped", got)
+	if got := SanitizeUserText("  " + ContinueNudgeText + "  "); got != "You should continue what you are doing." {
+		t.Fatalf("padded continue nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText(CompletionNudgeTextBuild); got != "<system_prompt>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>" {
-		t.Fatalf("build completion nudge = %q; want brackets stripped", got)
+	if got := SanitizeUserText(CompletionNudgeTextBuild); got != "If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
+		t.Fatalf("build completion nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("  " + CompletionNudgeTextBuild + "  "); got != "<system_prompt>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>" {
-		t.Fatalf("padded build completion nudge = %q; want brackets stripped", got)
+	if got := SanitizeUserText("  " + CompletionNudgeTextBuild + "  "); got != "If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
+		t.Fatalf("padded build completion nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText(CompletionNudgeTextPlan); got != "<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>" {
-		t.Fatalf("plan completion nudge = %q; want brackets stripped", got)
+	if got := SanitizeUserText(CompletionNudgeTextPlan); got != "If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
+		t.Fatalf("plan completion nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("  " + CompletionNudgeTextPlan + "  "); got != "<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>" {
-		t.Fatalf("padded plan completion nudge = %q; want brackets stripped", got)
+	if got := SanitizeUserText("  " + CompletionNudgeTextPlan + "  "); got != "If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
+		t.Fatalf("padded plan completion nudge = %q; want tags stripped", got)
 	}
-	for _, s := range []string{"hello", "", "[unrelated]", "<system_prompt>You should continue what you are doing.</system_prompt>"} {
+	if got := SanitizeUserText("<system_prompt>qualquer coisa</system_prompt>"); got != "qualquer coisa" {
+		t.Fatalf("custom system_prompt = %q; want tags stripped", got)
+	}
+	if got := SanitizeUserText("  <system_prompt>qualquer coisa</system_prompt>  "); got != "qualquer coisa" {
+		t.Fatalf("padded custom system_prompt = %q; want tags stripped", got)
+	}
+	if got := SanitizeUserText("prefix <system_prompt>mid</system_prompt> suffix"); got != "prefix mid suffix" {
+		t.Fatalf("embedded system_prompt = %q; want tags stripped", got)
+	}
+	for _, s := range []string{"hello", "", "[unrelated]", "regular message without tags"} {
 		if got := SanitizeUserText(s); got != s {
 			t.Fatalf("SanitizeUserText(%q) = %q; want unchanged", s, got)
 		}

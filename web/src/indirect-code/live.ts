@@ -29,19 +29,25 @@ export function displayToolArgs(raw?: string): Record<string, any> {
   if (values.oldText !== undefined || values.newText !== undefined) values.edits = [{oldText:values.oldText || "", newText:values.newText || ""}];
   return values;
 }
-/** Synthetic daemon nudge re-prompting the model after an empty terminal
- * response or when prompting for completion. Transcript-real (sent to the provider)
- * but never shown as a user bubble. Must match core constants in the daemon. */
-export const CONTINUE_NUDGE_TEXT = "[<system_prompt>You should continue what you are doing.</system_prompt>]";
-export const COMPLETION_NUDGE_BUILD = "[<system_prompt>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>]";
-export const COMPLETION_NUDGE_PLAN = "[<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>]";
-
 export const SIGNAL_TOOL_NAMES = new Set(["todo", "mark_task_as_complete", "mark_plan_as_ready_to_execute"]);
 export const COMPLETION_TOOL_NAMES = new Set(["mark_task_as_complete", "mark_plan_as_ready_to_execute"]);
 
+/** Detects synthetic system prompt nudges. Transcript-real (sent to the provider)
+ * but never shown as a user bubble in the chat UI. */
 export function isSyntheticNudge(text: string): boolean {
   const trimmed = text.trim();
-  return trimmed === CONTINUE_NUDGE_TEXT || trimmed === COMPLETION_NUDGE_BUILD || trimmed === COMPLETION_NUDGE_PLAN;
+  return trimmed.startsWith("<system_prompt>") && trimmed.endsWith("</system_prompt>");
+}
+
+export function sanitizeUserText(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("<system_prompt>") && trimmed.endsWith("</system_prompt>")) {
+    return trimmed.slice("<system_prompt>".length, -"</system_prompt>".length).trim();
+  }
+  if (text.includes("<system_prompt>") || text.includes("</system_prompt>")) {
+    return text.replaceAll("<system_prompt>", "").replaceAll("</system_prompt>", "").trim();
+  }
+  return text;
 }
 
 export function withoutContinueNudges(messages: ChatMessage[]): ChatMessage[] {

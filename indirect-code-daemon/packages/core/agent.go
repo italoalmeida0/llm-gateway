@@ -16,16 +16,15 @@ import (
 // when the model returns a terminal stop with no visible text and no tool
 // calls (typically a thinking-only early stop): instead of ending the
 // turn, the loop nudges the model to continue. Frontends hide user
-// messages whose trimmed text equals this (same idea as TODO activity,
-// which is also transcript-real but display-hidden). Keep the frontend
-// CONTINUE_NUDGE_TEXT constant in sync.
-const ContinueNudgeText = "[<system_prompt>You should continue what you are doing.</system_prompt>]"
+// messages whose trimmed text is wrapped in <system_prompt>...</system_prompt>
+// (same idea as TODO activity, which is also transcript-real but display-hidden).
+const ContinueNudgeText = "<system_prompt>You should continue what you are doing.</system_prompt>"
 
 // CompletionNudgeTextBuild and CompletionNudgeTextPlan prompt the model
 // when it returns visible text without calling a completion tool in build/plan modes.
 const (
-	CompletionNudgeTextBuild = "[<system_prompt>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>]"
-	CompletionNudgeTextPlan  = "[<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>]"
+	CompletionNudgeTextBuild = "<system_prompt>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>"
+	CompletionNudgeTextPlan  = "<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>"
 )
 
 // maxContinueNudges caps consecutive empty-response nudges per turn so a
@@ -36,14 +35,21 @@ const maxContinueNudges = 3
 // maxCompletionNudges caps consecutive completion-prompt nudges per turn.
 const maxCompletionNudges = 3
 
-// SanitizeUserText keeps a user-authored message distinguishable from the
-// synthetic continue nudge: when the trimmed text equals ContinueNudgeText
-// or a completion nudge, the surrounding brackets are stripped, so the
-// frontend's nudge filter (exact match on the bracketed form) never hides a real user message.
+// SanitizeUserText keeps a user-authored message distinguishable from
+// synthetic system prompt nudges: when the trimmed text contains or is wrapped in
+// <system_prompt>...</system_prompt>, the tags are stripped so the
+// frontend's nudge filter never hides a real user message.
 func SanitizeUserText(s string) string {
 	t := strings.TrimSpace(s)
-	if t == ContinueNudgeText || t == CompletionNudgeTextBuild || t == CompletionNudgeTextPlan {
-		return t[1 : len(t)-1]
+	if strings.HasPrefix(t, "<system_prompt>") && strings.HasSuffix(t, "</system_prompt>") {
+		inner := strings.TrimPrefix(t, "<system_prompt>")
+		inner = strings.TrimSuffix(inner, "</system_prompt>")
+		return strings.TrimSpace(inner)
+	}
+	if strings.Contains(s, "<system_prompt>") || strings.Contains(s, "</system_prompt>") {
+		res := strings.ReplaceAll(s, "<system_prompt>", "")
+		res = strings.ReplaceAll(res, "</system_prompt>", "")
+		return strings.TrimSpace(res)
 	}
 	return s
 }

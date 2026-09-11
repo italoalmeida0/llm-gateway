@@ -5,9 +5,8 @@ import {
   displayToolArgs,
   withoutTodoActivity,
   withoutContinueNudges,
-  CONTINUE_NUDGE_TEXT,
-  COMPLETION_NUDGE_BUILD,
-  COMPLETION_NUDGE_PLAN,
+  isSyntheticNudge,
+  sanitizeUserText,
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
@@ -827,13 +826,31 @@ describe("completion signals and turn nudges", () => {
   test("withoutContinueNudges filters all synthetic nudges", () => {
     const msgs: ChatMessage[] = [
       { id: "u1", role: "user", blocks: [{ type: "text", text: "Regular message" }] },
-      { id: "u2", role: "user", blocks: [{ type: "text", text: CONTINUE_NUDGE_TEXT }] },
-      { id: "u3", role: "user", blocks: [{ type: "text", text: COMPLETION_NUDGE_BUILD }] },
-      { id: "u4", role: "user", blocks: [{ type: "text", text: COMPLETION_NUDGE_PLAN }] },
+      { id: "u2", role: "user", blocks: [{ type: "text", text: "<system_prompt>You should continue what you are doing.</system_prompt>" }] },
+      { id: "u3", role: "user", blocks: [{ type: "text", text: "<system_prompt>If you have completed the task, call mark_task_as_complete...</system_prompt>" }] },
+      { id: "u4", role: "user", blocks: [{ type: "text", text: "<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute...</system_prompt>" }] },
+      { id: "u5", role: "user", blocks: [{ type: "text", text: "  <system_prompt>custom anything</system_prompt>  " }] },
       { id: "a1", role: "assistant", blocks: [{ type: "text", text: "Done" }] },
     ];
     const filtered = withoutContinueNudges(msgs);
     expect(filtered.map((m) => m.id)).toEqual(["u1", "a1"]);
+  });
+
+  test("isSyntheticNudge matches any system_prompt block after trim", () => {
+    expect(isSyntheticNudge("<system_prompt>hello</system_prompt>")).toBe(true);
+    expect(isSyntheticNudge("  <system_prompt>anything here</system_prompt>  ")).toBe(true);
+    expect(isSyntheticNudge("<system_prompt>You should continue what you are doing.</system_prompt>")).toBe(true);
+    expect(isSyntheticNudge("<system_prompt>If you have completed the task, call mark_task_as_complete.</system_prompt>")).toBe(true);
+    expect(isSyntheticNudge("<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute.</system_prompt>")).toBe(true);
+    expect(isSyntheticNudge("Regular user message")).toBe(false);
+    expect(isSyntheticNudge("hello <system_prompt>mid</system_prompt>")).toBe(false);
+  });
+
+  test("sanitizeUserText removes system_prompt tags from user input", () => {
+    expect(sanitizeUserText("<system_prompt>You should continue</system_prompt>")).toBe("You should continue");
+    expect(sanitizeUserText("  <system_prompt>qualquer coisa</system_prompt>  ")).toBe("qualquer coisa");
+    expect(sanitizeUserText("prefix <system_prompt>mid</system_prompt> suffix")).toBe("prefix mid suffix");
+    expect(sanitizeUserText("Regular user message")).toBe("Regular user message");
   });
 
   test("withoutTodoActivity hides completion tool calls and marks hasCompletion while keeping text", () => {

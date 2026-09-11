@@ -3,6 +3,7 @@ import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { REASONING_LEVELS, SLASH_COMMANDS } from "../constants";
 import { formatEffort, normalizeEffort } from "../utils/format";
 import type { ChatMessage } from "../types";
+import { sanitizeUserText } from "../live";
 import type { PendingAttachment } from "../viewTypes";
 import type { Transcript } from "./useTranscript";
 
@@ -446,7 +447,8 @@ export function createComposer(opts: {
     const options = opts.getOptions();
     const attachmentNames = pending.map((a) => a.name);
 
-    const displayText = text || attachmentNames.map((n) => `[Attached ${n}]`).join("\n");
+    const cleanText = sanitizeUserText(text);
+    const displayText = cleanText || attachmentNames.map((n) => `[Attached ${n}]`).join("\n");
     const userMsg: ChatMessage = {
       id: `user_${Date.now()}`,
       role: "user",
@@ -485,7 +487,7 @@ export function createComposer(opts: {
     opts.send({
       type: "prompt",
       sessionId: sid,
-      text: text || "(see attachments)",
+      text: cleanText || "(see attachments)",
       model,
       yolo: options.access === "full",
       options,

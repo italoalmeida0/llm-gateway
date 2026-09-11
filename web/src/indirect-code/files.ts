@@ -69,3 +69,17 @@ export function fileIcon(path: string): FileIconSpec {
   if (/\.(test|spec)\.[^.]+$/.test(name)) return named("mdi:test-tube", "str");
   return byExtension.get(name.split(".").pop() || "") || named("lucide:file-text", "comment");
 }
+
+/**
+ * True when `text` looks like a file with a KNOWN icon (basename after the
+ * last / or \ ends with a recognized extension or matches a named rule
+ * like Dockerfile). Inline-code without a known icon stays plain text.
+ */
+export function hasFileIcon(text: string): boolean {
+  const base = text.trim().split(/[\\/]/).pop() || "";
+  if (!base || /\s/.test(base)) return false;
+  if (base.startsWith(".") && base.indexOf(".", 1) === -1) return false; // dotfile w/o ext
+  const spec = fileIcon(base);
+  // fileIcon falls back to the generic file-text icon: only report known.
+  return spec.icon !== "lucide:file-text";
+}

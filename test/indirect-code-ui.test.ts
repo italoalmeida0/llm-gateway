@@ -970,3 +970,23 @@ describe("Turn-end browser notification (useTurnNotify)", () => {
     expect(JSON.stringify(p)).not.toMatch(/gw_|dmt_|sk-|Bearer/i);
   });
 });
+
+describe("File icon in inline code (hasFileIcon)", () => {
+  test("detects files by trailing extension, even with paths", async () => {
+    const { hasFileIcon } = await import("../web/src/indirect-code/files");
+    expect(hasFileIcon("server.ts")).toBe(true);
+    expect(hasFileIcon("seilaoq/blabla.ts")).toBe(true);
+    expect(hasFileIcon("src/api/routes.py")).toBe(true);
+    expect(hasFileIcon("C:\\proj\\app.go")).toBe(true);
+    expect(hasFileIcon("Dockerfile")).toBe(true);
+    expect(hasFileIcon("package.json")).toBe(true);
+    expect(hasFileIcon("run.test.ts")).toBe(true);
+    // Not files: identifiers, commands, prose with dots, unknown extensions.
+    expect(hasFileIcon("useState")).toBe(false);
+    expect(hasFileIcon("npm run dev")).toBe(false);
+    expect(hasFileIcon("v1.0")).toBe(false);
+    expect(hasFileIcon("foo.xyzabc")).toBe(false);
+    expect(hasFileIcon("")).toBe(false);
+    expect(hasFileIcon(".gitignore")).toBe(false);
+  });
+});

@@ -71,15 +71,28 @@ export function fileIcon(path: string): FileIconSpec {
 }
 
 /**
- * True when `text` looks like a file with a KNOWN icon (basename after the
- * last / or \ ends with a recognized extension or matches a named rule
- * like Dockerfile). Inline-code without a known icon stays plain text.
+ * True when `text` looks like a file with a KNOWN icon: the basename
+ * (after the last / or \) must either contain a dot followed by a
+ * recognized extension, or match an extensionless special name
+ * (Dockerfile, Makefile, LICENSE, ...). Bare words like `ts` or `useState`
+ * never match — the extension map is only consulted after a dot.
  */
 export function hasFileIcon(text: string): boolean {
   const base = text.trim().split(/[\\/]/).pop() || "";
   if (!base || /\s/.test(base)) return false;
-  if (base.startsWith(".") && base.indexOf(".", 1) === -1) return false; // dotfile w/o ext
-  const spec = fileIcon(base);
-  // fileIcon falls back to the generic file-text icon: only report known.
-  return spec.icon !== "lucide:file-text";
+  const lower = base.toLowerCase();
+  const dot = lower.lastIndexOf(".");
+  if (dot > 0) {
+    // Dotted name: icon only when the trailing extension is known.
+    // (fileIcon falls back to generic file-text for unknown extensions.)
+    const spec = fileIcon(base);
+    return spec.icon !== "lucide:file-text";
+  }
+  if (dot === 0) {
+    // Dotfile without extension: icon only for the known config names
+    // (.gitignore, .dockerignore and friends stay plain text).
+    return /^\.(git|gitattributes|env|npmrc|editorconfig|prettier.*|eslint.*)$/.test(lower);
+  }
+  // Extensionless: only the special names fileIcon knows by heart.
+  return fileIcon(base).icon !== "lucide:file-text" && !byExtension.has(lower);
 }

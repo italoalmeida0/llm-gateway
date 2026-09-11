@@ -988,5 +988,19 @@ describe("File icon in inline code (hasFileIcon)", () => {
     expect(hasFileIcon("foo.xyzabc")).toBe(false);
     expect(hasFileIcon("")).toBe(false);
     expect(hasFileIcon(".gitignore")).toBe(false);
+    // Bare extension words are not files (no dot in the basename).
+    expect(hasFileIcon("ts")).toBe(false);
+    expect(hasFileIcon("tsx")).toBe(false);
+    expect(hasFileIcon("js")).toBe(false);
+    expect(hasFileIcon("py")).toBe(false);
+    expect(hasFileIcon("go")).toBe(false);
+    expect(hasFileIcon("README")).toBe(false);
+    // Extensionless special names and known dotfiles keep their icons.
+    expect(hasFileIcon("Makefile")).toBe(true);
+    expect(hasFileIcon("LICENSE")).toBe(true);
+    expect(hasFileIcon(".git")).toBe(true);
+    expect(hasFileIcon(".env")).toBe(true);
+    expect(hasFileIcon(".env.local")).toBe(true);
+    expect(hasFileIcon("bun.lock")).toBe(true);
   });
 });

@@ -18,6 +18,8 @@ export default tseslint.config(
       "docs/**",
       // Third-party reference snapshots (git-ignored, carry their own configs).
       "remote-code-ref/**",
+      // Local scratch/reference checkouts (not part of this repo's build).
+      "tmp/**",
     ],
   },
   js.configs.recommended,

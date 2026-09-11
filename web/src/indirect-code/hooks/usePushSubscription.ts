@@ -43,6 +43,7 @@ export function createPushSubscription(opts: {
 }) {
   const [subscribed, setSubscribed] = createSignal(false);
   const [supported] = createSignal(pushSupported());
+  const [state, setState] = createSignal<"unknown" | "active" | "off" | "blocked" | "unsupported" | "error">("unknown");
   let syncing = false;
 
   async function currentEndpoint(): Promise<string | null> {
@@ -57,7 +58,10 @@ export function createPushSubscription(opts: {
 
   /** Align server state with (toggle, permission): subscribe or unsubscribe. */
   async function sync(): Promise<void> {
-    if (syncing || !supported()) return;
+    if (syncing || !supported()) {
+      if (!supported()) setState("unsupported");
+      return;
+    }
     syncing = true;
     try {
       const reg = await navigator.serviceWorker.ready;
@@ -69,24 +73,25 @@ export function createPushSubscription(opts: {
           await api("POST", "/api/push/unsubscribe", { endpoint }).catch(() => {});
         }
         setSubscribed(false);
+        setState("off");
+        return;
+      }
+      if (Notification.permission === "denied") {
+        setSubscribed(false);
+        setState("blocked");
         return;
       }
       if (Notification.permission !== "granted") {
         setSubscribed(!!existing);
+        setState(existing ? "active" : "off");
         return;
       }
-      if (existing) {
-        setSubscribed(true);
-        return;
-      }
-      const { publicKey } = await api<{ success: boolean; publicKey: string }>(
-        "GET",
-        "/api/push/vapid-key",
-      );
-      const sub = await reg.pushManager.subscribe({
+      // Permission granted: ensure the server knows this subscription
+      // (upsert is idempotent — covers DB wipes and re-installs).
+      const sub = existing ?? (await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToBytes(publicKey).buffer as ArrayBuffer,
-      });
+        applicationServerKey: urlBase64ToBytes((await api<{ success: boolean; publicKey: string }>("GET", "/api/push/vapid-key")).publicKey).buffer as ArrayBuffer,
+      }));
       const raw = sub.toJSON();
       await api("POST", "/api/push/subscribe", {
         endpoint: sub.endpoint,
@@ -94,16 +99,18 @@ export function createPushSubscription(opts: {
         label: browserLabel(),
       });
       setSubscribed(true);
+      setState("active");
     } catch (e: any) {
       console.warn("[push] sync failed:", e);
       opts.toast(`Push setup failed: ${e?.message || e}`, "err");
       setSubscribed(false);
+      setState("error");
     } finally {
       syncing = false;
     }
   }
 
-  return { subscribed, supported, sync, currentEndpoint };
+  return { subscribed, supported, state, sync, currentEndpoint };
 }
 
 export type PushSubscription = ReturnType<typeof createPushSubscription>;

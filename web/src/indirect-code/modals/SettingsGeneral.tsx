@@ -182,7 +182,15 @@ export function SettingsGeneralSection() {
       </button>
       <Show when={ui.pushSub.supported()}>
         <span class="text-[11px] text-ink-500">
-          {ui.pushSub.subscribed() ? "Push active on this device." : "Push not active on this device yet."}
+          {ui.pushSub.state() === "active"
+            ? "Push active on this device — closed tabs still notify."
+            : ui.pushSub.state() === "blocked"
+              ? "Push blocked — allow notifications in site settings."
+              : ui.pushSub.state() === "off"
+                ? "Push off — turn notifications on to enable."
+                : ui.pushSub.state() === "error"
+                  ? "Push setup failed — retry with Test below."
+                  : "Checking push status…"}
         </span>
       </Show>
     </div>

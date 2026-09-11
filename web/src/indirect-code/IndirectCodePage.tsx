@@ -265,12 +265,20 @@ export default function IndirectCodePage() {
 
   // Register the push Service Worker once (Camada B: all tabs closed).
   // Registration is idempotent; failures degrade to Camada A only.
+  // After registration, auto-sync the subscription (farm-game style): if
+  // the master toggle is ON and permission is granted, ensure the server
+  // knows this browser — no manual toggle dance required.
   onMount(() => {
     try {
       if ("serviceWorker" in navigator && "PushManager" in window) {
-        void navigator.serviceWorker.register("/push-sw.js").catch((e) => {
-          console.warn("[push] service worker registration failed:", e);
-        });
+        void navigator.serviceWorker
+          .register("/push-sw.js")
+          .then(() => {
+            if (turnNotify.notifyOn()) void pushSub.sync();
+          })
+          .catch((e) => {
+            console.warn("[push] service worker registration failed:", e);
+          });
       }
     } catch {}
   });

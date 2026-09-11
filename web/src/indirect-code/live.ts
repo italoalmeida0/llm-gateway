@@ -33,8 +33,8 @@ export function displayToolArgs(raw?: string): Record<string, any> {
  * response or when prompting for completion. Transcript-real (sent to the provider)
  * but never shown as a user bubble. Must match core constants in the daemon. */
 export const CONTINUE_NUDGE_TEXT = "[You should continue what you are doing.]";
-export const COMPLETION_NUDGE_BUILD = "[If you have completed the task, call mark_task_as_complete. Otherwise, continue your work.]";
-export const COMPLETION_NUDGE_PLAN = "[If your plan is ready, call mark_plan_as_ready_to_execute. Otherwise, continue your work.]";
+export const COMPLETION_NUDGE_BUILD = "[Automatic system message: If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.]";
+export const COMPLETION_NUDGE_PLAN = "[Automatic system message: If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.]";
 
 export const SIGNAL_TOOL_NAMES = new Set(["todo", "mark_task_as_complete", "mark_plan_as_ready_to_execute"]);
 export const COMPLETION_TOOL_NAMES = new Set(["mark_task_as_complete", "mark_plan_as_ready_to_execute"]);

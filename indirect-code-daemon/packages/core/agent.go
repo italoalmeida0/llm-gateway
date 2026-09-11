@@ -24,8 +24,8 @@ const ContinueNudgeText = "[You should continue what you are doing.]"
 // CompletionNudgeTextBuild and CompletionNudgeTextPlan prompt the model
 // when it returns visible text without calling a completion tool in build/plan modes.
 const (
-	CompletionNudgeTextBuild = "[If you have completed the task, call mark_task_as_complete. Otherwise, continue your work.]"
-	CompletionNudgeTextPlan  = "[If your plan is ready, call mark_plan_as_ready_to_execute. Otherwise, continue your work.]"
+	CompletionNudgeTextBuild = "[Automatic system message: If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.]"
+	CompletionNudgeTextPlan  = "[Automatic system message: If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.]"
 )
 
 // maxContinueNudges caps consecutive empty-response nudges per turn so a

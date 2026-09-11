@@ -158,16 +158,16 @@ func TestSanitizeUserText(t *testing.T) {
 	if got := SanitizeUserText("  " + ContinueNudgeText + "  "); got != "You should continue what you are doing." {
 		t.Fatalf("padded nudge = %q; want brackets stripped", got)
 	}
-	if got := SanitizeUserText(CompletionNudgeTextBuild); got != "If you have completed the task, call mark_task_as_complete. Otherwise, continue your work." {
+	if got := SanitizeUserText(CompletionNudgeTextBuild); got != "Automatic system message: If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
 		t.Fatalf("build completion nudge = %q; want brackets stripped", got)
 	}
-	if got := SanitizeUserText("  " + CompletionNudgeTextBuild + "  "); got != "If you have completed the task, call mark_task_as_complete. Otherwise, continue your work." {
+	if got := SanitizeUserText("  " + CompletionNudgeTextBuild + "  "); got != "Automatic system message: If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
 		t.Fatalf("padded build completion nudge = %q; want brackets stripped", got)
 	}
-	if got := SanitizeUserText(CompletionNudgeTextPlan); got != "If your plan is ready, call mark_plan_as_ready_to_execute. Otherwise, continue your work." {
+	if got := SanitizeUserText(CompletionNudgeTextPlan); got != "Automatic system message: If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
 		t.Fatalf("plan completion nudge = %q; want brackets stripped", got)
 	}
-	if got := SanitizeUserText("  " + CompletionNudgeTextPlan + "  "); got != "If your plan is ready, call mark_plan_as_ready_to_execute. Otherwise, continue your work." {
+	if got := SanitizeUserText("  " + CompletionNudgeTextPlan + "  "); got != "Automatic system message: If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
 		t.Fatalf("padded plan completion nudge = %q; want brackets stripped", got)
 	}
 	for _, s := range []string{"hello", "", "[unrelated]", "You should continue what you are doing."} {

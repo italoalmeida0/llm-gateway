@@ -66,11 +66,6 @@ export function TranscriptView() {
   });
   return (
 <>
-<Show when={h.activeHost() && h.connectionState() !== "connected"}>
-  <div role="status" class="border-b border-line bg-elev px-4 py-2 text-center text-xs text-ink-400">
-    Connection interrupted. Reconnecting to your host…
-  </div>
-</Show>
 
 
 {/* Floating top-left: back + sidebar toggle (no topbar) */}

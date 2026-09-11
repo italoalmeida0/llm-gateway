@@ -11,6 +11,14 @@ import { fileIcon, hasFileIcon } from "../files";
  */
 
 function codeText(children: unknown): string | null {
+  // Solid passes reactive getters as children: resolve before inspecting.
+  if (typeof children === "function") {
+    try {
+      return codeText((children as () => unknown)());
+    } catch {
+      return null;
+    }
+  }
   if (typeof children === "string") return children;
   if (Array.isArray(children)) {
     let out = "";

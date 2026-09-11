@@ -17,4 +17,4 @@ index c06718c2db82d9d64bd06d6f27585216361f8309..a60bc27417ff72dd82edc1638144eab0
 +++ b/src/index.tsx
 @@ -72 +72 @@
 -  return <SolidMarkdown children={parsedContent()} />
-+  return <SolidMarkdown children={parsedContent()} remarkPlugins={props.remarkPlugins} />
++  return <SolidMarkdown children={parsedContent()} remarkPlugins={props.remarkPlugins} components={props.components} />

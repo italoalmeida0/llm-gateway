@@ -1,19 +1,19 @@
 /**
  * Web Push Service Worker (Camada B: all tabs closed).
  *
- * Vanilla, no bundle: copied as-is to dist/ by build.ts. Renders turn-end
- * pushes as OS notifications; click opens (or focuses) the Indirect Code
- * page. Payload is display-only ({title, body, url, tag}) — never secrets.
+ * Plain JavaScript on purpose: copied as-is to dist/ by build.ts with NO
+ * transpiler step, so no TypeScript syntax (declare/as/annotations) is
+ * allowed here — the browser parses it raw. Renders turn-end pushes as OS
+ * notifications; click opens (or focuses) the Indirect Code page. Payload
+ * is display-only ({title, body, url, tag}) — never secrets.
  */
 
 /* eslint-disable no-undef */
-declare const self: ServiceWorkerGlobalScope;
-
 self.addEventListener("push", (event) => {
   let data = { title: "Turn finished", body: "Your agent replied", url: "/#/code", tag: "turn" };
   try {
-    if (event.data) data = { ...data, ...event.data.json() };
-  } catch {}
+    if (event.data) data = Object.assign({}, data, event.data.json());
+  } catch (e) {}
   event.waitUntil(
     self.registration.showNotification(data.title, {
       body: data.body,
@@ -27,22 +27,23 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const url = (event.notification.data && event.notification.data.url) || "/#/code";
+  const ndata = event.notification.data || {};
+  const url = ndata.url || "/#/code";
   event.waitUntil(
     (async () => {
       const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       for (const w of wins) {
         try {
-          if ("focus" in w) {
-            await (w as WindowClient).focus();
-            if ("navigate" in w) await (w as WindowClient).navigate(url);
+          if (typeof w.focus === "function") {
+            await w.focus();
+            if (typeof w.navigate === "function") await w.navigate(url);
             return;
           }
-        } catch {}
+        } catch (e) {}
       }
       try {
         await self.clients.openWindow(url);
-      } catch {}
+      } catch (e) {}
     })(),
   );
 });

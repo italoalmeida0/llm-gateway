@@ -1069,3 +1069,39 @@ describe("Read tool label line range (toolSummary)", () => {
     expect(toolSummary(readUnit(56, undefined, 60) as any).target).toBe("server.ts#L56-115");
   });
 });
+
+describe("Turn balloons use daemon-stamped turnIndex", () => {
+  test("balloon anchors by stamped turn even when local bubble count diverges", async () => {
+    const { buildRenderBlocks, mapBalloonsToBlocks } = await import("../web/src/indirect-code/transcript");
+    // Daemon session is at TurnSeq 10/11, but only 2 user bubbles are visible
+    // (older turns compacted away). Old code counted bubbles (turns 1-2) and
+    // piled balloon 10 onto the first block; stamped anchoring + backward
+    // fallback must keep it near the end instead.
+    const userA: ChatMessage = { id: "ua", role: "user", blocks: [{ type: "text", text: "a" }], turnIndex: 10 };
+    const asstA: ChatMessage = { id: "aa", role: "assistant", blocks: [{ type: "text", text: "A" }], turnIndex: 10 };
+    const userB: ChatMessage = { id: "ub", role: "user", blocks: [{ type: "text", text: "b" }], turnIndex: 11 };
+    const blocks = buildRenderBlocks([userA, asstA, userB]).map((b) => ({ ...b, id: b.msg.id }));
+    const balloon: TurnBalloon = { turnIndex: 10, files: [{ path: "f.ts", status: "modified" }] };
+    const map = mapBalloonsToBlocks(blocks, [balloon]);
+    // Turn 10's last block is asstA (right above userB's message).
+    expect(map.get("aa")?.map((b) => b.turnIndex)).toEqual([10]);
+    expect(map.get("ua")).toBeUndefined();
+  });
+
+  test("missing turn walks back to the nearest older rendered turn", async () => {
+    const { buildRenderBlocks, mapBalloonsToBlocks } = await import("../web/src/indirect-code/transcript");
+    const userA: ChatMessage = { id: "ua", role: "user", blocks: [{ type: "text", text: "a" }], turnIndex: 8 };
+    const asstA: ChatMessage = { id: "aa", role: "assistant", blocks: [{ type: "text", text: "A" }], turnIndex: 8 };
+    const userB: ChatMessage = { id: "ub", role: "user", blocks: [{ type: "text", text: "b" }], turnIndex: 11 };
+    const asstB: ChatMessage = { id: "ab", role: "assistant", blocks: [{ type: "text", text: "B" }], turnIndex: 11 };
+    const blocks = buildRenderBlocks([userA, asstA, userB, asstB]).map((b) => ({ ...b, id: b.msg.id }));
+    // Balloon for pruned turn 10: must sit after turn 8 (nearest older),
+    // never piled onto the first block.
+    const map = mapBalloonsToBlocks(blocks, [{ turnIndex: 10, files: [{ path: "f.ts", status: "modified" }] }]);
+    expect(map.get("aa")?.map((b) => b.turnIndex)).toEqual([10]);
+    expect(map.get("ua")).toBeUndefined();
+    // Future turn 12 (not rendered yet): pins to the end.
+    const map2 = mapBalloonsToBlocks(blocks, [{ turnIndex: 12, files: [{ path: "g.ts", status: "new" }] }]);
+    expect(map2.get("ab")?.map((b) => b.turnIndex)).toEqual([12]);
+  });
+});

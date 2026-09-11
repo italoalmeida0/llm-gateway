@@ -373,15 +373,27 @@ export function mapBalloonsToBlocks(
 
   let currentTurn = 0;
   const lastBlockOfTurn = new Map<number, string>();
+  // Highest daemon-stamped turn seen: separates "turn not rendered yet"
+  // (attach at the end) from "turn gone" (attach at nearest older turn).
+  let maxStampedTurn = 0;
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
     const blockId = (block as any).id || block.msg.id;
-    if (isTurnStartMessage(block.msg)) {
-      currentTurn++;
+    // Prefer the daemon-stamped session turn sequence carried on every
+    // message; fall back to counting visible user bubbles only for
+    // unstamped (legacy) messages.
+    const stamped = typeof block.msg.turnIndex === "number" && block.msg.turnIndex > 0 ? block.msg.turnIndex : 0;
+    if (stamped > 0) {
+      if (stamped > maxStampedTurn) maxStampedTurn = stamped;
+      lastBlockOfTurn.set(stamped, blockId);
+    } else {
+      if (isTurnStartMessage(block.msg)) {
+        currentTurn++;
+      }
+      const tIdx = currentTurn > 0 ? currentTurn : 1;
+      lastBlockOfTurn.set(tIdx, blockId);
     }
-    const tIdx = currentTurn > 0 ? currentTurn : 1;
-    lastBlockOfTurn.set(tIdx, blockId);
   }
 
   const lastBlockId = (blocks[blocks.length - 1] as any).id || blocks[blocks.length - 1].msg.id;
@@ -392,10 +404,16 @@ export function mapBalloonsToBlocks(
     let targetId = lastBlockOfTurn.get(tIdx);
 
     if (!targetId) {
-      if (tIdx >= currentTurn) {
+      if (tIdx > maxStampedTurn) {
+        // Turn not rendered yet (live/current): pin to the end.
         targetId = lastBlockId;
       } else {
-        targetId = firstBlockId;
+        // Turn gone (pruned/compacted): walk back to the nearest older
+        // rendered turn instead of piling onto the first block.
+        for (let t = tIdx - 1; t >= 1 && !targetId; t--) {
+          targetId = lastBlockOfTurn.get(t);
+        }
+        targetId = targetId || firstBlockId;
       }
     }
 

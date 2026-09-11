@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 	"llm-gateway/indirect-code-daemon/packages/filetrack"
 )
 
@@ -18,18 +19,72 @@ type turnFileChanges struct {
 	tracker   *filetrack.TurnTracker
 	turnIndex int
 	cwd       string
+	// brainDir is the per-session private workspace: scratch-space files
+	// are never user-facing changes, so preview/finish filter them out.
+	// This is defense-in-depth on top of the tools skipping brain paths
+	// at tracking time (old crash journals may still carry them).
+	brainDir string
 }
 
 // beginTurnTracking creates the per-turn incoming-changes area.
 // The caller must hold act.mu (runAgentTurn does at this point).
-func beginTurnTracking(act *ActiveSession, cwd string, turnIndex int) *turnFileChanges {
+func beginTurnTracking(act *ActiveSession, cwd string, turnIndex int, brainDir string) *turnFileChanges {
 	tfc := &turnFileChanges{
 		tracker:   filetrack.NewTurnTracker(),
 		turnIndex: turnIndex,
 		cwd:       cwd,
+		brainDir:  brainDir,
 	}
 	act.fileChanges = tfc
 	return tfc
+}
+
+// dropBrainTracked removes tracked paths living under the per-session
+// private workspace. Tools already skip brain paths at tracking time;
+// this is defense-in-depth for crash journals written before the skip
+// existed (or restored from disk). Empty brainDir never matches.
+func dropBrainTracked(in []filetrack.TrackedFile, brainDir string) []filetrack.TrackedFile {
+	if brainDir == "" || len(in) == 0 {
+		return in
+	}
+	out := in[:0]
+	for _, tf := range in {
+		if tools.IsBrainPath(brainDir, tf.Path) {
+			continue
+		}
+		out = append(out, tf)
+	}
+	// Zero the tail so retained backing-array elements don't pin content.
+	for i := len(out); i < len(in); i++ {
+		in[i] = filetrack.TrackedFile{}
+	}
+	return out
+}
+
+// stripBrainBalloonFiles drops balloon files living under the per-session
+// private workspace and removes balloons left empty. Old sessions may
+// persist brain files from before tools skipped them; the brain is
+// session memory, never user-facing file changes.
+func stripBrainBalloonFiles(in []filetrack.TurnChanges, brainDir string) []filetrack.TurnChanges {
+	if brainDir == "" || len(in) == 0 {
+		return in
+	}
+	out := make([]filetrack.TurnChanges, 0, len(in))
+	for _, b := range in {
+		kept := make([]filetrack.ChangedFile, 0, len(b.Files))
+		for _, f := range b.Files {
+			if tools.IsBrainPath(brainDir, f.Path) {
+				continue
+			}
+			kept = append(kept, f)
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		b.Files = kept
+		out = append(out, b)
+	}
+	return out
 }
 
 // previewIncoming builds the live "changed" preview from the current
@@ -38,7 +93,7 @@ func previewIncoming(tfc *turnFileChanges) []filetrack.ChangedFile {
 	if tfc == nil {
 		return nil
 	}
-	return filetrack.PreviewChanged(tfc.tracker.Snapshot(), tfc.cwd)
+	return filetrack.PreviewChanged(dropBrainTracked(tfc.tracker.Snapshot(), tfc.brainDir), tfc.cwd)
 }
 
 // finishTurnTracking builds the final changed list, resets incoming, appends
@@ -47,7 +102,7 @@ func (d *DaemonServer) finishTurnTracking(act *ActiveSession, tfc *turnFileChang
 	if tfc == nil {
 		return nil
 	}
-	files := filetrack.BuildChanged(tfc.tracker.Snapshot(), tfc.cwd)
+	files := filetrack.BuildChanged(dropBrainTracked(tfc.tracker.Snapshot(), tfc.brainDir), tfc.cwd)
 	tfc.tracker.Reset()
 	if len(files) == 0 {
 		return nil

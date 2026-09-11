@@ -232,11 +232,11 @@ func TestWriteDescriptionOmitsBrain(t *testing.T) {
 	}
 }
 
-type countTracker struct{ writes int }
+type countTracker struct{ writes, reads, edits int }
 
-func (c *countTracker) NoteRead(absPath, content string)                   {}
+func (c *countTracker) NoteRead(absPath, content string)                   { c.reads++ }
 func (c *countTracker) NoteWrite(absPath string, existed bool, old string) { c.writes++ }
-func (c *countTracker) NoteEditBefore(absPath, beforeContent string)       {}
+func (c *countTracker) NoteEditBefore(absPath, beforeContent string)       { c.edits++ }
 func (c *countTracker) NoteBinaryNew(absPath string)                       { c.writes++ }
 
 func TestWriteBrainSkipsChangeTracking(t *testing.T) {
@@ -252,6 +252,37 @@ func TestWriteBrainSkipsChangeTracking(t *testing.T) {
 	}
 	if tracker.writes != 1 {
 		t.Fatalf("tracked writes = %d; want 1 (brain write must be skipped)", tracker.writes)
+	}
+}
+
+func TestReadEditBrainSkipChangeTracking(t *testing.T) {
+	dir := t.TempDir()
+	brain := t.TempDir()
+	brainFile := filepath.Join(brain, "notes.md")
+	if err := os.WriteFile(brainFile, []byte("hello brain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	normalFile := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(normalFile, []byte("hello world\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tracker := &countTracker{}
+	readTool := &ReadTool{CWD: dir, BrainDir: brain, Changes: tracker}
+	editTool := &EditTool{CWD: dir, BrainDir: brain, Changes: tracker}
+	if _, err := readTool.Execute(context.Background(), mustJSON(t, map[string]any{"path": brainFile}), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := editTool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":  brainFile,
+		"edits": []map[string]any{{"oldText": "brain", "newText": "memory"}},
+	}), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "a.txt"}), nil); err != nil {
+		t.Fatal(err)
+	}
+	if tracker.reads != 1 || tracker.edits != 0 {
+		t.Fatalf("reads=%d edits=%d; want reads=1 edits=0 (brain read/edit must be skipped)", tracker.reads, tracker.edits)
 	}
 }
 

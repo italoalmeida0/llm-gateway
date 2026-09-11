@@ -22,6 +22,9 @@ type EditTool struct {
 	CWD     string
 	Sandbox *Sandbox
 	Changes ChangeTracker
+	// BrainDir is the absolute path of the per-session private workspace.
+	// Scratch-space edits are never tracked: they are not user-facing changes.
+	BrainDir string
 }
 
 // piEdit is one targeted replacement, exactly like pi's replaceEditSchema.
@@ -137,7 +140,8 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 
 	// Change tracking: snapshot the content BEFORE the edit (first sighting
 	// only). The tmp content is compared after the edit for the live diff.
-	if t.Changes != nil {
+	// Scratch-space edits are never tracked: they are not user-facing changes.
+	if t.Changes != nil && !IsBrainPath(t.BrainDir, abs) {
 		if capped, tooLarge := cappedSnapshot(data); tooLarge {
 			t.Changes.NoteBinaryNew(abs)
 		} else {

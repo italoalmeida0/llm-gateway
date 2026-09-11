@@ -182,9 +182,9 @@ func (r *turnRun) setupAgent() bool {
 	}
 
 	baseTools := []core.Tool{
-		&tools.ReadTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker},
+		&tools.ReadTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir},
 		&tools.WriteTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir},
-		&tools.EditTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker},
+		&tools.EditTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir},
 		&tools.BashTool{CWD: r.sessionCWD, Sandbox: sb},
 		&tools.GlobTool{CWD: r.sessionCWD, Sandbox: sb},
 		&tools.SearchTool{CWD: r.sessionCWD, Sandbox: sb},
@@ -618,9 +618,10 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
 	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
 	tfc := &turnFileChanges{
-		tracker:   filetrack.RestoreTurnTracker(j.Incoming),
+		tracker:   filetrack.RestoreTurnTracker(dropBrainTracked(j.Incoming, d.brainDir(sessionID))),
 		turnIndex: j.TurnIndex,
 		cwd:       sessionCWD,
+		brainDir:  d.brainDir(sessionID),
 	}
 	act.fileChanges = tfc
 	ctx, cancel := context.WithCancel(context.Background())

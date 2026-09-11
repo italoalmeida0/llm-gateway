@@ -63,7 +63,9 @@ func (d *DaemonServer) forkSession(raw []byte) {
 	rec := &SessionRecord{ID: fmt.Sprintf("sess_%d", now.UnixNano()), CWD: resolvePath(source.CWD), Title: source.Title + " (fork)", TitleSource: "manual", Model: source.Model, Options: normalizedOptions(source.Options), Status: "idle", CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli(), TurnSeq: source.TurnSeq}
 	// Carry only balloons anchored inside the copied prefix. Their
 	// MessageIndex still resolves because the prefix is message-identical.
-	for _, b := range source.FileBalloons {
+	// Brain files never ride along: the brain is session memory, never
+	// user-facing file changes (old sessions may persist them).
+	for _, b := range stripBrainBalloonFiles(source.FileBalloons, d.brainDir(source.ID)) {
 		if b.MessageIndex > 0 && b.MessageIndex <= end {
 			rec.FileBalloons = append(rec.FileBalloons, b)
 		}
@@ -147,6 +149,10 @@ func (d *DaemonServer) forkSession(raw []byte) {
 					replaced = true
 					break
 				}
+			}
+			if !replaced {
+				rec.Messages[i].Content = []provider.Content{provider.TextBlock{Text: req.EditText}}
+				replaced = true
 			}
 			if replaced {
 				rec.Messages[i].Time = time.Now()

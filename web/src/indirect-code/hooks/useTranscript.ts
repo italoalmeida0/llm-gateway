@@ -44,6 +44,8 @@ export function createTranscript(opts: {
   /** Context received in usage: the page compares it with the catalog. */
   onUsageContext: (ctx: SessionContext) => void;
   isHideToolMessages?: () => boolean;
+  onDiscardResendOrRegenerate?: (sessionId: string) => void;
+  onForkKind?: (kind: "resend" | "regenerate" | "fork") => void;
 }) {
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
@@ -404,6 +406,7 @@ export function createTranscript(opts: {
     if (last.srcIdx == null) return;
     forkRequestId = crypto.randomUUID();
     setForking(true);
+    opts.onForkKind?.("fork");
     opts.send({ type: "fork_session", sessionId: opts.getSessionId(), index: last.srcIdx, requestId: forkRequestId });
   }
   // Regenerate from message idx: the daemon drops that message and everything
@@ -416,6 +419,31 @@ export function createTranscript(opts: {
       opts.toast("Stop the current turn first", "err");
       return;
     }
+
+    const msgs = messages();
+    // Locate the user message that prompted this assistant turn.
+    // Search backwards from idx in messages() for the preceding user message.
+    let userMsg: ChatMessage | null = null;
+    let userIdx = -1;
+    for (let k = idx; k >= 0; k--) {
+      if (msgs[k]?.role === "user") {
+        userMsg = msgs[k];
+        userIdx = k;
+        break;
+      }
+    }
+    if (!userMsg) {
+      for (let k = msgs.length - 1; k >= 0; k--) {
+        if (msgs[k]?.role === "user") {
+          userMsg = msgs[k];
+          userIdx = k;
+          break;
+        }
+      }
+    }
+    const userRawIdx = typeof userMsg?.srcIdx === "number" ? userMsg.srcIdx : (userMsg ? userIdx : rawIdx(idx));
+    const userText = userMsg ? messageText(userMsg) : "";
+
     const choice = await opts.showChoice({
       title: "Regenerate response?",
       message: "Everything from this point down will be discarded and the turn re-runs from the previous user message.\n\nFork keeps the current timeline in a copy and regenerates there instead.",
@@ -428,12 +456,31 @@ export function createTranscript(opts: {
     if (choice === "fork") {
       forkRequestId = crypto.randomUUID();
       setForking(true);
-      opts.send({ type: "fork_session", sessionId: sid, index: rawIdx(idx), requestId: forkRequestId });
+      opts.onForkKind?.("regenerate");
+      opts.send({
+        type: "fork_session",
+        sessionId: sid,
+        index: userRawIdx,
+        requestId: forkRequestId,
+        editText: userText,
+        editModel: getModel(),
+        editYolo: getYolo(),
+      });
       return;
     }
-    // Optimistic cut: drop rendered tail now (daemon reconciles via session_truncated).
-    cutLiveTail(rawIdx(idx) - 1);
-    opts.send({ type: "regenerate", sessionId: sid, index: rawIdx(idx), model: getModel(), yolo: getYolo() });
+    // Arm full reload after daemon signals the new turn
+    opts.onDiscardResendOrRegenerate?.(sid);
+
+    // Optimistic cut: drop rendered tail now (daemon reconciles via session_truncated and subsequent full reload).
+    cutLiveTail(userRawIdx);
+    opts.send({
+      type: "regenerate",
+      sessionId: sid,
+      index: userRawIdx,
+      text: userText,
+      model: getModel(),
+      yolo: getYolo(),
+    });
   }
   let editMsgTimer: ReturnType<typeof setTimeout> | undefined;
   let lastSentEditIdx: number | null = null;
@@ -587,6 +634,7 @@ export function createTranscript(opts: {
       opts.toast("Stop the current turn first", "err");
       return;
     }
+    const targetRawIdx = typeof m.srcIdx === "number" ? m.srcIdx : rawIdx(idx);
     if (regen) {
       const choice = await opts.showChoice({
         title: "Resend edited message?",
@@ -602,17 +650,20 @@ export function createTranscript(opts: {
         // applies it to the boundary user message and resends from there.
         forkRequestId = crypto.randomUUID();
         setForking(true);
-        opts.send({ type: "fork_session", sessionId: sid, index: rawIdx(idx), requestId: forkRequestId, editText: text, editModel: getModel(), editYolo: getYolo() });
+        opts.onForkKind?.("resend");
+        opts.send({ type: "fork_session", sessionId: sid, index: targetRawIdx, requestId: forkRequestId, editText: text, editModel: getModel(), editYolo: getYolo() });
         cancelEditMsg();
         return;
       }
+      // Arm full reload after daemon signals the new turn
+      opts.onDiscardResendOrRegenerate?.(sid);
       // Optimistic cut: drop rendered tail now (daemon reconciles via session_truncated).
-      cutLiveTail(rawIdx(idx));
+      cutLiveTail(targetRawIdx);
     }
     opts.send({
       type: "edit_message",
       sessionId: sid,
-      index: rawIdx(idx),
+      index: targetRawIdx,
       text,
       model: getModel(),
       yolo: getYolo(),

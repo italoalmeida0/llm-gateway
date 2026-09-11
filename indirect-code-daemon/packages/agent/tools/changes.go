@@ -21,3 +21,22 @@ type ChangeTracker interface {
 	NoteEditBefore(absPath, beforeContent string)
 	NoteBinaryNew(absPath string)
 }
+
+// IsBrainPath reports whether abs lives under the per-session private
+// workspace (brainDir). Scratch-space files are never user-facing
+// changes, so tools skip change tracking for them. Empty brainDir never
+// matches.
+func IsBrainPath(brainDir, abs string) bool {
+	if brainDir == "" || abs == "" {
+		return false
+	}
+	target, err := canonicalOrParent(abs)
+	if err != nil {
+		return false
+	}
+	brain, err := canonicalOrParent(brainDir)
+	if err != nil {
+		return false
+	}
+	return isUnder(brain, target)
+}

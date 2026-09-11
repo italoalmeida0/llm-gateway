@@ -34,8 +34,9 @@ func (d *DaemonServer) handleGetTurnChanges(raw []byte) {
 	}
 	act.mu.Lock()
 	var balloons []map[string]any
+	brainDir := d.brainDir(req.SessionID)
 	if act.record != nil {
-		for _, b := range act.record.FileBalloons {
+		for _, b := range stripBrainBalloonFiles(act.record.FileBalloons, brainDir) {
 			if req.TurnIndex != nil && b.TurnIndex != *req.TurnIndex {
 				continue
 			}
@@ -61,7 +62,8 @@ func (d *DaemonServer) handleGetTurnChanges(raw []byte) {
 		}
 	}
 	if live == nil && journal != nil && len(journal.Incoming) > 0 {
-		if files := filetrack.PreviewChanged(journal.Incoming, act.record.CWD); len(files) > 0 {
+		incoming := append([]filetrack.TrackedFile(nil), journal.Incoming...)
+		if files := filetrack.PreviewChanged(dropBrainTracked(incoming, brainDir), act.record.CWD); len(files) > 0 {
 			live = map[string]any{
 				"turnIndex": journal.TurnIndex,
 				"files":     files,

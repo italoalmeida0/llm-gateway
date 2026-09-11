@@ -1520,6 +1520,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		var req struct {
 			SessionID string `json:"sessionId"`
 			Index     int    `json:"index"`
+			Text      string `json:"text"`
 			Model     string `json:"model"`
 			YOLO      bool   `json:"yolo"`
 		}
@@ -1533,22 +1534,26 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		userIdx := -1
 		var userText string
 		upper := req.Index
-		if upper >= len(rec.Messages) {
+		if upper >= len(rec.Messages) || upper < 0 {
 			upper = len(rec.Messages) - 1
 		}
 		for i := upper; i >= 0; i-- {
 			if rec.Messages[i].Role == provider.RoleUser {
+				var parts []string
 				for _, c := range rec.Messages[i].Content {
 					if tb, ok := c.(provider.TextBlock); ok && strings.TrimSpace(tb.Text) != "" {
-						userText = tb.Text
-						break
+						parts = append(parts, tb.Text)
 					}
 				}
-				if userText != "" {
+				if len(parts) > 0 {
+					userText = strings.Join(parts, "\n")
 					userIdx = i
 					break
 				}
 			}
+		}
+		if userText == "" && strings.TrimSpace(req.Text) != "" {
+			userText = strings.TrimSpace(req.Text)
 		}
 		if userIdx < 0 || userText == "" {
 			return
@@ -2345,7 +2350,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	_ = d.saveSession(act.record)
 	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
-	tfc := beginTurnTracking(act, sessionCWD, turnSeq)
+	tfc := beginTurnTracking(act, sessionCWD, turnSeq, d.brainDir(sessionID))
 	d.writeTurnJournal(sessionID, &TurnJournal{TurnIndex: turnSeq, StartedAt: act.record.Turn.StartedAt, Model: modelToUse})
 
 	ctx, cancel := context.WithCancel(context.Background())

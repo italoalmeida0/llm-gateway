@@ -23,6 +23,9 @@ type ReadTool struct {
 	CWD     string
 	Sandbox *Sandbox
 	Changes ChangeTracker
+	// BrainDir is the absolute path of the per-session private workspace.
+	// Scratch-space reads are never tracked: they are not user-facing changes.
+	BrainDir string
 }
 
 type readArgs struct {
@@ -104,8 +107,9 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		return core.ToolResult{}, fmt.Errorf("%s looks binary; refusing to read as text", a.Path)
 	}
 	// Change tracking: first sighting of this path in the turn snapshots
-	// the full content (not the offset/limit window).
-	if t.Changes != nil {
+	// the full content (not the offset/limit window). Scratch-space reads
+	// are never tracked: they are not user-facing changes.
+	if t.Changes != nil && !IsBrainPath(t.BrainDir, path) {
 		t.Changes.NoteRead(path, string(data))
 	}
 

@@ -217,3 +217,51 @@ func TestEditMessageTrimsDiscardedBalloons(t *testing.T) {
 		t.Fatalf("want no balloons after full cut, got %+v", after.FileBalloons)
 	}
 }
+
+func TestBrainFilesNeverBecomeBalloons(t *testing.T) {
+	d := testDaemon(t)
+	dir := t.TempDir()
+	brain := filepath.Join(d.dataDir, "brain", "s-brain")
+	if err := os.MkdirAll(brain, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	brainFile := filepath.Join(brain, "notes.md")
+	if err := os.WriteFile(brainFile, []byte("scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	normalFile := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(normalFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	act := &ActiveSession{record: &SessionRecord{ID: "s-brain", CWD: dir}}
+	tfc := beginTurnTracking(act, dir, 1, brain)
+	// Simulate tools that tracked brain paths anyway (old journal shape).
+	tfc.tracker.NoteRead(brainFile, "scratch\n")
+	tfc.tracker.NoteWrite(normalFile, true, "package main\n")
+	if err := os.WriteFile(normalFile, []byte("package main\n\n// touched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	balloon := d.finishTurnTracking(act, tfc)
+	if balloon == nil || len(balloon.Files) != 1 || balloon.Files[0].Path != normalFile {
+		t.Fatalf("brain file leaked into balloon: %+v", balloon)
+	}
+	// Preview path filters too.
+	tfc2 := beginTurnTracking(act, dir, 2, brain)
+	tfc2.tracker.NoteRead(brainFile, "scratch\n")
+	if files := previewIncoming(tfc2); len(files) != 0 {
+		t.Fatalf("brain file leaked into live preview: %+v", files)
+	}
+	// Persisted balloons carrying brain files are stripped on read paths.
+	stripped := stripBrainBalloonFiles([]filetrack.TurnChanges{
+		{TurnIndex: 1, Files: []filetrack.ChangedFile{{Path: brainFile}, {Path: normalFile}}},
+		{TurnIndex: 2, Files: []filetrack.ChangedFile{{Path: brainFile}}},
+	}, brain)
+	if len(stripped) != 1 || len(stripped[0].Files) != 1 || stripped[0].Files[0].Path != normalFile {
+		t.Fatalf("stripBrainBalloonFiles wrong: %+v", stripped)
+	}
+	// Journal restore path filters too.
+	restored := dropBrainTracked([]filetrack.TrackedFile{{Path: brainFile}, {Path: normalFile}}, brain)
+	if len(restored) != 1 || restored[0].Path != normalFile {
+		t.Fatalf("dropBrainTracked wrong: %+v", restored)
+	}
+}

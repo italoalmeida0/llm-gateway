@@ -26,18 +26,7 @@ type WriteTool struct {
 
 // isBrainPath reports whether an absolute path lives in the scratch space.
 func (t *WriteTool) isBrainPath(abs string) bool {
-	if t.BrainDir == "" {
-		return false
-	}
-	target, err := canonicalOrParent(abs)
-	if err != nil {
-		return false
-	}
-	brain, err := canonicalOrParent(t.BrainDir)
-	if err != nil {
-		return false
-	}
-	return isUnder(brain, target)
+	return IsBrainPath(t.BrainDir, abs)
 }
 
 type writeArgs struct {

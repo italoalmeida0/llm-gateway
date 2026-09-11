@@ -189,3 +189,156 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 		t.Fatalf("edited text duplicated by resend: %d copies", n)
 	}
 }
+
+func TestRegeneratePicksLastUserMessageInMultiTurn(t *testing.T) {
+	d := testDaemon(t)
+	rec := &SessionRecord{
+		ID: "multi-turn", CWD: t.TempDir(), Title: "Multi", Model: "m", Status: "idle",
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "first question"}}},
+			{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: "first answer"}}},
+			{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "second question"}}},
+			{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: "second answer"}}},
+		},
+	}
+	d.sessions["multi-turn"] = &ActiveSession{record: rec, gen: 1}
+	if err := d.saveSession(rec); err != nil {
+		t.Fatal(err)
+	}
+
+	srcSeq := rec.TurnSeq
+	targetSeq := srcSeq + 1
+
+	// Regenerate pointing at the last user message (index 2)
+	command, _ := json.Marshal(map[string]any{
+		"type":      "regenerate",
+		"sessionId": "multi-turn",
+		"index":     2,
+		"text":      "second question",
+	})
+	d.handleMessage(command)
+
+	// Check that the re-run message appended by Prompt is "second question", NOT "first question"
+	stamped := func() (bool, string) {
+		s, _ := d.loadSession("multi-turn")
+		if s == nil {
+			return false, ""
+		}
+		for _, m := range s.Messages {
+			if m.Role == provider.RoleUser && m.TurnIndex == targetSeq {
+				for _, c := range m.Content {
+					if tb, ok := c.(provider.TextBlock); ok {
+						return true, tb.Text
+					}
+				}
+			}
+		}
+		return false, ""
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var reRunText string
+	for {
+		ok, txt := stamped()
+		if ok {
+			reRunText = txt
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("regenerate turn never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if reRunText != "second question" {
+		t.Fatalf("regenerate picked wrong user message: got %q, want %q", reRunText, "second question")
+	}
+
+	// Clean up background turns
+	d.sessionsMu.RLock()
+	for _, s := range d.sessions {
+		s.mu.Lock()
+		if s.cancel != nil {
+			s.cancel()
+		}
+		s.mu.Unlock()
+	}
+	d.sessionsMu.RUnlock()
+}
+
+func TestForkAndRegenerate(t *testing.T) {
+	d := testDaemon(t)
+	rec := &SessionRecord{
+		ID: "src-fork-regen", CWD: t.TempDir(), Title: "ForkRegen", Model: "m", Status: "idle",
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "q1"}}},
+			{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: "a1"}}},
+			{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "q2"}}},
+			{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: "a2"}}},
+		},
+	}
+	d.sessions["src-fork-regen"] = &ActiveSession{record: rec, gen: 1}
+	if err := d.saveSession(rec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fork & regenerate passes index of q2 (2) and editText with q2's text
+	command, _ := json.Marshal(map[string]any{
+		"type":      "fork_session",
+		"sessionId": "src-fork-regen",
+		"index":     2,
+		"editText":  "q2",
+	})
+	d.handleMessage(command)
+
+	var forkID string
+	for _, summary := range d.listSessions() {
+		if summary.ID != "src-fork-regen" {
+			forkID = summary.ID
+		}
+	}
+	if forkID == "" {
+		t.Fatal("no fork created")
+	}
+
+	// Prove Prompt ran on the fork with q2
+	stamped := func() (bool, string) {
+		fork, _ := d.loadSession(forkID)
+		if fork == nil {
+			return false, ""
+		}
+		for _, m := range fork.Messages {
+			if m.Role == provider.RoleUser {
+				for _, c := range m.Content {
+					if tb, ok := c.(provider.TextBlock); ok && tb.Text == "q2" {
+						return true, tb.Text
+					}
+				}
+			}
+		}
+		return false, ""
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ok, _ := stamped()
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fork & regenerate turn never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Clean up background turns
+	d.sessionsMu.RLock()
+	for _, s := range d.sessions {
+		s.mu.Lock()
+		if s.cancel != nil {
+			s.cancel()
+		}
+		s.mu.Unlock()
+	}
+	d.sessionsMu.RUnlock()
+}

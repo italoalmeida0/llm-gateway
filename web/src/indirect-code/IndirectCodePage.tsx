@@ -98,6 +98,8 @@ export default function IndirectCodePage() {
       options.resetPendingChoice();
       transcript.clearForkRequest();
       transcript.setForking(false);
+      forkKind = null;
+      pendingDiscardReloadSid = null;
       setCreatingSession(false);
       projects.setFolderLoading(false);
       mirror.dataLayer.disconnect();
@@ -147,6 +149,12 @@ export default function IndirectCodePage() {
       if (configured !== ctx.windowTokens) void loadGatewayModels();
     },
     isHideToolMessages: () => !verboseChat() || hideToolMessages(),
+    onDiscardResendOrRegenerate: (sid: string) => {
+      pendingDiscardReloadSid = sid;
+    },
+    onForkKind: (kind: "resend" | "regenerate" | "fork") => {
+      forkKind = kind;
+    },
   });
 
   const options = createSessionOptions({
@@ -294,6 +302,28 @@ export default function IndirectCodePage() {
   let filesBtn: HTMLButtonElement | undefined;
   let contextBtn: HTMLButtonElement | undefined;
 
+  let forkKind: "resend" | "regenerate" | "fork" | null = null;
+  let pendingDiscardReloadSid: string | null = null;
+
+  function reloadSessionFromDaemon(sid: string) {
+    if (!sid || sid !== activeSessionId()) return;
+    composer.clearAttachments();
+    const s = mirror.sessions().find((x) => x.id === sid);
+    if (s) {
+      transcript.setSessionStatus(s.status);
+      if (s.model) options.setActiveModel(s.model);
+      if (s.options) options.applyOptions(s.options);
+      if (typeof s.todosOpen === "boolean") transcript.applyTodosOpenFromRemote(s.todosOpen);
+      if (s.editingMsg && typeof s.editingMsg.index === "number") {
+        transcript.applyEditingMsgFromRemote(s.editingMsg.index, s.editingMsg.text || "");
+      } else {
+        transcript.applyEditingMsgFromRemote(null, "");
+      }
+    }
+    transcript.fetchSession(sid);
+    turnChanges.requestBalloons();
+  }
+
   // --- Fetch Gateway Models ---
   async function loadGatewayModels() {
     try {
@@ -416,7 +446,10 @@ export default function IndirectCodePage() {
     if (mirror.dataLayer.handleMessage(msg)) return;
     // The relay fans out every host; foreground events belong to the selected host only.
     if (msg.type !== "host_status" && msg.hostId && msg.hostId !== hosts.activeHostId()) return;
-    if (msg.type === "error" && msg.requestId === transcript.forkRequestId()) transcript.setForking(false);
+    if (msg.type === "error" && msg.requestId === transcript.forkRequestId()) {
+      transcript.setForking(false);
+      forkKind = null;
+    }
     switch (msg.type) {
       case "relay_connected":
         break;
@@ -440,10 +473,15 @@ export default function IndirectCodePage() {
         selectSession(msg.session.id);
         if (msg.resent) {
           transcript.setSessionStatus("running");
-          notice.toast("Fork created — resending with edited text", "ok");
+          if (forkKind === "regenerate") {
+            notice.toast("Fork created — regenerating response", "ok");
+          } else {
+            notice.toast("Fork created — resending with edited text", "ok");
+          }
         } else {
           notice.toast("Conversation fork created", "ok");
         }
+        forkKind = null;
         break;
       }
       case "session_created": {
@@ -553,6 +591,11 @@ export default function IndirectCodePage() {
       }
 
       case "session_status": {
+        if (pendingDiscardReloadSid && pendingDiscardReloadSid === msg.sessionId && msg.status === "running") {
+          const sid = pendingDiscardReloadSid;
+          pendingDiscardReloadSid = null;
+          reloadSessionFromDaemon(sid);
+        }
         transcript.handleStatusEvent(msg);
         break;
       }
@@ -605,6 +648,11 @@ export default function IndirectCodePage() {
 
       case "agent_event": {
         if (msg.sessionId !== activeSessionId()) break;
+        if (pendingDiscardReloadSid && pendingDiscardReloadSid === msg.sessionId && msg.event?.type === "turn_start") {
+          const sid = pendingDiscardReloadSid;
+          pendingDiscardReloadSid = null;
+          reloadSessionFromDaemon(sid);
+        }
         transcript.handleAgentEvent(msg.sessionId, msg.event);
         break;
       }

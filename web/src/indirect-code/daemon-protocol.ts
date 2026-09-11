@@ -36,7 +36,7 @@ export type DaemonCommand = CommandBase &
   | { type: "prompt"; sessionId: string; text: string; model: string; yolo: boolean; options: Omit<SessionChoice, "model">; attachmentIds: string[] }
   | { type: "cancel"; sessionId: string }
   | { type: "fork_session"; sessionId: string; index: number; requestId?: string; editText?: string; editModel?: string; editYolo?: boolean }
-  | { type: "regenerate"; sessionId: string; index: number; model: string; yolo: boolean }
+  | { type: "regenerate"; sessionId: string; index: number; text?: string; model: string; yolo: boolean }
   | { type: "edit_message"; sessionId: string; index: number; text: string; model: string; yolo: boolean; regenerate: boolean }
   | { type: "delete_message"; sessionId: string; index: number }
   | { type: "create_session"; requestId: string; cwd: string; title: string; model: string; options: Omit<SessionChoice, "model"> }

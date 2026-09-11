@@ -29,6 +29,8 @@ import {
 } from "./ctx";
 import { parseDaemonMessage, type DaemonMessage } from "./daemon-protocol";
 import { createNotice } from "./hooks/useNotice";
+import { createTurnNotify } from "./hooks/useTurnNotify";
+import { createPushSubscription } from "./hooks/usePushSubscription";
 import { createModals } from "./hooks/useModals";
 import { createRelay } from "./hooks/useRelay";
 import { createMirror } from "./hooks/useMirror";
@@ -241,6 +243,38 @@ export default function IndirectCodePage() {
     getConfigDoc: () => mirror.configDoc(),
   });
 
+  // Turn-end notifications (Camada A: tab open). Fed BEFORE the
+  // active-host filter below so turns on any host/session notify.
+  const turnNotify = createTurnNotify({
+    hosts: () => hosts.hosts(),
+    sessions: () => mirror.sessions(),
+    toast: notice.toast,
+    onOpenSession: (hostId, sessionId) => {
+      try { window.focus(); } catch {}
+      if (hostId !== hosts.activeHostId()) hosts.setActiveHostId(hostId);
+      selectSession(sessionId);
+      try {
+        if (location.hash !== "#/code") location.hash = "#/code";
+      } catch {}
+    },
+  });
+  const pushSub = createPushSubscription({
+    enabled: () => turnNotify.notifyOn(),
+    toast: notice.toast,
+  });
+
+  // Register the push Service Worker once (Camada B: all tabs closed).
+  // Registration is idempotent; failures degrade to Camada A only.
+  onMount(() => {
+    try {
+      if ("serviceWorker" in navigator && "PushManager" in window) {
+        void navigator.serviceWorker.register("/push-sw.js").catch((e) => {
+          console.warn("[push] service worker registration failed:", e);
+        });
+      }
+    } catch {}
+  });
+
   // --- Page's own state (orchestration + view) ---
   // Gateway Models (Fetched live from /api/me/models)
   const [gatewayModels, setGatewayModels] = createSignal<GatewayModel[]>([]);
@@ -444,6 +478,9 @@ export default function IndirectCodePage() {
     // SignalDB sync protocol messages (pull responses / change pings) are
     // owned by the data layer; everything else is event-driven below.
     if (mirror.dataLayer.handleMessage(msg)) return;
+    // Turn-end notifier sees every host/session (any-host coverage),
+    // before the foreground-only filter below.
+    turnNotify.noteMessage(msg);
     // The relay fans out every host; foreground events belong to the selected host only.
     if (msg.type !== "host_status" && msg.hostId && msg.hostId !== hosts.activeHostId()) return;
     if (msg.type === "error" && msg.requestId === transcript.forkRequestId()) {
@@ -1012,6 +1049,8 @@ export default function IndirectCodePage() {
   };
   const uiValue: UICtxValue = {
     ...notice,
+    turnNotify,
+    pushSub,
     sidebarOpen,
     setSidebarOpen,
     isMobile,

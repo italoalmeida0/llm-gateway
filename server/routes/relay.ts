@@ -2,6 +2,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { db, stmts, type RemoteHostRow } from "../db";
 import { GATEWAY_SECRET } from "../config";
 import { jwtVerify, sha256Hex } from "../crypto";
+import { sendTurnPush, type TurnPush } from "../push";
 
 export type WsData =
   | { type: "daemon"; hostId: string; userId: string }
@@ -141,6 +142,9 @@ export const remoteRelayWsHandlers = {
       // Message originating from Daemon -> forward to user's web client(s)
       const { userId } = ws.data;
       broadcastToUser(userId, rawStr);
+      // Turn finished while the user has no tab open: wake the browser
+      // via Web Push. Tabs open (Camada A) already notified — skip.
+      maybePushTurnEnd(userId, ws.data.hostId, parsed);
     } else if (ws.data.type === "client") {
       // Message originating from Web Client -> route to target daemon
       const hostId = parsed.hostId;
@@ -199,6 +203,67 @@ export const remoteRelayWsHandlers = {
     }
   },
 };
+
+/** Last-seen session titles from `session_data` (push needs a human name;
+ *  `session_status` carries only ids). Bounded best-effort cache. */
+const lastSessionTitle = new Map<string, string>();
+/** Last `turn_end` disposition per turn (error/cancelled vary the push text). */
+const lastDisposition = new Map<string, TurnPush["disposition"]>();
+
+function turnKey(hostId: string, sessionId: string): string {
+  return `${hostId}:${sessionId}`;
+}
+
+/**
+ * Turn-end fan-out for closed tabs. Fires only when the user has zero
+ * connected browser tabs (open tabs notify locally via Camada A) and the
+ * daemon reports the real turn end: `session_status: idle` from finishTurn().
+ * `turn_end` agent events are per-model-step, never a turn boundary.
+ * Fire-and-forget: never blocks the relay hot path.
+ */
+function maybePushTurnEnd(userId: string, hostId: string, parsed: any): void {
+  if (!parsed || typeof parsed !== "object") return;
+  const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : "";
+  if (!sessionId) return;
+  const key = turnKey(hostId, sessionId);
+  if (parsed.type === "session_data" && parsed.session && typeof parsed.session === "object") {
+    const title = parsed.session.title;
+    if (typeof title === "string" && title) {
+      lastSessionTitle.set(key, title);
+      if (lastSessionTitle.size > 2000) {
+        const first = lastSessionTitle.keys().next();
+        if (!first.done) lastSessionTitle.delete(first.value);
+      }
+    }
+    return;
+  }
+  if (parsed.type === "agent_event" && parsed.event && typeof parsed.event === "object") {
+    const ev = parsed.event;
+    if (ev.type === "turn_end") {
+      lastDisposition.set(
+        key,
+        ev.cancelled === true ? "cancelled" : typeof ev.error === "string" && ev.error ? "error" : "done",
+      );
+    }
+    return;
+  }
+  if (parsed.type !== "session_status" || parsed.status !== "idle") return;
+  const disposition = lastDisposition.get(key) ?? "done";
+  lastDisposition.delete(key);
+  const clients = clientsByUserId.get(userId);
+  if (clients && clients.size > 0) return;
+  const host = db
+    .prepare<{ name: string; hostname: string }, [string]>("SELECT name, hostname FROM remote_hosts WHERE id = ?")
+    .get(hostId);
+  const title = lastSessionTitle.get(key) ?? sessionId.slice(0, 12);
+  const push: TurnPush = {
+    title,
+    host: host?.name || host?.hostname || "host",
+    disposition,
+    url: "/#/code",
+  };
+  void sendTurnPush(userId, push).catch((e) => console.warn("[PUSH] fan-out failed:", e));
+}
 
 function broadcastToUser(userId: string, data: string | object): void {
   const set = clientsByUserId.get(userId);

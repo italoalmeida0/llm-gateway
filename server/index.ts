@@ -9,6 +9,7 @@ import { handleKeysRoute } from "./routes/keys";
 import { handleUsageRoute } from "./routes/usage";
 import { handleAdminRoute } from "./routes/admin";
 import { handleIndirectCodeRestRoute } from "./routes/indirect-code";
+import { handlePushRoute } from "./routes/push";
 import { handleIndirectCodeUpgrade, remoteRelayWsHandlers, type WsData } from "./routes/relay";
 import { handleProxy } from "./proxy/index";
 import { serveStatic } from "./static";
@@ -108,6 +109,8 @@ async function route(req: Request, server: any): Promise<Response | undefined> {
     }
     const viaIndirectCode = await handleIndirectCodeRestRoute(path, req, url);
     if (viaIndirectCode) return viaIndirectCode;
+    const viaPush = await handlePushRoute(path, req, url);
+    if (viaPush) return viaPush;
     const viaAuth = await handleAuthRoute(path, req, server);
     if (viaAuth) return viaAuth;
     const viaMe = await handleMeRoute(path, req);

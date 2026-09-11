@@ -80,7 +80,10 @@ const server = serve({
       }
     }
 
-    const resolved = resolveDevFile(url.pathname);
+    // Push Service Worker lives at web/push-sw.js but must be served from
+    // the site root (scope covers the whole dashboard), like build.ts does.
+    const swPath = url.pathname === "/push-sw.js" ? "/web/push-sw.js" : url.pathname;
+    const resolved = resolveDevFile(swPath);
     if (!resolved) return new Response("Not found", { status: 404 });
     try {
       const file = Bun.file(resolved);

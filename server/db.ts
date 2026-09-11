@@ -547,6 +547,25 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE providers ADD COLUMN strip_params TEXT NOT NULL DEFAULT '[]';
     `,
   },
+  {
+    name: "019_push_subscriptions",
+    // Web Push subscriptions for turn-end notifications with no tab open.
+    // One row per (user, browser endpoint): the endpoint URL is globally
+    // unique, so it is the natural dedup key. p256dh/auth are the
+    // RFC 8291 client keys (public, safe to store). Dead endpoints (410/404
+    // from the push service) are deleted on the send path.
+    up: `
+      CREATE TABLE push_subscriptions (
+        endpoint   TEXT PRIMARY KEY,
+        user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        p256dh     TEXT NOT NULL,
+        auth       TEXT NOT NULL,
+        label      TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_push_subs_user ON push_subscriptions(user_id);
+    `,
+  },
 ];
 
 export function migrate(): void {

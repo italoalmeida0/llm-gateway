@@ -38,6 +38,14 @@ async function build() {
     cpSync(path.join(ROOT, "web", "public"), distDir, { recursive: true });
   }
 
+  // Web Push Service Worker (vanilla, outside the bundle): must be served
+  // from the site root so its scope covers the whole dashboard.
+  const swSrc = path.join(ROOT, "web", "push-sw.js");
+  if (existsSync(swSrc)) {
+    cpSync(swSrc, path.join(distDir, "push-sw.js"));
+    console.log("[build] push-sw.js -> dist/ (turn-end push for closed tabs)");
+  }
+
   // pandoc.wasm (58MB office-to-markdown engine): copied from the reference
   // checkout when present; office conversion degrades gracefully without it.
   const pandocSrc = path.join(ROOT, "remote-code-ref", "chatbot", "pandoc.wasm");

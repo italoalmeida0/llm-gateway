@@ -2,6 +2,29 @@ import { For, Show } from "solid-js";
 import { ThemeToggle } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { useModal, useUI } from "../ctx";
+import { pushSupported } from "../hooks/usePushSubscription";
+
+function Toggle(props: {
+  on: () => boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={props.onToggle}
+      class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${props.on() ? "bg-accent-500" : "bg-ink-700"}`}
+      style={{ height: "22px" }}
+      role="switch"
+      aria-checked={props.on()}
+      aria-label={props.label}
+    >
+      <span
+        class={`block w-4 h-4 rounded-full bg-accent-fg transition-transform ${props.on() ? "translate-x-[18px]" : "translate-x-0"}`}
+        style={{ height: "16px", width: "16px" }}
+      />
+    </button>
+  );
+}
 
 export function SettingsGeneralSection() {
   const m = useModal();
@@ -100,6 +123,68 @@ export function SettingsGeneralSection() {
           )}
         </For>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
+  <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+    <Iconify icon="lucide:bell" size={15} class="text-ink-500" />
+    <span>Turn notifications</span>
+  </h3>
+  <div class="space-y-3 text-xs">
+    <div class="py-2 flex items-center justify-between gap-4">
+      <div>
+        <div class="font-semibold text-ink-200">Notify when a turn finishes</div>
+        <div class="text-[11px] text-ink-500 mt-0.5">
+          Browser notification for turns on any host or conversation — even ones you are not watching.
+          <Show when={pushSupported()}>
+            <span> With this on and permission granted, closed tabs still notify via push.</span>
+          </Show>
+        </div>
+      </div>
+      <Toggle
+        on={() => ui.turnNotify.notifyOn()}
+        label="Notify when a turn finishes"
+        onToggle={() => {
+          const v = !ui.turnNotify.notifyOn();
+          ui.turnNotify.setEnabled(v);
+          void ui.pushSub.sync();
+        }}
+      />
+    </div>
+    <Show when={ui.turnNotify.notifyOn()}>
+      <div class="py-2 pl-4 border-l-2 border-line/60 flex items-center justify-between gap-4">
+        <div>
+          <div class="font-semibold text-ink-200">Play a sound</div>
+          <div class="text-[11px] text-ink-500 mt-0.5">
+            Short chime with the notification (only while a tab is open).
+          </div>
+        </div>
+        <Toggle
+          on={() => ui.turnNotify.soundOn()}
+          label="Play a sound"
+          onToggle={() => ui.turnNotify.setSound(!ui.turnNotify.soundOn())}
+        />
+      </div>
+    </Show>
+    <Show when={ui.turnNotify.notifyOn() && ui.turnNotify.permission() === "denied"}>
+      <p class="text-[11px] text-rose-500">
+        Browser notifications are blocked for this site — allow them in the browser site settings, then use Test below.
+      </p>
+    </Show>
+    <div class="flex items-center gap-2">
+      <button
+        onClick={() => ui.turnNotify.testNotify()}
+        class="px-3 py-1.5 rounded-lg border border-line text-ink-200 hover:bg-ink-800 transition-colors cursor-pointer"
+      >
+        Test notification
+      </button>
+      <Show when={ui.pushSub.supported()}>
+        <span class="text-[11px] text-ink-500">
+          {ui.pushSub.subscribed() ? "Push active on this device." : "Push not active on this device yet."}
+        </span>
+      </Show>
     </div>
   </div>
 </div>

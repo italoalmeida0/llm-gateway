@@ -13,6 +13,8 @@ import type { Modals } from "./hooks/useModals";
 import type { ReviewDomain } from "./hooks/useReview";
 import type { Settings } from "./hooks/useSettings";
 import type { Notice } from "./hooks/useNotice";
+import type { TurnNotify } from "./hooks/useTurnNotify";
+import type { PushSubscription } from "./hooks/usePushSubscription";
 import { contextDisplay, type GatewayModel } from "./context";
 
 /** Solid contexts for Remote Code — replace the god-object
@@ -77,6 +79,8 @@ export interface ComposerCtxValue extends Composer {
 export interface ModalCtxValue extends Modals, ReviewDomain, Settings {}
 
 export interface UICtxValue extends Notice {
+  turnNotify: TurnNotify;
+  pushSub: PushSubscription;
   sidebarOpen: () => boolean;
   setSidebarOpen: (v: boolean | ((p: boolean) => boolean)) => void;
   isMobile: () => boolean;

@@ -897,3 +897,76 @@ describe("completion signals and turn nudges", () => {
   });
 });
 
+
+describe("Turn-end browser notification (useTurnNotify)", () => {
+  test("turnNotifyText varies title by disposition", async () => {
+    const { turnNotifyText } = await import("../web/src/indirect-code/hooks/useTurnNotify");
+    expect(turnNotifyText({ title: "Fix bug", hostName: "Mac", disposition: "done" })).toEqual({
+      title: "Turn finished — Fix bug",
+      body: "Mac · tap to open",
+    });
+    expect(turnNotifyText({ title: "Fix bug", hostName: "Mac", disposition: "error" }).title).toBe(
+      "Turn failed — Fix bug",
+    );
+    expect(turnNotifyText({ title: "Fix bug", hostName: "Mac", disposition: "cancelled" }).title).toBe(
+      "Turn cancelled — Fix bug",
+    );
+  });
+
+  test("noteMessage notifies only on running->idle, any host, enriched by turn_end", async () => {
+    const { createTurnNotify } = await import("../web/src/indirect-code/hooks/useTurnNotify");
+    // Notification API stub: capture shows instead of OS popups.
+    const shown: { title: string; body: string }[] = [];
+    (globalThis as any).Notification = class {
+      static permission = "granted";
+      onclick: (() => void) | null = null;
+      constructor(title: string, opts?: { body?: string }) {
+        shown.push({ title, body: opts?.body ?? "" });
+      }
+      close() {}
+    };
+    const opened: { hostId: string; sessionId: string }[] = [];
+    const n = createTurnNotify({
+      hosts: () => [{ id: "h1", name: "Mac", hostname: "mac", os: "darwin", arch: "arm64", userId: "u", apiKeyId: null, status: "online", lastSeenAt: null, createdAt: 0 }],
+      sessions: () => [{ id: "s1", title: "Fix bug" } as any],
+      toast: () => {},
+      onOpenSession: (hostId, sessionId) => opened.push({ hostId, sessionId }),
+    });
+
+    const run = (hostId: string, sessionId: string) => ({ type: "session_status", hostId, sessionId, status: "running" }) as any;
+    const idle = (hostId: string, sessionId: string) => ({ type: "session_status", hostId, sessionId, status: "idle" }) as any;
+
+    // Stray idle with no running turn: silent (reconnect replay safety).
+    expect(n.noteMessage(idle("h1", "s1"))).toBe(false);
+    expect(shown.length).toBe(0);
+
+    // running -> turn_end(error) -> idle: notifies as failed.
+    expect(n.noteMessage(run("h1", "s1"))).toBe(true);
+    expect(n.noteMessage({ type: "agent_event", hostId: "h1", sessionId: "s1", event: { type: "turn_end", error: "boom" } } as any)).toBe(true);
+    expect(shown.length).toBe(0); // turn_end alone never notifies (per-step)
+    expect(n.noteMessage(idle("h1", "s1"))).toBe(true);
+    expect(shown.length).toBe(1);
+    expect(shown[0]!.title).toBe("Turn failed — Fix bug");
+
+    // Second idle without running: silent (no double notify).
+    expect(n.noteMessage(idle("h1", "s1"))).toBe(false);
+    expect(shown.length).toBe(1);
+
+    // turn_start also arms (daemon live path), cancelled disposition varies text.
+    expect(n.noteMessage({ type: "agent_event", hostId: "h9", sessionId: "s9", event: { type: "turn_start" } } as any)).toBe(true);
+    expect(n.noteMessage({ type: "agent_event", hostId: "h9", sessionId: "s9", event: { type: "turn_end", cancelled: true } } as any)).toBe(true);
+    expect(n.noteMessage(idle("h9", "s9"))).toBe(true);
+    expect(shown.length).toBe(2);
+    expect(shown[1]!.title).toContain("Turn cancelled");
+
+    delete (globalThis as any).Notification;
+  });
+
+  test("buildTurnPayload is display-only (no secrets on lock screens)", async () => {
+    const { buildTurnPayload } = await import("../server/push");
+    const p = JSON.parse(buildTurnPayload({ title: "Fix bug", host: "Mac", disposition: "done", url: "/#/code" }));
+    expect(p.title).toBe("Turn finished — Fix bug");
+    expect(p.body).toBe("Mac · tap to open");
+    expect(JSON.stringify(p)).not.toMatch(/gw_|dmt_|sk-|Bearer/i);
+  });
+});

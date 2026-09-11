@@ -84,9 +84,12 @@ export function serveStatic(req: Request, urlPath: string): Response | null {
   const headers = baseHeaders(req, resolved.isHtml);
   headers.set("Content-Type", MIME[path.extname(resolved.filePath).toLowerCase()] ?? "application/octet-stream");
   // Hashed build artifacts can be cached forever; HTML always revalidates.
+  // The push Service Worker must never stick in cache: a stale SW keeps
+  // rendering old notification shapes after deploys.
+  const isPushSw = path.basename(resolved.filePath) === "push-sw.js";
   headers.set(
     "Cache-Control",
-    resolved.isHtml ? "no-cache" : IMMUTABLE_EXT.has(path.extname(resolved.filePath)) ? "public, max-age=31536000, immutable" : "public, max-age=300",
+    resolved.isHtml || isPushSw ? "no-cache" : IMMUTABLE_EXT.has(path.extname(resolved.filePath)) ? "public, max-age=31536000, immutable" : "public, max-age=300",
   );
 
   return new Response(file, { status: 200, headers });

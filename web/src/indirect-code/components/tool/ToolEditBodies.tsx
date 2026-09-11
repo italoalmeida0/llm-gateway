@@ -110,7 +110,7 @@ function FileEditCard(props: { sec: FileEditSection; scrollKey?: string }) {
             </span>
           </Show>
           <Show when={props.sec.status === "dry_run"}>
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-800 dark:text-amber-200 font-mono">
               preview
             </span>
           </Show>

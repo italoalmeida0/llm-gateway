@@ -20,7 +20,7 @@ function statusMeta(status: TurnChangedFile["status"]) {
     case "new":
       return { icon: "lucide:file-plus-2", label: "new", cls: "text-emerald-400" };
     case "modified":
-      return { icon: "lucide:file-diff", label: "modified", cls: "text-amber-300" };
+      return { icon: "lucide:file-diff", label: "modified", cls: "text-amber-800 dark:text-amber-200" };
     case "deleted":
       return { icon: "lucide:file-minus-2", label: "deleted", cls: "text-red-400" };
     case "binary":
@@ -95,7 +95,7 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
   return (
     <Show when={files().length > 0}>
       <div class="w-full flex justify-center my-3 select-text">
-        <div class="w-full max-w-2xl rounded-xl border border-line/70 bg-card p-3 shadow-xs transition-all">
+        <div class="w-full max-w-2xl rounded-xl border border-line/70 bg-card p-1 shadow-xs transition-all">
         <div class="flex items-center justify-between gap-2 flex-wrap">
           <button
             type="button"
@@ -136,7 +136,7 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
               class="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg border border-line/70 text-ink-300 hover:text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer"
             >
               <Iconify icon="lucide:refresh-cw" size={13} />
-              Review changes
+              Refresh
             </button>
           </Show>
           <Show when={!props.live}>

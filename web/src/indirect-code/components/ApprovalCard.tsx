@@ -137,7 +137,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
                   props.setYoloMode(true);
                   props.respondApproval(true, true);
                 }}
-                class="px-3.5 py-1.5 rounded-xl bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 text-xs font-semibold transition-colors cursor-pointer"
+                class="px-3.5 py-1.5 rounded-xl bg-amber-500/15 text-amber-800 dark:text-amber-200 hover:bg-amber-500/25 border border-amber-500/30 text-xs font-semibold transition-colors cursor-pointer"
                 data-rc-tip="Enable Full access and allow all tool calls" aria-label="Always allow — enable Full access"
               >
                 Always allow

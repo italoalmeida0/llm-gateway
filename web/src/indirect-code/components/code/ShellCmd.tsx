@@ -27,7 +27,7 @@ export function ShellCmd(props: { text: string; max?: number }) {
       const [full, comment, str, vr, op, _pre, flag, num] = m;
       if (comment) out.push({ t: full, c: "text-ink-600 italic" });
       else if (str) out.push({ t: full, c: "text-emerald-300" });
-      else if (vr) out.push({ t: full, c: "text-amber-300" });
+      else if (vr) out.push({ t: full, c: "text-amber-800 dark:text-amber-200" });
       else if (op) out.push({ t: full, c: "text-rose-300" });
       else if (flag) out.push({ t: full, c: "text-sky-300" });
       else if (num) out.push({ t: full, c: "text-violet-300" });

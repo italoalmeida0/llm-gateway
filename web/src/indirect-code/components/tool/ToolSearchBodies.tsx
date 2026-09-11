@@ -11,7 +11,7 @@ function flagBadge(flag: string) {
   if (!flag || flag === "•") return null;
   const color =
     flag === "M"
-      ? "bg-amber-500/15 text-amber-300"
+      ? "bg-amber-500/15 text-amber-800 dark:text-amber-200"
       : flag === "A"
         ? "bg-emerald-500/15 text-emerald-300"
         : flag === "D" || flag === "R"

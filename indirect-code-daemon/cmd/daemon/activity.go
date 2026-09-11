@@ -44,9 +44,8 @@ func (d *DaemonServer) toolApprovalHook(ctx context.Context, act *ActiveSession,
 			act.mu.Unlock()
 			return false, reason, nil
 		}
-		// The questionnaire is itself an explicit user interaction. Avoid an
-		// extra permission prompt before asking the actual questions.
-		if act.record.Options.Access == "full" || call.Name == "question" {
+		// The questionnaire and signal tools do not need manual user approval.
+		if act.record.Options.Access == "full" || call.Name == "question" || call.Name == "todo" || call.Name == "mark_task_as_complete" || call.Name == "mark_plan_as_ready_to_execute" {
 			act.mu.Unlock()
 			return true, "", nil
 		}
@@ -106,8 +105,14 @@ func finishTurnActivity(act *ActiveSession, cancelled bool) {
 }
 
 func modeToolRestriction(mode, tool string) string {
-	if (mode == "plan" || mode == "learning") && (tool == "write" || tool == "edit") {
+	if (mode == "plan" || mode == "learning") && (tool == "write" || tool == "edit" || tool == "mark_task_as_complete") {
 		return "The session is now in " + mode + " mode. Edit and create tools are disabled."
+	}
+	if mode != "plan" && tool == "mark_plan_as_ready_to_execute" {
+		return "mark_plan_as_ready_to_execute is only available in plan mode."
+	}
+	if mode != "build" && tool == "mark_task_as_complete" {
+		return "mark_task_as_complete is only available in build mode."
 	}
 	return ""
 }

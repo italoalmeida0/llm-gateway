@@ -215,7 +215,7 @@ export function renderMessageContent(ctx: TranscriptRenderCtx, msg: ChatMessage,
               {(block) => {
                 if (block.type === "text" && block.text) {
                   const hasTools = msg.blocks.some((b) => b.type === "tool_call" || b.type === "tool_result");
-                  if (ctx.hideToolMessages() && hasTools) return null;
+                  if (ctx.hideToolMessages() && hasTools && !msg.hasCompletion) return null;
                   return (
                     <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
                       <Streamdown>{block.text}</Streamdown>
@@ -268,7 +268,7 @@ export function renderSeriesLead(ctx: TranscriptRenderCtx, series: RenderBlockSe
         </div>
       </Show>
     </Show>
-    <For each={all()}>{(message) => <For each={message.blocks.filter((b) => b.type === "image" || (!(ctx.hideToolMessages() && series.units.length > 0) && b.type === "text" && !!b.text?.trim()))}>{(block) => block.type === "image" ? renderImageBlock(ctx, block) : <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto"><Streamdown>{block.text}</Streamdown></div>}</For>}</For>
+    <For each={all()}>{(message) => <For each={message.blocks.filter((b) => b.type === "image" || ((!(ctx.hideToolMessages() && series.units.length > 0) || message.hasCompletion) && b.type === "text" && !!b.text?.trim()))}>{(block) => block.type === "image" ? renderImageBlock(ctx, block) : <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto"><Streamdown>{block.text}</Streamdown></div>}</For>}</For>
   </div>;
 }
 /**

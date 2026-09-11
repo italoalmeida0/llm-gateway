@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"llm-gateway/indirect-code-daemon/packages/core"
 )
 
 func TestSessionSystemPromptIncludesCurrentDateTime(t *testing.T) {
@@ -136,3 +138,60 @@ func TestSessionSystemPromptIncludesOSAndShell(t *testing.T) {
 		t.Fatalf("system prompt missing %q:\n%s", want, prompt)
 	}
 }
+
+func TestCompletionToolsModeRestrictions(t *testing.T) {
+	buildReg := core.Registry{
+		"write":                        nil,
+		"edit":                         nil,
+		"bash":                         nil,
+		"mark_task_as_complete":        nil,
+		"mark_plan_as_ready_to_execute": nil,
+	}
+	restrictModeTools(buildReg, "build")
+	if _, ok := buildReg["mark_task_as_complete"]; !ok {
+		t.Fatal("expected mark_task_as_complete in build mode")
+	}
+	if _, ok := buildReg["mark_plan_as_ready_to_execute"]; ok {
+		t.Fatal("did not expect mark_plan_as_ready_to_execute in build mode")
+	}
+
+	planReg := core.Registry{
+		"read":                         nil,
+		"write":                        nil,
+		"edit":                         nil,
+		"mark_task_as_complete":        nil,
+		"mark_plan_as_ready_to_execute": nil,
+	}
+	restrictModeTools(planReg, "plan")
+	if _, ok := planReg["mark_plan_as_ready_to_execute"]; !ok {
+		t.Fatal("expected mark_plan_as_ready_to_execute in plan mode")
+	}
+	if _, ok := planReg["mark_task_as_complete"]; ok {
+		t.Fatal("did not expect mark_task_as_complete in plan mode")
+	}
+	if _, ok := planReg["write"]; ok {
+		t.Fatal("did not expect write in plan mode")
+	}
+
+	talkReg := core.Registry{
+		"read":                         nil,
+		"mark_task_as_complete":        nil,
+		"mark_plan_as_ready_to_execute": nil,
+	}
+	restrictModeTools(talkReg, "talk")
+	if _, ok := talkReg["mark_task_as_complete"]; ok || talkReg["mark_plan_as_ready_to_execute"] != nil {
+		t.Fatal("expected completion tools removed in talk mode")
+	}
+}
+
+func TestBrainInstructionsDirectAccessRule(t *testing.T) {
+	brain := filepath.Join(t.TempDir(), "brain", "sess_1")
+	text := brainInstructions("build", brain)
+	if !strings.Contains(text, "ALWAYS ACCESS DIRECTLY") {
+		t.Fatalf("expected brain instructions to tell AI to access directly with file tools:\n%s", text)
+	}
+	if !strings.Contains(text, "NEVER use shell or terminal commands") {
+		t.Fatalf("expected brain instructions to forbid shell commands for session memory:\n%s", text)
+	}
+}
+

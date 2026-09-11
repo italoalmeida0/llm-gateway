@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { compactTokens, contextDisplay, groupModelsByProvider } from "../web/src/indirect-code/context";
 import { createTranscriptScroll } from "../web/src/indirect-code/scroll";
-import { displayToolArgs, withoutTodoActivity } from "../web/src/indirect-code/live";
+import {
+  displayToolArgs,
+  withoutTodoActivity,
+  withoutContinueNudges,
+  CONTINUE_NUDGE_TEXT,
+  COMPLETION_NUDGE_BUILD,
+  COMPLETION_NUDGE_PLAN,
+} from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
   buildRenderBlocks, isTurnStartMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
@@ -815,3 +822,78 @@ describe("balloon tail cuts", () => {
     expect(tc.balloons().map((b) => b.turnIndex)).toEqual([3]);
   });
 });
+
+describe("completion signals and turn nudges", () => {
+  test("withoutContinueNudges filters all synthetic nudges", () => {
+    const msgs: ChatMessage[] = [
+      { id: "u1", role: "user", blocks: [{ type: "text", text: "Regular message" }] },
+      { id: "u2", role: "user", blocks: [{ type: "text", text: CONTINUE_NUDGE_TEXT }] },
+      { id: "u3", role: "user", blocks: [{ type: "text", text: COMPLETION_NUDGE_BUILD }] },
+      { id: "u4", role: "user", blocks: [{ type: "text", text: COMPLETION_NUDGE_PLAN }] },
+      { id: "a1", role: "assistant", blocks: [{ type: "text", text: "Done" }] },
+    ];
+    const filtered = withoutContinueNudges(msgs);
+    expect(filtered.map((m) => m.id)).toEqual(["u1", "a1"]);
+  });
+
+  test("withoutTodoActivity hides completion tool calls and marks hasCompletion while keeping text", () => {
+    const msgs: ChatMessage[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        blocks: [
+          { type: "text", text: "I have finished all tasks." },
+          { type: "tool_call", toolId: "call_done", toolName: "mark_task_as_complete", toolArgs: "{}" },
+        ],
+      },
+      {
+        id: "t1",
+        role: "tool",
+        blocks: [
+          { type: "tool_result", toolId: "call_done", toolResult: "Task marked as complete." },
+        ],
+      },
+    ];
+
+    const result = withoutTodoActivity(msgs);
+    // Tool result message t1 should be dropped completely
+    expect(result.length).toBe(1);
+    expect(result[0].id).toBe("a1");
+    // tool_call block is stripped, text block is retained
+    expect(result[0].blocks).toEqual([{ type: "text", text: "I have finished all tasks." }]);
+    expect(result[0].hasCompletion).toBe(true);
+  });
+
+  test("buildRenderBlocks displays text sent with completion tool even when hideToolMessages is true", () => {
+    const user: ChatMessage = { id: "u1", role: "user", blocks: [{ type: "text", text: "Fix bug" }] };
+    const step1: ChatMessage = {
+      id: "a1",
+      role: "assistant",
+      blocks: [{ type: "tool_call", toolId: "call_write", toolName: "write", toolArgs: "{}" }],
+    };
+    const res1: ChatMessage = {
+      id: "t1",
+      role: "tool",
+      blocks: [{ type: "tool_result", toolId: "call_write", toolResult: "written" }],
+    };
+    const step2: ChatMessage = {
+      id: "a2",
+      role: "assistant",
+      blocks: [
+        { type: "text", text: "Everything fixed and verified." },
+        { type: "tool_call", toolId: "call_done", toolName: "mark_task_as_complete", toolArgs: "{}" },
+      ],
+    };
+
+    const cleaned = withoutTodoActivity([user, step1, res1, step2]);
+    const blocks = buildRenderBlocks(cleaned, { hideToolMessages: true });
+
+    // The tool series contains a1 (the write call)
+    // a2 (with text and mark_task_as_complete) must be rendered as a single block with visible text, NOT hidden!
+    const a2Block = blocks.find((b) => b.msg.id === "a2");
+    expect(a2Block).toBeDefined();
+    expect(a2Block?.kind).toBe("single");
+    expect(a2Block?.msg.blocks[0]?.text).toBe("Everything fixed and verified.");
+  });
+});
+

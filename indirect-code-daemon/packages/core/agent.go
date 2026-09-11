@@ -21,18 +21,28 @@ import (
 // CONTINUE_NUDGE_TEXT constant in sync.
 const ContinueNudgeText = "[You should continue what you are doing.]"
 
+// CompletionNudgeTextBuild and CompletionNudgeTextPlan prompt the model
+// when it returns visible text without calling a completion tool in build/plan modes.
+const (
+	CompletionNudgeTextBuild = "[If you have completed the task, call mark_task_as_complete. Otherwise, continue your work.]"
+	CompletionNudgeTextPlan  = "[If your plan is ready, call mark_plan_as_ready_to_execute. Otherwise, continue your work.]"
+)
+
 // maxContinueNudges caps consecutive empty-response nudges per turn so a
 // model stuck returning nothing cannot burn requests forever; the turn
 // then ends normally.
 const maxContinueNudges = 3
 
+// maxCompletionNudges caps consecutive completion-prompt nudges per turn.
+const maxCompletionNudges = 3
+
 // SanitizeUserText keeps a user-authored message distinguishable from the
 // synthetic continue nudge: when the trimmed text equals ContinueNudgeText
-// the surrounding brackets are stripped, so the frontend's nudge filter
-// (exact match on the bracketed form) never hides a real user message.
+// or a completion nudge, the surrounding brackets are stripped, so the
+// frontend's nudge filter (exact match on the bracketed form) never hides a real user message.
 func SanitizeUserText(s string) string {
 	t := strings.TrimSpace(s)
-	if t == ContinueNudgeText {
+	if t == ContinueNudgeText || t == CompletionNudgeTextBuild || t == CompletionNudgeTextPlan {
 		return t[1 : len(t)-1]
 	}
 	return s
@@ -377,6 +387,8 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 	// retry forever on the backoff schedule — only AI conclusion or
 	// user cancel (context cancellation) ends a turn.
 	nudges := 0
+	completionNudges := 0
+	completedInTurn := false
 	for step := 1; ; step++ {
 		// Preparation is cached across steps and user messages. Only an
 		// explicit prompt/model/session change invokes BeforeStart again.
@@ -448,6 +460,14 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			// Real progress: the model asked for more work, so the
 			// empty-response nudge budget renews from here.
 			nudges = 0
+			completionNudges = 0
+			for _, c := range assistantMsg.Content {
+				if tc, ok := c.(provider.ToolCallBlock); ok {
+					if tc.Name == "mark_task_as_complete" || tc.Name == "mark_plan_as_ready_to_execute" {
+						completedInTurn = true
+					}
+				}
+			}
 			// Execute each client tool call, append a single tool-results message, continue.
 			toolMsg, hadError := a.executeTools(ctx, assistantMsg, sink)
 			if len(toolMsg.Content) == 0 {
@@ -472,14 +492,20 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			continue
 		}
 
-		// Terminal stop (end, length, error, aborted). An empty terminal
-		// response — no tool calls and no visible text after trim,
+		// Terminal stop (end, length, error, aborted).
+		if ctx.Err() != nil || stop == provider.StopAborted {
+			sink(EvDone{})
+			return nil
+		}
+
+		trimmedText := strings.TrimSpace(extractText(assistantMsg))
+
+		// An empty terminal response — no tool calls and no visible text after trim,
 		// typically a thinking-only early stop — does NOT end the turn:
 		// append a hidden user nudge and ask the model again, so the
 		// turn only completes on real output. Capped per turn; cancelled
 		// and aborted turns still end immediately.
-		if ctx.Err() == nil && stop != provider.StopAborted &&
-			strings.TrimSpace(extractText(assistantMsg)) == "" && nudges < maxContinueNudges {
+		if trimmedText == "" && !completedInTurn && nudges < maxContinueNudges {
 			nudges++
 			nudge := provider.Message{
 				Role:    provider.RoleUser,
@@ -495,6 +521,39 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			sink(EvUserMessage{Message: nudge})
 			continue
 		}
+
+		// When the model returns visible text without calling any tools:
+		// check if a completion tool is configured in the registry and has not yet been called in this turn.
+		// If so, prompt the model to either mark completion or continue working.
+		if trimmedText != "" && !completedInTurn && completionNudges < maxCompletionNudges {
+			completionNudgeText := ""
+			a.mu.Lock()
+			tools := a.Tools
+			a.mu.Unlock()
+			if _, err := tools.Get("mark_task_as_complete"); err == nil {
+				completionNudgeText = CompletionNudgeTextBuild
+			} else if _, err := tools.Get("mark_plan_as_ready_to_execute"); err == nil {
+				completionNudgeText = CompletionNudgeTextPlan
+			}
+
+			if completionNudgeText != "" {
+				completionNudges++
+				nudge := provider.Message{
+					Role:    provider.RoleUser,
+					Content: []provider.Content{provider.TextBlock{Text: completionNudgeText}},
+					Time:    time.Now(),
+				}
+				a.stampTurn(&nudge)
+				a.mu.Lock()
+				a.messages = append(a.messages, nudge)
+				a.rev++
+				a.mu.Unlock()
+				a.fireMessageAppended(nudge)
+				sink(EvUserMessage{Message: nudge})
+				continue
+			}
+		}
+
 		sink(EvDone{})
 		return nil
 	}

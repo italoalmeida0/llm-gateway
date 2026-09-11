@@ -30,9 +30,20 @@ export function displayToolArgs(raw?: string): Record<string, any> {
   return values;
 }
 /** Synthetic daemon nudge re-prompting the model after an empty terminal
- * response. Transcript-real (it is sent to the provider) but never shown
- * as a user bubble. Must match core.ContinueNudgeText in the daemon. */
+ * response or when prompting for completion. Transcript-real (sent to the provider)
+ * but never shown as a user bubble. Must match core constants in the daemon. */
 export const CONTINUE_NUDGE_TEXT = "[You should continue what you are doing.]";
+export const COMPLETION_NUDGE_BUILD = "[If you have completed the task, call mark_task_as_complete. Otherwise, continue your work.]";
+export const COMPLETION_NUDGE_PLAN = "[If your plan is ready, call mark_plan_as_ready_to_execute. Otherwise, continue your work.]";
+
+export const SIGNAL_TOOL_NAMES = new Set(["todo", "mark_task_as_complete", "mark_plan_as_ready_to_execute"]);
+export const COMPLETION_TOOL_NAMES = new Set(["mark_task_as_complete", "mark_plan_as_ready_to_execute"]);
+
+export function isSyntheticNudge(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed === CONTINUE_NUDGE_TEXT || trimmed === COMPLETION_NUDGE_BUILD || trimmed === COMPLETION_NUDGE_PLAN;
+}
+
 export function withoutContinueNudges(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((m) => {
     if (m.role !== "user") return true;
@@ -40,16 +51,31 @@ export function withoutContinueNudges(messages: ChatMessage[]): ChatMessage[] {
       .filter((b) => b.type === "text")
       .map((b) => b.text ?? "")
       .join("");
-    return text.trim() !== CONTINUE_NUDGE_TEXT;
+    return !isSyntheticNudge(text);
   });
 }
-/** Keep canonical messages untouched; the checklist has its own live panel. */
+/** Keep canonical messages untouched; signal tools (todo checklist, mark_task_as_complete, mark_plan_as_ready_to_execute) are hidden like TODO activity. */
 export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
-  const ids = new Set(messages.flatMap((m) => m.blocks.filter((b) => b.type === "tool_call" && b.toolName === "todo").map((b) => b.toolId)));
+  const ids = new Set(
+    messages.flatMap((m) =>
+      m.blocks
+        .filter((b) => b.type === "tool_call" && b.toolName && SIGNAL_TOOL_NAMES.has(b.toolName))
+        .map((b) => b.toolId)
+    )
+  );
   return messages.flatMap((message) => {
-    const blocks = message.blocks.filter((b) => !((b.type === "tool_call" || b.type === "tool_result") && (b.toolName === "todo" || (b.toolId && ids.has(b.toolId)))));
+    const hadCompletion = message.blocks.some(
+      (b) => b.type === "tool_call" && b.toolName && COMPLETION_TOOL_NAMES.has(b.toolName)
+    );
+    const blocks = message.blocks.filter(
+      (b) =>
+        !(
+          (b.type === "tool_call" || b.type === "tool_result") &&
+          ((b.toolName && SIGNAL_TOOL_NAMES.has(b.toolName)) || (b.toolId && ids.has(b.toolId)))
+        )
+    );
     if (blocks.length === message.blocks.length) return [message];
     if (blocks.every((b) => b.type === "text" && !b.text?.trim())) return [];
-    return [{...message, blocks}];
+    return [{ ...message, blocks, hasCompletion: hadCompletion || message.hasCompletion }];
   });
 }

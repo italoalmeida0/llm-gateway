@@ -214,9 +214,17 @@ func (r *turnRun) setupAgent() bool {
 		_ = r.d.sendWS(map[string]any{"type": "agent_event", "hostId": r.cfg.HostID, "sessionId": r.sessionID, "event": map[string]any{"type": "todo_update", "items": items}})
 		return nil
 	}}
-	r.reg = core.NewRegistry(append(append(baseTools, questionTool), todoTool)...)
+	markTaskTool := &tools.MarkTaskAsCompleteTool{}
+	markPlanTool := &tools.MarkPlanAsReadyToExecuteTool{}
+	r.reg = core.NewRegistry(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool)...)
 
-	r.agent = core.NewAgent(r.client, r.modelToUse, systemPromptWithBrain(r.cfg, r.sessionCWD, r.options, brainDir), r.reg)
+	initTools := core.Registry{}
+	for name, tool := range r.reg {
+		initTools[name] = tool
+	}
+	restrictModeTools(initTools, r.options.Mode)
+
+	r.agent = core.NewAgent(r.client, r.modelToUse, systemPromptWithBrain(r.cfg, r.sessionCWD, r.options, brainDir), initTools)
 	r.agent.TurnIndex = r.turnIndex
 	r.agent.Reasoning = r.options.Effort
 	// Only the agent goroutine changes runtime fields. Commands write the session;

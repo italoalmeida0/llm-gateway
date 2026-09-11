@@ -80,6 +80,8 @@ export interface ChatMessage {
   time?: number;
   attachments?: string[];
   thinkingDuration?: number;
+  /** True when this message included a completion signal (mark_task_as_complete / mark_plan_as_ready_to_execute). */
+  hasCompletion?: boolean;
   /**
    * Index of the source message in the daemon's raw transcript. Display
    * normalization merges/drops raw messages (tool results are hoisted onto

@@ -89,17 +89,22 @@ func TestBrowseFoldersNavigatesWithoutCreatingPaths(t *testing.T) {
 }
 
 func TestModesExposeTheirIntendedTools(t *testing.T) {
-	for _, mode := range []string{"plan", "learning", "talk"} {
+	for _, mode := range []string{"plan", "learning", "talk", "build"} {
 		reg := core.NewRegistry(
 			&tools.ReadTool{}, &tools.GlobTool{}, &tools.BashTool{}, &tools.PythonTool{},
 			&tools.WriteTool{}, &tools.EditTool{},
 			&tools.SearchTool{}, &tools.InspectTool{},
 			&tools.SearchWebTool{}, &tools.FetchURLTool{},
 			&tools.TodoTool{}, &tools.QuestionTool{},
+			&tools.MarkTaskAsCompleteTool{}, &tools.MarkPlanAsReadyToExecuteTool{},
 		)
 		restrictModeTools(reg, mode)
 		if mode == "talk" {
 			// Talk has its own assertions below (no workspace tools at all).
+		} else if mode == "build" {
+			if reg["write"] == nil || reg["edit"] == nil || reg["mark_task_as_complete"] == nil || reg["mark_plan_as_ready_to_execute"] != nil {
+				t.Fatal("Build mode must have write/edit/mark_task_as_complete and not mark_plan_as_ready_to_execute")
+			}
 		} else {
 			if reg["write"] != nil || reg["edit"] != nil || reg["read"] == nil || reg["glob"] == nil || reg["todo"] == nil {
 				t.Fatal("mode exposed the wrong file tools or lost the checklist")
@@ -108,14 +113,24 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 				t.Fatal("Plan and Learning must retain exploration tools (search/inspect)")
 			}
 		}
-		if reg["question"] == nil {
-			t.Fatal("Plan and Learning must retain questions")
+		if mode != "talk" && reg["question"] == nil {
+			t.Fatal("Plan, Learning and Build must retain questions")
 		}
-		if mode == "plan" && reg["bash"] == nil {
-			t.Fatal("Plan must retain shell commands for read-only inspection")
+		if mode == "plan" {
+			if reg["bash"] == nil {
+				t.Fatal("Plan must retain shell commands for read-only inspection")
+			}
+			if reg["mark_plan_as_ready_to_execute"] == nil || reg["mark_task_as_complete"] != nil {
+				t.Fatal("Plan must retain mark_plan_as_ready_to_execute and drop mark_task_as_complete")
+			}
 		}
-		if mode == "learning" && (reg["bash"] != nil || reg["python"] != nil) {
-			t.Fatal("Learning must not execute code (read-only observation)")
+		if mode == "learning" {
+			if reg["bash"] != nil || reg["python"] != nil {
+				t.Fatal("Learning must not execute code (read-only observation)")
+			}
+			if reg["mark_task_as_complete"] != nil || reg["mark_plan_as_ready_to_execute"] != nil {
+				t.Fatal("Learning must not have completion tools")
+			}
 		}
 		if mode == "talk" {
 			for _, keep := range []string{"question", "search_web", "fetch_url", "todo"} {
@@ -123,7 +138,7 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 					t.Fatalf("Talk must retain %s", keep)
 				}
 			}
-			for _, drop := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob"} {
+			for _, drop := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute"} {
 				if reg[drop] != nil {
 					t.Fatalf("Talk must not expose %s (no workspace access)", drop)
 				}

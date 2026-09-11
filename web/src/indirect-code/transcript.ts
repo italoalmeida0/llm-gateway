@@ -53,10 +53,10 @@ export function buildRenderBlocks(
     }
     const turnMsgs = list.slice(i, turnEnd + 1);
 
-    // Find the last assistant message in this turn with tool activity
+    // Find the last assistant message in this turn with tool activity (excluding completion signals)
     let lastToolRelIdx = -1;
     for (let k = turnMsgs.length - 1; k >= 0; k--) {
-      if (hasToolActivity(turnMsgs[k])) {
+      if (hasToolActivity(turnMsgs[k]) && !turnMsgs[k].hasCompletion) {
         lastToolRelIdx = k;
         break;
       }

@@ -167,7 +167,7 @@ export function TranscriptView() {
       };
       const rctx = renderCtx();
       const textOf = () => {
-        if (block.kind === "series" && rctx.hideToolMessages() && block.units.length > 0) {
+        if (block.kind === "series" && rctx.hideToolMessages() && block.units.length > 0 && !msg.hasCompletion) {
           return "";
         }
         return msg.blocks

@@ -1023,3 +1023,24 @@ describe("File icon in inline code (hasFileIcon)", () => {
     expect(commandIcon("useState x")).toBeNull();
   });
 });
+
+describe("Read tool label line range (toolSummary)", () => {
+  const readUnit = (offset: number | undefined, limit: number | undefined, resultLines: number) => ({
+    call: {
+      type: "tool_call",
+      toolId: "1",
+      toolName: "read",
+      toolArgs: JSON.stringify({ path: "server.ts", ...(offset !== undefined ? { offset } : {}), ...(limit !== undefined ? { limit } : {}) }),
+    },
+    result: { type: "tool_result", toolId: "1", toolResult: Array(resultLines).fill("x").join("\n") },
+  });
+  test("offset is 1-indexed: label matches the display block numbering", async () => {
+    const { toolSummary } = await import("../web/src/indirect-code/transcript");
+    // AI reads lines 56..115 (offset=56, limit=60): block shows 56:..115:.
+    expect(toolSummary(readUnit(56, 60, 60) as any).target).toBe("server.ts#L56-115");
+    // No offset: first line is L1, matching the block's 1: prefix.
+    expect(toolSummary(readUnit(undefined, undefined, 10) as any).target).toBe("server.ts#L1-10");
+    // Offset only: range covers the returned lines.
+    expect(toolSummary(readUnit(56, undefined, 60) as any).target).toBe("server.ts#L56-115");
+  });
+});

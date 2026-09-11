@@ -212,14 +212,17 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       };
     }
     case "read": {
-      const off = Number(args.offset || 0);
+      // Daemon offset is 1-indexed (schema: "Line number to start reading
+      // from (1-indexed)"); the display block numbers lines with startLine+i+1,
+      // so the label must use off directly, not off+1.
+      const off = Math.max(1, Number(args.offset || 1));
       const lines = res ? res.split("\n").length : 0;
       const lim = Number(args.limit || 0);
-      const end = lim > 0 ? off + lim : off + lines;
+      const end = lim > 0 ? off + lim - 1 : off + lines - 1;
       return {
         icon: "lucide:file-text",
         verb: "Analyzed",
-        target: `${baseNameOf(args.path) || args.path || "file"}#L${off + 1}-${Math.max(end, off + 1)}`,
+        target: `${baseNameOf(args.path) || args.path || "file"}#L${off}-${Math.max(end, off)}`,
       };
     }
     case "glob": {

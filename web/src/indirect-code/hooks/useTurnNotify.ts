@@ -5,17 +5,21 @@ import type { RemoteHostDto } from "../../api";
 /**
  * Turn-end browser notification (Camada A: at least one tab open).
  *
- * Trigger: `session_status: idle` arriving for a turn we saw running — the
- * daemon's finishTurn() is the only real turn end. `turn_end` agent events
- * fire per model step (tools continue after them), so they only enrich the
- * text (done/error/cancelled), never notify by themselves.
+ * Triggers:
+ * - `session_status: idle` for a turn we saw running — finishTurn() is the
+ *   only real turn end. `turn_end` agent events fire per model step, so they
+ *   only enrich the text (done/error/cancelled), never notify by themselves.
+ * - `tool_approval_request` / `question_request` — the turn PAUSES waiting
+ *   for the user (approval or answers). Deduped per call/question id.
+ * - `turn_end` with error and NO `retry` following — the turn died waiting
+ *   on nothing (a retry means it continues alone: silence).
  *
  * Runs BEFORE the page's active-host filter so turns on any host/session
  * notify (user decision). Click focuses the window and navigates to the
  * finished session.
  */
 
-export type TurnDisposition = "done" | "error" | "cancelled";
+export type TurnDisposition = "done" | "error" | "cancelled" | "approval" | "question";
 
 export interface TurnNotifyTarget {
   hostId: string;
@@ -66,7 +70,11 @@ export function turnNotifyText(t: Pick<TurnNotifyTarget, "title" | "hostName" | 
       ? `Turn failed — ${t.title}`
       : t.disposition === "cancelled"
         ? `Turn cancelled — ${t.title}`
-        : `Turn finished — ${t.title}`;
+        : t.disposition === "approval"
+          ? `Approval needed — ${t.title}`
+          : t.disposition === "question"
+            ? `Your answer needed — ${t.title}`
+            : `Turn finished — ${t.title}`;
   return { title, body: `${t.hostName} · tap to open` };
 }
 
@@ -105,6 +113,43 @@ export function createTurnNotify(opts: {
 
   /** Turns currently running, keyed `hostId:sessionId`. */
   const running = new Map<string, TurnDisposition>();
+  /** Already-notified wait prompts, keyed `hostId:sessionId:callOrQuestionId`. */
+  const notifiedWaits = new Set<string>();
+  /** Pending fatal error per turn (cleared when a `retry` shows it continues). */
+  const pendingFatal = new Map<string, string>();
+  /** Watchdog timers for stalled-after-error turns. */
+  const fatalTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const FATAL_STALL_MS = 10_000;
+
+  function clearFatal(key: string): void {
+    pendingFatal.delete(key);
+    const t = fatalTimers.get(key);
+    if (t !== undefined) {
+      clearTimeout(t);
+      fatalTimers.delete(key);
+    }
+  }
+
+  /** turn_end with error and no retry: the turn may be stalled. If nothing
+   * resumes it within FATAL_STALL_MS, notify (sound included). */
+  function watchFatal(hostId: string, sessionId: string, key: string, error: string): void {
+    clearFatal(key);
+    pendingFatal.set(key, error);
+    fatalTimers.set(
+      key,
+      setTimeout(() => {
+        fatalTimers.delete(key);
+        if (!pendingFatal.has(key)) return;
+        pendingFatal.delete(key);
+        // Still stalled: idle would have notified already (running entry
+        // gone); only notify when the turn never closed.
+        if (!running.has(key)) return;
+        running.delete(key);
+        const { hostName, title } = resolveNames(hostId, sessionId);
+        showNotification({ hostId, sessionId, title, hostName, disposition: "error" });
+      }, FATAL_STALL_MS),
+    );
+  }
 
   function setEnabled(v: boolean): void {
     setTurnNotifyEnabled(v);
@@ -153,7 +198,11 @@ export function createTurnNotify(opts: {
     const go = () => opts.onOpenSession(target.hostId, target.sessionId);
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       try {
-        const n = new Notification(title, { body, tag: `turn-${target.hostId}-${target.sessionId}` });
+        const tag =
+          target.disposition === "approval" || target.disposition === "question"
+            ? `wait-${target.hostId}-${target.sessionId}`
+            : `turn-${target.hostId}-${target.sessionId}`;
+        const n = new Notification(title, { body, tag });
         n.onclick = () => {
           try {
             window.focus();
@@ -170,6 +219,32 @@ export function createTurnNotify(opts: {
     if (soundOn()) playChime();
   }
 
+  function notifyWait(
+    hostId: string,
+    sessionId: string,
+    waitId: string,
+    disposition: "approval" | "question",
+    detail: string,
+  ): boolean {
+    const key = `${hostId}:${sessionId}:${waitId}`;
+    if (notifiedWaits.has(key)) return false;
+    notifiedWaits.add(key);
+    if (notifiedWaits.size > 500) {
+      const first = notifiedWaits.values().next();
+      if (!first.done) notifiedWaits.delete(first.value);
+    }
+    const { hostName, title } = resolveNames(hostId, sessionId);
+    showNotification({
+      hostId,
+      sessionId,
+      title,
+      hostName,
+      disposition,
+    });
+    void detail;
+    return true;
+  }
+
   /**
    * Feed every inbound daemon message BEFORE the active-host filter.
    * Returns true when the message was a turn boundary (for tests).
@@ -179,6 +254,21 @@ export function createTurnNotify(opts: {
     if (!msg || typeof msg !== "object" || !("type" in msg)) return false;
     const hostId = (msg as { hostId?: unknown }).hostId;
     if (typeof hostId !== "string" || !hostId) return false;
+    // Turn pauses waiting for the user: tool approval.
+    if (msg.type === "tool_approval_request") {
+      const m = msg as { sessionId?: unknown; callId?: unknown; tool?: unknown };
+      if (typeof m.sessionId !== "string" || !m.sessionId) return false;
+      const callId = typeof m.callId === "string" && m.callId ? m.callId : "approval";
+      return notifyWait(hostId, m.sessionId, callId, "approval", typeof m.tool === "string" ? m.tool : "");
+    }
+    // Turn pauses waiting for the user: question answers.
+    if (msg.type === "question_request") {
+      const m = msg as { sessionId?: unknown; question?: unknown };
+      if (typeof m.sessionId !== "string" || !m.sessionId) return false;
+      const q = m.question as { id?: unknown } | undefined;
+      const qid = q && typeof q.id === "string" && q.id ? q.id : "question";
+      return notifyWait(hostId, m.sessionId, qid, "question", "");
+    }
     if (msg.type === "agent_event") {
       const ev = (msg as { sessionId?: unknown; event?: unknown }).event as
         | { type?: unknown; cancelled?: unknown; error?: unknown }
@@ -191,11 +281,37 @@ export function createTurnNotify(opts: {
         return true;
       }
       if (ev.type === "turn_end" && running.has(key)) {
-        running.set(
-          key,
-          ev.cancelled === true ? "cancelled" : typeof ev.error === "string" && ev.error ? "error" : "done",
-        );
+        const disposition =
+          ev.cancelled === true ? "cancelled" : typeof ev.error === "string" && ev.error ? "error" : "done";
+        running.set(key, disposition);
+        if (disposition === "error" && typeof ev.error === "string") {
+          watchFatal(hostId, sessionId, key, ev.error);
+        } else {
+          clearFatal(key);
+        }
         return true;
+      }
+      // Retry scheduled: the turn continues alone, clear any pending fatal.
+      if (ev.type === "retry") {
+        clearFatal(key);
+        return false;
+      }
+      // Any forward progress clears a pending fatal (deltas, tool
+      // activity, new turn starting).
+      if (
+        ev.type === "text_delta" ||
+        ev.type === "reasoning_delta" ||
+        ev.type === "tool_call" ||
+        ev.type === "tool_use_start" ||
+        ev.type === "tool_use_args" ||
+        ev.type === "tool_use_end" ||
+        ev.type === "tool_execution_start" ||
+        ev.type === "tool_progress" ||
+        ev.type === "tool_result" ||
+        ev.type === "assistant_message" ||
+        ev.type === "turn_start"
+      ) {
+        clearFatal(key);
       }
       return false;
     }
@@ -213,6 +329,7 @@ export function createTurnNotify(opts: {
         // (reconnect replays, compaction) must stay silent.
         if (disposition === undefined) return false;
         running.delete(key);
+        clearFatal(key);
         const { hostName, title } = resolveNames(hostId, m.sessionId);
         showNotification({ hostId, sessionId: m.sessionId, title, hostName, disposition });
         return true;

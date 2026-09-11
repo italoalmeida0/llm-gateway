@@ -1105,3 +1105,49 @@ describe("Turn balloons use daemon-stamped turnIndex", () => {
     expect(map2.get("ab")?.map((b) => b.turnIndex)).toEqual([12]);
   });
 });
+
+describe("Wait-state notifications (approval/question/stalled error)", () => {
+  test("approval/question text varies; waits dedupe per id; retry clears fatal", async () => {
+    const { createTurnNotify, turnNotifyText } = await import("../web/src/indirect-code/hooks/useTurnNotify");
+    expect(turnNotifyText({ title: "Fix bug", hostName: "Mac", disposition: "approval" }).title).toBe(
+      "Approval needed — Fix bug",
+    );
+    expect(turnNotifyText({ title: "Fix bug", hostName: "Mac", disposition: "question" }).title).toBe(
+      "Your answer needed — Fix bug",
+    );
+    const shown: string[] = [];
+    (globalThis as any).Notification = class {
+      static permission = "granted";
+      onclick: (() => void) | null = null;
+      constructor(title: string) {
+        shown.push(title);
+      }
+      close() {}
+    };
+    const n = createTurnNotify({
+      hosts: () => [],
+      sessions: () => [],
+      toast: () => {},
+      onOpenSession: () => {},
+    });
+    const run = { type: "session_status", hostId: "h1", sessionId: "s1", status: "running" } as any;
+    expect(n.noteMessage(run)).toBe(true);
+    // Approval notifies once per callId.
+    const appr = { type: "tool_approval_request", hostId: "h1", sessionId: "s1", callId: "c1", tool: "bash" } as any;
+    expect(n.noteMessage(appr)).toBe(true);
+    expect(n.noteMessage(appr)).toBe(false);
+    expect(shown.filter((t) => t.startsWith("Approval"))).toHaveLength(1);
+    // Question notifies once per question id.
+    const q = { type: "question_request", hostId: "h1", sessionId: "s1", question: { id: "q1" } } as any;
+    expect(n.noteMessage(q)).toBe(true);
+    expect(n.noteMessage(q)).toBe(false);
+    expect(shown.filter((t) => t.startsWith("Your answer"))).toHaveLength(1);
+    // turn_end error arms a fatal; retry clears it (no stalled notification).
+    expect(n.noteMessage({ type: "agent_event", hostId: "h1", sessionId: "s1", event: { type: "turn_end", error: "boom" } } as any)).toBe(true);
+    expect(n.noteMessage({ type: "agent_event", hostId: "h1", sessionId: "s1", event: { type: "retry", attempt: 1 } } as any)).toBe(false);
+    // Normal idle still notifies once as failed (no duplicate from watchdog).
+    expect(n.noteMessage({ type: "session_status", hostId: "h1", sessionId: "s1", status: "idle" } as any)).toBe(true);
+    expect(shown.filter((t) => t.startsWith("Turn failed"))).toHaveLength(1);
+    delete (globalThis as any).Notification;
+  });
+});

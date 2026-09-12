@@ -38,9 +38,17 @@
             link.rel = "icon";
             document.head.appendChild(link);
           }
+          // Per-page override (set by the SPA, e.g. Indirect Code icon).
+          // Cleared when leaving the page: falls back to the gateway tile.
+          if (window.__pageIcon) {
+            if (link.getAttribute("href") !== window.__pageIcon) link.href = window.__pageIcon;
+            return;
+          }
           link.href = iconFor(t);
         }
         syncFavicon();
+        // Exposed for the SPA per-page override (window.__pageIcon).
+        window.__syncFavicon = syncFavicon;
         new MutationObserver(syncFavicon).observe(document.documentElement, {
           attributes: true,
           attributeFilter: ["data-theme"],

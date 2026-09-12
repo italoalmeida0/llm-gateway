@@ -11,7 +11,7 @@ import {
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
-  buildRenderBlocks, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
+  buildRenderBlocks, finalTurnMessage, fuzzySame, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
 } from "../web/src/indirect-code/transcript";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
 import { parseGlobList, parseInspectTree, parseQuestionQA } from "../web/src/indirect-code/utils/toolTrees";
@@ -70,7 +70,7 @@ test("orders projects by their own conversations' most recent activity", () => {
   expect(ordered.map((p) => p.id)).toEqual(["first","second","home"]);
 });
 
-test("groups tools and thinking until non-whitespace assistant text intervenes", () => {
+test("groups a whole tool turn into one aggregate with ordered entries", () => {
   const list:ChatMessage[] = [
     {id:"one",role:"assistant",srcIdx:1,thinkingDuration:3,blocks:[{type:"reasoning",reasoning:"Inspect"},{type:"tool_call",toolId:"a",toolName:"read"}]},
     {id:"two",role:"assistant",srcIdx:3,thinkingDuration:1,blocks:[{type:"text",text:" \n "},{type:"reasoning",reasoning:"Verify"},{type:"tool_call",toolId:"b",toolName:"bash"}]},
@@ -78,32 +78,91 @@ test("groups tools and thinking until non-whitespace assistant text intervenes",
     {id:"four",role:"assistant",srcIdx:7,blocks:[{type:"reasoning",reasoning:"Testing"},{type:"tool_call",toolId:"d",toolName:"bash"}]},
   ];
   const blocks = buildRenderBlocks(list);
-  expect(blocks).toHaveLength(2);
-  expect(blocks[0].kind === "series" && blocks[0].units.map((u) => u.call?.toolId)).toEqual(["a","b"]);
-  expect(blocks[1].kind === "series" && blocks[1].extras[0].thinkingDuration).toBeUndefined();
-  expect(blocks[1].msg.srcIdx).toBe(5);
+  expect(blocks).toHaveLength(1);
+  expect(blocks[0].kind).toBe("series");
+  if (blocks[0].kind === "series") {
+    expect(blocks[0].units.map((u) => u.call?.toolId)).toEqual(["a","b","c","d"]);
+    expect(blocks[0].extras.map((m) => m.id)).toEqual(["two","three","four"]);
+    expect(blocks[0].entries.map((e) => e.kind)).toEqual(
+      ["thinking","tools","thinking","tools","text","tools","thinking","tools"]);
+    expect(blocks[0].finalMsgId).toBeNull();
+  }
   expect(list[1].blocks).toHaveLength(3);
 });
 
-test("fuses all intermediate tool messages and thoughts into one series when hideToolMessages is true", () => {
+test("turn aggregate keeps event order and features the long closing message", () => {
+  const long = "All issues are now resolved across the workspace. " + "x".repeat(200);
   const list: ChatMessage[] = [
     {id:"one",role:"assistant",srcIdx:1,thinkingDuration:3,blocks:[{type:"reasoning",reasoning:"Inspect"},{type:"tool_call",toolId:"a",toolName:"read"}]},
     {id:"two",role:"assistant",srcIdx:3,thinkingDuration:1,blocks:[{type:"text",text:"Checking file"},{type:"reasoning",reasoning:"Verify"},{type:"tool_call",toolId:"b",toolName:"bash"}]},
     {id:"three",role:"assistant",srcIdx:5,blocks:[{type:"text",text:"I found an issue."},{type:"tool_call",toolId:"c",toolName:"edit"}]},
     {id:"four",role:"assistant",srcIdx:7,blocks:[{type:"reasoning",reasoning:"Testing"},{type:"tool_call",toolId:"d",toolName:"bash"}]},
-    {id:"five",role:"assistant",srcIdx:9,blocks:[{type:"text",text:"All issues resolved."}]},
+    {id:"five",role:"assistant",srcIdx:9,blocks:[{type:"text",text:long}]},
   ];
   const blocks = buildRenderBlocks(list, { hideToolMessages: true });
-  expect(blocks).toHaveLength(2);
+  expect(blocks).toHaveLength(1);
   expect(blocks[0].kind).toBe("series");
   if (blocks[0].kind === "series") {
     expect(blocks[0].units.map((u) => u.call?.toolId)).toEqual(["a","b","c","d"]);
-    expect(blocks[0].extras.map((m) => m.id)).toEqual(["two","three","four"]);
+    expect(blocks[0].extras.map((m) => m.id)).toEqual(["two","three","four","five"]);
+    expect(blocks[0].entries.at(-1)?.kind).toBe("text");
+    expect(blocks[0].finalMsgId).toBe("five");
   }
-  expect(blocks[1].kind).toBe("single");
-  if (blocks[1].kind === "single") {
-    expect(blocks[1].msg.id).toBe("five");
+});
+
+test("text-only turns stay as plain singles (no aggregate)", () => {
+  const list: ChatMessage[] = [
+    {id:"u",role:"user",srcIdx:0,blocks:[{type:"text",text:"hi"}]},
+    {id:"a",role:"assistant",srcIdx:1,blocks:[{type:"text",text:"Hello!"}]},
+    {id:"b",role:"assistant",srcIdx:2,blocks:[{type:"text",text:"How can I help?"}]},
+  ];
+  const blocks = buildRenderBlocks(list);
+  expect(blocks.map((b) => b.kind)).toEqual(["single","single","single"]);
+});
+
+test("fuzzy duplicate progress notes hide, last wins", () => {
+  expect(fuzzySame("Reading package.json to understand the project layout", "reading package.json to understand the project layout now")).toBe(true);
+  expect(fuzzySame("Checking the file", "Running the test suite")).toBe(false);
+  expect(fuzzySame("", "something")).toBe(false);
+  const list: ChatMessage[] = [
+    {id:"one",role:"assistant",srcIdx:1,blocks:[
+      {type:"text",text:"Reading package.json to understand the project layout"},
+      {type:"tool_call",toolId:"a",toolName:"read"},
+    ]},
+    {id:"two",role:"assistant",srcIdx:3,blocks:[
+      {type:"text",text:"Reading package.json to understand the project layout now"},
+      {type:"tool_call",toolId:"b",toolName:"bash"},
+    ]},
+  ];
+  const blocks = buildRenderBlocks(list);
+  expect(blocks).toHaveLength(1);
+  if (blocks[0].kind === "series") {
+    const texts = blocks[0].entries.filter((e) => e.kind === "text");
+    expect(texts).toHaveLength(2);
+    expect(texts[0].kind === "text" && texts[0].hidden).toBe(true);
+    expect(texts[1].kind === "text" && texts[1].hidden).not.toBe(true);
+  } else {
+    throw new Error("expected series");
   }
+});
+
+test("final message is the last long text without tools (or with completion)", () => {
+  const longTool = "Tool-adjacent long note. " + "x".repeat(200);
+  const longFinal = "Final summary of everything done. " + "y".repeat(200);
+  const list: ChatMessage[] = [
+    {id:"one",role:"assistant",srcIdx:1,blocks:[{type:"text",text:longTool},{type:"tool_call",toolId:"a",toolName:"read"}]},
+    {id:"two",role:"assistant",srcIdx:3,blocks:[{type:"text",text:longFinal}]},
+  ];
+  expect(finalTurnMessage(list)?.id).toBe("two");
+  const withCompletion: ChatMessage[] = [
+    {id:"one",role:"assistant",srcIdx:1,hasCompletion:true,blocks:[{type:"text",text:longFinal},{type:"tool_call",toolId:"a",toolName:"read"}]},
+  ];
+  expect(finalTurnMessage(withCompletion)?.id).toBe("one");
+  const short: ChatMessage[] = [
+    {id:"one",role:"assistant",srcIdx:1,blocks:[{type:"tool_call",toolId:"a",toolName:"read"}]},
+    {id:"two",role:"assistant",srcIdx:3,blocks:[{type:"text",text:"Done."}]},
+  ];
+  expect(finalTurnMessage(short)).toBeNull();
 });
 
 test("terminal footer becomes a duration without removing real output", () => {
@@ -551,14 +610,13 @@ describe("Indirect Code turn balloons anchoring", () => {
     const text1: ChatMessage = { id: "a1", role: "assistant", blocks: [{ type: "text", text: "done" }] };
 
     const blocks = buildRenderBlocks([user1, tool1, text1]).map((b) => ({ ...b, id: b.msg.id }));
-    expect(blocks.length).toBe(3); // user1, tool1 (series), text1 (single)
+    expect(blocks.length).toBe(2); // user1, one turn aggregate (t1 lead + a1 extra)
 
     const balloon: TurnBalloon = { turnIndex: 1, files: [{ path: "test.ts", status: "modified" }] };
     const map = mapBalloonsToBlocks(blocks, [balloon]);
 
-    // Must attach to a1 (the final block of turn 1), not the intermediate tool series
-    expect(map.get("a1")?.map((b) => b.turnIndex)).toEqual([1]);
-    expect(map.get("t1")).toBeUndefined();
+    // Must attach to the turn aggregate (the final block of turn 1)
+    expect(map.get("t1")?.map((b) => b.turnIndex)).toEqual([1]);
     expect(map.get("u1")).toBeUndefined();
   });
 
@@ -958,12 +1016,18 @@ describe("completion signals and turn nudges", () => {
     const cleaned = withoutTodoActivity([user, step1, res1, step2]);
     const blocks = buildRenderBlocks(cleaned, { hideToolMessages: true });
 
-    // The tool series contains a1 (the write call)
-    // a2 (with text and mark_task_as_complete) must be rendered as a single block with visible text, NOT hidden!
-    const a2Block = blocks.find((b) => b.msg.id === "a2");
-    expect(a2Block).toBeDefined();
-    expect(a2Block?.kind).toBe("single");
-    expect(a2Block?.msg.blocks[0]?.text).toBe("Everything fixed and verified.");
+    // One turn aggregate: the write unit plus a visible text entry for a2
+    // (completion text is exempt from hiding — enforced at render).
+    expect(blocks).toHaveLength(2);
+    const series = blocks[1];
+    expect(series.kind).toBe("series");
+    if (series.kind === "series") {
+      expect(series.units.map((u) => u.call?.toolName)).toEqual(["write"]);
+      const texts = series.entries.filter((e) => e.kind === "text");
+      expect(texts).toHaveLength(1);
+      expect(texts[0].kind === "text" && texts[0].block.text).toBe("Everything fixed and verified.");
+      expect(texts[0].kind === "text" && texts[0].msg.hasCompletion).toBe(true);
+    }
   });
 
   test("isLongAssistantMessage estimates tokens as chars/4 with a 50-token threshold", () => {

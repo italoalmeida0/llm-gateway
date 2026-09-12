@@ -1,4 +1,4 @@
-import type { ChatMessage, RenderBlock, ToolUnit, TurnBalloon } from "./types";
+import type { ChatMessage, RenderBlock, ToolUnit, TurnBalloon, TurnEntry } from "./types";
 import { displayToolArgs, withoutContinueNudges, withoutTodoActivity } from "./live";
 
 export function hasVisibleText(message: ChatMessage): boolean {
@@ -69,98 +69,152 @@ export function latestShortTurnMessage(messages: ChatMessage[]): string {
   return "";
 }
 
-/** Only visible assistant text starts a new response group. Keep the raw
- * transcript and source indices intact, including while a new step streams.
- * When hideToolMessages is true, messages sent alongside tool calls in a turn
- * are grouped into the series so intermediate actions and thoughts can form
- * a single mega group during the turn. */
-export function buildRenderBlocks(
-  messages: ChatMessage[],
-  options?: { hideToolMessages?: boolean },
-): RenderBlock[] {
-  const list = withoutContinueNudges(withoutTodoActivity(messages));
-  const result: RenderBlock[] = [];
-  const hideTools = !!options?.hideToolMessages;
+/** Fuzzy text similarity for turn dedup: normalized containment either way
+ * or high word-overlap. Keeps only the last of near-duplicate progress
+ * notes (the agent restating itself while tools run). Pure — covered by tests. */
+export function fuzzySame(a: string, b: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const na = norm(a);
+  const nb = norm(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na];
+  if (short.length >= 24 && long.includes(short)) return true;
+  const words = (s: string) => new Set(s.split(" ").filter(Boolean));
+  const wa = words(na);
+  const wb = words(nb);
+  let inter = 0;
+  for (const w of wa) if (wb.has(w)) inter++;
+  const union = wa.size + wb.size - inter;
+  return union > 0 && inter / union >= 0.8;
+}
 
-  for (let i = 0; i < list.length; i++) {
-    const head = list[i];
-    if (head.role === "user") { result.push({kind:"single", msg:head}); continue; }
+/** Featured final message of a turn: the last message with 50+ tokens that
+ * was written either without calling any tool or alongside the completion
+ * signal. Rendered below the aggregate once the turn ends. */
+export function finalTurnMessage(turnMsgs: ChatMessage[]): ChatMessage | null {
+  for (let k = turnMsgs.length - 1; k >= 0; k--) {
+    const m = turnMsgs[k];
+    if (!hasVisibleText(m)) continue;
+    if (hasToolActivity(m) && !m.hasCompletion) continue;
+    if (!isLongAssistantMessage(m)) continue;
+    return m;
+  }
+  return null;
+}
 
-    if (!hideTools) {
-      const extras: ChatMessage[] = [];
-      while (i+1 < list.length && list[i+1].role !== "user" && !hasVisibleText(list[i+1])) extras.push(list[++i]);
-      const units: ToolUnit[] = [];
-      const byId = new Map<string, ToolUnit>();
-      for (const message of [head, ...extras]) for (const block of message.blocks) {
-        if (block.type === "tool_call") {
-          const unit = {call:block}; units.push(unit);
-          if (block.toolId) byId.set(block.toolId, unit);
-        } else if (block.type === "tool_result") {
-          const unit = block.toolId ? byId.get(block.toolId) : undefined;
-          if (unit && !unit.result) unit.result = block;
-          else units.push({result:block});
-        }
+/** Pair tool calls with results across a turn, in display order. */
+function pairTurnUnits(turnMsgs: ChatMessage[]): ToolUnit[] {
+  const units: ToolUnit[] = [];
+  const byId = new Map<string, ToolUnit>();
+  for (const message of turnMsgs) {
+    for (const block of message.blocks) {
+      if (block.type === "tool_call") {
+        const unit: ToolUnit = { call: block };
+        units.push(unit);
+        if (block.toolId) byId.set(block.toolId, unit);
+      } else if (block.type === "tool_result") {
+        const unit = block.toolId ? byId.get(block.toolId) : undefined;
+        if (unit && !unit.result) unit.result = block;
+        else units.push({ result: block });
       }
-      result.push(units.length || extras.length ? {kind:"series", msg:head, extras, units} : {kind:"single", msg:head});
-      continue;
     }
+  }
+  return units;
+}
 
-    // When hideToolMessages is enabled:
-    // Look ahead to find all consecutive assistant messages in this turn
-    let turnEnd = i;
-    while (turnEnd + 1 < list.length && list[turnEnd + 1].role !== "user") {
-      turnEnd++;
+/** Ordered aggregate rows for a turn, in stored (daemon) block order.
+ * Tool runs stay merged across messages until a thinking/text/image entry
+ * breaks them, preserving the existing cross-message explore/command
+ * sub-grouping for pure tool runs. */
+function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
+  const entries: TurnEntry[] = [];
+  let run: ToolUnit[] = [];
+  let runMsg: ChatMessage | null = null;
+  const byId = new Map<string, ToolUnit>();
+  const flushRun = () => {
+    if (run.length && runMsg) entries.push({ kind: "tools", msg: runMsg, units: run });
+    run = [];
+    runMsg = null;
+  };
+  for (const message of turnMsgs) {
+    const reasoning = message.blocks.filter((b) => b.type === "reasoning" && !!b.reasoning?.trim());
+    // Stored (daemon) order, newest first; stored[0] is the live one.
+    for (let r = 0; r < reasoning.length; r++) {
+      flushRun();
+      entries.push({ kind: "thinking", msg: message, block: reasoning[r], nth: r, isNewest: r === 0 });
     }
-    const turnMsgs = list.slice(i, turnEnd + 1);
-
-    // Find the last assistant message in this turn with tool activity (excluding completion signals)
-    let lastToolRelIdx = -1;
-    for (let k = turnMsgs.length - 1; k >= 0; k--) {
-      if (hasToolActivity(turnMsgs[k]) && !turnMsgs[k].hasCompletion) {
-        lastToolRelIdx = k;
+    let textNth = 0;
+    for (const block of message.blocks) {
+      if (block.type === "tool_call") {
+        const unit: ToolUnit = { call: block };
+        if (!runMsg) runMsg = message;
+        run.push(unit);
+        if (block.toolId) byId.set(block.toolId, unit);
+      } else if (block.type === "tool_result") {
+        const unit = block.toolId ? byId.get(block.toolId) : undefined;
+        if (!runMsg) runMsg = message;
+        if (unit && !unit.result && run.includes(unit)) unit.result = block;
+        else run.push({ result: block });
+      } else if (block.type === "text" && !!block.text?.trim()) {
+        flushRun();
+        entries.push({ kind: "text", msg: message, block, nth: textNth++ });
+      } else if (block.type === "image") {
+        flushRun();
+        entries.push({ kind: "image", msg: message, block });
+      }
+    }
+  }
+  flushRun();
+  // Fuzzy dedup: hide near-duplicate texts, the last one wins.
+  const texts = entries.filter((e) => e.kind === "text");
+  for (let i = 0; i < texts.length; i++) {
+    for (let j = texts.length - 1; j > i; j--) {
+      if (texts[j].kind === "text" && texts[i].kind === "text" &&
+        fuzzySame(texts[i].block.text || "", texts[j].block.text || "")) {
+        texts[i].hidden = true;
         break;
       }
     }
+  }
+  return entries;
+}
 
-    if (lastToolRelIdx >= 0) {
-      // Fuse messages up to lastToolRelIdx into one mega tool series
-      const seriesMsgs = turnMsgs.slice(0, lastToolRelIdx + 1);
-      const units: ToolUnit[] = [];
-      const byId = new Map<string, ToolUnit>();
-      for (const message of seriesMsgs) {
-        for (const block of message.blocks) {
-          if (block.type === "tool_call") {
-            const unit = { call: block };
-            units.push(unit);
-            if (block.toolId) byId.set(block.toolId, unit);
-          } else if (block.type === "tool_result") {
-            const unit = block.toolId ? byId.get(block.toolId) : undefined;
-            if (unit && !unit.result) unit.result = block;
-            else units.push({ result: block });
-          }
-        }
-      }
+/** One aggregate per assistant turn: every message of a turn with tool
+ * activity or thinking (texts, thinkings, tool runs) becomes ordered rows
+ * of a single card. A turn with neither stays as plain single bubbles.
+ * Keep the raw transcript and source indices intact, including while a new
+ * step streams. */
+export function buildRenderBlocks(
+  messages: ChatMessage[],
+  _options?: { hideToolMessages?: boolean },
+): RenderBlock[] {
+  const list = withoutContinueNudges(withoutTodoActivity(messages));
+  const result: RenderBlock[] = [];
 
+  for (let i = 0; i < list.length; i++) {
+    const head = list[i];
+    if (head.role === "user") { result.push({ kind: "single", msg: head }); continue; }
+
+    let turnEnd = i;
+    while (turnEnd + 1 < list.length && list[turnEnd + 1].role !== "user") turnEnd++;
+    const turnMsgs = list.slice(i, turnEnd + 1);
+    const tools = turnMsgs.some(hasToolActivity);
+    const thoughts = turnMsgs.some((m) =>
+      m.blocks.some((b) => b.type === "reasoning" && !!b.reasoning?.trim()));
+    if (!tools && !thoughts) {
+      for (const m of turnMsgs) result.push({ kind: "single", msg: m });
+    } else {
       result.push({
         kind: "series",
-        msg: seriesMsgs[0],
-        extras: seriesMsgs.slice(1),
-        units,
+        msg: turnMsgs[0],
+        extras: turnMsgs.slice(1),
+        units: pairTurnUnits(turnMsgs),
+        entries: buildTurnEntries(turnMsgs),
+        finalMsgId: finalTurnMessage(turnMsgs)?.id ?? null,
       });
-
-      i += lastToolRelIdx;
-    } else {
-      // No tools in this turn; group by visible text as normal
-      const extras: ChatMessage[] = [];
-      while (i + 1 < list.length && list[i + 1].role !== "user" && !hasVisibleText(list[i + 1])) {
-        extras.push(list[++i]);
-      }
-      result.push(
-        extras.length
-          ? { kind: "series", msg: head, extras, units: [] }
-          : { kind: "single", msg: head }
-      );
     }
+    i = turnEnd;
   }
   return result;
 }

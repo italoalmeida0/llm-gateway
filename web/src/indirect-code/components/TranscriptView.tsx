@@ -5,7 +5,7 @@ import { FileIcon } from "../presentation";
 import { elapsedLabel, messageText } from "../utils/format";
 import type { TranscriptRenderCtx } from "./TranscriptBlocks";
 import {
-  renderAssistantSpecial, renderMessageContent, renderSeriesLead,
+  renderFinalMsg, renderSingleAssistant, renderTurnAggregate,
 } from "./TranscriptBlocks";
 import { HistoryView } from "./HistoryView";
 import { ApprovalCard } from "./ApprovalCard";
@@ -13,7 +13,6 @@ import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
 import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges } from "../ctx";
 import { TurnChangesBalloon } from "./TurnChangesBalloon";
 import { mapBalloonsToBlocks } from "../transcript";
-import { isLongAssistantMessage } from "../transcript";
 
 export function TranscriptView() {
   const t = useTranscriptCtx();
@@ -162,17 +161,12 @@ export function TranscriptView() {
         return isLast();
       };
       const rctx = renderCtx();
-      const textOf = () => {
-        if (block.kind === "series" && rctx.hideToolMessages() && block.units.length > 0 && !msg.hasCompletion && !isLongAssistantMessage(msg)) {
-          // Lead is hidden but long extras stay visible — keep copy available for them.
-          return block.extras
-            .filter((m) => m.hasCompletion || isLongAssistantMessage(m))
-            .map((m) => messageText(m))
-            .filter((s) => s.trim() !== "")
-            .join("\n\n");
-        }
-        return messageText(msg);
-      };
+      const featuredFinal = () =>
+        block.kind === "series" && block.finalMsgId != null &&
+        (t.sessionStatus() !== "running" || !isLast())
+          ? [block.msg, ...block.extras].find((m) => m.id === block.finalMsgId)
+          : undefined;
+      const textOf = () => messageText(featuredFinal() ?? msg);
       const isEditing = () => t.editingMsgIdx() === rawIdx();
       return (
         <>
@@ -288,9 +282,13 @@ export function TranscriptView() {
               </Show>
 
               {block.kind === "series" ? <>
-                {renderSeriesLead(rctx, block)}
-                <Show when={block.units.length}>{renderAssistantSpecial(rctx, msg.id, block.units, isLast(), block.extras.map((e) => e.srcIdx ?? 0))}</Show>
-              </> : renderMessageContent(rctx, msg, isLast())}
+                {renderTurnAggregate(rctx, block, isLast())}
+                <Show when={featuredFinal()}>
+                  <div class="w-full mt-2.5">
+                    {renderFinalMsg(rctx, block)}
+                  </div>
+                </Show>
+              </> : renderSingleAssistant(rctx, msg)}
 
               {/* Hover actions (chatbot-style) */}
               <Show when={(t.sessionStatus() !== "running" || !isLast()) && !isEditing()}>

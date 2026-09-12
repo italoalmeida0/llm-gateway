@@ -7,10 +7,12 @@ import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 
 /** Reactive model of a tool row: memos derived from ToolUnit.
  * Called synchronously within the component (same Solid owner),
- * so createMemo instances belong to the row and dispose with it. */
-export function useToolUnitModel(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, _running: boolean) {
+ * so createMemo instances belong to the row and dispose with it.
+ * Rows start open while the turn runs and closed once it ends, unless
+ * the user toggled them explicitly. */
+export function useToolUnitModel(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean) {
 const key = () => toolRowKey(msgId, u, ui);
-const open = () => ctx.toolOpen()[key()] ?? false;
+const open = () => ctx.toolOpen()[key()] ?? running;
 const sum = createMemo(() => toolSummary(u));
 const prog = () => (u.call?.toolId ? ctx.toolProgress()[u.call.toolId] : undefined);
 const args = createMemo(() => tryParseArgs(u.call?.toolArgs));

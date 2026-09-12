@@ -4,7 +4,8 @@ export { default as IndirectCodePage } from "./IndirectCodePage";
 export type {
   AgentSettings, ChatMessage, ContentBlock, MCPServerConfig, PendingApproval,
   PreviewFile, Project, RenderBlock, RenderBlockSeries, SessionSummary,
-  SessionUsage, SkillConfig, ToolCat, ToolUnit, MsgPart, TurnBalloon, TurnChangedFile,
+  SessionUsage, SkillConfig, ToolCat, ToolUnit, TurnBalloon, TurnChangedFile,
+  TurnEntry,
 } from "./types";
 export { createDataLayer } from "./store/sessions";
 export type { RcProject, RcSession } from "./store/sessions";

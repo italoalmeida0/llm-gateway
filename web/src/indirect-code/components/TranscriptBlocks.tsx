@@ -1,9 +1,8 @@
 import { createMemo, For, Show } from "solid-js";
 import { Streamdown } from "streamdown-solid";
 import { Icon as Iconify } from "../../components/icon";
-import type { ChatMessage, ContentBlock, RenderBlock, RenderBlockSeries, ToolUnit } from "../types";
+import type { ChatMessage, ContentBlock, RenderBlock, RenderBlockSeries, ToolUnit, TurnEntry } from "../types";
 import { isLongAssistantMessage } from "../transcript";
-import { splitToolRuns } from "../utils/tools";
 import { partitionToolSegs } from "../utils/toolSegs";
 import type { ToolSeg } from "../utils/toolSegs";
 import { groupTitle, specialTitle } from "../utils/titles";
@@ -41,84 +40,136 @@ export interface TranscriptRenderCtx {
   projects: () => import("../types").Project[];
 }
 
-export function renderThinkingBlock(
+/** Thinking as a tool-style row: header (bot icon + timer) with a
+ * Streamdown body. Open by default while the turn runs, closed after —
+ * unless the user toggled it explicitly. */
+export function renderThinkingRow(
   ctx: TranscriptRenderCtx,
-  msg: ChatMessage,
-  block: ContentBlock,
-  nth: number,
+  entry: Extract<TurnEntry, { kind: "thinking" }>,
+  running: boolean,
+  hidden: boolean,
+  live: boolean,
 ) {
-  const thinkKey = () => `${msg.id}:think:${nth}`;
-  const openNow = () => ctx.messages().at(-1)?.id === msg.id && ctx.sessionStatus() === "running";
-  const live = () =>
-    openNow() && ctx.thinkingStart() !== null && ctx.thinkingIndex() === nth;
-  const open = () => ctx.expandedThinking()[thinkKey()] ?? false;
+  const key = `${entry.msg.id}:think:${entry.nth}`;
+  const open = () => ctx.expandedThinking()[key] ?? running;
+  const label = () =>
+    live
+      ? `Thinking ${ctx.thinkingElapsed()}s`
+      : entry.msg.thinkingDuration !== undefined
+        ? `Thinking ${entry.msg.thinkingDuration}s`
+        : open()
+          ? "Hide thinking"
+          : "Thinking";
   return (
-    <Show when={ctx.verboseChat()}>
-      <div class="w-full">
-        <button
-          aria-expanded={open()}
-          onClick={() => ctx.setExpandedThinking((prev) => ({ ...prev, [thinkKey()]: !open() }))}
-        class={`flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
-          openNow() ? "text-ink-300" : "text-ink-500 hover:text-ink-300"
-        }`}
+    <div style={hidden ? { display: "none" } : undefined} data-thinking-row={key}>
+      <div
+        onClick={() => ctx.setExpandedThinking((prev) => ({ ...prev, [key]: !open() }))}
+        class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
       >
-        <Iconify icon="lucide:bot" size={14} />
-        <span>
-          {live()
-            ? `Thinking ${ctx.thinkingElapsed()}s`
-            : msg.thinkingDuration !== undefined
-              ? `Thinking ${msg.thinkingDuration}s`
-              : open()
-                ? "Hide thinking"
-                : "Thinking"}
-        </span>
-        <Show when={live()}>
-          <span class="thinking-indicator">
-            <span />
-            <span />
-            <span />
-          </span>
+        <Show
+          when={!live}
+          fallback={
+            <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
+          }
+        >
+          <Iconify icon="lucide:bot" size={14} class="shrink-0 text-ink-500" />
         </Show>
+        <span class="text-ink-500 shrink-0">{label()}</span>
+        <span class="flex-1" />
         <Iconify
           icon="lucide:chevron-down"
           size={12}
-          class={`transition-transform ${open() ? "rotate-180" : ""}`}
+          class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
         />
-      </button>
+      </div>
       <Show when={open()}>
-        <div class="mt-2 max-h-64 overflow-y-auto [scrollbar-gutter:stable] pl-3 border-l-2 border-line text-ink-400 whitespace-pre-wrap break-words text-xs leading-relaxed">
-          {block.reasoning || "(thinking…)"}
+        <div class="rc-markdown w-full text-xs leading-relaxed break-words overflow-x-auto pl-1 pb-1 text-ink-400">
+          <Streamdown components={transcriptMarkdownComponents}>
+            {entry.block.reasoning || "(thinking…)"}
+          </Streamdown>
         </div>
       </Show>
     </div>
-    </Show>
+  );
+}
+
+/** Assistant text as a tool-style row: header with a one-line preview and
+ * a Streamdown body. Hidden (display:none, kept in the DOM) while the
+ * hide-tool-messages rule, verbose filter, fuzzy dedup or the featured
+ * final message takes it out of the card. */
+export function renderTextRow(
+  ctx: TranscriptRenderCtx,
+  entry: Extract<TurnEntry, { kind: "text" }>,
+  running: boolean,
+  hidden: boolean,
+) {
+  const key = `${entry.msg.id}:text:${entry.nth}`;
+  const open = () => ctx.toolOpen()[key] ?? running;
+  const preview = () =>
+    (entry.block.text || "").replace(/\s+/g, " ").trim().slice(0, 80);
+  return (
+    <div style={hidden ? { display: "none" } : undefined} data-text-row={key}>
+      <div
+        onClick={() => ctx.toggleToolOpen(key)}
+        class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
+      >
+        <Iconify icon="lucide:message-circle" size={14} class="shrink-0 text-ink-500" />
+        <span class="text-ink-500 shrink-0">Message</span>
+        <span class="truncate text-ink-200 font-medium min-w-0 flex-1">{preview()}</span>
+        <Iconify
+          icon="lucide:chevron-down"
+          size={12}
+          class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
+        />
+      </div>
+      <Show when={open()}>
+        <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto pl-1 pb-1">
+          <Streamdown components={transcriptMarkdownComponents}>{entry.block.text}</Streamdown>
+        </div>
+      </Show>
+    </div>
   );
 }
 
 /**
- * The special aggregate balloon: one card per consecutive tool-call series
- * (possibly spanning several rendered assistant messages — see
- * buildRenderBlocks). It has its own chrome (header + collapse) and NO
- * per-message chrome of its own: the lead message's hover actions cover
- * the whole turn; the card itself carries no edit/delete/copy buttons.
- * `extraSrcIds` are the raw daemon indices fused in, used only for keys.
+ * The turn aggregate: one card per turn with every thinking, message and
+ * tool run in event order. Open by default while the turn runs (verbose no
+ * longer affects this), closed once it ends — unless toggled explicitly.
+ * Question-only turns keep their inline rendering, exempt from the card.
  */
-
-export function renderAssistantSpecial(
+export function renderTurnAggregate(
   ctx: TranscriptRenderCtx,
-  msgId: string,
-  units: ToolUnit[],
+  series: RenderBlockSeries,
   _isLast: boolean,
-  extraSrcIds: number[] = [],
 ) {
   // NOTE: ctx.renderBlocks() is the FULL list (window only affects the <For>);
-  // the running unit is always the newest block, which is always visible.
-  const running = createMemo(() => ctx.renderBlocks().at(-1)?.msg.id === msgId && ctx.sessionStatus() === "running");
-  const summary = createMemo(() => specialTitle(units));
-  const key = `${msgId}:special`;
-  const open = () => ctx.toolGroupOpen()[key] ?? false;
+  // the running turn is always the newest block, which is always visible.
+  const running = createMemo(() => ctx.renderBlocks().at(-1)?.msg.id === series.msg.id && ctx.sessionStatus() === "running");
+  const summary = createMemo(() => specialTitle(series.units));
+  const key = `${series.msg.id}:turn`;
+  const open = () => ctx.toolGroupOpen()[key] ?? running();
+  /** The featured final renders below once idle; inside the card its rows
+   * stay mounted with display:none so Solid keeps DOM identity. */
+  const featured = () => series.finalMsgId != null && !running();
+  const lastTurnId = () => series.extras.at(-1)?.id ?? series.msg.id;
+  const lastTextIdx = () => {
+    let idx = -1;
+    series.entries.forEach((e, i) => { if (e.kind === "text") idx = i; });
+    return idx;
+  };
+  const thinkingHidden = () => !ctx.verboseChat();
+  const textHidden = (entry: Extract<TurnEntry, { kind: "text" }>, idx: number) => {
+    if (entry.hidden) return true;
+    if (featured() && entry.msg.id === series.finalMsgId) return true;
+    if (!ctx.verboseChat() && idx !== lastTextIdx()) return true;
+    if (
+      ctx.hideToolMessages() && series.units.length > 0 &&
+      !entry.msg.hasCompletion && !isLongAssistantMessage(entry.msg)
+    ) return true;
+    return false;
+  };
   return (
-    <Show when={units.every((u) => u.call?.toolName === "question")} fallback={
+    <Show when={series.units.every((u) => u.call?.toolName === "question")} fallback={
     <div class="w-full border-t border-line/60 overflow-hidden mt-1">
       <button
         onClick={() => ctx.toggleToolGroup(key)}
@@ -135,7 +186,7 @@ export function renderAssistantSpecial(
         <span class="text-[13px] font-medium text-ink-300 truncate flex-1 min-w-0">
           {summary()}
         </span>
-        <Show when={ctx.specialProgress(units)}>
+        <Show when={ctx.specialProgress(series.units)}>
           {(t) => (
             <span class="font-mono text-[11px] text-ink-600 truncate max-w-[40%] shrink-0">
               {t()}
@@ -150,11 +201,61 @@ export function renderAssistantSpecial(
       </button>
       <Show when={open()}>
         <div class="border-t border-line/60 px-2 py-1.5 space-y-0.5">
-          {renderToolSegs(ctx, msgId, extraSrcIds.join(",") || "lead", units, running())}
+          <For each={series.entries}>
+            {(entry, ei) => {
+              if (entry.kind === "tools") {
+                return renderToolSegs(ctx, entry.msg.id, `${series.msg.id}:e${ei()}`, entry.units, running());
+              }
+              if (entry.kind === "thinking") {
+                const live = running() && entry.isNewest && entry.msg.id === lastTurnId() && ctx.thinkingStart() !== null;
+                return renderThinkingRow(ctx, entry, running(), thinkingHidden(), live);
+              }
+              if (entry.kind === "text") {
+                return renderTextRow(ctx, entry, running(), textHidden(entry, ei()));
+              }
+              return renderImageBlock(ctx, entry.block);
+            }}
+          </For>
         </div>
       </Show>
     </div>
-    }><For each={units}>{(unit, index) => renderToolUnit(ctx, msgId, unit, index(), running())}</For></Show>
+    }><For each={series.units}>{(unit, index) => renderToolUnit(ctx, series.msg.id, unit, index(), running())}</For></Show>
+  );
+}
+
+/** Featured final message of a finished turn, rendered as a plain bubble
+ * below the aggregate (the files balloon comes right after). */
+export function renderFinalMsg(ctx: TranscriptRenderCtx, series: RenderBlockSeries) {
+  const msg = () => [series.msg, ...series.extras].find((m) => m.id === series.finalMsgId);
+  return (
+    <Show when={msg()}>
+      {(m) => (
+        <div class="w-full space-y-2.5">
+          <For each={m().blocks.filter((b) => b.type === "image" || (b.type === "text" && !!b.text?.trim()))}>
+            {(block) => block.type === "image" ? renderImageBlock(ctx, block) : (
+              <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
+                <Streamdown components={transcriptMarkdownComponents}>{block.text}</Streamdown>
+              </div>
+            )}
+          </For>
+        </div>
+      )}
+    </Show>
+  );
+}
+
+/** Plain assistant bubble for turns with no tools and no thinking. */
+export function renderSingleAssistant(ctx: TranscriptRenderCtx, msg: ChatMessage) {
+  return (
+    <div class="w-full space-y-2.5">
+      <For each={msg.blocks.filter((b) => b.type === "image" || (b.type === "text" && !!b.text?.trim()))}>
+        {(block) => block.type === "image" ? renderImageBlock(ctx, block) : (
+          <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
+            <Streamdown components={transcriptMarkdownComponents}>{block.text}</Streamdown>
+          </div>
+        )}
+      </For>
+    </div>
   );
 }
 
@@ -191,94 +292,11 @@ export function renderImageBlock(ctx: TranscriptRenderCtx, block: ContentBlock) 
   );
 }
 
-
-export function renderMessageContent(ctx: TranscriptRenderCtx, msg: ChatMessage, isLast: boolean) {
-  let thinkNth = 0;
-  return (
-    <div class="w-full space-y-2.5">
-      <For each={splitToolRuns(msg.blocks)}>
-        {(part) => {
-          if (part.kind === "tools") {
-            return renderAssistantSpecial(ctx, msg.id, part.units, isLast);
-          }
-          if (part.kind === "thinking") {
-            return (
-              <Show when={ctx.verboseChat()}>
-                <div class="w-full space-y-2">
-                  <For each={part.blocks}>
-                    {(block) => renderThinkingBlock(ctx, msg, block, thinkNth++)}
-                  </For>
-                </div>
-              </Show>
-            );
-          }
-          return (
-            <For each={part.blocks}>
-              {(block) => {
-                if (block.type === "text" && block.text) {
-                  const hasTools = msg.blocks.some((b) => b.type === "tool_call" || b.type === "tool_result");
-                  if (ctx.hideToolMessages() && hasTools && !msg.hasCompletion && !isLongAssistantMessage(msg)) return null;
-                  return (
-                    <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
-                      <Streamdown components={transcriptMarkdownComponents}>{block.text}</Streamdown>
-                    </div>
-                  );
-                }
-                if (block.type === "image") return renderImageBlock(ctx, block);
-                return null;
-              }}
-            </For>
-          );
-        }}
-      </For>
-    </div>
-  );
-}
 /**
- * Renders ONE render block: either a series (lead text/thinking in wire
- * order, then the aggregate card of the whole fused run) or a single
- * message with its per-bubble chrome (edit/copy/regenerate/delete
- * on its own rendered position).
- */
-
-export function renderSeriesLead(ctx: TranscriptRenderCtx, series: RenderBlockSeries) {
-  const all = () => [series.msg, ...series.extras];
-  const thoughts = createMemo(() => all().flatMap((msg) => msg.blocks.filter((b) => b.type === "reasoning" && !!b.reasoning?.trim()).map((block, nth) => ({msg, block, nth}))));
-  const key = `${series.msg.id}:group-thinking`;
-  const open = () => ctx.expandedThinking()[key] ?? false;
-  const entryDuration = (entry: { msg: ChatMessage }) => {
-    if (entry.msg.id === ctx.messages().at(-1)?.id && ctx.thinkingStart() !== null) {
-      return `${ctx.thinkingElapsed()}s`;
-    }
-    return entry.msg.thinkingDuration !== undefined ? `${entry.msg.thinkingDuration}s` : "—";
-  };
-  const maxDurLen = createMemo(() => Math.max(3, ...thoughts().map((e) => entryDuration(e).length)));
-  const displayThoughts = createMemo(() => thoughts().slice().reverse());
-  return <div class="w-full space-y-2.5">
-    <Show when={ctx.verboseChat() && thoughts().length}>
-      <Show when={thoughts().length > 1} fallback={<For each={thoughts()}>{(entry) => renderThinkingBlock(ctx, entry.msg, entry.block, entry.nth)}</For>}>
-        <div class="w-full" data-grouped-thinking>
-          <button aria-expanded={open()} onClick={() => ctx.setExpandedThinking((prev) => ({...prev, [key]:!open()}))} class="flex items-center gap-1.5 text-xs text-ink-500 hover:text-ink-300 cursor-pointer">
-            <Iconify icon="lucide:bot" size={14} /><span>Thinking</span><Iconify icon="lucide:chevron-down" size={12} class={open() ? "rotate-180" : ""} />
-          </button>
-          <Show when={open()}><ol class="mt-2 max-h-64 overflow-y-auto [scrollbar-gutter:stable] space-y-3 text-xs text-ink-400 leading-relaxed">
-            <For each={displayThoughts()}>{(entry) => <li class="flex gap-3 items-start">
-              <span class="w-10 shrink-0 text-right tabular-nums font-mono whitespace-pre text-ink-500">{entryDuration(entry).padStart(maxDurLen(), " ")}</span>
-              <span class="pl-3 border-l border-line whitespace-pre-wrap break-words min-w-0">{entry.block.reasoning}</span>
-            </li>}</For>
-          </ol></Show>
-        </div>
-      </Show>
-    </Show>
-    <For each={all()}>{(message) => <For each={message.blocks.filter((b) => b.type === "image" || ((!(ctx.hideToolMessages() && series.units.length > 0) || message.hasCompletion || isLongAssistantMessage(message)) && b.type === "text" && !!b.text?.trim()))}>{(block) => block.type === "image" ? renderImageBlock(ctx, block) : <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto"><Streamdown components={transcriptMarkdownComponents}>{block.text}</Streamdown></div>}</For>}</For>
-  </div>;
-}
-/**
- * Per-series collapsible sub-groups (explore/command runs) inside the
- * special card. Same grouping as before, keyed on the series card so
+ * Per-run collapsible sub-groups (explore/command runs) inside the
+ * aggregate card. Same grouping as before, keyed on the series card so
  * state never collides across fused messages.
  */
-
 export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt: string, units: ToolUnit[], running: boolean) {
   // Partition consecutive explore/command runs into collapsible groups
   // (pure helper — algorithm lives in utils/toolSegs, covered by tests).

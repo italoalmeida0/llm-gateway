@@ -1,5 +1,5 @@
 import { displayToolArgs } from "../live";
-import type { ContentBlock, MsgPart, ToolCat, ToolUnit } from "../types";
+import type { ContentBlock, ToolCat, ToolUnit } from "../types";
 
 export function tryParseArgs(a?: string): any {
   return displayToolArgs(a);
@@ -56,61 +56,4 @@ export function msgHasTools(m: { blocks: ContentBlock[] }): boolean {
  * envelopes are reported so the renderer can skip them.
  */
 
-/**
- * Splits a message into text runs, thinking runs and consecutive tool runs
- * (order kept). Thinking panels break a tool series on purpose: a thinking
- * block renders ABOVE its own group, never swallowed inside one, so every
- * reasoning stays visible even in a tool-heavy transcript.
- */
-export function splitToolRuns(blocks: ContentBlock[]): MsgPart[] {
-  const parts: MsgPart[] = [];
-  let buf: ContentBlock[] = [];
-  let think: ContentBlock[] = [];
-  let run: ToolUnit[] = [];
-  const byId = new Map<string, ToolUnit>();
-  const flushBuf = () => {
-    if (buf.length) {
-      parts.push({ kind: "blocks", blocks: buf });
-      buf = [];
-    }
-  };
-  const flushThink = () => {
-    if (think.length) {
-      parts.push({ kind: "thinking", blocks: think });
-      think = [];
-    }
-  };
-  const flushRun = () => {
-    if (run.length) {
-      parts.push({ kind: "tools", units: run });
-      run = [];
-    }
-  };
-  for (const b of blocks) {
-    if (b.type === "tool_call") {
-      flushBuf();
-      flushThink();
-      const u: ToolUnit = { call: b };
-      run.push(u);
-      if (b.toolId) byId.set(b.toolId, u);
-    } else if (b.type === "tool_result") {
-      flushBuf();
-      flushThink();
-      const u = (b.toolId && byId.get(b.toolId)) || null;
-      if (u && !u.result) u.result = b;
-      else run.push({ result: b });
-    } else if (b.type === "reasoning") {
-      flushBuf();
-      flushRun();
-      think.push(b);
-    } else {
-      flushRun();
-      flushThink();
-      buf.push(b);
-    }
-  }
-  flushRun();
-  flushThink();
-  flushBuf();
-  return parts;
-}
+

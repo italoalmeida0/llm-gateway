@@ -224,7 +224,7 @@ export function createTurnNotify(opts: {
           target.disposition === "approval" || target.disposition === "question"
             ? notifyTag("wait", target.hostId, target.sessionId)
             : notifyTag("turn", target.hostId, target.sessionId);
-        const n = new Notification(title, { body, tag });
+        const n = new Notification(title, { body, tag, icon: "/indirect-icon.svg" });
         n.onclick = () => {
           try {
             window.focus();

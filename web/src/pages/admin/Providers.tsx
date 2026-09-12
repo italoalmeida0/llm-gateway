@@ -406,7 +406,7 @@ export default function AdminProvidersPage() {
                           {p.responsesBaseUrl && <Badge tone="indigo">Responses</Badge>}
                           <span class="text-[11px] text-ink-500">priority {p.priority} · {p.modelCount} model{p.modelCount === 1 ? "" : "s"} · added {fmtDate(p.createdAt)}</span>
                         </div>
-                        <div class="mt-2 min-w-0 space-y-1 text-xs text-ink-400">
+                        <div class="mt-2 hidden min-w-0 space-y-1 text-xs text-ink-400 sm:block">
                           <Show when={p.openaiBaseUrl}>
                             <div class="min-w-0 break-all">
                               OpenAI: <code class="text-ink-300 break-all">{p.openaiBaseUrl}</code>

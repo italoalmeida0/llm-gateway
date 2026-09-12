@@ -206,7 +206,7 @@ export default function AdminStatsPage() {
 
       <Show when={stats() && !stats.loading}>
         <div
-          class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 mb-6"
+          class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 mb-5"
           {...usalItems("fade-u", 90)}
         >
           <StatCard
@@ -241,7 +241,7 @@ export default function AdminStatsPage() {
           />
         </div>
 
-        <Card class="mb-6">
+        <Card class="mb-5">
           <CardHeader
             title={days() === "1" ? "Hourly usage" : "Daily usage"}
             subtitle={`Tokens per ${days() === "1" ? "hour" : "day"} (UTC)`}
@@ -255,7 +255,7 @@ export default function AdminStatsPage() {
           </div>
         </Card>
 
-        <div class="flex flex-col gap-6" {...usalItems("fade-u", 90)}>
+        <div class="flex flex-col gap-4" {...usalItems("fade-u", 90)}>
           <Card>
             <CardHeader
               title="Top users"
@@ -263,12 +263,12 @@ export default function AdminStatsPage() {
             />
             <Show
               when={!breakdownCounts.loading}
-              fallback={<div class="p-6 text-xs text-ink-500">Loading…</div>}
+              fallback={<div class="p-5 text-xs text-ink-500">Loading…</div>}
             >
               <Show
                 when={(breakdownCounts()?.users ?? 0) > 0}
                 fallback={
-                  <div class="p-6">
+                  <div class="p-5">
                     <EmptyState icon={Icons.users} title="No user data in this window" />
                   </div>
                 }
@@ -294,12 +294,12 @@ export default function AdminStatsPage() {
             />
             <Show
               when={!breakdownCounts.loading}
-              fallback={<div class="p-6 text-xs text-ink-500">Loading…</div>}
+              fallback={<div class="p-5 text-xs text-ink-500">Loading…</div>}
             >
               <Show
                 when={(breakdownCounts()?.models ?? 0) > 0}
                 fallback={
-                  <div class="p-6">
+                  <div class="p-5">
                     <EmptyState icon={Icons.chart} title="No model data in this window" />
                   </div>
                 }

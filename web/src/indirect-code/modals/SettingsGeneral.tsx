@@ -12,15 +12,13 @@ function Toggle(props: {
   return (
     <button
       onClick={props.onToggle}
-      class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${props.on() ? "bg-accent-500" : "bg-ink-700"}`}
-      style={{ height: "22px" }}
+      class="ui-switch-track shrink-0 cursor-pointer"
       role="switch"
       aria-checked={props.on()}
       aria-label={props.label}
     >
       <span
-        class={`block w-4 h-4 rounded-full bg-accent-fg transition-transform ${props.on() ? "translate-x-[18px]" : "translate-x-0"}`}
-        style={{ height: "16px", width: "16px" }}
+        class="ui-switch-thumb"
       />
     </button>
   );
@@ -31,7 +29,7 @@ export function SettingsGeneralSection() {
   const ui = useUI();
   return (
 <>
-<div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
+<div class="border-b border-line pb-4 last:border-0 last:pb-0 space-y-3">
   <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
     <Iconify icon="lucide:palette" size={15} class="text-ink-500" />
     <span>Appearance</span>
@@ -40,7 +38,7 @@ export function SettingsGeneralSection() {
   <div class="space-y-3 text-xs">
     <div class="py-2 flex items-center justify-between gap-4">
       <div>
-        <div class="font-semibold text-ink-200">Theme</div>
+        <div class="font-medium text-ink-200">Theme</div>
         <div class="text-[11px] text-ink-500 mt-0.5">
           White or dark interface.
         </div>
@@ -49,7 +47,7 @@ export function SettingsGeneralSection() {
     </div>
     <div class="py-2 flex items-center justify-between gap-4">
       <div>
-        <div class="font-semibold text-ink-200">Verbose Agent Chat</div>
+        <div class="font-medium text-ink-200">Verbose Agent Chat</div>
         <div class="text-[11px] text-ink-500 mt-0.5">
           Display intermediate thinking steps.
         </div>
@@ -60,22 +58,20 @@ export function SettingsGeneralSection() {
           ui.setVerboseChat(v);
           try { localStorage.setItem("llmgw-rc-verbose", v ? "1" : "0"); } catch {}
         }}
-        class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${ui.verboseChat() ? "bg-accent-500" : "bg-ink-700"}`}
-        style={{ height: "22px" }}
+        class="ui-switch-track shrink-0 cursor-pointer"
         role="switch"
         aria-checked={ui.verboseChat()}
         aria-label="Verbose agent chat"
       >
         <span
-          class={`block w-4 h-4 rounded-full bg-accent-fg transition-transform ${ui.verboseChat() ? "translate-x-[18px]" : "translate-x-0"}`}
-          style={{ height: "16px", width: "16px" }}
+          class="ui-switch-thumb"
         />
       </button>
     </div>
     <Show when={ui.verboseChat()}>
       <div class="py-2 pl-4 border-l-2 border-line/60 flex items-center justify-between gap-4">
         <div>
-          <div class="font-semibold text-ink-200">Hide Tool Call Messages</div>
+          <div class="font-medium text-ink-200">Hide Tool Call Messages</div>
           <div class="text-[11px] text-ink-500 mt-0.5">
             Hide intermediate messages sent alongside tool calls to group actions and thoughts during the turn. Messages with 50+ tokens always stay visible.
           </div>
@@ -86,25 +82,23 @@ export function SettingsGeneralSection() {
             ui.setHideToolMessages(v);
             try { localStorage.setItem("llmgw-rc-hide-tool-messages", v ? "1" : "0"); } catch {}
           }}
-          class={`w-10 h-5.5 rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${ui.hideToolMessages() ? "bg-accent-500" : "bg-ink-700"}`}
-          style={{ height: "22px" }}
+          class="ui-switch-track shrink-0 cursor-pointer"
           role="switch"
           aria-checked={ui.hideToolMessages()}
           aria-label="Hide tool call messages"
         >
           <span
-            class={`block w-4 h-4 rounded-full bg-accent-fg transition-transform ${ui.hideToolMessages() ? "translate-x-[18px]" : "translate-x-0"}`}
-            style={{ height: "16px", width: "16px" }}
+            class="ui-switch-thumb"
           />
         </button>
       </div>
     </Show>
     <div class="py-2">
-      <div class="font-semibold text-ink-200">Conversation Width</div>
+      <div class="font-medium text-ink-200">Conversation Width</div>
       <div class="text-[11px] text-ink-500 mt-0.5 mb-2">
         Maximum width of the conversation panel.
       </div>
-      <div class="grid grid-cols-3 gap-1 bg-ink-950 p-1 rounded-xl border border-line/60">
+      <div class="ui-segmented grid grid-cols-3">
         <For each={[["narrow", "Narrow"], ["default", "Default"], ["wide", "Wide"]] as const}>
           {([v, label]) => (
             <button
@@ -112,11 +106,8 @@ export function SettingsGeneralSection() {
                 ui.setConvWidth(v);
                 try { localStorage.setItem("llmgw-rc-width", v); } catch {}
               }}
-              class={`py-1.5 rounded-lg text-center font-medium transition-colors cursor-pointer ${
-                ui.convWidth() === v
-                  ? "bg-ink-800 text-ink-100"
-                  : "text-ink-500 hover:text-ink-300"
-              }`}
+              aria-pressed={ui.convWidth() === v}
+              class="ui-segment"
             >
               {label}
             </button>
@@ -127,7 +118,7 @@ export function SettingsGeneralSection() {
   </div>
 </div>
 
-<div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
+<div class="border-b border-line pb-4 last:border-0 last:pb-0 space-y-3">
   <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
     <Iconify icon="lucide:bell" size={15} class="text-ink-500" />
     <span>Turn notifications</span>
@@ -135,7 +126,7 @@ export function SettingsGeneralSection() {
   <div class="space-y-3 text-xs">
     <div class="py-2 flex items-center justify-between gap-4">
       <div>
-        <div class="font-semibold text-ink-200">Notify when a turn finishes</div>
+        <div class="font-medium text-ink-200">Notify when a turn finishes</div>
         <div class="text-[11px] text-ink-500 mt-0.5">
           Browser notification for turns on any host or conversation — even ones you are not watching.
           <Show when={pushSupported()}>
@@ -156,7 +147,7 @@ export function SettingsGeneralSection() {
     <Show when={ui.turnNotify.notifyOn()}>
       <div class="py-2 pl-4 border-l-2 border-line/60 flex items-center justify-between gap-4">
         <div>
-          <div class="font-semibold text-ink-200">Play a sound</div>
+          <div class="font-medium text-ink-200">Play a sound</div>
           <div class="text-[11px] text-ink-500 mt-0.5">
             Short chime with the notification (only while a tab is open).
           </div>
@@ -197,7 +188,7 @@ export function SettingsGeneralSection() {
   </div>
 </div>
 
-<div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
+<div class="border-b border-line pb-4 last:border-0 last:pb-0 space-y-3">
   <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
     <Iconify icon="lucide:bot" size={15} class="text-ink-500" />
     <span>Agent</span>
@@ -225,28 +216,25 @@ export function SettingsGeneralSection() {
   </div>
 </div>
 
-<div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
+<div class="border-b border-line pb-4 last:border-0 last:pb-0 space-y-3">
   <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
     <Iconify icon="lucide:sliders-horizontal" size={15} class="text-ink-500" />
     <span>Advanced</span>
   </h3>
   <div class="space-y-4 text-xs">
     <div>
-      <label class="block font-semibold text-ink-200 mb-1">
+      <label class="block font-medium text-ink-200 mb-1">
         Auto-compact threshold
       </label>
-      <div class="grid grid-cols-6 gap-1 bg-ink-900 p-1 rounded-xl border border-line">
+      <div class="ui-segmented grid grid-cols-6">
         <For each={[0, 70, 80, 85, 90, 95]}>
           {(v) => (
             <button
               onClick={() =>
                 m.setDaemonSettings({ ...m.daemonSettings(), autoCompactPercent: v })
               }
-              class={`py-1 rounded-lg text-center font-medium transition-colors cursor-pointer ${
-                (m.daemonSettings().autoCompactPercent ?? 80) === v
-                  ? "bg-ink-100 text-ink-950"
-                  : "text-ink-400 hover:text-ink-200"
-              }`}
+              aria-pressed={(m.daemonSettings().autoCompactPercent ?? 80) === v}
+              class="ui-segment"
             >
               {v === 0 ? "Off" : `${v}%`}
             </button>
@@ -260,7 +248,7 @@ export function SettingsGeneralSection() {
   </div>
 </div>
 
-<div class="rounded-xl border border-line bg-elev/40 p-4 sm:p-5 space-y-4">
+<div class="border-b border-line pb-4 last:border-0 last:pb-0 space-y-3">
   <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
     <Iconify icon="lucide:type" size={15} class="text-ink-500" />
     <span>Title Generator</span>

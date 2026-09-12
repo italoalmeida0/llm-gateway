@@ -391,7 +391,7 @@ export default function AdminProvidersPage() {
           <For each={providers()}>
             {(p) => (
               <div data-id={p.id}>
-                <Card interactive class="p-6">
+                <Card interactive class="p-5">
                   <div class="flex flex-wrap items-start justify-between gap-3">
                     <div class="flex items-start gap-2 min-w-0">
                       <span data-handle title="Drag to reorder (fallback priority)" class="mt-0.5 text-ink-600 hover:text-ink-300 transition-colors">

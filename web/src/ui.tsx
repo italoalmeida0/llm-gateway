@@ -16,7 +16,7 @@ import { usalCount } from "./motion";
 
 /**
  * Hand-built UI kit: buttons, cards, inputs, custom select, modal, toast,
- * badges — themed through CSS vars (white/dark), monospace-red brand accents,
+ * badges — themed through CSS vars (white/dark), restrained teal accents,
  * USAL friendly. No component library by design.
  */
 
@@ -165,7 +165,7 @@ export function ThemeToggle(props: {
         type="button"
         onClick={toggleTheme}
         aria-label="Toggle theme"
-        class={`relative flex h-10 w-10 items-center justify-center rounded-xl text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 transition-all duration-300 cursor-pointer ${props.class ?? ""}`}
+        class={`relative flex h-9 w-9 items-center justify-center rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 transition-all duration-300 cursor-pointer ${props.class ?? ""}`}
       >
         <span
           class="flex items-center justify-center transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
@@ -194,21 +194,10 @@ export function Btn(props: {
   title?: string;
   children: JSX.Element;
 }) {
-  const base =
-    "inline-flex items-center justify-center gap-1.5 rounded-xl font-medium transition-all duration-200 active:scale-[0.97] focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer";
-  const variant = {
-    primary: "bg-accent-500 hover:bg-accent-600 text-accent-fg shadow-sm",
-    ghost: "hover:bg-ink-800 text-ink-200",
-    danger: "bg-rose-600/90 hover:bg-rose-600 text-white",
-    outline:
-      "border border-ink-600/80 hover:border-ink-500 hover:bg-ink-800/60 text-ink-100",
-  }[props.variant ?? "primary"];
-  const size =
-    props.size === "sm" ? "text-xs px-2.5 py-1.5" : "text-sm px-4 py-2";
   const btn = (
     <button
       type={props.type ?? "button"}
-      class={`${base} ${variant} ${size} ${props.class ?? ""}`}
+      class={`ui-button ui-button-${props.variant ?? "primary"} ${props.size === "sm" ? "ui-button-sm" : ""} ${props.class ?? ""}`}
       onClick={props.onClick}
       disabled={props.disabled}
     >
@@ -230,9 +219,9 @@ export function Card(props: {
 }) {
   return (
     <div
-      class={`rounded-xl border border-line bg-card overflow-hidden ${
+      class={`ui-card ${
         props.interactive
-          ? "transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 hover:border-ink-600/50"
+          ? "ui-card-interactive"
           : ""
       } ${props.class ?? ""}`}
     >
@@ -247,7 +236,7 @@ export function CardHeader(props: {
   right?: JSX.Element;
 }) {
   return (
-    <div class="flex items-start justify-between gap-4 px-6 pt-5 pb-3">
+    <div class="flex items-start justify-between gap-3 px-5 pt-4 pb-3">
       <div>
         <h2 class="text-sm font-semibold text-ink-100">{props.title}</h2>
         <Show when={props.subtitle}>
@@ -263,7 +252,7 @@ export function CardHeader(props: {
 export function IconTile(props: { icon: string; class?: string }) {
   return (
     <div
-      class={`rounded-2xl bg-brand-500/10 border border-brand-500/15 text-brand-500 flex items-center justify-center shrink-0 ${props.class ?? "w-10 h-10"}`}
+      class={`rounded-lg bg-ink-900 border border-line text-ink-400 flex items-center justify-center shrink-0 ${props.class ?? "w-10 h-10"}`}
     >
       <Icon name={props.icon} size={20} />
     </div>
@@ -287,7 +276,7 @@ export function IconBtn(props: {
         aria-label={props.title}
         disabled={props.disabled}
         onClick={props.onClick}
-        class={`flex items-center justify-center rounded-lg p-2 transition-all duration-200 active:scale-[0.95] disabled:opacity-40 disabled:pointer-events-none cursor-pointer ${
+        class={`flex items-center justify-center rounded-lg p-2 transition-all duration-200 active:translate-y-px disabled:opacity-40 disabled:pointer-events-none cursor-pointer ${
           props.danger
             ? "text-ink-400 hover:text-rose-500 hover:bg-rose-500/10"
             : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/60"
@@ -304,7 +293,7 @@ export function DeltaPill(props: { pct: number }) {
   const up = () => props.pct >= 0;
   return (
     <span
-      class={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold tabular-nums ${
+      class={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${
         up()
           ? "bg-emerald-500/10 text-emerald-500"
           : "bg-rose-500/10 text-rose-500"
@@ -316,7 +305,7 @@ export function DeltaPill(props: { pct: number }) {
   );
 }
 
-/** Pill-shaped segmented control (elevated track, raised active segment). */
+/** Compact segmented control with a raised active option. */
 export function Segmented<T extends string>(props: {
   value: T;
   onChange: (v: T) => void;
@@ -325,20 +314,16 @@ export function Segmented<T extends string>(props: {
 }) {
   return (
     <div
-      class={`inline-flex items-center gap-0.5 rounded-full border border-line bg-elev p-1 shadow-sm ${props.class ?? ""}`}
-      role="tablist"
+      class={`ui-segmented ${props.class ?? ""}`}
+      role="group"
     >
       <For each={props.options}>
         {(o) => (
           <button
-            role="tab"
-            aria-selected={o.value === props.value}
+            type="button"
+            aria-pressed={o.value === props.value}
             onClick={() => props.onChange(o.value)}
-            class={`rounded-full px-3.5 py-1.5 text-xs transition-all duration-200 cursor-pointer ${
-              o.value === props.value
-                ? "bg-ink-100 text-ink-950 font-semibold shadow-sm"
-                : "text-ink-400 hover:text-ink-100"
-            }`}
+            class="ui-segment"
           >
             {o.label}
           </button>
@@ -393,11 +378,11 @@ export function StatCard(props: {
   sub?: JSX.Element;
 }) {
   return (
-    <Card interactive class="p-6">
+    <Card interactive class="p-5">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <div class="text-xs font-medium text-ink-500 mb-2">{props.label}</div>
-          <div class="text-[32px] leading-9 font-light tracking-tight truncate">
+          <div class="text-[28px] leading-8 font-medium tracking-tight truncate">
             <Show when={props.countValue !== undefined} fallback={props.value}>
               <CountUp value={props.countValue!} />
             </Show>
@@ -407,11 +392,11 @@ export function StatCard(props: {
           <Show when={props.delta !== null && props.delta !== undefined}>
             <DeltaPill pct={props.delta!} />
           </Show>
-          <IconTile icon={props.icon} class="w-9 h-9 rounded-xl" />
+          <IconTile icon={props.icon} class="w-8 h-8 rounded-lg" />
         </div>
       </div>
       <Show when={props.sub}>
-        <div class="mt-4 pt-3.5 border-t border-line text-xs text-ink-500">
+        <div class="mt-3 pt-3 border-t border-line text-xs text-ink-500">
           {props.sub}
         </div>
       </Show>
@@ -432,15 +417,21 @@ export function Input(props: {
   hint?: string;
   disabled?: boolean;
 }) {
+  const [revealed, setRevealed] = createSignal(false);
+  const inputId = createUniqueId();
+  const hintId = createUniqueId();
   return (
-    <label class="block">
+    <div class="block">
       <Show when={props.label}>
-        <span class="block text-xs font-medium text-ink-300 mb-1.5">
+        <label for={inputId} class="block text-xs font-medium text-ink-300 mb-1.5">
           {props.label}
-        </span>
+        </label>
       </Show>
+      <div class="relative">
       <input
-        type={props.type ?? "text"}
+        id={inputId}
+        aria-describedby={props.hint ? hintId : undefined}
+        type={props.type === "password" && revealed() ? "text" : props.type ?? "text"}
         value={props.value}
         onInput={(e) => props.onInput(e.currentTarget.value)}
         placeholder={props.placeholder}
@@ -449,12 +440,25 @@ export function Input(props: {
         autocomplete={props.autocomplete}
         required={props.required}
         disabled={props.disabled}
-        class="w-full rounded-xl border border-line bg-elev px-3.5 py-2.5 text-sm text-ink-100 placeholder:text-ink-500 focus:border-ink-500 focus:outline-none focus:ring-2 focus:ring-ink-500/10 transition-all duration-200 disabled:opacity-50 disabled:pointer-events-none"
+        class={`ui-field ${props.type === "password" ? "pr-10" : ""}`}
       />
-      <Show when={props.hint}>
-        <span class="block text-xs text-ink-500 mt-1.5">{props.hint}</span>
+      <Show when={props.type === "password"}>
+        <button
+          type="button"
+          aria-label={revealed() ? "Hide password" : "Show password"}
+          aria-pressed={revealed()}
+          disabled={props.disabled}
+          onClick={() => setRevealed(!revealed())}
+          class="absolute inset-y-px right-px flex w-9 items-center justify-center rounded-r-lg border-l border-line text-ink-400 hover:text-ink-100 hover:bg-ink-800/50 cursor-pointer disabled:opacity-50"
+        >
+          <Icon name={revealed() ? "lucide:eye-off" : Icons.eye} size={15} />
+        </button>
       </Show>
-    </label>
+      </div>
+      <Show when={props.hint}>
+        <span id={hintId} class="block text-xs text-ink-500 mt-1.5">{props.hint}</span>
+      </Show>
+    </div>
   );
 }
 
@@ -565,8 +569,8 @@ export function Select(props: {
           onClick={() => (open() ? setOpen(false) : openMenu())}
           aria-haspopup="listbox"
           aria-expanded={open()}
-          class={`w-full rounded-xl border bg-elev px-3.5 py-2.5 text-sm text-left text-ink-100 flex items-center justify-between gap-2 transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-ink-500/10 ${
-            open() ? "border-ink-500" : "border-line hover:border-ink-600"
+          class={`ui-field text-left flex items-center justify-between gap-2 cursor-pointer ${
+            open() ? "border-brand-500" : ""
           }`}
         >
           <span class="truncate">{current().label}</span>
@@ -596,7 +600,7 @@ export function Select(props: {
                 );
               }}
               role="listbox"
-              class="anim-float-in overflow-y-auto rounded-xl border border-line bg-elev p-1 shadow-xl shadow-black/10"
+              class="ui-popover anim-float-in overflow-y-auto p-1"
             >
             <For each={props.options}>
               {(o, i) => (
@@ -607,7 +611,7 @@ export function Select(props: {
                   data-hl={i() === highlight() ? "1" : "0"}
                   onClick={() => pick(o.value)}
                   onMouseEnter={() => setHighlight(i())}
-                  class={`w-full flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm text-left transition-colors cursor-pointer ${
+                  class={`w-full flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[13px] text-left transition-colors cursor-pointer ${
                     o.value === props.value
                       ? "bg-brand-500/10 text-brand-500 font-medium"
                       : i() === highlight()
@@ -699,7 +703,7 @@ export function Tooltip(props: {
               );
             }}
             role="tooltip"
-            class="anim-float-in pointer-events-none w-max max-w-[calc(100vw-1rem)] whitespace-pre-wrap break-words rounded-lg border border-line bg-elev px-2.5 py-1.5 text-xs font-medium text-ink-100 shadow-xl shadow-black/10"
+            class="ui-popover anim-float-in pointer-events-none w-max max-w-[calc(100vw-1rem)] whitespace-pre-wrap break-words px-2 py-1 text-[11px] font-medium text-ink-100"
           >
             {props.content}
           </div>
@@ -723,7 +727,7 @@ export function Badge(props: {
   };
   return (
     <span
-      class={`max-h-5 min-h-5 max-w-fit min-w-fit inline-flex items-center rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tones[props.tone]}`}
+      class={`max-h-5 min-h-5 max-w-fit min-w-fit inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${tones[props.tone]}`}
     >
       {props.children}
     </span>
@@ -750,8 +754,8 @@ export function ModalSection(props: {
               </h4>
               <Show when={props.info}>
                 <Tooltip content={props.info}>
-                  <span class="text-ink-400 hover:text-ink-200 cursor-help transition-colors text-xs">
-                    ⓘ
+                  <span tabindex="0" aria-label={props.info} class="inline-flex text-ink-400 hover:text-ink-200 cursor-help transition-colors">
+                    <Icon name="lucide:info" size={12} />
                   </span>
                 </Tooltip>
               </Show>
@@ -816,53 +820,38 @@ export function SwitchCard(props: {
   class?: string;
 }) {
   return (
-    <div
-      role="button"
-      tabIndex={props.disabled ? -1 : 0}
-      onClick={() => !props.disabled && props.onChange(!props.checked)}
-      onKeyDown={(e) => {
-        if (!props.disabled && (e.key === "Enter" || e.key === " ")) {
-          e.preventDefault();
-          props.onChange(!props.checked);
-        }
-      }}
-      class={`flex items-start gap-3.5 p-3.5 sm:p-4 rounded-xl border border-line bg-ink-900/40 hover:bg-ink-900/70 hover:border-ink-600 transition-all cursor-pointer select-none ${
+    <label
+      class={`ui-switch-card select-none ${
         props.disabled ? "opacity-50 pointer-events-none" : ""
       } ${props.class ?? ""}`}
     >
-      <button
-        type="button"
+      <span class="relative shrink-0">
+      <input
+        type="checkbox"
         role="switch"
+        class="peer sr-only"
+        aria-label={props.title}
+        checked={props.checked}
         aria-checked={props.checked}
         disabled={props.disabled}
-        onClick={(e) => {
-          e.stopPropagation();
-          props.onChange(!props.checked);
-        }}
-        class={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out mt-0.5 focus:outline-none ${
-          props.checked ? "bg-brand-500" : "bg-ink-700"
-        }`}
-      >
-        <span
-          class={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
-            props.checked ? "translate-x-4" : "translate-x-0"
-          }`}
-        />
-      </button>
-      <div class="min-w-0 flex-1">
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="text-xs sm:text-sm font-medium text-ink-100">
+        onChange={(e) => props.onChange(e.currentTarget.checked)}
+      />
+      <span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb" /></span>
+      </span>
+      <span class="min-w-0 flex-1">
+        <span class="flex items-center gap-2 flex-wrap">
+          <span class="text-xs font-medium text-ink-100">
             {props.title}
           </span>
           {props.badge}
-        </div>
+        </span>
         <Show when={props.description}>
-          <p class="text-xs text-ink-400 leading-relaxed mt-0.5">
+          <span class="block text-xs text-ink-400 leading-relaxed mt-0.5">
             {props.description}
-          </p>
+          </span>
         </Show>
-      </div>
-    </div>
+      </span>
+    </label>
   );
 }
 
@@ -880,7 +869,7 @@ export function FilterChip(props: {
       type="button"
       disabled={props.disabled}
       onClick={props.onClick}
-      class={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer select-none border ${
+      class={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-all cursor-pointer select-none border ${
         props.selected
           ? "bg-accent-500 text-accent-fg border-accent-500 font-semibold shadow-sm"
           : "bg-ink-900/60 text-ink-300 border-line hover:border-ink-500 hover:text-ink-100"
@@ -919,7 +908,7 @@ export function ModalNotice(props: {
   };
   return (
     <div
-      class={`rounded-xl border p-3.5 text-xs leading-relaxed ${tones[props.tone ?? "info"]} ${props.class ?? ""}`}
+      class={`rounded-lg border p-3 text-xs leading-relaxed ${tones[props.tone ?? "info"]} ${props.class ?? ""}`}
     >
       <Show when={props.title}>
         <div class="font-semibold text-ink-100 mb-1">{props.title}</div>
@@ -993,7 +982,7 @@ export function Modal(props: {
     <Show when={props.open}>
       <Portal>
         <div
-          class="fixed inset-0 overflow-y-auto bg-black/75 backdrop-blur-sm transition-opacity p-3 sm:p-6 flex items-center justify-center min-h-screen"
+          class="ui-dialog-backdrop fixed inset-0 overflow-y-auto p-3 sm:p-6 flex items-center justify-center"
           style={{ "z-index": Z.modal }}
           onMouseDown={props.onClose}
         >
@@ -1004,19 +993,19 @@ export function Modal(props: {
             aria-labelledby={titleId}
             aria-describedby={desc() ? descriptionId : undefined}
             tabindex="-1"
-            class={`anim-pop-in flex max-h-[90vh] my-auto min-h-0 w-full flex-col ${
+            class={`ui-dialog anim-pop-in flex max-h-[calc(100dvh-2rem)] sm:max-h-[90dvh] my-auto min-h-0 w-full flex-col ${
               props.width ?? "max-w-xl"
-            } rounded-xl sm:rounded-2xl border border-line bg-card shadow-2xl outline-none overflow-hidden`}
+            } ${props.fullOnMobile ? "ui-dialog-full" : ""} outline-none overflow-hidden`}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div class="flex shrink-0 items-start justify-between gap-4 px-6 py-5 border-b border-line bg-card">
+            <div class="ui-dialog-header flex shrink-0 items-start justify-between gap-3 px-4 py-3.5 border-b border-line">
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2 flex-wrap">
                   <h3
                     id={titleId}
-                    class="text-base sm:text-lg font-semibold text-ink-100 tracking-tight break-words"
+                    class="text-sm font-semibold text-ink-100 tracking-tight break-words"
                   >
                     {props.title}
                   </h3>
@@ -1044,18 +1033,18 @@ export function Modal(props: {
             {/* Body */}
             <div
               ref={(el) => props.bodyRef?.(el)}
-              class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5 space-y-5 text-xs sm:text-sm"
+              class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 space-y-4 text-[13px]"
             >
               {props.children}
             </div>
 
             {/* Footer */}
             <Show when={props.footer || props.footerLeft}>
-              <div class="flex shrink-0 items-center justify-between gap-3 border-t border-line bg-ink-900/40 px-6 py-3.5">
+              <div class="ui-dialog-footer flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-2.5">
                 <div class="min-w-0 flex items-center gap-2 empty:hidden text-xs text-ink-400">
                   {props.footerLeft}
                 </div>
-                <div class="flex items-center justify-end gap-2.5 flex-wrap ml-auto">
+                <div class="flex items-center justify-end gap-2 flex-wrap ml-auto">
                   {props.footer}
                 </div>
               </div>

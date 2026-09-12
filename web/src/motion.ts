@@ -21,8 +21,8 @@ USAL.config({
   defaults: {
     animation: "fade",
     direction: "u",
-    duration: reduceMotion ? 1 : 1000,
-    delay: 100,
+    duration: reduceMotion ? 1 : 240,
+    delay: 0,
     threshold: 10,
     splitDelay: reduceMotion ? 0 : 30,
     forwards: true,
@@ -38,7 +38,11 @@ USAL.config({
  * Plain attribute passthrough — USAL parses the tokens itself.
  */
 export function usal(value: string): { "data-usal": string } {
-  return { "data-usal": value };
+  // Explicit per-element timings otherwise override the reduced-motion defaults.
+  const timing = reduceMotion
+    ? `${value.replace(/\b(duration|delay|split-delay)-\d+\b/g, (_, kind: string) => `${kind}-${kind === "duration" ? 1 : 0}`).replace(/\bloop\b/g, "")} duration-1 delay-0`
+    : value;
+  return { "data-usal": timing };
 }
 
 /** Staggered container: children cascade in. */

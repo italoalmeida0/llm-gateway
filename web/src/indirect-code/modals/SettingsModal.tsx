@@ -15,14 +15,14 @@ export function SettingsModal() {
   return (
     <Modal
       open={m.showConfigModal()}
-      title="Host & Agent Settings"
-      subtitle="Appearance, chat preferences, Model Context Protocol servers, and custom skills on this host."
+      title="Host & agent settings"
+      subtitle="Customize your workspace and the agent on this host."
       width="max-w-2xl"
       onClose={m.cancelSettings}
       footerLeft={
         <div class="flex items-center gap-1.5 text-xs text-ink-400">
           <Iconify icon="lucide:hard-drive" size={13} />
-          <span>Config stored on host daemon</span>
+          <span>Saved on this host</span>
         </div>
       }
       footer={
@@ -48,7 +48,7 @@ export function SettingsModal() {
         </>
       }
     >
-      <div class="w-full space-y-5">
+      <div class="w-full space-y-4">
         <Show when={ui.appNotice()}>
           {(notice) => (
             <div
@@ -61,60 +61,55 @@ export function SettingsModal() {
         </Show>
 
         {/* Tab switcher bar */}
-        <div class="flex items-center gap-1.5 p-1 rounded-xl bg-ink-950/70 border border-line overflow-x-auto">
+        <div class="ui-segmented w-full overflow-x-auto">
           <button
             type="button"
             onClick={() => setActiveTab("general")}
-            class={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-all cursor-pointer whitespace-nowrap ${
-              activeTab() === "general"
-                ? "bg-accent-500 text-accent-fg shadow-sm font-semibold"
-                : "text-ink-400 hover:text-ink-100 hover:bg-ink-900/50 font-medium"
-            }`}
+            aria-pressed={activeTab() === "general"}
+            class="ui-segment flex flex-1 items-center justify-center gap-1.5 px-2"
           >
             <Iconify icon="lucide:sliders" size={13} />
-            <span>General & Appearance</span>
+            <span>General</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab("mcp")}
-            class={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-all cursor-pointer whitespace-nowrap ${
-              activeTab() === "mcp"
-                ? "bg-accent-500 text-accent-fg shadow-sm font-semibold"
-                : "text-ink-400 hover:text-ink-100 hover:bg-ink-900/50 font-medium"
-            }`}
+            aria-pressed={activeTab() === "mcp"}
+            class="ui-segment flex flex-1 items-center justify-center gap-1.5 px-2"
           >
             <Iconify icon="lucide:cpu" size={13} />
-            <span>MCP Servers</span>
+            <span>MCP servers</span>
+            <Show when={Object.keys(m.mcpServers()).length > 0}>
             <span
               class={`text-[10px] px-1.5 py-0.2 rounded-full ${
                 activeTab() === "mcp"
-                  ? "bg-accent-fg/15 text-accent-fg"
+                  ? "bg-ink-800 text-ink-200"
                   : "bg-ink-800 text-ink-400"
               }`}
             >
               {Object.keys(m.mcpServers()).length}
             </span>
+            </Show>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab("skills")}
-            class={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-all cursor-pointer whitespace-nowrap ${
-              activeTab() === "skills"
-                ? "bg-accent-500 text-accent-fg shadow-sm font-semibold"
-                : "text-ink-400 hover:text-ink-100 hover:bg-ink-900/50 font-medium"
-            }`}
+            aria-pressed={activeTab() === "skills"}
+            class="ui-segment flex flex-1 items-center justify-center gap-1.5 px-2"
           >
             <Iconify icon="lucide:puzzle" size={13} />
             <span>Skills</span>
+            <Show when={Object.keys(m.skills()).length > 0}>
             <span
               class={`text-[10px] px-1.5 py-0.2 rounded-full ${
                 activeTab() === "skills"
-                  ? "bg-accent-fg/15 text-accent-fg"
+                  ? "bg-ink-800 text-ink-200"
                   : "bg-ink-800 text-ink-400"
               }`}
             >
               {Object.keys(m.skills()).length}
             </span>
+            </Show>
           </button>
         </div>
 

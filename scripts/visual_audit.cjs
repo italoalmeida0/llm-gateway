@@ -76,7 +76,7 @@ async function runAudit() {
       await page.waitForTimeout(400); // let animation settle
 
       // Run styling verification
-      const inspection = await dialog.evaluate((dialogEl, { vpWidth, vpHeight, modalKey }) => {
+      const inspection = await dialog.evaluate((dialogEl, { vpWidth, vpHeight: _vpHeight, modalKey: _modalKey }) => {
         const bodyEl = dialogEl.querySelector('.overflow-y-auto') || dialogEl;
         const rect = dialogEl.getBoundingClientRect();
         

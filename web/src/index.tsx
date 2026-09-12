@@ -23,7 +23,6 @@ import {
 } from "./api";
 import {
   Icon,
-  IconTile,
   Icons,
   ThemeToggle,
   Toasts,
@@ -31,7 +30,6 @@ import {
   toast,
   watchSystemTheme,
 } from "./ui";
-import { usal, usalItems } from "./motion";
 import LoginPage from "./pages/Login";
 import SetPasswordPage from "./pages/SetPassword";
 import DashboardPage from "./pages/Dashboard";
@@ -110,16 +108,16 @@ function isActive(item: NavItem, current: string): boolean {
 function LogoMark(props: { class?: string }) {
   return (
     <div
-      class={`rounded-xl bg-brand-500 flex items-center justify-center shadow-lg shadow-brand-500/25 ${props.class ?? "w-10 h-10"}`}
+      class={`rounded-lg bg-brand-500 text-ink-950 flex items-center justify-center border border-brand-600/30 shadow-sm ${props.class ?? "w-8 h-8"}`}
     >
       <svg viewBox="0 0 32 32" class="w-[62%] h-[62%]" aria-hidden="true">
         <path
           d="M16 7l7 4v8l-7 4-7-4v-8z"
           fill="none"
-          stroke="white"
+          stroke="currentColor"
           stroke-width="2"
         />
-        <circle cx="16" cy="15" r="2.5" fill="white" />
+        <circle cx="16" cy="15" r="2.5" fill="currentColor" />
       </svg>
     </div>
   );
@@ -134,26 +132,26 @@ function RailItem(props: { item: NavItem; current: string; badge?: number }) {
     <Tooltip content={props.item.label} placement="right" delay={50}>
       <a
         href={`#${props.item.path}`}
-        class={`relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200 ${
+        class={`gateway-nav relative flex h-9 w-9 lg:w-44 items-center justify-center lg:justify-start lg:px-2.5 gap-2.5 rounded-lg transition-colors duration-150 ${
           active()
-            ? "bg-brand-500/10 text-brand-500"
+            ? "text-ink-100"
             : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/60"
         }`}
         aria-label={props.item.label}
         aria-current={active() ? "page" : undefined}
       >
         <Show when={props.item.icon == "indirect-code"} fallback={
-          <Icon name={props.item.icon} size={22} />
+          <Icon name={props.item.icon} size={17} />
         }>
           <img
             src="/indirect-icon.svg"
             alt="Indirect"
-            class="w-[22px] h-[22px] shrink-0 object-contain rounded"
+            class="w-[17px] h-[17px] shrink-0 object-contain rounded"
           />
         </Show>
-        
+        <span class="hidden lg:block text-xs font-medium truncate">{props.item.label}</span>
         <Show when={(props.badge ?? 0) > 0}>
-          <span class="absolute top-1 right-1 min-w-4 h-4 px-1 rounded-full bg-brand-500 text-white text-[9px] font-bold leading-4 text-center tabular-nums">
+          <span class="absolute top-0.5 right-0.5 lg:static lg:ml-auto min-w-4 h-4 px-1 rounded-md bg-brand-500/10 text-brand-500 text-[9px] font-medium leading-4 text-center tabular-nums">
             {props.badge}
           </span>
         </Show>
@@ -220,13 +218,14 @@ function AppShell(props: { children: JSX.Element }) {
   return (
     <div class="min-h-screen">
       {/* ===== desktop icon rail ===== */}
-      <aside class="hidden md:flex fixed inset-y-0 left-0 w-20 flex-col items-center py-5 border-r border-line bg-ink-950 z-30">
-        <a href="#/" {...usal("zoomin-25 duration-500")}>
+      <aside class="gateway-rail hidden md:flex fixed inset-y-0 left-0 w-16 lg:w-48 flex-col items-center py-4 border-r border-line z-30">
+        <a href="#/" class="flex items-center gap-2.5 lg:w-44 lg:px-2" aria-label="LLM Gateway home">
           <LogoMark />
+          <span class="hidden lg:block text-[13px] font-semibold tracking-tight">LLM Gateway</span>
         </a>
         <nav
-          class="flex-1 flex flex-col items-center gap-1.5 mt-9"
-          {...usalItems("fade-r", 70)}
+          class="flex-1 min-h-0 overflow-y-auto flex flex-col items-center gap-1 mt-6"
+          aria-label="Main navigation"
         >
           <For each={USER_NAV}>
             {(item) => (
@@ -238,21 +237,22 @@ function AppShell(props: { children: JSX.Element }) {
             )}
           </For>
           <Show when={user().role === "admin"}>
-            <span class="w-6 h-px bg-line my-2" />
+            <span class="w-6 lg:w-40 h-px bg-line mt-4 mb-2 shrink-0" />
+            <span class="hidden lg:block w-44 px-2.5 pb-1 text-[10px] font-medium text-ink-500">Administration</span>
             <For each={ADMIN_NAV}>
               {(item) => <RailItem item={item} current={route().path} />}
             </For>
           </Show>
         </nav>
-        <div class="flex flex-col items-center gap-1.5">
+        <div class="flex flex-col lg:flex-row items-center lg:justify-between lg:w-44 lg:px-1 gap-1.5 pt-3">
           <ThemeToggle tooltipPlacement="right" />
           <Tooltip content="Sign out" placement="right" delay={50}>
             <button
               onClick={logout}
-              class="flex h-10 w-10 items-center justify-center rounded-xl text-ink-400 hover:text-rose-500 hover:bg-rose-500/10 transition-all duration-200 cursor-pointer"
+              class="flex h-9 w-9 items-center justify-center rounded-lg text-ink-400 hover:text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer"
               aria-label="Sign out"
             >
-              <Icon name={Icons.logout} size={22} />
+              <Icon name={Icons.logout} size={17} />
             </button>
           </Tooltip>
         </div>
@@ -298,24 +298,15 @@ function AppShell(props: { children: JSX.Element }) {
         </Show>
       </div>
 
-      <main class="md:pl-20">
+      <main class="md:pl-16 lg:pl-48">
         {/* ===== desktop header ===== */}
         <header
-          class="hidden md:flex sticky top-0 z-20 h-[72px] items-center justify-between gap-4 border-b border-line bg-ink-950/85 backdrop-blur px-8"
-          {...usal("fade-d duration-500")}
+          class="hidden md:flex sticky top-0 z-20 h-14 items-center justify-between gap-4 border-b border-line bg-ink-950/95 backdrop-blur px-6"
         >
-          <div class="flex items-center gap-3.5 min-w-0">
-            <IconTile icon={info().icon} class="w-10 h-10" />
-            <div class="min-w-0">
-              <div class="text-[15px] font-semibold truncate leading-tight">
-                {info().label}
-              </div>
-              <div class="text-xs text-ink-500 truncate leading-tight mt-0.5">
-                {user().role === "admin"
-                  ? "Admin console"
-                  : "Your gateway workspace"}
-              </div>
-            </div>
+          <div class="flex items-center gap-2.5 min-w-0 text-xs">
+            <span class="text-ink-500">{route().path.startsWith("/admin") ? "Administration" : "Workspace"}</span>
+            <span class="text-ink-600" aria-hidden="true">/</span>
+            <span class="text-ink-200 font-medium truncate">{info().label}</span>
           </div>
           <div class="flex items-center gap-3 shrink-0">
             <div class="hidden lg:block text-right mr-1">
@@ -326,13 +317,13 @@ function AppShell(props: { children: JSX.Element }) {
                 {user().email}
               </div>
             </div>
-            <div class="w-9 h-9 rounded-full bg-accent-500 text-accent-fg flex items-center justify-center text-[13px] font-bold shadow-sm">
+            <div class="w-8 h-8 rounded-lg border border-line bg-card text-ink-300 flex items-center justify-center text-xs font-medium">
               {(user().name || user().email).slice(0, 1).toUpperCase()}
             </div>
           </div>
         </header>
 
-        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
+        <div class="mx-auto max-w-7xl px-4 sm:px-6 py-6">
           {props.children}
         </div>
       </main>
@@ -347,18 +338,16 @@ function PageTitle(props: {
 }) {
   return (
     <div
-      class="relative z-30 flex flex-wrap items-end justify-between gap-4 mb-8"
-      {...usal("fade-d duration-500 threshold-20")}
+      class="relative flex flex-wrap items-end justify-between gap-3 mb-5"
     >
       <div>
         <h1
-          class="text-[2rem] leading-tight font-semibold tracking-tight"
-          {...usal("fade-d blur")}
+          class="text-2xl leading-tight font-semibold tracking-tight"
         >
           {props.title}
         </h1>
         <Show when={props.subtitle}>
-          <p class="text-sm text-ink-500 mt-1">{props.subtitle}</p>
+          <p class="text-xs leading-relaxed text-ink-400 mt-1.5">{props.subtitle}</p>
         </Show>
       </div>
       {props.right}

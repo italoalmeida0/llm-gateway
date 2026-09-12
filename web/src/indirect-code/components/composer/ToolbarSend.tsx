@@ -20,7 +20,7 @@ export function ToolbarSend() {
             ? !c.inputPrompt().trim() && c.pendingAttachments().length === 0
             : (!c.inputPrompt().trim() && c.pendingAttachments().length === 0) || !s.activeProject())
         }
-        class="w-7 h-7 rounded-full bg-ink-100 text-ink-950 hover:bg-accent-400 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all cursor-pointer"
+        class="ui-button ui-button-primary ui-button-sm w-8 h-8 p-0"
         data-rc-tip={!s.activeSessionId() ? "Start conversation" : "Send"}
         aria-label={!s.activeSessionId() ? "Start conversation" : "Send"}
       >
@@ -30,7 +30,7 @@ export function ToolbarSend() {
   >
     <button
       onClick={t.cancelCurrentTurn}
-      class="w-7 h-7 rounded-full bg-rose-950 text-rose-50 hover:bg-rose-900 border border-rose-800/40 flex items-center justify-center transition-colors cursor-pointer"
+      class="ui-button ui-button-danger ui-button-sm w-8 h-8 p-0"
       data-rc-tip="Stop"
       aria-label="Stop"
     >

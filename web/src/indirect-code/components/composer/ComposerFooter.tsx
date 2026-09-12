@@ -28,7 +28,7 @@ export function ComposerFooter() {
           c.setAddContextOpen(false);
           ui.setUsageOpen(false);
         }}
-        class="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-elev border border-line text-sm text-ink-200 hover:bg-ink-800 font-medium cursor-pointer"
+        class="ui-button ui-button-outline ui-button-sm gap-2"
         data-rc-tip="Project" aria-label="Project"
       >
         <Iconify icon="lucide:folder" size={13} />

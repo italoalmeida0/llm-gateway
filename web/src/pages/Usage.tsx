@@ -212,8 +212,8 @@ export default function UsagePage() {
         subtitle="Inspect consumption per key, provider, model and request"
       />
 
-      <Card class="mb-6">
-        <div class="flex flex-wrap gap-3 items-end justify-between px-6 pt-5">
+      <Card class="mb-5">
+        <div class="flex flex-wrap gap-3 items-end justify-between px-5 pt-5">
           <div class="w-full sm:w-64">
             <Select
               label="Key"
@@ -259,14 +259,14 @@ export default function UsagePage() {
         </div>
       </Card>
 
-      <Card class="mb-6">
+      <Card class="mb-5">
         <CardHeader
           title="By model"
           subtitle={`Model × provider breakdown · ${windowLabel(days())}`}
         />
         <Show
           when={!breakdownCount.loading}
-          fallback={<div class="p-6 text-xs text-ink-500">Loading…</div>}
+          fallback={<div class="p-5 text-xs text-ink-500">Loading…</div>}
         >
           <Show
             when={(breakdownCount() ?? 0) > 0}
@@ -294,7 +294,7 @@ export default function UsagePage() {
           />
         <Show
           when={!eventCount.loading}
-          fallback={<div class="p-6 text-xs text-ink-500">Loading…</div>}
+          fallback={<div class="p-5 text-xs text-ink-500">Loading…</div>}
         >
           <Show
             when={(eventCount() ?? 0) > 0}

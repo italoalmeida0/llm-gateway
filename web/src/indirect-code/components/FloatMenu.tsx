@@ -21,7 +21,7 @@ export function FloatMenu(props: {
             onCleanup(anchorFloat(a, el, { placement: props.placement ?? "bottom-start", maxHeight: 520 }));
           }}
           data-floatmenu
-          class="anim-float-in max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-line bg-card shadow-xl p-1.5 text-xs [scrollbar-gutter:stable]"
+          class="ui-popover anim-float-in max-w-[calc(100vw-1rem)] overflow-y-auto p-1 text-xs [scrollbar-gutter:stable]"
           style={props.width ? { width: props.width } : undefined}
           onClick={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}

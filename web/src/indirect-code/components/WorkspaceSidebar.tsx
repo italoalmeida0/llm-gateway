@@ -40,7 +40,7 @@ export function WorkspaceSidebar() {
   />
 </Show>
 <aside
-  class={`border-r border-line/70 bg-ink-950 flex flex-col shrink-0 transition-all duration-200 ${
+  class={`rc-sidebar border-r border-line flex flex-col shrink-0 transition-all duration-200 ${
     ui.sidebarOpen()
       ? ui.isMobile()
         ? "fixed inset-0 z-40 w-full shadow-2xl border-r-0"
@@ -49,15 +49,15 @@ export function WorkspaceSidebar() {
   }`}
 >
   {/* Brand Header */}
-  <div class="flex items-center justify-between px-3.5 pt-3 select-none">
+  <div class="flex items-center justify-between px-3.5 h-14 shrink-0 border-b border-line select-none">
     <div class="flex items-center gap-2.5 min-w-0">
       <img
         src="/indirect-icon.svg"
         alt="Indirect"
         class="w-5 h-5 shrink-0 object-contain rounded"
       />
-      <span class="font-mono text-xs font-semibold tracking-wider text-ink-100 uppercase truncate">
-        INDIRECT CODE
+      <span class="text-[13px] font-semibold tracking-tight text-ink-100 truncate">
+        Indirect Code
       </span>
     </div>
     <Show when={ui.isMobile()}>
@@ -78,7 +78,7 @@ export function WorkspaceSidebar() {
         s.startNewConversation();
         ui.closeSidebarOnMobile();
       }}
-      class="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-ink-900 hover:bg-ink-800 border border-line/60 text-[13px] font-medium text-ink-200 transition-colors cursor-pointer"
+      class="ui-button ui-button-outline w-full justify-start"
     >
       <Iconify icon="lucide:plus" size={14} />
       <span>New Conversation</span>
@@ -98,7 +98,7 @@ export function WorkspaceSidebar() {
 
   {/* Projects */}
   <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-3 min-h-0 [scrollbar-gutter:stable]">
-      <div class="flex items-center justify-between px-1.5 py-1 bg-ink-950 border-b border-line/50">
+      <div class="flex items-center justify-between px-1.5 py-1 border-b border-line/50">
         <Show
           when={s.selectionMode()}
           fallback={

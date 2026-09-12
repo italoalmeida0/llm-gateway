@@ -48,14 +48,14 @@ export default function SetPasswordPage(props: { query: URLSearchParams }) {
       </div>
 
       <div class="relative w-full max-w-sm">
-        <div class="flex flex-col items-center mb-8" {...usal("fade-d duration-700")}>
+        <div class="flex flex-col items-center mb-6" {...usal("fade-d duration-700")}>
           <div {...usal("zoomin-30 duration-700")}>
-            <LogoMark class="w-14 h-14 rounded-2xl mb-5" />
+            <LogoMark class="w-10 h-10 rounded-xl mb-4" />
           </div>
           <h1 class="text-2xl font-semibold tracking-tight">Set your password</h1>
         </div>
 
-        <Card class="p-7 shadow-xl shadow-black/5" {...usal("zoomin-15 duration-600 delay-150")}>
+        <Card class="p-5 sm:p-6" {...usal("zoomin-15 duration-600 delay-150")}>
           <Show
             when={token}
             fallback={<p class="text-sm text-rose-500">This link is missing its token. Ask for a new one.</p>}

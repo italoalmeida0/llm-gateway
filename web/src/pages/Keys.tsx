@@ -392,12 +392,12 @@ export default function KeysPage() {
         open={showCreate()}
         onClose={() => setShowCreate(false)}
         title="Create API key"
-        subtitle="Generate a new gateway token to authenticate your applications with OpenAI or Anthropic SDKs."
+        subtitle="Connect an application to your gateway."
         width="max-w-xl"
         footerLeft={
           <div class="text-xs text-ink-400 flex items-center gap-1.5">
             <Icon name={Icons.shield} size={13} />
-            <span>Encrypted at rest · SHA-256</span>
+            <span>Stored securely</span>
           </div>
         }
         footer={
@@ -411,12 +411,12 @@ export default function KeysPage() {
           </>
         }
       >
-        <div class="space-y-6">
+        <div class="space-y-4">
           <ModalSection
-            title="Key identification"
-            subtitle="Provide a human-readable identifier to recognize where this key is deployed."
+            title="Name"
+            subtitle="Choose a name you will recognize later."
           >
-            <ModalField label="Key name" hint="e.g. production-backend, cursor-agent, eval-runner">
+            <ModalField label="Key name">
               <input
                 type="text"
                 value={form().name}
@@ -428,8 +428,8 @@ export default function KeysPage() {
           </ModalSection>
 
           <ModalSection
-            title="Expiration schedule"
-            subtitle="Configure token lifetime. Expired keys cease authenticating immediately."
+            title="Expiration"
+            subtitle="Choose how long this key can be used."
           >
             <div class="space-y-2.5">
               <label class="block text-xs font-normal text-ink-300">
@@ -462,7 +462,7 @@ export default function KeysPage() {
 
               <OrDivider text="Or specify custom date" />
 
-              <ModalField label="Custom expiration timestamp">
+              <ModalField label="Custom expiration">
                 <input
                   type="datetime-local"
                   value={form().customDate}
@@ -482,7 +482,7 @@ export default function KeysPage() {
           <ModalSection
             title="Output token budgets"
             info="Key budgets cap output tokens only. Input and cached tokens are tracked for visibility and never deplete key budget."
-            subtitle="Cap maximum allowed generation spend. Resets daily or terminates on total limit."
+            subtitle="Limit the output tokens this key can use."
           >
             <div class="space-y-3">
               <div class="flex items-center justify-between flex-wrap gap-2">
@@ -540,15 +540,15 @@ export default function KeysPage() {
           </ModalSection>
 
           <ModalSection
-            title="Rate limiting & Concurrency"
-            subtitle="Protect upstream providers against runaway client retry loops."
+            title="Request limits"
+            subtitle="Control how frequently this key can send requests."
           >
             <div class="space-y-3">
               <SwitchCard
                 checked={form().rpm !== ""}
                 onChange={(checked) => setForm({ ...form(), rpm: checked ? (form().rpm || "120") : "" })}
                 title="Enable per-minute rate limiting (RPM)"
-                description="Throttle sliding-window requests across this key to prevent provider exhaustion."
+                description="Set the maximum requests allowed per minute."
               />
               <Show when={form().rpm !== ""}>
                 <div class="pl-12">
@@ -601,10 +601,10 @@ export default function KeysPage() {
           </>
         }
       >
-        <div class="space-y-6">
+        <div class="space-y-4">
           <ModalSection
-            title="Key identification"
-            subtitle="Update the human-readable label for this key."
+            title="Name"
+            subtitle="Choose a name you will recognize later."
           >
             <ModalField label="Key name">
               <input
@@ -617,7 +617,7 @@ export default function KeysPage() {
           </ModalSection>
 
           <ModalSection
-            title="Expiration schedule"
+            title="Expiration"
             subtitle="Update key expiration timestamp or leave permanent."
           >
             <div class="space-y-2.5">
@@ -648,7 +648,7 @@ export default function KeysPage() {
 
               <OrDivider text="Or specify custom date" />
 
-              <ModalField label="Custom expiration timestamp">
+              <ModalField label="Custom expiration">
                 <input
                   type="datetime-local"
                   value={form().customDate}
@@ -697,7 +697,7 @@ export default function KeysPage() {
           </ModalSection>
 
           <ModalSection
-            title="Rate limiting & Concurrency"
+            title="Request limits"
             subtitle="Per-minute request throttling across this credential."
           >
             <div class="space-y-3">

@@ -25,6 +25,15 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    files: ["scripts/*.cjs"],
+    languageOptions: {
+      sourceType: "commonjs",
+      // Browser globals are used inside Playwright's page.evaluate callbacks.
+      globals: { console: "readonly", process: "readonly", document: "readonly", localStorage: "readonly" },
+    },
+    rules: { "@typescript-eslint/no-require-imports": "off" },
+  },
+  {
     files: ["web/src/**/*.{ts,tsx}"],
     extends: [solid.configs["flat/typescript"]],
     rules: {

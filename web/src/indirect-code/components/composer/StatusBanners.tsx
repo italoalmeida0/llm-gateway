@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
 import { useHost, useSession, useTranscriptCtx, useUI } from "../../ctx";
 import { QuestionPanel } from "../QuestionModal";
+import { IndirectBrand } from "../IndirectBrand";
 
 export function StatusBanners() {
   const s = useSession();
@@ -11,15 +12,8 @@ export function StatusBanners() {
   return (
 <>
 <Show when={s.draftMode()}>
-  <div class="flex flex-col items-center mb-10 justify-center min-w-0">
-      <img
-        src="/indirect-big-icon.svg"
-        alt="Indirect"
-        class="w-auto h-60 shrink-0 object-contain rounded"
-      />
-      <span class="font-mono mt-[-1rem] text-[2.5rem] font-semibold tracking-wider text-ink-100 uppercase truncate">
-        INDIRECT
-      </span>
+  <div class="mb-6">
+    <IndirectBrand />
   </div>
 </Show>
 <Show when={s.activeSessionId() && t.turnActivity()}>

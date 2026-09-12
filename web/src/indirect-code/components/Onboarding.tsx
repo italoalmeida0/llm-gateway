@@ -1,8 +1,9 @@
 import { Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
-import { copyWithToast } from "../../ui";
+import { Btn, copyWithToast } from "../../ui";
 import { useHost, useModal } from "../ctx";
 import { indirectInstallCommands } from "../install";
+import { IndirectBrand } from "./IndirectBrand";
 
 export function Onboarding() {
   const h = useHost();
@@ -10,23 +11,14 @@ export function Onboarding() {
   m.setShowPairModal(false);
   return (
 <>
-<div class="flex-1 flex flex-col items-center justify-center p-6 bg-ink-950 text-center overflow-y-auto">
+<div class="flex-1 min-h-0 flex flex-col items-center p-4 sm:p-6 bg-ink-950 text-center overflow-y-auto">
   <div class="max-w-xl w-full mx-auto space-y-6 my-auto py-8">
 
     {/* Title & Subtitle */}
     <div>
-      <div class="flex flex-col items-center mb-10 justify-center min-w-0">
-      <img
-        src="/indirect-big-icon.svg"
-        alt="Indirect"
-        class="w-auto h-60 shrink-0 object-contain rounded"
-      />
-      <span class="font-mono mt-[-1rem] text-[2.5rem] font-semibold tracking-wider text-ink-100 uppercase truncate">
-        INDIRECT
-      </span>
-      </div>
-      <p class="text-sm text-ink-400 mt-2 max-w-md mx-auto leading-relaxed">
-        Run autonomous coding agents directly on your machine. Sessions, files, and commands remain 100% local on your device while you control them from this interface.
+      <IndirectBrand />
+      <p class="text-[13px] text-ink-400 mt-5 max-w-sm mx-auto leading-relaxed">
+        Connect a machine to work with your coding agent from anywhere. Your projects and conversations stay on that host.
       </p>
     </div>
 
@@ -35,10 +27,10 @@ export function Onboarding() {
       when={m.pairingData()}
       fallback={
         <div class="pt-2">
-          <button
+          <Btn
             onClick={() => m.generatePairingToken({ silent: true })}
             disabled={m.pairingLoading()}
-            class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-sm transition-all shadow-lg shadow-brand-500/20 hover:shadow-brand-500/30 cursor-pointer disabled:opacity-50"
+            class="gap-2"
           >
             <Show
               when={!m.pairingLoading()}
@@ -46,18 +38,18 @@ export function Onboarding() {
             >
               <Iconify icon="lucide:plus" size={18} />
             </Show>
-            <span>Connect Indirect Code Host</span>
-          </button>
+            <span>Connect a host</span>
+          </Btn>
         </div>
       }
     >
       {/* Pairing Card */}
-      <div class="p-6 rounded-2xl bg-ink-900 border border-line text-left space-y-5 shadow-2xl">
+      <div class="ui-card p-4 text-left space-y-4">
         <div class="flex items-center justify-between pb-3 border-b border-line">
           <div class="flex items-center gap-2">
             <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
             <span class="text-xs font-semibold uppercase tracking-wider text-ink-200">
-              Pairing Credentials Ready
+              Ready to connect
             </span>
           </div>
           <span class="text-[11px] font-mono text-ink-400">
@@ -81,7 +73,7 @@ export function Onboarding() {
             >
               <span class="flex items-center gap-2 text-xs font-medium text-ink-200">
                 <Iconify icon="lucide:terminal" size={14} class="text-brand-400" />
-                Linux e macOS
+                Linux & macOS
               </span>
               <Iconify icon="lucide:copy" size={14} class="text-ink-500 group-hover:text-brand-300" />
             </button>
@@ -101,7 +93,7 @@ export function Onboarding() {
             </button>
           </div>
           <p class="text-[11px] text-ink-500 leading-relaxed">
-            Downloads the latest compatible build, pairs this host and keeps it running in the background (log: ~/.indirect-code/daemon.log).
+            Installs Indirect Code, connects this host, and keeps it available in the background.
           </p>
         </div>
 
@@ -112,7 +104,7 @@ export function Onboarding() {
             <Iconify icon="lucide:refresh-cw" size={16} class="animate-spin" />
           </div>
           <div class="text-xs">
-            <p class="font-medium text-ink-200">Waiting for daemon connection...</p>
+            <p class="font-medium text-ink-200">Waiting for your host…</p>
             <p class="text-ink-400 text-[11px] mt-0.5">
               Run the command above in your terminal. This screen will connect automatically.
             </p>

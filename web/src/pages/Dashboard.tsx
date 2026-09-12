@@ -193,10 +193,10 @@ export default function DashboardPage() {
         <Show when={series()} keyed>
           {(_series) => (
           <div
-            class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6"
+            class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5"
             {...usalItems("fade-u", 110)}
           >
-            <Card interactive class="p-6">
+            <Card interactive class="p-5">
               <div class="flex items-start justify-between gap-3">
                 <div class="text-xs font-medium text-ink-500">
                   Tokens · {windowLabel(days())}
@@ -235,7 +235,7 @@ export default function DashboardPage() {
               </div>
             </Card>
 
-            <Card interactive class="p-6">
+            <Card interactive class="p-5">
               <HeroHeader
                 icon={Icons.bolt}
                 count={winReqs()}
@@ -271,7 +271,7 @@ export default function DashboardPage() {
         class="grid grid-cols-1 lg:grid-cols-2 gap-5"
         {...usalItems("fade-u", 110)}
       >
-        <Card class="p-6">
+        <Card class="p-5">
           <div class="flex items-start justify-between gap-3 mb-4">
             <div>
               <h2 class="text-sm font-semibold text-ink-100">
@@ -312,7 +312,7 @@ export default function DashboardPage() {
           </Show>
         </Card>
 
-        <Card class="p-6">
+        <Card class="p-5">
           <div class="mb-4">
             <h2 class="text-sm font-semibold text-ink-100">
               Endpoint configuration
@@ -333,7 +333,7 @@ export default function DashboardPage() {
             <Show when={(keys() ?? []).length === 0}>
               <button
                 onClick={() => navigate("/keys")}
-                class="group mt-1 w-full rounded-2xl bg-accent-500 text-accent-fg px-5 py-3.5 text-sm font-medium flex items-center justify-between transition-all duration-300 hover:shadow-lg cursor-pointer"
+                class="ui-button ui-button-primary group mt-1 w-full justify-between"
                 {...usal("zoomin-15 delay-150 duration-500")}
               >
                 Create your first API key

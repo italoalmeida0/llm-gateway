@@ -126,33 +126,24 @@ export default function LoginPage() {
 
   return (
     <div class="relative min-h-screen flex items-center justify-center px-4 py-10 overflow-hidden">
-      {/* soft brand glow on top */}
-      <div
-        class="pointer-events-none absolute inset-0"
-        style={{
-          background:
-            "radial-gradient(55% 45% at 50% -5%, var(--glow-brand), transparent 72%)",
-        }}
-      />
       <div class="absolute top-4 right-4 z-10">
         <ThemeToggle />
       </div>
 
       <div class="relative w-full max-w-sm">
-        <div class="flex flex-col items-center mb-8" {...usal("fade-d duration-700")}>
+        <div class="flex flex-col items-center mb-6" {...usal("fade-d duration-700")}>
           <div {...usal("zoomin-30 duration-700")}>
-            <LogoMark class="w-14 h-14 rounded-2xl mb-5" />
+            <LogoMark class="w-10 h-10 rounded-xl mb-4" />
           </div>
           <h1
             class="text-2xl font-semibold tracking-tight"
-            {...usal("text-shimmer split-letter duration-2400 split-delay-80 loop threshold-60")}
           >
             LLM Gateway
           </h1>
           <p class="text-sm text-ink-500 mt-1.5">Sign in to your account</p>
         </div>
 
-        <Card class="p-7 shadow-xl shadow-black/5" {...usal("zoomin-15 duration-600 delay-150")}>
+        <Card class="p-5 sm:p-6" {...usal("zoomin-15 duration-600 delay-150")}>
           <Show when={error()}>
             <div class="mb-4 rounded-xl border border-rose-500/25 bg-rose-500/8 px-3.5 py-2.5 text-sm text-rose-500 anim-fade-in">
               {capitalize(error())}

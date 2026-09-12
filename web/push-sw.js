@@ -13,7 +13,7 @@ self.addEventListener("push", (event) => {
   let data = { title: "Turn finished", body: "Your agent replied", url: "/#/code", tag: "turn" };
   try {
     if (event.data) data = Object.assign({}, data, event.data.json());
-  } catch (e) {}
+  } catch {}
   event.waitUntil(
     self.registration.showNotification(data.title, {
       body: data.body,
@@ -39,11 +39,11 @@ self.addEventListener("notificationclick", (event) => {
             if (typeof w.navigate === "function") await w.navigate(url);
             return;
           }
-        } catch (e) {}
+        } catch {}
       }
       try {
         await self.clients.openWindow(url);
-      } catch (e) {}
+      } catch {}
     })(),
   );
 });

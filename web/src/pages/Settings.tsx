@@ -182,10 +182,10 @@ export default function SettingsPage() {
     <div>
       <PageTitle title="Settings" subtitle="Profile, security and active sessions" />
 
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6" {...usalItems("fade-u", 90)}>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4" {...usalItems("fade-u", 90)}>
         <Card>
           <CardHeader title="Profile" />
-          <div class="px-6 pb-6 space-y-4">
+          <div class="px-5 pb-5 space-y-4">
             <Input label="Display name" value={name()} onInput={setName} />
             <div>
               <span class="block text-xs font-medium text-ink-300 mb-1.5">Email</span>
@@ -199,7 +199,7 @@ export default function SettingsPage() {
 
         <Card>
           <CardHeader title="Password" subtitle={me().hasPassword ? "Change your password" : "You don't have a password yet — set one"} />
-          <div class="px-6 pb-6 space-y-4">
+          <div class="px-5 pb-5 space-y-4">
             <Show when={me().hasPassword}>
               <Input label="Current password" type="password" value={curPw()} onInput={setCurPw} autocomplete="current-password" />
             </Show>
@@ -219,7 +219,7 @@ export default function SettingsPage() {
               <Badge tone={me().totpEnabled ? "green" : "zinc"}>{me().totpEnabled ? "Enabled" : "Disabled"}</Badge>
             }
           />
-          <div class="px-6 pb-6 space-y-4">
+          <div class="px-5 pb-5 space-y-4">
             <Show
               when={me().totpEnabled}
               fallback={
@@ -270,7 +270,7 @@ export default function SettingsPage() {
               <Badge tone={me().googleLinked ? "green" : "zinc"}>{me().googleLinked ? "Linked" : "Not linked"}</Badge>
             }
           />
-          <div class="px-6 pb-6 space-y-4">
+          <div class="px-5 pb-5 space-y-4">
             <Show
               when={me().googleLinked}
               fallback={
@@ -291,7 +291,7 @@ export default function SettingsPage() {
 
       <Card class="mt-6">
         <CardHeader title="Active sessions" subtitle="Devices currently signed in" />
-        <div class="px-6 pb-6">
+        <div class="px-5 pb-5">
           <ul class="divide-y divide-line" {...usalItems("fade-u", 40)}>
             <For each={sessions() ?? []}>
               {(s) => (

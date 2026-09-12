@@ -19,9 +19,9 @@ export function Composer() {
 <>
 
 <Show when={!ui.historyView()}>
-<div class={s.draftMode() ? "flex-1 min-h-0 overflow-y-auto flex items-center justify-center px-4 py-10" : "px-4 pb-4 pt-2 bg-ink-950 relative z-20"}>
+<div class={s.draftMode() ? "rc-draft flex-1 min-h-0 overflow-y-auto flex flex-col px-4 py-10" : "px-4 pb-4 pt-2 bg-ink-950 relative z-20"}>
   <ScrollOverlays />
-  <div class="w-full max-w-2xl mx-auto">
+  <div class="w-full max-w-2xl mx-auto my-auto shrink-0">
   <StatusBanners />
     <Show when={!s.workspaceBlocked()} fallback={
       <div role="status" class="rounded-2xl border border-line bg-elev px-4 py-4 text-sm text-ink-300" data-workspace-unavailable>
@@ -31,9 +31,9 @@ export function Composer() {
         <div class="mt-3 flex gap-3"><button onClick={s.checkWorkspace} class="text-xs text-ink-200 hover:underline cursor-pointer">Check again</button><Show when={t.sessionStatus() === "running"}><button onClick={t.cancelCurrentTurn} class="text-xs text-ink-200 hover:underline cursor-pointer">Stop turn</button></Show></div>
       </div>
     }>
-    <div class="rounded-2xl border border-line/70 bg-ink-900/80 shadow-xl focus-within:border-ink-500 transition-colors relative flex flex-col">
+    <div class="rc-composer relative flex flex-col">
     <ComposerInput />
-    <div class="flex items-end justify-between gap-2 px-3 pb-2.5 pt-1">
+    <div class="rc-composer-toolbar flex items-end justify-between gap-2 px-2.5 py-2">
       <div class="flex flex-1 min-w-0 flex-wrap items-center gap-0.5 text-xs text-ink-400">
       <ToolbarFiles />
       <ToolbarContext />

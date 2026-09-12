@@ -32,7 +32,13 @@
         }
         function syncFavicon() {
           var t = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-          var link = document.querySelector("link[rel='icon']");
+          // Deduplicate: only one icon link may exist (browsers pin the
+          // first and ignore the rest, so a stray duplicate freezes the icon).
+          var links = document.querySelectorAll("link[rel='icon']");
+          var link = links[0];
+          for (var i = 1; i < links.length; i++) {
+            if (links[i].parentNode) links[i].parentNode.removeChild(links[i]);
+          }
           if (!link) {
             link = document.createElement("link");
             link.rel = "icon";

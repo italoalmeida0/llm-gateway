@@ -76,12 +76,8 @@ export function ComposerInput() {
     ref={textareaRef}
     disabled={s.creatingSession()}
     rows={1}
-    class="flex-1 min-w-0 bg-transparent text-base sm:text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto [scrollbar-gutter:stable]"
-    placeholder={
-      ui.isMobile() ? "Ask anything…" : s.activeSession()
-        ? `Ask anything, @ to mention, / for actions`
-        : `Start a conversation in ${s.activeProject()?.name || "project"}...`
-    }
+    class="flex-1 min-w-0 bg-transparent text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-4 pt-3 pb-1 max-h-[160px] min-h-[48px] overflow-y-auto [scrollbar-gutter:stable]"
+    placeholder="Ask anything, @ to mention, / for actions"
     value={c.inputPrompt()}
     onBlur={() => c.flushPendingDraft()}
     onInput={(e) => {

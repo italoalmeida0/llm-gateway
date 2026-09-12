@@ -36,16 +36,29 @@ export const COMPLETION_TOOL_NAMES = new Set(["mark_task_as_complete", "mark_pla
  * but never shown as a user bubble in the chat UI. */
 export function isSyntheticNudge(text: string): boolean {
   const trimmed = text.trim();
-  return trimmed.startsWith("<system_prompt>") && trimmed.endsWith("</system_prompt>");
+  return trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>");
 }
 
 export function sanitizeUserText(text: string): string {
   const trimmed = text.trim();
-  if (trimmed.startsWith("<system_prompt>") && trimmed.endsWith("</system_prompt>")) {
-    return trimmed.slice("<system_prompt>".length, -"</system_prompt>".length).trim();
+  if (trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>")) {
+    return trimmed.slice("<system-reminder>".length, -"</system-reminder>".length).trim();
   }
-  if (text.includes("<system_prompt>") || text.includes("</system_prompt>")) {
-    return text.replaceAll("<system_prompt>", "").replaceAll("</system_prompt>", "").trim();
+  if (text.includes("<system-reminder>") || text.includes("</system-reminder>")) {
+    return text.replaceAll("<system-reminder>", "").replaceAll("</system-reminder>", "").trim();
+  }
+  return text;
+}
+
+/** Strips a leading <system-reminder>...</system-reminder> block (such as date or mode directives)
+ * from a user message so the chat UI displays only the user's actual text. */
+export function stripLeadingSystemPrompt(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("<system-reminder>")) {
+    const endIdx = trimmed.indexOf("</system-reminder>");
+    if (endIdx !== -1) {
+      return trimmed.slice(endIdx + "</system-reminder>".length).trim();
+    }
   }
   return text;
 }

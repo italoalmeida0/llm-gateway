@@ -56,9 +56,12 @@ export function normalizeEffort(raw: string): string {
   }
 }
 
+import { stripLeadingSystemPrompt } from "../live";
+
 export function messageText(m: ChatMessage): string {
-  return m.blocks
+  const raw = m.blocks
     .filter((b) => b.type === "text" && b.text)
     .map((b) => b.text as string)
     .join("\n");
+  return m.role === "user" ? stripLeadingSystemPrompt(raw) : raw;
 }

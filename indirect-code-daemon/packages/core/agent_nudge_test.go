@@ -170,14 +170,14 @@ func TestSanitizeUserText(t *testing.T) {
 	if got := SanitizeUserText("  " + CompletionNudgeTextPlan + "  "); got != "If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
 		t.Fatalf("padded plan completion nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("<system_prompt>qualquer coisa</system_prompt>"); got != "qualquer coisa" {
-		t.Fatalf("custom system_prompt = %q; want tags stripped", got)
+	if got := SanitizeUserText("<system-reminder>qualquer coisa</system-reminder>"); got != "qualquer coisa" {
+		t.Fatalf("custom system-reminder = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("  <system_prompt>qualquer coisa</system_prompt>  "); got != "qualquer coisa" {
-		t.Fatalf("padded custom system_prompt = %q; want tags stripped", got)
+	if got := SanitizeUserText("  <system-reminder>qualquer coisa</system-reminder>  "); got != "qualquer coisa" {
+		t.Fatalf("padded custom system-reminder = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("prefix <system_prompt>mid</system_prompt> suffix"); got != "prefix mid suffix" {
-		t.Fatalf("embedded system_prompt = %q; want tags stripped", got)
+	if got := SanitizeUserText("prefix <system-reminder>mid</system-reminder> suffix"); got != "prefix mid suffix" {
+		t.Fatalf("embedded system-reminder = %q; want tags stripped", got)
 	}
 	for _, s := range []string{"hello", "", "[unrelated]", "regular message without tags"} {
 		if got := SanitizeUserText(s); got != s {

@@ -134,6 +134,8 @@ type SessionRecord struct {
 	UpdatedAt   int64              `json:"updatedAt"`
 	Messages    []provider.Message `json:"messages"`
 	Attachments []AttachmentRef    `json:"attachments,omitempty"`
+	LastDate    string             `json:"lastDate,omitempty"`
+	LastMode    string             `json:"lastMode,omitempty"`
 	// Compaction is the incremental chain head (previous summary +
 	// file ops + cut anchor + count). Persisted on every compaction so the
 	// next summarization — even after a daemon restart — builds an update
@@ -1546,14 +1548,14 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 					}
 				}
 				if len(parts) > 0 {
-					userText = strings.Join(parts, "\n")
+					userText = core.StripLeadingSystemPrompt(strings.Join(parts, "\n"))
 					userIdx = i
 					break
 				}
 			}
 		}
 		if userText == "" && strings.TrimSpace(req.Text) != "" {
-			userText = strings.TrimSpace(req.Text)
+			userText = core.StripLeadingSystemPrompt(strings.TrimSpace(req.Text))
 		}
 		if userIdx < 0 || userText == "" {
 			return
@@ -2296,6 +2298,39 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	go d.runAgentTurn(act, promptText, "", yolo, attachmentIDs)
 }
 
+// buildTurnSystemDirectives checks if the date or mode changed compared to the last
+// known state in SessionRecord. When changed, it builds a leading <system-reminder> block
+// and updates rec.LastDate and rec.LastMode.
+func buildTurnSystemDirectives(rec *SessionRecord, mode string, now time.Time) string {
+	today := now.Format("2006-01-02")
+	todayDisplay := now.Format("Monday, 2006-01-02")
+	if mode == "" {
+		mode = "build"
+	}
+	var sysParts []string
+	if rec.LastDate != today {
+		sysParts = append(sysParts, fmt.Sprintf("Current date: %s", todayDisplay))
+		rec.LastDate = today
+	}
+	if rec.LastMode != mode {
+		switch mode {
+		case "plan":
+			sysParts = append(sysParts, "Operational mode: Plan. You are in READ-ONLY phase. Inspect, read, and plan; file modifications (write/edit) are disabled. When your plan is ready, call mark_plan_as_ready_to_execute.")
+		case "build":
+			sysParts = append(sysParts, "Operational mode: Build. You are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed. When finished, call mark_task_as_complete.")
+		case "learning":
+			sysParts = append(sysParts, "Operational mode: Learning. You are a patient Socratic programming tutor. Never write the solution or modify files.")
+		case "talk":
+			sysParts = append(sysParts, "Operational mode: Talk. Conversational mode. No workspace modifications or executions.")
+		}
+		rec.LastMode = mode
+	}
+	if len(sysParts) == 0 {
+		return ""
+	}
+	return "<system-reminder>\n" + strings.Join(sysParts, "\n") + "\n</system-reminder>"
+}
+
 func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string) {
 	// A user message identical to the synthetic continue nudge must stay
 	// visible: strip the brackets so it no longer matches the hidden form.
@@ -2456,6 +2491,21 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	fullPrompt := promptText
 	if len(contextParts) > 0 {
 		fullPrompt = promptText + "\n\n" + strings.Join(contextParts, "\n\n")
+	}
+
+	act.mu.Lock()
+	sysBlock := buildTurnSystemDirectives(act.record, options.Mode, time.Now())
+	if sysBlock != "" {
+		_ = d.saveSession(act.record)
+	}
+	act.mu.Unlock()
+
+	if sysBlock != "" {
+		if fullPrompt == "" {
+			fullPrompt = sysBlock
+		} else {
+			fullPrompt = sysBlock + "\n\n" + fullPrompt
+		}
 	}
 
 	// Proactive compaction happens INSIDE the loop now (agent.AutoCompact,

@@ -16,15 +16,15 @@ import (
 // when the model returns a terminal stop with no visible text and no tool
 // calls (typically a thinking-only early stop): instead of ending the
 // turn, the loop nudges the model to continue. Frontends hide user
-// messages whose trimmed text is wrapped in <system_prompt>...</system_prompt>
+// messages whose trimmed text is wrapped in <system-reminder>...</system-reminder>
 // (same idea as TODO activity, which is also transcript-real but display-hidden).
-const ContinueNudgeText = "<system_prompt>You should continue what you are doing.</system_prompt>"
+const ContinueNudgeText = "<system-reminder>You should continue what you are doing.</system-reminder>"
 
 // CompletionNudgeTextBuild and CompletionNudgeTextPlan prompt the model
 // when it returns visible text without calling a completion tool in build/plan modes.
 const (
-	CompletionNudgeTextBuild = "<system_prompt>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>"
-	CompletionNudgeTextPlan  = "<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system_prompt>"
+	CompletionNudgeTextBuild = "<system-reminder>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system-reminder>"
+	CompletionNudgeTextPlan  = "<system-reminder>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system-reminder>"
 )
 
 // maxContinueNudges caps consecutive empty-response nudges per turn so a
@@ -37,21 +37,34 @@ const maxCompletionNudges = 3
 
 // SanitizeUserText keeps a user-authored message distinguishable from
 // synthetic system prompt nudges: when the trimmed text contains or is wrapped in
-// <system_prompt>...</system_prompt>, the tags are stripped so the
+// <system-reminder>...</system-reminder>, the tags are stripped so the
 // frontend's nudge filter never hides a real user message.
 func SanitizeUserText(s string) string {
 	t := strings.TrimSpace(s)
-	if strings.HasPrefix(t, "<system_prompt>") && strings.HasSuffix(t, "</system_prompt>") {
-		inner := strings.TrimPrefix(t, "<system_prompt>")
-		inner = strings.TrimSuffix(inner, "</system_prompt>")
+	if strings.HasPrefix(t, "<system-reminder>") && strings.HasSuffix(t, "</system-reminder>") {
+		inner := strings.TrimPrefix(t, "<system-reminder>")
+		inner = strings.TrimSuffix(inner, "</system-reminder>")
 		return strings.TrimSpace(inner)
 	}
-	if strings.Contains(s, "<system_prompt>") || strings.Contains(s, "</system_prompt>") {
-		res := strings.ReplaceAll(s, "<system_prompt>", "")
-		res = strings.ReplaceAll(res, "</system_prompt>", "")
+	if strings.Contains(s, "<system-reminder>") || strings.Contains(s, "</system-reminder>") {
+		res := strings.ReplaceAll(s, "<system-reminder>", "")
+		res = strings.ReplaceAll(res, "</system-reminder>", "")
 		return strings.TrimSpace(res)
 	}
 	return s
+}
+
+// StripLeadingSystemPrompt removes any synthetic leading <system-reminder>...</system-reminder>
+// block from a message (e.g. date/mode directives) returning the underlying user text.
+func StripLeadingSystemPrompt(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "<system-reminder>") {
+		endIdx := strings.Index(trimmed, "</system-reminder>")
+		if endIdx != -1 {
+			return strings.TrimSpace(trimmed[endIdx+len("</system-reminder>"):])
+		}
+	}
+	return text
 }
 
 // Agent is a stateful conversation bound to a provider client, a model,
@@ -466,7 +479,6 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			// Real progress: the model asked for more work, so the
 			// empty-response nudge budget renews from here.
 			nudges = 0
-			completionNudges = 0
 			for _, c := range assistantMsg.Content {
 				if tc, ok := c.(provider.ToolCallBlock); ok {
 					if tc.Name == "mark_task_as_complete" || tc.Name == "mark_plan_as_ready_to_execute" {

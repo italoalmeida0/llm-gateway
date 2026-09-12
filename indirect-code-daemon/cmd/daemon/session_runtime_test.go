@@ -35,9 +35,9 @@ func TestLiveChoicesApplyToNextRequestAndToolWithinSameTask(t *testing.T) {
 			t.Errorf("wrong path %s", r.URL.Path)
 		}
 		var req struct {
-			Model  string `json:"model"`
-			Max    int    `json:"max_tokens"`
-			System string `json:"system"`
+			Model  string          `json:"model"`
+			Max    int             `json:"max_tokens"`
+			System json.RawMessage `json:"system"`
 			Tools  []struct {
 				Name string `json:"name"`
 			} `json:"tools"`
@@ -62,8 +62,9 @@ func TestLiveChoicesApplyToNextRequestAndToolWithinSameTask(t *testing.T) {
 		case 3:
 			mode = "patient Socratic"
 		}
-		if req.Model != model || req.Max != maxTokens || !strings.Contains(req.System, mode) || hasWrite != (step == 1 || step == 4) {
-			t.Errorf("request %d: model=%s max=%d write=%t system=%s", step, req.Model, req.Max, hasWrite, req.System)
+		systemText := string(req.System)
+		if req.Model != model || req.Max != maxTokens || !strings.Contains(systemText, mode) || hasWrite != (step == 1 || step == 4) {
+			t.Errorf("request %d: model=%s max=%d write=%t system=%s", step, req.Model, req.Max, hasWrite, systemText)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		emit := func(event string, payload any) {
@@ -96,6 +97,7 @@ func TestLiveChoicesApplyToNextRequestAndToolWithinSameTask(t *testing.T) {
 		case 3:
 			configure("model-a", "low", "build", "full")
 			toolUse(0, "read-again", "read", `{"path":"started"}`)
+			toolUse(1, "finish", "mark_task_as_complete", "{}")
 			stop("tool_use")
 		default:
 			text(0, "Done")

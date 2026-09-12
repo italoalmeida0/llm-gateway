@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/provider"
 	"os"
 	"path/filepath"
@@ -123,7 +124,7 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 				continue
 			}
 			for _, c := range m.Content {
-				if tb, ok := c.(provider.TextBlock); ok && tb.Text == "edited question" {
+				if tb, ok := c.(provider.TextBlock); ok && core.StripLeadingSystemPrompt(tb.Text) == "edited question" {
 					n++
 				}
 			}
@@ -143,7 +144,7 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 		for _, m := range fork.Messages {
 			if m.Role == provider.RoleUser && m.TurnIndex == targetSeq {
 				for _, c := range m.Content {
-					if tb, ok := c.(provider.TextBlock); ok && tb.Text == "edited question" {
+					if tb, ok := c.(provider.TextBlock); ok && core.StripLeadingSystemPrompt(tb.Text) == "edited question" {
 						return true
 					}
 				}
@@ -250,7 +251,7 @@ func TestRegeneratePicksLastUserMessageInMultiTurn(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	if reRunText != "second question" {
+	if core.StripLeadingSystemPrompt(reRunText) != "second question" {
 		t.Fatalf("regenerate picked wrong user message: got %q, want %q", reRunText, "second question")
 	}
 
@@ -310,7 +311,7 @@ func TestForkAndRegenerate(t *testing.T) {
 		for _, m := range fork.Messages {
 			if m.Role == provider.RoleUser {
 				for _, c := range m.Content {
-					if tb, ok := c.(provider.TextBlock); ok && tb.Text == "q2" {
+					if tb, ok := c.(provider.TextBlock); ok && core.StripLeadingSystemPrompt(tb.Text) == "q2" {
 						return true, tb.Text
 					}
 				}

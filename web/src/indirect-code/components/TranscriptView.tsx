@@ -2,7 +2,7 @@ import { createMemo, For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { CompactionBalloon } from "./CompactionBalloon";
 import { FileIcon } from "../presentation";
-import { elapsedLabel } from "../utils/format";
+import { elapsedLabel, messageText } from "../utils/format";
 import type { TranscriptRenderCtx } from "./TranscriptBlocks";
 import {
   renderAssistantSpecial, renderMessageContent, renderSeriesLead,
@@ -17,7 +17,7 @@ import { mapBalloonsToBlocks } from "../transcript";
 export function TranscriptView() {
   const t = useTranscriptCtx();
   const s = useSession();
-  const h = useHost();
+  const _h = useHost();
   const c = useComposerCtx();
   const m = useModal();
   const ui = useUI();
@@ -165,10 +165,7 @@ export function TranscriptView() {
         if (block.kind === "series" && rctx.hideToolMessages() && block.units.length > 0 && !msg.hasCompletion) {
           return "";
         }
-        return msg.blocks
-          .filter((b) => b.type === "text" && b.text)
-          .map((b) => b.text as string)
-          .join("\n");
+        return messageText(msg);
       };
       const isEditing = () => t.editingMsgIdx() === rawIdx();
       return (

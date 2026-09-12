@@ -52,9 +52,20 @@ func (c *anthropicClient) Name() string { return "anthropic" }
 
 // ---- wire types ----
 
+type anthCacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+type anthSystemBlock struct {
+	Type         string            `json:"type"` // "text"
+	Text         string            `json:"text"`
+	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
+}
+
 type anthTextBlock struct {
-	Type string `json:"type"` // "text"
-	Text string `json:"text"`
+	Type         string            `json:"type"` // "text"
+	Text         string            `json:"text"`
+	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthImageBlock struct {
@@ -64,6 +75,7 @@ type anthImageBlock struct {
 		MediaType string `json:"media_type"`
 		Data      string `json:"data"`
 	} `json:"source"`
+	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthToolUseBlock struct {
@@ -81,10 +93,11 @@ type anthRedactedThinkingBlock struct {
 }
 
 type anthToolResultBlock struct {
-	Type      string      `json:"type"` // "tool_result"
-	ToolUseID string      `json:"tool_use_id"`
-	Content   interface{} `json:"content,omitempty"` // string or []block
-	IsError   bool        `json:"is_error,omitempty"`
+	Type         string            `json:"type"` // "tool_result"
+	ToolUseID    string            `json:"tool_use_id"`
+	Content      interface{}       `json:"content,omitempty"` // string or []block
+	IsError      bool              `json:"is_error,omitempty"`
+	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthMessage struct {
@@ -93,14 +106,15 @@ type anthMessage struct {
 }
 
 type anthTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description,omitempty"`
+	InputSchema  json.RawMessage   `json:"input_schema"`
+	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthRequest struct {
 	Model       string        `json:"model"`
-	System      string        `json:"system,omitempty"`
+	System      interface{}   `json:"system,omitempty"` // []anthSystemBlock
 	Messages    []anthMessage `json:"messages"`
 	Tools       []anthTool    `json:"tools,omitempty"`
 	MaxTokens   int           `json:"max_tokens"`
@@ -148,10 +162,18 @@ func (c *anthropicClient) buildRequest(req Request) (*anthRequest, error) {
 
 	out := &anthRequest{
 		Model:       req.Model,
-		System:      req.System,
 		MaxTokens:   maxTok,
 		Temperature: req.Temperature,
 		Stream:      true,
+	}
+	if req.System != "" {
+		out.System = []anthSystemBlock{
+			{
+				Type:         "text",
+				Text:         req.System,
+				CacheControl: &anthCacheControl{Type: "ephemeral"},
+			},
+		}
 	}
 
 	req.Messages = RepairOrphanedToolResults(req.Messages)
@@ -232,6 +254,29 @@ func (c *anthropicClient) buildRequest(req Request) (*anthRequest, error) {
 		}
 	}
 
+	// Cache the conversation history by setting cache_control on the last block
+	// of the last user turn (including tool results, which are user turns in Anthropic).
+	for i := len(out.Messages) - 1; i >= 0; i-- {
+		if out.Messages[i].Role == "user" {
+			if blocks, ok := out.Messages[i].Content.([]interface{}); ok && len(blocks) > 0 {
+				lastIdx := len(blocks) - 1
+				switch b := blocks[lastIdx].(type) {
+				case anthTextBlock:
+					b.CacheControl = &anthCacheControl{Type: "ephemeral"}
+					blocks[lastIdx] = b
+				case anthImageBlock:
+					b.CacheControl = &anthCacheControl{Type: "ephemeral"}
+					blocks[lastIdx] = b
+				case anthToolResultBlock:
+					b.CacheControl = &anthCacheControl{Type: "ephemeral"}
+					blocks[lastIdx] = b
+				}
+				out.Messages[i].Content = blocks
+			}
+			break
+		}
+	}
+
 	activatedTools := activatedToolNames(req.Messages)
 	for _, t := range req.Tools {
 		if t.Deferred && !activatedTools[t.Name] {
@@ -244,6 +289,9 @@ func (c *anthropicClient) buildRequest(req Request) (*anthRequest, error) {
 		out.Tools = append(out.Tools, anthTool{
 			Name: t.Name, Description: t.Description, InputSchema: schema,
 		})
+	}
+	if len(out.Tools) > 0 {
+		out.Tools[len(out.Tools)-1].CacheControl = &anthCacheControl{Type: "ephemeral"}
 	}
 
 	return out, nil

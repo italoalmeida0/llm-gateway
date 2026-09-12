@@ -776,6 +776,14 @@ describe("Indirect Code Relay and Pairing", () => {
           .filter((m: any) => m.role === "user")
           .map((m: any) => ((m.content || []) as any[]).filter((b: any) => typeof b?.text === "string").map((b: any) => b.text).join(""));
       };
+      const stripSystem = (t: string) => {
+        const trimmed = t.trim();
+        if (trimmed.startsWith("<system-reminder>")) {
+          const end = trimmed.indexOf("</system-reminder>");
+          if (end !== -1) return trimmed.slice(end + "</system-reminder>".length).trim();
+        }
+        return t;
+      };
       // The resent turn retries its model call forever (no provider here);
       // observe the worst case over a few seconds instead of waiting for idle.
       const maxUserTextCount = async (sid: string, text: string): Promise<number> => {
@@ -783,7 +791,7 @@ describe("Indirect Code Relay and Pairing", () => {
         const deadline = Date.now() + 5000;
         while (Date.now() < deadline) {
           const texts = await userTexts(sid);
-          max = Math.max(max, texts.filter((t) => t === text).length);
+          max = Math.max(max, texts.filter((t) => stripSystem(t) === text).length);
           if (max >= 2) break;
           await Bun.sleep(150);
         }

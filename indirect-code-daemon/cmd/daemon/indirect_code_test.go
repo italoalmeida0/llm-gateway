@@ -202,6 +202,7 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 			toolUse(2, fmt.Sprintf("read-%d", step), "read", string(args))
 			toolUse(3, fmt.Sprintf("todo-%d", step), "todo", `{"items":[{"id":"read","text":"Read hello.txt","status":"completed"}]}`)
 			toolUse(4, fmt.Sprintf("question-%d", step), "question", `{"questions":[{"header":"Next step","question":"How should I proceed?","options":[{"label":"Continue"}]}]}`)
+			toolUse(5, fmt.Sprintf("complete-%d", step), "mark_task_as_complete", `{"notes":"done"}`)
 			emit("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "tool_use"}, "usage": map[string]any{"output_tokens": 500}})
 		} else {
 			text(1, "The file is readable.")

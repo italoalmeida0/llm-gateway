@@ -7,6 +7,7 @@ import {
   withoutContinueNudges,
   isSyntheticNudge,
   sanitizeUserText,
+  stripLeadingSystemPrompt,
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
@@ -834,31 +835,37 @@ describe("completion signals and turn nudges", () => {
   test("withoutContinueNudges filters all synthetic nudges", () => {
     const msgs: ChatMessage[] = [
       { id: "u1", role: "user", blocks: [{ type: "text", text: "Regular message" }] },
-      { id: "u2", role: "user", blocks: [{ type: "text", text: "<system_prompt>You should continue what you are doing.</system_prompt>" }] },
-      { id: "u3", role: "user", blocks: [{ type: "text", text: "<system_prompt>If you have completed the task, call mark_task_as_complete...</system_prompt>" }] },
-      { id: "u4", role: "user", blocks: [{ type: "text", text: "<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute...</system_prompt>" }] },
-      { id: "u5", role: "user", blocks: [{ type: "text", text: "  <system_prompt>custom anything</system_prompt>  " }] },
+      { id: "u2", role: "user", blocks: [{ type: "text", text: "<system-reminder>You should continue what you are doing.</system-reminder>" }] },
+      { id: "u3", role: "user", blocks: [{ type: "text", text: "<system-reminder>If you have completed the task, call mark_task_as_complete...</system-reminder>" }] },
+      { id: "u4", role: "user", blocks: [{ type: "text", text: "<system-reminder>If your plan is ready, call mark_plan_as_ready_to_execute...</system-reminder>" }] },
+      { id: "u5", role: "user", blocks: [{ type: "text", text: "  <system-reminder>custom anything</system-reminder>  " }] },
       { id: "a1", role: "assistant", blocks: [{ type: "text", text: "Done" }] },
     ];
     const filtered = withoutContinueNudges(msgs);
     expect(filtered.map((m) => m.id)).toEqual(["u1", "a1"]);
   });
 
-  test("isSyntheticNudge matches any system_prompt block after trim", () => {
-    expect(isSyntheticNudge("<system_prompt>hello</system_prompt>")).toBe(true);
-    expect(isSyntheticNudge("  <system_prompt>anything here</system_prompt>  ")).toBe(true);
-    expect(isSyntheticNudge("<system_prompt>You should continue what you are doing.</system_prompt>")).toBe(true);
-    expect(isSyntheticNudge("<system_prompt>If you have completed the task, call mark_task_as_complete.</system_prompt>")).toBe(true);
-    expect(isSyntheticNudge("<system_prompt>If your plan is ready, call mark_plan_as_ready_to_execute.</system_prompt>")).toBe(true);
+  test("isSyntheticNudge matches any system-reminder block after trim", () => {
+    expect(isSyntheticNudge("<system-reminder>hello</system-reminder>")).toBe(true);
+    expect(isSyntheticNudge("  <system-reminder>anything here</system-reminder>  ")).toBe(true);
+    expect(isSyntheticNudge("<system-reminder>You should continue what you are doing.</system-reminder>")).toBe(true);
+    expect(isSyntheticNudge("<system-reminder>If you have completed the task, call mark_task_as_complete.</system-reminder>")).toBe(true);
+    expect(isSyntheticNudge("<system-reminder>If your plan is ready, call mark_plan_as_ready_to_execute.</system-reminder>")).toBe(true);
     expect(isSyntheticNudge("Regular user message")).toBe(false);
-    expect(isSyntheticNudge("hello <system_prompt>mid</system_prompt>")).toBe(false);
+    expect(isSyntheticNudge("hello <system-reminder>mid</system-reminder>")).toBe(false);
   });
 
-  test("sanitizeUserText removes system_prompt tags from user input", () => {
-    expect(sanitizeUserText("<system_prompt>You should continue</system_prompt>")).toBe("You should continue");
-    expect(sanitizeUserText("  <system_prompt>qualquer coisa</system_prompt>  ")).toBe("qualquer coisa");
-    expect(sanitizeUserText("prefix <system_prompt>mid</system_prompt> suffix")).toBe("prefix mid suffix");
+  test("sanitizeUserText removes system-reminder tags from user input", () => {
+    expect(sanitizeUserText("<system-reminder>You should continue</system-reminder>")).toBe("You should continue");
+    expect(sanitizeUserText("  <system-reminder>qualquer coisa</system-reminder>  ")).toBe("qualquer coisa");
+    expect(sanitizeUserText("prefix <system-reminder>mid</system-reminder> suffix")).toBe("prefix mid suffix");
     expect(sanitizeUserText("Regular user message")).toBe("Regular user message");
+  });
+
+  test("stripLeadingSystemPrompt removes leading system-reminder block and preserves user text", () => {
+    expect(stripLeadingSystemPrompt("<system-reminder>\nCurrent date: Monday, 2026-09-12\n</system-reminder>\n\nCan you fix the bug?")).toBe("Can you fix the bug?");
+    expect(stripLeadingSystemPrompt("<system-reminder>Operational mode: Plan</system-reminder> Please inspect")).toBe("Please inspect");
+    expect(stripLeadingSystemPrompt("Regular user message without tag")).toBe("Regular user message without tag");
   });
 
   test("withoutTodoActivity hides completion tool calls and marks hasCompletion while keeping text", () => {

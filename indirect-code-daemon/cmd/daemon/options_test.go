@@ -11,21 +11,13 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/core"
 )
 
-func TestSessionSystemPromptIncludesCurrentDateTime(t *testing.T) {
+func TestSessionSystemPromptIncludesSystemDirectivesAndOmitsDate(t *testing.T) {
 	prompt := sessionSystemPrompt(DaemonConfig{}, "/tmp", SessionOptions{Mode: "build"})
-	line := ""
-	for _, l := range strings.Split(prompt, "\n") {
-		if strings.HasPrefix(l, "Current date and time:") {
-			line = l
-			break
-		}
+	if !strings.Contains(prompt, "System directives: The user's input may be prepended with a <system-reminder>") {
+		t.Fatalf("system prompt missing system directives notice:\n%s", prompt)
 	}
-	if line == "" {
-		t.Fatalf("system prompt has no current date/time line:\n%s", prompt)
-	}
-	today := time.Now().Format("Monday, 2006-01-02")
-	if !strings.Contains(line, today) {
-		t.Fatalf("date line %q does not match today (%s)", line, today)
+	if strings.Contains(prompt, "Current date") {
+		t.Fatalf("system prompt should not include dynamic date (must be static for prompt caching):\n%s", prompt)
 	}
 }
 
@@ -139,6 +131,14 @@ func TestSessionSystemPromptIncludesOSAndShell(t *testing.T) {
 	}
 }
 
+func TestBuildAndPlanShareIdenticalSystemPrompt(t *testing.T) {
+	buildPrompt := sessionSystemPrompt(DaemonConfig{}, "/tmp", SessionOptions{Mode: "build"})
+	planPrompt := sessionSystemPrompt(DaemonConfig{}, "/tmp", SessionOptions{Mode: "plan"})
+	if buildPrompt != planPrompt {
+		t.Fatalf("build and plan system prompts must be identical for prompt caching:\n--- build ---\n%s\n--- plan ---\n%s", buildPrompt, planPrompt)
+	}
+}
+
 func TestCompletionToolsModeRestrictions(t *testing.T) {
 	buildReg := core.Registry{
 		"write":                        nil,
@@ -194,4 +194,56 @@ func TestBrainInstructionsDirectAccessRule(t *testing.T) {
 		t.Fatalf("expected brain instructions to forbid shell commands for session memory:\n%s", text)
 	}
 }
+
+func TestBuildTurnSystemDirectives(t *testing.T) {
+	rec := &SessionRecord{}
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+
+	// First call: both date and mode are unset, so both should be emitted
+	first := buildTurnSystemDirectives(rec, "build", now)
+	if !strings.Contains(first, "Current date: Saturday, 2026-09-12") {
+		t.Fatalf("expected date in initial directives:\n%s", first)
+	}
+	if !strings.Contains(first, "Operational mode: Build") {
+		t.Fatalf("expected mode in initial directives:\n%s", first)
+	}
+	if !strings.HasPrefix(first, "<system-reminder>\n") || !strings.HasSuffix(first, "\n</system-reminder>") {
+		t.Fatalf("directives not properly enclosed in <system-reminder>:\n%s", first)
+	}
+	if rec.LastDate != "2026-09-12" || rec.LastMode != "build" {
+		t.Fatalf("record state not updated: LastDate=%q, LastMode=%q", rec.LastDate, rec.LastMode)
+	}
+
+	// Repeated call on the same day and mode: returns empty string
+	second := buildTurnSystemDirectives(rec, "build", now)
+	if second != "" {
+		t.Fatalf("expected empty directives on same day and mode, got:\n%s", second)
+	}
+
+	// Mode switch: only mode is emitted, date is skipped
+	modeSwitch := buildTurnSystemDirectives(rec, "plan", now)
+	if strings.Contains(modeSwitch, "Current date") {
+		t.Fatalf("date should not be included when date has not changed:\n%s", modeSwitch)
+	}
+	if !strings.Contains(modeSwitch, "Operational mode: Plan") {
+		t.Fatalf("expected plan mode in directives:\n%s", modeSwitch)
+	}
+	if rec.LastMode != "plan" {
+		t.Fatalf("record LastMode not updated: %q", rec.LastMode)
+	}
+
+	// Next day: only date is emitted, mode is skipped
+	nextDay := now.Add(24 * time.Hour)
+	daySwitch := buildTurnSystemDirectives(rec, "plan", nextDay)
+	if !strings.Contains(daySwitch, "Current date: Sunday, 2026-09-13") {
+		t.Fatalf("expected new date in directives:\n%s", daySwitch)
+	}
+	if strings.Contains(daySwitch, "Operational mode") {
+		t.Fatalf("mode should not be included when mode has not changed:\n%s", daySwitch)
+	}
+	if rec.LastDate != "2026-09-13" {
+		t.Fatalf("record LastDate not updated: %q", rec.LastDate)
+	}
+}
+
 

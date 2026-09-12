@@ -60,7 +60,7 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		}
 	}
 	now := time.Now()
-	rec := &SessionRecord{ID: fmt.Sprintf("sess_%d", now.UnixNano()), CWD: resolvePath(source.CWD), Title: source.Title + " (fork)", TitleSource: "manual", Model: source.Model, Options: normalizedOptions(source.Options), Status: "idle", CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli(), TurnSeq: source.TurnSeq}
+	rec := &SessionRecord{ID: fmt.Sprintf("sess_%d", now.UnixNano()), CWD: resolvePath(source.CWD), Title: source.Title + " (fork)", TitleSource: "manual", Model: source.Model, Options: normalizedOptions(source.Options), Status: "idle", CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli(), TurnSeq: source.TurnSeq, LastDate: source.LastDate, LastMode: source.LastMode}
 	// Carry only balloons anchored inside the copied prefix. Their
 	// MessageIndex still resolves because the prefix is message-identical.
 	// Brain files never ride along: the brain is session memory, never

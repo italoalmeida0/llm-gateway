@@ -38,8 +38,12 @@ func TestAnthropicBuildRequest(t *testing.T) {
 	if wire.MaxTokens != 512 {
 		t.Fatalf("max_tokens=%d", wire.MaxTokens)
 	}
-	if wire.System != "sys" {
-		t.Fatalf("system=%q", wire.System)
+	sysBlocks, ok := wire.System.([]anthSystemBlock)
+	if !ok || len(sysBlocks) != 1 || sysBlocks[0].Text != "sys" {
+		t.Fatalf("system=%+v", wire.System)
+	}
+	if sysBlocks[0].CacheControl == nil || sysBlocks[0].CacheControl.Type != "ephemeral" {
+		t.Fatalf("system cache_control missing: %+v", sysBlocks[0].CacheControl)
 	}
 	if len(wire.Messages) != 3 {
 		t.Fatalf("messages=%d want 3", len(wire.Messages))
@@ -52,8 +56,14 @@ func TestAnthropicBuildRequest(t *testing.T) {
 	if !strings.Contains(string(tool), `"tool_result"`) {
 		t.Fatalf("tool blocks=%s", tool)
 	}
+	if !strings.Contains(string(tool), `"cache_control"`) {
+		t.Fatalf("tool result message missing cache_control: %s", tool)
+	}
 	if len(wire.Tools) != 1 || wire.Tools[0].Name != "read" {
 		t.Fatalf("tools=%+v", wire.Tools)
+	}
+	if wire.Tools[0].CacheControl == nil || wire.Tools[0].CacheControl.Type != "ephemeral" {
+		t.Fatalf("tools[0] cache_control missing: %+v", wire.Tools[0].CacheControl)
 	}
 }
 

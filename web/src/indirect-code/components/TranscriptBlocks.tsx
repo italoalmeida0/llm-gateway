@@ -119,7 +119,7 @@ export function renderAssistantSpecial(
   const open = () => ctx.toolGroupOpen()[key] ?? false;
   return (
     <Show when={units.every((u) => u.call?.toolName === "question")} fallback={
-    <div class="w-full rounded-xl overflow-hidden mt-1">
+    <div class="w-full border-t border-line/60 overflow-hidden mt-1">
       <button
         onClick={() => ctx.toggleToolGroup(key)}
         class="w-full flex items-center gap-2 px-3 py-2 hover:bg-ink-900/60 transition-colors cursor-pointer text-left"
@@ -353,7 +353,7 @@ export function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolU
     <div class="w-full">
       <ToolUnitHeader {...part} />
       <Show when={m.open()}>
-        <div class="ml-5 mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 overflow-hidden">
+        <div class="mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 overflow-hidden">
           <ToolEditBodies {...part} />
           <ToolSearchBodies {...part} />
           <ToolQuestionBodies {...part} />

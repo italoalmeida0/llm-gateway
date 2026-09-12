@@ -2,6 +2,7 @@ import { createMemo, For, Show } from "solid-js";
 import { Streamdown } from "streamdown-solid";
 import { Icon as Iconify } from "../../components/icon";
 import type { ChatMessage, ContentBlock, RenderBlock, RenderBlockSeries, ToolUnit } from "../types";
+import { isLongAssistantMessage } from "../transcript";
 import { splitToolRuns } from "../utils/tools";
 import { partitionToolSegs } from "../utils/toolSegs";
 import type { ToolSeg } from "../utils/toolSegs";
@@ -216,7 +217,7 @@ export function renderMessageContent(ctx: TranscriptRenderCtx, msg: ChatMessage,
               {(block) => {
                 if (block.type === "text" && block.text) {
                   const hasTools = msg.blocks.some((b) => b.type === "tool_call" || b.type === "tool_result");
-                  if (ctx.hideToolMessages() && hasTools && !msg.hasCompletion) return null;
+                  if (ctx.hideToolMessages() && hasTools && !msg.hasCompletion && !isLongAssistantMessage(msg)) return null;
                   return (
                     <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
                       <Streamdown components={transcriptMarkdownComponents}>{block.text}</Streamdown>
@@ -269,7 +270,7 @@ export function renderSeriesLead(ctx: TranscriptRenderCtx, series: RenderBlockSe
         </div>
       </Show>
     </Show>
-    <For each={all()}>{(message) => <For each={message.blocks.filter((b) => b.type === "image" || ((!(ctx.hideToolMessages() && series.units.length > 0) || message.hasCompletion) && b.type === "text" && !!b.text?.trim()))}>{(block) => block.type === "image" ? renderImageBlock(ctx, block) : <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto"><Streamdown components={transcriptMarkdownComponents}>{block.text}</Streamdown></div>}</For>}</For>
+    <For each={all()}>{(message) => <For each={message.blocks.filter((b) => b.type === "image" || ((!(ctx.hideToolMessages() && series.units.length > 0) || message.hasCompletion || isLongAssistantMessage(message)) && b.type === "text" && !!b.text?.trim()))}>{(block) => block.type === "image" ? renderImageBlock(ctx, block) : <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto"><Streamdown components={transcriptMarkdownComponents}>{block.text}</Streamdown></div>}</For>}</For>
   </div>;
 }
 /**

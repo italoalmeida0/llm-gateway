@@ -77,7 +77,7 @@ export function SettingsGeneralSection() {
         <div>
           <div class="font-semibold text-ink-200">Hide Tool Call Messages</div>
           <div class="text-[11px] text-ink-500 mt-0.5">
-            Hide intermediate messages sent alongside tool calls to group actions and thoughts during the turn.
+            Hide intermediate messages sent alongside tool calls to group actions and thoughts during the turn. Messages with 50+ tokens always stay visible.
           </div>
         </div>
         <button

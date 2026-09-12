@@ -9,6 +9,66 @@ export function hasToolActivity(message: ChatMessage): boolean {
   return message.blocks.some((b) => b.type === "tool_call" || b.type === "tool_result");
 }
 
+/** Rough token estimate for hide-tool-messages: chars / 4. Messages with
+ * >= LONG_MESSAGE_TOKENS always show even when hiding is enabled, so
+ * genuinely useful agent output is never swallowed by the tool group. */
+export const LONG_MESSAGE_TOKENS = 50;
+
+export function assistantTextTokens(message: ChatMessage): number {
+  const text = message.blocks
+    .filter((b) => b.type === "text" && b.text)
+    .map((b) => b.text as string)
+    .join("\n")
+    .trim();
+  return text.length / 4;
+}
+
+export function isLongAssistantMessage(message: ChatMessage): boolean {
+  return assistantTextTokens(message) >= LONG_MESSAGE_TOKENS;
+}
+
+/** Max chars for the live turn hint shown next to "Working · <time>". */
+export const TURN_HINT_MAX_CHARS = 100;
+
+/** Single-line text of an assistant message (whitespace collapsed). */
+export function assistantSingleLine(message: ChatMessage): string {
+  return message.blocks
+    .filter((b) => b.type === "text" && b.text)
+    .map((b) => b.text as string)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Latest short (<100 chars) assistant text of the current turn: the turn
+ * is the max stamped turnIndex, or — when nothing is stamped yet (live
+ * streaming) — the tail after the last user turn-start message. Walks
+ * back so a long/streaming bubble falls through to an earlier short one. */
+export function latestShortTurnMessage(messages: ChatMessage[]): string {
+  if (!messages || messages.length === 0) return "";
+  let maxStamped = 0;
+  for (const m of messages) {
+    if (typeof m.turnIndex === "number" && m.turnIndex > maxStamped) maxStamped = m.turnIndex;
+  }
+  let turnMsgs: ChatMessage[];
+  if (maxStamped > 0) {
+    turnMsgs = messages.filter((m) => m.turnIndex === maxStamped);
+  } else {
+    let start = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (isTurnStartMessage(messages[i])) { start = i + 1; break; }
+    }
+    turnMsgs = messages.slice(start);
+  }
+  for (let i = turnMsgs.length - 1; i >= 0; i--) {
+    const m = turnMsgs[i];
+    if (m.role !== "assistant") continue;
+    const text = assistantSingleLine(m);
+    if (text && text.length < TURN_HINT_MAX_CHARS) return text;
+  }
+  return "";
+}
+
 /** Only visible assistant text starts a new response group. Keep the raw
  * transcript and source indices intact, including while a new step streams.
  * When hideToolMessages is true, messages sent alongside tool calls in a turn

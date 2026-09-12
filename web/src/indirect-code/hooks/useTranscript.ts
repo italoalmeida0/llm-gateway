@@ -3,7 +3,7 @@ import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { copyWithToast } from "../../ui";
 import { createTranscriptScroll } from "../scroll";
-import { buildRenderBlocks } from "../transcript";
+import { buildRenderBlocks, latestShortTurnMessage } from "../transcript";
 import { elapsedLabel, messageText } from "../utils/format";
 import { prettyArgs } from "../utils/wire";import {
   appendReasoningDelta as reduceReasoningDelta,
@@ -93,6 +93,11 @@ export function createTranscript(opts: {
     const label = turn.status === "running" && pendingQuestion() ? "Waiting for your answers" : turn.status === "running" && pendingApproval() ? "Waiting for approval" : { running: "Working", cancelling: "Stopping turn", cancelled: "Turn cancelled", completed: "Turn completed", failed: "Turn failed" }[turn.status];
     return `${label} · ${elapsed}`;
   };
+  /** Last short assistant text of the running turn (single-line hint). */
+  const turnHint = createMemo(() => {
+    if (turnActivity()?.status !== "running" || sessionStatus() !== "running") return "";
+    return latestShortTurnMessage(messages());
+  });
   const [pendingApproval, setPendingApproval] = createSignal<PendingApproval | null>(null);
   const [pendingQuestion, setPendingQuestion] = createSignal<PendingQuestion | null>(null);
   const [questionSubmitting, setQuestionSubmitting] = createSignal(false);
@@ -879,7 +884,7 @@ export function createTranscript(opts: {
   return {
     // state
     messages, sessionStatus, setSessionStatus, turnActivity, setTurnActivity,
-    todos, setTodos, todosOpen, setTodosOpen, toggleTodosOpen, applyTodosOpenFromRemote, turnClock, turnLabel,
+    todos, setTodos, todosOpen, setTodosOpen, toggleTodosOpen, applyTodosOpenFromRemote, turnClock, turnLabel, turnHint,
     sessionCompaction, setSessionCompaction,
     pendingApproval, setPendingApproval, pendingQuestion,
     questionSubmitting, questionError, showQuestion, clearQuestion, answerQuestion,

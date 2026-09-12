@@ -11,7 +11,7 @@ import {
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
-  buildRenderBlocks, isTurnStartMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
+  buildRenderBlocks, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
 } from "../web/src/indirect-code/transcript";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
 import { parseGlobList, parseInspectTree, parseQuestionQA } from "../web/src/indirect-code/utils/toolTrees";
@@ -926,6 +926,36 @@ describe("completion signals and turn nudges", () => {
     expect(a2Block).toBeDefined();
     expect(a2Block?.kind).toBe("single");
     expect(a2Block?.msg.blocks[0]?.text).toBe("Everything fixed and verified.");
+  });
+
+  test("isLongAssistantMessage estimates tokens as chars/4 with a 50-token threshold", () => {
+    const short: ChatMessage = { id: "s", role: "assistant", blocks: [{ type: "text", text: "Checking file" }] };
+    const long: ChatMessage = {
+      id: "l", role: "assistant",
+      blocks: [{ type: "text", text: "x".repeat(200) }, { type: "tool_call", toolId: "t", toolName: "bash" }],
+    };
+    expect(isLongAssistantMessage(short)).toBe(false);
+    expect(isLongAssistantMessage(long)).toBe(true);
+  });
+
+  test("latestShortTurnMessage returns the last short assistant text of the current turn", () => {
+    const mk = (id: string, text: string, turnIndex?: number): ChatMessage => ({
+      id, role: "assistant", blocks: [{ type: "text", text }], ...(turnIndex !== undefined ? { turnIndex } : {}),
+    });
+    const user: ChatMessage = { id: "u", role: "user", blocks: [{ type: "text", text: "go" }] };
+    // Stamped turns: only the max turn counts, newest short text wins.
+    expect(latestShortTurnMessage([
+      mk("a1", "old turn", 49), user,
+      mk("a2", "x".repeat(200), 50),
+      mk("a3", "Checking file", 50),
+    ])).toBe("Checking file");
+    // Long tail falls back to the earlier short message of the same turn.
+    expect(latestShortTurnMessage([mk("a1", "ok", 50), mk("a2", "y".repeat(150), 50)])).toBe("ok");
+    // No short text at all -> empty.
+    expect(latestShortTurnMessage([mk("a1", "z".repeat(120), 50)])).toBe("");
+    // Unstamped (live streaming): tail after the last user turn-start.
+    expect(latestShortTurnMessage([mk("old", "stale"), user, mk("new", "Reading config")])).toBe("Reading config");
+    expect(latestShortTurnMessage([])).toBe("");
   });
 });
 

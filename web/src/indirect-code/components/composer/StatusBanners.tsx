@@ -23,9 +23,12 @@ export function StatusBanners() {
   </div>
 </Show>
 <Show when={s.activeSessionId() && t.turnActivity()}>
-  <div role="status" data-turn-status class="mb-2 flex items-center gap-2 text-xs text-ink-500">
-    <Iconify icon={t.sessionStatus() === "running" ? "lucide:loader-circle" : "lucide:clock-3"} size={13} class={t.sessionStatus() === "running" ? "animate-spin" : ""} />
-    <span>{t.turnLabel()}</span>
+  <div role="status" data-turn-status class="mb-2 flex items-center gap-2 text-xs text-ink-500 min-w-0">
+    <Iconify icon={t.sessionStatus() === "running" ? "lucide:loader-circle" : "lucide:clock-3"} size={13} class={t.sessionStatus() === "running" ? "animate-spin shrink-0" : "shrink-0"} />
+    <span class="shrink-0">{t.turnLabel()}</span>
+    <Show when={t.turnHint()}>{(hint) =>
+      <span class="min-w-0 flex-1 truncate whitespace-nowrap overflow-hidden" title={hint()}>{hint()}</span>
+    }</Show>
   </div>
 </Show>
 <Show when={s.activeSessionId() && t.pendingQuestion()?.id} keyed>{(id) =>

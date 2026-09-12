@@ -13,6 +13,7 @@ import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
 import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges } from "../ctx";
 import { TurnChangesBalloon } from "./TurnChangesBalloon";
 import { mapBalloonsToBlocks } from "../transcript";
+import { isLongAssistantMessage } from "../transcript";
 
 export function TranscriptView() {
   const t = useTranscriptCtx();
@@ -162,8 +163,13 @@ export function TranscriptView() {
       };
       const rctx = renderCtx();
       const textOf = () => {
-        if (block.kind === "series" && rctx.hideToolMessages() && block.units.length > 0 && !msg.hasCompletion) {
-          return "";
+        if (block.kind === "series" && rctx.hideToolMessages() && block.units.length > 0 && !msg.hasCompletion && !isLongAssistantMessage(msg)) {
+          // Lead is hidden but long extras stay visible — keep copy available for them.
+          return block.extras
+            .filter((m) => m.hasCompletion || isLongAssistantMessage(m))
+            .map((m) => messageText(m))
+            .filter((s) => s.trim() !== "")
+            .join("\n\n");
         }
         return messageText(msg);
       };

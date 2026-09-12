@@ -1172,3 +1172,40 @@ describe("Notification tags are unique per event", () => {
     expect(p1.tag).not.toBe(p2.tag);
   });
 });
+
+describe("Notify only for build/plan modes", () => {
+  test("learning/talk sessions stay silent, unknown mode still notifies", async () => {
+    const { createTurnNotify } = await import("../web/src/indirect-code/hooks/useTurnNotify");
+    const shown: string[] = [];
+    (globalThis as any).Notification = class {
+      static permission = "granted";
+      onclick: (() => void) | null = null;
+      constructor(title: string) {
+        shown.push(title);
+      }
+      close() {}
+    };
+    const mkSessions = () => [
+      { id: "build-s", title: "Build", hostId: "h1", options: { mode: "build" } },
+      { id: "plan-s", title: "Plan", hostId: "h1", options: { mode: "plan" } },
+      { id: "talk-s", title: "Talk", hostId: "h1", options: { mode: "talk" } },
+      { id: "learn-s", title: "Learn", hostId: "h1", options: { mode: "learning" } },
+    ];
+    const n = createTurnNotify({
+      hosts: () => [],
+      sessions: mkSessions as any,
+      toast: () => {},
+      onOpenSession: () => {},
+    });
+    const idle = (sid: string) => ({ type: "session_status", hostId: "h1", sessionId: sid, status: "idle" }) as any;
+    const run = (sid: string) => ({ type: "session_status", hostId: "h1", sessionId: sid, status: "running" }) as any;
+    for (const sid of ["build-s", "plan-s", "talk-s", "learn-s", "unknown-s"]) n.noteMessage(run(sid));
+    for (const sid of ["build-s", "plan-s", "talk-s", "learn-s", "unknown-s"]) n.noteMessage(idle(sid));
+    expect(shown.filter((t) => t.includes("Build"))).toHaveLength(1);
+    expect(shown.filter((t) => t.includes("Plan"))).toHaveLength(1);
+    expect(shown.filter((t) => t.includes("Talk"))).toHaveLength(0);
+    expect(shown.filter((t) => t.includes("Learn"))).toHaveLength(0);
+    expect(shown.filter((t) => t.includes("unknown"))).toHaveLength(1);
+    delete (globalThis as any).Notification;
+  });
+});

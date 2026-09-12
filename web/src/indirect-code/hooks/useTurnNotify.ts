@@ -109,7 +109,7 @@ function playChime(): void {
 
 export function createTurnNotify(opts: {
   hosts: () => RemoteHostDto[];
-  sessions: () => { id: string; title: string }[];
+  sessions: () => { id: string; title: string; hostId?: string; options?: { mode?: string } }[];
   toast: (message: string, kind?: "ok" | "err") => void;
   onOpenSession: (hostId: string, sessionId: string) => void;
 }) {
@@ -201,7 +201,21 @@ export function createTurnNotify(opts: {
     };
   }
 
+  /**
+   * Only build/plan turns notify: learning/talk sessions are used up-close
+   * (watching the chat), so sounds + popups would just annoy. Unknown mode
+   * (session not in the mirror yet) still notifies — better loud than silent.
+   */
+  function shouldNotify(hostId: string, sessionId: string): boolean {
+    const session = opts.sessions().find((s) => s.id === sessionId && (!s.hostId || s.hostId === hostId));
+    const mode = session?.options?.mode;
+    if (!mode) return true;
+    return mode === "build" || mode === "plan";
+  }
+
   function showNotification(target: TurnNotifyTarget): void {
+    // Interactive modes (learning/talk) are watched up-close: stay silent.
+    if (!shouldNotify(target.hostId, target.sessionId)) return;
     const { title, body } = turnNotifyText(target);
     const go = () => opts.onOpenSession(target.hostId, target.sessionId);
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {

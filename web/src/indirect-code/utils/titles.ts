@@ -12,23 +12,35 @@ export function groupTitle(cat: "explore" | "command", units: ToolUnit[]): strin
 }
 
   /**
-   * One-line card title for the special aggregate balloon: tool verbs
-   * compressed (first 3 distinct, then "+N more") so a 20-call series
-   * stays one readable line instead of a paragraph.
+   * One-line activity summary for the turn aggregate card: counts per
+   * activity (explored files, searches, commands, edits…) so a 20-call
+   * turn stays one readable line instead of a paragraph.
    */
-export function specialTitle(units: ToolUnit[]): string {
-  if (units.length === 0) return "Tools";
-  const parts = units.map((u) => {
-    const names: Record<string,string> = {bash:"run", write:"create", edit:"edit", read:"read", glob:"search", todo:"plan"};
-    return names[u.call?.toolName || ""] || u.call?.toolName || "tool";
-  });
-  const seen: string[] = [];
-  for (const p of parts) {
-    if (!seen.includes(p)) seen.push(p);
+export function specialTitle(units: ToolUnit[], extra?: { texts?: number; thoughts?: number }): string {
+  const plural = (n: number, one: string, many?: string) => `${n} ${n === 1 ? one : (many || `${one}s`)}`;
+  const names = units.map((u) => u.call?.toolName || "");
+  const count = (...ns: string[]) => names.filter((n) => ns.includes(n)).length;
+  const files = count("read");
+  const searches = count("glob", "search");
+  const commands = count("bash", "python");
+  const edits = count("edit", "write", "patch");
+  const questions = count("question");
+  const web = count("fetch_url", "search_web");
+  const others = units.length - files - searches - commands - edits - questions - web;
+  const parts: string[] = [];
+  if (files > 0 || searches > 0) {
+    let explored = `Explored ${plural(files, "file")}`;
+    if (searches > 0) explored += `, ${plural(searches, "search", "searches")}`;
+    parts.push(explored);
   }
-  if (units.length === 1) return `1 tool call · ${seen[0] || "tool"}`;
-  if (seen.length <= 3) return `${units.length} tool calls · ${seen.join(" · ")}`;
-  return `${units.length} tool calls · ${seen.slice(0, 3).join(" · ")} +${seen.length - 3} more`;
+  if (commands > 0) parts.push(`Ran ${plural(commands, "command")}`);
+  if (edits > 0) parts.push(`Made ${plural(edits, "edit")}`);
+  if (questions > 0) parts.push(`Asked ${plural(questions, "question")}`);
+  if (web > 0) parts.push(`Checked ${plural(web, "page")}`);
+  if (others > 0) parts.push(plural(others, "call"));
+  if ((extra?.texts || 0) > 0) parts.push(plural(extra!.texts!, "note"));
+  if (parts.length === 0) return (extra?.thoughts || 0) > 0 ? "Thinking" : "Tools";
+  return parts.join(" · ");
 }
 export function toolRowKey(msgId: string, u: ToolUnit, fallback: number) {
   return `${msgId}:${u.call?.toolId || u.result?.toolId || "u" + fallback}`;

@@ -1,4 +1,5 @@
-import { For, Show, createMemo } from "solid-js";
+import { For, Show, createMemo, onCleanup } from "solid-js";
+import { followTail } from "../../utils/scrollMemory";
 import { Streamdown } from "streamdown-solid";
 import { Icon as Iconify } from "../../../components/icon";
 import { CodeBlock } from "../CodeBlock";
@@ -43,7 +44,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">regex</span>
               {props.m.args().path && String(props.m.args().path) !== "." ? <span class="ml-1.5">in {String(props.m.args().path)}</span> : null}
             </div>
-            <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+            <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
           </Show>
         </Show>
         <Show when={props.m.name() === "inspect"}>
@@ -54,7 +55,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
             <Show
               when={inspectTree()}
               fallback={
-                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
               }
             >
               {(t) => (
@@ -106,7 +107,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
             <Show
               when={globList()}
               fallback={
-                <CodeBlock text={props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+                <CodeBlock follow={() => props.m.open() && props.running} text={props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
               }
             >
               {(g) => (
@@ -118,7 +119,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
                     <div class="px-3 pt-2 pb-1 font-mono text-[11px] text-ink-500">
                       {g().files.length} {g().files.length === 1 ? "file" : "files"}
                     </div>
-                    <ul class="px-1.5 pb-1.5 max-h-64 overflow-y-auto">
+                    <ul ref={(el) => onCleanup(followTail(el, () => props.m.open() && props.running))} class="px-1.5 pb-1.5 max-h-64 overflow-y-auto [scrollbar-gutter:stable]">
                       <For each={g().files}>
                         {(f) => (
                           <li class="flex items-center gap-1.5 rounded-md px-1.5 py-[3px] hover:bg-ink-900/70 text-[12px]">
@@ -148,7 +149,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               <Show when={props.m.webDetails()?.cached}><span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">cached</span></Show>
             </div>
             <Show when={(props.m.webDetails()?.results || []).length > 0} fallback={
-              <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={`${props.m.key()}:results`} />
+              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={`${props.m.key()}:results`} />
             }>
               <ol class="px-3 pb-2 space-y-1.5">
                 <For each={(props.m.webDetails()?.results || []).slice(0, 10)}>{(r: any, i: () => number) =>
@@ -187,16 +188,17 @@ export function ToolSearchBodies(props: ToolPartProps) {
             </a>
             <Show when={props.m.fetchDetails()?.content} fallback={
               <div class="border-t border-line/50 mt-2">
-                <CodeBlock text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language="markdown" scrollKey={`${props.m.key()}:content`} />
+                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language="markdown" scrollKey={`${props.m.key()}:content`} />
               </div>
             }>
               <div
                 ref={(el) => {
                   restoreToolScroll(props.m.key(), el);
                   requestAnimationFrame(() => restoreToolScroll(props.m.key(), el));
+                  onCleanup(followTail(el, () => props.m.open() && props.running));
                 }}
                 onScroll={(e) => recordToolScroll(props.m.key(), e.currentTarget)}
-                class="px-3 py-2 max-h-96 overflow-y-auto text-[12.5px] leading-relaxed text-ink-200 article-body"
+                class="px-3 py-2 max-h-96 overflow-y-auto [scrollbar-gutter:stable] text-[12.5px] leading-relaxed text-ink-200 article-body"
               >
                 <Streamdown>{String(props.m.fetchDetails()?.content || "")}</Streamdown>
               </div>
@@ -215,9 +217,10 @@ export function ToolSearchBodies(props: ToolPartProps) {
               ref={(el) => {
                 restoreToolScroll(props.m.key(), el);
                 requestAnimationFrame(() => restoreToolScroll(props.m.key(), el));
+                onCleanup(followTail(el, () => props.m.open() && props.running));
               }}
               onScroll={(e) => recordToolScroll(props.m.key(), e.currentTarget)}
-              class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto max-h-56 whitespace-pre-wrap"
+              class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-56 whitespace-pre-wrap"
             >
               {props.m.name() === "bash" && props.u.result ? props.m.terminal().output || "No output" : props.u.result?.toolResult || props.m.prog() || ""}
             </pre>

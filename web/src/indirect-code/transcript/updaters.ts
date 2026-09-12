@@ -262,13 +262,17 @@ export function appendToolResult(
   ];
 }
 
-/** Stamps thinking duration onto the most recent assistant. */
+/** Stamps thinking duration onto the most recent assistant that actually
+ * thought. Messages without reasoning keep no duration (a stop landing on
+ * a fresh empty carrier must not mint a phantom "0s"), and sub-second
+ * thinkings clamp to 1s — same convention as the persisted meta. */
 export function stampDuration(prev: ChatMessage[], dur: number): ChatMessage[] {
   for (let i = prev.length - 1; i >= 0; i--) {
-    if (prev[i].role === "assistant") {
-      const m = { ...prev[i], thinkingDuration: dur };
-      return [...prev.slice(0, i), m, ...prev.slice(i + 1)];
-    }
+    if (prev[i].role !== "assistant") continue;
+    const thought = prev[i].blocks.some((b) => b.type === "reasoning" && !!b.reasoning?.trim());
+    if (!thought) continue;
+    const m = { ...prev[i], thinkingDuration: Math.max(1, dur) };
+    return [...prev.slice(0, i), m, ...prev.slice(i + 1)];
   }
   return prev;
 }

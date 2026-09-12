@@ -21,3 +21,21 @@ export function restoreToolScroll(key: string | undefined, el: HTMLElement | nul
 export function clearToolScrolls() {
   toolScrollMap.clear();
 }
+
+/** Keeps an open body pinned to its tail while it grows (streaming
+ * output, thinking, messages). Follows only while `isActive()` holds
+ * (open + turn running) and never on the initial layout, so a remount
+ * still restores the reader's saved position first. Returns a cleanup. */
+export function followTail(el: HTMLElement | null, isActive: () => boolean): () => void {
+  if (!el || typeof ResizeObserver === "undefined") return () => {};
+  let first = true;
+  const ro = new ResizeObserver(() => {
+    if (first) {
+      first = false;
+      return;
+    }
+    if (isActive()) el.scrollTop = el.scrollHeight;
+  });
+  ro.observe(el);
+  return () => ro.disconnect();
+}

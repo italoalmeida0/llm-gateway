@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
 import { escapeHtml, highlightCode } from "../utils/lang";
-import { recordToolScroll, restoreToolScroll } from "../utils/scrollMemory";
+import { followTail, recordToolScroll, restoreToolScroll } from "../utils/scrollMemory";
 
 export { ShellCmd } from "./code/ShellCmd";
 export { DiffView } from "./code/DiffView";
@@ -30,6 +30,8 @@ export function CodeBlock(props: {
   bare?: boolean;
   maxH?: string;
   scrollKey?: string;
+  /** Pin to the tail while growing (streaming). Omit for static views. */
+  follow?: () => boolean;
 }) {
   let containerRef: HTMLDivElement | null = null;
   const [rows, setRows] = createSignal<CodeRow[] | null>(null);
@@ -107,9 +109,10 @@ export function CodeBlock(props: {
         containerRef = el;
         restoreToolScroll(props.scrollKey, el);
         requestAnimationFrame(() => restoreToolScroll(props.scrollKey, el));
+        if (props.follow) onCleanup(followTail(el, props.follow));
       }}
       onScroll={(e) => recordToolScroll(props.scrollKey, e.currentTarget)}
-      class={`font-mono text-[11px] text-ink-300 overflow-x-auto select-text ${
+      class={`font-mono text-[11px] text-ink-300 overflow-x-auto overflow-y-auto select-text [scrollbar-gutter:stable] ${
         props.maxH || "max-h-56"
       }`}
     >

@@ -2,7 +2,7 @@ import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
 import { Tooltip } from "../../../ui";
 import { compactTokens } from "../../context";
-import { baseNameOf } from "../../transcript";
+import { baseNameOf, cacheHitPct } from "../../transcript";
 import { useComposerCtx, useSession, useTranscriptCtx, useUI } from "../../ctx";
 import { FloatMenu } from "../FloatMenu";
 
@@ -116,7 +116,7 @@ export function ComposerFooter() {
           {(u) => (
             <div class="space-y-1.5 font-mono text-[11px]">
               <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}</span></div>
-              <div class="flex justify-between"><span class="text-ink-500">Cache</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
+              <div class="flex justify-between"><span class="text-ink-500">Cache{(() => { const p = cacheHitPct(u()); return p === null ? "" : ` (${p}%)`; })()}</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
               <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}</span></div>
               <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}</span></div>
               <Show when={u().costUsd > 0}>

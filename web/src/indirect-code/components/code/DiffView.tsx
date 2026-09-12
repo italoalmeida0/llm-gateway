@@ -93,7 +93,7 @@ export function DiffView(props: { text: string; max?: number; name?: string; scr
         requestAnimationFrame(() => restoreToolScroll(props.scrollKey, el));
       }}
       onScroll={(e) => recordToolScroll(props.scrollKey, e.currentTarget)}
-      class="font-mono text-[11px] leading-relaxed overflow-x-auto select-text"
+      class="font-mono text-[11px] leading-relaxed overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-96 select-text"
     >
       <div class="min-w-full w-fit">
         <Show

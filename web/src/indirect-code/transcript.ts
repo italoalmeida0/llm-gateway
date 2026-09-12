@@ -27,6 +27,14 @@ export function isLongAssistantMessage(message: ChatMessage): boolean {
   return assistantTextTokens(message) >= LONG_MESSAGE_TOKENS;
 }
 
+/** Share of input tokens served from cache: cache / (fresh + cache).
+ * Null when nothing was read yet — the caller then shows bare "Cache". */
+export function cacheHitPct(usage: { inTok: number; cacheTok: number }): number | null {
+  const total = (usage.inTok || 0) + (usage.cacheTok || 0);
+  if (total <= 0) return null;
+  return Math.round((100 * (usage.cacheTok || 0)) / total);
+}
+
 /** Max chars for the live turn hint shown next to "Working · <time>". */
 export const TURN_HINT_MAX_CHARS = 100;
 

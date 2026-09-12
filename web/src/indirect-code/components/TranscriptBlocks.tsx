@@ -1,5 +1,6 @@
-import { createMemo, For, Show } from "solid-js";
+import { createMemo, For, Show, onCleanup } from "solid-js";
 import { Streamdown } from "streamdown-solid";
+import { followTail } from "../utils/scrollMemory";
 import { Icon as Iconify } from "../../components/icon";
 import type { ChatMessage, ContentBlock, RenderBlock, RenderBlockSeries, ToolUnit, TurnEntry } from "../types";
 import { isLongAssistantMessage } from "../transcript";
@@ -49,6 +50,7 @@ export function renderThinkingRow(
   openByDefault: boolean,
   hidden: boolean,
   live: boolean,
+  streaming: boolean,
 ) {
   const key = `${entry.msg.id}:think:${entry.nth}`;
   const open = () => ctx.expandedThinking()[key] ?? openByDefault;
@@ -83,7 +85,10 @@ export function renderThinkingRow(
         />
       </div>
       <Show when={open()}>
-        <div class="rc-markdown w-full text-xs leading-relaxed break-words overflow-x-auto pl-1 pb-1 text-ink-400">
+        <div
+          ref={(el) => onCleanup(followTail(el, () => open() && streaming))}
+          class="rc-markdown w-full text-xs leading-relaxed break-words overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-64 pl-1 pb-1 text-ink-400"
+        >
           <Streamdown components={transcriptMarkdownComponents}>
             {entry.block.reasoning || "(thinking…)"}
           </Streamdown>
@@ -102,6 +107,7 @@ export function renderTextRow(
   entry: Extract<TurnEntry, { kind: "text" }>,
   openByDefault: boolean,
   hidden: boolean,
+  streaming: boolean,
 ) {
   const key = `${entry.msg.id}:text:${entry.nth}`;
   const open = () => ctx.toolOpen()[key] ?? openByDefault;
@@ -123,7 +129,10 @@ export function renderTextRow(
         />
       </div>
       <Show when={open()}>
-        <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto pl-1 pb-1">
+        <div
+          ref={(el) => onCleanup(followTail(el, () => open() && streaming))}
+          class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-96 pl-1 pb-1"
+        >
           <Streamdown components={transcriptMarkdownComponents}>{entry.block.text}</Streamdown>
         </div>
       </Show>
@@ -145,7 +154,10 @@ export function renderTurnAggregate(
   // NOTE: ctx.renderBlocks() is the FULL list (window only affects the <For>);
   // the running turn is always the newest block, which is always visible.
   const running = createMemo(() => ctx.renderBlocks().at(-1)?.msg.id === series.msg.id && ctx.sessionStatus() === "running");
-  const summary = createMemo(() => specialTitle(series.units));
+  const summary = createMemo(() => specialTitle(series.units, {
+    texts: series.entries.filter((e) => e.kind === "text").length,
+    thoughts: series.entries.filter((e) => e.kind === "thinking").length,
+  }));
   const key = `${series.msg.id}:turn`;
   const open = () => ctx.toolGroupOpen()[key] ?? running();
   /** The featured final renders below once idle; inside the card its rows
@@ -223,11 +235,11 @@ export function renderTurnAggregate(
                 const live = tail && tailIsThinking() && running() && entry.isNewest &&
                   entry.msg.id === lastTurnId() && ctx.thinkingStart() !== null;
                 const content = (entry.block.reasoning || "").trim() !== "";
-                return renderThinkingRow(ctx, entry, running() && tail && content, thinkingHidden(), live);
+                return renderThinkingRow(ctx, entry, running() && tail && content, thinkingHidden(), live, running() && tail);
               }
               if (entry.kind === "text") {
                 const content = (entry.block.text || "").trim() !== "";
-                return renderTextRow(ctx, entry, running() && tail && content, textHidden(entry, ei()));
+                return renderTextRow(ctx, entry, running() && tail && content, textHidden(entry, ei()), running() && tail);
               }
               return renderImageBlock(ctx, entry.block);
             }}

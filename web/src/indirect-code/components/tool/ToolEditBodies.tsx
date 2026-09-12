@@ -215,6 +215,7 @@ export function ToolEditBodies(props: ToolPartProps) {
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Reading file…" : null}</div>}
           >
             <CodeBlock
+              follow={() => props.m.open() && props.running}
               text={(props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || props.m.prog() || ""}
               language={languageForPath(String(props.m.args().path || ""))}
               scrollKey={props.m.key()}
@@ -223,6 +224,7 @@ export function ToolEditBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "write"}>
           <CodeBlock
+            follow={() => props.m.open() && props.running}
             text={String((props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || props.m.args().content || "")}
             language={languageForPath(String(props.m.args().path || ""))}
             scrollKey={props.m.key()}
@@ -240,10 +242,10 @@ export function ToolEditBodies(props: ToolPartProps) {
               </div>
             </Show>
             <Show when={props.m.args().code}>
-              <CodeBlock text={String(props.m.args().code || "")} language="python" scrollKey={`${props.m.key()}:code`} />
+              <CodeBlock follow={() => props.m.open() && props.running} text={String(props.m.args().code || "")} language="python" scrollKey={`${props.m.key()}:code`} />
             </Show>
             <div class="border-t border-line/50">
-              <CodeBlock text={props.m.terminal().output || "No output"} language={undefined} scrollKey={props.m.key()} />
+              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || "No output"} language={undefined} scrollKey={props.m.key()} />
             </div>
           </Show>
         </Show>

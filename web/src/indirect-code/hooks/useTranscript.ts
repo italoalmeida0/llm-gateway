@@ -173,7 +173,11 @@ export function createTranscript(opts: {
   const [thinkingIndex, setThinkingIndex] = createSignal(0);
   let thinkingTimer: any = null;
   function startThinkingTimer(startedAt = Date.now()) {
-    stopThinkingTimer();
+    // Monotonic: never rewind a running clock. Snapshots re-send the
+    // daemon's thinkingStartedAt on every pull; restarting here reset the
+    // visible count back to 0s and the trailing stop then stamped ~0 over
+    // the real duration. A null clock (fresh load, new phase) starts.
+    if (thinkingStart() !== null) return;
     setThinkingStart(startedAt);
     setThinkingElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
     thinkingTimer = setInterval(() => {

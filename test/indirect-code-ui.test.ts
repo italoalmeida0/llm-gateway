@@ -11,15 +11,17 @@ import {
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
-  buildRenderBlocks, finalTurnMessage, fuzzySame, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
+  buildRenderBlocks, cacheHitPct, finalTurnMessage, fuzzySame, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
 } from "../web/src/indirect-code/transcript";
+import { specialTitle } from "../web/src/indirect-code/utils/titles";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
+import { followTail } from "../web/src/indirect-code/utils/scrollMemory";
 import { parseGlobList, parseInspectTree, parseQuestionQA } from "../web/src/indirect-code/utils/toolTrees";
 import { parseDaemonMessage } from "../web/src/indirect-code/daemon-protocol";
 import { parseContentBlocks } from "../web/src/indirect-code/utils/wire";
 import {
   appendReasoningDelta, appendTextDelta, appendToolArgsDelta, appendToolResult,
-  cutTail, finishTurn, mergeUsage, normalizeSessionMessages, upsertToolCall,
+  cutTail, finishTurn, mergeUsage, normalizeSessionMessages, stampDuration, upsertToolCall,
 } from "../web/src/indirect-code/transcript/updaters";
 import type { ChatMessage, ToolUnit, TurnBalloon } from "../web/src/indirect-code/types";
 import { fileIcon } from "../web/src/indirect-code/files";
@@ -184,6 +186,28 @@ test("final message is the last long text without tools (or with completion)", (
     {id:"two",role:"assistant",srcIdx:3,blocks:[{type:"text",text:"Done."}]},
   ];
   expect(finalTurnMessage(short)).toBeNull();
+});
+
+test("cache hit share rounds cached input over total input", () => {
+  expect(cacheHitPct({ inTok: 25, cacheTok: 75 })).toBe(75);
+  expect(cacheHitPct({ inTok: 100, cacheTok: 0 })).toBe(0);
+  expect(cacheHitPct({ inTok: 0, cacheTok: 0 })).toBeNull();
+});
+
+test("aggregate title summarizes activity counts", () => {
+  const unit = (toolName: string): ToolUnit => ({ call: { type: "tool_call", toolId: toolName, toolName } });
+  expect(specialTitle([unit("read"), unit("read"), unit("glob")])).toBe("Explored 2 files, 1 search");
+  expect(specialTitle([unit("bash"), unit("bash"), unit("edit")])).toBe("Ran 2 commands · Made 1 edit");
+  expect(specialTitle([unit("fetch_url"), unit("mystery")])).toBe("Checked 1 page · 1 call");
+  expect(specialTitle([unit("read")], { texts: 2 })).toBe("Explored 1 file · 2 notes");
+  expect(specialTitle([], { thoughts: 1 })).toBe("Thinking");
+  expect(specialTitle([])).toBe("Tools");
+});
+
+test("followTail is inert without a DOM element", () => {
+  const cleanup = followTail(null, () => true);
+  expect(typeof cleanup).toBe("function");
+  cleanup();
 });
 
 test("terminal footer becomes a duration without removing real output", () => {
@@ -497,6 +521,16 @@ describe("Indirect Code transcript updaters", () => {
     expect(merged[0].blocks[0]).toEqual({ type: "reasoning", reasoning: "ab" });
     const fresh = appendReasoningDelta([asst([{ type: "text", text: "done" }])], "b");
     expect(fresh[0].blocks[0]).toEqual({ type: "reasoning", reasoning: "b" });
+  });
+  test("stampDuration lands on thought-bearing messages, never mints 0s", () => {
+    const thought = asst([{ type: "reasoning", reasoning: "hmm" }]);
+    const empty = asst([], { id: "a2" });
+    const stamped = stampDuration([thought, empty], 3);
+    expect(stamped[0].thinkingDuration).toBe(3);
+    expect(stamped[1].thinkingDuration).toBeUndefined();
+    expect(stampDuration([thought], 0)[0].thinkingDuration).toBe(1);
+    expect(stampDuration([empty], 5)[0].thinkingDuration).toBeUndefined();
+    expect(stampDuration([], 5)).toEqual([]);
   });
   test("upsertToolCall finalizes pre-created cards, appends otherwise", () => {
     const pre = [asst([{ type: "tool_call", toolId: "t", toolName: "", toolArgs: "" }])];

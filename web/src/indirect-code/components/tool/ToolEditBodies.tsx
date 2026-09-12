@@ -206,13 +206,13 @@ export function ToolEditBodies(props: ToolPartProps) {
             </div>
           </Show>
           <div class="px-3 py-2 text-[11px] text-ink-600">
-            {props.m.args().dryRun === true ? "Previewing edit…" : "Applying edit…"}
+            {props.active ? (props.m.args().dryRun === true ? "Previewing edit…" : "Applying edit…") : null}
           </div>
         </Show>
         <Show when={props.m.name() === "read"}>
           <Show
             when={props.u.result?.toolDetails?.display || props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Reading file…</div>}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Reading file…" : null}</div>}
           >
             <CodeBlock
               text={(props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || props.m.prog() || ""}
@@ -231,7 +231,7 @@ export function ToolEditBodies(props: ToolPartProps) {
         <Show when={props.m.name() === "python"}>
           <Show
             when={props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Running Python…</div>}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Running Python…" : null}</div>}
           >
             <Show when={props.m.args().script}>
               <div class="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-ink-500">

@@ -22,7 +22,7 @@ export function ToolUnitHeader(props: ToolPartProps) {
       class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
     >
       <Show
-        when={!(props.running && !props.u.result)}
+        when={!(props.running && props.active && !props.u.result)}
         fallback={
           <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
         }

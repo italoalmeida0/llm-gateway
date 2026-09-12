@@ -1,4 +1,4 @@
-import type { ChatMessage, RenderBlock, ToolUnit, TurnBalloon, TurnEntry } from "./types";
+import type { ChatMessage, ContentBlock, RenderBlock, ToolUnit, TurnBalloon, TurnEntry } from "./types";
 import { displayToolArgs, withoutContinueNudges, withoutTodoActivity } from "./live";
 
 export function hasVisibleText(message: ChatMessage): boolean {
@@ -103,16 +103,27 @@ export function finalTurnMessage(turnMsgs: ChatMessage[]): ChatMessage | null {
   return null;
 }
 
-/** Pair tool calls with results across a turn, in display order. */
+/** Pair tool calls with results across a turn, in display order.
+ * Duplicate calls with the same id (pre-created card + finalized call)
+ * merge into one unit so no result-less orphan lingers mid-list. */
+export function pushCallUnit(units: ToolUnit[], byId: Map<string, ToolUnit>, block: ContentBlock): void {
+  const existing = block.toolId ? byId.get(block.toolId) : undefined;
+  if (existing && existing.call && !existing.result) {
+    existing.call = block;
+    return;
+  }
+  const unit: ToolUnit = { call: block };
+  units.push(unit);
+  if (block.toolId) byId.set(block.toolId, unit);
+}
+
 function pairTurnUnits(turnMsgs: ChatMessage[]): ToolUnit[] {
   const units: ToolUnit[] = [];
   const byId = new Map<string, ToolUnit>();
   for (const message of turnMsgs) {
     for (const block of message.blocks) {
       if (block.type === "tool_call") {
-        const unit: ToolUnit = { call: block };
-        units.push(unit);
-        if (block.toolId) byId.set(block.toolId, unit);
+        pushCallUnit(units, byId, block);
       } else if (block.type === "tool_result") {
         const unit = block.toolId ? byId.get(block.toolId) : undefined;
         if (unit && !unit.result) unit.result = block;
@@ -147,15 +158,17 @@ function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
     let textNth = 0;
     for (const block of message.blocks) {
       if (block.type === "tool_call") {
-        const unit: ToolUnit = { call: block };
         if (!runMsg) runMsg = message;
-        run.push(unit);
-        if (block.toolId) byId.set(block.toolId, unit);
+        pushCallUnit(run, byId, block);
       } else if (block.type === "tool_result") {
         const unit = block.toolId ? byId.get(block.toolId) : undefined;
-        if (!runMsg) runMsg = message;
-        if (unit && !unit.result && run.includes(unit)) unit.result = block;
-        else run.push({ result: block });
+        if (unit && !unit.result) {
+          // Pairs wherever the call lives, even in an already-flushed run.
+          unit.result = block;
+        } else {
+          if (!runMsg) runMsg = message;
+          run.push({ result: block });
+        }
       } else if (block.type === "text" && !!block.text?.trim()) {
         flushRun();
         entries.push({ kind: "text", msg: message, block, nth: textNth++ });

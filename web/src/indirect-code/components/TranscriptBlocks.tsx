@@ -46,12 +46,12 @@ export interface TranscriptRenderCtx {
 export function renderThinkingRow(
   ctx: TranscriptRenderCtx,
   entry: Extract<TurnEntry, { kind: "thinking" }>,
-  running: boolean,
+  openByDefault: boolean,
   hidden: boolean,
   live: boolean,
 ) {
   const key = `${entry.msg.id}:think:${entry.nth}`;
-  const open = () => ctx.expandedThinking()[key] ?? running;
+  const open = () => ctx.expandedThinking()[key] ?? openByDefault;
   const label = () =>
     live
       ? `Thinking ${ctx.thinkingElapsed()}s`
@@ -100,11 +100,11 @@ export function renderThinkingRow(
 export function renderTextRow(
   ctx: TranscriptRenderCtx,
   entry: Extract<TurnEntry, { kind: "text" }>,
-  running: boolean,
+  openByDefault: boolean,
   hidden: boolean,
 ) {
   const key = `${entry.msg.id}:text:${entry.nth}`;
-  const open = () => ctx.toolOpen()[key] ?? running;
+  const open = () => ctx.toolOpen()[key] ?? openByDefault;
   const preview = () =>
     (entry.block.text || "").replace(/\s+/g, " ").trim().slice(0, 80);
   return (
@@ -152,6 +152,16 @@ export function renderTurnAggregate(
    * stay mounted with display:none so Solid keeps DOM identity. */
   const featured = () => series.finalMsgId != null && !running();
   const lastTurnId = () => series.extras.at(-1)?.id ?? series.msg.id;
+  /** Live tail: the turn's latest call, or any call with live progress
+   * (parallel in-flight). Only the tail spins/auto-opens; when a new
+   * entry arrives the previous one falls back to closed on its own. */
+  const tailCall = () => [...series.units].reverse().find((u) => u.call) ?? null;
+  const isActive = (u: ToolUnit) =>
+    running() && (u === tailCall() || (u.call?.toolId != null && ctx.toolProgress()[u.call.toolId] != null));
+  const lastEntryIdx = () => series.entries.length - 1;
+  /** A stale thinking timer (snapshot restart mid-tools) must not spin:
+   * live only while the turn's tail is still thinking. */
+  const tailIsThinking = () => series.entries[lastEntryIdx()]?.kind === "thinking";
   const lastTextIdx = () => {
     let idx = -1;
     series.entries.forEach((e, i) => { if (e.kind === "text") idx = i; });
@@ -203,15 +213,21 @@ export function renderTurnAggregate(
         <div class="border-t border-line/60 px-2 py-1.5 space-y-0.5">
           <For each={series.entries}>
             {(entry, ei) => {
+              const tail = ei() === lastEntryIdx();
               if (entry.kind === "tools") {
-                return renderToolSegs(ctx, entry.msg.id, `${series.msg.id}:e${ei()}`, entry.units, running());
+                return renderToolSegs(ctx, entry.msg.id, `${series.msg.id}:e${ei()}`, entry.units, running(), isActive);
               }
               if (entry.kind === "thinking") {
-                const live = running() && entry.isNewest && entry.msg.id === lastTurnId() && ctx.thinkingStart() !== null;
-                return renderThinkingRow(ctx, entry, running(), thinkingHidden(), live);
+                // Stale snapshot restarts must not spin: live only while
+                // the tail is still thinking AND the clock is actually on.
+                const live = tail && tailIsThinking() && running() && entry.isNewest &&
+                  entry.msg.id === lastTurnId() && ctx.thinkingStart() !== null;
+                const content = (entry.block.reasoning || "").trim() !== "";
+                return renderThinkingRow(ctx, entry, running() && tail && content, thinkingHidden(), live);
               }
               if (entry.kind === "text") {
-                return renderTextRow(ctx, entry, running(), textHidden(entry, ei()));
+                const content = (entry.block.text || "").trim() !== "";
+                return renderTextRow(ctx, entry, running() && tail && content, textHidden(entry, ei()));
               }
               return renderImageBlock(ctx, entry.block);
             }}
@@ -219,7 +235,7 @@ export function renderTurnAggregate(
         </div>
       </Show>
     </div>
-    }><For each={series.units}>{(unit, index) => renderToolUnit(ctx, series.msg.id, unit, index(), running())}</For></Show>
+    }><For each={series.units}>{(unit, index) => renderToolUnit(ctx, series.msg.id, unit, index(), running(), isActive(unit))}</For></Show>
   );
 }
 
@@ -297,7 +313,7 @@ export function renderImageBlock(ctx: TranscriptRenderCtx, block: ContentBlock) 
  * aggregate card. Same grouping as before, keyed on the series card so
  * state never collides across fused messages.
  */
-export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt: string, units: ToolUnit[], running: boolean) {
+export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt: string, units: ToolUnit[], running: boolean, isActive: (u: ToolUnit) => boolean = () => running) {
   // Partition consecutive explore/command runs into collapsible groups
   // (pure helper — algorithm lives in utils/toolSegs, covered by tests).
   const segs = partitionToolSegs(units);
@@ -315,11 +331,13 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
           if (seg.kind === "unit")
             return (
               <div data-toolseg={segKey(seg)} style={{ "overflow-anchor": "none" }}>
-                {renderToolUnit(ctx, msgId, seg.unit, seg.idx, running)}
+                {renderToolUnit(ctx, msgId, seg.unit, seg.idx, running, isActive(seg.unit))}
               </div>
             );
           const gkey = `${msgId}:${keySalt}:${segKey(seg)}`;
-          const open = () => ctx.toolGroupOpen()[gkey] ?? false;
+          // Sub-groups open while they hold live work; a finished group
+          // (and its rows) falls back to closed on its own.
+          const open = () => ctx.toolGroupOpen()[gkey] ?? (running && seg.units.some(isActive));
           return (
             <div class="w-full" data-toolseg={segKey(seg)} style={{ "overflow-anchor": "none" }}>
               <button
@@ -341,7 +359,7 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
                       // não no grupo — a chave da row (toolRowKey) não muda
                       // quando o grupo cresce.
                       const gi = units.indexOf(u);
-                      return renderToolUnit(ctx, msgId, u, gi >= 0 ? gi : 0, running);
+                      return renderToolUnit(ctx, msgId, u, gi >= 0 ? gi : 0, running, isActive(u));
                     }}
                   </For>
                 </div>
@@ -364,9 +382,9 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
 // Preserve DOM/component identity across deltas. Rebuilding <For> entries
 // on every token remounted Markdown and collapsed its height before repaint.
 
-export function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean) {
-  const m = useToolUnitModel(ctx, msgId, u, ui, running);
-  const part = { ctx, msgId, u, m, running };
+export function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean, active: boolean) {
+  const m = useToolUnitModel(ctx, msgId, u, ui, running, active);
+  const part = { ctx, msgId, u, m, running, active };
   return (
     <div class="w-full">
       <ToolUnitHeader {...part} />

@@ -146,6 +146,27 @@ test("fuzzy duplicate progress notes hide, last wins", () => {
   }
 });
 
+test("duplicate tool calls with the same id merge into one unit", () => {
+  const list: ChatMessage[] = [
+    {id:"one",role:"assistant",srcIdx:1,blocks:[
+      {type:"tool_call",toolId:"a",toolName:"bash",toolArgs:""},
+      {type:"tool_call",toolId:"a",toolName:"bash",toolArgs:'{"command":"ls"}'},
+    ]},
+    {id:"two",role:"assistant",srcIdx:3,blocks:[{type:"tool_result",toolId:"a",toolResult:"done"}]},
+  ];
+  const blocks = buildRenderBlocks(list);
+  expect(blocks).toHaveLength(1);
+  if (blocks[0].kind === "series") {
+    expect(blocks[0].units).toHaveLength(1);
+    expect(blocks[0].units[0].call?.toolArgs).toBe('{"command":"ls"}');
+    expect(blocks[0].units[0].result?.toolResult).toBe("done");
+    // The cross-message result pairs onto the call instead of orphaning.
+    expect(blocks[0].entries.filter((e) => e.kind === "tools")).toHaveLength(1);
+  } else {
+    throw new Error("expected series");
+  }
+});
+
 test("final message is the last long text without tools (or with completion)", () => {
   const longTool = "Tool-adjacent long note. " + "x".repeat(200);
   const longFinal = "Final summary of everything done. " + "y".repeat(200);

@@ -36,7 +36,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
         <Show when={props.m.name() === "search"}>
           <Show
             when={props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Searching…</div>}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Searching…" : null}</div>}
           >
             <div class="px-3 py-1.5 text-[11px] text-ink-500 font-mono">
               <span class="text-ink-300">/{String(props.m.args().pattern || "")}/</span>
@@ -49,7 +49,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
         <Show when={props.m.name() === "inspect"}>
           <Show
             when={props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Listing…</div>}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Listing…" : null}</div>}
           >
             <Show
               when={inspectTree()}
@@ -101,7 +101,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
         <Show when={props.m.name() === "glob"}>
           <Show
             when={props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Finding files…</div>}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Finding files…" : null}</div>}
           >
             <Show
               when={globList()}
@@ -140,7 +140,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
         <Show when={props.m.name() === "search_web"}>
           <Show
             when={props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Searching the web…</div>}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Searching the web…" : null}</div>}
           >
             <div class="px-3 pt-2 pb-1 text-[11px] text-ink-500">
               <span class="font-mono text-ink-300">“{String(props.m.args().query || props.m.webDetails()?.query || "")}”</span>
@@ -172,7 +172,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
         <Show when={props.m.name() === "fetch_url"}>
           <Show
             when={props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Fetching {String(props.m.args().url || "URL")}…</div>}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Fetching {String(props.m.args().url || "URL")}{props.active ? "…" : ""}</div>}
           >
             <a href={String(props.m.fetchDetails()?.url || props.m.args().url || "")} target="_blank" rel="noreferrer"
                class="mx-3 mt-2 flex items-center gap-2 rounded-lg border border-line/60 bg-elev/50 px-2.5 py-2 transition-colors hover:border-ink-500">
@@ -209,7 +209,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
         <Show when={props.m.name() !== "edit" && props.m.name() !== "read" && props.m.name() !== "write" && props.m.name() !== "python" && props.m.name() !== "search" && props.m.name() !== "inspect" && props.m.name() !== "glob" && props.m.name() !== "question" && props.m.name() !== "patch" && props.m.name() !== "search_web" && props.m.name() !== "fetch_url"}>
           <Show
             when={props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.m.name() === "question" ? "Waiting for your answers…" : props.ctx.pendingApproval()?.callId === props.u.call?.toolId ? "Waiting for approval…" : "Running…"}</div>}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.m.name() === "question" ? "Waiting for your answers…" : props.ctx.pendingApproval()?.callId === props.u.call?.toolId ? "Waiting for approval…" : props.active ? "Running…" : null}</div>}
           >
             <pre
               ref={(el) => {

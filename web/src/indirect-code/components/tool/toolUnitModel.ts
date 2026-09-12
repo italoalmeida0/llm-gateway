@@ -8,14 +8,23 @@ import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 /** Reactive model of a tool row: memos derived from ToolUnit.
  * Called synchronously within the component (same Solid owner),
  * so createMemo instances belong to the row and dispose with it.
- * Rows start open while the turn runs and closed once it ends, unless
- * the user toggled them explicitly. */
-export function useToolUnitModel(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean) {
+ * Rows start open only while active (the turn's live tail) with
+ * non-blank content, and closed otherwise — unless the user toggled
+ * them explicitly. */
+export function useToolUnitModel(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean, active: boolean) {
 const key = () => toolRowKey(msgId, u, ui);
-const open = () => ctx.toolOpen()[key()] ?? running;
 const sum = createMemo(() => toolSummary(u));
 const prog = () => (u.call?.toolId ? ctx.toolProgress()[u.call.toolId] : undefined);
 const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
+/** Anything worth showing: result output, streamed args/progress. Rows
+ * with nothing (pre-created card, empty call) stay shut until content
+ * lands — the chevron still opens them manually. */
+const hasContent = createMemo(() => {
+  if (((u.result?.toolDetails?.display ?? u.result?.toolResult) || "").trim() !== "") return true;
+  if ((prog() || "").trim() !== "") return true;
+  return Object.keys(args()).length > 0;
+});
+const open = () => ctx.toolOpen()[key()] ?? (running && active && hasContent());
 const name = () => u.call?.toolName || "tool";
 // Full shell command for the highlighted header: commands[] joined with
 // the effective joiner (&& or ;), else the single command. Python rows
@@ -59,4 +68,7 @@ export interface ToolPartProps {
   u: ToolUnit;
   m: ToolModel;
   running: boolean;
+  /** The turn's live tail (latest call, or live progress): only active
+   * rows spin or auto-open. Stale result-less units stay neutral. */
+  active: boolean;
 }

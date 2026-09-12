@@ -1,5 +1,5 @@
 import { Show } from "solid-js";
-import { Modal, Btn, Badge } from "../../ui";
+import { Modal, Badge } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { languageForPath } from "../utils/lang";
 import { CodeBlock } from "../components/CodeBlock";
@@ -17,7 +17,6 @@ export function PreviewModal() {
       title={file()?.name || "File Preview"}
       subtitle="Inspect source code, review estimated token size, or truncate content before sending to agent."
       width="max-w-3xl"
-      fullOnMobile
       badge={
         <Show when={file()?.truncated}>
           <Badge tone="amber">truncated</Badge>
@@ -44,9 +43,13 @@ export function PreviewModal() {
         </Show>
       }
       footer={
-        <Btn variant="ghost" onClick={() => m.setPreviewFile(null)}>
+        <button
+          type="button"
+          onClick={() => m.setPreviewFile(null)}
+          class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+        >
           Close
-        </Btn>
+        </button>
       }
     >
       <Show when={file()}>
@@ -58,7 +61,7 @@ export function PreviewModal() {
                 <Show when={f().truncated && f().fullText}>
                   <button
                     onClick={m.restorePreviewFile}
-                    class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-xl border bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20 transition-colors cursor-pointer"
+                    class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20 transition-colors cursor-pointer"
                   >
                     <Iconify icon="lucide:rotate-ccw" size={13} />
                     <span>Restore Full</span>
@@ -67,7 +70,7 @@ export function PreviewModal() {
                 <Show when={!f().dataUrl}>
                   <button
                     onClick={() => m.setShowTruncateInput(!m.showTruncateInput())}
-                    class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-xl border border-line bg-elev/50 text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-colors cursor-pointer"
+                    class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-line bg-ink-900/60 text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-colors cursor-pointer"
                     data-rc-tip="Truncate to reduce tokens"
                     aria-label="Truncate to reduce tokens"
                   >
@@ -82,7 +85,7 @@ export function PreviewModal() {
                       m.setPreviewCopied(true);
                       setTimeout(() => m.setPreviewCopied(false), 1500);
                     }}
-                    class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-xl border border-line bg-elev/50 text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-colors cursor-pointer"
+                    class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-line bg-ink-900/60 text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-colors cursor-pointer"
                   >
                     <Iconify icon={m.previewCopied() ? "lucide:check" : "lucide:copy"} size={13} />
                     <span>{m.previewCopied() ? "Copied!" : "Copy Code"}</span>
@@ -91,7 +94,7 @@ export function PreviewModal() {
                 <Show when={f().dataB64}>
                   <button
                     onClick={m.downloadPreviewFile}
-                    class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-xl border border-line bg-elev/50 text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-colors cursor-pointer"
+                    class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-line bg-ink-900/60 text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-colors cursor-pointer"
                   >
                     <Iconify icon="lucide:download" size={13} />
                     <span>Download</span>
@@ -106,7 +109,7 @@ export function PreviewModal() {
 
             {/* Truncate input card */}
             <Show when={m.showTruncateInput() && !f().dataUrl}>
-              <div class="flex flex-wrap items-center gap-3 p-3.5 rounded-2xl bg-elev/40 border border-line/80">
+              <div class="flex flex-wrap items-center gap-3 p-3.5 rounded-xl bg-ink-950/70 border border-line">
                 <div class="flex items-center gap-1.5 text-ink-400 text-xs">
                   <Iconify icon="lucide:scissors" size={14} class="text-ink-400" />
                   <span>Truncate to:</span>
@@ -116,7 +119,7 @@ export function PreviewModal() {
                   min={100}
                   max={200000}
                   step={1000}
-                  class="w-28 bg-ink-950 border border-line rounded-lg px-2.5 py-1 text-ink-100 text-xs font-mono focus:outline-none focus:border-accent-500"
+                  class="w-28 bg-ink-900 border border-line rounded-lg px-2.5 py-1 text-ink-100 text-xs font-mono focus:outline-none focus:border-blue-500"
                   value={m.truncateTokens() || 16000}
                   onInput={(e) => m.setTruncateTokens(parseInt(e.currentTarget.value) || 16000)}
                 />
@@ -130,21 +133,22 @@ export function PreviewModal() {
                   >
                     Cancel
                   </button>
-                  <Btn
-                    size="sm"
+                  <button
+                    type="button"
                     onClick={() => {
                       m.truncatePreviewFile();
                       m.setShowTruncateInput(false);
                     }}
+                    class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
                   >
                     Apply
-                  </Btn>
+                  </button>
                 </div>
               </div>
             </Show>
 
             {/* Code / Image Content Viewer */}
-            <div class="max-h-[55vh] overflow-auto rounded-2xl border border-line/80 bg-ink-950 p-4">
+            <div class="max-h-[55vh] overflow-auto rounded-xl border border-line bg-ink-950 p-4">
               <Show
                 when={f().dataUrl}
                 fallback={

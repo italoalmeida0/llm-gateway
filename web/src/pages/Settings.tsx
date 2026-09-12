@@ -5,7 +5,7 @@ import { PageTitle, navigate } from "../index";
 import { usalItems } from "../motion";
 import { renderGoogleButton } from "../google";
 import {
-  Badge, Btn, Card, IconBtn, CardHeader, Icon, Icons, Input, Modal, ModalNotice, Spinner, copyWithToast, fmtDate, toast,
+  Badge, Btn, Card, IconBtn, CardHeader, Icon, Icons, Input, Modal, ModalField, ModalNotice, Spinner, copyWithToast, fmtDate, toast,
 } from "../ui";
 
 export default function SettingsPage() {
@@ -358,32 +358,50 @@ export default function SettingsPage() {
         title="Disable two-factor authentication"
         subtitle="Confirm with your current 6-digit authenticator code before removing 2FA protection."
         width="max-w-md"
-        footerLeft={<Badge tone="amber">Security change</Badge>}
+        footerLeft={
+          <div class="text-xs text-amber-400 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.shield} size={13} />
+            <span>Security change</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setDisableTotpOpen(false)}>
+            <button
+              type="button"
+              onClick={() => setDisableTotpOpen(false)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn
-              variant="danger"
+            </button>
+            <button
+              type="button"
               onClick={disableTotp}
               disabled={busy() || totpDisableCode().length !== 6}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               Disable 2FA
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-4">
-          <Input
+          <ModalField
             label="Current 6-digit authenticator code"
-            value={totpDisableCode()}
-            onInput={setTotpDisableCode}
-            placeholder="123456"
-            autocomplete="one-time-code"
-          />
+            hint="Enter the numerical code from Google Authenticator, 1Password, or Authy."
+          >
+            <input
+              type="text"
+              value={totpDisableCode()}
+              onInput={(e) => setTotpDisableCode(e.currentTarget.value.trim())}
+              placeholder="123456"
+              autocomplete="one-time-code"
+              maxlength={6}
+              class="w-full rounded-lg border border-line bg-ink-950/70 px-3.5 py-2.5 text-center text-lg tracking-widest font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+            />
+          </ModalField>
+
           <ModalNotice tone="warn" title="Reduced account protection">
-            Disabling 2FA means your account will only require a password (or Google login) to sign in.
+            Disabling 2FA removes the second security layer. Your account will only require a password or Google OAuth to sign in.
           </ModalNotice>
         </div>
       </Modal>

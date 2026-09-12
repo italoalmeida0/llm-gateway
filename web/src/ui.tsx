@@ -733,6 +733,7 @@ export function Badge(props: {
 export function ModalSection(props: {
   title?: string;
   subtitle?: string;
+  info?: string;
   badge?: JSX.Element;
   action?: JSX.Element;
   children: JSX.Element;
@@ -744,13 +745,20 @@ export function ModalSection(props: {
         <div class="flex items-start sm:items-center justify-between gap-3 flex-wrap">
           <div class="min-w-0">
             <div class="flex items-center gap-2 flex-wrap">
-              <h4 class="text-xs font-semibold uppercase tracking-wider text-ink-300">
+              <h4 class="text-xs sm:text-sm font-semibold text-ink-100">
                 {props.title}
               </h4>
+              <Show when={props.info}>
+                <Tooltip content={props.info}>
+                  <span class="text-ink-400 hover:text-ink-200 cursor-help transition-colors text-xs">
+                    ⓘ
+                  </span>
+                </Tooltip>
+              </Show>
               {props.badge}
             </div>
             <Show when={props.subtitle}>
-              <p class="text-[11px] sm:text-xs text-ink-500 leading-relaxed mt-0.5">
+              <p class="text-xs text-ink-400 leading-relaxed mt-0.5">
                 {props.subtitle}
               </p>
             </Show>
@@ -761,6 +769,39 @@ export function ModalSection(props: {
         </div>
       </Show>
       {props.children}
+    </div>
+  );
+}
+
+export function OrDivider(props: { text?: string; class?: string }) {
+  return (
+    <div class={`flex items-center gap-3 my-3 ${props.class ?? ""}`}>
+      <div class="h-px bg-line/80 flex-1" />
+      <span class="text-[11px] font-medium text-ink-500 uppercase tracking-wider">
+        {props.text ?? "Or"}
+      </span>
+      <div class="h-px bg-line/80 flex-1" />
+    </div>
+  );
+}
+
+export function ModalField(props: {
+  label?: string;
+  hint?: string;
+  children: JSX.Element;
+  class?: string;
+}) {
+  return (
+    <div class={`space-y-1.5 ${props.class ?? ""}`}>
+      <Show when={props.label}>
+        <label class="block text-xs font-medium text-ink-300">
+          {props.label}
+        </label>
+      </Show>
+      {props.children}
+      <Show when={props.hint}>
+        <p class="text-[11px] text-ink-500">{props.hint}</p>
+      </Show>
     </div>
   );
 }
@@ -785,23 +826,10 @@ export function SwitchCard(props: {
           props.onChange(!props.checked);
         }
       }}
-      class={`flex items-start sm:items-center justify-between gap-4 p-3.5 sm:p-4 rounded-xl border border-line/80 bg-elev/30 hover:bg-elev/60 transition-all cursor-pointer select-none ${
+      class={`flex items-start gap-3.5 p-3.5 sm:p-4 rounded-xl border border-line bg-ink-900/40 hover:bg-ink-900/70 hover:border-ink-600 transition-all cursor-pointer select-none ${
         props.disabled ? "opacity-50 pointer-events-none" : ""
       } ${props.class ?? ""}`}
     >
-      <div class="min-w-0 flex-1">
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="text-xs sm:text-sm font-medium text-ink-100">
-            {props.title}
-          </span>
-          {props.badge}
-        </div>
-        <Show when={props.description}>
-          <p class="text-[11px] sm:text-xs text-ink-400 leading-relaxed mt-0.5">
-            {props.description}
-          </p>
-        </Show>
-      </div>
       <button
         type="button"
         role="switch"
@@ -811,16 +839,29 @@ export function SwitchCard(props: {
           e.stopPropagation();
           props.onChange(!props.checked);
         }}
-        class={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 ${
-          props.checked ? "bg-accent-500" : "bg-ink-700"
+        class={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out mt-0.5 focus:outline-none ${
+          props.checked ? "bg-blue-600" : "bg-ink-700"
         }`}
       >
         <span
-          class={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-accent-fg shadow-sm transition duration-200 ease-in-out ${
+          class={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
             props.checked ? "translate-x-4" : "translate-x-0"
           }`}
         />
       </button>
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-xs sm:text-sm font-medium text-ink-100">
+            {props.title}
+          </span>
+          {props.badge}
+        </div>
+        <Show when={props.description}>
+          <p class="text-xs text-ink-400 leading-relaxed mt-0.5">
+            {props.description}
+          </p>
+        </Show>
+      </div>
     </div>
   );
 }
@@ -841,8 +882,8 @@ export function FilterChip(props: {
       onClick={props.onClick}
       class={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer select-none border ${
         props.selected
-          ? "bg-accent-500 text-accent-fg border-accent-500 shadow-sm"
-          : "bg-elev/40 text-ink-300 border-line hover:border-ink-500 hover:text-ink-100"
+          ? "bg-blue-600 text-white border-blue-500 shadow-sm"
+          : "bg-ink-900/60 text-ink-300 border-line hover:border-ink-500 hover:text-ink-100"
       } ${props.disabled ? "opacity-40 cursor-not-allowed" : ""} ${props.class ?? ""}`}
     >
       <span>{props.children}</span>
@@ -855,7 +896,7 @@ export function FilterChip(props: {
             props.onRemove?.();
           }}
           class="hover:opacity-75 p-0.5 rounded transition-opacity"
-          title="Remove"
+          title="Deselect"
         >
           <Icon name={Icons.x} size={11} />
         </span>
@@ -951,40 +992,74 @@ export function Modal(props: {
   return (
     <Show when={props.open}>
       <Portal>
-        <div class="fixed inset-0 overflow-hidden bg-black/60 backdrop-blur-sm transition-opacity" style={{ "z-index": Z.modal }}
-          onMouseDown={props.onClose}>
-          <div class={`h-full flex items-end sm:items-center justify-center p-0 sm:p-6 overflow-hidden ${props.fullOnMobile ? "" : ""}`}>
-            <div ref={setupDialog} role="dialog" aria-modal="true" aria-labelledby={titleId}
-              aria-describedby={desc() ? descriptionId : undefined} tabindex="-1"
-              class={`anim-pop-in flex max-h-[92dvh] sm:max-h-[88vh] min-h-0 w-full flex-col ${props.width ?? "max-w-md"} rounded-t-3xl sm:rounded-3xl border-t border-x sm:border border-line/80 bg-card shadow-2xl outline-none overflow-hidden ${props.fullOnMobile ? "max-sm:h-full max-sm:max-h-full max-sm:rounded-none max-sm:border-0" : ""}`}
-              onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-              
-              <Show when={!props.fullOnMobile}>
-                <div class="sm:hidden w-10 h-1 rounded-full bg-ink-600/30 mx-auto mt-2.5 -mb-1.5 shrink-0" />
-              </Show>
-
-              <div class="flex shrink-0 items-start justify-between gap-4 px-5 py-4 sm:px-6 sm:py-5 border-b border-line/80 bg-card">
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <h3 id={titleId} class="text-base sm:text-lg font-semibold text-ink-100 tracking-tight break-words">{props.title}</h3>
-                    {props.badge}
-                  </div>
-                  <Show when={desc()}><p id={descriptionId} class="mt-1 text-xs sm:text-[13px] leading-relaxed text-ink-400 font-normal">{desc()}</p></Show>
+        <div
+          class="fixed inset-0 overflow-y-auto bg-black/75 backdrop-blur-sm transition-opacity p-3 sm:p-6 flex items-center justify-center min-h-screen"
+          style={{ "z-index": Z.modal }}
+          onMouseDown={props.onClose}
+        >
+          <div
+            ref={setupDialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            aria-describedby={desc() ? descriptionId : undefined}
+            tabindex="-1"
+            class={`anim-pop-in flex max-h-[90vh] my-auto min-h-0 w-full flex-col ${
+              props.width ?? "max-w-xl"
+            } rounded-xl sm:rounded-2xl border border-line bg-card shadow-2xl outline-none overflow-hidden`}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div class="flex shrink-0 items-start justify-between gap-4 px-6 py-5 border-b border-line bg-card">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <h3
+                    id={titleId}
+                    class="text-base sm:text-lg font-semibold text-ink-100 tracking-tight break-words"
+                  >
+                    {props.title}
+                  </h3>
+                  {props.badge}
                 </div>
-                <button type="button" onClick={props.onClose} class="shrink-0 rounded-xl p-1.5 text-ink-400 hover:text-ink-100 hover:bg-elev active:scale-95 focus-visible:ring-2 focus-visible:ring-accent-500 transition-all cursor-pointer" aria-label="Close">
-                  <Icon name={Icons.x} size={18} />
-                </button>
+                <Show when={desc()}>
+                  <p
+                    id={descriptionId}
+                    class="mt-1 text-xs text-ink-400 leading-relaxed font-normal"
+                  >
+                    {desc()}
+                  </p>
+                </Show>
               </div>
-
-              <div ref={(el) => props.bodyRef?.(el)} class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5 sm:px-6 sm:py-6">{props.children}</div>
-
-              <Show when={props.footer || props.footerLeft}>
-                <div class="flex shrink-0 flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3 border-t border-line/80 bg-elev/40 px-5 py-3.5 sm:px-6 rounded-b-2xl sm:rounded-b-3xl max-sm:rounded-b-none">
-                  <div class="min-w-0 flex items-center gap-2 empty:hidden">{props.footerLeft}</div>
-                  <div class="flex items-center justify-end gap-2.5 flex-wrap sm:ml-auto">{props.footer}</div>
-                </div>
-              </Show>
+              <button
+                type="button"
+                onClick={props.onClose}
+                class="shrink-0 rounded-lg p-1.5 text-ink-400 hover:text-ink-100 hover:bg-elev active:scale-95 transition-colors cursor-pointer"
+                aria-label="Close"
+              >
+                <Icon name={Icons.x} size={16} />
+              </button>
             </div>
+
+            {/* Body */}
+            <div
+              ref={(el) => props.bodyRef?.(el)}
+              class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5 space-y-5 text-xs sm:text-sm"
+            >
+              {props.children}
+            </div>
+
+            {/* Footer */}
+            <Show when={props.footer || props.footerLeft}>
+              <div class="flex shrink-0 items-center justify-between gap-3 border-t border-line bg-ink-900/40 px-6 py-3.5">
+                <div class="min-w-0 flex items-center gap-2 empty:hidden text-xs text-ink-400">
+                  {props.footerLeft}
+                </div>
+                <div class="flex items-center justify-end gap-2.5 flex-wrap ml-auto">
+                  {props.footer}
+                </div>
+              </div>
+            </Show>
           </div>
         </div>
       </Portal>

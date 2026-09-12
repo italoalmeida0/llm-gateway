@@ -7,14 +7,14 @@ import {
   Btn,
   Card,
   EmptyState,
+  FilterChip,
   Icon,
   IconBtn,
   Icons,
-  Input,
   Modal,
+  ModalField,
   ModalNotice,
   ModalSection,
-  Select,
   SwitchCard,
   copyWithToast,
   fmtDate,
@@ -317,18 +317,24 @@ export default function AdminUsersPage() {
         title="Create user"
         subtitle="Provision a new user account with dedicated API keys and rate limits."
         width="max-w-lg"
-        footerLeft={<span class="text-xs text-ink-500">Instant activation</span>}
+        footerLeft={<span class="text-xs text-ink-400">Instant activation</span>}
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setShowCreate(false)}>
+            <button
+              type="button"
+              onClick={() => setShowCreate(false)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn
+            </button>
+            <button
+              type="button"
               onClick={create}
               disabled={busy() || !email().trim() || !name().trim()}
+              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Creating…" : "Create user"}
-            </Btn>
+            </button>
           </>
         }
       >
@@ -338,34 +344,48 @@ export default function AdminUsersPage() {
             subtitle="Account login email and display identity."
           >
             <div class="space-y-3.5">
-              <Input
-                label="Email address"
-                type="email"
-                value={email()}
-                onInput={setEmail}
-                placeholder="friend@example.com"
-              />
-              <Input
-                label="Full name"
-                value={name()}
-                onInput={setName}
-                placeholder="Alice"
-              />
-              <Select
-                label="Gateway role"
-                value={role()}
-                onChange={setRole}
-                options={[
-                  { value: "user", label: "User (Key & budget management)" },
-                  { value: "admin", label: "Admin (Full registry & user access)" },
-                ]}
-              />
+              <ModalField label="Email address">
+                <input
+                  type="email"
+                  value={email()}
+                  onInput={(e) => setEmail(e.currentTarget.value)}
+                  placeholder="name@example.com"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+              </ModalField>
+
+              <ModalField label="Full name">
+                <input
+                  type="text"
+                  value={name()}
+                  onInput={(e) => setName(e.currentTarget.value)}
+                  placeholder="e.g. Alice Smith"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+              </ModalField>
+
+              <ModalField label="Gateway role" hint="Determines access to the admin dashboard and registry controls.">
+                <div class="flex flex-wrap gap-2 pt-1">
+                  <FilterChip
+                    selected={role() === "user"}
+                    onClick={() => setRole("user")}
+                  >
+                    User (Keys & budgets)
+                  </FilterChip>
+                  <FilterChip
+                    selected={role() === "admin"}
+                    onClick={() => setRole("admin")}
+                  >
+                    Admin (Full access)
+                  </FilterChip>
+                </div>
+              </ModalField>
             </div>
           </ModalSection>
 
           <ModalSection
-            title="Onboarding"
-            subtitle="Invitation delivery and initial credentials."
+            title="Onboarding & Delivery"
+            subtitle="Invitation link and initial credentials."
           >
             <SwitchCard
               checked={sendInvite()}
@@ -385,18 +405,27 @@ export default function AdminUsersPage() {
         subtitle="Modify user display name, administrative role, and account authorization status."
         width="max-w-lg"
         footerLeft={
-          <span class="text-xs text-ink-500 font-mono">
+          <span class="text-xs text-ink-400 font-mono">
             Role: {editing()?.role}
           </span>
         }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setEditing(null)}>
+            <button
+              type="button"
+              onClick={() => setEditing(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn onClick={saveEdit} disabled={busy() || !editing()?.name.trim()}>
+            </button>
+            <button
+              type="button"
+              onClick={saveEdit}
+              disabled={busy() || !editing()?.name.trim()}
+              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               {busy() ? "Saving…" : "Save changes"}
-            </Btn>
+            </button>
           </>
         }
       >
@@ -408,34 +437,48 @@ export default function AdminUsersPage() {
                 subtitle="Primary identity and access privileges."
               >
                 <div class="space-y-3.5">
-                  <Input
-                    label="Display name"
-                    value={u().name}
-                    onInput={(v) => setEditing({ ...u(), name: v })}
-                  />
-                  <Select
-                    label="Role"
-                    value={u().role}
-                    onChange={(v) =>
-                      setEditing({ ...u(), role: v as "admin" | "user" })
-                    }
-                    options={[
-                      { value: "user", label: "User" },
-                      { value: "admin", label: "Admin" },
-                    ]}
-                  />
-                  <Select
-                    label="Account status"
-                    value={u().status}
-                    onChange={(v) =>
-                      setEditing({ ...u(), status: v as "active" | "banned" })
-                    }
-                    options={[
-                      { value: "active", label: "Active" },
-                      { value: "banned", label: "Banned (all keys blocked)" },
-                    ]}
-                    hint="Banning immediately revokes active sessions and blocks all proxy keys."
-                  />
+                  <ModalField label="Display name">
+                    <input
+                      type="text"
+                      value={u().name}
+                      onInput={(e) => setEditing({ ...u(), name: e.currentTarget.value })}
+                      class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    />
+                  </ModalField>
+
+                  <ModalField label="Gateway role">
+                    <div class="flex flex-wrap gap-2 pt-1">
+                      <FilterChip
+                        selected={u().role === "user"}
+                        onClick={() => setEditing({ ...u(), role: "user" })}
+                      >
+                        User
+                      </FilterChip>
+                      <FilterChip
+                        selected={u().role === "admin"}
+                        onClick={() => setEditing({ ...u(), role: "admin" })}
+                      >
+                        Admin
+                      </FilterChip>
+                    </div>
+                  </ModalField>
+
+                  <ModalField label="Account status" hint="Banning immediately revokes active sessions and blocks all proxy keys.">
+                    <div class="flex flex-wrap gap-2 pt-1">
+                      <FilterChip
+                        selected={u().status === "active"}
+                        onClick={() => setEditing({ ...u(), status: "active" })}
+                      >
+                        Active
+                      </FilterChip>
+                      <FilterChip
+                        selected={u().status === "banned"}
+                        onClick={() => setEditing({ ...u(), status: "banned" })}
+                      >
+                        Banned (all keys blocked)
+                      </FilterChip>
+                    </div>
+                  </ModalField>
                 </div>
               </ModalSection>
             </div>
@@ -450,24 +493,36 @@ export default function AdminUsersPage() {
         title="Account action link"
         subtitle="SMTP is not configured on this instance. Copy and share this secure one-time onboarding link."
         width="max-w-lg"
-        footerLeft={<Badge tone="amber">Single use</Badge>}
+        footerLeft={
+          <div class="text-xs text-amber-400 font-medium flex items-center gap-1.5">
+            <span class="inline-block w-2 h-2 rounded-full bg-amber-500" />
+            <span>Single-use link</span>
+          </div>
+        }
         footer={
           <>
-            <Btn
-              variant="outline"
-              size="sm"
+            <button
+              type="button"
               onClick={() => copyWithToast(inviteLink())}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer inline-flex items-center gap-1.5"
             >
-              <Icon name={Icons.copy} /> Copy link
-            </Btn>
-            <Btn onClick={() => setInviteLink("")}>Done</Btn>
+              <Icon name={Icons.copy} size={13} />
+              <span>Copy link</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setInviteLink("")}
+              class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
+              Done
+            </button>
           </>
         }
       >
         <div class="space-y-4">
-          <div class="rounded-xl border border-line/80 bg-ink-950/60 p-3.5 space-y-2">
-            <div class="text-[11px] text-ink-400 font-medium">One-time setup URL</div>
-            <code class="block font-mono text-xs text-emerald-400 break-all select-all">
+          <div class="rounded-xl border border-line bg-ink-950/80 p-3.5 space-y-2">
+            <div class="text-xs text-ink-400 font-medium">One-time setup URL</div>
+            <code class="block font-mono text-xs text-emerald-300 break-all select-all bg-ink-900/60 p-2.5 rounded-lg border border-line/40">
               {inviteLink()}
             </code>
           </div>
@@ -484,26 +539,45 @@ export default function AdminUsersPage() {
         onClose={() => setConfirmReset2fa(null)}
         title="Reset 2FA"
         subtitle="Remove two-factor authentication requirement for this account."
-        footerLeft={<Badge tone="amber">Security reset</Badge>}
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-amber-400 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.shield} size={13} />
+            <span>Security reset</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmReset2fa(null)}>
+            <button
+              type="button"
+              onClick={() => setConfirmReset2fa(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={reset2fa} disabled={busy()}>
+            </button>
+            <button
+              type="button"
+              onClick={reset2fa}
+              disabled={busy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               Reset 2FA
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="warn" title="Reset TOTP authentication">
-            Reset two-factor authentication for{" "}
-            <strong>{confirmReset2fa()?.email}</strong>? Their existing authenticator app keys will be discarded.
+            Reset two-factor authentication for <strong class="text-white">{confirmReset2fa()?.email}</strong>? Their existing authenticator app keys will be discarded.
           </ModalNotice>
-          <p class="text-xs text-ink-400 leading-relaxed">
-            The user will be prompted to re-enroll a new TOTP authenticator upon their next login.
-          </p>
+          <div class="rounded-xl border border-line bg-ink-950/40 p-3.5 space-y-2 text-xs text-ink-300">
+            <div class="font-medium text-ink-100">Security reset outcome:</div>
+            <ul class="list-disc list-inside space-y-1 text-ink-400 pl-1">
+              <li>TOTP secret will be wiped from the account.</li>
+              <li>Active sessions will remain logged in.</li>
+              <li>The user will be prompted to enroll a new authenticator upon their next login.</li>
+            </ul>
+          </div>
         </div>
       </Modal>
 
@@ -513,26 +587,46 @@ export default function AdminUsersPage() {
         onClose={() => setConfirmDelete(null)}
         title="Delete user"
         subtitle="Permanently delete this user account, their API keys, and active sessions."
-        footerLeft={<Badge tone="red">Permanent</Badge>}
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.trash} size={13} />
+            <span>Permanent deletion</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={remove} disabled={busy()}>
+            </button>
+            <button
+              type="button"
+              onClick={remove}
+              disabled={busy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               Delete user
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="danger" title="Confirm account deletion">
-            Delete <strong>{confirmDelete()?.email}</strong>? All their active sessions,
+            Delete <strong class="text-white">{confirmDelete()?.email}</strong>? All their active sessions,
             gateway API keys, and authentication credentials will be permanently erased.
           </ModalNotice>
-          <p class="text-xs text-ink-400 leading-relaxed">
-            Historical usage metrics and spend records are kept for financial and audit accounting.
-          </p>
+          <div class="rounded-xl border border-line bg-ink-950/40 p-3.5 space-y-2 text-xs text-ink-300">
+            <div class="font-medium text-ink-100">Permanent erasure details:</div>
+            <ul class="list-disc list-inside space-y-1 text-ink-400 pl-1">
+              <li>User row, password hashes, and TOTP secrets are permanently removed.</li>
+              <li>All gateway API keys owned by this user are deleted.</li>
+              <li>Historical usage records remain safely kept for audit and financial accounting.</li>
+            </ul>
+          </div>
         </div>
       </Modal>
     </div>

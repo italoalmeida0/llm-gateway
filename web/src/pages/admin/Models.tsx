@@ -4,7 +4,7 @@ import { api, type ModelDto, type ProviderDto, type RoutingMode, type SyncOutcom
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
-import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, ModalNotice, ModalSection, Segmented, Select, SwitchCard, toast, fmtNum } from "../../ui";
+import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Modal, ModalField, ModalNotice, ModalSection, Segmented, Select, SwitchCard, toast, fmtNum } from "../../ui";
 import { UsageGrid, serverDatasource } from "../../aggrid";
 import type { ColDef, GridApi } from "ag-grid-community";
 
@@ -660,19 +660,28 @@ export default function AdminModelsPage() {
         subtitle="Configure public model routing, multi-provider failover chains, and client-advertised parameters."
         width="max-w-2xl"
         footerLeft={
-          <span class="text-xs text-ink-500 font-medium flex items-center gap-1.5">
+          <span class="text-xs text-ink-400 font-medium flex items-center gap-1.5">
             <Icon name={Icons.bolt} size={13} />
             <span>{fTargets().length} target{fTargets().length > 1 ? "s" : ""} in fallback order</span>
           </span>
         }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setEditing(null)}>
+            <button
+              type="button"
+              onClick={() => setEditing(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn onClick={save} disabled={busy() || !targetsValid() || !fId().trim()}>
+            </button>
+            <button
+              type="button"
+              onClick={save}
+              disabled={busy() || !targetsValid() || !fId().trim()}
+              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               {busy() ? "Saving…" : "Save model"}
-            </Btn>
+            </button>
           </>
         }
       >
@@ -682,17 +691,23 @@ export default function AdminModelsPage() {
             subtitle="The model identifier expected in client API request payloads."
           >
             <div class="space-y-3.5">
-              <Input
-                label="Public model id"
-                value={fId()}
-                onInput={setFId}
-                placeholder="hf:zai-org/GLM-5.2"
+              <ModalField
+                label="Public model ID"
                 hint={
                   editing() === "new"
-                    ? "What clients send as `model`"
-                    : "Changing the id renames the entry — clients must send the new id (usage history keeps the old one)"
+                    ? "What clients send as `model` parameter"
+                    : "Renaming updates the ID in-place; client applications must point to the new ID"
                 }
-              />
+              >
+                <input
+                  type="text"
+                  value={fId()}
+                  onInput={(e) => setFId(e.currentTarget.value)}
+                  placeholder="e.g. hf:zai-org/GLM-5.2 or gpt-4o"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+              </ModalField>
+
               <SwitchCard
                 checked={fEnabled()}
                 onChange={setFEnabled}
@@ -705,11 +720,129 @@ export default function AdminModelsPage() {
           {/* routing targets / failover chain */}
           <ModalSection
             title="Routing Targets · Fallback Order"
-            subtitle="The gateway cascades requests top-down when an upstream provider hits billing (402) or transient rate limits."
-            action={
+            info="The gateway cascades requests top-down. If an upstream provider hits billing (402) or transient rate limits, the gateway rewrites the model and cascades to the next candidate."
+            subtitle="Requests walk targets top-down. Fallback occurs before the first response byte reaches the client."
+          >
+            <div class="space-y-2.5">
+              {/* Column header (desktop / tablet) */}
+              <div class="hidden sm:flex items-center gap-2 text-[11px] text-ink-400 px-2 select-none">
+                <span class="w-5 text-center">#</span>
+                <span class="w-[38%]">Provider endpoint</span>
+                <span class="w-4 text-center" />
+                <span class="flex-1">Upstream model ID</span>
+                <span class="w-12 text-center">Active</span>
+                <span class="w-6" />
+              </div>
+
+              {/* Rows */}
+              <div
+                class="space-y-2"
+                ref={(el) =>
+                  attachSortable(el, {
+                    onReorder: (ids) =>
+                      setFTargets((prev) => ids.map((s) => prev[Number(s)]!).filter(Boolean)),
+                  })
+                }
+              >
+                <For each={fTargets()}>
+                  {(t, i) => (
+                    <div
+                      data-id={String(i())}
+                      class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-2.5 rounded-xl border border-line bg-ink-950/70 p-2.5 transition-colors hover:border-ink-600"
+                    >
+                      {/* Top bar on mobile / left side on desktop */}
+                      <div class="flex items-center gap-2 flex-1 sm:flex-none sm:w-[38%] min-w-0">
+                        <span
+                          data-handle
+                          title="Drag to reorder"
+                          class="text-ink-500 hover:text-ink-200 transition-colors shrink-0 cursor-grab active:cursor-grabbing p-1"
+                        >
+                          <Icon name={Icons.grip} size={14} />
+                        </span>
+                        <span class="text-xs font-mono font-medium text-ink-400 w-5 shrink-0 text-center">
+                          {i() + 1}
+                        </span>
+                        <div class="flex-1 sm:w-full min-w-0">
+                          <Select
+                            value={t.providerId}
+                            onChange={(v) => updateTarget(i(), { providerId: v })}
+                            options={providerOptions()}
+                          />
+                        </div>
+                        {/* Mobile quick actions (Active + Remove) */}
+                        <div class="flex sm:hidden items-center gap-2 shrink-0 ml-auto pl-1">
+                          <label
+                            class="flex items-center gap-1 shrink-0 cursor-pointer text-xs text-ink-300"
+                            title="Enabled target"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={t.enabled}
+                              onChange={(e) => updateTarget(i(), { enabled: e.currentTarget.checked })}
+                              class="w-4 h-4 rounded border-line bg-ink-900 accent-blue-600 cursor-pointer"
+                            />
+                            <span class="text-[11px] font-medium text-ink-400">On</span>
+                          </label>
+                          <button
+                            type="button"
+                            title={fTargets().length <= 1 ? "At least one target required" : "Remove target"}
+                            disabled={fTargets().length <= 1}
+                            onClick={() => setFTargets((prev) => prev.filter((_, j) => j !== i()))}
+                            class="p-1 rounded text-ink-400 hover:text-rose-400 disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer shrink-0"
+                          >
+                            <Icon name={Icons.x} size={15} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Direction arrow on desktop */}
+                      <span class="hidden sm:inline text-ink-500 text-xs shrink-0 select-none">→</span>
+
+                      {/* Model input: on mobile shows inline arrow, takes remaining space */}
+                      <div class="flex-1 min-w-0 flex items-center gap-2 pl-7 sm:pl-0">
+                        <span class="sm:hidden text-ink-500 text-xs shrink-0 select-none">→</span>
+                        <input
+                          type="text"
+                          value={t.upstreamModel}
+                          onInput={(e) => updateTarget(i(), { upstreamModel: e.currentTarget.value })}
+                          placeholder={fId() || "defaults to public id"}
+                          class="w-full rounded-lg border border-line bg-ink-900/60 px-3 py-1.5 sm:py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                        />
+                      </div>
+
+                      {/* Desktop actions */}
+                      <div class="hidden sm:flex items-center gap-2 shrink-0">
+                        <label
+                          class="flex items-center gap-1 shrink-0 cursor-pointer text-xs text-ink-300 px-1"
+                          title="Enabled target (disabled targets are skipped during failover)"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={t.enabled}
+                            onChange={(e) => updateTarget(i(), { enabled: e.currentTarget.checked })}
+                            class="w-4 h-4 rounded border-line bg-ink-900 accent-blue-600 cursor-pointer"
+                          />
+                          <span class="text-[11px] font-medium text-ink-400">On</span>
+                        </label>
+                        <button
+                          type="button"
+                          title={fTargets().length <= 1 ? "A model needs at least one routing target" : "Remove target"}
+                          disabled={fTargets().length <= 1}
+                          onClick={() => setFTargets((prev) => prev.filter((_, j) => j !== i()))}
+                          class="p-1 rounded text-ink-400 hover:text-rose-400 disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer shrink-0"
+                        >
+                          <Icon name={Icons.x} size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </div>
+
+              {/* Add target button */}
               <button
                 type="button"
-                class="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-elev/60 border border-line text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-all cursor-pointer disabled:opacity-40"
+                class="text-xs font-medium text-blue-400 hover:text-blue-300 inline-flex items-center gap-1.5 cursor-pointer py-1.5 transition-colors disabled:opacity-40"
                 disabled={fTargets().length >= 8}
                 onClick={() =>
                   setFTargets((prev) => [
@@ -725,62 +858,9 @@ export default function AdminModelsPage() {
                   ])
                 }
               >
-                <Icon name={Icons.plus} size={12} /> Add fallback
+                <Icon name={Icons.plus} size={13} />
+                <span>+ Add another fallback target</span>
               </button>
-            }
-          >
-            <div
-              class="space-y-2"
-              ref={(el) =>
-                attachSortable(el, {
-                  onReorder: (ids) =>
-                    setFTargets((prev) => ids.map((s) => prev[Number(s)]!).filter(Boolean)),
-                })
-              }
-            >
-              <For each={fTargets()}>
-                {(t, i) => (
-                  <div data-id={String(i())} class="flex items-center gap-2.5 rounded-xl border border-line/80 bg-elev/40 px-3 py-2.5 transition-colors hover:border-line">
-                    <span data-handle title="Drag to reorder" class="text-ink-500 hover:text-ink-200 transition-colors shrink-0 cursor-grab active:cursor-grabbing p-0.5">
-                      <Icon name={Icons.grip} size={14} />
-                    </span>
-                    <span class="text-xs font-mono font-medium text-ink-400 w-4 shrink-0">{i() + 1}</span>
-                    <div class="w-[36%] shrink-0">
-                      <Select
-                        value={t.providerId}
-                        onChange={(v) => updateTarget(i(), { providerId: v })}
-                        options={providerOptions()}
-                      />
-                    </div>
-                    <div class="flex-1 min-w-0">
-                      <Input
-                        value={t.upstreamModel}
-                        onInput={(v) => updateTarget(i(), { upstreamModel: v })}
-                        placeholder={fId() || "defaults to public id"}
-                      />
-                    </div>
-                    <label
-                      class="flex items-center gap-1.5 shrink-0 cursor-pointer text-xs text-ink-400 px-1"
-                      title="Enabled target (disabled targets are skipped during failover)"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={t.enabled}
-                        onChange={(e) => updateTarget(i(), { enabled: e.currentTarget.checked })}
-                        class="w-3.5 h-3.5 rounded border-line bg-elev accent-brand-500 cursor-pointer"
-                      />
-                      <span>on</span>
-                    </label>
-                    <IconBtn
-                      icon={Icons.trash}
-                      title={fTargets().length <= 1 ? "A model needs at least one routing target" : "Remove target"}
-                      danger
-                      disabled={fTargets().length <= 1}
-                      onClick={() => setFTargets((prev) => prev.filter((_, j) => j !== i()))}
-                    />
-                  </div>
-                )}
-              </For>
             </div>
           </ModalSection>
 
@@ -788,7 +868,7 @@ export default function AdminModelsPage() {
             title="Advanced Metadata & Pricing"
             subtitle="Parameters advertised to clients querying GET /v1/models."
           >
-            <div class="rounded-2xl border border-line/70 bg-elev/30 p-4 space-y-4">
+            <div class="rounded-xl border border-line bg-ink-900/40 p-4 space-y-4">
               <button
                 type="button"
                 onClick={() => setShowAdvanced(!showAdvanced())}
@@ -805,33 +885,107 @@ export default function AdminModelsPage() {
                 <span class="text-[11px] text-ink-500">Optional</span>
               </button>
               <Show when={showAdvanced()}>
-                <div class="space-y-4 pt-2 border-t border-line/60">
-                  <Input label="Display name" value={fName()} onInput={setFName} placeholder="defaults to id" />
-                  <Input label="Description" value={fDesc()} onInput={setFDesc} />
+                <div class="space-y-4 pt-3 border-t border-line">
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <Input label="Context length" type="number" value={fContext()} onInput={setFContext} />
-                    <Input label="Max output" type="number" value={fMaxOut()} onInput={setFMaxOut} />
+                    <ModalField label="Display name">
+                      <input
+                        type="text"
+                        value={fName()}
+                        onInput={(e) => setFName(e.currentTarget.value)}
+                        placeholder="defaults to id"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      />
+                    </ModalField>
+                    <ModalField label="Description">
+                      <input
+                        type="text"
+                        value={fDesc()}
+                        onInput={(e) => setFDesc(e.currentTarget.value)}
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      />
+                    </ModalField>
                   </div>
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <Input label="Input modalities (csv)" value={fInMod()} onInput={setFInMod} placeholder="text, image" />
-                    <Input label="Output modalities (csv)" value={fOutMod()} onInput={setFOutMod} placeholder="text" />
+                    <ModalField label="Context length">
+                      <input
+                        type="number"
+                        value={fContext()}
+                        onInput={(e) => setFContext(e.currentTarget.value)}
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 focus:border-blue-500 focus:outline-none transition-colors"
+                      />
+                    </ModalField>
+                    <ModalField label="Max output">
+                      <input
+                        type="number"
+                        value={fMaxOut()}
+                        onInput={(e) => setFMaxOut(e.currentTarget.value)}
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 focus:border-blue-500 focus:outline-none transition-colors"
+                      />
+                    </ModalField>
                   </div>
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <Input label="Sampling params (csv)" value={fSampling()} onInput={setFSampling} placeholder="temperature, top_p" />
-                    <Input label="Features (csv)" value={fFeatures()} onInput={setFFeatures} placeholder="tools, reasoning" />
+                    <ModalField label="Input modalities (csv)">
+                      <input
+                        type="text"
+                        value={fInMod()}
+                        onInput={(e) => setFInMod(e.currentTarget.value)}
+                        placeholder="text, image"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      />
+                    </ModalField>
+                    <ModalField label="Output modalities (csv)">
+                      <input
+                        type="text"
+                        value={fOutMod()}
+                        onInput={(e) => setFOutMod(e.currentTarget.value)}
+                        placeholder="text"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      />
+                    </ModalField>
                   </div>
-                  <Input label="Reasoning efforts (csv)" value={fEfforts()} onInput={setFEfforts} placeholder="low, medium, high" />
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <ModalField label="Sampling params (csv)">
+                      <input
+                        type="text"
+                        value={fSampling()}
+                        onInput={(e) => setFSampling(e.currentTarget.value)}
+                        placeholder="temperature, top_p"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      />
+                    </ModalField>
+                    <ModalField label="Features (csv)">
+                      <input
+                        type="text"
+                        value={fFeatures()}
+                        onInput={(e) => setFFeatures(e.currentTarget.value)}
+                        placeholder="tools, reasoning"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      />
+                    </ModalField>
+                  </div>
+                  <ModalField label="Reasoning efforts (csv)">
+                    <input
+                      type="text"
+                      value={fEfforts()}
+                      onInput={(e) => setFEfforts(e.currentTarget.value)}
+                      placeholder="low, medium, high"
+                      class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    />
+                  </ModalField>
                   <div>
-                    <div class="text-xs font-medium text-ink-300 mb-1.5">Pricing (per token, USD strings)</div>
+                    <div class="text-xs font-medium text-ink-300 mb-2">Pricing (per token, USD strings)</div>
                     <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
                       <For each={PRICING_KEYS}>
                         {(k) => (
-                          <Input
-                            label={k}
-                            value={fPricing()[k] ?? ""}
-                            onInput={(pv) => setFPricing((prev) => ({ ...prev, [k]: pv }))}
-                            placeholder="0.00000475"
-                          />
+                          <ModalField label={k}>
+                            <input
+                              type="text"
+                              value={fPricing()[k] ?? ""}
+                              onInput={(e) => setFPricing((prev) => ({ ...prev, [k]: e.currentTarget.value }))}
+                              placeholder="0.00000475"
+                              class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                            />
+                          </ModalField>
                         )}
                       </For>
                     </div>
@@ -849,26 +1003,46 @@ export default function AdminModelsPage() {
         onClose={() => setConfirmDelete(null)}
         title="Delete model"
         subtitle="Remove this model registration from the gateway routing registry."
-        footerLeft={<Badge tone="red">Irreversible</Badge>}
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.trash} size={13} />
+            <span>Registry removal</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={remove} disabled={busy()}>
+            </button>
+            <button
+              type="button"
+              onClick={remove}
+              disabled={busy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               {busy() ? "Deleting…" : "Delete model"}
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="danger" title="Confirm model deletion">
-            Delete model <strong>{confirmDelete()?.id}</strong>? Requests targeting
+            Delete model <strong class="text-white">{confirmDelete()?.id}</strong>? Requests targeting
             this model ID in router mode will immediately fail with 404 Not Found.
           </ModalNotice>
-          <p class="text-xs text-ink-400 leading-relaxed">
-            Historical usage metrics and spend records associated with this model will be preserved.
-          </p>
+          <div class="rounded-xl border border-line bg-ink-950/40 p-3.5 space-y-2 text-xs text-ink-300">
+            <div class="font-medium text-ink-100">Deletion impact:</div>
+            <ul class="list-disc list-inside space-y-1 text-ink-400 pl-1">
+              <li>Model is removed from registry and routing fallback tables.</li>
+              <li>Calls in router mode specifying this model will return 404.</li>
+              <li>Historical usage metrics and spend records remain safely stored.</li>
+            </ul>
+          </div>
         </div>
       </Modal>
 
@@ -878,26 +1052,46 @@ export default function AdminModelsPage() {
         onClose={() => setConfirmBulk(false)}
         title="Delete selected models"
         subtitle="Remove all selected model registrations from the gateway routing registry."
-        footerLeft={<Badge tone="red">{selected().size} selected</Badge>}
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.trash} size={13} />
+            <span>{selected().size} models selected</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmBulk(false)}>
+            <button
+              type="button"
+              onClick={() => setConfirmBulk(false)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={bulkRemove} disabled={busy()}>
+            </button>
+            <button
+              type="button"
+              onClick={bulkRemove}
+              disabled={busy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               {busy() ? "Deleting…" : `Delete ${selected().size} models`}
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="danger" title="Bulk deletion">
-            Delete <strong>{selected().size}</strong> selected model
+            Delete <strong class="text-white">{selected().size}</strong> selected model
             {selected().size === 1 ? "" : "s"}? Router-mode requests for these models will immediately return 404.
           </ModalNotice>
-          <p class="text-xs text-ink-400 leading-relaxed">
-            Usage ledger rows and token logs are retained for audit and accounting.
-          </p>
+          <div class="rounded-xl border border-line bg-ink-950/40 p-3.5 space-y-2 text-xs text-ink-300">
+            <div class="font-medium text-ink-100">Bulk purge summary:</div>
+            <ul class="list-disc list-inside space-y-1 text-ink-400 pl-1">
+              <li>All {selected().size} model definitions will be dropped from routing.</li>
+              <li>Pass-through requests remain unaffected.</li>
+              <li>Usage ledger records and historical logs will be preserved.</li>
+            </ul>
+          </div>
         </div>
       </Modal>
     </div>

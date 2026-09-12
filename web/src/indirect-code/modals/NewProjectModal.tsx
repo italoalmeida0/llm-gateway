@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { Modal, Btn, ModalNotice } from "../../ui";
+import { Modal, ModalNotice } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { useSession } from "../ctx";
 
@@ -16,32 +16,36 @@ export function NewProjectModal() {
       title="Select project folder"
       subtitle="Browse the host filesystem to choose or initialize a workspace for your agent sessions."
       width="max-w-2xl"
-      fullOnMobile
       footerLeft={
         <div class="min-w-0 flex items-center gap-2 text-xs text-ink-400 font-mono truncate max-w-xs sm:max-w-sm">
-          <Iconify icon="lucide:folder-check" size={14} class="shrink-0 text-brand-500" />
+          <Iconify icon="lucide:folder-check" size={14} class="shrink-0 text-blue-400" />
           <span class="truncate">{s.folderCurrent() || s.newProjectPath() || "No folder selected"}</span>
         </div>
       }
       footer={
         <>
-          <Btn variant="ghost" onClick={() => s.setShowNewProjectModal(false)}>
+          <button
+            type="button"
+            onClick={() => s.setShowNewProjectModal(false)}
+            class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+          >
             Cancel
-          </Btn>
-          <Btn
+          </button>
+          <button
             type="button"
             disabled={!isCurrentValid()}
             onClick={s.createProject}
+            class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
           >
             Open Project
-          </Btn>
+          </button>
         </>
       }
     >
       <div class="space-y-4">
         {/* Navigation / Path input bar */}
         <form
-          class="flex items-center gap-2 p-1.5 rounded-xl border border-line/80 bg-elev/40 focus-within:border-accent-500/60 focus-within:bg-elev/70 transition-all"
+          class="flex items-center gap-2 p-1.5 rounded-xl border border-line bg-ink-950/70 focus-within:border-blue-500 transition-all"
           onSubmit={(e) => {
             e.preventDefault();
             s.requestFolders(s.newProjectPath());
@@ -59,11 +63,11 @@ export function NewProjectModal() {
           />
           <button
             type="submit"
-            class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-ink-300 hover:text-ink-100 hover:bg-elev/80 transition-colors flex items-center gap-1 cursor-pointer shrink-0"
+            class="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-300 hover:text-ink-100 hover:bg-ink-800 transition-colors flex items-center gap-1 cursor-pointer shrink-0 border border-line/60"
             title="Navigate to path"
           >
             <span>Go</span>
-            <Iconify icon="lucide:arrow-right" size={14} />
+            <Iconify icon="lucide:arrow-right" size={13} />
           </button>
         </form>
 
@@ -74,16 +78,16 @@ export function NewProjectModal() {
         </Show>
 
         {/* Directory browser container */}
-        <div class="rounded-2xl border border-line/80 bg-elev/30 overflow-hidden">
-          <div class="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-line/60 bg-elev/40">
+        <div class="rounded-xl border border-line bg-ink-950/60 overflow-hidden">
+          <div class="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-line bg-ink-900/50">
             <div class="flex items-center gap-2 text-xs font-medium text-ink-200 min-w-0 truncate">
               <Iconify icon="lucide:folder-tree" size={14} class="text-ink-400 shrink-0" />
-              <span class="truncate">{s.folderCurrent() || "Host Root"}</span>
+              <span class="truncate font-mono text-xs">{s.folderCurrent() || "Host Root"}</span>
             </div>
             <div class="flex items-center gap-2 shrink-0">
               <Show when={!s.folderLoading() && s.folderEntries()}>
-                <span class="text-[10px] text-ink-500 uppercase tracking-wider">
-                  {s.folderEntries().length} items
+                <span class="text-[11px] text-ink-500 font-mono">
+                  {s.folderEntries().length} folders
                 </span>
               </Show>
               <button
@@ -94,7 +98,7 @@ export function NewProjectModal() {
                   s.folderParent() === s.folderCurrent()
                 }
                 onClick={() => s.requestFolders(s.folderParent())}
-                class="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-ink-400 hover:text-ink-100 hover:bg-elev transition-colors disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
+                class="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium text-ink-300 hover:text-ink-100 hover:bg-ink-800 border border-line/60 transition-colors disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
                 title="Go to parent directory"
               >
                 <Iconify icon="lucide:arrow-up" size={13} />
@@ -132,13 +136,13 @@ export function NewProjectModal() {
                     type="button"
                     aria-label={`Open ${folder.name}`}
                     onClick={() => s.requestFolders(folder.path)}
-                    class="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl text-left text-xs sm:text-sm text-ink-300 hover:text-ink-100 hover:bg-elev/70 focus-visible:bg-elev/70 outline-none transition-all cursor-pointer group"
+                    class="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-left text-xs sm:text-sm text-ink-300 hover:text-ink-100 hover:bg-ink-900/80 focus-visible:bg-ink-900 outline-none transition-all cursor-pointer group"
                   >
                     <span class="flex items-center gap-2.5 min-w-0 truncate">
                       <Iconify
                         icon="lucide:folder"
-                        size={16}
-                        class="shrink-0 text-ink-500 group-hover:text-brand-500 transition-colors"
+                        size={15}
+                        class="shrink-0 text-ink-500 group-hover:text-blue-400 transition-colors"
                       />
                       <span class="truncate font-mono text-xs">{folder.name}</span>
                     </span>

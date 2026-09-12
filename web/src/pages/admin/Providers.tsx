@@ -4,7 +4,7 @@ import { api, type AuthStyle, type ProviderDto, type ProviderKeyDto, type SyncOu
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
-import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, ModalNotice, ModalSection, Segmented, Select, SwitchCard, toast, fmtDate, timeUntil } from "../../ui";
+import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Modal, ModalField, ModalNotice, ModalSection, Segmented, Select, SwitchCard, toast, fmtDate, timeUntil } from "../../ui";
 import { syncSummary } from "./Models";
 
 /** Badge view of a provider key's failover state. */
@@ -523,26 +523,32 @@ export default function AdminProvidersPage() {
         subtitle="Configure upstream API endpoints, capability authentication headers, and failover priority."
         width="max-w-xl"
         footerLeft={
-          <div class="text-[11px] text-ink-500 flex items-center gap-1.5">
+          <div class="text-xs text-ink-400 flex items-center gap-1.5">
             <Icon name={Icons.shield} size={13} />
             <span>Upstream keys AES-256 encrypted</span>
           </div>
         }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setEditing(null)}>
+            <button
+              type="button"
+              onClick={() => setEditing(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn
+            </button>
+            <button
+              type="button"
               onClick={save}
               disabled={
                 busy() ||
                 !name().trim() ||
                 (!openaiUrl().trim() && !anthropicUrl().trim() && !responsesUrl().trim())
               }
+              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Saving…" : "Save provider"}
-            </Btn>
+            </button>
           </>
         }
       >
@@ -552,25 +558,36 @@ export default function AdminProvidersPage() {
             subtitle="Display label and failover priority ranking."
           >
             <div class="space-y-3.5">
-              <Input label="Name" value={name()} onInput={setName} placeholder="e.g. OpenAI Direct" />
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5 items-end">
-                <Input
-                  label="Priority (lower = preferred)"
+              <ModalField label="Provider name">
+                <input
+                  type="text"
+                  value={name()}
+                  onInput={(e) => setName(e.currentTarget.value)}
+                  placeholder="e.g. OpenAI Direct"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+              </ModalField>
+
+              <SwitchCard
+                checked={enabled()}
+                onChange={setEnabled}
+                title="Provider active in routing table"
+                description="When disabled, all routes, models, and keys linked to this provider are skipped during failover."
+              />
+
+              <ModalField
+                label="Priority ranking (lower number = preferred)"
+                hint="Order in which this provider is attempted during failover cascades."
+              >
+                <input
                   type="number"
                   min={0}
                   max={10000}
                   value={priority()}
-                  onInput={setPriority}
-                  hint="Order in which this provider is attempted"
+                  onInput={(e) => setPriority(e.currentTarget.value)}
+                  class="w-full max-w-xs rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 focus:border-blue-500 focus:outline-none transition-colors"
                 />
-                <SwitchCard
-                  checked={enabled()}
-                  onChange={setEnabled}
-                  title="Provider enabled"
-                  description="When disabled, all its routes and keys are skipped during failover."
-                  class="h-[84px] py-2"
-                />
-              </div>
+              </ModalField>
             </div>
           </ModalSection>
 
@@ -578,42 +595,51 @@ export default function AdminProvidersPage() {
             title="Upstream Protocol Endpoints"
             subtitle="Configure API base URLs and authentication header styles. Leave empty if a protocol is not supported."
           >
-            <div class="space-y-3.5 rounded-2xl border border-line/70 bg-elev/30 p-4">
+            <div class="space-y-3.5 rounded-xl border border-line bg-ink-900/40 p-4">
               <div class="space-y-2">
-                <Input
-                  label="OpenAI-compatible base URL"
-                  value={openaiUrl()}
-                  onInput={setOpenaiUrl}
-                  placeholder="https://api.openai.com/v1"
-                />
+                <ModalField label="OpenAI-compatible base URL">
+                  <input
+                    type="text"
+                    value={openaiUrl()}
+                    onInput={(e) => setOpenaiUrl(e.currentTarget.value)}
+                    placeholder="https://api.openai.com/v1"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  />
+                </ModalField>
                 <div class="flex items-center justify-between gap-3 pt-0.5">
-                  <span class="text-xs text-ink-500">Send OpenAI key as</span>
+                  <span class="text-xs text-ink-400">Send OpenAI key as</span>
                   <Segmented value={openaiAuth()} onChange={setOpenaiAuth} options={AUTH_STYLE_OPTIONS} />
                 </div>
               </div>
 
-              <div class="space-y-2 pt-2 border-t border-line/50">
-                <Input
-                  label="Anthropic-compatible base URL"
-                  value={anthropicUrl()}
-                  onInput={setAnthropicUrl}
-                  placeholder="https://api.anthropic.com/v1"
-                />
+              <div class="space-y-2 pt-3 border-t border-line">
+                <ModalField label="Anthropic-compatible base URL">
+                  <input
+                    type="text"
+                    value={anthropicUrl()}
+                    onInput={(e) => setAnthropicUrl(e.currentTarget.value)}
+                    placeholder="https://api.anthropic.com/v1"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  />
+                </ModalField>
                 <div class="flex items-center justify-between gap-3 pt-0.5">
-                  <span class="text-xs text-ink-500">Send Anthropic key as</span>
+                  <span class="text-xs text-ink-400">Send Anthropic key as</span>
                   <Segmented value={anthropicAuth()} onChange={setAnthropicAuth} options={AUTH_STYLE_OPTIONS} />
                 </div>
               </div>
 
-              <div class="space-y-2 pt-2 border-t border-line/50">
-                <Input
-                  label="Responses API base URL"
-                  value={responsesUrl()}
-                  onInput={setResponsesUrl}
-                  placeholder="https://provider.example.com/v1"
-                />
+              <div class="space-y-2 pt-3 border-t border-line">
+                <ModalField label="Responses API base URL">
+                  <input
+                    type="text"
+                    value={responsesUrl()}
+                    onInput={(e) => setResponsesUrl(e.currentTarget.value)}
+                    placeholder="https://provider.example.com/v1"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  />
+                </ModalField>
                 <div class="flex items-center justify-between gap-3 pt-0.5">
-                  <span class="text-xs text-ink-500">Send Responses key as</span>
+                  <span class="text-xs text-ink-400">Send Responses key as</span>
                   <Segmented value={responsesAuth()} onChange={setResponsesAuth} options={AUTH_STYLE_OPTIONS} />
                 </div>
               </div>
@@ -626,23 +652,33 @@ export default function AdminProvidersPage() {
           >
             <div class="space-y-3.5">
               <Show when={editing() === "new"}>
-                <Input
+                <ModalField
                   label="Upstream API key"
-                  type="password"
-                  value={apiKey()}
-                  onInput={setApiKey}
-                  placeholder="sk-…"
-                  autocomplete="off"
                   hint="Stored with AES-256-GCM encryption. Fallback keys can be added after saving."
-                />
+                >
+                  <input
+                    type="password"
+                    value={apiKey()}
+                    onInput={(e) => setApiKey(e.currentTarget.value)}
+                    placeholder="sk-…"
+                    autocomplete="off"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  />
+                </ModalField>
               </Show>
-              <Input
+
+              <ModalField
                 label="Blocked upstream params"
-                value={stripParams()}
-                onInput={setStripParams}
-                placeholder="temperature, max_tokens"
-                hint="Comma-separated request keys stripped before forwarding upstream (for providers that reject them)."
-              />
+                hint="Comma-separated keys stripped before forwarding upstream (for providers that reject unexpected flags)."
+              >
+                <input
+                  type="text"
+                  value={stripParams()}
+                  onInput={(e) => setStripParams(e.currentTarget.value)}
+                  placeholder="e.g. temperature, max_tokens"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+              </ModalField>
             </div>
           </ModalSection>
         </div>
@@ -656,9 +692,13 @@ export default function AdminProvidersPage() {
         subtitle="Verify upstream network reachability, latency, and live chat probe response."
         width="max-w-xl"
         footer={
-          <Btn variant="ghost" onClick={closeTest}>
+          <button
+            type="button"
+            onClick={closeTest}
+            class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+          >
             Close
-          </Btn>
+          </button>
         }
       >
         <div class="space-y-6">
@@ -666,8 +706,8 @@ export default function AdminProvidersPage() {
             title="Endpoint Smoke Test"
             subtitle="Automatic ping to check health and query available models."
           >
-            <Show when={!smokeBusy()} fallback={<div class="text-xs text-ink-500 py-2">Probing endpoints…</div>}>
-              <Show when={smoke()} fallback={<div class="text-xs text-ink-500 py-2">No response data</div>}>
+            <Show when={!smokeBusy()} fallback={<div class="text-xs text-ink-400 py-2">Probing endpoints…</div>}>
+              <Show when={smoke()} fallback={<div class="text-xs text-ink-400 py-2">No response data</div>}>
                 {(s) => (
                   <div class="flex flex-wrap gap-2 pt-1">
                     <For each={Object.entries(s()) as Array<[Cap, SmokeResult]>}>
@@ -689,7 +729,7 @@ export default function AdminProvidersPage() {
             title="Interactive Chat Probe"
             subtitle="Sends a live turn upstream to test credentials and streaming responses."
           >
-            <div class="rounded-2xl border border-line/70 bg-elev/30 p-4 space-y-3.5">
+            <div class="rounded-xl border border-line bg-ink-900/40 p-4 space-y-3.5">
               <Show when={(["openai", "anthropic", "responses"] as const).filter((c) => testFor()?.[`${c}BaseUrl` as const]).length > 1}>
                 <Segmented
                   value={probeCap()}
@@ -707,22 +747,34 @@ export default function AdminProvidersPage() {
                   options={listedModels().map((m) => ({ value: m, label: m }))}
                 />
               </Show>
-              <Input
-                label={listedModels().length > 0 ? "…or specify a model id" : "Model id"}
-                value={modelFree()}
-                onInput={setModelFree}
-                placeholder="e.g. gpt-4o-mini / claude-3-5-sonnet"
+              <ModalField
+                label={listedModels().length > 0 ? "…or specify a model ID" : "Model ID"}
                 hint={
                   listedModels().length > 0
                     ? "Typing here overrides the dropdown selection above"
                     : "Model list was empty — enter the ID manually"
                 }
-              />
+              >
+                <input
+                  type="text"
+                  value={modelFree()}
+                  onInput={(e) => setModelFree(e.currentTarget.value)}
+                  placeholder="e.g. gpt-4o-mini / claude-3-5-sonnet"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+              </ModalField>
+
               <div class="flex justify-end pt-1">
-                <Btn onClick={runProbe} disabled={probeBusy() || !effectiveModel()}>
+                <button
+                  type="button"
+                  onClick={runProbe}
+                  disabled={probeBusy() || !effectiveModel()}
+                  class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+                >
                   {probeBusy() ? "Sending…" : "Send Hello Probe"}
-                </Btn>
+                </button>
               </div>
+
               <Show when={probe()}>
                 {(r) => (
                   <div
@@ -735,18 +787,20 @@ export default function AdminProvidersPage() {
                     <Show
                       when={r().reachable && (r().status ?? 500) < 400}
                       fallback={
-                        <div class="text-rose-500">
+                        <div class="text-rose-400">
                           {r().reachable
                             ? `HTTP ${r().status} — ${r().upstreamError ?? "upstream rejected the request"}`
                             : `Unreachable — ${r().error ?? "unknown error"}`}
                         </div>
                       }
                     >
-                      <div class="text-emerald-500 font-medium">
+                      <div class="text-emerald-400 font-medium">
                         OK · {r().latencyMs}ms · model {r().model}
                       </div>
                       <Show when={r().reply}>
-                        <div class="text-ink-200 mt-1.5 font-mono text-[11px] leading-relaxed">“{r().reply}”</div>
+                        <div class="text-ink-200 mt-1.5 font-mono text-[11px] leading-relaxed bg-ink-950/60 p-2.5 rounded-lg border border-line/40">
+                          “{r().reply}”
+                        </div>
                       </Show>
                     </Show>
                   </div>
@@ -764,15 +818,24 @@ export default function AdminProvidersPage() {
         title={`Import models — ${importFor()?.name ?? ""}`}
         subtitle="Upstream model preview detected from endpoint. Models will be registered into the gateway registry."
         width="max-w-lg"
-        footerLeft={<span class="text-xs text-ink-500">Auto-sync discovery</span>}
+        footerLeft={<span class="text-xs text-ink-400">Auto-sync discovery</span>}
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setImportFor(null)}>
+            <button
+              type="button"
+              onClick={() => setImportFor(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Skip for now
-            </Btn>
-            <Btn onClick={runImport} disabled={importBusy()}>
+            </button>
+            <button
+              type="button"
+              onClick={runImport}
+              disabled={importBusy()}
+              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               {importBusy() ? "Importing…" : "Import models"}
-            </Btn>
+            </button>
           </>
         }
       >
@@ -806,33 +869,55 @@ export default function AdminProvidersPage() {
         subtitle="Add a fallback key to this provider's credential pool. Keys rotate automatically upon rate limits."
         width="max-w-lg"
         footerLeft={
-          <div class="text-[11px] text-ink-500 flex items-center gap-1.5">
+          <div class="text-xs text-ink-400 flex items-center gap-1.5">
             <Icon name={Icons.shield} size={13} />
             <span>AES-256 encrypted</span>
           </div>
         }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setKeyFor(null)}>
+            <button
+              type="button"
+              onClick={() => setKeyFor(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn onClick={addKey} disabled={keyBusy() || !newKeySecret().trim()}>
+            </button>
+            <button
+              type="button"
+              onClick={addKey}
+              disabled={keyBusy() || !newKeySecret().trim()}
+              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               {keyBusy() ? "Adding…" : "Add key"}
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-4">
-          <Input label="Label (optional)" value={newKeyLabel()} onInput={setNewKeyLabel} placeholder="e.g. backup billing account" />
-          <Input
-            label="API key"
-            type="password"
-            value={newKeySecret()}
-            onInput={setNewKeySecret}
-            placeholder="sk-…"
-            autocomplete="off"
+          <ModalField label="Key label (optional)">
+            <input
+              type="text"
+              value={newKeyLabel()}
+              onInput={(e) => setNewKeyLabel(e.currentTarget.value)}
+              placeholder="e.g. backup billing account, tier-2 pool"
+              class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+            />
+          </ModalField>
+
+          <ModalField
+            label="Upstream API key"
             hint="Appended to the end of the fallback chain. Drag up on the provider card to prioritize."
-          />
+          >
+            <input
+              type="password"
+              value={newKeySecret()}
+              onInput={(e) => setNewKeySecret(e.currentTarget.value)}
+              placeholder="sk-…"
+              autocomplete="off"
+              class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+            />
+          </ModalField>
         </div>
       </Modal>
 
@@ -842,26 +927,46 @@ export default function AdminProvidersPage() {
         onClose={() => setConfirmDeleteKey(null)}
         title="Remove upstream key"
         subtitle="Remove this credential from the provider's fallback pool."
-        footerLeft={<Badge tone="amber">Immediate effect</Badge>}
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-amber-400 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.ban} size={13} />
+            <span>Immediate key deactivation</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmDeleteKey(null)}>
+            <button
+              type="button"
+              onClick={() => setConfirmDeleteKey(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={deleteKey} disabled={keyBusy()}>
+            </button>
+            <button
+              type="button"
+              onClick={deleteKey}
+              disabled={keyBusy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               Remove key
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="warn" title="Confirm key removal">
-            Remove <strong>{confirmDeleteKey()?.key.label || "this key"}</strong> from{" "}
-            <strong>{confirmDeleteKey()?.provider.name}</strong>'s fallback chain?
+            Remove <strong class="text-white">{confirmDeleteKey()?.key.label || "this key"}</strong> from{" "}
+            <strong class="text-white">{confirmDeleteKey()?.provider.name}</strong>'s fallback chain?
           </ModalNotice>
-          <p class="text-xs text-ink-400 leading-relaxed">
-            Requests will immediately skip this key during failover cascade.
-          </p>
+          <div class="rounded-xl border border-line bg-ink-950/40 p-3.5 space-y-2 text-xs text-ink-300">
+            <div class="font-medium text-ink-100">Key removal impact:</div>
+            <ul class="list-disc list-inside space-y-1 text-ink-400 pl-1">
+              <li>This credential is deleted from SQLite and cannot be used in failover cascades.</li>
+              <li>Requests currently in flight will finish normally.</li>
+              <li>Other keys in this provider pool remain active.</li>
+            </ul>
+          </div>
         </div>
       </Modal>
 
@@ -871,38 +976,53 @@ export default function AdminProvidersPage() {
         onClose={() => setConfirmDelete(null)}
         title="Delete provider"
         subtitle="Remove this provider and take down its upstream endpoints."
-        footerLeft={<Badge tone="red">Permanent</Badge>}
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.trash} size={13} />
+            <span>Permanent removal</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={remove} disabled={busy()}>
+            </button>
+            <button
+              type="button"
+              onClick={remove}
+              disabled={busy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               Delete provider
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="danger" title="Confirm provider deletion">
-            Delete <strong>{confirmDelete()?.name}</strong>? Upstream proxy requests for its capabilities
+            Delete <strong class="text-white">{confirmDelete()?.name}</strong>? Upstream proxy requests for its capabilities
             will fail until another enabled provider covers them.
           </ModalNotice>
           <Show when={(confirmDelete()?.modelCount ?? 0) > 0}>
-            <div class="rounded-xl border border-line/80 bg-elev/40 p-3.5">
+            <div class="rounded-xl border border-line bg-ink-950/40 p-3.5">
               <label class="flex items-start gap-2.5 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={deleteModels()}
                   onChange={(e) => setDeleteModels(e.currentTarget.checked)}
-                  class="w-4 h-4 rounded border-line bg-elev accent-brand-500 mt-0.5 cursor-pointer"
+                  class="w-4 h-4 rounded border-line bg-ink-900 accent-blue-600 mt-0.5 cursor-pointer"
                 />
                 <div class="text-xs text-ink-300">
                   <div class="font-medium text-ink-100">
                     Also delete its {confirmDelete()?.modelCount} registered model
                     {(confirmDelete()?.modelCount ?? 0) === 1 ? "" : "s"}
                   </div>
-                  <div class="text-ink-500 mt-0.5 leading-relaxed">
+                  <div class="text-ink-400 mt-0.5 leading-relaxed">
                     If unchecked, models are kept and become orphaned (badge "no provider") so you can re-link them in the Models tab.
                   </div>
                 </div>

@@ -1,4 +1,4 @@
-import { createResource, createSignal, Show } from "solid-js";
+import { createResource, createSignal, For, Show } from "solid-js";
 
 import { api, type ApiKeyDto } from "../api";
 import { PageTitle } from "../index";
@@ -7,15 +7,17 @@ import {
   Btn,
   Card,
   EmptyState,
+  FilterChip,
   Icon,
   IconBtn,
   Icons,
-  Input,
   Modal,
+  ModalField,
   ModalNotice,
   ModalSection,
+  OrDivider,
   ProgressBar,
-  Select,
+  SwitchCard,
   copyWithToast,
   fmtDate,
   fmtNum,
@@ -96,6 +98,7 @@ export default function KeysPage() {
     null,
   );
   const [busy, setBusy] = createSignal(false);
+  const [snippetTab, setSnippetTab] = createSignal<"curl" | "python" | "node">("curl");
 
   const [form, setForm] = createSignal<KeyFormState>({
     name: "",
@@ -392,88 +395,185 @@ export default function KeysPage() {
         subtitle="Generate a new gateway token to authenticate your applications with OpenAI or Anthropic SDKs."
         width="max-w-xl"
         footerLeft={
-          <div class="text-[11px] text-ink-500 flex items-center gap-1.5">
+          <div class="text-xs text-ink-400 flex items-center gap-1.5">
             <Icon name={Icons.shield} size={13} />
-            <span>Encrypted at rest · SHA-256 lookup</span>
+            <span>Encrypted at rest · SHA-256</span>
           </div>
         }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setShowCreate(false)}>
+            <button
+              type="button"
+              onClick={() => setShowCreate(false)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn onClick={create} disabled={busy()}>
+            </button>
+            <button
+              type="button"
+              onClick={create}
+              disabled={busy()}
+              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               {busy() ? "Creating…" : "Create key"}
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-6">
           <ModalSection
-            title="General Information"
-            subtitle="Provide an identifier name and expiry schedule for this token."
+            title="Key identification"
+            subtitle="Provide a human-readable identifier to recognize where this key is deployed."
           >
-            <div class="space-y-3.5">
-              <Input
-                label="Name"
+            <ModalField label="Key name" hint="e.g. production-backend, cursor-agent, eval-runner">
+              <input
+                type="text"
                 value={form().name}
-                onInput={(v) => setForm({ ...form(), name: v })}
-                placeholder="e.g. alice-short-experiment"
-                hint="Use a descriptive name to easily recognize where this key is deployed."
+                onInput={(e) => setForm({ ...form(), name: e.currentTarget.value })}
+                placeholder="e.g. production-agent-01"
+                class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
               />
-              <Select
-                label="Expiration"
-                value={form().preset}
-                onChange={(v) => setForm({ ...form(), preset: v })}
-                options={EXPIRY_PRESETS}
-                hint="When it expires, the key simply stops authenticating requests."
-              />
-              <Show when={form().preset === "custom"}>
-                <Input
-                  label="Expires at"
+            </ModalField>
+          </ModalSection>
+
+          <ModalSection
+            title="Expiration schedule"
+            subtitle="Configure token lifetime. Expired keys cease authenticating immediately."
+          >
+            <div class="space-y-2.5">
+              <label class="block text-xs font-normal text-ink-300">
+                Select an expiration preset:
+              </label>
+              <div class="flex flex-wrap gap-2">
+                <For each={EXPIRY_PRESETS.filter((p) => p.value !== "custom")}>
+                  {(preset) => (
+                    <FilterChip
+                      selected={form().preset === preset.value}
+                      onClick={() => setForm({ ...form(), preset: preset.value, customDate: "" })}
+                      onRemove={() => setForm({ ...form(), preset: "never", customDate: "" })}
+                    >
+                      {preset.label}
+                    </FilterChip>
+                  )}
+                </For>
+              </div>
+              <Show when={form().preset !== "never" && form().preset !== "custom"}>
+                <div class="pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form(), preset: "never", customDate: "" })}
+                    class="text-xs text-blue-400 hover:text-blue-300 inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>↺ Reset to permanent</span>
+                  </button>
+                </div>
+              </Show>
+
+              <OrDivider text="Or specify custom date" />
+
+              <ModalField label="Custom expiration timestamp">
+                <input
                   type="datetime-local"
                   value={form().customDate}
-                  onInput={(v) => setForm({ ...form(), customDate: v })}
+                  onInput={(e) =>
+                    setForm({
+                      ...form(),
+                      preset: e.currentTarget.value ? "custom" : "never",
+                      customDate: e.currentTarget.value,
+                    })
+                  }
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
                 />
-              </Show>
+              </ModalField>
             </div>
           </ModalSection>
 
           <ModalSection
-            title="Budget & Rate Caps"
-            subtitle="Key budgets limit output tokens only. Input and cached tokens are tracked for visibility."
+            title="Output token budgets"
+            info="Key budgets cap output tokens only. Input and cached tokens are tracked for visibility and never deplete key budget."
+            subtitle="Cap maximum allowed generation spend. Resets daily or terminates on total limit."
           >
-            <div class="rounded-2xl border border-line/70 bg-elev/30 p-4 space-y-4">
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                <Input
-                  label="Daily output limit"
-                  type="number"
-                  min={1}
-                  value={form().dailyLimit}
-                  onInput={(v) => setForm({ ...form(), dailyLimit: v })}
-                  placeholder="unlimited"
-                  hint="Output tokens · resets 00:00 UTC"
-                />
-                <Input
-                  label="Total output limit"
-                  type="number"
-                  min={1}
-                  value={form().totalLimit}
-                  onInput={(v) => setForm({ ...form(), totalLimit: v })}
-                  placeholder="unlimited"
-                  hint="Output tokens · permanent cap"
-                />
+            <div class="space-y-3">
+              <div class="flex items-center justify-between flex-wrap gap-2">
+                <span class="text-xs text-ink-400">Quick limit presets:</span>
+                <div class="flex flex-wrap gap-1.5">
+                  <For each={[
+                    { label: "100K Out", val: "100000" },
+                    { label: "500K Out", val: "500000" },
+                    { label: "1M Out", val: "1000000" },
+                    { label: "5M Out", val: "5000000" },
+                  ]}>
+                    {(preset) => (
+                      <button
+                        type="button"
+                        onClick={() => setForm({ ...form(), dailyLimit: preset.val, totalLimit: String(Number(preset.val) * 10) })}
+                        class="px-2 py-1 rounded bg-ink-900/60 hover:bg-ink-800 text-[11px] text-ink-300 hover:text-ink-100 border border-line/60 transition-colors cursor-pointer"
+                      >
+                        {preset.label}
+                      </button>
+                    )}
+                  </For>
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form(), dailyLimit: "", totalLimit: "" })}
+                    class="px-2 py-1 rounded bg-ink-900/60 hover:bg-ink-800 text-[11px] text-ink-400 hover:text-ink-200 border border-line/60 transition-colors cursor-pointer"
+                  >
+                    Unlimited
+                  </button>
+                </div>
               </div>
-              <Input
-                label="Requests per minute (RPM)"
-                type="number"
-                min={1}
-                max={1000000}
-                value={form().rpm}
-                onInput={(v) => setForm({ ...form(), rpm: v })}
-                placeholder="default (120)"
-                hint="Sliding window per-key request concurrency guard."
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <ModalField label="Daily output limit" hint="Output tokens · resets 00:00 UTC">
+                  <input
+                    type="number"
+                    min={1}
+                    value={form().dailyLimit}
+                    onInput={(e) => setForm({ ...form(), dailyLimit: e.currentTarget.value })}
+                    placeholder="Unlimited"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  />
+                </ModalField>
+                <ModalField label="Total output limit" hint="Output tokens · permanent cap">
+                  <input
+                    type="number"
+                    min={1}
+                    value={form().totalLimit}
+                    onInput={(e) => setForm({ ...form(), totalLimit: e.currentTarget.value })}
+                    placeholder="Unlimited"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  />
+                </ModalField>
+              </div>
+            </div>
+          </ModalSection>
+
+          <ModalSection
+            title="Rate limiting & Concurrency"
+            subtitle="Protect upstream providers against runaway client retry loops."
+          >
+            <div class="space-y-3">
+              <SwitchCard
+                checked={form().rpm !== ""}
+                onChange={(checked) => setForm({ ...form(), rpm: checked ? (form().rpm || "120") : "" })}
+                title="Enable per-minute rate limiting (RPM)"
+                description="Throttle sliding-window requests across this key to prevent provider exhaustion."
               />
+              <Show when={form().rpm !== ""}>
+                <div class="pl-12">
+                  <ModalField label="Maximum requests per minute" hint="Sliding 60-second window (default 120 RPM)">
+                    <input
+                      type="number"
+                      min={1}
+                      max={1000000}
+                      value={form().rpm}
+                      onInput={(e) => setForm({ ...form(), rpm: e.currentTarget.value })}
+                      placeholder="120"
+                      class="w-full max-w-xs rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    />
+                  </ModalField>
+                </div>
+              </Show>
             </div>
           </ModalSection>
         </div>
@@ -484,70 +584,143 @@ export default function KeysPage() {
         open={!!editing()}
         onClose={() => setEditing(null)}
         title={`Edit “${editing()?.name ?? ""}”`}
-        subtitle="Adjust token budgets or rate limits. Raising the total limit reactivates exhausted keys immediately."
+        subtitle="Adjust token budgets, rate limits, or expiration schedule. Raising total limit reactivates exhausted keys."
         width="max-w-xl"
         footerLeft={
-          <div class="text-[11px] text-ink-500 font-mono">
+          <div class="text-xs text-ink-400 font-mono">
             Prefix: {editing()?.prefix}…
           </div>
         }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setEditing(null)}>
+            <button
+              type="button"
+              onClick={() => setEditing(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn onClick={saveEdit} disabled={busy()}>
+            </button>
+            <button
+              type="button"
+              onClick={saveEdit}
+              disabled={busy()}
+              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
               {busy() ? "Saving…" : "Save changes"}
-            </Btn>
+            </button>
           </>
         }
       >
         <div class="space-y-6">
           <ModalSection
-            title="Key Details"
+            title="Key identification"
             subtitle="Update the human-readable label for this key."
           >
-            <Input
-              label="Name"
-              value={form().name}
-              onInput={(v) => setForm({ ...form(), name: v })}
-            />
+            <ModalField label="Key name">
+              <input
+                type="text"
+                value={form().name}
+                onInput={(e) => setForm({ ...form(), name: e.currentTarget.value })}
+                class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+              />
+            </ModalField>
           </ModalSection>
 
           <ModalSection
-            title="Output Limits & Concurrency"
-            subtitle="Budgets only cap output tokens; prompt and cache tokens are tracked separately."
+            title="Expiration schedule"
+            subtitle="Update key expiration timestamp or leave permanent."
           >
-            <div class="rounded-2xl border border-line/70 bg-elev/30 p-4 space-y-4">
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                <Input
-                  label="Daily output limit"
-                  type="number"
-                  min={1}
-                  value={form().dailyLimit}
-                  onInput={(v) => setForm({ ...form(), dailyLimit: v })}
-                  placeholder="unlimited"
-                  hint="Output tokens · empty = unlimited"
-                />
-                <Input
-                  label="Total output limit"
-                  type="number"
-                  min={1}
-                  value={form().totalLimit}
-                  onInput={(v) => setForm({ ...form(), totalLimit: v })}
-                  placeholder="unlimited"
-                  hint="Raising it reactivates an exhausted key"
-                />
+            <div class="space-y-2.5">
+              <div class="flex flex-wrap gap-2">
+                <For each={EXPIRY_PRESETS.filter((p) => p.value !== "custom")}>
+                  {(preset) => (
+                    <FilterChip
+                      selected={form().preset === preset.value}
+                      onClick={() => setForm({ ...form(), preset: preset.value, customDate: "" })}
+                      onRemove={() => setForm({ ...form(), preset: "never", customDate: "" })}
+                    >
+                      {preset.label}
+                    </FilterChip>
+                  )}
+                </For>
               </div>
-              <Input
-                label="Requests per minute"
-                type="number"
-                min={1}
-                max={1000000}
-                value={form().rpm}
-                onInput={(v) => setForm({ ...form(), rpm: v })}
-                placeholder="default (120)"
+
+              <OrDivider text="Or specify custom date" />
+
+              <ModalField label="Custom expiration timestamp">
+                <input
+                  type="datetime-local"
+                  value={form().customDate}
+                  onInput={(e) =>
+                    setForm({
+                      ...form(),
+                      preset: e.currentTarget.value ? "custom" : "never",
+                      customDate: e.currentTarget.value,
+                    })
+                  }
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+              </ModalField>
+            </div>
+          </ModalSection>
+
+          <ModalSection
+            title="Output token budgets"
+            info="Budgets only cap output tokens; prompt and cache tokens are tracked separately."
+            subtitle="Adjust quota thresholds. Increasing the total limit immediately reactivates an exhausted key."
+          >
+            <div class="space-y-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <ModalField label="Daily output limit" hint="Output tokens · empty = unlimited">
+                  <input
+                    type="number"
+                    min={1}
+                    value={form().dailyLimit}
+                    onInput={(e) => setForm({ ...form(), dailyLimit: e.currentTarget.value })}
+                    placeholder="Unlimited"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  />
+                </ModalField>
+                <ModalField label="Total output limit" hint="Raising reactivates an exhausted key">
+                  <input
+                    type="number"
+                    min={1}
+                    value={form().totalLimit}
+                    onInput={(e) => setForm({ ...form(), totalLimit: e.currentTarget.value })}
+                    placeholder="Unlimited"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  />
+                </ModalField>
+              </div>
+            </div>
+          </ModalSection>
+
+          <ModalSection
+            title="Rate limiting & Concurrency"
+            subtitle="Per-minute request throttling across this credential."
+          >
+            <div class="space-y-3">
+              <SwitchCard
+                checked={form().rpm !== ""}
+                onChange={(checked) => setForm({ ...form(), rpm: checked ? (form().rpm || "120") : "" })}
+                title="Enable per-minute rate limiting (RPM)"
+                description="Limit sliding-window request concurrency for this API key."
               />
+              <Show when={form().rpm !== ""}>
+                <div class="pl-12">
+                  <ModalField label="Requests per minute" hint="Sliding 60-second window">
+                    <input
+                      type="number"
+                      min={1}
+                      max={1000000}
+                      value={form().rpm}
+                      onInput={(e) => setForm({ ...form(), rpm: e.currentTarget.value })}
+                      placeholder="120"
+                      class="w-full max-w-xs rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    />
+                  </ModalField>
+                </div>
+              </Show>
             </div>
           </ModalSection>
         </div>
@@ -558,42 +731,134 @@ export default function KeysPage() {
         open={!!newToken()}
         onClose={() => setNewToken("")}
         title="API key generated successfully"
-        subtitle="Copy your key and store it securely. For safety, this raw token is never shown again once you close this dialog."
-        width="max-w-lg"
-        footerLeft={<Badge tone="green">Ready for requests</Badge>}
+        subtitle="Copy your key and integration snippets now. For security, raw tokens cannot be retrieved again once closed."
+        width="max-w-xl"
+        footerLeft={
+          <div class="flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
+            <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span>Key is active and ready</span>
+          </div>
+        }
         footer={
           <>
-            <Btn
-              variant="outline"
-              size="sm"
+            <button
+              type="button"
               onClick={() => copyWithToast(newToken())}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer inline-flex items-center gap-1.5"
             >
-              <Icon name={Icons.copy} /> Copy key
-            </Btn>
-            <Btn onClick={() => setNewToken("")}>Done</Btn>
+              <Icon name={Icons.copy} size={13} />
+              <span>Copy key</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setNewToken("")}
+              class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
+              Done
+            </button>
           </>
         }
       >
-        <div class="space-y-4">
-          <div class="rounded-2xl border border-emerald-500/30 bg-ink-950/60 p-4 space-y-2">
-            <div class="flex items-center justify-between text-xs text-ink-400">
-              <span class="font-medium text-emerald-400">New Gateway Token</span>
+        <div class="space-y-5">
+          <div class="rounded-xl border border-emerald-500/30 bg-ink-950/80 p-4 space-y-2">
+            <div class="flex items-center justify-between text-xs">
+              <span class="font-medium text-emerald-400">Gateway Secret Key</span>
               <button
+                type="button"
                 onClick={() => copyWithToast(newToken())}
-                class="hover:text-ink-100 flex items-center gap-1 cursor-pointer"
+                class="text-xs text-ink-400 hover:text-ink-100 flex items-center gap-1 cursor-pointer transition-colors"
               >
                 <Icon name={Icons.copy} size={12} />
-                <span>Copy</span>
+                <span>Copy secret</span>
               </button>
             </div>
-            <code class="block font-mono text-xs text-emerald-400 break-all select-all pt-1">
+            <code class="block font-mono text-xs text-emerald-300 break-all select-all pt-1 bg-ink-900/50 p-2.5 rounded-lg border border-line/40">
               {newToken()}
             </code>
           </div>
 
+          <ModalSection
+            title="Integration snippet"
+            subtitle="Plug this gateway key into your application or SDK configuration:"
+          >
+            <div class="space-y-2.5">
+              <div class="flex items-center gap-1.5 border-b border-line pb-2">
+                <button
+                  type="button"
+                  onClick={() => setSnippetTab("curl")}
+                  class={`px-3 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+                    snippetTab() === "curl"
+                      ? "bg-blue-600 text-white"
+                      : "text-ink-400 hover:text-ink-100"
+                  }`}
+                >
+                  cURL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSnippetTab("python")}
+                  class={`px-3 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+                    snippetTab() === "python"
+                      ? "bg-blue-600 text-white"
+                      : "text-ink-400 hover:text-ink-100"
+                  }`}
+                >
+                  Python (OpenAI)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSnippetTab("node")}
+                  class={`px-3 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+                    snippetTab() === "node"
+                      ? "bg-blue-600 text-white"
+                      : "text-ink-400 hover:text-ink-100"
+                  }`}
+                >
+                  Node.js
+                </button>
+              </div>
+
+              <pre class="overflow-x-auto rounded-xl border border-line bg-ink-950/80 p-3.5 text-[11px] font-mono text-ink-200 leading-relaxed">
+                <Show when={snippetTab() === "curl"}>
+{`curl ${window.location.origin}/v1/chat/completions \\
+  -H "Authorization: Bearer ${newToken()}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello!"}]}'`}
+                </Show>
+                <Show when={snippetTab() === "python"}>
+{`from openai import OpenAI
+
+client = OpenAI(
+    base_url="${window.location.origin}/v1",
+    api_key="${newToken()}",
+)
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(response.choices[0].message.content)`}
+                </Show>
+                <Show when={snippetTab() === "node"}>
+{`import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "${window.location.origin}/v1",
+  apiKey: "${newToken()}",
+});
+
+const response = await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "Hello!" }],
+});
+console.log(response.choices[0].message.content);`}
+                </Show>
+              </pre>
+            </div>
+          </ModalSection>
+
           <ModalNotice tone="info" title="Security advisory">
-            The gateway stores only the cryptographic SHA-256 hash of this key.
-            If you misplace this secret, you will need to revoke it and generate a new key.
+            The gateway stores only the cryptographic SHA-256 hash of this key. If you misplace this secret,
+            you will need to revoke it and generate a new key.
           </ModalNotice>
         </div>
       </Modal>
@@ -604,27 +869,48 @@ export default function KeysPage() {
         onClose={() => setConfirmRevoke(null)}
         title="Revoke API key"
         subtitle="Immediately deactivate this key across all client applications and active agents."
-        footerLeft={<Badge tone="red">Irreversible</Badge>}
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.ban} size={13} />
+            <span>Immediate revocation</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmRevoke(null)}>
+            <button
+              type="button"
+              onClick={() => setConfirmRevoke(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={revoke} disabled={busy()}>
-              Revoke key
-            </Btn>
+            </button>
+            <button
+              type="button"
+              onClick={revoke}
+              disabled={busy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
+              {busy() ? "Revoking…" : "Revoke key"}
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="danger" title="Confirm key deactivation">
             Revoking will immediately cause all SDK and API requests using{" "}
-            <strong>{confirmRevoke()?.name}</strong> (
-            <code>{confirmRevoke()?.prefix}…</code>) to fail with 401 Unauthorized.
+            <strong class="text-white">{confirmRevoke()?.name}</strong> (
+            <code class="text-rose-300">{confirmRevoke()?.prefix}…</code>) to fail with 401 Unauthorized.
           </ModalNotice>
-          <p class="text-xs text-ink-400 leading-relaxed">
-            Historical usage metrics and audit logs associated with this key will remain intact for reporting.
-          </p>
+
+          <div class="rounded-xl border border-line bg-ink-950/40 p-3.5 space-y-2 text-xs text-ink-300">
+            <div class="font-medium text-ink-100">What happens when you revoke:</div>
+            <ul class="list-disc list-inside space-y-1 text-ink-400 pl-1">
+              <li>In-flight requests already accepted will complete normally.</li>
+              <li>Any new request presenting this token is immediately rejected.</li>
+              <li>Historical usage records and audit logs are safely preserved.</li>
+            </ul>
+          </div>
         </div>
       </Modal>
 
@@ -634,28 +920,48 @@ export default function KeysPage() {
         onClose={() => setConfirmDelete(null)}
         title="Delete key permanently"
         subtitle="Permanently remove this key record from the gateway database."
-        footerLeft={<Badge tone="red">Permanent deletion</Badge>}
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.trash} size={13} />
+            <span>Permanent database purge</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={hardDelete} disabled={busy()}>
-              Delete permanently
-            </Btn>
+            </button>
+            <button
+              type="button"
+              onClick={hardDelete}
+              disabled={busy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
+              {busy() ? "Deleting…" : "Delete permanently"}
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="danger" title="Purge database record">
             Permanently delete{" "}
-            <strong>{confirmDelete()?.name}</strong> (
-            <code>{confirmDelete()?.prefix}…</code>)? Unlike revoking, this key
-            row will be completely purged from the registry.
+            <strong class="text-white">{confirmDelete()?.name}</strong> (
+            <code class="text-rose-300">{confirmDelete()?.prefix}…</code>)? This action cannot be undone.
           </ModalNotice>
-          <p class="text-xs text-ink-400 leading-relaxed">
-            All usage and audit logs are safely preserved. This action cannot be undone.
-          </p>
+
+          <div class="rounded-xl border border-line bg-ink-950/40 p-3.5 space-y-2 text-xs text-ink-300">
+            <div class="font-medium text-ink-100">Database purge consequences:</div>
+            <ul class="list-disc list-inside space-y-1 text-ink-400 pl-1">
+              <li>The API key record is completely removed from the SQLite database.</li>
+              <li>All aggregated token and cost usage data remains preserved for audit history.</li>
+              <li>Any applications using this token will fail with 401 Unauthorized.</li>
+            </ul>
+          </div>
         </div>
       </Modal>
     </div>

@@ -4,7 +4,6 @@ import { api, type ApiKeyDto } from "../../api";
 import { PageTitle } from "../../index";
 import {
   Badge,
-  Btn,
   Card,
   copyWithToast,
   EmptyState,
@@ -244,57 +243,97 @@ export default function AdminKeysPage() {
       <Modal
         open={!!confirmRevoke()}
         onClose={() => setConfirmRevoke(null)}
-        title="Revoke key (admin)"
-        subtitle="Administratively revoke this user's API key with immediate effect."
-        footerLeft={<Badge tone="red">Irreversible</Badge>}
+        title="Revoke user API key"
+        subtitle="Administratively revoke this key across all gateway proxies."
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
+            <span class="inline-block w-2 h-2 rounded-full bg-rose-500" />
+            <span>Immediate deactivation</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmRevoke(null)}>
+            <button
+              type="button"
+              onClick={() => setConfirmRevoke(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={revoke} disabled={busy()}>
-              Revoke key
-            </Btn>
+            </button>
+            <button
+              type="button"
+              onClick={revoke}
+              disabled={busy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
+              {busy() ? "Revoking…" : "Revoke key"}
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="danger" title="Administrative key deactivation">
-            Revoke <strong>{confirmRevoke()?.name}</strong> belonging to{" "}
-            <strong>{confirmRevoke()?.userEmail}</strong>?
+            Revoke <strong class="text-white">{confirmRevoke()?.name}</strong> belonging to{" "}
+            <strong class="text-white">{confirmRevoke()?.userEmail}</strong>?
           </ModalNotice>
-          <p class="text-xs text-ink-400 leading-relaxed">
-            All client requests using this key will immediately be blocked with 401 Unauthorized across all gateway proxies.
-          </p>
+          <div class="rounded-xl border border-line bg-ink-950/40 p-3.5 space-y-2 text-xs text-ink-300">
+            <div class="font-medium text-ink-100">Action consequences:</div>
+            <ul class="list-disc list-inside space-y-1 text-ink-400 pl-1">
+              <li>All client requests using this key will immediately return 401 Unauthorized.</li>
+              <li>Active connections will not be renewed.</li>
+              <li>Historical usage logs and aggregates will be preserved.</li>
+            </ul>
+          </div>
         </div>
       </Modal>
 
       <Modal
         open={!!confirmDelete()}
         onClose={() => setConfirmDelete(null)}
-        title="Delete key permanently (admin)"
+        title="Delete key permanently"
         subtitle="Permanently remove this key row from the gateway database."
-        footerLeft={<Badge tone="red">Permanent deletion</Badge>}
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
+            <span class="inline-block w-2 h-2 rounded-full bg-rose-500" />
+            <span>Database purge</span>
+          </div>
+        }
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(null)}
+              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
               Cancel
-            </Btn>
-            <Btn variant="danger" onClick={hardDelete} disabled={busy()}>
-              Delete permanently
-            </Btn>
+            </button>
+            <button
+              type="button"
+              onClick={hardDelete}
+              disabled={busy()}
+              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
+            >
+              {busy() ? "Deleting…" : "Delete permanently"}
+            </button>
           </>
         }
       >
         <div class="space-y-4">
           <ModalNotice tone="danger" title="Permanent database purge">
             Permanently delete{" "}
-            <strong>{confirmDelete()?.name}</strong> belonging to{" "}
-            <strong>{confirmDelete()?.userEmail}</strong>?
+            <strong class="text-white">{confirmDelete()?.name}</strong> belonging to{" "}
+            <strong class="text-white">{confirmDelete()?.userEmail}</strong>?
           </ModalNotice>
-          <p class="text-xs text-ink-400 leading-relaxed">
-            The database row is permanently deleted. Historical usage event logs and spend aggregates are preserved for accounting.
-          </p>
+          <div class="rounded-xl border border-line bg-ink-950/40 p-3.5 space-y-2 text-xs text-ink-300">
+            <div class="font-medium text-ink-100">Database purge consequences:</div>
+            <ul class="list-disc list-inside space-y-1 text-ink-400 pl-1">
+              <li>The API key record is completely erased from SQLite.</li>
+              <li>Historical usage event logs and spend aggregates are safely preserved.</li>
+              <li>This action cannot be reverted.</li>
+            </ul>
+          </div>
         </div>
       </Modal>
     </div>

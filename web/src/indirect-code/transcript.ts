@@ -97,16 +97,26 @@ export function fuzzySame(a: string, b: string): boolean {
   return union > 0 && inter / union >= 0.8;
 }
 
-/** Featured final message of a turn: the last message with 50+ tokens that
- * was written either without calling any tool or alongside the completion
- * signal. Rendered below the aggregate once the turn ends. */
+/** Featured final message of a turn, by priority: among the last two
+ * messages with 50+ tokens written either without calling any tool or
+ * alongside the completion signal, the longest wins; with none
+ * qualifying, the last text the AI sent in the turn regardless of size.
+ * Rendered below the aggregate once the turn ends. */
 export function finalTurnMessage(turnMsgs: ChatMessage[]): ChatMessage | null {
+  const qualifying = turnMsgs.filter((m) =>
+    hasVisibleText(m) &&
+    (!hasToolActivity(m) || m.hasCompletion) &&
+    isLongAssistantMessage(m));
+  const lastTwo = qualifying.slice(-2);
+  if (lastTwo.length > 0) {
+    let best = lastTwo[0];
+    for (const m of lastTwo.slice(1)) {
+      if (assistantTextTokens(m) > assistantTextTokens(best)) best = m;
+    }
+    return best;
+  }
   for (let k = turnMsgs.length - 1; k >= 0; k--) {
-    const m = turnMsgs[k];
-    if (!hasVisibleText(m)) continue;
-    if (hasToolActivity(m) && !m.hasCompletion) continue;
-    if (!isLongAssistantMessage(m)) continue;
-    return m;
+    if (hasVisibleText(turnMsgs[k])) return turnMsgs[k];
   }
   return null;
 }

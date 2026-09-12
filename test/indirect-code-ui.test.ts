@@ -87,7 +87,8 @@ test("groups a whole tool turn into one aggregate with ordered entries", () => {
     expect(blocks[0].extras.map((m) => m.id)).toEqual(["two","three","four"]);
     expect(blocks[0].entries.map((e) => e.kind)).toEqual(
       ["thinking","tools","thinking","tools","text","tools","thinking","tools"]);
-    expect(blocks[0].finalMsgId).toBeNull();
+    // Nothing reaches 50 tokens: fallback features the last AI text.
+    expect(blocks[0].finalMsgId).toBe("three");
   }
   expect(list[1].blocks).toHaveLength(3);
 });
@@ -185,7 +186,24 @@ test("final message is the last long text without tools (or with completion)", (
     {id:"one",role:"assistant",srcIdx:1,blocks:[{type:"tool_call",toolId:"a",toolName:"read"}]},
     {id:"two",role:"assistant",srcIdx:3,blocks:[{type:"text",text:"Done."}]},
   ];
-  expect(finalTurnMessage(short)).toBeNull();
+  // No 50+ token message: falls back to the last AI text regardless of size.
+  expect(finalTurnMessage(short)?.id).toBe("two");
+  const toolOnly: ChatMessage[] = [
+    {id:"one",role:"assistant",srcIdx:1,blocks:[{type:"tool_call",toolId:"a",toolName:"read"}]},
+  ];
+  expect(finalTurnMessage(toolOnly)).toBeNull();
+});
+
+test("final message prefers the longest of the last two qualifying texts", () => {
+  const mk = (id: string, n: number): ChatMessage => ({
+    id, role: "assistant", blocks: [{ type: "text", text: "t".repeat(n) }],
+  });
+  // Last two qualify; the longer (middle) wins over the tail.
+  expect(finalTurnMessage([mk("a", 300), mk("b", 500), mk("c", 250)])?.id).toBe("b");
+  // Tail longest wins.
+  expect(finalTurnMessage([mk("a", 300), mk("b", 250), mk("c", 500)])?.id).toBe("c");
+  // Older qualifying messages outside the last two lose.
+  expect(finalTurnMessage([mk("a", 900), mk("b", 250), mk("c", 260)])?.id).toBe("c");
 });
 
 test("cache hit share rounds cached input over total input", () => {

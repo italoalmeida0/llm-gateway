@@ -80,3 +80,52 @@ func TestHydratePreservesTurnIndex(t *testing.T) {
 		t.Fatalf("plain TurnIndex = %d; want 0", plain.TurnIndex)
 	}
 }
+
+// Details is the frontend-only rendering data (bash terminal view, read
+// line numbers, edit diffs). It is persisted with the transcript but
+// never sent to the LLM. The on-disk round-trip must keep it: dropping
+// it on hydrate makes the first save after a daemon restart strip it
+// permanently, and the UI falls back to raw tool output.
+func TestHydratePreservesToolResultDetails(t *testing.T) {
+	msg := provider.Message{
+		Role: provider.RoleTool,
+		Content: []provider.Content{provider.ToolResultBlock{
+			CallID:  "call_1",
+			Content: []provider.Content{provider.TextBlock{Text: "(no output)\n\nCommand exited with code 1"}},
+			Details: map[string]any{"display": "$ ls\n[exit 1]  Took 0.0s", "exitCode": 1},
+		}},
+	}
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	back, err := HydrateMessageObject(raw)
+	if err != nil {
+		t.Fatalf("hydrate: %v", err)
+	}
+	tr, ok := back.Content[0].(provider.ToolResultBlock)
+	if !ok {
+		t.Fatalf("hydrated content = %T; want ToolResultBlock", back.Content[0])
+	}
+	if tr.Details == nil {
+		t.Fatal("Details = nil after hydrate; want preserved")
+	}
+	// The remarshal must be byte-identical so repeated load→save cycles
+	// (restart, rename, usage events, ...) never degrade the transcript.
+	rewritten, err := json.Marshal(back)
+	if err != nil {
+		t.Fatalf("remarshal: %v", err)
+	}
+	if string(rewritten) != string(raw) {
+		t.Fatalf("round-trip changed bytes:\n got  %s\n want %s", rewritten, raw)
+	}
+	// Results without details hydrate with nil, not an empty value.
+	plain, err := HydrateMessageObject([]byte(`{"role":"tool","content":[{"call_id":"c","content":[{"text":"ok"}]}]}`))
+	if err != nil {
+		t.Fatalf("hydrate plain: %v", err)
+	}
+	plainTR := plain.Content[0].(provider.ToolResultBlock)
+	if plainTR.Details != nil {
+		t.Fatalf("plain Details = %v; want nil", plainTR.Details)
+	}
+}

@@ -76,9 +76,18 @@ func HydrateMessageObject(rawMessage []byte) (provider.Message, error) {
 				CallID     string            `json:"call_id"`
 				Content    []json.RawMessage `json:"content"`
 				IsError    bool              `json:"is_error"`
+				// Details is frontend-only rendering data (bash terminal
+				// view, read line numbers, edit diffs). It is persisted
+				// but never sent to the LLM; dropping it here would make
+				// the first save after a restart strip it permanently and
+				// the transcript would fall back to raw tool output.
+				Details json.RawMessage `json:"details"`
 			}
 			_ = json.Unmarshal(raw, &tr)
 			block := provider.ToolResultBlock{CallID: tr.CallID, IsError: tr.IsError, StartedAt: tr.StartedAt, DurationMs: tr.DurationMs}
+			if len(tr.Details) > 0 && string(tr.Details) != "null" {
+				block.Details = json.RawMessage(tr.Details)
+			}
 			for _, c := range tr.Content {
 				var inner struct {
 					Text     string `json:"text"`

@@ -195,24 +195,6 @@ function AppShell(props: { children: JSX.Element }) {
     setMobileNav(false);
   });
 
-  // Per-page title + favicon: Indirect Code gets its own identity while
-  // open; everything else uses the gateway default. The init script in
-  // index.html honors window.__pageIcon when syncing the favicon.
-  createEffect(() => {
-    const p = route().path;
-    try {
-      if (p.startsWith("/code")) {
-        document.title = "Indirect Code";
-        (window as any).__pageIcon = "/indirect-icon.svg";
-      } else {
-        document.title = "LLM Gateway";
-        delete (window as any).__pageIcon;
-      }
-      // Re-run the init-script sync (theme observer keeps working after).
-      (window as any).__syncFavicon?.();
-    } catch {}
-  });
-
   const mobileLink = (item: NavItem) => (
     <a
       href={`#${item.path}`}
@@ -391,6 +373,24 @@ function Root() {
   const off = onSessionChange(() => setTick((t) => t + 1));
   onCleanup(off);
   onMount(() => watchSystemTheme());
+
+  // Per-page title + favicon (must live in Root: /code renders OUTSIDE
+  // AppShell, so an effect there would unmount on exactly the page that
+  // needs it). The init script in index.html honors window.__pageIcon.
+  createEffect(() => {
+    const p = route().path;
+    try {
+      if (p.startsWith("/code")) {
+        document.title = "Indirect Code";
+        (window as any).__pageIcon = "/indirect-icon.svg";
+      } else {
+        document.title = "LLM Gateway";
+        delete (window as any).__pageIcon;
+      }
+      // Re-run the init-script sync (theme observer keeps working after).
+      (window as any).__syncFavicon?.();
+    } catch {}
+  });
 
   const current = () => {
     void tick();

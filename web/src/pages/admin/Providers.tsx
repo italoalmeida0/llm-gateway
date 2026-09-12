@@ -384,14 +384,14 @@ export default function AdminProvidersPage() {
           hint="Add your endpoint(s) — the gateway cannot serve requests until one is enabled." /></Card>
       }>
         <div
-          class="grid gap-4"
+          class="grid gap-4 min-w-0"
           {...usalItems("fade-u", 80)}
           ref={(el) => attachSortable(el, { onReorder: reorderProviders })}
         >
           <For each={providers()}>
             {(p) => (
-              <div data-id={p.id}>
-                <Card interactive class="p-5">
+              <div data-id={p.id} class="min-w-0">
+                <Card interactive class="min-w-0 p-4 sm:p-5">
                   <div class="flex flex-wrap items-start justify-between gap-3">
                     <div class="flex items-start gap-2 min-w-0">
                       <span data-handle title="Drag to reorder (fallback priority)" class="mt-0.5 text-ink-600 hover:text-ink-300 transition-colors">
@@ -406,22 +406,22 @@ export default function AdminProvidersPage() {
                           {p.responsesBaseUrl && <Badge tone="indigo">Responses</Badge>}
                           <span class="text-[11px] text-ink-500">priority {p.priority} · {p.modelCount} model{p.modelCount === 1 ? "" : "s"} · added {fmtDate(p.createdAt)}</span>
                         </div>
-                        <div class="mt-2 space-y-1 text-xs text-ink-400">
+                        <div class="mt-2 min-w-0 space-y-1 text-xs text-ink-400">
                           <Show when={p.openaiBaseUrl}>
-                            <div>
-                              OpenAI: <code class="text-ink-300">{p.openaiBaseUrl}</code>
+                            <div class="min-w-0 break-all">
+                              OpenAI: <code class="text-ink-300 break-all">{p.openaiBaseUrl}</code>
                               <span class="text-ink-600"> · key via {p.openaiAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
                             </div>
                           </Show>
                           <Show when={p.anthropicBaseUrl}>
-                            <div>
-                              Anthropic: <code class="text-ink-300">{p.anthropicBaseUrl}</code>
+                            <div class="min-w-0 break-all">
+                              Anthropic: <code class="text-ink-300 break-all">{p.anthropicBaseUrl}</code>
                               <span class="text-ink-600"> · key via {p.anthropicAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
                             </div>
                           </Show>
                           <Show when={p.responsesBaseUrl}>
-                            <div>
-                              Responses: <code class="text-ink-300">{p.responsesBaseUrl}</code>
+                            <div class="min-w-0 break-all">
+                              Responses: <code class="text-ink-300 break-all">{p.responsesBaseUrl}</code>
                               <span class="text-ink-600"> · key via {p.responsesAuthStyle === "x-api-key" ? "x-api-key" : "Bearer"}</span>
                             </div>
                           </Show>
@@ -463,13 +463,13 @@ export default function AdminProvidersPage() {
                         {(k) => {
                           const st = () => keyStatus(k);
                           return (
-                            <div data-id={k.id} class="flex items-center gap-2 rounded-xl border border-line bg-elev/40 px-2 py-1.5">
+                            <div data-id={k.id} class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl border border-line bg-elev/40 px-2 py-1.5">
                               <span data-handle title="Drag to reorder" class="text-ink-600 hover:text-ink-300 transition-colors shrink-0">
                                 <Icon name={Icons.grip} size={14} />
                               </span>
                               <Badge tone={st().tone}>{st().label}</Badge>
-                              <span class="text-xs text-ink-200 font-medium truncate">{k.label || "key"}</span>
-                              <span class="text-[10px] text-ink-600 truncate">
+                              <span class="min-w-0 flex-1 basis-20 text-xs text-ink-200 font-medium truncate">{k.label || "key"}</span>
+                              <span class="min-w-0 shrink-0 text-[10px] text-ink-600 truncate">
                                 {st().tone === "green" ? "configured ✓" : `fails ${k.failCount}`}
                               </span>
                               <div class="ml-auto flex items-center gap-0.5 shrink-0">

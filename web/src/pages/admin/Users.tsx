@@ -171,14 +171,17 @@ export default function AdminUsersPage() {
 
   // ---- grid cells ----
 
-  function UserCell(props: { data?: AdminUserDto }) {
+  function NameCell(props: { data?: AdminUserDto }) {
     return (
-      <div class="flex flex-col gap-0.5 py-1">
-        <span class="text-sm text-ink-100 truncate">
-          {props.data?.name || props.data?.email}
-        </span>
-        <span class="text-ink-500 truncate">{props.data?.email}</span>
-      </div>
+      <span class="text-sm text-ink-100 truncate block">
+        {props.data?.name || props.data?.email}
+      </span>
+    );
+  }
+
+  function EmailCell(props: { data?: AdminUserDto }) {
+    return (
+      <span class="text-ink-500 truncate block">{props.data?.email}</span>
     );
   }
 
@@ -249,7 +252,8 @@ export default function AdminUsersPage() {
   }
 
   const cols: ColDef[] = [
-    { field: "email", headerName: "User", flex: 1.4, minWidth: 220, cellRenderer: UserCell },
+    { field: "name", headerName: "Name", flex: 1, minWidth: 160, cellRenderer: NameCell },
+    { field: "email", headerName: "Email", flex: 1.2, minWidth: 200, cellRenderer: EmailCell },
     { field: "role", headerName: "Role", width: 150, cellRenderer: RoleCell },
     {
       colId: "security",

@@ -220,14 +220,19 @@ export default function KeysPage() {
 
   // ---- grid cells ----
 
-  function KeyCell(props: { data?: ApiKeyDto }) {
+  function NameCell(props: { data?: ApiKeyDto }) {
     return (
-      <div class="min-w-0 flex flex-col gap-0.5 py-1">
-        <span class="text-sm font-medium text-ink-100 truncate">
-          {props.data?.name}
-        </span>
-        <code class="text-[11px] text-ink-500">{props.data?.prefix}…</code>
-      </div>
+      <span class="text-sm font-medium text-ink-100 truncate block">
+        {props.data?.name}
+      </span>
+    );
+  }
+
+  function PrefixCell(props: { data?: ApiKeyDto }) {
+    return (
+      <code class="text-[11px] text-ink-500 truncate block">
+        {props.data?.prefix}…
+      </code>
     );
   }
 
@@ -244,13 +249,13 @@ export default function KeysPage() {
     const used = today ? k.outputToday : k.outputTotal;
     const limit = today ? k.dailyLimit : k.totalLimit;
     return (
-      <div class="flex flex-col items-end gap-1 py-1">
-        <span class="tabular-nums">
+      <div class="flex items-center justify-end gap-2">
+        <span class="tabular-nums whitespace-nowrap">
           {fmtNum(used)}
           {limit ? <span class="text-ink-500"> / {fmtNum(limit)}</span> : ""}
         </span>
         {limit ? (
-          <div class="w-20">
+          <div class="w-16 shrink-0">
             <ProgressBar danger value={used} max={limit} />
           </div>
         ) : null}
@@ -297,12 +302,13 @@ export default function KeysPage() {
   }
 
   const cols: ColDef[] = [
-    { field: "name", headerName: "Key", flex: 1.3, minWidth: 200, cellRenderer: KeyCell },
+    { field: "name", headerName: "Name", flex: 1.2, minWidth: 160, cellRenderer: NameCell },
+    { field: "prefix", headerName: "Prefix", width: 130, cellRenderer: PrefixCell },
     { field: "status", headerName: "Status", width: 160, cellRenderer: StatusBadgeCell },
     {
       field: "outputToday",
       headerName: "Out today",
-      width: 140,
+      width: 170,
       filter: "agNumberColumnFilter",
       cellRenderer: BudgetCell,
       cellRendererParams: { kind: "today" },
@@ -310,7 +316,7 @@ export default function KeysPage() {
     {
       field: "outputTotal",
       headerName: "Out total",
-      width: 140,
+      width: 170,
       filter: "agNumberColumnFilter",
       cellRenderer: BudgetCell,
       cellRendererParams: { kind: "total" },

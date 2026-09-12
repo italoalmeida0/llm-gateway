@@ -404,16 +404,19 @@ export default function AdminModelsPage() {
 
   // ---- grid cells ----
 
-  function ModelCell(props: { data?: ModelDto }) {
+  function ModelIdCell(props: { data?: ModelDto }) {
     const m = props.data;
     if (!m) return null;
     return (
-      <div class="flex flex-col gap-0.5 py-1 min-w-0">
-        <span class="text-sm text-ink-100 font-medium truncate">{m.id}</span>
-        <Show when={m.name && m.name !== m.id}>
-          <span class="text-ink-500 truncate">{m.name}</span>
-        </Show>
-      </div>
+      <span class="text-sm text-ink-100 font-medium truncate block">{m.id}</span>
+    );
+  }
+
+  function ModelNameCell(props: { data?: ModelDto }) {
+    const m = props.data;
+    if (!m) return null;
+    return (
+      <span class="text-ink-400 truncate block">{m.name && m.name !== m.id ? m.name : "—"}</span>
     );
   }
 
@@ -476,7 +479,8 @@ export default function AdminModelsPage() {
       resizable: false,
       pinned: "left",
     },
-    { field: "id", headerName: "Model", flex: 1.4, minWidth: 220, cellRenderer: ModelCell },
+    { field: "id", headerName: "Model ID", flex: 1.2, minWidth: 180, cellRenderer: ModelIdCell },
+    { field: "name", headerName: "Name", flex: 1, minWidth: 140, cellRenderer: ModelNameCell },
     { field: "providerName", headerName: "Provider", flex: 1, minWidth: 140, cellRenderer: ProviderCell },
     {
       field: "upstreamModel",
@@ -511,21 +515,29 @@ export default function AdminModelsPage() {
     },
     {
       colId: "pricing_cache",
-      headerName: "Input cache / 1M",
-      width: 150,
+      headerName: "Cache read / 1M",
+      width: 130,
       cellRenderer: (p: { data?: ModelDto }) => (
-        <div class="flex flex-col gap-0.5 py-1 text-[10px] leading-tight" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
-          <code class="text-ink-400">{pricePerMillion(p.data?.pricingInputCache)}</code>
-          <Show when={p.data?.pricingInputCacheWrite != null}>
-            <span class="text-[9px] text-ink-500">
-              write {pricePerMillion(p.data?.pricingInputCacheWrite)}
-            </span>
-          </Show>
-        </div>
+        <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
+          {pricePerMillion(p.data?.pricingInputCache)}
+        </code>
       ),
       type: "rightAligned",
       filter: "agNumberColumnFilter",
       valueGetter: (p) => pricePerMillionNumber(p.data?.pricingInputCache),
+    },
+    {
+      colId: "pricing_cache_write",
+      headerName: "Cache write / 1M",
+      width: 135,
+      cellRenderer: (p: { data?: ModelDto }) => (
+        <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
+          {pricePerMillion(p.data?.pricingInputCacheWrite)}
+        </code>
+      ),
+      type: "rightAligned",
+      filter: "agNumberColumnFilter",
+      valueGetter: (p) => pricePerMillionNumber(p.data?.pricingInputCacheWrite),
     },
     {
       colId: "pricing_output",

@@ -107,12 +107,15 @@ export default function AdminKeysPage() {
 
   // ---- grid cells ----
 
-  function KeyCell(props: { data?: ApiKeyDto }) {
+  function NameCell(props: { data?: ApiKeyDto }) {
     return (
-      <div class="flex flex-col gap-0.5 py-1">
-        <span class="text-sm text-ink-100 truncate">{props.data?.name}</span>
-        <code class="text-ink-500">{props.data?.prefix}…</code>
-      </div>
+      <span class="text-sm text-ink-100 truncate block">{props.data?.name}</span>
+    );
+  }
+
+  function PrefixCell(props: { data?: ApiKeyDto }) {
+    return (
+      <code class="text-ink-500 truncate block">{props.data?.prefix}…</code>
     );
   }
 
@@ -150,7 +153,8 @@ export default function AdminKeysPage() {
   }
 
   const cols: ColDef[] = [
-    { field: "name", headerName: "Key", flex: 1.2, minWidth: 190, cellRenderer: KeyCell },
+    { field: "name", headerName: "Name", flex: 1.1, minWidth: 160, cellRenderer: NameCell },
+    { field: "prefix", headerName: "Prefix", width: 130, cellRenderer: PrefixCell },
     {
       field: "userEmail",
       headerName: "Owner",

@@ -878,6 +878,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
             contextLength: { col: "context_length", kind: "number" },
             pricing_input: { col: "pricing_input * 1000000", kind: "number" },
             pricing_cache: { col: "pricing_input_cache * 1000000", kind: "number" },
+            pricing_cache_write: { col: "pricing_input_cache_write * 1000000", kind: "number" },
             pricing_output: { col: "pricing_output * 1000000", kind: "number" },
             createdAt: { col: "created_at", kind: "number" },
             updatedAt: { col: "updated_at", kind: "number" },

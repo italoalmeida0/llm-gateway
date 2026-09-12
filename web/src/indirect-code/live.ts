@@ -36,28 +36,38 @@ export const COMPLETION_TOOL_NAMES = new Set(["mark_task_as_complete", "mark_pla
  * but never shown as a user bubble in the chat UI. */
 export function isSyntheticNudge(text: string): boolean {
   const trimmed = text.trim();
-  return trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>");
+  return (
+    (trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>")) ||
+    (trimmed.startsWith("<system_prompt>") && trimmed.endsWith("</system_prompt>"))
+  );
 }
 
 export function sanitizeUserText(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>")) {
-    return trimmed.slice("<system-reminder>".length, -"</system-reminder>".length).trim();
+  let res = text;
+  for (const tag of ["system-reminder", "system_prompt"]) {
+    const open = `<${tag}>`;
+    const close = `</${tag}>`;
+    const trimmed = res.trim();
+    if (trimmed.startsWith(open) && trimmed.endsWith(close)) {
+      res = trimmed.slice(open.length, -close.length).trim();
+    } else if (res.includes(open) || res.includes(close)) {
+      res = res.replaceAll(open, "").replaceAll(close, "").trim();
+    }
   }
-  if (text.includes("<system-reminder>") || text.includes("</system-reminder>")) {
-    return text.replaceAll("<system-reminder>", "").replaceAll("</system-reminder>", "").trim();
-  }
-  return text;
+  return res;
 }
 
-/** Strips a leading <system-reminder>...</system-reminder> block (such as date or mode directives)
- * from a user message so the chat UI displays only the user's actual text. */
+/** Strips a leading <system-reminder>...</system-reminder> or <system_prompt>...</system_prompt>
+ * block (such as date or mode directives) from a user message so the chat UI displays only the user's actual text. */
 export function stripLeadingSystemPrompt(text: string): string {
   const trimmed = text.trim();
-  if (trimmed.startsWith("<system-reminder>")) {
-    const endIdx = trimmed.indexOf("</system-reminder>");
-    if (endIdx !== -1) {
-      return trimmed.slice(endIdx + "</system-reminder>".length).trim();
+  for (const tag of ["<system-reminder>", "<system_prompt>"]) {
+    const closeTag = tag.replace("<", "</");
+    if (trimmed.startsWith(tag)) {
+      const endIdx = trimmed.indexOf(closeTag);
+      if (endIdx !== -1) {
+        return trimmed.slice(endIdx + closeTag.length).trim();
+      }
     }
   }
   return text;

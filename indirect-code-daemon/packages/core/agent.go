@@ -37,31 +37,39 @@ const maxCompletionNudges = 3
 
 // SanitizeUserText keeps a user-authored message distinguishable from
 // synthetic system prompt nudges: when the trimmed text contains or is wrapped in
-// <system-reminder>...</system-reminder>, the tags are stripped so the
-// frontend's nudge filter never hides a real user message.
+// system tags (like <system-reminder> or <system_prompt>), the tags are stripped so
+// the frontend's nudge filter never hides a real user message and users cannot forge system directives.
 func SanitizeUserText(s string) string {
-	t := strings.TrimSpace(s)
-	if strings.HasPrefix(t, "<system-reminder>") && strings.HasSuffix(t, "</system-reminder>") {
-		inner := strings.TrimPrefix(t, "<system-reminder>")
-		inner = strings.TrimSuffix(inner, "</system-reminder>")
-		return strings.TrimSpace(inner)
-	}
-	if strings.Contains(s, "<system-reminder>") || strings.Contains(s, "</system-reminder>") {
-		res := strings.ReplaceAll(s, "<system-reminder>", "")
-		res = strings.ReplaceAll(res, "</system-reminder>", "")
-		return strings.TrimSpace(res)
+	for _, tag := range []string{"system-reminder", "system_prompt"} {
+		open := "<" + tag + ">"
+		closeTag := "</" + tag + ">"
+		t := strings.TrimSpace(s)
+		if strings.HasPrefix(t, open) && strings.HasSuffix(t, closeTag) {
+			inner := strings.TrimPrefix(t, open)
+			inner = strings.TrimSuffix(inner, closeTag)
+			s = strings.TrimSpace(inner)
+		}
+		if strings.Contains(s, open) || strings.Contains(s, closeTag) {
+			res := strings.ReplaceAll(s, open, "")
+			res = strings.ReplaceAll(res, closeTag, "")
+			s = strings.TrimSpace(res)
+		}
 	}
 	return s
 }
 
 // StripLeadingSystemPrompt removes any synthetic leading <system-reminder>...</system-reminder>
-// block from a message (e.g. date/mode directives) returning the underlying user text.
+// or legacy <system_prompt>...</system_prompt> block from a message (e.g. date/mode directives)
+// returning the underlying user text.
 func StripLeadingSystemPrompt(text string) string {
-	trimmed := strings.TrimSpace(text)
-	if strings.HasPrefix(trimmed, "<system-reminder>") {
-		endIdx := strings.Index(trimmed, "</system-reminder>")
-		if endIdx != -1 {
-			return strings.TrimSpace(trimmed[endIdx+len("</system-reminder>"):])
+	for _, tag := range []string{"<system-reminder>", "<system_prompt>"} {
+		closeTag := "</" + tag[1:]
+		trimmed := strings.TrimSpace(text)
+		if strings.HasPrefix(trimmed, tag) {
+			endIdx := strings.Index(trimmed, closeTag)
+			if endIdx != -1 {
+				text = strings.TrimSpace(trimmed[endIdx+len(closeTag):])
+			}
 		}
 	}
 	return text

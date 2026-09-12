@@ -256,15 +256,25 @@ func TestRegeneratePicksLastUserMessageInMultiTurn(t *testing.T) {
 	}
 
 	// Clean up background turns
-	d.sessionsMu.RLock()
-	for _, s := range d.sessions {
-		s.mu.Lock()
-		if s.cancel != nil {
-			s.cancel()
+	for i := 0; i < 100; i++ {
+		d.sessionsMu.RLock()
+		running := false
+		for _, s := range d.sessions {
+			s.mu.Lock()
+			if s.cancel != nil || (s.record != nil && s.record.Status == "running") {
+				running = true
+				if s.cancel != nil {
+					s.cancel()
+				}
+			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
+		d.sessionsMu.RUnlock()
+		if !running && i > 5 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	d.sessionsMu.RUnlock()
 }
 
 func TestForkAndRegenerate(t *testing.T) {
@@ -333,13 +343,23 @@ func TestForkAndRegenerate(t *testing.T) {
 	}
 
 	// Clean up background turns
-	d.sessionsMu.RLock()
-	for _, s := range d.sessions {
-		s.mu.Lock()
-		if s.cancel != nil {
-			s.cancel()
+	for i := 0; i < 100; i++ {
+		d.sessionsMu.RLock()
+		running := false
+		for _, s := range d.sessions {
+			s.mu.Lock()
+			if s.cancel != nil || (s.record != nil && s.record.Status == "running") {
+				running = true
+				if s.cancel != nil {
+					s.cancel()
+				}
+			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
+		d.sessionsMu.RUnlock()
+		if !running && i > 5 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	d.sessionsMu.RUnlock()
 }

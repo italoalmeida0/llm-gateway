@@ -27,6 +27,36 @@ export function isLongAssistantMessage(message: ChatMessage): boolean {
   return assistantTextTokens(message) >= LONG_MESSAGE_TOKENS;
 }
 
+/** Per-row session costs with the output bucket split pro-rata between
+ * plain output and reasoning (same unit price, so the split is exact).
+ * Null when the daemon reported no pricing — callers then hide costs. */
+export function usageCosts(usage: {
+  outTok: number; reasoningTok: number; costUsd: number;
+  costInUsd?: number; costCacheUsd?: number; costOutUsd?: number;
+}): { total: number; input: number; cache: number; output: number; reasoning: number } | null {
+  const ci = usage.costInUsd || 0;
+  const cc = usage.costCacheUsd || 0;
+  const co = usage.costOutUsd || 0;
+  if (ci + cc + co <= 0 && !(usage.costUsd > 0)) return null;
+  const out = Math.max(0, usage.outTok || 0);
+  const reason = Math.min(Math.max(0, usage.reasoningTok || 0), out);
+  const reasoningShare = out > 0 ? (co * reason) / out : 0;
+  return {
+    total: usage.costUsd || 0,
+    input: ci,
+    cache: cc,
+    output: co - reasoningShare,
+    reasoning: reasoningShare,
+  };
+}
+
+/** USD with 2 decimals, truncated (never rounded up): $0.001 shows
+ * as $0.00. */
+export function fmtUsd(v: number): string {
+  const n = Number(v) || 0;
+  return (Math.floor(n * 100) / 100).toFixed(2);
+}
+
 /** Share of input tokens served from cache: cache / (fresh + cache).
  * Null when nothing was read yet — the caller then shows bare "Cache". */
 export function cacheHitPct(usage: { inTok: number; cacheTok: number }): number | null {

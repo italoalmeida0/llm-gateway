@@ -37,8 +37,9 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 				Context int `json:"context"`
 				Output  int `json:"output"`
 			} `json:"limit"`
-			ContextLength   int `json:"context_length"`
-			MaxOutputLength int `json:"max_output_length"`
+			ContextLength   int               `json:"context_length"`
+			MaxOutputLength int               `json:"max_output_length"`
+			Pricing         map[string]float64 `json:"pricing"`
 			Reasoning       struct {
 				Efforts []string `json:"efforts"`
 			} `json:"reasoning_parameters"`
@@ -69,6 +70,7 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 		if entry.ID != id {
 			continue
 		}
+		applyGatewayPricing(&model, entry.Pricing)
 		model.ContextWindow = max(0, entry.Limit.Context, entry.ContextLength)
 		model.MaxOutput = max(0, entry.Limit.Output, entry.MaxOutputLength)
 		model.Reasoning = len(entry.Reasoning.Efforts) > 0
@@ -88,6 +90,24 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 		return model
 	}
 	return model
+}
+
+// applyGatewayPricing copies the registry pricing dict (USD per 1M
+// tokens, free-form keys — same aliases as the gateway pricingColumns)
+// onto the provider model. Missing keys stay zero: unknown price.
+func applyGatewayPricing(model *provider.Model, pricing map[string]float64) {
+	first := func(keys ...string) float64 {
+		for _, k := range keys {
+			if v, ok := pricing[k]; ok && v >= 0 {
+				return v
+			}
+		}
+		return 0
+	}
+	model.PriceInput = first("prompt", "input", "input_price")
+	model.PriceOutput = first("completion", "output", "output_price")
+	model.PriceCacheRead = first("input_cache_reads", "input_cache_read", "input_cache", "cache_read", "cache")
+	model.PriceCacheWrite = first("input_cache_writes", "input_cache_write", "cache_write")
 }
 
 type SessionContext struct {

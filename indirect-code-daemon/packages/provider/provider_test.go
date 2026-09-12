@@ -55,6 +55,31 @@ func TestComputeCostInputTier(t *testing.T) {
 	}
 }
 
+func TestComputeCostBreakdownSplitsBuckets(t *testing.T) {
+	m := Model{PriceInput: 3, PriceOutput: 15, PriceCacheRead: 0.3, PriceCacheWrite: 0.6}
+	u := Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000, CacheWriteTokens: 1_000_000}
+	in, cache, out := ComputeCostBreakdown(m, u)
+	for _, tc := range []struct {
+		got, want float64
+	}{ {in, 3}, {cache, 0.9}, {out, 15} } {
+		if math.Abs(tc.got-tc.want) > 1e-9 {
+			t.Fatalf("breakdown=%v,%v,%v", in, cache, out)
+		}
+	}
+	if total := ComputeCost(m, u); total != in+cache+out {
+		t.Fatalf("total=%v sum=%v", total, in+cache+out)
+	}
+	stamped := u
+	StampCost(m, &stamped)
+	if math.Abs(stamped.CostUSD-18.9) > 1e-9 {
+		t.Fatalf("stamped=%+v", stamped)
+	}
+	added := Usage{CostInputUSD: 1}.Add(Usage{CostInputUSD: 2, CostCacheUSD: 3, CostOutputUSD: 4, CostUSD: 9})
+	if added.CostInputUSD != 3 || added.CostCacheUSD != 3 || added.CostOutputUSD != 4 {
+		t.Fatalf("add=%+v", added)
+	}
+}
+
 func TestOpenAIErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

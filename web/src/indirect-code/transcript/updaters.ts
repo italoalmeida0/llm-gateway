@@ -97,6 +97,9 @@ export function mergeUsage(
         (src.cache_read_tokens ?? 0) + (src.cache_write_tokens ?? src.cache_creation_tokens ?? 0),
       reasoningTok: src.reasoning_tokens ?? prev[sessionId]?.reasoningTok ?? 0,
       costUsd: src.cost_usd ?? prev[sessionId]?.costUsd ?? 0,
+      costInUsd: src.cost_input_usd ?? prev[sessionId]?.costInUsd ?? 0,
+      costCacheUsd: src.cost_cache_usd ?? prev[sessionId]?.costCacheUsd ?? 0,
+      costOutUsd: src.cost_output_usd ?? prev[sessionId]?.costOutUsd ?? 0,
     },
   };
 }

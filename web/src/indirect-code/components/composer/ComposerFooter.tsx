@@ -2,7 +2,7 @@ import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
 import { Tooltip } from "../../../ui";
 import { compactTokens } from "../../context";
-import { baseNameOf, cacheHitPct } from "../../transcript";
+import { baseNameOf, cacheHitPct, fmtUsd, usageCosts } from "../../transcript";
 import { useComposerCtx, useSession, useTranscriptCtx, useUI } from "../../ctx";
 import { FloatMenu } from "../FloatMenu";
 
@@ -113,17 +113,22 @@ export function ComposerFooter() {
             </p>
           }
         >
-          {(u) => (
+          {(u) => {
+            const costs = usageCosts(u());
+            const chip = (v: number | undefined) =>
+              costs ? <span class="text-ink-600 ml-1.5">${fmtUsd(v || 0)}</span> : null;
+            return (
             <div class="space-y-1.5 font-mono text-[11px]">
-              <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}</span></div>
-              <div class="flex justify-between"><span class="text-ink-500">Cache{(() => { const p = cacheHitPct(u()); return p === null ? "" : ` (${p}%)`; })()}</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}</span></div>
-              <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}</span></div>
-              <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}</span></div>
-              <Show when={u().costUsd > 0}>
-                <div class="flex justify-between pt-1 border-t border-line/60"><span class="text-ink-500">Cost</span><span class="text-ink-200">${u().costUsd.toFixed(4)}</span></div>
+              <Show when={costs && costs.total > 0}>
+                <div class="flex justify-between pb-1 border-b border-line/60"><span class="text-ink-500">Total</span><span class="text-ink-100">${fmtUsd(costs!.total)}</span></div>
               </Show>
+              <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}{chip(costs?.input)}</span></div>
+              <div class="flex justify-between"><span class="text-ink-500">Cache{(() => { const p = cacheHitPct(u()); return p === null ? "" : ` (${p}%)`; })()}</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}{chip(costs?.cache)}</span></div>
+              <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}{chip(costs?.output)}</span></div>
+              <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}{chip(costs?.reasoning)}</span></div>
             </div>
-          )}
+            );
+          }}
         </Show>
       </div>
     </FloatMenu>

@@ -166,6 +166,11 @@ type Usage struct {
 	CacheReadTokens      int     `json:"cache_read_tokens"`
 	CacheWriteTokens     int     `json:"cache_write_tokens"`
 	CostUSD              float64 `json:"cost_usd"`
+	// Per-bucket cost split (USD). Output includes reasoning tokens at
+	// the output rate; the frontend splits that share pro-rata.
+	CostInputUSD  float64 `json:"cost_input_usd,omitempty"`
+	CostCacheUSD  float64 `json:"cost_cache_usd,omitempty"`
+	CostOutputUSD float64 `json:"cost_output_usd,omitempty"`
 }
 
 // Add returns u plus v. A reasoning total is known only when both
@@ -179,6 +184,9 @@ func (u Usage) Add(v Usage) Usage {
 		CacheReadTokens:      u.CacheReadTokens + v.CacheReadTokens,
 		CacheWriteTokens:     u.CacheWriteTokens + v.CacheWriteTokens,
 		CostUSD:              u.CostUSD + v.CostUSD,
+		CostInputUSD:         u.CostInputUSD + v.CostInputUSD,
+		CostCacheUSD:         u.CostCacheUSD + v.CostCacheUSD,
+		CostOutputUSD:        u.CostOutputUSD + v.CostOutputUSD,
 	}
 }
 

@@ -28,6 +28,14 @@ type Model struct {
 
 // ComputeCost returns the USD cost for the given usage on model m.
 func ComputeCost(m Model, u Usage) float64 {
+	in, cache, out := ComputeCostBreakdown(m, u)
+	return in + cache + out
+}
+
+// ComputeCostBreakdown splits the USD cost per bucket: fresh input,
+// cached input (read + write), and output (reasoning bills at the
+// output rate, so it stays inside the output share).
+func ComputeCostBreakdown(m Model, u Usage) (in, cache, out float64) {
 	inputPrice := m.PriceInput
 	outputPrice := m.PriceOutput
 	cacheReadPrice := m.PriceCacheRead
@@ -41,8 +49,18 @@ func ComputeCost(m Model, u Usage) float64 {
 	}
 
 	const per = 1_000_000.0
-	return float64(u.InputTokens)*inputPrice/per +
-		float64(u.OutputTokens)*outputPrice/per +
-		float64(u.CacheReadTokens)*cacheReadPrice/per +
-		float64(u.CacheWriteTokens)*cacheWritePrice/per
+	in = float64(u.InputTokens) * inputPrice / per
+	cache = (float64(u.CacheReadTokens)*cacheReadPrice +
+		float64(u.CacheWriteTokens)*cacheWritePrice) / per
+	out = float64(u.OutputTokens) * outputPrice / per
+	return in, cache, out
+}
+
+// StampCost fills CostUSD plus the per-bucket split on u.
+func StampCost(m Model, u *Usage) {
+	in, cache, out := ComputeCostBreakdown(m, *u)
+	u.CostUSD = in + cache + out
+	u.CostInputUSD = in
+	u.CostCacheUSD = cache
+	u.CostOutputUSD = out
 }

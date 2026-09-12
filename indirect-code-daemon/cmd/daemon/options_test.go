@@ -9,7 +9,26 @@ import (
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
+	"llm-gateway/indirect-code-daemon/packages/provider"
 )
+
+func TestApplyGatewayPricingFirstMatchWins(t *testing.T) {
+	var m provider.Model
+	applyGatewayPricing(&m, map[string]float64{
+		"prompt": 3, "input": 99,
+		"completion": 15,
+		"input_cache_reads": 0.3,
+		"cache_write":       0.6,
+	})
+	if m.PriceInput != 3 || m.PriceOutput != 15 || m.PriceCacheRead != 0.3 || m.PriceCacheWrite != 0.6 {
+		t.Fatalf("pricing=%+v", m)
+	}
+	var empty provider.Model
+	applyGatewayPricing(&empty, nil)
+	if empty.PriceInput != 0 || empty.PriceOutput != 0 {
+		t.Fatalf("empty pricing must stay zero: %+v", empty)
+	}
+}
 
 func TestSessionSystemPromptIncludesSystemDirectivesAndOmitsDate(t *testing.T) {
 	prompt := sessionSystemPrompt(DaemonConfig{}, "/tmp", SessionOptions{Mode: "build"})

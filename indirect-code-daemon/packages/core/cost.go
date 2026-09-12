@@ -31,5 +31,6 @@ func (c *CostTracker) Add(u provider.Usage) provider.Usage {
 // Seed replaces the running total with usage restored from a session.
 func (c *CostTracker) Seed(u provider.Usage) {
 	c.Total = u
-	c.hasTotal = u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0 || u.CacheWriteTokens != 0 || u.CostUSD != 0
+	c.hasTotal = u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0 || u.CacheWriteTokens != 0 || u.CostUSD != 0 ||
+		u.CostInputUSD != 0 || u.CostCacheUSD != 0 || u.CostOutputUSD != 0
 }

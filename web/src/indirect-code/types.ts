@@ -32,6 +32,11 @@ export interface SessionUsage {
   cacheTok: number;
   reasoningTok: number;
   costUsd: number;
+  /** Per-bucket cost split (USD), when the daemon knows model pricing.
+   * costOutUsd covers the whole output bucket including reasoning. */
+  costInUsd?: number;
+  costCacheUsd?: number;
+  costOutUsd?: number;
 }
 
 export interface CompactionUsage {

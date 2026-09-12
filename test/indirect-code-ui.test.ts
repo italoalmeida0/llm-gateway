@@ -11,7 +11,7 @@ import {
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
-  buildRenderBlocks, cacheHitPct, finalTurnMessage, fuzzySame, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary,
+  buildRenderBlocks, cacheHitPct, finalTurnMessage, fmtUsd, fuzzySame, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
 } from "../web/src/indirect-code/transcript";
 import { specialTitle } from "../web/src/indirect-code/utils/titles";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
@@ -210,6 +210,19 @@ test("cache hit share rounds cached input over total input", () => {
   expect(cacheHitPct({ inTok: 25, cacheTok: 75 })).toBe(75);
   expect(cacheHitPct({ inTok: 100, cacheTok: 0 })).toBe(0);
   expect(cacheHitPct({ inTok: 0, cacheTok: 0 })).toBeNull();
+});
+
+test("usage costs split output pro-rata and hide without pricing", () => {
+  const c = usageCosts({ outTok: 1000, reasoningTok: 250, costUsd: 0.02, costInUsd: 0.01, costCacheUsd: 0.002, costOutUsd: 0.008 });
+  expect(c).not.toBeNull();
+  expect(c!.reasoning).toBeCloseTo(0.002, 9);
+  expect(c!.output).toBeCloseTo(0.006, 9);
+  expect(c!.total).toBe(0.02);
+  expect(usageCosts({ outTok: 0, reasoningTok: 0, costUsd: 0 })).toBeNull();
+  expect(fmtUsd(2.5)).toBe("2.50");
+  expect(fmtUsd(0.02)).toBe("0.02");
+  expect(fmtUsd(0.001)).toBe("0.00");
+  expect(fmtUsd(0.009)).toBe("0.00");
 });
 
 test("aggregate title summarizes activity counts", () => {
@@ -573,7 +586,9 @@ describe("Indirect Code transcript updaters", () => {
   test("mergeUsage keeps previous buckets when the payload omits them", () => {
     const prev = { s: { inTok: 1, outTok: 2, cacheTok: 3, reasoningTok: 4, costUsd: 5 } };
     const next = mergeUsage(prev, "s", { output_tokens: 9 }, null);
-    expect(next.s).toEqual({ inTok: 1, outTok: 9, cacheTok: 0, reasoningTok: 4, costUsd: 5 });
+    expect(next.s).toEqual({ inTok: 1, outTok: 9, cacheTok: 0, reasoningTok: 4, costUsd: 5, costInUsd: 0, costCacheUsd: 0, costOutUsd: 0 });
+    const split = mergeUsage(prev, "s", { output_tokens: 9, cost_input_usd: 0.1, cost_cache_usd: 0.2, cost_output_usd: 0.3 }, null);
+    expect(split.s).toMatchObject({ costInUsd: 0.1, costCacheUsd: 0.2, costOutUsd: 0.3 });
     expect(mergeUsage(prev, "", {}, null)).toBe(prev);
   });
   test("normalizeSessionMessages hoists tool results and drops image mirrors", () => {

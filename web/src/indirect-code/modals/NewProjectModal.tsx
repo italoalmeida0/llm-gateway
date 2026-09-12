@@ -16,12 +16,6 @@ export function NewProjectModal() {
       title="Select project folder"
       subtitle="Browse the host filesystem to choose or initialize a workspace for your agent sessions."
       width="max-w-2xl"
-      footerLeft={
-        <div class="min-w-0 flex items-center gap-2 text-xs text-ink-400 font-mono truncate max-w-xs sm:max-w-sm">
-          <Iconify icon="lucide:folder-check" size={14} class="shrink-0 text-brand-400" />
-          <span class="truncate">{s.folderCurrent() || s.newProjectPath() || "No folder selected"}</span>
-        </div>
-      }
       footer={
         <>
           <Btn

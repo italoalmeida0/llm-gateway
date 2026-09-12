@@ -19,12 +19,6 @@ export function SettingsModal() {
       subtitle="Customize your workspace and the agent on this host."
       width="max-w-2xl"
       onClose={m.cancelSettings}
-      footerLeft={
-        <div class="flex items-center gap-1.5 text-xs text-ink-400">
-          <Iconify icon="lucide:hard-drive" size={13} />
-          <span>Saved on this host</span>
-        </div>
-      }
       footer={
         <>
           <Btn

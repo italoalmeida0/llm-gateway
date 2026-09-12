@@ -247,12 +247,6 @@ export default function AdminKeysPage() {
         title="Revoke user API key"
         subtitle="Administratively revoke this key across all gateway proxies."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
-            <span class="inline-block w-2 h-2 rounded-full bg-rose-500" />
-            <span>Immediate deactivation</span>
-          </div>
-        }
         footer={
           <>
             <Btn
@@ -295,12 +289,6 @@ export default function AdminKeysPage() {
         title="Delete key permanently"
         subtitle="Permanently remove this key row from the gateway database."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
-            <span class="inline-block w-2 h-2 rounded-full bg-rose-500" />
-            <span>Database purge</span>
-          </div>
-        }
         footer={
           <>
             <Btn

@@ -659,12 +659,6 @@ export default function AdminModelsPage() {
         title={editing() === "new" ? "Register model" : `Edit ${(editing() as ModelDto)?.id ?? ""}`}
         subtitle="Configure public model routing, multi-provider failover chains, and client-advertised parameters."
         width="max-w-2xl"
-        footerLeft={
-          <span class="text-xs text-ink-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.bolt} size={13} />
-            <span>{fTargets().length} target{fTargets().length > 1 ? "s" : ""} in fallback order</span>
-          </span>
-        }
         footer={
           <>
             <Btn
@@ -1003,12 +997,6 @@ export default function AdminModelsPage() {
         title="Delete model"
         subtitle="Remove this model registration from the gateway routing registry."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.trash} size={13} />
-            <span>Registry removal</span>
-          </div>
-        }
         footer={
           <>
             <Btn
@@ -1052,12 +1040,6 @@ export default function AdminModelsPage() {
         title="Delete selected models"
         subtitle="Remove all selected model registrations from the gateway routing registry."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.trash} size={13} />
-            <span>{selected().size} models selected</span>
-          </div>
-        }
         footer={
           <>
             <Btn

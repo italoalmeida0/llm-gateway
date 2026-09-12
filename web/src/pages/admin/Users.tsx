@@ -317,7 +317,6 @@ export default function AdminUsersPage() {
         title="Create user"
         subtitle="Provision a new user account with dedicated API keys and rate limits."
         width="max-w-lg"
-        footerLeft={<span class="text-xs text-ink-400">Instant activation</span>}
         footer={
           <>
             <Btn
@@ -403,11 +402,6 @@ export default function AdminUsersPage() {
         title={`Edit ${editing()?.email ?? ""}`}
         subtitle="Modify user display name, administrative role, and account authorization status."
         width="max-w-lg"
-        footerLeft={
-          <span class="text-xs text-ink-400 font-mono">
-            Role: {editing()?.role}
-          </span>
-        }
         footer={
           <>
             <Btn
@@ -491,12 +485,6 @@ export default function AdminUsersPage() {
         title="Account action link"
         subtitle="SMTP is not configured on this instance. Copy and share this secure one-time onboarding link."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-amber-400 font-medium flex items-center gap-1.5">
-            <span class="inline-block w-2 h-2 rounded-full bg-amber-500" />
-            <span>Single-use link</span>
-          </div>
-        }
         footer={
           <>
             <Btn
@@ -537,12 +525,6 @@ export default function AdminUsersPage() {
         title="Reset 2FA"
         subtitle="Remove two-factor authentication requirement for this account."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-amber-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.shield} size={13} />
-            <span>Security reset</span>
-          </div>
-        }
         footer={
           <>
             <Btn
@@ -585,12 +567,6 @@ export default function AdminUsersPage() {
         title="Delete user"
         subtitle="Permanently delete this user account, their API keys, and active sessions."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.trash} size={13} />
-            <span>Permanent deletion</span>
-          </div>
-        }
         footer={
           <>
             <Btn

@@ -931,7 +931,6 @@ export function Modal(props: {
   width?: string;
   fullOnMobile?: boolean;
   footer?: JSX.Element;
-  footerLeft?: JSX.Element;
   children: JSX.Element;
   bodyRef?: (el: HTMLDivElement | undefined) => void;
 }) {
@@ -1039,14 +1038,9 @@ export function Modal(props: {
             </div>
 
             {/* Footer */}
-            <Show when={props.footer || props.footerLeft}>
-              <div class="ui-dialog-footer flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-2.5">
-                <div class="min-w-0 flex items-center gap-2 empty:hidden text-xs text-ink-400">
-                  {props.footerLeft}
-                </div>
-                <div class="flex items-center justify-end gap-2 flex-wrap ml-auto">
-                  {props.footer}
-                </div>
+            <Show when={props.footer}>
+              <div class="ui-dialog-footer flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-line px-4 py-2.5">
+                {props.footer}
               </div>
             </Show>
           </div>

@@ -95,14 +95,6 @@ export function ConfirmModal() {
         state()?.resolve(false);
         m.setConfirmState(null);
       }}
-      footerLeft={
-        <Show when={state()?.danger}>
-          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
-            <span class="inline-block w-2 h-2 rounded-full bg-rose-500" />
-            <span>Irreversible</span>
-          </div>
-        </Show>
-      }
       footer={
         <>
           <Btn
@@ -149,12 +141,6 @@ export function PairModal() {
       subtitle="Run a one-time terminal command on your target machine to connect its daemon with your account."
       width="max-w-xl"
       onClose={() => m.setShowPairModal(false)}
-      footerLeft={
-        <div class="flex items-center gap-1.5 text-xs text-ink-400">
-          <Iconify icon="lucide:shield-check" size={14} class="text-brand-400" />
-          <span>Encrypted relay channel</span>
-        </div>
-      }
       footer={
         <Btn size="sm" onClick={() => m.setShowPairModal(false)}>
           Done

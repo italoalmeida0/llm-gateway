@@ -21,26 +21,6 @@ export function PreviewModal() {
           <Badge tone="amber">truncated</Badge>
         </Show>
       }
-      footerLeft={
-        <Show when={file()?.text}>
-          <div class="flex items-center gap-3 text-xs text-ink-400 flex-wrap">
-            <span class="flex items-center gap-1 font-mono text-[11px] text-ink-300">
-              <Iconify icon="lucide:file-text" size={13} class="text-ink-500" />
-              {(file()?.text || "").split("\n").length.toLocaleString()} lines
-            </span>
-            <span class="text-ink-600">·</span>
-            <span class="flex items-center gap-1 font-mono text-[11px] text-ink-300">
-              <Iconify icon="lucide:hash" size={13} class="text-ink-500" />
-              ~{Math.round((file()?.text || "").length / 4).toLocaleString()} tokens
-            </span>
-            <Show when={file()?.truncated && file()?.fullText}>
-              <span class="text-amber-400 text-[10px]">
-                (original: {(file()?.fullText || "").length.toLocaleString()} chars)
-              </span>
-            </Show>
-          </div>
-        </Show>
-      }
       footer={
         <Btn
           variant="outline"

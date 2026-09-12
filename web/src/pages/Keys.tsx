@@ -394,12 +394,6 @@ export default function KeysPage() {
         title="Create API key"
         subtitle="Connect an application to your gateway."
         width="max-w-xl"
-        footerLeft={
-          <div class="text-xs text-ink-400 flex items-center gap-1.5">
-            <Icon name={Icons.shield} size={13} />
-            <span>Stored securely</span>
-          </div>
-        }
         footer={
           <>
             <Btn variant="outline" size="sm" onClick={() => setShowCreate(false)}>
@@ -577,11 +571,6 @@ export default function KeysPage() {
         title={`Edit “${editing()?.name ?? ""}”`}
         subtitle="Adjust token budgets, rate limits, or expiration schedule. Raising total limit reactivates exhausted keys."
         width="max-w-xl"
-        footerLeft={
-          <div class="text-xs text-ink-400 font-mono">
-            Prefix: {editing()?.prefix}…
-          </div>
-        }
         footer={
           <>
             <Btn
@@ -734,12 +723,6 @@ export default function KeysPage() {
         title="API key generated successfully"
         subtitle="Copy your key and integration snippets now. For security, raw tokens cannot be retrieved again once closed."
         width="max-w-xl"
-        footerLeft={
-          <div class="flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
-            <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>Key is active and ready</span>
-          </div>
-        }
         footer={
           <>
             <Btn
@@ -870,12 +853,6 @@ console.log(response.choices[0].message.content);`}
         title="Revoke API key"
         subtitle="Immediately deactivate this key across all client applications and active agents."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.ban} size={13} />
-            <span>Immediate revocation</span>
-          </div>
-        }
         footer={
           <>
             <button
@@ -921,12 +898,6 @@ console.log(response.choices[0].message.content);`}
         title="Delete key permanently"
         subtitle="Permanently remove this key record from the gateway database."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.trash} size={13} />
-            <span>Permanent database purge</span>
-          </div>
-        }
         footer={
           <>
             <button

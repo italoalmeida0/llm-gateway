@@ -358,12 +358,6 @@ export default function SettingsPage() {
         title="Disable two-factor authentication"
         subtitle="Confirm with your current 6-digit authenticator code before removing 2FA protection."
         width="max-w-md"
-        footerLeft={
-          <div class="text-xs text-amber-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.shield} size={13} />
-            <span>Security change</span>
-          </div>
-        }
         footer={
           <>
             <Btn

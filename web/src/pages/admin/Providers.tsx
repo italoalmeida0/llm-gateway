@@ -522,12 +522,6 @@ export default function AdminProvidersPage() {
         title={editing() === "new" ? "New provider" : `Edit ${name()}`}
         subtitle="Configure upstream API endpoints, capability authentication headers, and failover priority."
         width="max-w-xl"
-        footerLeft={
-          <div class="text-xs text-ink-400 flex items-center gap-1.5">
-            <Icon name={Icons.shield} size={13} />
-            <span>Upstream keys AES-256 encrypted</span>
-          </div>
-        }
         footer={
           <>
             <Btn
@@ -816,7 +810,6 @@ export default function AdminProvidersPage() {
         title={`Import models — ${importFor()?.name ?? ""}`}
         subtitle="Upstream model preview detected from endpoint. Models will be registered into the gateway registry."
         width="max-w-lg"
-        footerLeft={<span class="text-xs text-ink-400">Auto-sync discovery</span>}
         footer={
           <>
             <Btn
@@ -865,12 +858,6 @@ export default function AdminProvidersPage() {
         title={`Add upstream key — ${keyFor()?.name ?? ""}`}
         subtitle="Add a fallback key to this provider's credential pool. Keys rotate automatically upon rate limits."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-ink-400 flex items-center gap-1.5">
-            <Icon name={Icons.shield} size={13} />
-            <span>AES-256 encrypted</span>
-          </div>
-        }
         footer={
           <>
             <Btn
@@ -924,12 +911,6 @@ export default function AdminProvidersPage() {
         title="Remove upstream key"
         subtitle="Remove this credential from the provider's fallback pool."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-amber-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.ban} size={13} />
-            <span>Immediate key deactivation</span>
-          </div>
-        }
         footer={
           <>
             <Btn
@@ -973,12 +954,6 @@ export default function AdminProvidersPage() {
         title="Delete provider"
         subtitle="Remove this provider and take down its upstream endpoints."
         width="max-w-lg"
-        footerLeft={
-          <div class="text-xs text-rose-400 font-medium flex items-center gap-1.5">
-            <Icon name={Icons.trash} size={13} />
-            <span>Permanent removal</span>
-          </div>
-        }
         footer={
           <>
             <Btn

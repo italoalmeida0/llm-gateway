@@ -4,7 +4,7 @@ import { api, type AuthStyle, type ProviderDto, type ProviderKeyDto, type SyncOu
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
-import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtDate, timeUntil } from "../../ui";
+import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, ModalNotice, ModalSection, Segmented, Select, SwitchCard, toast, fmtDate, timeUntil } from "../../ui";
 import { syncSummary } from "./Models";
 
 /** Badge view of a provider key's failover state. */
@@ -516,66 +516,160 @@ export default function AdminProvidersPage() {
       </Show>
 
       {/* editor modal */}
-      <Modal open={!!editing()} onClose={() => setEditing(null)} title={editing() === "new" ? "New provider" : `Edit ${name()}`} width="max-w-lg">
-        <div class="space-y-4">
-          <Input label="Name" value={name()} onInput={setName} placeholder="e.g. Provider" />
-          <div>
-            <Input label="OpenAI-compatible base URL" value={openaiUrl()} onInput={setOpenaiUrl}
-              placeholder="https://provider.example.com/openai/v1" hint="Leave empty if the provider has no OpenAI surface" />
-            <div class="mt-2 flex items-center justify-between gap-3">
-              <span class="text-xs text-ink-500">Send the key as</span>
-              <Segmented value={openaiAuth()} onChange={setOpenaiAuth} options={AUTH_STYLE_OPTIONS} />
-            </div>
+      <Modal
+        open={!!editing()}
+        onClose={() => setEditing(null)}
+        title={editing() === "new" ? "New provider" : `Edit ${name()}`}
+        subtitle="Configure upstream API endpoints, capability authentication headers, and failover priority."
+        width="max-w-xl"
+        footerLeft={
+          <div class="text-[11px] text-ink-500 flex items-center gap-1.5">
+            <Icon name={Icons.shield} size={13} />
+            <span>Upstream keys AES-256 encrypted</span>
           </div>
-          <div>
-            <Input label="Anthropic-compatible base URL" value={anthropicUrl()} onInput={setAnthropicUrl}
-              placeholder="https://provider.example.com/anthropic/v1" hint="Leave empty if it has no Anthropic surface" />
-            <div class="mt-2 flex items-center justify-between gap-3">
-              <span class="text-xs text-ink-500">Send the key as</span>
-              <Segmented value={anthropicAuth()} onChange={setAnthropicAuth} options={AUTH_STYLE_OPTIONS} />
-            </div>
-          </div>
-          <div>
-            <Input label="Responses API base URL" value={responsesUrl()} onInput={setResponsesUrl}
-              placeholder="https://provider.example.com/v1" hint="Leave empty if it has no Responses surface" />
-            <div class="mt-2 flex items-center justify-between gap-3">
-              <span class="text-xs text-ink-500">Send the key as</span>
-              <Segmented value={responsesAuth()} onChange={setResponsesAuth} options={AUTH_STYLE_OPTIONS} />
-            </div>
-          </div>
-          <Show when={editing() === "new"}>
-            <Input label="Upstream API key" type="password" value={apiKey()} onInput={setApiKey}
-              placeholder="sk-…" autocomplete="off"
-              hint="Becomes the primary key — add fallback keys on the provider card after creating" />
-          </Show>
-          <Input label="Blocked upstream params" value={stripParams()} onInput={setStripParams}
-            placeholder="temperature, max_tokens" hint="Comma-separated top-level request keys never sent upstream (for providers that reject them)" />
-          <div class="grid grid-cols-2 gap-3 items-end">
-            <Input label="Priority (lower = preferred)" type="number" min={0} max={10000} value={priority()} onInput={setPriority} />
-            <label class="flex items-center gap-2 pb-2 cursor-pointer">
-              <input type="checkbox" checked={enabled()} onChange={(e) => setEnabled(e.currentTarget.checked)}
-                class="w-4 h-4 rounded border-line bg-elev accent-brand-500" />
-              <span class="text-sm">Enabled</span>
-            </label>
-          </div>
-          <div class="flex justify-end gap-2 pt-2">
-            <Btn variant="ghost" onClick={() => setEditing(null)}>Cancel</Btn>
-            <Btn onClick={save} disabled={busy() || !name().trim() || (!openaiUrl().trim() && !anthropicUrl().trim() && !responsesUrl().trim())}>
+        }
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setEditing(null)}>
+              Cancel
+            </Btn>
+            <Btn
+              onClick={save}
+              disabled={
+                busy() ||
+                !name().trim() ||
+                (!openaiUrl().trim() && !anthropicUrl().trim() && !responsesUrl().trim())
+              }
+            >
               {busy() ? "Saving…" : "Save provider"}
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-6">
+          <ModalSection
+            title="Provider Identity & State"
+            subtitle="Display label and failover priority ranking."
+          >
+            <div class="space-y-3.5">
+              <Input label="Name" value={name()} onInput={setName} placeholder="e.g. OpenAI Direct" />
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5 items-end">
+                <Input
+                  label="Priority (lower = preferred)"
+                  type="number"
+                  min={0}
+                  max={10000}
+                  value={priority()}
+                  onInput={setPriority}
+                  hint="Order in which this provider is attempted"
+                />
+                <SwitchCard
+                  checked={enabled()}
+                  onChange={setEnabled}
+                  title="Provider enabled"
+                  description="When disabled, all its routes and keys are skipped during failover."
+                  class="h-[84px] py-2"
+                />
+              </div>
+            </div>
+          </ModalSection>
+
+          <ModalSection
+            title="Upstream Protocol Endpoints"
+            subtitle="Configure API base URLs and authentication header styles. Leave empty if a protocol is not supported."
+          >
+            <div class="space-y-3.5 rounded-2xl border border-line/70 bg-elev/30 p-4">
+              <div class="space-y-2">
+                <Input
+                  label="OpenAI-compatible base URL"
+                  value={openaiUrl()}
+                  onInput={setOpenaiUrl}
+                  placeholder="https://api.openai.com/v1"
+                />
+                <div class="flex items-center justify-between gap-3 pt-0.5">
+                  <span class="text-xs text-ink-500">Send OpenAI key as</span>
+                  <Segmented value={openaiAuth()} onChange={setOpenaiAuth} options={AUTH_STYLE_OPTIONS} />
+                </div>
+              </div>
+
+              <div class="space-y-2 pt-2 border-t border-line/50">
+                <Input
+                  label="Anthropic-compatible base URL"
+                  value={anthropicUrl()}
+                  onInput={setAnthropicUrl}
+                  placeholder="https://api.anthropic.com/v1"
+                />
+                <div class="flex items-center justify-between gap-3 pt-0.5">
+                  <span class="text-xs text-ink-500">Send Anthropic key as</span>
+                  <Segmented value={anthropicAuth()} onChange={setAnthropicAuth} options={AUTH_STYLE_OPTIONS} />
+                </div>
+              </div>
+
+              <div class="space-y-2 pt-2 border-t border-line/50">
+                <Input
+                  label="Responses API base URL"
+                  value={responsesUrl()}
+                  onInput={setResponsesUrl}
+                  placeholder="https://provider.example.com/v1"
+                />
+                <div class="flex items-center justify-between gap-3 pt-0.5">
+                  <span class="text-xs text-ink-500">Send Responses key as</span>
+                  <Segmented value={responsesAuth()} onChange={setResponsesAuth} options={AUTH_STYLE_OPTIONS} />
+                </div>
+              </div>
+            </div>
+          </ModalSection>
+
+          <ModalSection
+            title="Credentials & Sanitization"
+            subtitle="Upstream API key and request parameter filtering."
+          >
+            <div class="space-y-3.5">
+              <Show when={editing() === "new"}>
+                <Input
+                  label="Upstream API key"
+                  type="password"
+                  value={apiKey()}
+                  onInput={setApiKey}
+                  placeholder="sk-…"
+                  autocomplete="off"
+                  hint="Stored with AES-256-GCM encryption. Fallback keys can be added after saving."
+                />
+              </Show>
+              <Input
+                label="Blocked upstream params"
+                value={stripParams()}
+                onInput={setStripParams}
+                placeholder="temperature, max_tokens"
+                hint="Comma-separated request keys stripped before forwarding upstream (for providers that reject them)."
+              />
+            </div>
+          </ModalSection>
         </div>
       </Modal>
 
       {/* test modal */}
-      <Modal open={!!testFor()} onClose={closeTest} title={`Test ${testFor()?.name ?? ""}`} width="max-w-lg">
-        <div class="space-y-5">
-          <div>
-            <div class="text-xs font-medium text-ink-300 mb-2">Endpoint smoke test</div>
-            <Show when={!smokeBusy()} fallback={<div class="text-xs text-ink-500">Checking…</div>}>
-              <Show when={smoke()} fallback={<div class="text-xs text-ink-500">No result</div>}>
+      <Modal
+        open={!!testFor()}
+        onClose={closeTest}
+        title={`Test ${testFor()?.name ?? ""}`}
+        subtitle="Verify upstream network reachability, latency, and live chat probe response."
+        width="max-w-xl"
+        footer={
+          <Btn variant="ghost" onClick={closeTest}>
+            Close
+          </Btn>
+        }
+      >
+        <div class="space-y-6">
+          <ModalSection
+            title="Endpoint Smoke Test"
+            subtitle="Automatic ping to check health and query available models."
+          >
+            <Show when={!smokeBusy()} fallback={<div class="text-xs text-ink-500 py-2">Probing endpoints…</div>}>
+              <Show when={smoke()} fallback={<div class="text-xs text-ink-500 py-2">No response data</div>}>
                 {(s) => (
-                  <div class="flex flex-wrap gap-2">
+                  <div class="flex flex-wrap gap-2 pt-1">
                     <For each={Object.entries(s()) as Array<[Cap, SmokeResult]>}>
                       {([cap, r]) => (
                         <Badge tone={r.reachable && (r.status ?? 500) < 400 ? "green" : "red"}>
@@ -589,11 +683,13 @@ export default function AdminProvidersPage() {
                 )}
               </Show>
             </Show>
-          </div>
+          </ModalSection>
 
-          <div class="border-t border-line pt-5">
-            <div class="text-xs font-medium text-ink-300 mb-2">Chat probe (sends a real "Hello")</div>
-            <div class="space-y-3">
+          <ModalSection
+            title="Interactive Chat Probe"
+            subtitle="Sends a live turn upstream to test credentials and streaming responses."
+          >
+            <div class="rounded-2xl border border-line/70 bg-elev/30 p-4 space-y-3.5">
               <Show when={(["openai", "anthropic", "responses"] as const).filter((c) => testFor()?.[`${c}BaseUrl` as const]).length > 1}>
                 <Segmented
                   value={probeCap()}
@@ -612,25 +708,25 @@ export default function AdminProvidersPage() {
                 />
               </Show>
               <Input
-                label={listedModels().length > 0 ? "…or type a model id" : "Model id"}
+                label={listedModels().length > 0 ? "…or specify a model id" : "Model id"}
                 value={modelFree()}
                 onInput={setModelFree}
-                placeholder="e.g. gpt-4o-mini / fake-llm-1"
+                placeholder="e.g. gpt-4o-mini / claude-3-5-sonnet"
                 hint={
                   listedModels().length > 0
-                    ? "Typing here overrides the dropdown"
-                    : "Model list was empty — enter the id manually"
+                    ? "Typing here overrides the dropdown selection above"
+                    : "Model list was empty — enter the ID manually"
                 }
               />
-              <div class="flex justify-end">
+              <div class="flex justify-end pt-1">
                 <Btn onClick={runProbe} disabled={probeBusy() || !effectiveModel()}>
-                  {probeBusy() ? "Sending…" : "Send Hello"}
+                  {probeBusy() ? "Sending…" : "Send Hello Probe"}
                 </Btn>
               </div>
               <Show when={probe()}>
                 {(r) => (
                   <div
-                    class={`rounded-lg border px-3 py-2.5 text-xs anim-fade-in ${
+                    class={`rounded-xl border px-3.5 py-3 text-xs anim-fade-in ${
                       r().reachable && (r().status ?? 500) < 400
                         ? "border-emerald-500/30 bg-emerald-500/5"
                         : "border-rose-500/30 bg-rose-500/5"
@@ -650,14 +746,14 @@ export default function AdminProvidersPage() {
                         OK · {r().latencyMs}ms · model {r().model}
                       </div>
                       <Show when={r().reply}>
-                        <div class="text-ink-200 mt-1.5">“{r().reply}”</div>
+                        <div class="text-ink-200 mt-1.5 font-mono text-[11px] leading-relaxed">“{r().reply}”</div>
                       </Show>
                     </Show>
                   </div>
                 )}
               </Show>
             </div>
-          </div>
+          </ModalSection>
         </div>
       </Modal>
 
@@ -666,11 +762,23 @@ export default function AdminProvidersPage() {
         open={!!importFor()}
         onClose={() => setImportFor(null)}
         title={`Import models — ${importFor()?.name ?? ""}`}
+        subtitle="Upstream model preview detected from endpoint. Models will be registered into the gateway registry."
         width="max-w-lg"
+        footerLeft={<span class="text-xs text-ink-500">Auto-sync discovery</span>}
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setImportFor(null)}>
+              Skip for now
+            </Btn>
+            <Btn onClick={runImport} disabled={importBusy()}>
+              {importBusy() ? "Importing…" : "Import models"}
+            </Btn>
+          </>
+        }
       >
         <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            The upstream model lists (duplicates merge into one entry):
+          <p class="text-xs text-ink-400 leading-relaxed">
+            The upstream endpoints returned the following model counts. Duplicates between protocols will be unified:
           </p>
           <div class="flex flex-wrap gap-2">
             <For each={(["openai", "anthropic"] as const).filter((c) => !!importFor()?.preview[c])}>
@@ -687,75 +795,120 @@ export default function AdminProvidersPage() {
               <Badge tone="indigo">{importFor()!.preview.common} listed by both</Badge>
             </Show>
           </div>
-          <div class="flex justify-end gap-2 pt-2">
-            <Btn variant="ghost" onClick={() => setImportFor(null)}>Skip for now</Btn>
-            <Btn onClick={runImport} disabled={importBusy()}>
-              {importBusy() ? "Importing…" : "Import models"}
-            </Btn>
-          </div>
         </div>
       </Modal>
 
       {/* add-key modal */}
-      <Modal open={!!keyFor()} onClose={() => setKeyFor(null)} title={`Add upstream key — ${keyFor()?.name ?? ""}`} width="max-w-md">
-        <div class="space-y-4">
-          <Input label="Label (optional)" value={newKeyLabel()} onInput={setNewKeyLabel} placeholder="e.g. backup account" />
-          <Input label="API key" type="password" value={newKeySecret()} onInput={setNewKeySecret}
-            placeholder="sk-…" autocomplete="off"
-            hint="Appended to the end of the fallback chain — drag it up to prefer it. Never leaves this server." />
-          <div class="flex justify-end gap-2 pt-2">
-            <Btn variant="ghost" onClick={() => setKeyFor(null)}>Cancel</Btn>
+      <Modal
+        open={!!keyFor()}
+        onClose={() => setKeyFor(null)}
+        title={`Add upstream key — ${keyFor()?.name ?? ""}`}
+        subtitle="Add a fallback key to this provider's credential pool. Keys rotate automatically upon rate limits."
+        width="max-w-lg"
+        footerLeft={
+          <div class="text-[11px] text-ink-500 flex items-center gap-1.5">
+            <Icon name={Icons.shield} size={13} />
+            <span>AES-256 encrypted</span>
+          </div>
+        }
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setKeyFor(null)}>
+              Cancel
+            </Btn>
             <Btn onClick={addKey} disabled={keyBusy() || !newKeySecret().trim()}>
               {keyBusy() ? "Adding…" : "Add key"}
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <Input label="Label (optional)" value={newKeyLabel()} onInput={setNewKeyLabel} placeholder="e.g. backup billing account" />
+          <Input
+            label="API key"
+            type="password"
+            value={newKeySecret()}
+            onInput={setNewKeySecret}
+            placeholder="sk-…"
+            autocomplete="off"
+            hint="Appended to the end of the fallback chain. Drag up on the provider card to prioritize."
+          />
         </div>
       </Modal>
 
       {/* delete-key confirm */}
-      <Modal open={!!confirmDeleteKey()} onClose={() => setConfirmDeleteKey(null)} title="Remove upstream key">
+      <Modal
+        open={!!confirmDeleteKey()}
+        onClose={() => setConfirmDeleteKey(null)}
+        title="Remove upstream key"
+        subtitle="Remove this credential from the provider's fallback pool."
+        footerLeft={<Badge tone="amber">Immediate effect</Badge>}
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmDeleteKey(null)}>
+              Cancel
+            </Btn>
+            <Btn variant="danger" onClick={deleteKey} disabled={keyBusy()}>
+              Remove key
+            </Btn>
+          </>
+        }
+      >
         <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            Remove <strong class="text-ink-100">{confirmDeleteKey()?.key.label || "this key"}</strong> from{" "}
-            <strong class="text-ink-100">{confirmDeleteKey()?.provider.name}</strong>'s fallback chain?
-            Requests will skip it immediately.
+          <ModalNotice tone="warn" title="Confirm key removal">
+            Remove <strong>{confirmDeleteKey()?.key.label || "this key"}</strong> from{" "}
+            <strong>{confirmDeleteKey()?.provider.name}</strong>'s fallback chain?
+          </ModalNotice>
+          <p class="text-xs text-ink-400 leading-relaxed">
+            Requests will immediately skip this key during failover cascade.
           </p>
-          <div class="flex justify-end gap-2">
-            <Btn variant="ghost" onClick={() => setConfirmDeleteKey(null)}>Cancel</Btn>
-            <Btn variant="danger" onClick={deleteKey} disabled={keyBusy()}>Remove</Btn>
-          </div>
         </div>
       </Modal>
 
       {/* delete confirm */}
-      <Modal open={!!confirmDelete()} onClose={() => setConfirmDelete(null)} title="Delete provider">
+      <Modal
+        open={!!confirmDelete()}
+        onClose={() => setConfirmDelete(null)}
+        title="Delete provider"
+        subtitle="Remove this provider and take down its upstream endpoints."
+        footerLeft={<Badge tone="red">Permanent</Badge>}
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
+              Cancel
+            </Btn>
+            <Btn variant="danger" onClick={remove} disabled={busy()}>
+              Delete provider
+            </Btn>
+          </>
+        }
+      >
         <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            Delete <strong class="text-ink-100">{confirmDelete()?.name}</strong>? Requests for its capabilities
-            will start failing until another enabled provider covers them.
-          </p>
+          <ModalNotice tone="danger" title="Confirm provider deletion">
+            Delete <strong>{confirmDelete()?.name}</strong>? Upstream proxy requests for its capabilities
+            will fail until another enabled provider covers them.
+          </ModalNotice>
           <Show when={(confirmDelete()?.modelCount ?? 0) > 0}>
-            <label class="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={deleteModels()}
-                onChange={(e) => setDeleteModels(e.currentTarget.checked)}
-                class="w-4 h-4 rounded border-line bg-elev accent-brand-500 mt-0.5"
-              />
-              <span class="text-xs text-ink-300">
-                Also delete its {confirmDelete()?.modelCount} registered model
-                {(confirmDelete()?.modelCount ?? 0) === 1 ? "" : "s"}.
-                <span class="text-ink-500 block mt-0.5">
-                  Unchecked: models are kept and become orphaned (badge "no provider") — you can
-                  re-link them to another provider from the Models tab.
-                </span>
-              </span>
-            </label>
+            <div class="rounded-xl border border-line/80 bg-elev/40 p-3.5">
+              <label class="flex items-start gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={deleteModels()}
+                  onChange={(e) => setDeleteModels(e.currentTarget.checked)}
+                  class="w-4 h-4 rounded border-line bg-elev accent-brand-500 mt-0.5 cursor-pointer"
+                />
+                <div class="text-xs text-ink-300">
+                  <div class="font-medium text-ink-100">
+                    Also delete its {confirmDelete()?.modelCount} registered model
+                    {(confirmDelete()?.modelCount ?? 0) === 1 ? "" : "s"}
+                  </div>
+                  <div class="text-ink-500 mt-0.5 leading-relaxed">
+                    If unchecked, models are kept and become orphaned (badge "no provider") so you can re-link them in the Models tab.
+                  </div>
+                </div>
+              </label>
+            </div>
           </Show>
-          <div class="flex justify-end gap-2">
-            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Btn>
-            <Btn variant="danger" onClick={remove} disabled={busy()}>Delete</Btn>
-          </div>
         </div>
       </Modal>
     </div>

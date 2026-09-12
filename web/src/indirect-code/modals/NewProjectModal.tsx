@@ -1,28 +1,159 @@
 import { For, Show } from "solid-js";
-import { Modal, Btn } from "../../ui";
+import { Modal, Btn, ModalNotice } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { useSession } from "../ctx";
 
 export function NewProjectModal() {
   const s = useSession();
+
+  const isCurrentValid = () =>
+    !s.folderLoading() && !!s.folderCurrent() && s.newProjectPath() === s.folderCurrent();
+
   return (
-<>
-<Modal open={s.showNewProjectModal()} onClose={() => s.setShowNewProjectModal(false)} title="Select project folder" width="max-w-2xl" fullOnMobile>
-  <form class="flex items-center gap-2 mb-3" onSubmit={(e) => { e.preventDefault(); s.requestFolders(s.newProjectPath()); }}>
-    <input aria-label="Folder path on host" class="flex-1 min-w-0 rounded-lg border border-line bg-elev px-3 py-2.5 text-sm font-mono text-ink-100 outline-none focus:border-ink-400" value={s.newProjectPath()} onInput={(e) => s.setNewProjectPath(e.currentTarget.value)} />
-    <button type="submit" class="p-2 text-ink-400 hover:text-ink-100 cursor-pointer" aria-label="Navigate to folder"><Iconify icon="lucide:arrow-right" size={16} /></button>
-    <Btn type="button" disabled={s.folderLoading() || !s.folderCurrent() || s.newProjectPath() !== s.folderCurrent()} onClick={s.createProject}>OK</Btn>
-  </form>
-  <Show when={s.folderError()}><div role="alert" class="mb-3 p-3 rounded-lg border border-brand-500/30 text-sm text-ink-200">{s.folderError()}</div></Show>
-  <div role="group" aria-label="Host folders" class="h-[50vh] min-h-48 overflow-y-auto -mx-2 space-y-0.5 [scrollbar-gutter:stable]">
-    <button disabled={s.folderLoading() || !s.folderParent() || s.folderParent() === s.folderCurrent()} onClick={() => s.requestFolders(s.folderParent())} class="flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-ink-300 hover:bg-elev disabled:opacity-40 cursor-pointer"><Iconify icon="lucide:arrow-up" size={17} /><span>..</span></button>
-    <Show when={!s.folderLoading()} fallback={<p class="px-3 py-5 text-sm text-ink-500">Loading folders…</p>}>
-      <For each={s.folderEntries()} fallback={<p class="px-3 py-5 text-sm text-ink-500">No subfolders. Select OK to use this folder.</p>}>{(folder) =>
-        <button aria-label={`Open ${folder.name}`} onClick={() => s.requestFolders(folder.path)} class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left text-sm text-ink-300 hover:bg-elev focus-visible:bg-elev outline-none cursor-pointer"><Iconify icon="lucide:folder" size={18} /><span class="truncate">{folder.name}</span></button>
-      }</For>
-    </Show>
-  </div>
-</Modal>
-</>
+    <Modal
+      open={s.showNewProjectModal()}
+      onClose={() => s.setShowNewProjectModal(false)}
+      title="Select project folder"
+      subtitle="Browse the host filesystem to choose or initialize a workspace for your agent sessions."
+      width="max-w-2xl"
+      fullOnMobile
+      footerLeft={
+        <div class="min-w-0 flex items-center gap-2 text-xs text-ink-400 font-mono truncate max-w-xs sm:max-w-sm">
+          <Iconify icon="lucide:folder-check" size={14} class="shrink-0 text-brand-500" />
+          <span class="truncate">{s.folderCurrent() || s.newProjectPath() || "No folder selected"}</span>
+        </div>
+      }
+      footer={
+        <>
+          <Btn variant="ghost" onClick={() => s.setShowNewProjectModal(false)}>
+            Cancel
+          </Btn>
+          <Btn
+            type="button"
+            disabled={!isCurrentValid()}
+            onClick={s.createProject}
+          >
+            Open Project
+          </Btn>
+        </>
+      }
+    >
+      <div class="space-y-4">
+        {/* Navigation / Path input bar */}
+        <form
+          class="flex items-center gap-2 p-1.5 rounded-xl border border-line/80 bg-elev/40 focus-within:border-accent-500/60 focus-within:bg-elev/70 transition-all"
+          onSubmit={(e) => {
+            e.preventDefault();
+            s.requestFolders(s.newProjectPath());
+          }}
+        >
+          <div class="pl-2.5 text-ink-400 shrink-0">
+            <Iconify icon="lucide:terminal" size={15} />
+          </div>
+          <input
+            aria-label="Folder path on host"
+            class="flex-1 min-w-0 bg-transparent px-2 py-1.5 text-xs sm:text-sm font-mono text-ink-100 placeholder:text-ink-500 outline-none"
+            value={s.newProjectPath()}
+            placeholder="/home/user/my-project"
+            onInput={(e) => s.setNewProjectPath(e.currentTarget.value)}
+          />
+          <button
+            type="submit"
+            class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-ink-300 hover:text-ink-100 hover:bg-elev/80 transition-colors flex items-center gap-1 cursor-pointer shrink-0"
+            title="Navigate to path"
+          >
+            <span>Go</span>
+            <Iconify icon="lucide:arrow-right" size={14} />
+          </button>
+        </form>
+
+        <Show when={s.folderError()}>
+          <ModalNotice tone="danger" title="Filesystem error">
+            {s.folderError()}
+          </ModalNotice>
+        </Show>
+
+        {/* Directory browser container */}
+        <div class="rounded-2xl border border-line/80 bg-elev/30 overflow-hidden">
+          <div class="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-line/60 bg-elev/40">
+            <div class="flex items-center gap-2 text-xs font-medium text-ink-200 min-w-0 truncate">
+              <Iconify icon="lucide:folder-tree" size={14} class="text-ink-400 shrink-0" />
+              <span class="truncate">{s.folderCurrent() || "Host Root"}</span>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <Show when={!s.folderLoading() && s.folderEntries()}>
+                <span class="text-[10px] text-ink-500 uppercase tracking-wider">
+                  {s.folderEntries().length} items
+                </span>
+              </Show>
+              <button
+                type="button"
+                disabled={
+                  s.folderLoading() ||
+                  !s.folderParent() ||
+                  s.folderParent() === s.folderCurrent()
+                }
+                onClick={() => s.requestFolders(s.folderParent())}
+                class="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-ink-400 hover:text-ink-100 hover:bg-elev transition-colors disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
+                title="Go to parent directory"
+              >
+                <Iconify icon="lucide:arrow-up" size={13} />
+                <span>Parent</span>
+              </button>
+            </div>
+          </div>
+
+          <div
+            role="group"
+            aria-label="Host folders"
+            class="h-[45vh] sm:h-64 min-h-44 overflow-y-auto p-2 space-y-0.5 [scrollbar-gutter:stable]"
+          >
+            <Show
+              when={!s.folderLoading()}
+              fallback={
+                <div class="flex items-center justify-center h-full text-xs text-ink-500 gap-2">
+                  <Iconify icon="lucide:loader-2" size={16} class="animate-spin text-ink-400" />
+                  <span>Scanning folders…</span>
+                </div>
+              }
+            >
+              <For
+                each={s.folderEntries()}
+                fallback={
+                  <div class="flex flex-col items-center justify-center h-full py-8 text-center text-xs text-ink-500">
+                    <Iconify icon="lucide:folder-open" size={24} class="text-ink-600 mb-2" />
+                    <p>No subfolders found in this directory.</p>
+                    <p class="text-[11px] text-ink-500 mt-0.5">Click "Open Project" below to select this folder.</p>
+                  </div>
+                }
+              >
+                {(folder) => (
+                  <button
+                    type="button"
+                    aria-label={`Open ${folder.name}`}
+                    onClick={() => s.requestFolders(folder.path)}
+                    class="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl text-left text-xs sm:text-sm text-ink-300 hover:text-ink-100 hover:bg-elev/70 focus-visible:bg-elev/70 outline-none transition-all cursor-pointer group"
+                  >
+                    <span class="flex items-center gap-2.5 min-w-0 truncate">
+                      <Iconify
+                        icon="lucide:folder"
+                        size={16}
+                        class="shrink-0 text-ink-500 group-hover:text-brand-500 transition-colors"
+                      />
+                      <span class="truncate font-mono text-xs">{folder.name}</span>
+                    </span>
+                    <Iconify
+                      icon="lucide:chevron-right"
+                      size={14}
+                      class="shrink-0 text-ink-600 group-hover:text-ink-300 transition-transform group-hover:translate-x-0.5"
+                    />
+                  </button>
+                )}
+              </For>
+            </Show>
+          </div>
+        </div>
+      </div>
+    </Modal>
   );
 }

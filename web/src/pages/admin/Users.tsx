@@ -12,7 +12,10 @@ import {
   Icons,
   Input,
   Modal,
+  ModalNotice,
+  ModalSection,
   Select,
+  SwitchCard,
   copyWithToast,
   fmtDate,
   toast,
@@ -312,42 +315,11 @@ export default function AdminUsersPage() {
         open={showCreate()}
         onClose={() => setShowCreate(false)}
         title="Create user"
-      >
-        <div class="space-y-4">
-          <Input
-            label="Email"
-            type="email"
-            value={email()}
-            onInput={setEmail}
-            placeholder="friend@example.com"
-          />
-          <Input
-            label="Name"
-            value={name()}
-            onInput={setName}
-            placeholder="Alice"
-          />
-          <Select
-            label="Role"
-            value={role()}
-            onChange={setRole}
-            options={[
-              { value: "user", label: "User" },
-              { value: "admin", label: "Admin" },
-            ]}
-          />
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={sendInvite()}
-              onChange={(e) => setSendInvite(e.currentTarget.checked)}
-              class="w-4 h-4 rounded border-line bg-elev accent-brand-500"
-            />
-            <span class="text-sm">
-              Send invite email with password-setup link
-            </span>
-          </label>
-          <div class="flex justify-end gap-2 pt-2">
+        subtitle="Provision a new user account with dedicated API keys and rate limits."
+        width="max-w-lg"
+        footerLeft={<span class="text-xs text-ink-500">Instant activation</span>}
+        footer={
+          <>
             <Btn variant="ghost" onClick={() => setShowCreate(false)}>
               Cancel
             </Btn>
@@ -357,7 +329,51 @@ export default function AdminUsersPage() {
             >
               {busy() ? "Creating…" : "Create user"}
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-6">
+          <ModalSection
+            title="User Credentials"
+            subtitle="Account login email and display identity."
+          >
+            <div class="space-y-3.5">
+              <Input
+                label="Email address"
+                type="email"
+                value={email()}
+                onInput={setEmail}
+                placeholder="friend@example.com"
+              />
+              <Input
+                label="Full name"
+                value={name()}
+                onInput={setName}
+                placeholder="Alice"
+              />
+              <Select
+                label="Gateway role"
+                value={role()}
+                onChange={setRole}
+                options={[
+                  { value: "user", label: "User (Key & budget management)" },
+                  { value: "admin", label: "Admin (Full registry & user access)" },
+                ]}
+              />
+            </div>
+          </ModalSection>
+
+          <ModalSection
+            title="Onboarding"
+            subtitle="Invitation delivery and initial credentials."
+          >
+            <SwitchCard
+              checked={sendInvite()}
+              onChange={setSendInvite}
+              title="Send invitation email"
+              description="Sends an invite with password-setup link. If SMTP is not configured, an action link is shown immediately after creation."
+            />
+          </ModalSection>
         </div>
       </Modal>
 
@@ -366,46 +382,62 @@ export default function AdminUsersPage() {
         open={!!editing()}
         onClose={() => setEditing(null)}
         title={`Edit ${editing()?.email ?? ""}`}
+        subtitle="Modify user display name, administrative role, and account authorization status."
+        width="max-w-lg"
+        footerLeft={
+          <span class="text-xs text-ink-500 font-mono">
+            Role: {editing()?.role}
+          </span>
+        }
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setEditing(null)}>
+              Cancel
+            </Btn>
+            <Btn onClick={saveEdit} disabled={busy() || !editing()?.name.trim()}>
+              {busy() ? "Saving…" : "Save changes"}
+            </Btn>
+          </>
+        }
       >
         <Show when={editing()}>
           {(u) => (
-            <div class="space-y-4">
-              <Input
-                label="Name"
-                value={u().name}
-                onInput={(v) => setEditing({ ...u(), name: v })}
-              />
-              <Select
-                label="Role"
-                value={u().role}
-                onChange={(v) =>
-                  setEditing({ ...u(), role: v as "admin" | "user" })
-                }
-                options={[
-                  { value: "user", label: "User" },
-                  { value: "admin", label: "Admin" },
-                ]}
-              />
-              <Select
-                label="Status"
-                value={u().status}
-                onChange={(v) =>
-                  setEditing({ ...u(), status: v as "active" | "banned" })
-                }
-                options={[
-                  { value: "active", label: "Active" },
-                  { value: "banned", label: "Banned (all keys blocked)" },
-                ]}
-                hint="Banning immediately revokes sessions and blocks every key."
-              />
-              <div class="flex justify-end gap-2 pt-2">
-                <Btn variant="ghost" onClick={() => setEditing(null)}>
-                  Cancel
-                </Btn>
-                <Btn onClick={saveEdit} disabled={busy() || !u().name.trim()}>
-                  Save
-                </Btn>
-              </div>
+            <div class="space-y-6">
+              <ModalSection
+                title="Account Information"
+                subtitle="Primary identity and access privileges."
+              >
+                <div class="space-y-3.5">
+                  <Input
+                    label="Display name"
+                    value={u().name}
+                    onInput={(v) => setEditing({ ...u(), name: v })}
+                  />
+                  <Select
+                    label="Role"
+                    value={u().role}
+                    onChange={(v) =>
+                      setEditing({ ...u(), role: v as "admin" | "user" })
+                    }
+                    options={[
+                      { value: "user", label: "User" },
+                      { value: "admin", label: "Admin" },
+                    ]}
+                  />
+                  <Select
+                    label="Account status"
+                    value={u().status}
+                    onChange={(v) =>
+                      setEditing({ ...u(), status: v as "active" | "banned" })
+                    }
+                    options={[
+                      { value: "active", label: "Active" },
+                      { value: "banned", label: "Banned (all keys blocked)" },
+                    ]}
+                    hint="Banning immediately revokes active sessions and blocks all proxy keys."
+                  />
+                </div>
+              </ModalSection>
             </div>
           )}
         </Show>
@@ -415,28 +447,34 @@ export default function AdminUsersPage() {
       <Modal
         open={!!inviteLink()}
         onClose={() => setInviteLink("")}
-        title="Action link"
-      >
-        <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            SMTP is not configured, so no email went out. Send this link to the
-            user manually:
-          </p>
-          <div class="flex items-center gap-2">
-            <code class="flex-1 rounded-lg bg-ink-850 border border-line px-3 py-2 text-[11px] text-emerald-500 break-all select-all">
-              {inviteLink()}
-            </code>
+        title="Account action link"
+        subtitle="SMTP is not configured on this instance. Copy and share this secure one-time onboarding link."
+        width="max-w-lg"
+        footerLeft={<Badge tone="amber">Single use</Badge>}
+        footer={
+          <>
             <Btn
               variant="outline"
               size="sm"
               onClick={() => copyWithToast(inviteLink())}
             >
-              <Icon name={Icons.copy} />
+              <Icon name={Icons.copy} /> Copy link
             </Btn>
-          </div>
-          <div class="flex justify-end">
             <Btn onClick={() => setInviteLink("")}>Done</Btn>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <div class="rounded-xl border border-line/80 bg-ink-950/60 p-3.5 space-y-2">
+            <div class="text-[11px] text-ink-400 font-medium">One-time setup URL</div>
+            <code class="block font-mono text-xs text-emerald-400 break-all select-all">
+              {inviteLink()}
+            </code>
           </div>
+
+          <ModalNotice tone="info" title="Manual distribution required">
+            Since outbound email is disabled, deliver this URL to the user securely. It will expire after first use.
+          </ModalNotice>
         </div>
       </Modal>
 
@@ -445,21 +483,27 @@ export default function AdminUsersPage() {
         open={!!confirmReset2fa()}
         onClose={() => setConfirmReset2fa(null)}
         title="Reset 2FA"
-      >
-        <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            Reset two-factor authentication for{" "}
-            <strong class="text-ink-100">{confirmReset2fa()?.email}</strong>?
-            They'll need to set a new TOTP secret on next login.
-          </p>
-          <div class="flex justify-end gap-2">
+        subtitle="Remove two-factor authentication requirement for this account."
+        footerLeft={<Badge tone="amber">Security reset</Badge>}
+        footer={
+          <>
             <Btn variant="ghost" onClick={() => setConfirmReset2fa(null)}>
               Cancel
             </Btn>
             <Btn variant="danger" onClick={reset2fa} disabled={busy()}>
               Reset 2FA
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <ModalNotice tone="warn" title="Reset TOTP authentication">
+            Reset two-factor authentication for{" "}
+            <strong>{confirmReset2fa()?.email}</strong>? Their existing authenticator app keys will be discarded.
+          </ModalNotice>
+          <p class="text-xs text-ink-400 leading-relaxed">
+            The user will be prompted to re-enroll a new TOTP authenticator upon their next login.
+          </p>
         </div>
       </Modal>
 
@@ -468,22 +512,27 @@ export default function AdminUsersPage() {
         open={!!confirmDelete()}
         onClose={() => setConfirmDelete(null)}
         title="Delete user"
-      >
-        <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            Delete{" "}
-            <strong class="text-ink-100">{confirmDelete()?.email}</strong>?
-            Their sessions, API keys and 2FA are removed. Usage history is kept
-            for accounting.
-          </p>
-          <div class="flex justify-end gap-2">
+        subtitle="Permanently delete this user account, their API keys, and active sessions."
+        footerLeft={<Badge tone="red">Permanent</Badge>}
+        footer={
+          <>
             <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
               Cancel
             </Btn>
             <Btn variant="danger" onClick={remove} disabled={busy()}>
-              Delete
+              Delete user
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <ModalNotice tone="danger" title="Confirm account deletion">
+            Delete <strong>{confirmDelete()?.email}</strong>? All their active sessions,
+            gateway API keys, and authentication credentials will be permanently erased.
+          </ModalNotice>
+          <p class="text-xs text-ink-400 leading-relaxed">
+            Historical usage metrics and spend records are kept for financial and audit accounting.
+          </p>
         </div>
       </Modal>
     </div>

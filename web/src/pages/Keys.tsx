@@ -12,6 +12,8 @@ import {
   Icons,
   Input,
   Modal,
+  ModalNotice,
+  ModalSection,
   ProgressBar,
   Select,
   copyWithToast,
@@ -387,66 +389,93 @@ export default function KeysPage() {
         open={showCreate()}
         onClose={() => setShowCreate(false)}
         title="Create API key"
-      >
-        <div class="space-y-4">
-          <Input
-            label="Name"
-            value={form().name}
-            onInput={(v) => setForm({ ...form(), name: v })}
-            placeholder="e.g. alice-short-experiment"
-          />
-          <Select
-            label="Expiration"
-            value={form().preset}
-            onChange={(v) => setForm({ ...form(), preset: v })}
-            options={EXPIRY_PRESETS}
-            hint="When it expires, the key simply stops working."
-          />
-          <Show when={form().preset === "custom"}>
-            <Input
-              label="Expires at"
-              type="datetime-local"
-              value={form().customDate}
-              onInput={(v) => setForm({ ...form(), customDate: v })}
-            />
-          </Show>
-          <div class="grid grid-cols-2 gap-3">
-            <Input
-              label="Daily output limit"
-              type="number"
-              min={1}
-              value={form().dailyLimit}
-              onInput={(v) => setForm({ ...form(), dailyLimit: v })}
-              placeholder="unlimited"
-              hint="Output tokens · resets 00:00 UTC"
-            />
-            <Input
-              label="Total output limit"
-              type="number"
-              min={1}
-              value={form().totalLimit}
-              onInput={(v) => setForm({ ...form(), totalLimit: v })}
-              placeholder="unlimited"
-              hint="Output tokens · permanent cap"
-            />
+        subtitle="Generate a new gateway token to authenticate your applications with OpenAI or Anthropic SDKs."
+        width="max-w-xl"
+        footerLeft={
+          <div class="text-[11px] text-ink-500 flex items-center gap-1.5">
+            <Icon name={Icons.shield} size={13} />
+            <span>Encrypted at rest · SHA-256 lookup</span>
           </div>
-          <Input
-            label="Requests per minute"
-            type="number"
-            min={1}
-            max={1000000}
-            value={form().rpm}
-            onInput={(v) => setForm({ ...form(), rpm: v })}
-            placeholder="default (120)"
-          />
-          <div class="flex justify-end gap-2 pt-2">
+        }
+        footer={
+          <>
             <Btn variant="ghost" onClick={() => setShowCreate(false)}>
               Cancel
             </Btn>
             <Btn onClick={create} disabled={busy()}>
               {busy() ? "Creating…" : "Create key"}
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-6">
+          <ModalSection
+            title="General Information"
+            subtitle="Provide an identifier name and expiry schedule for this token."
+          >
+            <div class="space-y-3.5">
+              <Input
+                label="Name"
+                value={form().name}
+                onInput={(v) => setForm({ ...form(), name: v })}
+                placeholder="e.g. alice-short-experiment"
+                hint="Use a descriptive name to easily recognize where this key is deployed."
+              />
+              <Select
+                label="Expiration"
+                value={form().preset}
+                onChange={(v) => setForm({ ...form(), preset: v })}
+                options={EXPIRY_PRESETS}
+                hint="When it expires, the key simply stops authenticating requests."
+              />
+              <Show when={form().preset === "custom"}>
+                <Input
+                  label="Expires at"
+                  type="datetime-local"
+                  value={form().customDate}
+                  onInput={(v) => setForm({ ...form(), customDate: v })}
+                />
+              </Show>
+            </div>
+          </ModalSection>
+
+          <ModalSection
+            title="Budget & Rate Caps"
+            subtitle="Key budgets limit output tokens only. Input and cached tokens are tracked for visibility."
+          >
+            <div class="rounded-2xl border border-line/70 bg-elev/30 p-4 space-y-4">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <Input
+                  label="Daily output limit"
+                  type="number"
+                  min={1}
+                  value={form().dailyLimit}
+                  onInput={(v) => setForm({ ...form(), dailyLimit: v })}
+                  placeholder="unlimited"
+                  hint="Output tokens · resets 00:00 UTC"
+                />
+                <Input
+                  label="Total output limit"
+                  type="number"
+                  min={1}
+                  value={form().totalLimit}
+                  onInput={(v) => setForm({ ...form(), totalLimit: v })}
+                  placeholder="unlimited"
+                  hint="Output tokens · permanent cap"
+                />
+              </div>
+              <Input
+                label="Requests per minute (RPM)"
+                type="number"
+                min={1}
+                max={1000000}
+                value={form().rpm}
+                onInput={(v) => setForm({ ...form(), rpm: v })}
+                placeholder="default (120)"
+                hint="Sliding window per-key request concurrency guard."
+              />
+            </div>
+          </ModalSection>
         </div>
       </Modal>
 
@@ -455,50 +484,72 @@ export default function KeysPage() {
         open={!!editing()}
         onClose={() => setEditing(null)}
         title={`Edit “${editing()?.name ?? ""}”`}
-      >
-        <div class="space-y-4">
-          <Input
-            label="Name"
-            value={form().name}
-            onInput={(v) => setForm({ ...form(), name: v })}
-          />
-          <div class="grid grid-cols-2 gap-3">
-            <Input
-              label="Daily output limit"
-              type="number"
-              min={1}
-              value={form().dailyLimit}
-              onInput={(v) => setForm({ ...form(), dailyLimit: v })}
-              placeholder="unlimited"
-              hint="Output tokens · empty = unlimited"
-            />
-            <Input
-              label="Total output limit"
-              type="number"
-              min={1}
-              value={form().totalLimit}
-              onInput={(v) => setForm({ ...form(), totalLimit: v })}
-              placeholder="unlimited"
-              hint="Output tokens · raising it reactivates an exhausted key"
-            />
+        subtitle="Adjust token budgets or rate limits. Raising the total limit reactivates exhausted keys immediately."
+        width="max-w-xl"
+        footerLeft={
+          <div class="text-[11px] text-ink-500 font-mono">
+            Prefix: {editing()?.prefix}…
           </div>
-          <Input
-            label="Requests per minute"
-            type="number"
-            min={1}
-            max={1000000}
-            value={form().rpm}
-            onInput={(v) => setForm({ ...form(), rpm: v })}
-            placeholder="default (120)"
-          />
-          <div class="flex justify-end gap-2 pt-2">
+        }
+        footer={
+          <>
             <Btn variant="ghost" onClick={() => setEditing(null)}>
               Cancel
             </Btn>
             <Btn onClick={saveEdit} disabled={busy()}>
-              {busy() ? "Saving…" : "Save"}
+              {busy() ? "Saving…" : "Save changes"}
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-6">
+          <ModalSection
+            title="Key Details"
+            subtitle="Update the human-readable label for this key."
+          >
+            <Input
+              label="Name"
+              value={form().name}
+              onInput={(v) => setForm({ ...form(), name: v })}
+            />
+          </ModalSection>
+
+          <ModalSection
+            title="Output Limits & Concurrency"
+            subtitle="Budgets only cap output tokens; prompt and cache tokens are tracked separately."
+          >
+            <div class="rounded-2xl border border-line/70 bg-elev/30 p-4 space-y-4">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <Input
+                  label="Daily output limit"
+                  type="number"
+                  min={1}
+                  value={form().dailyLimit}
+                  onInput={(v) => setForm({ ...form(), dailyLimit: v })}
+                  placeholder="unlimited"
+                  hint="Output tokens · empty = unlimited"
+                />
+                <Input
+                  label="Total output limit"
+                  type="number"
+                  min={1}
+                  value={form().totalLimit}
+                  onInput={(v) => setForm({ ...form(), totalLimit: v })}
+                  placeholder="unlimited"
+                  hint="Raising it reactivates an exhausted key"
+                />
+              </div>
+              <Input
+                label="Requests per minute"
+                type="number"
+                min={1}
+                max={1000000}
+                value={form().rpm}
+                onInput={(v) => setForm({ ...form(), rpm: v })}
+                placeholder="default (120)"
+              />
+            </div>
+          </ModalSection>
         </div>
       </Modal>
 
@@ -506,28 +557,44 @@ export default function KeysPage() {
       <Modal
         open={!!newToken()}
         onClose={() => setNewToken("")}
-        title="Key created — copy it now"
-      >
-        <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            This is the <strong class="text-ink-100">only time</strong> the full
-            token is shown. Store it like a password — we only keep its hash.
-          </p>
-          <div class="flex items-center">
-            <code class="flex-1 rounded-xl bg-ink-900 border border-line px-3.5 py-2.5 text-xs text-emerald-500 break-all select-all">
-              {newToken()}
-            </code>
-          </div>
-          <div class="flex justify-end gap-2">
+        title="API key generated successfully"
+        subtitle="Copy your key and store it securely. For safety, this raw token is never shown again once you close this dialog."
+        width="max-w-lg"
+        footerLeft={<Badge tone="green">Ready for requests</Badge>}
+        footer={
+          <>
             <Btn
               variant="outline"
               size="sm"
               onClick={() => copyWithToast(newToken())}
             >
-              <Icon name={Icons.copy} /> Copy
+              <Icon name={Icons.copy} /> Copy key
             </Btn>
             <Btn onClick={() => setNewToken("")}>Done</Btn>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <div class="rounded-2xl border border-emerald-500/30 bg-ink-950/60 p-4 space-y-2">
+            <div class="flex items-center justify-between text-xs text-ink-400">
+              <span class="font-medium text-emerald-400">New Gateway Token</span>
+              <button
+                onClick={() => copyWithToast(newToken())}
+                class="hover:text-ink-100 flex items-center gap-1 cursor-pointer"
+              >
+                <Icon name={Icons.copy} size={12} />
+                <span>Copy</span>
+              </button>
+            </div>
+            <code class="block font-mono text-xs text-emerald-400 break-all select-all pt-1">
+              {newToken()}
+            </code>
           </div>
+
+          <ModalNotice tone="info" title="Security advisory">
+            The gateway stores only the cryptographic SHA-256 hash of this key.
+            If you misplace this secret, you will need to revoke it and generate a new key.
+          </ModalNotice>
         </div>
       </Modal>
 
@@ -535,22 +602,29 @@ export default function KeysPage() {
       <Modal
         open={!!confirmRevoke()}
         onClose={() => setConfirmRevoke(null)}
-        title="Revoke key"
-      >
-        <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            Revoke <strong class="text-ink-100">{confirmRevoke()?.name}</strong>{" "}
-            ({confirmRevoke()?.prefix}…)? Any client using it stops working
-            immediately. This cannot be undone.
-          </p>
-          <div class="flex justify-end gap-2">
+        title="Revoke API key"
+        subtitle="Immediately deactivate this key across all client applications and active agents."
+        footerLeft={<Badge tone="red">Irreversible</Badge>}
+        footer={
+          <>
             <Btn variant="ghost" onClick={() => setConfirmRevoke(null)}>
               Cancel
             </Btn>
             <Btn variant="danger" onClick={revoke} disabled={busy()}>
-              Revoke
+              Revoke key
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <ModalNotice tone="danger" title="Confirm key deactivation">
+            Revoking will immediately cause all SDK and API requests using{" "}
+            <strong>{confirmRevoke()?.name}</strong> (
+            <code>{confirmRevoke()?.prefix}…</code>) to fail with 401 Unauthorized.
+          </ModalNotice>
+          <p class="text-xs text-ink-400 leading-relaxed">
+            Historical usage metrics and audit logs associated with this key will remain intact for reporting.
+          </p>
         </div>
       </Modal>
 
@@ -559,23 +633,29 @@ export default function KeysPage() {
         open={!!confirmDelete()}
         onClose={() => setConfirmDelete(null)}
         title="Delete key permanently"
-      >
-        <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            Permanently delete{" "}
-            <strong class="text-ink-100">{confirmDelete()?.name}</strong> (
-            {confirmDelete()?.prefix}…)? The key row is removed for good —
-            unlike revoke, it disappears from this list. Usage history is kept
-            for accounting. This cannot be undone.
-          </p>
-          <div class="flex justify-end gap-2">
+        subtitle="Permanently remove this key record from the gateway database."
+        footerLeft={<Badge tone="red">Permanent deletion</Badge>}
+        footer={
+          <>
             <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
               Cancel
             </Btn>
             <Btn variant="danger" onClick={hardDelete} disabled={busy()}>
               Delete permanently
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <ModalNotice tone="danger" title="Purge database record">
+            Permanently delete{" "}
+            <strong>{confirmDelete()?.name}</strong> (
+            <code>{confirmDelete()?.prefix}…</code>)? Unlike revoking, this key
+            row will be completely purged from the registry.
+          </ModalNotice>
+          <p class="text-xs text-ink-400 leading-relaxed">
+            All usage and audit logs are safely preserved. This action cannot be undone.
+          </p>
         </div>
       </Modal>
     </div>

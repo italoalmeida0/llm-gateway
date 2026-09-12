@@ -730,6 +730,164 @@ export function Badge(props: {
   );
 }
 
+export function ModalSection(props: {
+  title?: string;
+  subtitle?: string;
+  badge?: JSX.Element;
+  action?: JSX.Element;
+  children: JSX.Element;
+  class?: string;
+}) {
+  return (
+    <div class={`space-y-3 ${props.class ?? ""}`}>
+      <Show when={props.title || props.action}>
+        <div class="flex items-start sm:items-center justify-between gap-3 flex-wrap">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <h4 class="text-xs font-semibold uppercase tracking-wider text-ink-300">
+                {props.title}
+              </h4>
+              {props.badge}
+            </div>
+            <Show when={props.subtitle}>
+              <p class="text-[11px] sm:text-xs text-ink-500 leading-relaxed mt-0.5">
+                {props.subtitle}
+              </p>
+            </Show>
+          </div>
+          <Show when={props.action}>
+            <div class="shrink-0">{props.action}</div>
+          </Show>
+        </div>
+      </Show>
+      {props.children}
+    </div>
+  );
+}
+
+export function SwitchCard(props: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  title: string;
+  description?: string;
+  badge?: JSX.Element;
+  disabled?: boolean;
+  class?: string;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={props.disabled ? -1 : 0}
+      onClick={() => !props.disabled && props.onChange(!props.checked)}
+      onKeyDown={(e) => {
+        if (!props.disabled && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          props.onChange(!props.checked);
+        }
+      }}
+      class={`flex items-start sm:items-center justify-between gap-4 p-3.5 sm:p-4 rounded-xl border border-line/80 bg-elev/30 hover:bg-elev/60 transition-all cursor-pointer select-none ${
+        props.disabled ? "opacity-50 pointer-events-none" : ""
+      } ${props.class ?? ""}`}
+    >
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-xs sm:text-sm font-medium text-ink-100">
+            {props.title}
+          </span>
+          {props.badge}
+        </div>
+        <Show when={props.description}>
+          <p class="text-[11px] sm:text-xs text-ink-400 leading-relaxed mt-0.5">
+            {props.description}
+          </p>
+        </Show>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={props.checked}
+        disabled={props.disabled}
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onChange(!props.checked);
+        }}
+        class={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 ${
+          props.checked ? "bg-accent-500" : "bg-ink-700"
+        }`}
+      >
+        <span
+          class={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-accent-fg shadow-sm transition duration-200 ease-in-out ${
+            props.checked ? "translate-x-4" : "translate-x-0"
+          }`}
+        />
+      </button>
+    </div>
+  );
+}
+
+export function FilterChip(props: {
+  selected?: boolean;
+  onClick?: () => void;
+  onRemove?: () => void;
+  children: JSX.Element;
+  disabled?: boolean;
+  badge?: JSX.Element;
+  class?: string;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={props.disabled}
+      onClick={props.onClick}
+      class={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer select-none border ${
+        props.selected
+          ? "bg-accent-500 text-accent-fg border-accent-500 shadow-sm"
+          : "bg-elev/40 text-ink-300 border-line hover:border-ink-500 hover:text-ink-100"
+      } ${props.disabled ? "opacity-40 cursor-not-allowed" : ""} ${props.class ?? ""}`}
+    >
+      <span>{props.children}</span>
+      {props.badge}
+      <Show when={props.selected && props.onRemove}>
+        <span
+          role="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onRemove?.();
+          }}
+          class="hover:opacity-75 p-0.5 rounded transition-opacity"
+          title="Remove"
+        >
+          <Icon name={Icons.x} size={11} />
+        </span>
+      </Show>
+    </button>
+  );
+}
+
+export function ModalNotice(props: {
+  tone?: "info" | "warn" | "danger" | "success";
+  title?: string;
+  children: JSX.Element;
+  class?: string;
+}) {
+  const tones = {
+    info: "border-blue-500/30 bg-blue-500/10 text-blue-400",
+    warn: "border-amber-500/30 bg-amber-500/10 text-amber-400",
+    danger: "border-rose-500/30 bg-rose-500/10 text-rose-400",
+    success: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
+  };
+  return (
+    <div
+      class={`rounded-xl border p-3.5 text-xs leading-relaxed ${tones[props.tone ?? "info"]} ${props.class ?? ""}`}
+    >
+      <Show when={props.title}>
+        <div class="font-semibold text-ink-100 mb-1">{props.title}</div>
+      </Show>
+      <div class="text-ink-300">{props.children}</div>
+    </div>
+  );
+}
+
 const modalStack: HTMLElement[] = [];
 let previousBodyOverflow = "";
 
@@ -738,14 +896,19 @@ export function Modal(props: {
   onClose: () => void;
   title: string;
   description?: string;
+  subtitle?: string;
+  badge?: JSX.Element;
   width?: string;
   fullOnMobile?: boolean;
   footer?: JSX.Element;
+  footerLeft?: JSX.Element;
   children: JSX.Element;
   bodyRef?: (el: HTMLDivElement | undefined) => void;
 }) {
   const titleId = createUniqueId();
   const descriptionId = createUniqueId();
+  const desc = () => props.subtitle ?? props.description;
+
   const setupDialog = (panel: HTMLDivElement) => {
     const previousFocus = document.activeElement as HTMLElement | null;
     if (modalStack.length === 0) {
@@ -788,23 +951,39 @@ export function Modal(props: {
   return (
     <Show when={props.open}>
       <Portal>
-        <div class="fixed inset-0 overflow-hidden bg-black/50 backdrop-blur-sm" style={{ "z-index": Z.modal }}
+        <div class="fixed inset-0 overflow-hidden bg-black/60 backdrop-blur-sm transition-opacity" style={{ "z-index": Z.modal }}
           onMouseDown={props.onClose}>
-          <div class={`h-full flex items-center justify-center p-4 sm:p-6 ${props.fullOnMobile ? "max-sm:p-0" : ""}`}>
+          <div class={`h-full flex items-end sm:items-center justify-center p-0 sm:p-6 overflow-hidden ${props.fullOnMobile ? "" : ""}`}>
             <div ref={setupDialog} role="dialog" aria-modal="true" aria-labelledby={titleId}
-              aria-describedby={props.description ? descriptionId : undefined} tabindex="-1"
-              class={`anim-pop-in flex max-h-full min-h-0 w-full flex-col ${props.width ?? "max-w-md"} rounded-2xl border border-line bg-card shadow-2xl outline-none ${props.fullOnMobile ? "max-sm:h-full max-sm:max-w-full max-sm:rounded-none max-sm:border-0" : ""}`}
+              aria-describedby={desc() ? descriptionId : undefined} tabindex="-1"
+              class={`anim-pop-in flex max-h-[92dvh] sm:max-h-[88vh] min-h-0 w-full flex-col ${props.width ?? "max-w-md"} rounded-t-3xl sm:rounded-3xl border-t border-x sm:border border-line/80 bg-card shadow-2xl outline-none overflow-hidden ${props.fullOnMobile ? "max-sm:h-full max-sm:max-h-full max-sm:rounded-none max-sm:border-0" : ""}`}
               onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-              <div class="flex shrink-0 items-start justify-between gap-4 px-5 py-4 sm:px-6 border-b border-line">
-                <div class="min-w-0"><h3 id={titleId} class="text-sm font-semibold text-ink-100 break-words">{props.title}</h3>
-                  <Show when={props.description}><p id={descriptionId} class="mt-1 text-xs leading-relaxed text-ink-400">{props.description}</p></Show>
+              
+              <Show when={!props.fullOnMobile}>
+                <div class="sm:hidden w-10 h-1 rounded-full bg-ink-600/30 mx-auto mt-2.5 -mb-1.5 shrink-0" />
+              </Show>
+
+              <div class="flex shrink-0 items-start justify-between gap-4 px-5 py-4 sm:px-6 sm:py-5 border-b border-line/80 bg-card">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <h3 id={titleId} class="text-base sm:text-lg font-semibold text-ink-100 tracking-tight break-words">{props.title}</h3>
+                    {props.badge}
+                  </div>
+                  <Show when={desc()}><p id={descriptionId} class="mt-1 text-xs sm:text-[13px] leading-relaxed text-ink-400 font-normal">{desc()}</p></Show>
                 </div>
-                <button onClick={props.onClose} class="shrink-0 rounded-lg p-1 text-ink-400 hover:text-ink-100 hover:bg-elev focus-visible:ring-2 focus-visible:ring-accent-500 transition-colors cursor-pointer" aria-label="Close">
-                  <Icon name={Icons.x} />
+                <button type="button" onClick={props.onClose} class="shrink-0 rounded-xl p-1.5 text-ink-400 hover:text-ink-100 hover:bg-elev active:scale-95 focus-visible:ring-2 focus-visible:ring-accent-500 transition-all cursor-pointer" aria-label="Close">
+                  <Icon name={Icons.x} size={18} />
                 </button>
               </div>
-              <div ref={(el) => props.bodyRef?.(el)} class="min-h-0 overflow-y-auto overscroll-contain px-5 py-5 sm:px-6">{props.children}</div>
-              <Show when={props.footer}><div class="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-line bg-elev/40 px-5 py-3 sm:px-6 rounded-b-2xl">{props.footer}</div></Show>
+
+              <div ref={(el) => props.bodyRef?.(el)} class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5 sm:px-6 sm:py-6">{props.children}</div>
+
+              <Show when={props.footer || props.footerLeft}>
+                <div class="flex shrink-0 flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3 border-t border-line/80 bg-elev/40 px-5 py-3.5 sm:px-6 rounded-b-2xl sm:rounded-b-3xl max-sm:rounded-b-none">
+                  <div class="min-w-0 flex items-center gap-2 empty:hidden">{props.footerLeft}</div>
+                  <div class="flex items-center justify-end gap-2.5 flex-wrap sm:ml-auto">{props.footer}</div>
+                </div>
+              </Show>
             </div>
           </div>
         </div>

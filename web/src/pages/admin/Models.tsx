@@ -4,7 +4,7 @@ import { api, type ModelDto, type ProviderDto, type RoutingMode, type SyncOutcom
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
-import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, Segmented, Select, toast, fmtNum } from "../../ui";
+import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Input, Modal, ModalNotice, ModalSection, Segmented, Select, SwitchCard, toast, fmtNum } from "../../ui";
 import { UsageGrid, serverDatasource } from "../../aggrid";
 import type { ColDef, GridApi } from "ag-grid-community";
 
@@ -657,28 +657,59 @@ export default function AdminModelsPage() {
         open={!!editing()}
         onClose={() => setEditing(null)}
         title={editing() === "new" ? "Register model" : `Edit ${(editing() as ModelDto)?.id ?? ""}`}
+        subtitle="Configure public model routing, multi-provider failover chains, and client-advertised parameters."
         width="max-w-2xl"
+        footerLeft={
+          <span class="text-xs text-ink-500 font-medium flex items-center gap-1.5">
+            <Icon name={Icons.bolt} size={13} />
+            <span>{fTargets().length} target{fTargets().length > 1 ? "s" : ""} in fallback order</span>
+          </span>
+        }
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setEditing(null)}>
+              Cancel
+            </Btn>
+            <Btn onClick={save} disabled={busy() || !targetsValid() || !fId().trim()}>
+              {busy() ? "Saving…" : "Save model"}
+            </Btn>
+          </>
+        }
       >
-        <div class="space-y-4">
-          <Input
-            label="Public model id"
-            value={fId()}
-            onInput={setFId}
-            placeholder="hf:zai-org/GLM-5.2"
-            hint={
-              editing() === "new"
-                ? "What clients send as `model`"
-                : "Changing the id renames the entry — clients must send the new id (usage history keeps the old one)"
-            }
-          />
+        <div class="space-y-6">
+          <ModalSection
+            title="Public Model Identity"
+            subtitle="The model identifier expected in client API request payloads."
+          >
+            <div class="space-y-3.5">
+              <Input
+                label="Public model id"
+                value={fId()}
+                onInput={setFId}
+                placeholder="hf:zai-org/GLM-5.2"
+                hint={
+                  editing() === "new"
+                    ? "What clients send as `model`"
+                    : "Changing the id renames the entry — clients must send the new id (usage history keeps the old one)"
+                }
+              />
+              <SwitchCard
+                checked={fEnabled()}
+                onChange={setFEnabled}
+                title="Model active in registry"
+                description="When disabled, client requests targeting this model in router mode will immediately return a 404 response."
+              />
+            </div>
+          </ModalSection>
 
           {/* routing targets / failover chain */}
-          <div>
-            <div class="flex items-center justify-between mb-1.5">
-              <span class="text-xs font-medium text-ink-300">Routing targets · fallback order</span>
+          <ModalSection
+            title="Routing Targets · Fallback Order"
+            subtitle="The gateway cascades requests top-down when an upstream provider hits billing (402) or transient rate limits."
+            action={
               <button
                 type="button"
-                class="flex items-center gap-1 text-[11px] font-medium text-ink-400 hover:text-ink-100 transition-colors cursor-pointer disabled:opacity-40"
+                class="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-elev/60 border border-line text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-all cursor-pointer disabled:opacity-40"
                 disabled={fTargets().length >= 8}
                 onClick={() =>
                   setFTargets((prev) => [
@@ -696,25 +727,25 @@ export default function AdminModelsPage() {
               >
                 <Icon name={Icons.plus} size={12} /> Add fallback
               </button>
-            </div>
+            }
+          >
             <div
-              class="space-y-1.5"
+              class="space-y-2"
               ref={(el) =>
                 attachSortable(el, {
                   onReorder: (ids) =>
-                    // ids are the row indices captured at render time
                     setFTargets((prev) => ids.map((s) => prev[Number(s)]!).filter(Boolean)),
                 })
               }
             >
               <For each={fTargets()}>
                 {(t, i) => (
-                  <div data-id={String(i())} class="flex items-center gap-2 rounded-xl border border-line bg-elev/40 px-2 py-1.5">
-                    <span data-handle title="Drag to reorder" class="text-ink-600 hover:text-ink-300 transition-colors shrink-0">
+                  <div data-id={String(i())} class="flex items-center gap-2.5 rounded-xl border border-line/80 bg-elev/40 px-3 py-2.5 transition-colors hover:border-line">
+                    <span data-handle title="Drag to reorder" class="text-ink-500 hover:text-ink-200 transition-colors shrink-0 cursor-grab active:cursor-grabbing p-0.5">
                       <Icon name={Icons.grip} size={14} />
                     </span>
-                    <span class="text-[10px] tabular-nums text-ink-600 w-3 shrink-0">{i() + 1}</span>
-                    <div class="w-[38%] shrink-0">
+                    <span class="text-xs font-mono font-medium text-ink-400 w-4 shrink-0">{i() + 1}</span>
+                    <div class="w-[36%] shrink-0">
                       <Select
                         value={t.providerId}
                         onChange={(v) => updateTarget(i(), { providerId: v })}
@@ -725,20 +756,20 @@ export default function AdminModelsPage() {
                       <Input
                         value={t.upstreamModel}
                         onInput={(v) => updateTarget(i(), { upstreamModel: v })}
-                        placeholder={fId() || "defaults to the public id"}
+                        placeholder={fId() || "defaults to public id"}
                       />
                     </div>
                     <label
-                      class="flex items-center gap-1 shrink-0 cursor-pointer"
+                      class="flex items-center gap-1.5 shrink-0 cursor-pointer text-xs text-ink-400 px-1"
                       title="Enabled target (disabled targets are skipped during failover)"
                     >
                       <input
                         type="checkbox"
                         checked={t.enabled}
                         onChange={(e) => updateTarget(i(), { enabled: e.currentTarget.checked })}
-                        class="w-3.5 h-3.5 rounded border-line bg-elev accent-brand-500"
+                        class="w-3.5 h-3.5 rounded border-line bg-elev accent-brand-500 cursor-pointer"
                       />
-                      <span class="text-[10px] text-ink-500">on</span>
+                      <span>on</span>
                     </label>
                     <IconBtn
                       icon={Icons.trash}
@@ -751,104 +782,122 @@ export default function AdminModelsPage() {
                 )}
               </For>
             </div>
-            <p class="text-[11px] text-ink-500 mt-1.5">
-              The gateway tries targets top-down — when a provider's keys are out of credits or
-              failing, the request falls to the next target, each with its own upstream model id.
-            </p>
-          </div>
+          </ModalSection>
 
-          <div class="flex items-center gap-6">
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={fEnabled()} onChange={(e) => setFEnabled(e.currentTarget.checked)}
-                class="w-4 h-4 rounded border-line bg-elev accent-brand-500" />
-              <span class="text-sm">Enabled</span>
-            </label>
-          </div>
-
-          <div class="border-t border-line pt-3">
-            <button
-              type="button"
-              onClick={() => setShowAdvanced(!showAdvanced())}
-              class="flex items-center gap-1.5 text-xs font-medium text-ink-400 hover:text-ink-200 transition-colors cursor-pointer"
-            >
-              <Icon
-                name={Icons.chevronDown}
-                size={14}
-                class={`transition-transform duration-200 ${showAdvanced() ? "rotate-180" : ""}`}
-              />
-              Advanced metadata (shown in /v1/models)
-            </button>
-            <Show when={showAdvanced()}>
-              <div class="mt-3 space-y-3">
-                <Input label="Display name" value={fName()} onInput={setFName} placeholder="defaults to id" />
-                <Input label="Description" value={fDesc()} onInput={setFDesc} />
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Input label="Context length" type="number" value={fContext()} onInput={setFContext} />
-                  <Input label="Max output" type="number" value={fMaxOut()} onInput={setFMaxOut} />
-                </div>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Input label="Input modalities (csv)" value={fInMod()} onInput={setFInMod} placeholder="text, image" />
-                  <Input label="Output modalities (csv)" value={fOutMod()} onInput={setFOutMod} placeholder="text" />
-                </div>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Input label="Sampling params (csv)" value={fSampling()} onInput={setFSampling} placeholder="temperature, top_p" />
-                  <Input label="Features (csv)" value={fFeatures()} onInput={setFFeatures} placeholder="tools, reasoning" />
-                </div>
-                <Input label="Reasoning efforts (csv)" value={fEfforts()} onInput={setFEfforts} placeholder="low, medium, high" />
-                <div>
-                  <div class="text-xs font-medium text-ink-300 mb-1.5">Pricing (per token, USD strings)</div>
-                  <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                    <For each={PRICING_KEYS}>
-                      {(k) => (
-                        <Input
-                          label={k}
-                          value={fPricing()[k] ?? ""}
-                          onInput={(pv) => setFPricing((prev) => ({ ...prev, [k]: pv }))}
-                          placeholder="0.00000475"
-                        />
-                      )}
-                    </For>
+          <ModalSection
+            title="Advanced Metadata & Pricing"
+            subtitle="Parameters advertised to clients querying GET /v1/models."
+          >
+            <div class="rounded-2xl border border-line/70 bg-elev/30 p-4 space-y-4">
+              <button
+                type="button"
+                onClick={() => setShowAdvanced(!showAdvanced())}
+                class="w-full flex items-center justify-between text-xs font-medium text-ink-300 hover:text-ink-100 transition-colors cursor-pointer"
+              >
+                <span class="flex items-center gap-2">
+                  <Icon
+                    name={Icons.chevronDown}
+                    size={14}
+                    class={`transition-transform duration-200 ${showAdvanced() ? "rotate-180" : ""}`}
+                  />
+                  <span>{showAdvanced() ? "Hide advanced metadata" : "Show advanced metadata & pricing parameters"}</span>
+                </span>
+                <span class="text-[11px] text-ink-500">Optional</span>
+              </button>
+              <Show when={showAdvanced()}>
+                <div class="space-y-4 pt-2 border-t border-line/60">
+                  <Input label="Display name" value={fName()} onInput={setFName} placeholder="defaults to id" />
+                  <Input label="Description" value={fDesc()} onInput={setFDesc} />
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <Input label="Context length" type="number" value={fContext()} onInput={setFContext} />
+                    <Input label="Max output" type="number" value={fMaxOut()} onInput={setFMaxOut} />
+                  </div>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <Input label="Input modalities (csv)" value={fInMod()} onInput={setFInMod} placeholder="text, image" />
+                    <Input label="Output modalities (csv)" value={fOutMod()} onInput={setFOutMod} placeholder="text" />
+                  </div>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <Input label="Sampling params (csv)" value={fSampling()} onInput={setFSampling} placeholder="temperature, top_p" />
+                    <Input label="Features (csv)" value={fFeatures()} onInput={setFFeatures} placeholder="tools, reasoning" />
+                  </div>
+                  <Input label="Reasoning efforts (csv)" value={fEfforts()} onInput={setFEfforts} placeholder="low, medium, high" />
+                  <div>
+                    <div class="text-xs font-medium text-ink-300 mb-1.5">Pricing (per token, USD strings)</div>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      <For each={PRICING_KEYS}>
+                        {(k) => (
+                          <Input
+                            label={k}
+                            value={fPricing()[k] ?? ""}
+                            onInput={(pv) => setFPricing((prev) => ({ ...prev, [k]: pv }))}
+                            placeholder="0.00000475"
+                          />
+                        )}
+                      </For>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </Show>
-          </div>
-
-          <div class="flex justify-end gap-2 pt-2">
-            <Btn variant="ghost" onClick={() => setEditing(null)}>Cancel</Btn>
-            <Btn onClick={save} disabled={busy() || !targetsValid() || !fId().trim()}>
-              {busy() ? "Saving…" : "Save model"}
-            </Btn>
-          </div>
+              </Show>
+            </div>
+          </ModalSection>
         </div>
       </Modal>
 
-
       {/* delete confirm (single) */}
-      <Modal open={!!confirmDelete()} onClose={() => setConfirmDelete(null)} title="Delete model">
-        <p class="text-sm text-ink-300">
-          Delete <span class="font-semibold text-ink-100">{confirmDelete()?.id}</span>? Router-mode
-          requests for it will start failing with 404. Usage history keeps its rows.
-        </p>
-        <div class="flex justify-end gap-2 mt-5">
-          <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Btn>
-          <Btn variant="danger" onClick={remove} disabled={busy()}>
-            {busy() ? "Deleting…" : "Delete"}
-          </Btn>
+      <Modal
+        open={!!confirmDelete()}
+        onClose={() => setConfirmDelete(null)}
+        title="Delete model"
+        subtitle="Remove this model registration from the gateway routing registry."
+        footerLeft={<Badge tone="red">Irreversible</Badge>}
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
+              Cancel
+            </Btn>
+            <Btn variant="danger" onClick={remove} disabled={busy()}>
+              {busy() ? "Deleting…" : "Delete model"}
+            </Btn>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <ModalNotice tone="danger" title="Confirm model deletion">
+            Delete model <strong>{confirmDelete()?.id}</strong>? Requests targeting
+            this model ID in router mode will immediately fail with 404 Not Found.
+          </ModalNotice>
+          <p class="text-xs text-ink-400 leading-relaxed">
+            Historical usage metrics and spend records associated with this model will be preserved.
+          </p>
         </div>
       </Modal>
 
       {/* delete confirm (bulk) */}
-      <Modal open={confirmBulk()} onClose={() => setConfirmBulk(false)} title="Delete selected models">
-        <p class="text-sm text-ink-300">
-          Delete <span class="font-semibold text-ink-100">{selected().size}</span> selected model
-          {selected().size === 1 ? "" : "s"}? Usage history keeps its rows.
-        </p>
-        <div class="flex justify-end gap-2 mt-5">
-          <Btn variant="ghost" onClick={() => setConfirmBulk(false)}>Cancel</Btn>
-          <Btn variant="danger" onClick={bulkRemove} disabled={busy()}>
-            {busy() ? "Deleting…" : `Delete ${selected().size}`}
-          </Btn>
+      <Modal
+        open={confirmBulk()}
+        onClose={() => setConfirmBulk(false)}
+        title="Delete selected models"
+        subtitle="Remove all selected model registrations from the gateway routing registry."
+        footerLeft={<Badge tone="red">{selected().size} selected</Badge>}
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmBulk(false)}>
+              Cancel
+            </Btn>
+            <Btn variant="danger" onClick={bulkRemove} disabled={busy()}>
+              {busy() ? "Deleting…" : `Delete ${selected().size} models`}
+            </Btn>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <ModalNotice tone="danger" title="Bulk deletion">
+            Delete <strong>{selected().size}</strong> selected model
+            {selected().size === 1 ? "" : "s"}? Router-mode requests for these models will immediately return 404.
+          </ModalNotice>
+          <p class="text-xs text-ink-400 leading-relaxed">
+            Usage ledger rows and token logs are retained for audit and accounting.
+          </p>
         </div>
       </Modal>
     </div>

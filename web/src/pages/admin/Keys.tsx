@@ -11,6 +11,7 @@ import {
   IconBtn,
   Icons,
   Modal,
+  ModalNotice,
   toast,
   fmtDate,
   fmtNum,
@@ -244,22 +245,27 @@ export default function AdminKeysPage() {
         open={!!confirmRevoke()}
         onClose={() => setConfirmRevoke(null)}
         title="Revoke key (admin)"
-      >
-        <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            Revoke <strong class="text-ink-100">{confirmRevoke()?.name}</strong>{" "}
-            belonging to{" "}
-            <strong class="text-ink-100">{confirmRevoke()?.userEmail}</strong>?
-            Immediate effect.
-          </p>
-          <div class="flex justify-end gap-2">
+        subtitle="Administratively revoke this user's API key with immediate effect."
+        footerLeft={<Badge tone="red">Irreversible</Badge>}
+        footer={
+          <>
             <Btn variant="ghost" onClick={() => setConfirmRevoke(null)}>
               Cancel
             </Btn>
             <Btn variant="danger" onClick={revoke} disabled={busy()}>
-              Revoke
+              Revoke key
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <ModalNotice tone="danger" title="Administrative key deactivation">
+            Revoke <strong>{confirmRevoke()?.name}</strong> belonging to{" "}
+            <strong>{confirmRevoke()?.userEmail}</strong>?
+          </ModalNotice>
+          <p class="text-xs text-ink-400 leading-relaxed">
+            All client requests using this key will immediately be blocked with 401 Unauthorized across all gateway proxies.
+          </p>
         </div>
       </Modal>
 
@@ -267,24 +273,28 @@ export default function AdminKeysPage() {
         open={!!confirmDelete()}
         onClose={() => setConfirmDelete(null)}
         title="Delete key permanently (admin)"
-      >
-        <div class="space-y-4">
-          <p class="text-sm text-ink-300">
-            Permanently delete{" "}
-            <strong class="text-ink-100">{confirmDelete()?.name}</strong>{" "}
-            belonging to{" "}
-            <strong class="text-ink-100">{confirmDelete()?.userEmail}</strong>?
-            The row is removed for good (usage history is kept). This cannot be
-            undone.
-          </p>
-          <div class="flex justify-end gap-2">
+        subtitle="Permanently remove this key row from the gateway database."
+        footerLeft={<Badge tone="red">Permanent deletion</Badge>}
+        footer={
+          <>
             <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>
               Cancel
             </Btn>
             <Btn variant="danger" onClick={hardDelete} disabled={busy()}>
               Delete permanently
             </Btn>
-          </div>
+          </>
+        }
+      >
+        <div class="space-y-4">
+          <ModalNotice tone="danger" title="Permanent database purge">
+            Permanently delete{" "}
+            <strong>{confirmDelete()?.name}</strong> belonging to{" "}
+            <strong>{confirmDelete()?.userEmail}</strong>?
+          </ModalNotice>
+          <p class="text-xs text-ink-400 leading-relaxed">
+            The database row is permanently deleted. Historical usage event logs and spend aggregates are preserved for accounting.
+          </p>
         </div>
       </Modal>
     </div>

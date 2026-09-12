@@ -402,21 +402,12 @@ export default function KeysPage() {
         }
         footer={
           <>
-            <button
-              type="button"
-              onClick={() => setShowCreate(false)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
-            >
+            <Btn variant="outline" size="sm" onClick={() => setShowCreate(false)}>
               Cancel
-            </button>
-            <button
-              type="button"
-              onClick={create}
-              disabled={busy()}
-              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
-            >
+            </Btn>
+            <Btn size="sm" onClick={create} disabled={busy()}>
               {busy() ? "Creating…" : "Create key"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -431,7 +422,7 @@ export default function KeysPage() {
                 value={form().name}
                 onInput={(e) => setForm({ ...form(), name: e.currentTarget.value })}
                 placeholder="e.g. production-agent-01"
-                class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
               />
             </ModalField>
           </ModalSection>
@@ -462,7 +453,7 @@ export default function KeysPage() {
                   <button
                     type="button"
                     onClick={() => setForm({ ...form(), preset: "never", customDate: "" })}
-                    class="text-xs text-blue-400 hover:text-blue-300 inline-flex items-center gap-1 cursor-pointer"
+                    class="text-xs text-brand-400 hover:text-brand-300 inline-flex items-center gap-1 cursor-pointer transition-colors"
                   >
                     <span>↺ Reset to permanent</span>
                   </button>
@@ -482,7 +473,7 @@ export default function KeysPage() {
                       customDate: e.currentTarget.value,
                     })
                   }
-                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                 />
               </ModalField>
             </div>
@@ -531,7 +522,7 @@ export default function KeysPage() {
                     value={form().dailyLimit}
                     onInput={(e) => setForm({ ...form(), dailyLimit: e.currentTarget.value })}
                     placeholder="Unlimited"
-                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                   />
                 </ModalField>
                 <ModalField label="Total output limit" hint="Output tokens · permanent cap">
@@ -541,7 +532,7 @@ export default function KeysPage() {
                     value={form().totalLimit}
                     onInput={(e) => setForm({ ...form(), totalLimit: e.currentTarget.value })}
                     placeholder="Unlimited"
-                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                   />
                 </ModalField>
               </div>
@@ -569,7 +560,7 @@ export default function KeysPage() {
                       value={form().rpm}
                       onInput={(e) => setForm({ ...form(), rpm: e.currentTarget.value })}
                       placeholder="120"
-                      class="w-full max-w-xs rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      class="w-full max-w-xs rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                     />
                   </ModalField>
                 </div>
@@ -593,21 +584,20 @@ export default function KeysPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setEditing(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              size="sm"
               onClick={saveEdit}
               disabled={busy()}
-              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Saving…" : "Save changes"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -621,7 +611,7 @@ export default function KeysPage() {
                 type="text"
                 value={form().name}
                 onInput={(e) => setForm({ ...form(), name: e.currentTarget.value })}
-                class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
               />
             </ModalField>
           </ModalSection>
@@ -644,6 +634,17 @@ export default function KeysPage() {
                   )}
                 </For>
               </div>
+              <Show when={form().preset !== "never" && form().preset !== "custom"}>
+                <div class="pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form(), preset: "never", customDate: "" })}
+                    class="text-xs text-brand-400 hover:text-brand-300 inline-flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <span>↺ Reset to permanent</span>
+                  </button>
+                </div>
+              </Show>
 
               <OrDivider text="Or specify custom date" />
 
@@ -658,7 +659,7 @@ export default function KeysPage() {
                       customDate: e.currentTarget.value,
                     })
                   }
-                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                 />
               </ModalField>
             </div>
@@ -678,7 +679,7 @@ export default function KeysPage() {
                     value={form().dailyLimit}
                     onInput={(e) => setForm({ ...form(), dailyLimit: e.currentTarget.value })}
                     placeholder="Unlimited"
-                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                   />
                 </ModalField>
                 <ModalField label="Total output limit" hint="Raising reactivates an exhausted key">
@@ -688,7 +689,7 @@ export default function KeysPage() {
                     value={form().totalLimit}
                     onInput={(e) => setForm({ ...form(), totalLimit: e.currentTarget.value })}
                     placeholder="Unlimited"
-                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                   />
                 </ModalField>
               </div>
@@ -716,7 +717,7 @@ export default function KeysPage() {
                       value={form().rpm}
                       onInput={(e) => setForm({ ...form(), rpm: e.currentTarget.value })}
                       placeholder="120"
-                      class="w-full max-w-xs rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      class="w-full max-w-xs rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                     />
                   </ModalField>
                 </div>
@@ -741,21 +742,20 @@ export default function KeysPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => copyWithToast(newToken())}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer inline-flex items-center gap-1.5"
             >
               <Icon name={Icons.copy} size={13} />
               <span>Copy key</span>
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              size="sm"
               onClick={() => setNewToken("")}
-              class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               Done
-            </button>
+            </Btn>
           </>
         }
       >
@@ -788,8 +788,8 @@ export default function KeysPage() {
                   onClick={() => setSnippetTab("curl")}
                   class={`px-3 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                     snippetTab() === "curl"
-                      ? "bg-blue-600 text-white"
-                      : "text-ink-400 hover:text-ink-100"
+                      ? "bg-accent-500 text-accent-fg shadow-sm"
+                      : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/50"
                   }`}
                 >
                   cURL
@@ -799,8 +799,8 @@ export default function KeysPage() {
                   onClick={() => setSnippetTab("python")}
                   class={`px-3 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                     snippetTab() === "python"
-                      ? "bg-blue-600 text-white"
-                      : "text-ink-400 hover:text-ink-100"
+                      ? "bg-accent-500 text-accent-fg shadow-sm"
+                      : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/50"
                   }`}
                 >
                   Python (OpenAI)
@@ -810,8 +810,8 @@ export default function KeysPage() {
                   onClick={() => setSnippetTab("node")}
                   class={`px-3 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                     snippetTab() === "node"
-                      ? "bg-blue-600 text-white"
-                      : "text-ink-400 hover:text-ink-100"
+                      ? "bg-accent-500 text-accent-fg shadow-sm"
+                      : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/50"
                   }`}
                 >
                   Node.js

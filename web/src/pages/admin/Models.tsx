@@ -667,21 +667,20 @@ export default function AdminModelsPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setEditing(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              size="sm"
               onClick={save}
               disabled={busy() || !targetsValid() || !fId().trim()}
-              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Saving…" : "Save model"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -704,7 +703,7 @@ export default function AdminModelsPage() {
                   value={fId()}
                   onInput={(e) => setFId(e.currentTarget.value)}
                   placeholder="e.g. hf:zai-org/GLM-5.2 or gpt-4o"
-                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                 />
               </ModalField>
 
@@ -779,7 +778,7 @@ export default function AdminModelsPage() {
                               type="checkbox"
                               checked={t.enabled}
                               onChange={(e) => updateTarget(i(), { enabled: e.currentTarget.checked })}
-                              class="w-4 h-4 rounded border-line bg-ink-900 accent-blue-600 cursor-pointer"
+                              class="w-4 h-4 rounded border-line bg-ink-900 accent-brand-500 cursor-pointer"
                             />
                             <span class="text-[11px] font-medium text-ink-400">On</span>
                           </label>
@@ -806,7 +805,7 @@ export default function AdminModelsPage() {
                           value={t.upstreamModel}
                           onInput={(e) => updateTarget(i(), { upstreamModel: e.currentTarget.value })}
                           placeholder={fId() || "defaults to public id"}
-                          class="w-full rounded-lg border border-line bg-ink-900/60 px-3 py-1.5 sm:py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                          class="w-full rounded-lg border border-line bg-ink-900/60 px-3 py-1.5 sm:py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                         />
                       </div>
 
@@ -820,7 +819,7 @@ export default function AdminModelsPage() {
                             type="checkbox"
                             checked={t.enabled}
                             onChange={(e) => updateTarget(i(), { enabled: e.currentTarget.checked })}
-                            class="w-4 h-4 rounded border-line bg-ink-900 accent-blue-600 cursor-pointer"
+                            class="w-4 h-4 rounded border-line bg-ink-900 accent-brand-500 cursor-pointer"
                           />
                           <span class="text-[11px] font-medium text-ink-400">On</span>
                         </label>
@@ -842,7 +841,7 @@ export default function AdminModelsPage() {
               {/* Add target button */}
               <button
                 type="button"
-                class="text-xs font-medium text-blue-400 hover:text-blue-300 inline-flex items-center gap-1.5 cursor-pointer py-1.5 transition-colors disabled:opacity-40"
+                class="text-xs font-medium text-brand-400 hover:text-brand-300 inline-flex items-center gap-1.5 cursor-pointer py-1.5 transition-colors disabled:opacity-40"
                 disabled={fTargets().length >= 8}
                 onClick={() =>
                   setFTargets((prev) => [
@@ -893,7 +892,7 @@ export default function AdminModelsPage() {
                         value={fName()}
                         onInput={(e) => setFName(e.currentTarget.value)}
                         placeholder="defaults to id"
-                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                       />
                     </ModalField>
                     <ModalField label="Description">
@@ -901,7 +900,7 @@ export default function AdminModelsPage() {
                         type="text"
                         value={fDesc()}
                         onInput={(e) => setFDesc(e.currentTarget.value)}
-                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                       />
                     </ModalField>
                   </div>
@@ -911,7 +910,7 @@ export default function AdminModelsPage() {
                         type="number"
                         value={fContext()}
                         onInput={(e) => setFContext(e.currentTarget.value)}
-                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 focus:border-blue-500 focus:outline-none transition-colors"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 focus:border-brand-500 focus:outline-none transition-colors"
                       />
                     </ModalField>
                     <ModalField label="Max output">
@@ -919,7 +918,7 @@ export default function AdminModelsPage() {
                         type="number"
                         value={fMaxOut()}
                         onInput={(e) => setFMaxOut(e.currentTarget.value)}
-                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 focus:border-blue-500 focus:outline-none transition-colors"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 focus:border-brand-500 focus:outline-none transition-colors"
                       />
                     </ModalField>
                   </div>
@@ -930,7 +929,7 @@ export default function AdminModelsPage() {
                         value={fInMod()}
                         onInput={(e) => setFInMod(e.currentTarget.value)}
                         placeholder="text, image"
-                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                       />
                     </ModalField>
                     <ModalField label="Output modalities (csv)">
@@ -939,7 +938,7 @@ export default function AdminModelsPage() {
                         value={fOutMod()}
                         onInput={(e) => setFOutMod(e.currentTarget.value)}
                         placeholder="text"
-                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                       />
                     </ModalField>
                   </div>
@@ -950,7 +949,7 @@ export default function AdminModelsPage() {
                         value={fSampling()}
                         onInput={(e) => setFSampling(e.currentTarget.value)}
                         placeholder="temperature, top_p"
-                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                       />
                     </ModalField>
                     <ModalField label="Features (csv)">
@@ -959,7 +958,7 @@ export default function AdminModelsPage() {
                         value={fFeatures()}
                         onInput={(e) => setFFeatures(e.currentTarget.value)}
                         placeholder="tools, reasoning"
-                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                        class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                       />
                     </ModalField>
                   </div>
@@ -969,7 +968,7 @@ export default function AdminModelsPage() {
                       value={fEfforts()}
                       onInput={(e) => setFEfforts(e.currentTarget.value)}
                       placeholder="low, medium, high"
-                      class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                     />
                   </ModalField>
                   <div>
@@ -983,7 +982,7 @@ export default function AdminModelsPage() {
                               value={fPricing()[k] ?? ""}
                               onInput={(e) => setFPricing((prev) => ({ ...prev, [k]: e.currentTarget.value }))}
                               placeholder="0.00000475"
-                              class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                              class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                             />
                           </ModalField>
                         )}
@@ -1012,21 +1011,21 @@ export default function AdminModelsPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setConfirmDelete(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
               onClick={remove}
               disabled={busy()}
-              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Deleting…" : "Delete model"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -1061,21 +1060,21 @@ export default function AdminModelsPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setConfirmBulk(false)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
               onClick={bulkRemove}
               disabled={busy()}
-              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Deleting…" : `Delete ${selected().size} models`}
-            </button>
+            </Btn>
           </>
         }
       >

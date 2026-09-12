@@ -1,5 +1,5 @@
 import { createSignal, Show } from "solid-js";
-import { Modal } from "../../ui";
+import { Btn, Modal } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { useModal, useUI } from "../ctx";
 
@@ -27,25 +27,24 @@ export function SettingsModal() {
       }
       footer={
         <>
-          <button
-            type="button"
+          <Btn
+            variant="outline"
+            size="sm"
             onClick={m.cancelSettings}
-            class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
           >
             Cancel
-          </button>
-          <button
-            type="button"
+          </Btn>
+          <Btn
+            size="sm"
             onClick={() => {
               if (m.saveDaemonConfig()) {
                 m.setShowConfigModal(false);
                 ui.toast("Settings sent to host", "ok");
               }
             }}
-            class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
           >
             Save changes
-          </button>
+          </Btn>
         </>
       }
     >
@@ -66,10 +65,10 @@ export function SettingsModal() {
           <button
             type="button"
             onClick={() => setActiveTab("general")}
-            class={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+            class={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-all cursor-pointer whitespace-nowrap ${
               activeTab() === "general"
-                ? "bg-blue-600 text-white shadow-sm"
-                : "text-ink-400 hover:text-ink-100 hover:bg-ink-900/50"
+                ? "bg-accent-500 text-accent-fg shadow-sm font-semibold"
+                : "text-ink-400 hover:text-ink-100 hover:bg-ink-900/50 font-medium"
             }`}
           >
             <Iconify icon="lucide:sliders" size={13} />
@@ -78,10 +77,10 @@ export function SettingsModal() {
           <button
             type="button"
             onClick={() => setActiveTab("mcp")}
-            class={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+            class={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-all cursor-pointer whitespace-nowrap ${
               activeTab() === "mcp"
-                ? "bg-blue-600 text-white shadow-sm"
-                : "text-ink-400 hover:text-ink-100 hover:bg-ink-900/50"
+                ? "bg-accent-500 text-accent-fg shadow-sm font-semibold"
+                : "text-ink-400 hover:text-ink-100 hover:bg-ink-900/50 font-medium"
             }`}
           >
             <Iconify icon="lucide:cpu" size={13} />
@@ -89,7 +88,7 @@ export function SettingsModal() {
             <span
               class={`text-[10px] px-1.5 py-0.2 rounded-full ${
                 activeTab() === "mcp"
-                  ? "bg-white/20 text-white"
+                  ? "bg-accent-fg/15 text-accent-fg"
                   : "bg-ink-800 text-ink-400"
               }`}
             >
@@ -99,10 +98,10 @@ export function SettingsModal() {
           <button
             type="button"
             onClick={() => setActiveTab("skills")}
-            class={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+            class={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-all cursor-pointer whitespace-nowrap ${
               activeTab() === "skills"
-                ? "bg-blue-600 text-white shadow-sm"
-                : "text-ink-400 hover:text-ink-100 hover:bg-ink-900/50"
+                ? "bg-accent-500 text-accent-fg shadow-sm font-semibold"
+                : "text-ink-400 hover:text-ink-100 hover:bg-ink-900/50 font-medium"
             }`}
           >
             <Iconify icon="lucide:puzzle" size={13} />
@@ -110,7 +109,7 @@ export function SettingsModal() {
             <span
               class={`text-[10px] px-1.5 py-0.2 rounded-full ${
                 activeTab() === "skills"
-                  ? "bg-white/20 text-white"
+                  ? "bg-accent-fg/15 text-accent-fg"
                   : "bg-ink-800 text-ink-400"
               }`}
             >

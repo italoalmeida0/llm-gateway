@@ -366,21 +366,21 @@ export default function SettingsPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setDisableTotpOpen(false)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
               onClick={disableTotp}
               disabled={busy() || totpDisableCode().length !== 6}
-              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               Disable 2FA
-            </button>
+            </Btn>
           </>
         }
       >
@@ -396,7 +396,7 @@ export default function SettingsPage() {
               placeholder="123456"
               autocomplete="one-time-code"
               maxlength={6}
-              class="w-full rounded-lg border border-line bg-ink-950/70 px-3.5 py-2.5 text-center text-lg tracking-widest font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+              class="w-full rounded-lg border border-line bg-ink-950/70 px-3.5 py-2.5 text-center text-lg tracking-widest font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
             />
           </ModalField>
 

@@ -4,6 +4,7 @@ import { api, type ApiKeyDto } from "../../api";
 import { PageTitle } from "../../index";
 import {
   Badge,
+  Btn,
   Card,
   copyWithToast,
   EmptyState,
@@ -254,21 +255,21 @@ export default function AdminKeysPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setConfirmRevoke(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
               onClick={revoke}
               disabled={busy()}
-              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Revoking…" : "Revoke key"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -302,21 +303,21 @@ export default function AdminKeysPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setConfirmDelete(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
               onClick={hardDelete}
               disabled={busy()}
-              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Deleting…" : "Delete permanently"}
-            </button>
+            </Btn>
           </>
         }
       >

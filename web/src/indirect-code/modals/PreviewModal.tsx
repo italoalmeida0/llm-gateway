@@ -1,9 +1,8 @@
 import { Show } from "solid-js";
-import { Modal, Badge } from "../../ui";
+import { Modal, Badge, Btn, copyWithToast } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { languageForPath } from "../utils/lang";
 import { CodeBlock } from "../components/CodeBlock";
-import { copyWithToast } from "../../ui";
 import { useModal } from "../ctx";
 
 export function PreviewModal() {
@@ -43,13 +42,13 @@ export function PreviewModal() {
         </Show>
       }
       footer={
-        <button
-          type="button"
+        <Btn
+          variant="outline"
+          size="sm"
           onClick={() => m.setPreviewFile(null)}
-          class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
         >
           Close
-        </button>
+        </Btn>
       }
     >
       <Show when={file()}>
@@ -119,7 +118,7 @@ export function PreviewModal() {
                   min={100}
                   max={200000}
                   step={1000}
-                  class="w-28 bg-ink-900 border border-line rounded-lg px-2.5 py-1 text-ink-100 text-xs font-mono focus:outline-none focus:border-blue-500"
+                  class="w-28 bg-ink-900 border border-line rounded-lg px-2.5 py-1 text-ink-100 text-xs font-mono focus:outline-none focus:border-brand-500"
                   value={m.truncateTokens() || 16000}
                   onInput={(e) => m.setTruncateTokens(parseInt(e.currentTarget.value) || 16000)}
                 />
@@ -133,16 +132,15 @@ export function PreviewModal() {
                   >
                     Cancel
                   </button>
-                  <button
-                    type="button"
+                  <Btn
+                    size="sm"
                     onClick={() => {
                       m.truncatePreviewFile();
                       m.setShowTruncateInput(false);
                     }}
-                    class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
                   >
                     Apply
-                  </button>
+                  </Btn>
                 </div>
               </div>
             </Show>

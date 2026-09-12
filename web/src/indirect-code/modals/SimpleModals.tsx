@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { Modal, ModalNotice } from "../../ui";
+import { Btn, Modal, ModalNotice } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { copyWithToast } from "../../ui";
 import { useModal } from "../ctx";
@@ -18,13 +18,13 @@ export function ChoiceModal() {
       subtitle="Select one of the choices below to continue with this action."
       onClose={() => state()?.resolve(null)}
       footer={
-        <button
-          type="button"
+        <Btn
+          variant="outline"
+          size="sm"
           onClick={() => state()?.resolve(null)}
-          class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
         >
           Cancel
-        </button>
+        </Btn>
       }
     >
       <div class="space-y-4">
@@ -41,7 +41,7 @@ export function ChoiceModal() {
                 onClick={() => state()?.resolve(opt.id)}
                 class={`flex items-center justify-between gap-3 rounded-xl border p-3.5 text-left transition-all cursor-pointer group ${
                   opt.primary
-                    ? "border-blue-500 bg-blue-600/10 hover:bg-blue-600/20 shadow-sm"
+                    ? "border-brand-500/40 bg-brand-500/10 hover:bg-brand-500/15 shadow-sm"
                     : "border-line bg-ink-950/60 hover:bg-ink-900 hover:border-ink-500"
                 }`}
               >
@@ -55,7 +55,7 @@ export function ChoiceModal() {
                       {opt.label}
                     </span>
                     <Show when={opt.primary}>
-                      <span class="bg-blue-600 text-white text-[10px] font-medium px-2 py-0.5 rounded-full">
+                      <span class="bg-brand-500 text-white text-[10px] font-medium px-2 py-0.5 rounded-full">
                         Recommended
                       </span>
                     </Show>
@@ -70,7 +70,7 @@ export function ChoiceModal() {
                   icon="lucide:arrow-right"
                   size={15}
                   class={`shrink-0 transition-transform group-hover:translate-x-0.5 ${
-                    opt.primary ? "text-blue-400" : "text-ink-500"
+                    opt.primary ? "text-brand-400" : "text-ink-500"
                   }`}
                 />
               </button>
@@ -105,30 +105,26 @@ export function ConfirmModal() {
       }
       footer={
         <>
-          <button
-            type="button"
+          <Btn
+            variant="outline"
+            size="sm"
             onClick={() => {
               state()?.resolve(false);
               m.setConfirmState(null);
             }}
-            class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
           >
             {state()?.cancelText || "Cancel"}
-          </button>
-          <button
-            type="button"
+          </Btn>
+          <Btn
+            variant={state()?.danger ? "danger" : "primary"}
+            size="sm"
             onClick={() => {
               state()?.resolve(true);
               m.setConfirmState(null);
             }}
-            class={`${
-              state()?.danger
-                ? "bg-rose-600 hover:bg-rose-500"
-                : "bg-blue-600 hover:bg-blue-500"
-            } text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer`}
           >
             {state()?.confirmText || "Confirm"}
-          </button>
+          </Btn>
         </>
       }
     >
@@ -155,18 +151,14 @@ export function PairModal() {
       onClose={() => m.setShowPairModal(false)}
       footerLeft={
         <div class="flex items-center gap-1.5 text-xs text-ink-400">
-          <Iconify icon="lucide:shield-check" size={14} class="text-blue-400" />
+          <Iconify icon="lucide:shield-check" size={14} class="text-brand-400" />
           <span>Encrypted relay channel</span>
         </div>
       }
       footer={
-        <button
-          type="button"
-          onClick={() => m.setShowPairModal(false)}
-          class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
-        >
+        <Btn size="sm" onClick={() => m.setShowPairModal(false)}>
           Done
-        </button>
+        </Btn>
       }
     >
       <div class="space-y-5 text-xs">
@@ -183,7 +175,7 @@ export function PairModal() {
                     <button
                       type="button"
                       onClick={() => copyWithToast(cmds().unix)}
-                      class="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-ink-950/70 border border-line hover:border-blue-500 transition-all cursor-pointer group text-left"
+                      class="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-ink-950/70 border border-line hover:border-brand-500/60 hover:bg-elev/80 transition-all cursor-pointer group text-left"
                     >
                       <div>
                         <div class="text-xs font-semibold text-ink-100 flex items-center gap-1.5">
@@ -194,7 +186,7 @@ export function PairModal() {
                           curl -fsSL … | bash
                         </div>
                       </div>
-                      <div class="p-1.5 rounded-lg bg-ink-900 border border-line group-hover:text-blue-400 transition-colors">
+                      <div class="p-1.5 rounded-lg bg-ink-900 border border-line group-hover:text-brand-400 transition-colors">
                         <Iconify icon="lucide:copy" size={14} />
                       </div>
                     </button>
@@ -202,7 +194,7 @@ export function PairModal() {
                     <button
                       type="button"
                       onClick={() => copyWithToast(cmds().windows)}
-                      class="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-ink-950/70 border border-line hover:border-blue-500 transition-all cursor-pointer group text-left"
+                      class="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-ink-950/70 border border-line hover:border-brand-500/60 hover:bg-elev/80 transition-all cursor-pointer group text-left"
                     >
                       <div>
                         <div class="text-xs font-semibold text-ink-100 flex items-center gap-1.5">
@@ -213,7 +205,7 @@ export function PairModal() {
                           irm … | iex
                         </div>
                       </div>
-                      <div class="p-1.5 rounded-lg bg-ink-900 border border-line group-hover:text-blue-400 transition-colors">
+                      <div class="p-1.5 rounded-lg bg-ink-900 border border-line group-hover:text-brand-400 transition-colors">
                         <Iconify icon="lucide:copy" size={14} />
                       </div>
                     </button>
@@ -222,7 +214,7 @@ export function PairModal() {
 
                 <div class="p-3.5 rounded-xl bg-ink-900/40 border border-line space-y-2">
                   <div class="text-xs font-semibold text-ink-200 flex items-center gap-2">
-                    <Iconify icon="lucide:info" size={14} class="text-blue-400" />
+                    <Iconify icon="lucide:info" size={14} class="text-brand-400" />
                     <span>How pairing works</span>
                   </div>
                   <ol class="space-y-1 text-xs text-ink-400 leading-relaxed list-decimal list-inside">

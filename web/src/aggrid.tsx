@@ -37,7 +37,7 @@ import { Badge, Btn, Icon, Icons, fmtDate, fmtNum, getTheme, theme } from "./ui"
 export function ProtoCell(props: { value?: string }) {
   const openai = props.value === "openai";
   return (
-    <Badge tone={openai ? "blue" : "amber"}>
+    <Badge tone={openai ? "indigo" : "amber"}>
       {openai ? "OpenAI" : "Anthropic"}
     </Badge>
   );

@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { Modal, ModalNotice } from "../../ui";
+import { Btn, Modal, ModalNotice } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { useSession } from "../ctx";
 
@@ -18,34 +18,33 @@ export function NewProjectModal() {
       width="max-w-2xl"
       footerLeft={
         <div class="min-w-0 flex items-center gap-2 text-xs text-ink-400 font-mono truncate max-w-xs sm:max-w-sm">
-          <Iconify icon="lucide:folder-check" size={14} class="shrink-0 text-blue-400" />
+          <Iconify icon="lucide:folder-check" size={14} class="shrink-0 text-brand-400" />
           <span class="truncate">{s.folderCurrent() || s.newProjectPath() || "No folder selected"}</span>
         </div>
       }
       footer={
         <>
-          <button
-            type="button"
+          <Btn
+            variant="outline"
+            size="sm"
             onClick={() => s.setShowNewProjectModal(false)}
-            class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
           >
             Cancel
-          </button>
-          <button
-            type="button"
+          </Btn>
+          <Btn
+            size="sm"
             disabled={!isCurrentValid()}
             onClick={s.createProject}
-            class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
           >
             Open Project
-          </button>
+          </Btn>
         </>
       }
     >
       <div class="space-y-4">
         {/* Navigation / Path input bar */}
         <form
-          class="flex items-center gap-2 p-1.5 rounded-xl border border-line bg-ink-950/70 focus-within:border-blue-500 transition-all"
+          class="flex items-center gap-2 p-1.5 rounded-xl border border-line bg-ink-950/70 focus-within:border-brand-500 transition-all"
           onSubmit={(e) => {
             e.preventDefault();
             s.requestFolders(s.newProjectPath());
@@ -142,7 +141,7 @@ export function NewProjectModal() {
                       <Iconify
                         icon="lucide:folder"
                         size={15}
-                        class="shrink-0 text-ink-500 group-hover:text-blue-400 transition-colors"
+                        class="shrink-0 text-ink-500 group-hover:text-brand-400 transition-colors"
                       />
                       <span class="truncate font-mono text-xs">{folder.name}</span>
                     </span>

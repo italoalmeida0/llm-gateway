@@ -320,21 +320,20 @@ export default function AdminUsersPage() {
         footerLeft={<span class="text-xs text-ink-400">Instant activation</span>}
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setShowCreate(false)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              size="sm"
               onClick={create}
               disabled={busy() || !email().trim() || !name().trim()}
-              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Creating…" : "Create user"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -350,7 +349,7 @@ export default function AdminUsersPage() {
                   value={email()}
                   onInput={(e) => setEmail(e.currentTarget.value)}
                   placeholder="name@example.com"
-                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                 />
               </ModalField>
 
@@ -360,7 +359,7 @@ export default function AdminUsersPage() {
                   value={name()}
                   onInput={(e) => setName(e.currentTarget.value)}
                   placeholder="e.g. Alice Smith"
-                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                 />
               </ModalField>
 
@@ -411,21 +410,20 @@ export default function AdminUsersPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setEditing(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              size="sm"
               onClick={saveEdit}
               disabled={busy() || !editing()?.name.trim()}
-              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Saving…" : "Save changes"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -442,7 +440,7 @@ export default function AdminUsersPage() {
                       type="text"
                       value={u().name}
                       onInput={(e) => setEditing({ ...u(), name: e.currentTarget.value })}
-                      class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                      class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                     />
                   </ModalField>
 
@@ -501,21 +499,20 @@ export default function AdminUsersPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => copyWithToast(inviteLink())}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer inline-flex items-center gap-1.5"
             >
               <Icon name={Icons.copy} size={13} />
               <span>Copy link</span>
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              size="sm"
               onClick={() => setInviteLink("")}
-              class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               Done
-            </button>
+            </Btn>
           </>
         }
       >
@@ -548,21 +545,21 @@ export default function AdminUsersPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setConfirmReset2fa(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
               onClick={reset2fa}
               disabled={busy()}
-              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               Reset 2FA
-            </button>
+            </Btn>
           </>
         }
       >
@@ -596,21 +593,21 @@ export default function AdminUsersPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setConfirmDelete(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
               onClick={remove}
               disabled={busy()}
-              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               Delete user
-            </button>
+            </Btn>
           </>
         }
       >

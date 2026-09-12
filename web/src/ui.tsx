@@ -719,7 +719,7 @@ export function Badge(props: {
     amber: "bg-amber-500/10 text-amber-500 border-amber-500/20",
     zinc: "bg-ink-800/70 text-ink-300 border-ink-600/60",
     indigo: "bg-brand-500/10 text-brand-500 border-brand-500/20",
-    blue: "bg-blue-500/10 text-blue-500 border-blue-500/20",
+    blue: "bg-brand-500/10 text-brand-500 border-brand-500/20",
   };
   return (
     <span
@@ -840,7 +840,7 @@ export function SwitchCard(props: {
           props.onChange(!props.checked);
         }}
         class={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out mt-0.5 focus:outline-none ${
-          props.checked ? "bg-blue-600" : "bg-ink-700"
+          props.checked ? "bg-brand-500" : "bg-ink-700"
         }`}
       >
         <span
@@ -882,7 +882,7 @@ export function FilterChip(props: {
       onClick={props.onClick}
       class={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer select-none border ${
         props.selected
-          ? "bg-blue-600 text-white border-blue-500 shadow-sm"
+          ? "bg-accent-500 text-accent-fg border-accent-500 font-semibold shadow-sm"
           : "bg-ink-900/60 text-ink-300 border-line hover:border-ink-500 hover:text-ink-100"
       } ${props.disabled ? "opacity-40 cursor-not-allowed" : ""} ${props.class ?? ""}`}
     >
@@ -912,7 +912,7 @@ export function ModalNotice(props: {
   class?: string;
 }) {
   const tones = {
-    info: "border-blue-500/30 bg-blue-500/10 text-blue-400",
+    info: "border-brand-500/30 bg-brand-500/10 text-brand-400",
     warn: "border-amber-500/30 bg-amber-500/10 text-amber-400",
     danger: "border-rose-500/30 bg-rose-500/10 text-rose-400",
     success: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",

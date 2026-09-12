@@ -401,7 +401,7 @@ export default function AdminProvidersPage() {
                         <div class="flex items-center gap-2 flex-wrap">
                           <span class="font-semibold">{p.name}</span>
                           <Badge tone={p.enabled ? "green" : "zinc"}>{p.enabled ? "Enabled" : "Disabled"}</Badge>
-                          {p.openaiBaseUrl && <Badge tone="blue">OpenAI</Badge>}
+                          {p.openaiBaseUrl && <Badge tone="indigo">OpenAI</Badge>}
                           {p.anthropicBaseUrl && <Badge tone="amber">Anthropic</Badge>}
                           {p.responsesBaseUrl && <Badge tone="indigo">Responses</Badge>}
                           <span class="text-[11px] text-ink-500">priority {p.priority} · {p.modelCount} model{p.modelCount === 1 ? "" : "s"} · added {fmtDate(p.createdAt)}</span>
@@ -530,25 +530,24 @@ export default function AdminProvidersPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setEditing(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              size="sm"
               onClick={save}
               disabled={
                 busy() ||
                 !name().trim() ||
                 (!openaiUrl().trim() && !anthropicUrl().trim() && !responsesUrl().trim())
               }
-              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {busy() ? "Saving…" : "Save provider"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -564,7 +563,7 @@ export default function AdminProvidersPage() {
                   value={name()}
                   onInput={(e) => setName(e.currentTarget.value)}
                   placeholder="e.g. OpenAI Direct"
-                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                 />
               </ModalField>
 
@@ -585,7 +584,7 @@ export default function AdminProvidersPage() {
                   max={10000}
                   value={priority()}
                   onInput={(e) => setPriority(e.currentTarget.value)}
-                  class="w-full max-w-xs rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 focus:border-blue-500 focus:outline-none transition-colors"
+                  class="w-full max-w-xs rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 focus:border-brand-500 focus:outline-none transition-colors"
                 />
               </ModalField>
             </div>
@@ -603,7 +602,7 @@ export default function AdminProvidersPage() {
                     value={openaiUrl()}
                     onInput={(e) => setOpenaiUrl(e.currentTarget.value)}
                     placeholder="https://api.openai.com/v1"
-                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                   />
                 </ModalField>
                 <div class="flex items-center justify-between gap-3 pt-0.5">
@@ -619,7 +618,7 @@ export default function AdminProvidersPage() {
                     value={anthropicUrl()}
                     onInput={(e) => setAnthropicUrl(e.currentTarget.value)}
                     placeholder="https://api.anthropic.com/v1"
-                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                   />
                 </ModalField>
                 <div class="flex items-center justify-between gap-3 pt-0.5">
@@ -635,7 +634,7 @@ export default function AdminProvidersPage() {
                     value={responsesUrl()}
                     onInput={(e) => setResponsesUrl(e.currentTarget.value)}
                     placeholder="https://provider.example.com/v1"
-                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                   />
                 </ModalField>
                 <div class="flex items-center justify-between gap-3 pt-0.5">
@@ -662,7 +661,7 @@ export default function AdminProvidersPage() {
                     onInput={(e) => setApiKey(e.currentTarget.value)}
                     placeholder="sk-…"
                     autocomplete="off"
-                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                    class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                   />
                 </ModalField>
               </Show>
@@ -676,7 +675,7 @@ export default function AdminProvidersPage() {
                   value={stripParams()}
                   onInput={(e) => setStripParams(e.currentTarget.value)}
                   placeholder="e.g. temperature, max_tokens"
-                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                 />
               </ModalField>
             </div>
@@ -692,13 +691,13 @@ export default function AdminProvidersPage() {
         subtitle="Verify upstream network reachability, latency, and live chat probe response."
         width="max-w-xl"
         footer={
-          <button
-            type="button"
+          <Btn
+            variant="outline"
+            size="sm"
             onClick={closeTest}
-            class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
           >
             Close
-          </button>
+          </Btn>
         }
       >
         <div class="space-y-6">
@@ -760,19 +759,18 @@ export default function AdminProvidersPage() {
                   value={modelFree()}
                   onInput={(e) => setModelFree(e.currentTarget.value)}
                   placeholder="e.g. gpt-4o-mini / claude-3-5-sonnet"
-                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+                  class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                 />
               </ModalField>
 
               <div class="flex justify-end pt-1">
-                <button
-                  type="button"
+                <Btn
+                  size="sm"
                   onClick={runProbe}
                   disabled={probeBusy() || !effectiveModel()}
-                  class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
                 >
                   {probeBusy() ? "Sending…" : "Send Hello Probe"}
-                </button>
+                </Btn>
               </div>
 
               <Show when={probe()}>
@@ -821,21 +819,20 @@ export default function AdminProvidersPage() {
         footerLeft={<span class="text-xs text-ink-400">Auto-sync discovery</span>}
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setImportFor(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Skip for now
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              size="sm"
               onClick={runImport}
               disabled={importBusy()}
-              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {importBusy() ? "Importing…" : "Import models"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -876,21 +873,20 @@ export default function AdminProvidersPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setKeyFor(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              size="sm"
               onClick={addKey}
               disabled={keyBusy() || !newKeySecret().trim()}
-              class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               {keyBusy() ? "Adding…" : "Add key"}
-            </button>
+            </Btn>
           </>
         }
       >
@@ -901,7 +897,7 @@ export default function AdminProvidersPage() {
               value={newKeyLabel()}
               onInput={(e) => setNewKeyLabel(e.currentTarget.value)}
               placeholder="e.g. backup billing account, tier-2 pool"
-              class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+              class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
             />
           </ModalField>
 
@@ -915,7 +911,7 @@ export default function AdminProvidersPage() {
               onInput={(e) => setNewKeySecret(e.currentTarget.value)}
               placeholder="sk-…"
               autocomplete="off"
-              class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-blue-500 focus:outline-none transition-colors"
+              class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs font-mono text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
             />
           </ModalField>
         </div>
@@ -936,21 +932,21 @@ export default function AdminProvidersPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setConfirmDeleteKey(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
               onClick={deleteKey}
               disabled={keyBusy()}
-              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               Remove key
-            </button>
+            </Btn>
           </>
         }
       >
@@ -985,21 +981,21 @@ export default function AdminProvidersPage() {
         }
         footer={
           <>
-            <button
-              type="button"
+            <Btn
+              variant="outline"
+              size="sm"
               onClick={() => setConfirmDelete(null)}
-              class="border border-line bg-transparent hover:bg-elev text-ink-300 hover:text-ink-100 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
               onClick={remove}
               disabled={busy()}
-              class="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-medium shadow-sm transition-colors cursor-pointer"
             >
               Delete provider
-            </button>
+            </Btn>
           </>
         }
       >
@@ -1015,7 +1011,7 @@ export default function AdminProvidersPage() {
                   type="checkbox"
                   checked={deleteModels()}
                   onChange={(e) => setDeleteModels(e.currentTarget.checked)}
-                  class="w-4 h-4 rounded border-line bg-ink-900 accent-blue-600 mt-0.5 cursor-pointer"
+                  class="w-4 h-4 rounded border-line bg-ink-900 accent-brand-500 mt-0.5 cursor-pointer"
                 />
                 <div class="text-xs text-ink-300">
                   <div class="font-medium text-ink-100">

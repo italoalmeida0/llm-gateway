@@ -6,6 +6,7 @@ import { Icon as Iconify } from "../../components/icon";
 export function MenuItem(props: {
   icon?: string;
   iconSize?: number;
+  iconClass?: string;
   children: JSX.Element;
   onClick?: (e: MouseEvent) => void;
   class?: string;
@@ -23,7 +24,7 @@ export function MenuItem(props: {
         "w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink-300 hover:bg-ink-800/60 flex items-center gap-2 cursor-pointer"
       }
     >
-      {props.icon ? <Iconify icon={props.icon} size={props.iconSize ?? 13} /> : null}
+      {props.icon ? <Iconify icon={props.icon} size={props.iconSize ?? 13} class={props.iconClass} /> : null}
       {props.children}
     </button>
   );

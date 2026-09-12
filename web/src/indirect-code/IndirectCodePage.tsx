@@ -287,9 +287,19 @@ export default function IndirectCodePage() {
   // --- Page's own state (orchestration + view) ---
   // Gateway Models (Fetched live from /api/me/models)
   const [gatewayModels, setGatewayModels] = createSignal<GatewayModel[]>([]);
+  const activeModelObj = createMemo(() =>
+    gatewayModels().find((model) => model.id === options.activeModel()),
+  );
+  const activeModelName = createMemo(() => {
+    const found = activeModelObj();
+    if (found?.name) return found.name;
+    const raw = options.activeModel();
+    if (!raw) return "Select model";
+    return raw.split("/").pop() || raw;
+  });
   const activeContext = createMemo(() => contextDisplay(
     transcript.sessionContexts()[activeSessionId()] ?? null,
-    gatewayModels().find((model) => model.id === options.activeModel()),
+    activeModelObj(),
   ));
 
 
@@ -1031,6 +1041,7 @@ export default function IndirectCodePage() {
   const composerValue: ComposerCtxValue = {
     ...composer,
     activeModel: options.activeModel,
+    activeModelName,
     effort: options.effort,
     agentMode: options.agentMode,
     setAgentMode: options.setAgentMode,

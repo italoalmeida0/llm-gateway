@@ -157,13 +157,14 @@ export function ToolbarContext() {
             icon="lucide:cpu"
             onClick={() => setSubView("model")}
           >
-            <span class="flex-1 truncate">Model</span>
-            <span class="text-ink-300 font-medium text-[11px] truncate max-w-[110px]">
-              {c.activeModel().split("/").pop() || "Select model"}
+            <span class="flex-1 truncate text-ink-100 font-medium text-xs">
+              {c.activeModelName()}
             </span>
-            <span class="uppercase text-ink-500 shrink-0 text-[10px] ml-1">
-              {formatEffort(c.effort())}
-            </span>
+            <Show when={formatEffort(c.effort())}>
+              <span class="uppercase text-ink-500 shrink-0 text-[10px] ml-1">
+                {formatEffort(c.effort())}
+              </span>
+            </Show>
             <Iconify icon="lucide:chevron-right" size={13} class="text-ink-500 shrink-0 ml-1" />
           </MenuItem>
 
@@ -191,10 +192,11 @@ export function ToolbarContext() {
 
           <MenuItem
             icon={c.yoloMode() ? "lucide:shield-alert" : "lucide:hand"}
+            iconClass={c.yoloMode() ? "text-brand-500" : ""}
             onClick={() => setSubView("access")}
           >
             <span class="flex-1">Permissions</span>
-            <span class={`text-[11px] font-medium ${c.yoloMode() ? "text-amber-500" : "text-ink-300"}`}>
+            <span class={`text-[11px] font-medium ${c.yoloMode() ? "text-brand-500" : "text-ink-300"}`}>
               {c.yoloMode() ? "Full access" : "Ask for approval"}
             </span>
             <Iconify icon="lucide:chevron-right" size={13} class="text-ink-500 shrink-0 ml-1" />
@@ -340,17 +342,17 @@ export function ToolbarContext() {
                 }}
                 class="w-full flex items-center gap-3 px-2 py-3 text-left rounded-lg hover:bg-elev cursor-pointer"
               >
-                <Iconify icon={access.icon} size={19} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} />
+                <Iconify icon={access.icon} size={19} class={access.full ? "text-brand-500" : ""} />
                 <span class="flex-1">
-                  <span class={`font-medium ${access.full ? "text-amber-800 dark:text-amber-200" : "text-ink-100"}`}>
+                  <span class={`font-medium ${access.full ? "text-brand-500" : "text-ink-100"}`}>
                     {access.label}
                   </span>
-                  <span class={`block mt-1 text-[11px] ${access.full ? "text-amber-800/80 dark:text-amber-200/80" : "text-ink-500"}`}>
+                  <span class={`block mt-1 text-[11px] ${access.full ? "text-brand-500/80" : "text-ink-500"}`}>
                     {access.description}
                   </span>
                 </span>
                 <Show when={c.yoloMode() === access.full}>
-                  <Iconify icon="lucide:check" size={14} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} />
+                  <Iconify icon="lucide:check" size={14} class={access.full ? "text-brand-500" : ""} />
                 </Show>
               </button>
             )}
@@ -429,15 +431,15 @@ export function ToolbarContext() {
   <button ref={c.accessBtn} data-menubtn aria-label="Agent permissions" aria-expanded={c.accessMenuOpen()}
     onClick={() => { const next = !c.accessMenuOpen(); ui.closeMenus(); c.setAccessMenuOpen(next); }}
     class={`flex items-center gap-1.5 rounded-full px-2 py-1 text-xs hover:bg-elev cursor-pointer transition-colors ${
-      c.yoloMode() ? "text-amber-800 dark:text-amber-200" : ""
+      c.yoloMode() ? "text-brand-500" : ""
     }`}>
-    <Iconify icon={c.yoloMode() ? "lucide:shield-alert" : "lucide:hand"} size={14} class={c.yoloMode() ? "text-amber-800 dark:text-amber-200" : ""} /><span class={`hidden sm:inline ${c.yoloMode() ? "text-amber-800 dark:text-amber-200" : ""}`}>{c.yoloMode() ? "Full access" : "Ask for approval"}</span>
+    <Iconify icon={c.yoloMode() ? "lucide:shield-alert" : "lucide:hand"} size={14} class={c.yoloMode() ? "text-brand-500" : ""} /><span class={`hidden sm:inline ${c.yoloMode() ? "text-brand-500" : ""}`}>{c.yoloMode() ? "Full access" : "Ask for approval"}</span>
   </button>
   <FloatMenu anchor={() => c.accessBtn} open={c.accessMenuOpen()} placement="top-start" width="22rem">
     <p class="px-2 py-2 text-ink-400">How should actions be approved?</p>
     <For each={[{full:false, label:"Ask for approval", description:"Ask before every tool call, including reads and commands.", icon:"lucide:hand"}, {full:true, label:"Full access", description:"Allow all tool calls without asking (YOLO).", icon:"lucide:shield-alert"}]}>{(access) =>
       <button role="menuitemradio" aria-checked={c.yoloMode() === access.full} onClick={() => { c.setYoloMode(access.full); c.configureSession(); c.setAccessMenuOpen(false); }} class="w-full flex items-center gap-3 px-2 py-3 text-left rounded-lg hover:bg-elev cursor-pointer">
-        <Iconify icon={access.icon} size={19} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /><span class="flex-1"><span class={`font-medium ${access.full ? "text-amber-800 dark:text-amber-200" : "text-ink-100"}`}>{access.label}</span><span class={`block mt-1 text-[11px] ${access.full ? "text-amber-800/80 dark:text-amber-200/80" : "text-ink-500"}`}>{access.description}</span></span><Show when={c.yoloMode() === access.full}><Iconify icon="lucide:check" size={14} class={access.full ? "text-amber-800 dark:text-amber-200" : ""} /></Show>
+        <Iconify icon={access.icon} size={19} class={access.full ? "text-brand-500" : ""} /><span class="flex-1"><span class={`font-medium ${access.full ? "text-brand-500" : "text-ink-100"}`}>{access.label}</span><span class={`block mt-1 text-[11px] ${access.full ? "text-brand-500/80" : "text-ink-500"}`}>{access.description}</span></span><Show when={c.yoloMode() === access.full}><Iconify icon="lucide:check" size={14} class={access.full ? "text-brand-500" : ""} /></Show>
       </button>
     }</For>
   </FloatMenu>

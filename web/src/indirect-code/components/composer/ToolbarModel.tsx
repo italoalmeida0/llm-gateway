@@ -26,8 +26,10 @@ export function ToolbarModel() {
     class="flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-ink-800 font-medium cursor-pointer"
     data-rc-tip="Switch model" aria-label="Switch model"
   >
-    <span class="max-w-[120px] sm:max-w-[150px] truncate">{c.activeModel().split("/").pop() || "Select model"}</span>
-    <span class="uppercase text-ink-500 shrink-0 text-[11px]">{formatEffort(c.effort())}</span>
+    <span class="max-w-[120px] sm:max-w-[180px] truncate">{c.activeModelName()}</span>
+    <Show when={formatEffort(c.effort())}>
+      <span class="uppercase text-ink-500 shrink-0 text-[11px]">{formatEffort(c.effort())}</span>
+    </Show>
     <Iconify icon="lucide:chevron-down" size={11} class="shrink-0" />
   </button>
   <FloatMenu anchor={() => c.modelBtn} open={ui.modelMenuOpen()} placement="top-start" width="26rem">

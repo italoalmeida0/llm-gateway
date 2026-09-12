@@ -55,6 +55,7 @@ export interface TranscriptCtxValue
 
 export interface ComposerCtxValue extends Composer {
   activeModel: SessionOptions["activeModel"];
+  activeModelName: () => string;
   effort: SessionOptions["effort"];
   agentMode: SessionOptions["agentMode"];
   setAgentMode: SessionOptions["setAgentMode"];

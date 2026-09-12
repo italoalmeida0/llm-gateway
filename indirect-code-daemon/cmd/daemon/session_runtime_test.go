@@ -55,15 +55,12 @@ func TestLiveChoicesApplyToNextRequestAndToolWithinSameTask(t *testing.T) {
 		}
 		// The Anthropic wire carries no reasoning-effort knob; effort stays a
 		// daemon-side option and is not asserted here.
-		model, mode, maxTokens := "model-a", "Build", 4096
-		switch step {
-		case 2:
-			model, mode, maxTokens = "model-b", "Plan", 8192
-		case 3:
-			mode = "patient Socratic"
+		model, maxTokens := "model-a", 4096
+		if step == 2 {
+			model, maxTokens = "model-b", 8192
 		}
 		systemText := string(req.System)
-		if req.Model != model || req.Max != maxTokens || !strings.Contains(systemText, mode) || hasWrite != (step == 1 || step == 4) {
+		if req.Model != model || req.Max != maxTokens || !strings.Contains(systemText, "Modes of operation") || !hasWrite {
 			t.Errorf("request %d: model=%s max=%d write=%t system=%s", step, req.Model, req.Max, hasWrite, systemText)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")

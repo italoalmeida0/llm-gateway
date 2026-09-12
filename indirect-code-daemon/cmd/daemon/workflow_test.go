@@ -100,39 +100,6 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 		)
 		restrictModeTools(reg, mode)
 		if mode == "talk" {
-			// Talk has its own assertions below (no workspace tools at all).
-		} else if mode == "build" {
-			if reg["write"] == nil || reg["edit"] == nil || reg["mark_task_as_complete"] == nil || reg["mark_plan_as_ready_to_execute"] != nil {
-				t.Fatal("Build mode must have write/edit/mark_task_as_complete and not mark_plan_as_ready_to_execute")
-			}
-		} else {
-			if reg["write"] != nil || reg["edit"] != nil || reg["read"] == nil || reg["glob"] == nil || reg["todo"] == nil {
-				t.Fatal("mode exposed the wrong file tools or lost the checklist")
-			}
-			if reg["search"] == nil || reg["inspect"] == nil {
-				t.Fatal("Plan and Learning must retain exploration tools (search/inspect)")
-			}
-		}
-		if mode != "talk" && reg["question"] == nil {
-			t.Fatal("Plan, Learning and Build must retain questions")
-		}
-		if mode == "plan" {
-			if reg["bash"] == nil {
-				t.Fatal("Plan must retain shell commands for read-only inspection")
-			}
-			if reg["mark_plan_as_ready_to_execute"] == nil || reg["mark_task_as_complete"] != nil {
-				t.Fatal("Plan must retain mark_plan_as_ready_to_execute and drop mark_task_as_complete")
-			}
-		}
-		if mode == "learning" {
-			if reg["bash"] != nil || reg["python"] != nil {
-				t.Fatal("Learning must not execute code (read-only observation)")
-			}
-			if reg["mark_task_as_complete"] != nil || reg["mark_plan_as_ready_to_execute"] != nil {
-				t.Fatal("Learning must not have completion tools")
-			}
-		}
-		if mode == "talk" {
 			for _, keep := range []string{"question", "search_web", "fetch_url", "todo"} {
 				if reg[keep] == nil {
 					t.Fatalf("Talk must retain %s", keep)
@@ -143,9 +110,74 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 					t.Fatalf("Talk must not expose %s (no workspace access)", drop)
 				}
 			}
+		} else {
+			// Build, Plan, and Learning share the exact same tool registry
+			// to guarantee >95% prefix KV cache hits across mode switches.
+			for _, want := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "todo", "question", "search_web", "fetch_url", "mark_task_as_complete", "mark_plan_as_ready_to_execute"} {
+				if reg[want] == nil {
+					t.Fatalf("Mode %s must expose %s in tool registry for KV cache reuse", mode, want)
+				}
+			}
 		}
+
 		if modeInstructions(mode) == "" {
 			t.Fatal("missing mode instructions")
+		}
+	}
+
+	// Mode restrictions are enforced at runtime via modeToolRestriction.
+	// Build mode:
+	if r := modeToolRestriction("build", "write"); r != "" {
+		t.Fatalf("build should allow write, got %q", r)
+	}
+	if r := modeToolRestriction("build", "bash"); r != "" {
+		t.Fatalf("build should allow bash, got %q", r)
+	}
+	if r := modeToolRestriction("build", "mark_task_as_complete"); r != "" {
+		t.Fatalf("build should allow mark_task_as_complete, got %q", r)
+	}
+	if r := modeToolRestriction("build", "mark_plan_as_ready_to_execute"); r == "" {
+		t.Fatal("build should restrict mark_plan_as_ready_to_execute")
+	}
+
+	// Plan mode:
+	if r := modeToolRestriction("plan", "write"); r == "" {
+		t.Fatal("plan should restrict write")
+	}
+	if r := modeToolRestriction("plan", "edit"); r == "" {
+		t.Fatal("plan should restrict edit")
+	}
+	if r := modeToolRestriction("plan", "bash"); r != "" {
+		t.Fatalf("plan should allow bash for inspection, got %q", r)
+	}
+	if r := modeToolRestriction("plan", "mark_plan_as_ready_to_execute"); r != "" {
+		t.Fatalf("plan should allow mark_plan_as_ready_to_execute, got %q", r)
+	}
+	if r := modeToolRestriction("plan", "mark_task_as_complete"); r == "" {
+		t.Fatal("plan should restrict mark_task_as_complete")
+	}
+
+	// Learning mode:
+	if r := modeToolRestriction("learning", "write"); r == "" {
+		t.Fatal("learning should restrict write")
+	}
+	if r := modeToolRestriction("learning", "bash"); r != "" {
+		t.Fatalf("learning should allow bash for testing, got %q", r)
+	}
+	if r := modeToolRestriction("learning", "python"); r != "" {
+		t.Fatalf("learning should allow python for testing, got %q", r)
+	}
+	if r := modeToolRestriction("learning", "mark_task_as_complete"); r == "" {
+		t.Fatal("learning should restrict mark_task_as_complete")
+	}
+	if r := modeToolRestriction("learning", "mark_plan_as_ready_to_execute"); r == "" {
+		t.Fatal("learning should restrict mark_plan_as_ready_to_execute")
+	}
+
+	// Talk mode:
+	for _, tool := range []string{"read", "write", "edit", "bash", "python"} {
+		if r := modeToolRestriction("talk", tool); r == "" {
+			t.Fatalf("talk should restrict workspace tool %s", tool)
 		}
 	}
 }

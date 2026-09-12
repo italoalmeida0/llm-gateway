@@ -21,6 +21,13 @@ export function createTurnChanges(opts: {
   send: (payload: any) => void;
   getSessionId: () => string;
   toast: (message: string, kind?: "ok" | "err") => void;
+  showConfirm?: (o: {
+    title?: string;
+    message?: string;
+    confirmText?: string;
+    cancelText?: string;
+    danger?: boolean;
+  }) => Promise<boolean>;
 }) {
   const [balloons, setBalloons] = createSignal<TurnBalloon[]>([]);
   const [undoBusy, setUndoBusy] = createSignal<number | null>(null);
@@ -107,8 +114,23 @@ export function createTurnChanges(opts: {
     }
   }
 
-  function undoTurn(turnIndex: number, path?: string) {
+  async function undoTurn(turnIndex: number, path?: string) {
     if (!opts.getSessionId() || undoBusy() !== null) return;
+    if (opts.showConfirm) {
+      const balloon = balloons().find((b) => b.turnIndex === turnIndex);
+      const pendingFiles = (balloon?.files || []).filter((f) => !f.undone);
+      const count = path ? 1 : (pendingFiles.length || balloon?.files?.length || 1);
+      const confirmed = await opts.showConfirm({
+        title: "Undo turn changes?",
+        message: path
+          ? `Revert changes to "${path}"? This will restore the file to its state before this turn.`
+          : `Revert all file changes from this turn (${count} file${count === 1 ? "" : "s"})? This will restore files to their state before this turn.`,
+        confirmText: "Revert changes",
+        cancelText: "Cancel",
+        danger: true,
+      });
+      if (!confirmed) return;
+    }
     setUndoBusy(turnIndex);
     opts.send({
       type: "undo_turn_changes",

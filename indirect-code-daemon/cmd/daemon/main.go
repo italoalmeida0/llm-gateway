@@ -2319,7 +2319,7 @@ func buildTurnSystemDirectives(rec *SessionRecord, mode string, now time.Time) s
 		case "build":
 			sysParts = append(sysParts, "Operational mode: Build. You are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed. When finished, call mark_task_as_complete.")
 		case "learning":
-			sysParts = append(sysParts, "Operational mode: Learning. You are a patient Socratic programming tutor. Never write the solution or modify files.")
+			sysParts = append(sysParts, "Operational mode: Learning. You are a patient Socratic programming tutor. Never write the solution or modify project files. You may run inline python and terminal commands to test, and create test files in your private brain workspace if needed.")
 		case "talk":
 			sysParts = append(sysParts, "Operational mode: Talk. Conversational mode. No workspace modifications or executions.")
 		}

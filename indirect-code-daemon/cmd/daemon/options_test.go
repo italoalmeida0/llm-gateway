@@ -23,7 +23,7 @@ func TestSessionSystemPromptIncludesSystemDirectivesAndOmitsDate(t *testing.T) {
 
 func TestBrainInstructionsModes(t *testing.T) {
 	brain := filepath.Join(t.TempDir(), "brain", "sess_1")
-	for _, mode := range []string{"plan", "build"} {
+	for _, mode := range []string{"plan", "build", "learning"} {
 		text := brainInstructions(mode, brain)
 		if text == "" {
 			t.Fatalf("mode %q should include session memory instructions", mode)
@@ -34,7 +34,7 @@ func TestBrainInstructionsModes(t *testing.T) {
 			}
 		}
 	}
-	for _, mode := range []string{"talk", "learning", "", "other"} {
+	for _, mode := range []string{"talk", "", "other"} {
 		if got := brainInstructions(mode, brain); got != "" {
 			t.Fatalf("mode %q should not include session memory instructions: %q", mode, got)
 		}
@@ -134,43 +134,33 @@ func TestSessionSystemPromptIncludesOSAndShell(t *testing.T) {
 func TestBuildAndPlanShareIdenticalSystemPrompt(t *testing.T) {
 	buildPrompt := sessionSystemPrompt(DaemonConfig{}, "/tmp", SessionOptions{Mode: "build"})
 	planPrompt := sessionSystemPrompt(DaemonConfig{}, "/tmp", SessionOptions{Mode: "plan"})
-	if buildPrompt != planPrompt {
-		t.Fatalf("build and plan system prompts must be identical for prompt caching:\n--- build ---\n%s\n--- plan ---\n%s", buildPrompt, planPrompt)
+	learningPrompt := sessionSystemPrompt(DaemonConfig{}, "/tmp", SessionOptions{Mode: "learning"})
+	if buildPrompt != planPrompt || buildPrompt != learningPrompt {
+		t.Fatalf("build, plan, and learning system prompts must be identical for prompt caching:\n--- build ---\n%s\n--- plan ---\n%s\n--- learning ---\n%s", buildPrompt, planPrompt, learningPrompt)
 	}
 }
 
 func TestCompletionToolsModeRestrictions(t *testing.T) {
-	buildReg := core.Registry{
-		"write":                        nil,
-		"edit":                         nil,
-		"bash":                         nil,
-		"mark_task_as_complete":        nil,
-		"mark_plan_as_ready_to_execute": nil,
-	}
-	restrictModeTools(buildReg, "build")
-	if _, ok := buildReg["mark_task_as_complete"]; !ok {
-		t.Fatal("expected mark_task_as_complete in build mode")
-	}
-	if _, ok := buildReg["mark_plan_as_ready_to_execute"]; ok {
-		t.Fatal("did not expect mark_plan_as_ready_to_execute in build mode")
-	}
-
-	planReg := core.Registry{
-		"read":                         nil,
-		"write":                        nil,
-		"edit":                         nil,
-		"mark_task_as_complete":        nil,
-		"mark_plan_as_ready_to_execute": nil,
-	}
-	restrictModeTools(planReg, "plan")
-	if _, ok := planReg["mark_plan_as_ready_to_execute"]; !ok {
-		t.Fatal("expected mark_plan_as_ready_to_execute in plan mode")
-	}
-	if _, ok := planReg["mark_task_as_complete"]; ok {
-		t.Fatal("did not expect mark_task_as_complete in plan mode")
-	}
-	if _, ok := planReg["write"]; ok {
-		t.Fatal("did not expect write in plan mode")
+	// Build, plan, and learning retain the exact same tool set in the wire registry
+	// to maximize KV cache reuse across mode switches.
+	for _, mode := range []string{"build", "plan", "learning"} {
+		reg := core.Registry{
+			"write":                        nil,
+			"edit":                         nil,
+			"bash":                         nil,
+			"mark_task_as_complete":        nil,
+			"mark_plan_as_ready_to_execute": nil,
+		}
+		restrictModeTools(reg, mode)
+		if _, ok := reg["mark_task_as_complete"]; !ok {
+			t.Fatalf("expected mark_task_as_complete retained in %s mode for KV cache", mode)
+		}
+		if _, ok := reg["mark_plan_as_ready_to_execute"]; !ok {
+			t.Fatalf("expected mark_plan_as_ready_to_execute retained in %s mode for KV cache", mode)
+		}
+		if _, ok := reg["write"]; !ok {
+			t.Fatalf("expected write retained in %s mode for KV cache", mode)
+		}
 	}
 
 	talkReg := core.Registry{

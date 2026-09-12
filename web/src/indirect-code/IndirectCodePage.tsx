@@ -178,6 +178,7 @@ export default function IndirectCodePage() {
     send: (payload) => relay.send(payload),
     getSessionId: () => activeSessionId(),
     toast: notice.toast,
+    showConfirm: modals.showConfirm,
   });
 
   const composer = createComposer({

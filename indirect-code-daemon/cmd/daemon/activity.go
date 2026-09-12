@@ -105,7 +105,14 @@ func finishTurnActivity(act *ActiveSession, cancelled bool) {
 }
 
 func modeToolRestriction(mode, tool string) string {
-	if (mode == "plan" || mode == "learning") && (tool == "write" || tool == "edit" || tool == "mark_task_as_complete") {
+	if mode == "talk" {
+		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "patch"} {
+			if tool == name {
+				return "The session is in talk mode. Workspace tools are disabled."
+			}
+		}
+	}
+	if (mode == "plan" || mode == "learning") && (tool == "write" || tool == "edit" || tool == "patch") {
 		return "The session is now in " + mode + " mode. Edit and create tools are disabled."
 	}
 	if mode != "plan" && tool == "mark_plan_as_ready_to_execute" {

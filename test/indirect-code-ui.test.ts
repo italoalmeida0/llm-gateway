@@ -829,6 +829,44 @@ describe("balloon tail cuts", () => {
     tc.dropAbove(0);
     expect(tc.balloons().map((b) => b.turnIndex)).toEqual([3]);
   });
+
+  test("undoTurn prompts for confirmation before sending and honors cancellation", async () => {
+    const { createTurnChanges } = await import("../web/src/indirect-code/hooks/useTurnChanges");
+    const sent: any[] = [];
+    let confirmPrompt: any = null;
+    let confirmResult = false;
+    const tc = createTurnChanges({
+      send: (p) => sent.push(p),
+      getSessionId: () => "sess-1",
+      toast: () => {},
+      showConfirm: async (opts) => {
+        confirmPrompt = opts;
+        return confirmResult;
+      },
+    });
+    tc.applySnapshot({
+      fileBalloons: [
+        { turnIndex: 1, files: [{ path: "foo.ts" }, { path: "bar.ts" }] },
+      ],
+    });
+
+    // User cancels confirmation -> nothing sent
+    confirmResult = false;
+    await tc.undoTurn(1);
+    expect(confirmPrompt).not.toBeNull();
+    expect(confirmPrompt.title).toBe("Undo turn changes?");
+    expect(confirmPrompt.message).toContain("2 files");
+    expect(confirmPrompt.danger).toBe(true);
+    expect(sent.length).toBe(0);
+
+    // User confirms -> undo_turn_changes is sent
+    confirmResult = true;
+    await tc.undoTurn(1);
+    expect(sent.length).toBe(1);
+    expect(sent[0].type).toBe("undo_turn_changes");
+    expect(sent[0].sessionId).toBe("sess-1");
+    expect(sent[0].turnIndex).toBe(1);
+  });
 });
 
 describe("completion signals and turn nudges", () => {

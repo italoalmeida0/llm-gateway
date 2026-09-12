@@ -255,4 +255,29 @@ func TestBuildTurnSystemDirectives(t *testing.T) {
 	}
 }
 
-
+// LastDate/LastMode drive the dynamic <system-reminder> directives. The
+// on-disk round-trip must keep them: dropping them on load makes the
+// first turn after a restart re-emit the date/mode reminder (and bust
+// the prompt-cache prefix the directive scheme exists to protect).
+func TestLoadSessionPreservesDirectiveState(t *testing.T) {
+	d := &DaemonServer{dataDir: t.TempDir(), config: &DaemonConfig{HostID: "host-test"}, sessions: map[string]*ActiveSession{}}
+	rec := &SessionRecord{
+		ID: "sess_directives", CWD: t.TempDir(), Status: "idle",
+		CreatedAt: 1, UpdatedAt: 1,
+		LastDate: "2026-09-13", LastMode: "build",
+	}
+	if err := d.saveSession(rec); err != nil {
+		t.Fatal(err)
+	}
+	back, err := d.loadSession(rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.LastDate != "2026-09-13" || back.LastMode != "build" {
+		t.Fatalf("directive state lost on load: LastDate=%q LastMode=%q", back.LastDate, back.LastMode)
+	}
+	// The restored state must suppress the reminder on the same day/mode.
+	if got := buildTurnSystemDirectives(back, "build", time.Date(2026, 9, 13, 10, 0, 0, 0, time.UTC)); got != "" {
+		t.Fatalf("expected no directives after round-trip, got:\n%s", got)
+	}
+}

@@ -748,16 +748,22 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		return nil, err
 	}
 	var rawRec struct {
-		Turn        *TurnActivity         `json:"turn"`
-		Todos       []tools.TodoItem      `json:"todos"`
-		TodosOpen   *bool                 `json:"todosOpen"`
-		Draft       string                `json:"draft"`
-		EditingMsg  *EditingMsgState      `json:"editingMsg"`
-		Options     SessionOptions        `json:"options"`
-		ID          string                `json:"id"`
-		CWD         string                `json:"cwd"`
-		Title       string                `json:"title"`
-		TitleSource string                `json:"titleSource"`
+		Turn        *TurnActivity    `json:"turn"`
+		Todos       []tools.TodoItem `json:"todos"`
+		TodosOpen   *bool            `json:"todosOpen"`
+		Draft       string           `json:"draft"`
+		EditingMsg  *EditingMsgState `json:"editingMsg"`
+		Options     SessionOptions   `json:"options"`
+		ID          string           `json:"id"`
+		CWD         string           `json:"cwd"`
+		Title       string           `json:"title"`
+		TitleSource string           `json:"titleSource"`
+		// Dynamic system-directive state (date/mode change detection).
+		// Written by buildTurnSystemDirectives; must round-trip or every
+		// restart re-injects the date/mode reminder and busts the
+		// prompt-cache prefix the directive scheme exists to protect.
+		LastDate    string                `json:"lastDate"`
+		LastMode    string                `json:"lastMode"`
 		Usage       provider.Usage        `json:"usage"`
 		Context     *SessionContext       `json:"context"`
 		Model       string                `json:"model"`
@@ -785,7 +791,9 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		ID:          rawRec.ID,
 		CWD:         resolvePath(rawRec.CWD),
 		Title:       rawRec.Title,
-		TitleSource: rawRec.TitleSource, Usage: rawRec.Usage, Context: rawRec.Context,
+		TitleSource: rawRec.TitleSource,
+		LastDate:    rawRec.LastDate, LastMode: rawRec.LastMode,
+		Usage: rawRec.Usage, Context: rawRec.Context,
 		Model:        rawRec.Model,
 		Status:       rawRec.Status,
 		Pinned:       rawRec.Pinned,

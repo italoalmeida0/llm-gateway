@@ -19,7 +19,7 @@ export function Composer() {
 <>
 
 <Show when={!ui.historyView()}>
-<div class={s.draftMode() ? "rc-draft flex-1 min-h-0 overflow-y-auto flex flex-col px-4 py-10" : "px-4 pb-4 pt-2 bg-ink-950 relative z-20"}>
+<div class={s.draftMode() ? "rc-draft flex-1 min-h-0 overflow-y-auto flex flex-col px-4 py-10" : "px-4 pt-2 bg-ink-950 relative z-20"}>
   <ScrollOverlays />
   <div class="w-full max-w-2xl mx-auto my-auto shrink-0">
   <StatusBanners />

@@ -89,7 +89,7 @@ export function ComposerFooter() {
   </div>
 </Show>
 <Show when={s.activeSessionId()}>
-  <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-ink-500" data-composer-footer>
+  <div class="flex items-center justify-between gap-3 text-[11px] text-ink-500" data-composer-footer>
     <span class="flex items-center gap-1.5 min-w-0" data-rc-tip={s.currentProject()?.path}><Iconify icon="lucide:folder" size={13} /><span class="truncate">{s.currentProject()?.name || baseNameOf(s.activeSession()?.cwd) || "Project"}</span></span>
     <FloatMenu anchor={() => ui.contextBtn} open={ui.usageOpen()} placement="top-end" width="19rem">
       <div class="p-1.5 text-xs">

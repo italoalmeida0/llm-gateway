@@ -29,7 +29,7 @@ export function StatusBanners() {
   <QuestionPanel request={{...t.pendingQuestion()!, id}} connected={h.connectionState() === "connected" && h.activeHost()?.status === "online"} submitting={t.questionSubmitting()} error={t.questionError()} onSubmit={t.answerQuestion} />
 }</Show>
 <Show when={s.activeSessionId() && t.todos().length && !t.pendingQuestion()}>
-  <section aria-label="Task checklist" class="mb-3 rounded-xl border border-line bg-elev/40 text-xs">
+  <section aria-label="Task checklist" class="mb-2 rounded-xl border border-line bg-elev/40 text-xs">
     <button onClick={() => t.toggleTodosOpen()} aria-expanded={t.todosOpen()} class="w-full px-3 py-2.5 flex items-center gap-2 text-ink-300 cursor-pointer">
       <Iconify icon="lucide:list-checks" size={15} /><span class="font-medium">Task plan</span>
       <span class="text-ink-500">{t.todos().filter((item) => item.status === "completed").length}/{t.todos().length}</span>

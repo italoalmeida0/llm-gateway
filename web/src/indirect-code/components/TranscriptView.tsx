@@ -9,6 +9,7 @@ import {
 } from "./TranscriptBlocks";
 import { HistoryView } from "./HistoryView";
 import { ApprovalCard } from "./ApprovalCard";
+import { QuestionPanel } from "./QuestionModal";
 import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
 import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges } from "../ctx";
 import { TurnChangesBalloon } from "./TurnChangesBalloon";
@@ -17,7 +18,7 @@ import { mapBalloonsToBlocks } from "../transcript";
 export function TranscriptView() {
   const t = useTranscriptCtx();
   const s = useSession();
-  const _h = useHost();
+  const h = useHost();
   const c = useComposerCtx();
   const m = useModal();
   const ui = useUI();
@@ -333,6 +334,18 @@ export function TranscriptView() {
     respondApproval={t.respondApproval}
     setYoloMode={c.setYoloMode}
   />
+
+  <Show when={s.activeSessionId() && t.pendingQuestion()?.id} keyed>{(id) =>
+    <div class={`${ui.convWidthClass()} mx-auto`}>
+      <QuestionPanel
+        request={{ ...t.pendingQuestion()!, id }}
+        connected={h.connectionState() === "connected" && h.activeHost()?.status === "online"}
+        submitting={t.questionSubmitting()}
+        error={t.questionError()}
+        onSubmit={t.answerQuestion}
+      />
+    </div>
+  }</Show>
 </div>
 </div>
 </Show>

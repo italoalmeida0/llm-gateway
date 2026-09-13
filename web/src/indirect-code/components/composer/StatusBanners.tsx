@@ -1,7 +1,6 @@
 import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
 import { useHost, useSession, useTranscriptCtx, useUI } from "../../ctx";
-import { QuestionPanel } from "../QuestionModal";
 import { IndirectBrand } from "../IndirectBrand";
 
 export function StatusBanners() {
@@ -25,10 +24,7 @@ export function StatusBanners() {
     }</Show>
   </div>
 </Show>
-<Show when={s.activeSessionId() && t.pendingQuestion()?.id} keyed>{(id) =>
-  <QuestionPanel request={{...t.pendingQuestion()!, id}} connected={h.connectionState() === "connected" && h.activeHost()?.status === "online"} submitting={t.questionSubmitting()} error={t.questionError()} onSubmit={t.answerQuestion} />
-}</Show>
-<Show when={s.activeSessionId() && t.todos().length && !t.pendingQuestion()}>
+<Show when={s.activeSessionId() && t.todos().length}>
   <section aria-label="Task checklist" class="mb-2 rounded-xl border border-line bg-elev/40 text-xs">
     <button onClick={() => t.toggleTodosOpen()} aria-expanded={t.todosOpen()} class="w-full px-3 py-2.5 flex items-center gap-2 text-ink-300 cursor-pointer">
       <Iconify icon="lucide:list-checks" size={15} /><span class="font-medium">Task plan</span>

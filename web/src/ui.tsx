@@ -185,7 +185,7 @@ export function ThemeToggle(props: {
 // ==========================================
 
 export function Btn(props: {
-  variant?: "primary" | "ghost" | "danger" | "outline";
+  variant?: "primary" | "brand" | "ghost" | "danger" | "outline";
   size?: "sm" | "md";
   onClick?: (e: MouseEvent) => void;
   disabled?: boolean;

@@ -123,6 +123,7 @@ export function createTranscript(opts: {
     setPendingQuestion(question);
     setQuestionSubmitting(false);
     setQuestionError("");
+    if (question) scrollToBottom(true);
   }
   function answerQuestion(answers: string[][]) {
     const question = pendingQuestion();

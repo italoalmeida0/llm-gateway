@@ -132,7 +132,7 @@ function RailItem(props: { item: NavItem; current: string; badge?: number }) {
     <Tooltip content={props.item.label} placement="right" delay={50}>
       <a
         href={`#${props.item.path}`}
-        class={`gateway-nav relative flex h-9 w-9 lg:w-44 items-center justify-center lg:justify-start lg:px-2.5 gap-2.5 rounded-lg transition-colors duration-150 ${
+        class={`gateway-nav relative flex h-9 w-9 lg:w-60 items-center justify-center lg:justify-start lg:px-2.5 gap-2.5 rounded-lg transition-colors duration-150 ${
           active()
             ? "text-ink-100"
             : "text-ink-400 hover:text-ink-100 hover:bg-ink-800/60"
@@ -218,8 +218,8 @@ function AppShell(props: { children: JSX.Element }) {
   return (
     <div class="min-h-screen">
       {/* ===== desktop icon rail ===== */}
-      <aside class="gateway-rail hidden md:flex fixed inset-y-0 left-0 w-16 lg:w-48 flex-col items-center py-4 border-r border-line z-30">
-        <a href="#/" class="flex items-center gap-2.5 lg:w-44 lg:px-2" aria-label="LLM Gateway home">
+      <aside class="gateway-rail hidden md:flex fixed inset-y-0 left-0 w-16 lg:w-64 flex-col items-center py-4 border-r border-line z-30">
+        <a href="#/" class="flex items-center gap-2.5 lg:w-60 lg:px-2" aria-label="LLM Gateway home">
           <LogoMark />
           <span class="hidden lg:block text-[13px] font-semibold tracking-tight">LLM Gateway</span>
         </a>
@@ -237,14 +237,14 @@ function AppShell(props: { children: JSX.Element }) {
             )}
           </For>
           <Show when={user().role === "admin"}>
-            <span class="w-6 lg:w-40 h-px bg-line mt-4 mb-2 shrink-0" />
-            <span class="hidden lg:block w-44 px-2.5 pb-1 text-[10px] font-medium text-ink-500">Administration</span>
+            <span class="w-6 lg:w-56 h-px bg-line mt-4 mb-2 shrink-0" />
+            <span class="hidden lg:block w-60 px-2.5 pb-1 text-[10px] font-medium text-ink-500">Administration</span>
             <For each={ADMIN_NAV}>
               {(item) => <RailItem item={item} current={route().path} />}
             </For>
           </Show>
         </nav>
-        <div class="flex flex-col lg:flex-row items-center lg:justify-between lg:w-44 lg:px-1 gap-1.5 pt-3">
+        <div class="flex flex-col lg:flex-row items-center lg:justify-between lg:w-60 lg:px-1 gap-1.5 pt-3">
           <ThemeToggle tooltipPlacement="right" />
           <Tooltip content="Sign out" placement="right" delay={50}>
             <button
@@ -298,7 +298,7 @@ function AppShell(props: { children: JSX.Element }) {
         </Show>
       </div>
 
-      <main class="md:pl-16 lg:pl-48">
+      <main class="md:pl-16 lg:pl-64">
         {/* ===== desktop header ===== */}
         <header
           class="hidden md:flex sticky top-0 z-20 h-14 items-center justify-between gap-4 border-b border-line bg-ink-950/95 backdrop-blur px-6"

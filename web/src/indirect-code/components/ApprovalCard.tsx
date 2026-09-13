@@ -20,9 +20,9 @@ export function ApprovalCard(props: ApprovalCardProps) {
         const args = tryParseArgs(pa().args);
         const name = pa().tool || "tool";
         return (
-          <div class={`${props.convWidthClass()} mx-auto rounded-2xl border border-amber-500/40 bg-amber-500/[0.06] p-4 shadow-xl`}>
+          <div class={`${props.convWidthClass()} mx-auto rounded-2xl border border-brand-500/30 bg-brand-500/[0.05] p-4 shadow-xl`}>
             <div class="flex items-center gap-2 text-[13px]">
-              <Iconify icon="lucide:shield" size={15} class="text-amber-400 shrink-0" />
+              <Iconify icon="lucide:shield" size={15} class="text-brand-500 shrink-0" />
               <span class="font-semibold text-ink-100">Review tool call</span>
               <span class="text-[11px] text-ink-500">Safe mode — nothing ran yet</span>
             </div>
@@ -137,7 +137,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
                   props.setYoloMode(true);
                   props.respondApproval(true, true);
                 }}
-                class="px-3.5 py-1.5 rounded-xl bg-amber-500/15 text-amber-800 dark:text-amber-200 hover:bg-amber-500/25 border border-amber-500/30 text-xs font-semibold transition-colors cursor-pointer"
+                class="ui-button ui-button-brand !rounded-xl px-3.5 py-1.5 text-xs font-semibold"
                 data-rc-tip="Enable Full access and allow all tool calls" aria-label="Always allow — enable Full access"
               >
                 Always allow

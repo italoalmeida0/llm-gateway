@@ -20,7 +20,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
         const args = tryParseArgs(pa().args);
         const name = pa().tool || "tool";
         return (
-          <div class={`${props.convWidthClass()} mx-auto rounded-2xl border border-brand-500/30 bg-brand-500/[0.05] p-4 shadow-xl`}>
+          <div class={`${props.convWidthClass()} mx-auto rounded-2xl p-4 shadow-xl`}>
             <div class="flex items-center gap-2 text-[13px]">
               <Iconify icon="lucide:shield" size={15} class="text-brand-500 shrink-0" />
               <span class="font-semibold text-ink-100">Review tool call</span>
@@ -128,7 +128,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
               </button>
               <button
                 onClick={() => props.respondApproval(true)}
-                class="px-4 py-1.5 rounded-xl bg-ink-100 text-ink-950 hover:bg-accent-400 text-xs font-semibold transition-colors cursor-pointer"
+                class="px-4 py-1.5 rounded-xl bg-ink-100 text-ink-950 hover:bg-accent-400 text-xs font-semibold border border-transparent transition-colors cursor-pointer"
               >
                 Allow once
               </button>
@@ -137,7 +137,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
                   props.setYoloMode(true);
                   props.respondApproval(true, true);
                 }}
-                class="ui-button ui-button-brand !rounded-xl px-3.5 py-1.5 text-xs font-semibold"
+                class="px-3.5 py-1.5 rounded-xl border ui-button-brand text-xs font-semibold hover:brightness-105 active:translate-y-[1px] transition-all cursor-pointer"
                 data-rc-tip="Enable Full access and allow all tool calls" aria-label="Always allow — enable Full access"
               >
                 Always allow

@@ -19,7 +19,7 @@ export function QuestionPanel(props: {
 }) {
   const [step, setStep] = createSignal(0);
   const questions = () => Array.isArray(props.request?.questions) ? props.request.questions : [];
-  const [drafts, setDrafts] = createStore(questions().map((q) => ({selected:[] as string[], custom:!q.options?.length && q.custom !== false, text:""})));
+  const [drafts, setDrafts] = createStore(questions().map((q) => ({selected:[] as string[], custom:!q.options?.length, text:""})));
   const question = () => questions()[step()] || { header: "", question: "", options: [] };
   const draft = () => drafts[step()] || { selected: [], custom: false, text: "" };
   const answers = (i: number) => {
@@ -78,16 +78,14 @@ export function QuestionPanel(props: {
               <Icon icon="lucide:sparkles" size={14} /><span>{DELEGATE_LABEL} — the assistant proceeds with its best judgment</span>
             </button>
           </Show>
-          <Show when={question().custom !== false}>
-            <label class={`flex items-center gap-3 rounded-xl border px-3 py-2.5 cursor-pointer ${draft().custom ? "border-ink-400 bg-elev" : "border-line hover:bg-elev/70"}`}>
-              <input type={question().multiple ? "checkbox" : "radio"} name={`${props.request.id}-${step()}`} checked={draft().custom} onChange={(e) => {
-                setDrafts(step(), "custom", e.currentTarget.checked);
-                if (!question().multiple) setDrafts(step(), "selected", []);
-              }} class="accent-accent-500 shrink-0" /><span class="text-xs text-ink-300">Type your own answer</span>
-            </label>
-            <Show when={draft().custom}>
-              <textarea aria-label="Your answer" value={draft().text} maxLength={4000} rows={2} onInput={(e) => setDrafts(step(), "text", e.currentTarget.value)} class="block w-full resize-y rounded-xl border border-line bg-elev px-3 py-2 text-sm text-ink-100 outline-none focus:border-ink-400" />
-            </Show>
+          <label class={`flex items-center gap-3 rounded-xl border px-3 py-2.5 cursor-pointer transition-colors ${draft().custom ? "border-ink-400 bg-elev" : "border-line hover:bg-elev/70"}`}>
+            <input type={question().multiple ? "checkbox" : "radio"} name={`${props.request.id}-${step()}`} checked={draft().custom} onChange={(e) => {
+              setDrafts(step(), "custom", e.currentTarget.checked);
+              if (!question().multiple) setDrafts(step(), "selected", []);
+            }} class="accent-accent-500 shrink-0" /><span class="text-xs text-ink-300">Type your own answer</span>
+          </label>
+          <Show when={draft().custom}>
+            <textarea aria-label="Your answer" placeholder="Type your own answer or provide more details..." value={draft().text} maxLength={4000} rows={2} onInput={(e) => setDrafts(step(), "text", e.currentTarget.value)} class="block w-full resize-y rounded-xl border border-line bg-elev px-3 py-2 text-sm text-ink-100 outline-none focus:border-ink-400 placeholder:text-ink-500" />
           </Show>
         </div>
       </fieldset>

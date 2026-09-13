@@ -20,7 +20,6 @@ type Question struct {
 	Question string           `json:"question"`
 	Options  []QuestionOption `json:"options"`
 	Multiple bool             `json:"multiple,omitempty"`
-	Custom   *bool            `json:"custom,omitempty"`
 	// Recommend marks the suggested option label (rendered first with
 	// "(Recommended)" suffix when the caller doesn't pre-order options).
 	Recommend string `json:"recommend,omitempty"`
@@ -29,7 +28,7 @@ type Question struct {
 	DecideLater bool `json:"decideLater,omitempty"`
 }
 
-func (q Question) AllowsCustom() bool { return q.Custom == nil || *q.Custom }
+func (Question) AllowsCustom() bool { return true }
 
 type QuestionRequest struct {
 	Questions []Question `json:"questions"`
@@ -43,10 +42,10 @@ type QuestionTool struct {
 
 func (*QuestionTool) Name() string { return "question" }
 func (*QuestionTool) Description() string {
-	return `Ask the user interactive questions during execution to gather preferences or requirements, clarify ambiguous instructions, get implementation decisions, or choose a direction. Ask 1–4 short questions per call. Answers are returned as arrays of labels in question order. Set multiple:true for multi-select. Custom answers are enabled by default: the UI adds "Type your own answer", so never include Other or catch-all options. Set custom:false to restrict answers to listed options. For a recommendation, put that option first and suffix its label with "(Recommended)". Wait for the actual answers before continuing; never invent answers.`
+	return `Ask the user interactive questions during execution to gather preferences or requirements, clarify ambiguous instructions, get implementation decisions, or choose a direction. Ask 1–4 short questions per call. Answers are returned as arrays of labels in question order. Set multiple:true for multi-select. The UI always allows the user to enter their own custom answer or additional details, so never include "Other", "None of the above", or catch-all options. For a recommendation, put that option first and suffix its label with "(Recommended)". Wait for the actual answers before continuing; never invent answers.`
 }
 func (*QuestionTool) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"questions":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","properties":{"header":{"type":"string","description":"Short label for this step"},"question":{"type":"string","description":"Complete, self-contained question"},"options":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"label":{"type":"string","description":"Display text and returned value of the option."},"description":{"type":"string","description":"Explanation of what choosing this option implies."}},"required":["label"]}},"multiple":{"type":"boolean","default":false,"description":"Allow multiple selections."},"custom":{"type":"boolean","default":true,"description":"Allow custom user input (default true)."}},"required":["header","question","options"]}}},"required":["questions"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"questions":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","properties":{"header":{"type":"string","description":"Short label for this step"},"question":{"type":"string","description":"Complete, self-contained question"},"options":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"label":{"type":"string","description":"Display text and returned value of the option."},"description":{"type":"string","description":"Explanation of what choosing this option implies."}},"required":["label"]}},"multiple":{"type":"boolean","default":false,"description":"Allow multiple selections."}},"required":["header","question","options"]}}},"required":["questions"]}`)
 }
 
 func (r QuestionRequest) Validate() error {
@@ -57,8 +56,8 @@ func (r QuestionRequest) Validate() error {
 		if strings.TrimSpace(q.Header) == "" || len(q.Header) > 100 || strings.TrimSpace(q.Question) == "" || len(q.Question) > 2000 {
 			return fmt.Errorf("each question needs a short header and a nonempty question")
 		}
-		if len(q.Options) > 8 || (!q.AllowsCustom() && len(q.Options) == 0) {
-			return fmt.Errorf("provide up to 8 options; custom:false requires options")
+		if len(q.Options) > 8 {
+			return fmt.Errorf("provide up to 8 options")
 		}
 		seen := map[string]bool{}
 		for _, o := range q.Options {
@@ -103,7 +102,7 @@ func (r QuestionRequest) ValidateAnswers(answers [][]string) error {
 			}
 			if !listed {
 				custom++
-				if !q.AllowsCustom() || custom > 1 {
+				if custom > 1 {
 					return fmt.Errorf("invalid custom answer for question %d", i+1)
 				}
 			}

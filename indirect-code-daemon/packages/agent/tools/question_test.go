@@ -32,7 +32,7 @@ func TestQuestionReturnsOrderedLabelsAndDefaultCustomAnswer(t *testing.T) {
 func TestQuestionRejectsInvalidRequestsAndAnswers(t *testing.T) {
 	called := false
 	tool := &QuestionTool{Ask: func(context.Context, QuestionRequest) ([][]string, error) { called = true; return nil, nil }}
-	for _, raw := range []string{`{}`, `{"questions":[]}`, `{"questions":[{"header":"Q","question":"Q?","custom":false,"options":[]}]}`, `{"questions":[{"header":"Q","question":"Q?","options":[{"label":"Same"},{"label":"same"}]}]}`} {
+	for _, raw := range []string{`{}`, `{"questions":[]}`, `{"questions":[{"header":"Q","question":"Q?","options":[{"label":"Same"},{"label":"same"}]}]}`} {
 		if _, err := tool.Execute(context.Background(), json.RawMessage(raw), nil); err == nil {
 			t.Fatal("invalid question accepted")
 		}
@@ -40,14 +40,16 @@ func TestQuestionRejectsInvalidRequestsAndAnswers(t *testing.T) {
 	if called {
 		t.Fatal("invalid request reached the user")
 	}
-	no := false
-	req := QuestionRequest{Questions: []Question{{Header: "Q", Question: "Q?", Options: []QuestionOption{{Label: "A"}, {Label: "B"}}, Custom: &no}}}
-	for _, answers := range [][][]string{nil, {{}}, {{"unlisted"}}, {{"A", "B"}}, {{""}}, {{"A", "A"}}} {
+	req := QuestionRequest{Questions: []Question{{Header: "Q", Question: "Q?", Options: []QuestionOption{{Label: "A"}, {Label: "B"}}}}}
+	for _, answers := range [][][]string{nil, {{}}, {{"unlisted", "second"}}, {{"A", "B"}}, {{""}}, {{"A", "A"}}} {
 		if err := req.ValidateAnswers(answers); err == nil {
 			t.Fatalf("invalid answers accepted: %+v", answers)
 		}
 	}
 	if err := req.ValidateAnswers([][]string{{"B"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := req.ValidateAnswers([][]string{{"My custom answer"}}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

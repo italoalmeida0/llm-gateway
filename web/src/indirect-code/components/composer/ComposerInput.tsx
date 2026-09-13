@@ -76,7 +76,7 @@ export function ComposerInput() {
     ref={textareaRef}
     disabled={s.creatingSession()}
     rows={1}
-    class="flex-1 min-w-0 bg-transparent text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-3.5 pt-3 pb-2 max-h-[160px] min-h-[76px] overflow-y-auto [scrollbar-gutter:stable]"
+    class="flex-1 min-w-0 bg-transparent text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-3.5 pt-3 pb-2 max-h-[160px] min-h-[56px] overflow-y-auto [scrollbar-gutter:stable]"
     placeholder="Ask anything, @ to mention, / for actions"
     value={c.inputPrompt()}
     onBlur={() => c.flushPendingDraft()}

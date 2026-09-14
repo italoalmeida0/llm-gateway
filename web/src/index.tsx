@@ -155,7 +155,6 @@ function RailItem(props: { item: NavItem; current: string; badge?: number }) {
           </span>
         </Show>
       </a>
-    </Tooltip>
   );
 }
 

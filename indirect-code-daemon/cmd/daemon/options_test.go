@@ -14,11 +14,12 @@ import (
 
 func TestApplyGatewayPricingFirstMatchWins(t *testing.T) {
 	var m provider.Model
+	// Gateway serves USD per token; the provider model prices USD per 1M.
 	applyGatewayPricing(&m, map[string]float64{
-		"prompt": 3, "input": 99,
-		"completion": 15,
-		"input_cache_reads": 0.3,
-		"cache_write":       0.6,
+		"prompt": 0.000003, "input": 99,
+		"completion": 0.000015,
+		"input_cache_reads": 0.0000003,
+		"cache_write":       0.0000006,
 	})
 	if m.PriceInput != 3 || m.PriceOutput != 15 || m.PriceCacheRead != 0.3 || m.PriceCacheWrite != 0.6 {
 		t.Fatalf("pricing=%+v", m)
@@ -45,11 +46,16 @@ func TestBrainInstructionsModes(t *testing.T) {
 	for _, mode := range []string{"plan", "build", "learning"} {
 		text := brainInstructions(mode, brain)
 		if text == "" {
-			t.Fatalf("mode %q should include session memory instructions", mode)
+			t.Fatalf("mode %q should include session workspace instructions", mode)
 		}
-		for _, want := range []string{brain, "notes.md", "Do not mention this space"} {
+		for _, want := range []string{brain, "Do not mention this space"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("mode %q instructions missing %q:\n%s", mode, want, text)
+			}
+		}
+		for _, unwanted := range []string{"notes.md", "READ FIRST", "WRITE BACK", "Session memory"} {
+			if strings.Contains(text, unwanted) {
+				t.Fatalf("mode %q instructions should not contain journaling ritual %q:\n%s", mode, unwanted, text)
 			}
 		}
 	}

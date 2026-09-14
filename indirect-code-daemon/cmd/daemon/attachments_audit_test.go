@@ -57,6 +57,51 @@ func attachmentWire(t *testing.T, d *DaemonServer) func(map[string]any) map[stri
 	}
 }
 
+func TestAttachmentBMPNormalizedToPNGAndLimit(t *testing.T) {
+	d := testDaemon(t)
+	rec := &SessionRecord{ID: "bmp", CWD: t.TempDir(), Status: "running"}
+	d.sessions[rec.ID] = &ActiveSession{record: rec}
+	wire := attachmentWire(t, d)
+	// Minimal 2x2 24-bit BMP (red pixels).
+	bmpBytes := []byte{
+		66, 77, 70, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 1, 0, 24, 0,
+		0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 255, 0, 0, 255, 0, 0,
+		0, 0, 255, 0, 0, 255, 0, 0,
+	}
+	got := wire(map[string]any{"type": "upload_attachment", "sessionId": rec.ID, "requestId": "bmp1", "name": "img.bmp", "mime": "image/bmp", "data": base64.StdEncoding.EncodeToString(bmpBytes)})
+	if got["type"] != "attachment_uploaded" {
+		t.Fatalf("bmp upload failed: %v", got)
+	}
+	att := got["attachment"].(map[string]any)
+	if att["mime"] != "image/png" {
+		t.Fatalf("bmp not normalized to png: %v", att["mime"])
+	}
+	if len(rec.Attachments) != 1 {
+		t.Fatal("bmp attachment not stored")
+	}
+	// Limit: 30 ids validate, 31 do not.
+	attDir := filepath.Join(rec.CWD, "attachments")
+	if err := os.MkdirAll(attDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, 31)
+	for i := 0; i < 31; i++ {
+		id := fmt.Sprintf("att-%d", i)
+		ids = append(ids, id)
+		if err := os.WriteFile(filepath.Join(attDir, id), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		rec.Attachments = append(rec.Attachments, AttachmentRef{ID: id, Name: id + ".txt", Mime: "text/plain", Path: filepath.Join(attDir, id)})
+	}
+	if err := validateAttachmentIDs(rec, ids[:30]); err != nil {
+		t.Fatalf("30 attachments rejected: %v", err)
+	}
+	if err := validateAttachmentIDs(rec, ids); err == nil {
+		t.Fatal("31 attachments accepted")
+	}
+}
+
 func TestAttachmentUploadRoundTripAndActivePersistence(t *testing.T) {
 	d := testDaemon(t)
 	rec := &SessionRecord{ID: "files", CWD: t.TempDir(), Status: "running", Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "already running"}}}}}

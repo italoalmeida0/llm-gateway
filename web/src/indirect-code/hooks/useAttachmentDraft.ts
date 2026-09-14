@@ -2,7 +2,7 @@ import { createSignal, onCleanup } from "solid-js";
 import type { DaemonCommand } from "../daemon-protocol";
 import type { PendingAttachment, StoredAttachment } from "../viewTypes";
 
-export const MAX_ATTACHMENTS = 5;
+export const MAX_ATTACHMENTS = 30;
 export const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
 export const MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;
 

@@ -41,14 +41,7 @@ export function ComposerInput() {
         >
           <Show
             when={att.loading}
-            fallback={
-              <Show
-                when={att.objectUrl}
-                fallback={<FileIcon path={att.name} size={20} />}
-              >
-                <img src={att.objectUrl} class="w-7 h-7 object-cover rounded shrink-0 border border-line/60" />
-              </Show>
-            }
+            fallback={<FileIcon path={att.name} size={20} />}
           >
             <span class="w-5 h-5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
           </Show>

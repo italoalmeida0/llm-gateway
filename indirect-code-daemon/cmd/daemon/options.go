@@ -109,22 +109,23 @@ Wait for each answer, adapt the next hint, and use an unrelated example if they 
 	}
 }
 
-// brainInstructions is the living-docs-style session memory contract,
-// attached to workspace modes (plan/build/learning). The brain dir is
-// the agent's persistent per-session workspace: read before acting,
-// write back after completing work, one file owning the session log.
+// brainInstructions describes the per-session scratch workspace, attached to
+// workspace modes (plan/build/learning). The brain dir is the agent's private
+// area for test scripts, probes, downloads and experiment output: usable even
+// when jailed to the working directory, so the user's workspace stays clean.
 // This function is the single owner of that text - tools only enforce
-// access, they never advertise it.
+// access, they never advertise it. There is deliberately no running log or
+// journaling ritual: the conversation transcript is the source of truth for
+// prior decisions, and mandatory read/write bookkeeping on every turn only
+// adds noise without helping.
 func brainInstructions(mode, brainDir string) string {
 	if brainDir == "" || (mode != "plan" && mode != "build" && mode != "learning") {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\n### Session memory (private)\n")
-	fmt.Fprintf(&b, "Your persistent per-session workspace: %s. It survives across turns - treat it as your memory layer for this session.\n", brainDir)
-	b.WriteString("READ FIRST: at the start of each turn, read notes.md there if it exists (decisions, context and gotchas recorded by earlier turns).\n")
-	b.WriteString("USE IT: test scripts, probes, downloads and experiment output go here, not in the user's workspace. Writable even when jailed to the working directory.\n")
-	b.WriteString("WRITE BACK: at the end of each turn, append to notes.md what you decided, non-obvious context you found, and anything the next turn must not rediscover. One file owns the session log - do not scatter duplicates.\n")
+	b.WriteString("\n### Session workspace (private)\n")
+	fmt.Fprintf(&b, "Your private per-session scratch area: %s. It survives across turns.\n", brainDir)
+	b.WriteString("USE IT for test scripts, probes, downloads and experiment output - not the user's workspace. Writable even when jailed to the working directory.\n")
 	b.WriteString("ALWAYS ACCESS DIRECTLY: You are always free to read and write in this workspace directly using file tools (read, write, edit in Build mode; read in Plan and Learning modes), even when jailed. NEVER use shell or terminal commands (like bash, cat >>, echo >>) to write, append, or read files in your session memory workspace — use your file tools directly.\n")
 	b.WriteString("Do not mention this space to the user unless they ask about it.\n")
 	return b.String()

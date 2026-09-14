@@ -91,8 +91,8 @@ export function sniffFile(
     info.some((i) => (i.mime || "").startsWith("image/"));
   if (isImage) {
     const mime = info.find((i) => i.mime?.startsWith("image/"))?.mime || file.type;
-    if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mime)) {
-      return { blocked: `Unsupported image '${file.name}'. Use PNG, JPEG, GIF or WebP.` };
+    if (!["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"].includes(mime)) {
+      return { blocked: `Unsupported image '${file.name}'. Use PNG, JPEG, GIF, WebP or BMP.` };
     }
     return { kind: "image", mime };
   }

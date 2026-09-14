@@ -210,10 +210,12 @@ export function TranscriptView() {
                   <MentionMenu mentions={t.editMentions} inputId="rc-editing-msg" />
                   <div class="flex flex-wrap gap-2 mb-2">
                     <For each={t.editingAttachments()}>{(file) => <span class="flex items-center gap-1 text-xs text-ink-300">
+                      <FileIcon path={file.name} size={13} />
                       <button onClick={() => m.openStoredPreview(s.activeSessionId(), file.id)} class="cursor-pointer hover:underline">{file.name}</button>
                       <button disabled={t.savingEdit()} aria-label={`Remove ${file.name}`} onClick={() => t.setEditingAttachments((prev) => prev.filter((a) => a.id !== file.id))} class="cursor-pointer p-1">×</button>
                     </span>}</For>
                     <For each={t.editAttachments.pendingAttachments()}>{(file) => <span class="flex items-center gap-1 text-xs text-ink-300">
+                      <FileIcon path={file.name} size={13} />
                       <button onClick={() => m.previewPending(file)} class="cursor-pointer hover:underline">{file.name}</button>
                       <button disabled={t.savingEdit()} aria-label={`Remove ${file.name}`} onClick={() => t.editAttachments.removePendingAttachment(file.key)} class="cursor-pointer p-1">×</button>
                     </span>}</For>

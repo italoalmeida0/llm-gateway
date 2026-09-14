@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image/png"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,10 +14,12 @@ import (
 
 	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/provider"
+	"golang.org/x/image/bmp"
 )
 
 const maxAttachmentBytes = 4 << 20
 const maxAttachmentTextRunes = 512 * 1024
+const maxAttachmentsPerMessage = 30
 
 type messageAttachment struct {
 	ID   string `json:"id"`
@@ -25,13 +28,27 @@ type messageAttachment struct {
 	Size int64  `json:"size"`
 }
 
+// bmpToPNG decodes BMP bytes and re-encodes them as PNG so the stored
+// attachment is already in a provider-accepted inline image format.
+func bmpToPNG(data []byte) ([]byte, error) {
+	img, err := bmp.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func (d *DaemonServer) attachmentError(requestID, sessionID, message string) {
 	_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "requestId": requestID, "sessionId": sessionID, "message": message})
 }
 
 func validateAttachmentIDs(rec *SessionRecord, ids []string) error {
-	if len(ids) > 5 {
-		return fmt.Errorf("Max 5 attachments per message")
+	if len(ids) > maxAttachmentsPerMessage {
+		return fmt.Errorf("Max %d attachments per message", maxAttachmentsPerMessage)
 	}
 	seen := map[string]bool{}
 	for _, id := range ids {
@@ -178,13 +195,26 @@ func (d *DaemonServer) uploadAttachment(raw []byte) {
 		mime = detected
 	}
 	if strings.HasPrefix(mime, "image/") {
-		if mime != "image/png" && mime != "image/jpeg" && mime != "image/gif" && mime != "image/webp" {
-			fail("Unsupported image. Use PNG, JPEG, GIF or WebP.")
+		if mime != "image/png" && mime != "image/jpeg" && mime != "image/gif" && mime != "image/webp" && mime != "image/bmp" {
+			fail("Unsupported image. Use PNG, JPEG, GIF, WebP or BMP.")
 			return
 		}
-		if detected != mime {
+		if mime == "image/bmp" {
+			// Providers only accept PNG/JPEG/GIF/WebP inline, so BMP is
+			// normalized to PNG at upload time (same as the read tool).
+		if len(data) < 2 || data[0] != 'B' || data[1] != 'M' {
 			fail("Image data does not match its format")
 			return
+		}
+		converted, err := bmpToPNG(data)
+		if err != nil {
+			fail("Could not convert BMP image")
+			return
+		}
+		data, mime = converted, "image/png"
+		} else if detected != mime {
+		fail("Image data does not match its format")
+		return
 		}
 		if len(data) > 5*1024*1024/2 {
 			fail("Image too large (max 2.5MB)")

@@ -92,14 +92,15 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 	return model
 }
 
-// applyGatewayPricing copies the registry pricing dict (USD per 1M
-// tokens, free-form keys — same aliases as the gateway pricingColumns)
-// onto the provider model. Missing keys stay zero: unknown price.
+// applyGatewayPricing copies the registry pricing dict (USD per token —
+// the gateway stores pricing_input/pricing_output/... as USD per token
+// and serves them raw) onto the provider model, which prices in USD
+// per 1M tokens. Missing keys stay zero: unknown price.
 func applyGatewayPricing(model *provider.Model, pricing map[string]float64) {
 	first := func(keys ...string) float64 {
 		for _, k := range keys {
 			if v, ok := pricing[k]; ok && v >= 0 {
-				return v
+				return v * 1e6
 			}
 		}
 		return 0

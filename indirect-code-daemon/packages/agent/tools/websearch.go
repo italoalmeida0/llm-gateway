@@ -42,17 +42,13 @@ var (
 	webCacheMu sync.Mutex
 	webCache   = map[string]webCacheEntry{}
 
-	// DuckDuckGo answers ~429 when hammered. One query at a time,
-	// min 1.5s between requests (same policy as the TS reference).
 	ddgMu   sync.Mutex
 	ddgLast time.Time
 )
 
 const webCacheTTL = 60 * time.Second
 
-// SearchWebTool queries DuckDuckGo (HTML endpoint, lite fallback) — no key,
-// no Bing, no SearXNG. Port of remote-code-ref/mcp-web-search providers/
-// duckduckgo.ts: same endpoints, same selectors, same rate limit.
+
 type SearchWebTool struct {
 	CWD     string
 	Sandbox *Sandbox
@@ -64,7 +60,7 @@ type SearchWebTool struct {
 func (t *SearchWebTool) Name() string { return "search_web" }
 
 func (t *SearchWebTool) Description() string {
-	return "Web search via DuckDuckGo (no key needed). Params: `query` (required), `count` (default 10, max 20), `offset` (pagination). Returns [{title, url, snippet}]. Rate-limited (1.5s between queries), results cached 60s."
+	return "Web search. Params: `query` (required), `count` (default 10, max 20), `offset` (pagination). Returns [{title, url, snippet}]. Rate-limited (1.5s between queries), results cached 60s."
 }
 
 const webSearchSchema = `{"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Search query."},"count":{"type":"number","description":"Max results (default 10, max 20)."},"offset":{"type":"number","description":"Pagination offset."}}}`
@@ -125,7 +121,7 @@ func (t *SearchWebTool) search(ctx context.Context, query string, count, offset 
 		return "", false, nil, err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d result%s for %q (DuckDuckGo)\n", len(results), plural(len(results)), query)
+	fmt.Fprintf(&b, "%d result%s for %q\n", len(results), plural(len(results)), query)
 	for i, r := range results {
 		fmt.Fprintf(&b, "\n%d. %s\n   %s\n", i+1, r.Title, r.URL)
 		if r.Snippet != "" {
@@ -160,7 +156,7 @@ func (t *SearchWebTool) queryDDG(ctx context.Context, query string, count, offse
 		}
 		body, err = t.getHTML(ctx, "https://lite.duckduckgo.com/lite/?"+lite.Encode())
 		if err != nil {
-			return nil, fmt.Errorf("search_web: duckduckgo request failed: %v", err)
+			return nil, fmt.Errorf("search_web: request failed: %v", err)
 		}
 	}
 	results := parseDDGResults(bytes.NewReader(body))
@@ -204,10 +200,10 @@ func (t *SearchWebTool) getHTML(ctx context.Context, rawURL string) ([]byte, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 429 {
-		return nil, fmt.Errorf("duckduckgo rate limited (429) — retry in a bit")
+		return nil, fmt.Errorf("rate limited (429) — retry in a bit")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("duckduckgo HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 }

@@ -145,7 +145,6 @@ export function ToolSearchBodies(props: ToolPartProps) {
           >
             <div class="px-3 pt-2 pb-1 text-[11px] text-ink-500">
               <span class="font-mono text-ink-300">“{String(props.m.args().query || props.m.webDetails()?.query || "")}”</span>
-              <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">DuckDuckGo</span>
               <Show when={props.m.webDetails()?.cached}><span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">cached</span></Show>
             </div>
             <Show when={(props.m.webDetails()?.results || []).length > 0} fallback={

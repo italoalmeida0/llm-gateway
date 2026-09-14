@@ -44,6 +44,7 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
         streaming: m.streaming === true,
         blocks: [...reason, ...rest],
         thinkingDuration: Number(m.meta?.thinking_ms) > 0 ? Math.max(1, Math.ceil(Number(m.meta.thinking_ms) / 1000)) : undefined,
+        turnDurationMs: Number(m.meta?.turn_ms) > 0 ? Number(m.meta.turn_ms) : undefined,
         time: Date.now(),
         srcIdx: idx,
         turnIndex: typeof m.turnIndex === "number" ? m.turnIndex : undefined,
@@ -315,6 +316,7 @@ export function mergeAssistantMessage(prev: ChatMessage[], ev: any): ChatMessage
     turnIndex: ev.message?.turnIndex || ev.turnIndex || last?.turnIndex,
     streaming: false,
     thinkingDuration: duration > 0 ? Math.max(1, Math.ceil(duration / 1000)) : last?.thinkingDuration,
+    turnDurationMs: Number(ev.message?.meta?.turn_ms) > 0 ? Number(ev.message.meta.turn_ms) : last?.turnDurationMs,
   };
   return last?.role === "assistant" ? [...prev.slice(0, -1), message] : [...prev, message];
 }

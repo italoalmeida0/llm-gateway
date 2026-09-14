@@ -84,6 +84,9 @@ export interface ChatMessage {
   time?: number;
   attachments?: import("./viewTypes").StoredAttachment[];
   thinkingDuration?: number;
+  /** Wall-clock duration of the finished turn in ms (daemon-stamped `turn_ms`
+   * meta; only present on messages of completed/cancelled turns). */
+  turnDurationMs?: number;
   /** True only while this model response is streaming. */
   streaming?: boolean;
   /** True when this message included a completion signal (mark_task_as_complete / mark_plan_as_ready_to_execute). */

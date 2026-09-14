@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,6 +103,22 @@ func finishTurnActivity(act *ActiveSession, cancelled bool) {
 		act.record.Turn.Status = "cancelled"
 	} else if act.record.Turn.Status == "running" {
 		act.record.Turn.Status = "completed"
+	}
+	// Stamp the wall-clock duration on every message of this turn so
+	// finished aggregates can show "<time>" next to the toggle chevron
+	// (the live footer only covers the current turn).
+	if dur := act.record.Turn.EndedAt - act.record.Turn.StartedAt; dur > 0 {
+		stamp := strconv.FormatInt(dur, 10)
+		for i := range act.record.Messages {
+			m := &act.record.Messages[i]
+			if m.TurnIndex != act.record.TurnSeq {
+				continue
+			}
+			if m.Meta == nil {
+				m.Meta = map[string]string{}
+			}
+			m.Meta["turn_ms"] = stamp
+		}
 	}
 }
 

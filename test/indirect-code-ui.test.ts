@@ -612,6 +612,17 @@ describe("Indirect Code transcript updaters", () => {
     const out = normalizeSessionMessages(raw);
     expect(out.map((m) => m.turnIndex)).toEqual([7, 7, undefined]);
   });
+  test("normalizeSessionMessages carries daemon turn_ms as turnDurationMs", () => {
+    const raw = [
+      { role: "user", turnIndex: 3, content: [{ type: "text", text: "hi" }] },
+      { role: "assistant", turnIndex: 3, meta: { turn_ms: "83000" }, content: [{ type: "text", text: "yo" }] },
+      { role: "assistant", turnIndex: 4, content: [{ type: "text", text: "new" }] },
+    ];
+    const out = normalizeSessionMessages(raw);
+    expect(out[1].turnDurationMs).toBe(83000);
+    expect(out[0].turnDurationMs).toBeUndefined();
+    expect(out[2].turnDurationMs).toBeUndefined();
+  });
   test("finishTurn closes open turns, keeps the rest", () => {
     const open = finishTurn({ startedAt: 1, status: "running" });
     expect(open?.status).toBe("completed");

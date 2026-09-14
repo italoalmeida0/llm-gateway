@@ -157,6 +157,15 @@ export function renderTurnAggregate(
     thoughts: series.entries.filter((e) => e.kind === "thinking").length,
   }));
   const { open, toggle } = createDisclosure(() => String(running()), running);
+  /** Finished-turn wall-clock time (daemon-stamped); the running turn
+   * already shows its live timer in the footer above the composer. */
+  const turnDuration = () => {
+    if (running()) return undefined;
+    for (const m of [series.msg, ...series.extras]) {
+      if (typeof m.turnDurationMs === "number" && m.turnDurationMs > 0) return m.turnDurationMs;
+    }
+    return undefined;
+  };
   /** The featured final renders below once idle; inside the card its rows
    * stay mounted with display:none so Solid keeps DOM identity. */
   const featured = () => series.finalMsgId != null && !running();
@@ -217,6 +226,9 @@ export function renderTurnAggregate(
               {t()}
             </span>
           )}
+        </Show>
+        <Show when={turnDuration() != null}>
+          <span class="text-[11px] text-ink-500 tabular-nums shrink-0">{ctx.elapsedLabel(turnDuration()!)}</span>
         </Show>
         <Iconify
           icon="lucide:chevron-down"

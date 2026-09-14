@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -268,6 +269,18 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 	}
 	if stored.Turn == nil || stored.Turn.Status != "completed" || stored.Turn.EndedAt < stored.Turn.StartedAt {
 		t.Fatal("turn timer did not survive persistence")
+	}
+	turnStamped := false
+	for _, m := range stored.Messages {
+		if m.TurnIndex == stored.TurnSeq && m.Meta["turn_ms"] != "" {
+			turnStamped = true
+			if ms, err := strconv.Atoi(m.Meta["turn_ms"]); err != nil || int64(ms) != stored.Turn.EndedAt-stored.Turn.StartedAt {
+				t.Fatal("turn duration stamp mismatch")
+			}
+		}
+	}
+	if !turnStamped {
+		t.Fatal("turn duration was not stamped on the turn messages")
 	}
 	d.runAgentTurn(act, "Read it again", rec.Model, true, nil)
 	stored, err = d.loadSession(rec.ID)

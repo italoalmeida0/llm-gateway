@@ -688,18 +688,6 @@ export function createTranscript(opts: {
     } catch (e) { if (opts.getSessionId() === sid) opts.toast(e instanceof Error ? e.message : "Could not save message", "err"); }
     finally { setSavingEdit(false); }
   }
-  async function deleteMsg(idx: number) {
-    const sid = opts.getSessionId();
-    if (!sid || !opts.isOpen()) return;
-    const ok = await opts.showConfirm({
-      title: "Delete message?",
-      message: "This message will be permanently deleted from the transcript.\n\nThis action cannot be undone.",
-      confirmText: "Delete",
-      danger: true,
-    });
-    if (ok && opts.getSessionId() === sid && opts.isOpen()) opts.send({ type: "delete_message", sessionId: sid, index: idx });
-  }
-
   // --- Daemon events (called by the page dispatcher) ---
   function noteSessionDataRequestGuard(requestId: string | undefined): boolean {
     if (requestId && requestId !== transcriptRequestId) return true;
@@ -936,7 +924,7 @@ export function createTranscript(opts: {
     cancelTurnForSession, cancelCurrentTurn, respondApproval,
     forking, forkRequestId: () => forkRequestId,
     clearForkRequest: () => { forkRequestId = ""; }, setForking,
-    forkMessage, regenerateMsg, startEditMsg, cancelEditMsg, saveEditMsg, deleteMsg,
+    forkMessage, regenerateMsg, startEditMsg, cancelEditMsg, saveEditMsg,
     editAttachments, editingAttachments, setEditingAttachments, savingEdit, editMentions,
     resetForSession, resetCaches, purgeSession, pushUserMessage, beginTurn,
     clearMessages,

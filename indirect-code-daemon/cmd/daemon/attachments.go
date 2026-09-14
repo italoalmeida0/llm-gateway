@@ -344,3 +344,42 @@ func (d *DaemonServer) getAttachment(raw []byte) {
 	}
 	_ = d.sendWS(map[string]any{"type": "attachment_data", "hostId": d.config.HostID, "sessionId": req.SessionID, "requestId": req.RequestID, "attachment": payload})
 }
+
+// pruneOrphanAttachments drops attachment refs (and their files on disk) no
+// longer referenced by any message in rec.Messages. Attachments belong to
+// the turn that introduced them: discarding a turn must discard its files
+// too, instead of accumulating orphans in the session. Ids in keepExtra
+// (e.g. about to be re-sent by the new turn) are preserved. Must be called
+// with the session lock held.
+func pruneOrphanAttachments(rec *SessionRecord, keepExtra []string) {
+	keep := map[string]bool{}
+	for _, id := range keepExtra {
+		keep[id] = true
+	}
+	for _, m := range rec.Messages {
+		for _, id := range messageAttachmentIDs(m, rec.Attachments) {
+			keep[id] = true
+		}
+	}
+	if len(keep) == len(rec.Attachments) {
+		return
+	}
+	live := rec.Attachments[:0]
+	for _, a := range rec.Attachments {
+		if !keep[a.ID] {
+			os.Remove(a.Path)
+			if a.TextPath != "" {
+				os.Remove(a.TextPath)
+			}
+			continue
+		}
+		live = append(live, a)
+	}
+	// When nothing survives, release the backing array so pruned refs
+	// cannot linger via the old slice header.
+	if len(live) == 0 {
+		rec.Attachments = nil
+	} else {
+		rec.Attachments = live
+	}
+}

@@ -551,10 +551,13 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 func (r *turnRun) finishTurn() {
 	r.closeMCP()
 	r.act.mu.Lock()
-	defer r.act.mu.Unlock()
+	// NOTE: no defer Unlock here — the tail below unlocks manually so queue
+	// promotion (which re-acquires the session lock) can run synchronously
+	// before returning. Every return path must unlock explicitly.
 	// Shutdown/purge/new generations own the journal now. A stale finalizer
 	// must not touch files, history, or the replacement turn's recovery data.
 	if r.act.gen != r.myGen {
+		r.act.mu.Unlock()
 		return
 	}
 	var balloon *filetrack.TurnChanges
@@ -569,10 +572,13 @@ func (r *turnRun) finishTurn() {
 	}
 	r.act.fileChanges = nil
 	r.act.record.Status = "idle"
-	finishTurnActivity(r.act, r.ctx.Err() != nil)
+	cancelled := r.ctx.Err() != nil
+	finishTurnActivity(r.act, cancelled)
 	r.act.pendingApproval = nil
 	r.act.question = nil
 	r.act.convert = nil
+	sendNow := r.act.sendNow
+	r.act.sendNow = false
 	r.act.toolProgress = nil
 	r.act.toolStarts = nil
 	r.act.thinkingStartedAt = 0
@@ -585,6 +591,7 @@ func (r *turnRun) finishTurn() {
 	}
 	r.act.record.UpdatedAt = time.Now().UnixMilli()
 	if err := r.d.saveSession(r.act.record); err != nil {
+		r.act.mu.Unlock()
 		return // Keep the journal until completion is durably committed.
 	}
 	r.d.deleteTurnJournal(r.sessionID)
@@ -600,6 +607,14 @@ func (r *turnRun) finishTurn() {
 		"sessionId": r.sessionID,
 		"status":    "idle",
 	})
+	sessionID := r.sessionID
+	// Queue drain: a normally completed turn promotes the head; a
+	// send-now promotes the head after a cancelled turn. A plain
+	// cancelled turn never drains. Unlock first: promotion re-acquires.
+	r.act.mu.Unlock()
+	if !cancelled || sendNow {
+		r.d.promoteQueueHead(sessionID)
+	}
 }
 
 // isEmptyUsage reports whether a usage row carries no token counts at
@@ -646,6 +661,7 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
 	act.record.TurnSeq = max(act.record.TurnSeq, j.TurnIndex)
 	act.question = nil
 	act.convert = nil
+	act.sendNow = false
 	act.record.Turn = &TurnActivity{StartedAt: j.StartedAt, Status: "running"}
 	if act.record.Turn.StartedAt <= 0 {
 		act.record.Turn.StartedAt = now

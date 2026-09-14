@@ -20,7 +20,7 @@ export function StatusBanners() {
     <Iconify icon={t.sessionStatus() === "running" ? "lucide:loader-circle" : "lucide:clock-3"} size={13} class={t.sessionStatus() === "running" ? "animate-spin shrink-0" : "shrink-0"} />
     <span class="shrink-0">{t.turnLabel()}</span>
     <Show when={t.turnHint()}>{(hint) =>
-      <span class="min-w-0 flex-1 truncate whitespace-nowrap overflow-hidden" title={hint()}>{hint()}</span>
+      <span class="min-w-0 flex-1 truncate whitespace-nowrap overflow-hidden"> · {hint()}</span>
     }</Show>
   </div>
 </Show>

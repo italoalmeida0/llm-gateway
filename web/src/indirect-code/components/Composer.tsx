@@ -4,7 +4,6 @@ import { useComposerCtx, useSession, useTranscriptCtx, useUI } from "../ctx";
 import { ScrollOverlays } from "./composer/ScrollOverlays";
 import { StatusBanners } from "./composer/StatusBanners";
 import { ComposerInput } from "./composer/ComposerInput";
-import { ToolbarFiles } from "./composer/ToolbarFiles";
 import { ToolbarContext } from "./composer/ToolbarContext";
 import { ToolbarModel } from "./composer/ToolbarModel";
 import { ToolbarSend } from "./composer/ToolbarSend";
@@ -35,7 +34,6 @@ export function Composer() {
     <ComposerInput />
     <div class="rc-composer-toolbar flex items-end justify-between gap-2 px-2.5 py-2">
       <div class="flex flex-1 min-w-0 flex-wrap items-center gap-0.5 text-xs text-ink-400">
-      <ToolbarFiles />
       <ToolbarContext />
       <ToolbarModel />
       </div>

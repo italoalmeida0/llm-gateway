@@ -35,7 +35,7 @@ export function ShellCmd(props: { text: string }) {
     return out;
   };
   return (
-    <code class="font-mono truncate min-w-0" title={props.text || ""}>
+    <code class="font-mono truncate min-w-0">
       <span class="text-ink-600 select-none">$ </span>
       <For each={parts()}>{(p) =>
         p.c ? <span class={p.c}>{p.t}</span> : <span>{p.t}</span>

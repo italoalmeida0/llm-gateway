@@ -1,19 +1,17 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
-import { useComposerCtx, useModal, useSession, useUI } from "../../ctx";
+import { useComposerCtx, useModal, useUI } from "../../ctx";
 import { FloatMenu } from "../FloatMenu";
 import { MenuItem } from "../MenuItem";
-import { FileIcon } from "../../presentation";
 import { formatEffort } from "../../utils/format";
 
 export function ToolbarContext() {
   const c = useComposerCtx();
   const m = useModal();
-  const s = useSession();
   const ui = useUI();
 
   // Mobile submenu navigation inside the "+" menu
-  const [subView, setSubView] = createSignal<"main" | "model" | "mode" | "access" | "files">("main");
+  const [subView, setSubView] = createSignal<"main" | "model" | "mode" | "access">("main");
 
   // Reset to main view whenever the menu closes
   createEffect(() => {
@@ -135,19 +133,6 @@ export function ToolbarContext() {
         >
           <span>Actions</span>
         </MenuItem>
-
-        <Show when={(m.sessionFiles()[s.activeSessionId()] || []).length > 0}>
-          <MenuItem
-            icon="lucide:paperclip"
-            onClick={() => setSubView("files")}
-          >
-            <span class="flex-1">Session files</span>
-            <span class="text-ink-500 font-mono text-[11px] mr-1">
-              {(m.sessionFiles()[s.activeSessionId()] || []).length}
-            </span>
-            <Iconify icon="lucide:chevron-right" size={13} class="text-ink-500 shrink-0" />
-          </MenuItem>
-        </Show>
 
         <div class="mt-1 border-t border-line/60 pt-1">
           <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-600 tracking-wider">
@@ -360,43 +345,6 @@ export function ToolbarContext() {
         </div>
       </Show>
 
-      <Show when={subView() === "files"}>
-        <div>
-          <div class="flex items-center justify-between px-1 py-1 mb-1 border-b border-line/60">
-            <button
-              onClick={() => setSubView("main")}
-              class="px-1.5 py-1 rounded-md hover:bg-ink-800 text-ink-400 hover:text-ink-100 flex items-center gap-1 text-xs cursor-pointer"
-            >
-              <Iconify icon="lucide:chevron-left" size={14} />
-              <span>Back</span>
-            </button>
-            <span class="font-semibold text-xs text-ink-200">Session files</span>
-            <button
-              onClick={() => c.setAddContextOpen(false)}
-              class="px-1.5 py-1 rounded-md hover:bg-ink-800 text-ink-400 hover:text-ink-100 text-xs cursor-pointer"
-            >
-              Done
-            </button>
-          </div>
-          <div class="max-h-48 overflow-y-auto [scrollbar-gutter:stable]">
-            <For each={m.sessionFiles()[s.activeSessionId()] || []}>
-              {(f) => (
-                <MenuItem
-                  tip={`${f.name} (${Math.round(f.size / 1024)}KB)`}
-                  onClick={() => {
-                    c.setAddContextOpen(false);
-                    m.openStoredPreview(s.activeSessionId(), f.id);
-                  }}
-                >
-                  <FileIcon path={f.name} size={13} />
-                  <span class="truncate flex-1">{f.name}</span>
-                  <span class="text-[10px] text-ink-600 shrink-0">{Math.round(f.size / 1024)}K</span>
-                </MenuItem>
-              )}
-            </For>
-          </div>
-        </div>
-      </Show>
     </Show>
   </FloatMenu>
 </div>

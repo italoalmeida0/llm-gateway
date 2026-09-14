@@ -39,8 +39,8 @@ export interface MsgActionState {
   onCopy: () => void;
 }
 
-/** Hover actions for user bubbles (fork/copy/edit/delete). */
-export function UserMsgActions(props: MsgActionState & { onEdit: () => void; onDelete: () => void }) {
+/** Hover actions for user bubbles (fork/copy/edit). */
+export function UserMsgActions(props: MsgActionState & { onEdit: () => void }) {
   return (
     <div class="flex items-center gap-0.5 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
       <MsgIconBtn tip="Fork conversation from here" icon="lucide:git-branch" disabled={props.forking || !props.canFork} onClick={props.onFork} />
@@ -48,7 +48,6 @@ export function UserMsgActions(props: MsgActionState & { onEdit: () => void; onD
         <MsgIconBtn tip="Copy" icon="lucide:copy" compact copied={props.copied} onClick={props.onCopy} />
       </Show>
       <MsgIconBtn tip="Edit and resend" icon="lucide:pencil" compact onClick={props.onEdit} />
-      <MsgIconBtn tip="Delete" icon="lucide:trash-2" compact danger onClick={props.onDelete} />
     </div>
   );
 }

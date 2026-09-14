@@ -50,6 +50,7 @@ render(() => {
       transcript={{} as any}
       turnChanges={{} as any}
       composer={{} as any}
+      queue={{ queues: () => ({}), queueOf: () => [] } as any}
       modal={m as any}
       ui={{ appNotice: () => null } as any}
     >

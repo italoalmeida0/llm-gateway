@@ -32,6 +32,7 @@ import { createNotice } from "./hooks/useNotice";
 import { createTurnNotify } from "./hooks/useTurnNotify";
 import { createPushSubscription } from "./hooks/usePushSubscription";
 import { createConvert } from "./hooks/useConvert";
+import { createQueue } from "./hooks/useQueue";
 import { createModals } from "./hooks/useModals";
 import { createRelay } from "./hooks/useRelay";
 import { createMirror } from "./hooks/useMirror";
@@ -167,6 +168,14 @@ export default function IndirectCodePage() {
     },
   });
 
+  const queue = createQueue({
+    send: (payload) => relay.send(payload),
+    getSessionId: () => activeSessionId(),
+    isOpen: () => relay.wsOpen(),
+    isHostOnline: () => hosts.activeHost()?.status === "online",
+    toast: notice.toast,
+  });
+
   const options = createSessionOptions({
     send: (payload) => relay.send(payload),
     getSessionId: () => activeSessionId(),
@@ -213,6 +222,10 @@ export default function IndirectCodePage() {
     },
     onClearConversation: () => startNewConversation(),
     onBeginConversation: () => beginConversationWith(),
+    onQueueMessage: (text, attachmentIds, model, yolo) => {
+      queue.addToQueue(text, attachmentIds, model, yolo);
+      notice.toast("Queued — sends after agent finishes", "ok");
+    },
     isCreatingSession: () => creatingSession(),
     getSessionDraft: () => mirror.sessions().find((s) => s.id === activeSessionId())?.draft || "",
     getNewDraft: () => mirror.configDoc()?.newDraft || "",
@@ -365,7 +378,6 @@ export default function IndirectCodePage() {
   let modelBtn: HTMLButtonElement | undefined;
   let projBtn: HTMLButtonElement | undefined;
   let addBtn: HTMLButtonElement | undefined;
-  let filesBtn: HTMLButtonElement | undefined;
   let contextBtn: HTMLButtonElement | undefined;
 
   let forkKind: "resend" | "regenerate" | "fork" | null = null;
@@ -494,6 +506,7 @@ export default function IndirectCodePage() {
   function purgeSessionTrace(id: string) {
     transcript.purgeSession(id);
     review.purgeSessionFiles(id);
+    queue.purgeQueue(id);
     try {
       localStorage.removeItem(`llmgw-draft:${id}`);
     } catch {}
@@ -611,6 +624,7 @@ export default function IndirectCodePage() {
         if (msg.sessionId) review.addSessionFile(msg.sessionId, a);
         composer.noteAttachmentUploaded(msg.requestId, a, msg.sessionId);
         transcript.editAttachments.noteAttachmentUploaded(msg.requestId, a, msg.sessionId);
+        queue.editDraft.noteAttachmentUploaded(msg.requestId, a, msg.sessionId);
         break;
       }
 
@@ -643,6 +657,7 @@ export default function IndirectCodePage() {
         if (sid) {
           const atts = r.attachments || r.Attachments || [];
           review.noteSessionFiles(sid, atts);
+          queue.noteQueue(sid, r.queue);
         }
         if (sid && sid === activeSessionId()) {
           transcript.applySnapshot(sid, r);
@@ -662,6 +677,11 @@ export default function IndirectCodePage() {
       case "session_content": {
         if (msg.sessionId !== activeSessionId()) break;
         transcript.applySessionContent(msg.sessionId, msg.messages || [], msg.compaction);
+        break;
+      }
+
+      case "session_queue": {
+        queue.noteQueue(msg.sessionId, msg.queue);
         break;
       }
 
@@ -745,6 +765,7 @@ export default function IndirectCodePage() {
         if (projects.isProjectCreation(msg.requestId) && projects.showNewProjectModal()) { projects.setFolderError(msg.message || "Could not create project"); break; }
         if (msg.sessionId && msg.sessionId !== activeSessionId()) break;
         if (transcript.editAttachments.failUpload(msg.requestId, msg.message || "Upload failed")) break;
+        if (queue.editDraft.failUpload(msg.requestId, msg.message || "Upload failed")) break;
         if (review.failPreview(msg.requestId, msg.message || "Preview failed")) break;
         if (composer.failUpload(msg.requestId, msg.message || "Upload failed")) break;
         if (msg.replyTo === "create_session") setCreatingSession(false);
@@ -1025,7 +1046,6 @@ export default function IndirectCodePage() {
     hosts.setHostMenuOpen(false);
     projects.setNewProjectMenuOpen(false);
     composer.setAddContextOpen(false);
-    composer.setFilesMenuOpen(false);
     setModelMenuOpen(false);
     projects.setProjectMenuOpen(false);
     setUsageOpen(false);
@@ -1087,7 +1107,6 @@ export default function IndirectCodePage() {
     modelPickerBody,
     activeContext,
     addBtn,
-    filesBtn,
     modelBtn,
   };
   const modalValue: ModalCtxValue = {
@@ -1127,6 +1146,7 @@ export default function IndirectCodePage() {
       transcript={transcriptValue}
       turnChanges={turnChanges}
       composer={composerValue}
+      queue={queue}
       modal={modalValue}
       ui={uiValue}
     >

@@ -58,6 +58,7 @@ render(() => {
     },
     onClearConversation: () => setSid(""),
     onBeginConversation: () => {},
+    onQueueMessage: () => {},
     isCreatingSession: () => false,
   });
   Object.assign(api, { c, t, review, setOnline, setHost, setSid, sid });
@@ -74,6 +75,7 @@ render(() => {
       transcript={t as any}
       turnChanges={{} as any}
       composer={{ ...c, activeModel: () => "m" } as any}
+      queue={{ queues: () => ({}), queueOf: () => [] } as any}
       modal={review as any}
       ui={{ isMobile: () => false } as any}
     >

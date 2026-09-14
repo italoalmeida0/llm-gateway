@@ -142,6 +142,10 @@ type SessionRecord struct {
 	// FileBalloons holds one persistent file-changes balloon per finished
 	// turn that touched files (snapshot-based, no git).
 	FileBalloons []filetrack.TurnChanges `json:"fileBalloons,omitempty"`
+	// Queue holds user messages waiting for the running turn to finish.
+	// Drained FIFO: when a turn completes normally, the head is promoted
+	// to a new turn. A cancelled turn never drains the queue.
+	Queue []QueuedMessage `json:"queue,omitempty"`
 }
 
 // SessionSummary is returned to the web client for listing.
@@ -235,6 +239,7 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"workspace": inspectWorkspace(rec.CWD),
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
 		"attachments":  rec.Attachments,
+		"queue":        queuePayload(rec.Queue),
 		"compaction":   rec.Compaction,
 		"turnSeq":      rec.TurnSeq,
 		"fileBalloons": fileBalloonPayloads(rec.FileBalloons),
@@ -399,6 +404,7 @@ type ActiveSession struct {
 	toolStarts        map[string]int64
 	question          *pendingQuestion
 	convert           *pendingConvert
+	sendNow           bool
 	pendingApproval   *toolApproval
 	toolProgress      map[string]string
 	thinkingStartedAt int64
@@ -791,6 +797,9 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		// persistent per-turn balloons (and resets TurnSeq) on every
 		// load→save cycle — restart, edit, delete, pin.
 		FileBalloons []filetrack.TurnChanges `json:"fileBalloons,omitempty"`
+		// Queue must round-trip like FileBalloons: dropping it here would
+		// wipe waiting messages on every load→save cycle.
+		Queue []QueuedMessage `json:"queue,omitempty"`
 	}
 	if err := json.Unmarshal(data, &rawRec); err != nil {
 		return nil, err
@@ -815,6 +824,7 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		Compaction:   rawRec.Compaction,
 		TurnSeq:      rawRec.TurnSeq,
 		FileBalloons: rawRec.FileBalloons,
+		Queue:        rawRec.Queue,
 	}
 	for _, mBytes := range rawRec.Messages {
 		msg, err := core.HydrateMessageObject(mBytes)
@@ -1032,6 +1042,7 @@ func (d *DaemonServer) quiesceSessions() {
 		act.pendingApproval = nil
 		act.question = nil
 		act.convert = nil
+		act.sendNow = false
 		act.toolProgress = nil
 		act.toolStarts = nil
 		act.record.Status = "idle"
@@ -1105,6 +1116,14 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		d.answerQuestions(raw)
 	case "convert_response":
 		d.answerFileConvert(raw)
+	case "queue_add":
+		d.handleQueueAdd(raw)
+	case "queue_update":
+		d.handleQueueUpdate(raw)
+	case "queue_remove":
+		d.handleQueueRemove(raw)
+	case "queue_send_now":
+		d.handleQueueSendNow(raw)
 	case "check_workspace":
 		d.checkWorkspace(raw)
 	case "configure_session":
@@ -1523,11 +1542,14 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		msg.Meta = d.promptMeta(temporary, req.Text, ids)
 		// Truncate everything below the edited message: stale assistant
 		// replies (and later turns) no longer belong to this timeline.
+		// Attachments belong to their turn: files referenced only by the
+		// discarded tail are pruned (bytes + extracted text removed).
 		before := len(rec.Messages)
 		rec.Messages[req.Index] = msg
 		rec.Messages = append([]provider.Message(nil), rec.Messages[:req.Index+1]...)
 		rec.FileBalloons = dropBalloonsAbove(rec.FileBalloons, req.Index+1)
 		rec.Messages = provider.RepairOrphanedToolResults(rec.Messages)
+		pruneOrphanAttachments(rec, nil)
 		rec.UpdatedAt = time.Now().UnixMilli()
 		removed := before - len(rec.Messages)
 		if removed < 0 {
@@ -1603,45 +1625,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		// Drop the resent user message itself (and everything below): the
 		// turn re-sends its text, so keeping it would duplicate it.
 		d.truncateAndRun(req.SessionID, userIdx, messageUserText(rec.Messages[userIdx]), req.Model, req.YOLO, messageAttachmentIDs(rec.Messages[userIdx], rec.Attachments))
-
-	case "delete_message":
-		var req struct {
-			SessionID string `json:"sessionId"`
-			Index     int    `json:"index"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		rec, err := d.loadSession(req.SessionID)
-		if err != nil || req.Index < 0 || req.Index >= len(rec.Messages) {
-			return
-		}
-		if rec.Messages[req.Index].Role != provider.RoleUser {
-			return
-		}
-		if d.sessionRunning(req.SessionID) {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID, "sessionId": req.SessionID,
-				"message": "Stop the current turn before deleting",
-			})
-			return
-		}
-		rec.Messages = append(rec.Messages[:req.Index], rec.Messages[req.Index+1:]...)
-		rec.Messages = provider.RepairOrphanedToolResults(rec.Messages)
-		rec.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(rec)
-		d.sessionsMu.RLock()
-		if act, ok := d.sessions[req.SessionID]; ok {
-			act.mu.Lock()
-			act.record = rec
-			act.mu.Unlock()
-		}
-		d.sessionsMu.RUnlock()
-		_ = d.sendWS(map[string]any{
-			"type":       "session_content",
-			"hostId":     d.config.HostID,
-			"sessionId":  rec.ID,
-			"messages":   sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
-			"compaction": rec.Compaction,
-		})
 
 	case "get_attachment":
 		d.getAttachment(raw)
@@ -1829,22 +1812,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			SessionID string `json:"sessionId"`
 		}
 		_ = json.Unmarshal(raw, &req)
-
-		d.sessionsMu.RLock()
-		act := d.sessions[req.SessionID]
-		d.sessionsMu.RUnlock()
-
-		if act != nil {
-			act.mu.Lock()
-			if act.record.Turn != nil && act.record.Turn.Status == "running" {
-				act.record.Turn.Status = "cancelling"
-				_ = d.saveSession(act.record)
-			}
-			if act.cancel != nil {
-				act.cancel()
-			}
-			act.mu.Unlock()
-		}
+		d.cancelTurn(req.SessionID)
 
 	case "tool_approval_response":
 		var req struct {
@@ -1894,76 +1862,102 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			AttachmentIDs []string        `json:"attachmentIds"`
 		}
 		_ = json.Unmarshal(raw, &req)
+		d.startPrompt(req.SessionID, req.Text, req.AttachmentIDs, req.Model, req.YOLO, req.Options)
+	}
+}
 
-		cleanText := strings.TrimSpace(req.Text)
-		if isSlashCommand(cleanText) {
-			if len(req.AttachmentIDs) > 0 {
-				d.attachmentError("", req.SessionID, "Send attachments in a message before running a command")
-				return
-			}
-			d.handleSlashCommand(req.SessionID, cleanText)
+// startPrompt validates and launches a new turn for sessionID. It is the
+// single entry for user prompts: the "prompt" command, queue promotion
+// (auto-start and send-now) all flow through here.
+func (d *DaemonServer) startPrompt(sessionID, text string, attachmentIDs []string, model string, yolo bool, options *SessionOptions) {
+	cleanText := strings.TrimSpace(text)
+	if isSlashCommand(cleanText) {
+		if len(attachmentIDs) > 0 {
+			d.attachmentError("", sessionID, "Send attachments in a message before running a command")
 			return
 		}
+		d.handleSlashCommand(sessionID, cleanText)
+		return
+	}
 
-		act, err := d.getOrCreateActiveSession(req.SessionID)
-		if err != nil {
+	act, err := d.getOrCreateActiveSession(sessionID)
+	if err != nil {
+		_ = d.sendWS(map[string]any{
+			"type":      "error",
+			"hostId":    d.config.HostID,
+			"sessionId": sessionID,
+			"message":   "Session not found: " + err.Error(),
+		})
+		return
+	}
+
+	act.mu.Lock()
+	err = validateAttachmentIDs(act.record, attachmentIDs)
+	running := act.record.Status == "running"
+	act.mu.Unlock()
+	if err != nil {
+		d.attachmentError("", sessionID, err.Error())
+		return
+	}
+	if running {
+		d.attachmentError("", sessionID, "Turn already in flight")
+		return
+	}
+	if cleanText == "" && len(attachmentIDs) == 0 {
+		return
+	}
+
+	// Instant provisional title from the prompt's own words (their first 6
+	// content words); the LLM-generated title replaces it later via
+	// rename. Instant feedback: the sidebar never shows five stale "New
+	// conversation" rows again.
+	act.mu.Lock()
+	if model != "" {
+		act.record.Model = model
+	}
+	if options != nil {
+		act.record.Options = normalizedOptions(*options)
+	}
+	act.record.Draft = ""
+	act.record.EditingMsg = nil
+	_ = d.saveSession(act.record)
+	if !d.config.Settings.NoAutoTitle && (act.record.Title == "" || act.record.Title == "New conversation") {
+		if t := instantTitle(cleanText); t != "" {
+			act.record.Title = t
+			act.record.TitleSource = "pending"
+			act.record.UpdatedAt = time.Now().UnixMilli()
+			_ = d.saveSession(act.record)
 			_ = d.sendWS(map[string]any{
-				"type":      "error",
+				"type":      "session_renamed",
 				"hostId":    d.config.HostID,
-				"sessionId": req.SessionID,
-				"message":   "Session not found: " + err.Error(),
+				"sessionId": act.record.ID,
+				"title":     t,
+				"auto":      true,
 			})
-			return
 		}
+	}
+	act.mu.Unlock()
 
-		act.mu.Lock()
-		err = validateAttachmentIDs(act.record, req.AttachmentIDs)
-		running := act.record.Status == "running"
-		act.mu.Unlock()
-		if err != nil {
-			d.attachmentError("", req.SessionID, err.Error())
-			return
-		}
-		if running {
-			d.attachmentError("", req.SessionID, "Turn already in flight")
-			return
-		}
-		if cleanText == "" && len(req.AttachmentIDs) == 0 {
-			return
-		}
+	go d.runAgentTurn(act, text, "", yolo, attachmentIDs)
+}
 
-		// Instant provisional title from the prompt's own words (their first 6
-		// content words); the LLM-generated title replaces it later via
-		// rename. Instant feedback: the sidebar never shows five stale "New
-		// conversation" rows again.
+// cancelTurn marks the running turn as cancelling and cancels its context.
+// The turn finalizer treats it as cancelled: the queue is NOT drained.
+func (d *DaemonServer) cancelTurn(sessionID string) {
+	d.sessionsMu.RLock()
+	act := d.sessions[sessionID]
+	d.sessionsMu.RUnlock()
+
+	if act != nil {
 		act.mu.Lock()
-		if req.Model != "" {
-			act.record.Model = req.Model
+		if act.record.Turn != nil && act.record.Turn.Status == "running" {
+			act.record.Turn.Status = "cancelling"
+			_ = d.saveSession(act.record)
 		}
-		if req.Options != nil {
-			act.record.Options = normalizedOptions(*req.Options)
-		}
-		act.record.Draft = ""
-		act.record.EditingMsg = nil
-		_ = d.saveSession(act.record)
-		if !d.config.Settings.NoAutoTitle && (act.record.Title == "" || act.record.Title == "New conversation") {
-			if t := instantTitle(cleanText); t != "" {
-				act.record.Title = t
-				act.record.TitleSource = "pending"
-				act.record.UpdatedAt = time.Now().UnixMilli()
-				_ = d.saveSession(act.record)
-				_ = d.sendWS(map[string]any{
-					"type":      "session_renamed",
-					"hostId":    d.config.HostID,
-					"sessionId": act.record.ID,
-					"title":     t,
-					"auto":      true,
-				})
-			}
+		if act.cancel != nil {
+			act.cancel()
 		}
 		act.mu.Unlock()
-
-		go d.runAgentTurn(act, req.Text, "", req.YOLO, req.AttachmentIDs)
 	}
 }
 
@@ -2225,6 +2219,9 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	}
 	rec.Messages = append([]provider.Message(nil), rec.Messages[:keep]...)
 	rec.FileBalloons = dropBalloonsAbove(rec.FileBalloons, keep)
+	// The new turn re-sends attachmentIDs right after: keep them while
+	// pruning files orphaned by the discarded tail.
+	pruneOrphanAttachments(rec, attachmentIDs)
 	// Projection anchor invalidation: truncating the append-only history
 	// below the compaction cut point would leave the chain head pointing
 	// past the end of the log. Drop it; the next compaction re-anchors.
@@ -2309,6 +2306,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	act.record.Status = "running"
 	act.question = nil
 	act.convert = nil
+	act.sendNow = false
 	act.record.TurnSeq++
 	turnSeq := act.record.TurnSeq
 	act.record.Turn = &TurnActivity{StartedAt: time.Now().UnixMilli(), Status: "running"}

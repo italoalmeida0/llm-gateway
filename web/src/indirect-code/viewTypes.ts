@@ -64,6 +64,16 @@ export interface StoredAttachment {
   size: number;
 }
 
+/** One waiting user message (daemon session queue). */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  attachmentIds: string[];
+  model: string;
+  yolo: boolean;
+  createdAt: number;
+}
+
 export interface WorkspaceStatus {
   path: string;
   status: "available" | "missing" | "unavailable";

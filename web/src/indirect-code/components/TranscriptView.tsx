@@ -11,6 +11,7 @@ import {
 import { HistoryView } from "./HistoryView";
 import { ApprovalCard } from "./ApprovalCard";
 import { QuestionPanel } from "./QuestionModal";
+import { QueueCard } from "./QueueCard";
 import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
 import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges } from "../ctx";
 import { TurnChangesBalloon } from "./TurnChangesBalloon";
@@ -282,7 +283,6 @@ export function TranscriptView() {
                   onFork={() => t.forkMessage(block)}
                   onCopy={() => t.copyMsg(msg.id, textOf())}
                   onEdit={() => t.startEditMsg(rawIdx(), msg)}
-                  onDelete={() => t.deleteMsg(rawIdx())}
                 />
               </Show>
             </div>
@@ -352,13 +352,6 @@ export function TranscriptView() {
     }}
   </For>
 
-  <ApprovalCard
-    pendingApproval={t.pendingApproval}
-    convWidthClass={ui.convWidthClass}
-    respondApproval={t.respondApproval}
-    setYoloMode={c.setYoloMode}
-  />
-
   <Show when={s.activeSessionId() && t.pendingQuestion()?.id} keyed>{(id) =>
     <div class={`${ui.convWidthClass()} mx-auto`}>
       <QuestionPanel
@@ -370,6 +363,13 @@ export function TranscriptView() {
       />
     </div>
   }</Show>
+  <ApprovalCard
+    pendingApproval={t.pendingApproval}
+    convWidthClass={ui.convWidthClass}
+    respondApproval={t.respondApproval}
+    setYoloMode={c.setYoloMode}
+  />
+  <QueueCard />
 </div>
 </div>
 </Show>

@@ -57,7 +57,6 @@ export function NewProjectModal() {
           <button
             type="submit"
             class="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-300 hover:text-ink-100 hover:bg-ink-800 transition-colors flex items-center gap-1 cursor-pointer shrink-0 border border-line/60"
-            title="Navigate to path"
           >
             <span>Go</span>
             <Iconify icon="lucide:arrow-right" size={13} />
@@ -88,7 +87,6 @@ export function NewProjectModal() {
                 }
                 onClick={() => s.requestFolders(s.folderParent())}
                 class="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium text-ink-300 hover:text-ink-100 hover:bg-ink-800 border border-line/60 transition-colors disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
-                title="Go to parent directory"
               >
                 <Iconify icon="lucide:arrow-up" size={13} />
                 <span>Parent</span>

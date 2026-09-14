@@ -1,6 +1,6 @@
 import type { MCPServerConfig, SkillConfig } from "./types";
 import type { SessionContext } from "./context";
-import type { TodoItem } from "./viewTypes";
+import type { QueuedMessage, TodoItem } from "./viewTypes";
 
 /** Typed daemon protocol (WebSocket boundary).
  *
@@ -34,11 +34,14 @@ export type DaemonCommand = CommandBase &
   | { type: "pull"; collection: string }
   | { type: "configure_session"; sessionId: string; model: string; options: Omit<SessionChoice, "model"> }
   | { type: "prompt"; sessionId: string; text: string; model: string; yolo: boolean; options: Omit<SessionChoice, "model">; attachmentIds: string[] }
+  | { type: "queue_add"; sessionId: string; text: string; model: string; yolo: boolean; attachmentIds: string[] }
+  | { type: "queue_update"; sessionId: string; queueId: string; text: string; attachmentIds: string[] }
+  | { type: "queue_remove"; sessionId: string; queueId: string }
+  | { type: "queue_send_now"; sessionId: string; queueId: string }
   | { type: "cancel"; sessionId: string }
   | { type: "fork_session"; sessionId: string; index: number; requestId?: string; editText?: string; editModel?: string; editYolo?: boolean; attachmentIds?: string[] }
   | { type: "regenerate"; sessionId: string; index: number; text?: string; model: string; yolo: boolean }
   | { type: "edit_message"; sessionId: string; index: number; text: string; model: string; yolo: boolean; regenerate: boolean; attachmentIds?: string[] }
-  | { type: "delete_message"; sessionId: string; index: number }
   | { type: "create_session"; requestId: string; cwd: string; title: string; model: string; options: Omit<SessionChoice, "model"> }
   | { type: "delete_session"; sessionId: string }
   | { type: "rename_session"; sessionId: string; title: string }
@@ -136,6 +139,7 @@ export type DaemonEvent = EventBase &
     | { type: "tool_approval_request"; sessionId?: string; callId: string; tool: string; args: unknown }
     | { type: "convert_request"; sessionId?: string; requestId: string; filename: string; data: string }
     | { type: "convert_resolved"; sessionId?: string; requestId: string }
+    | { type: "session_queue"; sessionId?: string; queue: QueuedMessage[] }
     | { type: "agent_event"; sessionId?: string; event?: AgentEvent }
     | { type: "error"; requestId?: string; sessionId?: string; message?: string; replyTo?: string }
   );

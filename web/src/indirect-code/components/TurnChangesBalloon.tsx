@@ -54,7 +54,7 @@ function FileChangesRow(props: { f: TurnChangedFile; scrollKey: string }) {
           />
         </Show>
         <FileIcon path={props.f.rel || props.f.path} size={13} />
-        <span class="text-[11px] font-mono text-ink-200 truncate" title={props.f.path}>
+        <span class="text-[11px] font-mono text-ink-200 truncate">
           {props.f.rel || props.f.path}
         </span>
         <span class={`text-[10px] uppercase tracking-wide flex items-center gap-1 shrink-0 ${meta().cls}`}>

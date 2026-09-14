@@ -47,6 +47,8 @@ export function createComposer(opts: {
   onClearConversation: () => void;
   /** No session: the page creates one in the active project. */
   onBeginConversation: () => void;
+  /** Turn running: the page queues the message instead of sending. */
+  onQueueMessage: (text: string, attachmentIds: string[], model: string, yolo: boolean) => void;
   isCreatingSession: () => boolean;
   getSessionDraft?: () => string;
   getNewDraft?: () => string;
@@ -71,10 +73,9 @@ export function createComposer(opts: {
     if (!opts.isOpen() || !opts.isHostOnline()) attachments.cancelUploads();
   });
 
-  // Composer menus (addBtn/filesBtn anchors live on the page, as before —
+  // Composer menus (addBtn anchor lives on the page, as before —
   // ref={ctx.x} copies the value, always undefined; semantics preserved).
   const [addContextOpen, setAddContextOpen] = createSignal(false);
-  const [filesMenuOpen, setFilesMenuOpen] = createSignal(false);
 
   // Autocomplete Palette
   const [slashIndex, setSlashIndex] = createSignal(0);
@@ -376,7 +377,6 @@ export function createComposer(opts: {
       opts.onBeginConversation();
       return;
     }
-    if (opts.isSessionRunning()) return;
 
     // Upload pending attachments first so the daemon owns the bytes.
     let attachmentIds: string[] = [];
@@ -406,8 +406,7 @@ export function createComposer(opts: {
         opts.getHostId() !== hostId ||
         opts.getSessionId() !== sid ||
         !opts.isOpen() ||
-        !opts.isHostOnline() ||
-        opts.isSessionRunning()
+        !opts.isHostOnline()
       )
         return;
       if (
@@ -418,6 +417,18 @@ export function createComposer(opts: {
       const model = opts.getModel();
       const options = opts.getOptions();
       const cleanText = sanitizeUserText(text);
+      // A turn started while composing or uploading: queue instead of
+      // sending. The daemon promotes the head when the turn completes.
+      if (opts.isSessionRunning()) {
+        clearAttachments();
+        if (inputPrompt().trim() === text) setInputPrompt("");
+        lastSentDraft = "";
+        if (sid && opts.isOpen()) {
+          opts.send({ type: "set_draft", sessionId: sid, draft: "" });
+        }
+        opts.onQueueMessage(cleanText, attachmentIds, model, options.access === "full");
+        return;
+      }
       const displayText = cleanText;
       const userMsg: ChatMessage = {
         id: `user_${Date.now()}`,
@@ -476,8 +487,6 @@ export function createComposer(opts: {
     mentions,
     addContextOpen,
     setAddContextOpen,
-    filesMenuOpen,
-    setFilesMenuOpen,
     slashIndex,
     setSlashIndex,
     slashMatches,

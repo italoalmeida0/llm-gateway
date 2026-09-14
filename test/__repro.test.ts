@@ -9,7 +9,7 @@ const flat = (blocks: any[]) => JSON.stringify(blocks.map((b: any) => b.msg.role
 test("discard sequence repaints at every step", () => {
   const [state, setState] = createStore<{ blocks: any[] }>({ blocks: [] });
   const render = (msgs: any[]) => {
-    const blocks = buildRenderBlocks(msgs, { hideToolMessages: true }).map((b: any) => ({ ...b, id: b.msg.id }));
+    const blocks = buildRenderBlocks(msgs).map((b: any) => ({ ...b, id: b.msg.id }));
     setState("blocks", reconcile(blocks));
     return flat(state.blocks);
   };

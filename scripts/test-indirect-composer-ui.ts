@@ -35,6 +35,36 @@ try {
   page.on("pageerror", (error: Error) => errors.push(String(error)));
   await page.goto(server.url.toString());
   await page.waitForFunction(() => (window as any).composerUI.c);
+  // Explicit writes after a session switch must survive the deferred restore.
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.c.setInputPrompt("Draft A");
+    a.setSid("session-b");
+    a.c.setInputPrompt("Draft B");
+  });
+  assert.equal(await page.locator("#rc-composer").inputValue(), "Draft B");
+  await page.evaluate(() => (window as any).composerUI.setSid("session-a"));
+  assert.equal(await page.locator("#rc-composer").inputValue(), "Draft A");
+  await page.evaluate(() => (window as any).composerUI.setHost("host-b"));
+  assert.equal(await page.locator("#rc-composer").inputValue(), "");
+  await page.evaluate(() => (window as any).composerUI.setHost("host-a"));
+  assert.equal(await page.locator("#rc-composer").inputValue(), "Draft A");
+  // Mirror mutations need not bump activity timestamps.
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.mirror.store().projects.insert({id:"p",hostId:"host-a",name:"Old",path:"/work",createdAt:1});
+    a.mirror.store().sessions.insert({id:"s",hostId:"host-a",title:"Old",cwd:"/work",createdAt:1,updatedAt:1,model:"m",status:"idle",pinned:false});
+  });
+  await page.waitForFunction(() => (window as any).composerUI.mirror.projects()[0]?.name === "Old");
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.mirror.store().projects.updateOne({id:"p"}, {$set:{name:"Renamed",protected:true}});
+    a.mirror.store().sessions.updateOne({id:"s"}, {$set:{title:"Renamed",status:"running",pinned:true,options:{effort:"high",mode:"plan",access:"full",skills:["review"]}}});
+  });
+  assert.deepEqual(await page.evaluate(() => {
+    const m = (window as any).composerUI.mirror;
+    return [m.projects()[0].name,m.projects()[0].protected,m.sessions()[0].title,m.sessions()[0].status,m.sessions()[0].pinned,m.sessions()[0].options.skills];
+  }), ["Renamed",true,"Renamed","running",true,["review"]]);
   const state = () =>
     page.evaluate(() => {
       const a = (window as any).composerUI;
@@ -135,17 +165,17 @@ try {
     const a = (window as any).composerUI;
     await Promise.all([
       a.c.handleFiles(
-        Array.from({ length: 4 }, (_, i) => new File(["a"], `a${i}.txt`)),
+        Array.from({ length: 20 }, (_, i) => new File(["a"], `a${i}.txt`)),
       ),
       a.c.handleFiles(
-        Array.from({ length: 4 }, (_, i) => new File(["b"], `b${i}.txt`)),
+        Array.from({ length: 20 }, (_, i) => new File(["b"], `b${i}.txt`)),
       ),
     ]);
   });
   assert.equal(
     (await state()).pending.length,
-    5,
-    "concurrent drops must respect five-file cap",
+    30,
+    "concurrent drops must respect the 30-file cap",
   );
   await reset();
   await page.evaluate(async () => {
@@ -296,6 +326,7 @@ try {
         { role: "assistant", content: [{ text: "answer" }] },
       ],
     });
+    a.t.startEditMsg(3, a.t.messages().find((m: any) => m.srcIdx === 3));
   });
   assert.equal(
     await page.evaluate(
@@ -409,6 +440,46 @@ try {
     null,
     "closing preview must cancel its late response",
   );
+  // Empty edits, retained attachment choices and active editor restore locally.
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.rawEdit = {status:"idle", messages:[{role:"user",content:[{text:"Original"}],meta:{attachments:JSON.stringify([{id:"keep",name:"keep.txt"},{id:"remove",name:"remove.txt"}])}}]};
+    a.t.applySnapshot("session-a", a.rawEdit);
+    a.t.startEditMsg(0, a.t.messages()[0]);
+    a.t.updateEditingMsgText("");
+    a.t.setEditingAttachments(a.t.editingAttachments().filter((f:any) => f.id === "keep"));
+  });
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.t.resetForSession();
+    a.t.applySnapshot("session-a", a.rawEdit);
+  });
+  assert.deepEqual(await page.evaluate(() => {
+    const t = (window as any).composerUI.t;
+    return [t.editingMsgIdx(), t.editingMsgText(), t.editingAttachments().map((f:any) => f.id)];
+  }), [0,"",["keep"]]);
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.t.resetForSession();a.setHost("host-b");a.t.applySnapshot("session-a", a.rawEdit);
+    a.t.startEditMsg(0, a.t.messages()[0]);
+  });
+  assert.equal(await page.evaluate(() => (window as any).composerUI.t.editingMsgText()), "Original", "same session index on another host must not inherit edits");
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.t.cancelEditMsg();a.t.resetForSession();a.setHost("host-a");a.t.applySnapshot("session-a", a.rawEdit);
+    a.choose = () => new Promise(resolve => a.resolveChoice = resolve);
+    a.editDone = a.t.saveEditMsg(0,a.t.messages()[0],()=>"m",()=>true);
+    a.beforeChoiceCommands = a.commands.filter((c:any) => c.type === "edit_message").length;
+    a.setHost("host-b");
+  });
+  await page.evaluate(async () => {const a=(window as any).composerUI; a.resolveChoice("resend"); await a.editDone;});
+  assert(await page.evaluate(() => {const a=(window as any).composerUI;return a.commands.filter((c:any)=>c.type === "edit_message").length === a.beforeChoiceCommands;}), "host switch invalidates a pending edit confirmation");
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.t.resetForSession();a.setHost("host-a");
+    a.t.applySnapshot("session-a",{status:"idle",messages:[{role:"user",content:[{text:"Different message at the same index"}]}]});
+  });
+  assert.equal(await page.evaluate(() => (window as any).composerUI.t.editingMsgIdx()),null,"stale drafts do not reopen on a replaced message");
   assert.deepEqual(errors, []);
   console.log(
     "PASS: duplicate names, upload correlation, caps, late reads, offline retry, mentions, IME, commands, previews, raw edit indices and attachment retention",

@@ -19,62 +19,17 @@ export function createMirror(opts: {
     const hid = opts.getHostId();
     return hid ? dataLayer.storeFor(hid) : null;
   });
-  // Memoized sorting by shallow identity: Solid memos compare by
-  // === and change pings arrive at keystroke frequency — returning the
-  // same reference when nothing changed (same ids+updatedAt) avoids
-  // recomputing the whole chain (sidebar, counters, default effects).
-  let prevSessions: SessionSummary[] | null = null;
-  let prevSessionsHid = "";
+  // Compare complete summaries: timestamps alone do not change for every
+  // mutation (project rename, session options, pin/status updates).
   const sessions = createMemo<SessionSummary[]>(() => {
     const st = store();
-    if (!st) return [];
-    const hid = opts.getHostId();
-    const sorted = st.sessions
-      .find({ hostId: hid })
-      .fetch()
-      .slice()
-      .sort((a, b) => b.updatedAt - a.updatedAt);
-    if (
-      hid === prevSessionsHid &&
-      prevSessions &&
-      prevSessions.length === sorted.length &&
-      prevSessions.every((s, i) =>
-        s.id === sorted[i].id &&
-        s.updatedAt === sorted[i].updatedAt &&
-        s.todosOpen === sorted[i].todosOpen &&
-        s.model === sorted[i].model
-      )
-    ) {
-      return prevSessions;
-    }
-    prevSessionsHid = hid;
-    prevSessions = sorted;
-    return sorted;
-  });
-  let prevProjects: Project[] | null = null;
-  let prevProjectsHid = "";
+    return st ? st.sessions.find({ hostId: opts.getHostId() }).fetch().slice()
+      .sort((a, b) => b.updatedAt - a.updatedAt) : [];
+  }, [], { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const projects = createMemo<Project[]>(() => {
     const st = store();
-    if (!st) return [];
-    const hid = opts.getHostId();
-    const ordered = projectsByActivity(st.projects.find({ hostId: hid }).fetch(), sessions());
-    if (
-      hid === prevProjectsHid &&
-      prevProjects &&
-      prevProjects.length === ordered.length &&
-      prevProjects.every((p, i) =>
-        p.id === ordered[i].id &&
-        p.path === ordered[i].path &&
-        p.folderStatus === ordered[i].folderStatus &&
-        p.collapsed === ordered[i].collapsed
-      )
-    ) {
-      return prevProjects;
-    }
-    prevProjectsHid = hid;
-    prevProjects = ordered;
-    return ordered;
-  });
+    return st ? projectsByActivity(st.projects.find({ hostId: opts.getHostId() }).fetch(), sessions()) : [];
+  }, [], { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const configDoc = createMemo(() => {
     const st = store();
     if (!st) return null;

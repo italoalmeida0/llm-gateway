@@ -9,6 +9,8 @@ export type ToolSeg =
   | { kind: "group"; cat: "explore" | "command"; units: ToolUnit[] }
   | { kind: "unit"; unit: ToolUnit; idx: number };
 
+export const MAX_TOOL_GROUP_SIZE = 5;
+
 export function partitionToolSegs(units: ToolUnit[], groupSingles = false): ToolSeg[] {
   const segs: ToolSeg[] = [];
   let run: ToolUnit[] = [];
@@ -22,6 +24,7 @@ export function partitionToolSegs(units: ToolUnit[], groupSingles = false): Tool
     runCat = null;
   };
   units.forEach((unit, i) => {
+    if (run.length === MAX_TOOL_GROUP_SIZE) flush();
     const cat = toolCatOf(unit.call?.toolName);
     if ((cat === "explore" || cat === "command") && (runCat === null || runCat === cat)) {
       runCat = cat;

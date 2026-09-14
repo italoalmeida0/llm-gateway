@@ -40,7 +40,7 @@ export interface TranscriptRenderCtx {
 /** Thinking as a tool-style row: header (bot icon + timer) with a
  * Streamdown body. Open by default while the turn runs, closed after —
  * unless the user toggled it explicitly. */
-export function renderThinkingRow(
+function renderThinkingRow(
   ctx: TranscriptRenderCtx,
   entry: Extract<TurnEntry, { kind: "thinking" }>,
   openByDefault: () => boolean,
@@ -99,8 +99,7 @@ export function renderThinkingRow(
  * a Streamdown body. Hidden (display:none, kept in the DOM) while the
  * hide-tool-messages rule, verbose filter, fuzzy dedup or the featured
  * final message takes it out of the card. */
-export function renderTextRow(
-  ctx: TranscriptRenderCtx,
+function renderTextRow(
   entry: Extract<TurnEntry, { kind: "text" }>,
   openByDefault: () => boolean,
   hidden: () => boolean,
@@ -144,10 +143,9 @@ export function renderTextRow(
  * longer affects this), closed once it ends — unless toggled explicitly.
  * Questions stay collapsed here; the questionnaire renders separately.
  */
-export function renderTurnAggregate(
+function renderTurnAggregate(
   ctx: TranscriptRenderCtx,
   series: RenderBlockSeries,
-  _isLast: boolean,
 ) {
   // NOTE: ctx.renderBlocks() is the FULL list (window only affects the <For>);
   // the running turn is always the newest block, which is always visible.
@@ -157,15 +155,6 @@ export function renderTurnAggregate(
     thoughts: series.entries.filter((e) => e.kind === "thinking").length,
   }));
   const { open, toggle } = createDisclosure(() => String(running()), running);
-  /** Finished-turn wall-clock time (daemon-stamped); the running turn
-   * already shows its live timer in the footer above the composer. */
-  const turnDuration = () => {
-    if (running()) return undefined;
-    for (const m of [series.msg, ...series.extras]) {
-      if (typeof m.turnDurationMs === "number" && m.turnDurationMs > 0) return m.turnDurationMs;
-    }
-    return undefined;
-  };
   /** The featured final renders below once idle; inside the card its rows
    * stay mounted with display:none so Solid keeps DOM identity. */
   const featured = () => series.finalMsgId != null && !running();
@@ -203,6 +192,22 @@ export function renderTurnAggregate(
     ) return true;
     return false;
   };
+  // Invisible notes must not split a visible command/exploration run. Keep
+  // those rows mounted; attach merged units to the first tool entry's key.
+  const visibleRuns = createMemo(() => {
+    const runs = new Map<string | undefined, ToolUnit[]>();
+    let run: ToolUnit[] | undefined;
+    series.entries.forEach((entry, idx) => {
+      if (entry.kind === "tools") {
+        if (!run) { run = []; runs.set(entry.id, run); }
+        run.push(...entry.units);
+      } else if (!(entry.kind === "thinking" && thinkingHidden()) &&
+        !(entry.kind === "text" && textHidden(entry, idx))) {
+        run = undefined;
+      }
+    });
+    return runs;
+  });
   return (
     <div class="w-full border-t border-line/60 overflow-hidden mt-1">
       <button
@@ -227,9 +232,6 @@ export function renderTurnAggregate(
             </span>
           )}
         </Show>
-        <Show when={turnDuration() != null}>
-          <span class="text-[11px] text-ink-500 tabular-nums shrink-0">{ctx.elapsedLabel(turnDuration()!)}</span>
-        </Show>
         <Iconify
           icon="lucide:chevron-down"
           size={12}
@@ -242,7 +244,7 @@ export function renderTurnAggregate(
             {(entry, ei) => {
               const tail = () => ei() === lastEntryIdx();
               if (entry.kind === "tools") {
-                return renderToolSegs(ctx, entry.msg.id, () => entry.units, running, isActive, isPending);
+                return renderToolSegs(ctx, entry.msg.id, () => visibleRuns().get(entry.id) ?? [], running, isActive, isPending);
               }
               if (entry.kind === "thinking") {
                 // Stale snapshot restarts must not spin: live only while
@@ -255,7 +257,7 @@ export function renderTurnAggregate(
               if (entry.kind === "text") {
                 const content = () => (entry.block.text || "").trim() !== "";
                 const streaming = () => running() && tail() && entry.msg.streaming === true;
-                return renderTextRow(ctx, entry, () => streaming() && content(), () => textHidden(entry, ei()), streaming, running);
+                return renderTextRow(entry, () => streaming() && content(), () => textHidden(entry, ei()), streaming, running);
               }
               return renderImageBlock(ctx, entry.block);
             }}
@@ -266,9 +268,22 @@ export function renderTurnAggregate(
   );
 }
 
+/** The same carrier can acquire reasoning/tools after its first text delta. */
+export function AssistantTurnContent(props: { ctx: TranscriptRenderCtx; block: RenderBlock; finished: boolean }) {
+  return <Show when={props.block.kind === "series" ? props.block : undefined}
+    fallback={renderSingleAssistant(props.ctx, props.block.msg)}>
+    {(series) => <>
+      {renderTurnAggregate(props.ctx, series())}
+      <Show when={props.finished && series().finalMsgId != null}>
+        <div class="w-full mt-2.5" data-turn-final>{renderFinalMsg(props.ctx, series())}</div>
+      </Show>
+    </>}
+  </Show>;
+}
+
 /** Featured final message of a finished turn, rendered as a plain bubble
  * below the aggregate (the files balloon comes right after). */
-export function renderFinalMsg(ctx: TranscriptRenderCtx, series: RenderBlockSeries) {
+function renderFinalMsg(ctx: TranscriptRenderCtx, series: RenderBlockSeries) {
   const msg = () => [series.msg, ...series.extras].find((m) => m.id === series.finalMsgId);
   return (
     <Show when={msg()}>
@@ -288,7 +303,7 @@ export function renderFinalMsg(ctx: TranscriptRenderCtx, series: RenderBlockSeri
 }
 
 /** Plain assistant bubble for turns with no tools and no thinking. */
-export function renderSingleAssistant(ctx: TranscriptRenderCtx, msg: ChatMessage) {
+function renderSingleAssistant(ctx: TranscriptRenderCtx, msg: ChatMessage) {
   return (
     <div class="w-full space-y-2.5">
       <For each={msg.blocks.filter((b) => b.type === "image" || (b.type === "text" && !!b.text?.trim()))}>
@@ -303,7 +318,7 @@ export function renderSingleAssistant(ctx: TranscriptRenderCtx, msg: ChatMessage
 }
 
 
-export function renderImageBlock(ctx: TranscriptRenderCtx, block: ContentBlock) {
+function renderImageBlock(ctx: TranscriptRenderCtx, block: ContentBlock) {
   const src = () =>
     block.imageData
       ? `data:${block.imageMime || "image/jpeg"};base64,${block.imageData}`
@@ -340,7 +355,7 @@ export function renderImageBlock(ctx: TranscriptRenderCtx, block: ContentBlock) 
  * aggregate card. Same grouping as before, keyed on the series card so
  * state never collides across fused messages.
  */
-export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, units: () => ToolUnit[], running: () => boolean, isActive: (u: ToolUnit) => boolean = running, isPending = isActive) {
+function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, units: () => ToolUnit[], running: () => boolean, isActive: (u: ToolUnit) => boolean = running, isPending = isActive) {
   // Partition consecutive explore/command runs into collapsible groups
   // (pure helper — algorithm lives in utils/toolSegs, covered by tests).
   const [state, setState] = createStore<{ segs: (ToolSeg & { id: string })[] }>({ segs: [] });
@@ -368,7 +383,7 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, units: (
           const { open, toggle } = createDisclosure(() => `${running()}:${active()}`, active);
           return (
             <div class="w-full" data-toolseg={segKey(seg)} style={{ "overflow-anchor": "none" }}>
-              <button
+              <Show when={seg.units.length > 1}><button
                 onClick={toggle}
                 class="w-full flex items-center gap-1.5 pl-1 pr-1.5 py-1 rounded-lg hover:bg-ink-900/70 text-[13px] text-ink-400 hover:text-ink-200 cursor-pointer"
               >
@@ -378,9 +393,9 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, units: (
                   size={12}
                   class={`text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
                 />
-              </button>
-              <DisclosureBody open={open()}>
-                <div class="ml-3 border-l border-line/40 pl-1.5 space-y-0.5" style={{ "overflow-anchor": "none" }}>
+              </button></Show>
+              <DisclosureBody open={seg.units.length === 1 || open()}>
+                <div class={seg.units.length > 1 ? "ml-3 border-l border-line/40 pl-1.5 space-y-0.5" : "space-y-0.5"} style={{ "overflow-anchor": "none" }}>
                   <For each={seg.units}>
                     {(u) => {
                       // Keep fallback keys relative to the complete tool run.
@@ -398,17 +413,7 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, units: (
   );
 }
 
-// One session row, reused by the nested project groups and the flat list.
-
-/**
- * Render blocks for the conversation (recomputed when the transcript
- * changes). Series fusing is visual only: every block keeps its lead's
- * raw index (blockRawIdx) for per-message ops.
- */
-// Preserve DOM/component identity across deltas. Rebuilding <For> entries
-// on every token remounted Markdown and collapsed its height before repaint.
-
-export function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: () => boolean, active: () => boolean) {
+function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: () => boolean, active: () => boolean) {
   const m = useToolUnitModel(ctx, msgId, u, ui, running, active);
   const part = { ctx, msgId, u, m, get running() { return running(); }, get active() { return active(); } };
   return (

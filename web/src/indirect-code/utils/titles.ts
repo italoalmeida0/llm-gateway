@@ -5,10 +5,13 @@ export function groupTitle(cat: "explore" | "command", units: ToolUnit[]): strin
     return `Ran ${units.length} command${units.length === 1 ? "" : "s"}`;
   }
   const files = units.filter((u) => u.call?.toolName === "read").length;
-  const searches = units.filter((u) => u.call?.toolName === "glob").length;
-  let t = `Explored ${files} file${files === 1 ? "" : "s"}`;
-  if (searches > 0) t += `, ${searches} search${searches === 1 ? "" : "es"}`;
-  return t;
+  const searches = units.filter((u) => u.call?.toolName === "glob" || u.call?.toolName === "search").length;
+  const inspections = units.filter((u) => u.call?.toolName === "inspect").length;
+  const parts: string[] = [];
+  if (files) parts.push(`${files} file${files === 1 ? "" : "s"}`);
+  if (searches) parts.push(`${searches} search${searches === 1 ? "" : "es"}`);
+  if (inspections) parts.push(`${inspections} director${inspections === 1 ? "y" : "ies"}`);
+  return `Explored ${parts.join(", ")}`;
 }
 
   /**

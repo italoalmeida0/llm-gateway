@@ -36,9 +36,9 @@ import assert from "node:assert/strict";
  const row=page.locator('[data-toolseg="g:explore:r1"] .group\\/tool').first();
  await page.evaluate(()=>(window as any).readNode=document.querySelector('[data-toolseg="g:explore:r1"] .group\\/tool'));
  await send([thought,call,{type:'tool_result',toolId:'r1',toolResult:'1:First line'}]);
- assert(!await row.isVisible(),'completed subgroup closes while turn continues');
- await page.locator('[data-toolseg="g:explore:r1"] > button').click();
- assert(await row.isVisible(),'manual group inspection opens');
+ assert(await row.isVisible(),'a singleton has a directly accessible tool row');
+ assert.equal(await page.locator('[data-toolseg="g:explore:r1"] > button').count(),0,'a singleton has no redundant group header');
+ assert(!await page.locator('[data-toolseg="g:explore:r1"] .max-h-96').isVisible(),'completed singleton closes its body');
  const second={type:'tool_call',toolName:'glob',toolId:'r2',toolArgs:'{"pattern":"*.ts"}'};
  await page.evaluate(()=>(window as any).turnUI.setStarts({r2:1000}));
  await send([thought,call,{type:'tool_result',toolId:'r1',toolResult:'1:First line'},second]);
@@ -79,6 +79,42 @@ import assert from "node:assert/strict";
  await page.locator('#aggregate .group\\/tool').click();
  assert(await page.getByText('remote result',{exact:false}).last().isVisible(),'MCP result remains inspectable');
  assert.equal(await page.locator('[data-tool-duration]').textContent(),'1s','MCP duration uses persisted result timing');
+ // Hidden progress notes do not split runs; append into stable chunks of five.
+ await page.evaluate(()=>{(window as any).turnUI.setHideNotes(true);(window as any).turnUI.setVerbose(false);});
+ const commands=Array.from({length:12},(_,i)=>[
+   {type:'tool_call',toolId:`cmd${i}`,toolName:i%2?'python':'bash',toolArgs:'{}'},
+   {type:'tool_result',toolId:`cmd${i}`,toolResult:'done'},
+   {type:'text',text:`Step ${i} completed`},
+ ]).flat();
+ await send(commands);
+ assert.deepEqual(await page.locator('[data-toolseg] > button').allTextContents(),['Ran 5 commands','Ran 5 commands','Ran 2 commands']);
+ const firstGroup=page.locator('[data-toolseg="g:command:cmd0"]');
+ await firstGroup.locator('> button').click();
+ await firstGroup.locator('.group\\/tool').first().click();
+ const longCommands=commands.map((b:any)=>b.type==='tool_result' && b.toolId==='cmd0' ? {...b,toolResult:'Command output\n'.repeat(300)} : b);
+ await send(longCommands);
+ await firstGroup.locator('pre.max-h-56').first().evaluate((el:HTMLElement)=>{el.scrollTop=80;(window as any).commandBody=el;});
+ await send([...longCommands,{type:'tool_call',toolName:'bash',toolId:'cmd12',toolArgs:'{}'}]);
+ assert(await firstGroup.locator('pre.max-h-56').first().evaluate((el:HTMLElement)=>el===(window as any).commandBody && el.scrollTop===80),'appending tools retains an inspected body and its scroll');
+ // A reconciled carrier must switch from plain text to aggregate without a reload.
+ await send([{type:'text',text:'First progress note'}]);
+ assert.equal(await page.locator('[data-turn-final]').count(),0);
+ await send([{type:'text',text:'First progress note'},call]);
+ assert(await page.locator('[data-toolseg="g:explore:r1"]').isVisible(),'text carrier can acquire tools');
+ await page.evaluate(()=>{
+   (window as any).turnUI.setRunning(false);
+   (window as any).turnUI.setMessages([
+     {id:'a',role:'assistant',turnIndex:1,turnDurationMs:83000,blocks:[{type:'text',text:'Earlier answer'}]},
+     {id:'a2',role:'assistant',turnIndex:1,turnDurationMs:83000,blocks:[{type:'text',text:'Chosen final answer'}]},
+   ]);
+ });await settle();
+ assert.equal(await page.locator('[data-turn-final]').count(),1,'text-only multi-step turn has one featured final');
+ assert.equal(await page.locator('[data-turn-final]').textContent(),'Chosen final answer');
+ assert.equal(await page.getByText('Earlier answer',{exact:true}).filter({visible:true}).count(),0);
+ assert.equal(await page.locator('#actions [data-turn-duration]').textContent(),'1m 23s');
+ assert.equal(await page.locator('#aggregate [data-turn-duration]').count(),0);
+ await page.evaluate(()=>(window as any).turnUI.setMessages([{id:'a',role:'assistant',turnIndex:1,turnDurationMs:83000,blocks:[{type:'text',text:'Single final answer'}]}]));await settle();
+ assert.equal(await page.locator('#actions [data-turn-duration]').textContent(),'1m 23s','plain turn also has its duration');
  assert.deepEqual(errors,[]);
  console.log('PASS: live thinking, first-click collapse, DOM identity, tool result closure, subgroup growth, turn end, question, file refresh and finalization');
  } finally {await browser.close();server.stop(true);}

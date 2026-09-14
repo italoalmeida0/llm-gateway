@@ -81,6 +81,6 @@ describe("composer tokens and attachments", () => {
         new File([], "vector.svg", { type: "image/svg+xml" }),
         new TextEncoder().encode("<svg/>"),
       ).blocked,
-    ).toContain("PNG, JPEG, GIF or WebP");
+    ).toContain("PNG, JPEG, GIF, WebP or BMP");
   });
 });

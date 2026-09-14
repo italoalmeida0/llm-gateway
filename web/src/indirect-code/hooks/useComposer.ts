@@ -1,5 +1,5 @@
 import type { DaemonCommand } from "../daemon-protocol";
-import { createEffect, createMemo, createSignal } from "solid-js";
+import { createEffect, createMemo, createSignal, type Setter } from "solid-js";
 import { REASONING_LEVELS, SLASH_COMMANDS } from "../constants";
 import { formatEffort, normalizeEffort } from "../utils/format";
 import type { ChatMessage } from "../types";
@@ -45,7 +45,24 @@ export function createComposer(opts: {
   onQueueMessage: (text: string, attachmentIds: string[], model: string, yolo: boolean) => void;
   isCreatingSession: () => boolean;
 }) {
-  const [inputPrompt, setInputPrompt] = createSignal("");
+  const [inputPrompt, setInputPromptValue] = createSignal("");
+  let currentSid: string | null = null;
+  let currentHost = "";
+  // Persist at the edit boundary. A session switch and an explicit write can
+  // happen in one batch (session_created); a later restore must not erase it.
+  const setInputPrompt: Setter<string> = (value) => {
+    const host = opts.getHostId(), sid = opts.getSessionId();
+    const previous = host === currentHost && sid === currentSid ? inputPrompt() : readLocalDraft(host, sid);
+    const text = typeof value === "function" ? value(previous) : value;
+    currentHost = host;
+    currentSid = sid;
+    setInputPromptValue(() => text);
+    try {
+      if (text) localStorage.setItem(draftKey(host, sid), text);
+      else localStorage.removeItem(draftKey(host, sid));
+    } catch {}
+    return text;
+  };
   const mentions = createMentions({
     ...opts,
     text: inputPrompt,
@@ -105,15 +122,13 @@ export function createComposer(opts: {
   // The composer text is saved to localStorage per host+session (or per
   // host for a not-yet-created conversation) and restored on switch.
 
-  let currentSid: string | null = null;
-  let currentHost = "";
   createEffect(() => {
     const sid = opts.getSessionId();
     const host = opts.getHostId();
     if (sid !== currentSid || host !== currentHost) {
       currentHost = host;
       currentSid = sid;
-      setInputPrompt(readLocalDraft(host, sid));
+      setInputPromptValue(readLocalDraft(host, sid));
     }
   });
 
@@ -128,16 +143,6 @@ export function createComposer(opts: {
       return "";
     }
   }
-
-  createEffect(() => {
-    const text = inputPrompt();
-    const sid = opts.getSessionId();
-    const host = opts.getHostId();
-    try {
-      if (text) localStorage.setItem(draftKey(host, sid), text);
-      else localStorage.removeItem(draftKey(host, sid));
-    } catch {}
-  });
 
   // Routes /commands: UI-backed ones are handled locally (modals, silent
   // setters); recognized transcript commands go to the daemon. Returns true when fully handled.

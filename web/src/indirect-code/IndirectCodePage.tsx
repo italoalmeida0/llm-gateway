@@ -150,16 +150,15 @@ export default function IndirectCodePage() {
     send: (payload) => relay.send(payload),
     isOpen: () => relay.wsOpen(),
     getSessionId: () => activeSessionId(),
+    getHostId: () => hosts.activeHostId(),
     getProjectId: () => projects.activeProject()?.id || "",
     toast: notice.toast,
     showChoice: modals.showChoice,
-    showConfirm: modals.showConfirm,
     onTurnIdle: () => turnChanges.requestBalloons(),
     onUsageContext: (ctx) => {
       const configured = gatewayModels().find((m) => m.id === ctx.model)?.context ?? 0;
       if (configured !== ctx.windowTokens) void loadGatewayModels();
     },
-    isHideToolMessages: () => !verboseChat() || hideToolMessages(),
     onDiscardResendOrRegenerate: (sid: string) => {
       pendingDiscardReloadSid = sid;
     },
@@ -451,7 +450,6 @@ export default function IndirectCodePage() {
       const hid = hosts.activeHostId();
       if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, "new");
     } catch {}
-    composer.setInputPrompt("");
     turnChanges.reset();
     notice.setAppNotice(null);
     options.applyOptions(options.getLastLocalSelection() || mirror.configDoc()?.lastSelection);
@@ -501,7 +499,7 @@ export default function IndirectCodePage() {
       const keys: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        if (k && (k === `llmgw-draft:${hosts.activeHostId()}:${id}` || k.startsWith(`llmgw-edit:${id}:`))) keys.push(k);
+        if (k && (k === `llmgw-draft:${hosts.activeHostId()}:${id}` || k.startsWith(`llmgw-edit:${hosts.activeHostId()}:${id}:`))) keys.push(k);
       }
       for (const k of keys) localStorage.removeItem(k);
     } catch {}
@@ -574,6 +572,7 @@ export default function IndirectCodePage() {
           if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, r.id);
         } catch {}
         composer.setInputPrompt(firstDraft);
+        try { localStorage.removeItem(`llmgw-draft:${hosts.activeHostId()}:new`); } catch {}
         options.applyOptions(options.getLastLocalSelection() || r.options);
         // Attachments stay in the draft until upload succeeds on this new session.
         void composer.sendPrompt();
@@ -1157,4 +1156,3 @@ export default function IndirectCodePage() {
     </RemoteCodeProvider>
   );
 }
-

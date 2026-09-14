@@ -1,5 +1,5 @@
 import type { DaemonCommand } from "../daemon-protocol";
-import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { copyWithToast } from "../../ui";
 import { clearToolScrolls } from "../utils/scrollMemory";
@@ -39,15 +39,14 @@ export function createTranscript(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
   getSessionId: () => string;
+  getHostId: () => string;
   getProjectId?: () => string;
   toast: (message: string, kind?: "ok" | "err") => void;
   showChoice: (o: { title: string; message: string; options: { id: string; label: string; hint?: string; primary?: boolean }[] }) => Promise<string | null>;
-  showConfirm: (o: { title?: string; message?: string; confirmText?: string; cancelText?: string; danger?: boolean }) => Promise<boolean>;
   /** Turn became idle: the page refreshes the review. */
   onTurnIdle: () => void;
   /** Context received in usage: the page compares it with the catalog. */
   onUsageContext: (ctx: SessionContext) => void;
-  isHideToolMessages?: () => boolean;
   onDiscardResendOrRegenerate?: (sessionId: string) => void;
   onForkKind?: (kind: "resend" | "regenerate" | "fork") => void;
 }) {
@@ -223,8 +222,7 @@ export function createTranscript(opts: {
   // Render blocks (reconciled store to preserve DOM identity across deltas)
   const [renderState, setRenderState] = createStore<{ blocks: (RenderBlock & { id: string })[] }>({ blocks: [] });
   createEffect(() => {
-    const hide = opts.isHideToolMessages ? opts.isHideToolMessages() : true;
-    const blocks = buildRenderBlocks(messages(), { hideToolMessages: hide }).map((block) => ({ ...block, id: block.msg.id }));
+    const blocks = buildRenderBlocks(messages()).map((block) => ({ ...block, id: block.msg.id }));
     setRenderState("blocks", reconcile(blocks, { merge: true }));
   });
   const renderBlocks = () => renderState.blocks;
@@ -298,6 +296,7 @@ export function createTranscript(opts: {
   }
   function applySessionContent(sessionId: string, rawMsgs: any[], compaction?: any) {
     setMessages((prev) => normalizeSessionMessages(rawMsgs, prev));
+    restoreEditDraft();
     if (compaction !== undefined) {
       setSessionCompaction(compaction);
     }
@@ -415,6 +414,7 @@ export function createTranscript(opts: {
   // Offers fork-vs-resend: fork preserves the current timeline in a copy.
   async function regenerateMsg(idx: number, getModel: () => string, getYolo: () => boolean) {
     const sid = opts.getSessionId();
+    const host = opts.getHostId();
     if (!sid || !opts.isOpen()) return;
     if (sessionStatus() === "running") {
       opts.toast("Stop the current turn first", "err");
@@ -445,7 +445,7 @@ export function createTranscript(opts: {
         { id: "fork", label: "Fork & regenerate", hint: "Preserves here, regenerates in a copy" },
       ],
     });
-    if (!choice || opts.getSessionId() !== sid || !opts.isOpen() || sessionStatus() === "running") return;
+    if (!choice || opts.getHostId() !== host || opts.getSessionId() !== sid || !opts.isOpen() || sessionStatus() === "running") return;
     if (choice === "fork") {
       forkRequestId = crypto.randomUUID();
       setForking(true);
@@ -476,25 +476,46 @@ export function createTranscript(opts: {
       yolo: getYolo(),
     });
   }
-  function editDraftKey(): string | null {
-    const sid = opts.getSessionId();
-    if (sid == null || editingMsgIdx() == null) return null;
-    return `llmgw-edit:${sid}:${editingMsgIdx()}`;
+  let editSource: { host: string; sid: string; idx: number; source: string } | null = null;
+  function editDraftPrefix() {
+    return `llmgw-edit:${opts.getHostId()}:${opts.getSessionId()}:`;
+  }
+  function sourceOf(m: ChatMessage) {
+    return JSON.stringify([m.role, messageText(m), (m.attachments || []).map((a) => a.id)]);
   }
 
   function persistEditDraft() {
-    const key = editDraftKey();
-    if (!key) return;
+    if (!editSource || editSource.host !== opts.getHostId() || editSource.sid !== opts.getSessionId() || editingMsgIdx() !== editSource.idx) return;
     try {
-      const text = editingMsgText();
-      if (text) localStorage.setItem(key, text);
-      else localStorage.removeItem(key);
+      localStorage.setItem(`${editDraftPrefix()}${editSource.idx}`, JSON.stringify({
+        source: editSource.source, text: editingMsgText(), attachmentIds: editingAttachments().map((a) => a.id),
+      }));
+      localStorage.setItem(`${editDraftPrefix()}active`, String(editSource.idx));
     } catch {}
   }
 
-  function clearEditDraft(sid: string, idx: number) {
+  function clearEditDraft(idx: number) {
     try {
-      localStorage.removeItem(`llmgw-edit:${sid}:${idx}`);
+      localStorage.removeItem(`${editDraftPrefix()}${idx}`);
+      localStorage.removeItem(`${editDraftPrefix()}active`);
+    } catch {}
+  }
+  createEffect(() => { editingAttachments(); persistEditDraft(); });
+
+  function restoreEditDraft() {
+    if (editingMsgIdx() != null) {
+      const current = messages().find((m) => m.srcIdx === editingMsgIdx());
+      if (!current || sourceOf(current) !== editSource?.source) cancelEditMsg();
+      return;
+    }
+    try {
+      const saved = localStorage.getItem(`${editDraftPrefix()}active`);
+      if (saved == null) return;
+      const idx = Number(saved);
+      const msg = messages().find((m) => m.srcIdx === idx && m.role === "user");
+      const draft = JSON.parse(localStorage.getItem(`${editDraftPrefix()}${idx}`) || "null");
+      if (msg && draft?.source === sourceOf(msg) && typeof draft.text === "string") startEditMsg(idx, msg);
+      else clearEditDraft(idx);
     } catch {}
   }
 
@@ -503,34 +524,44 @@ export function createTranscript(opts: {
 
   // Inline edit (chatbot startEditMessage): user edits resubmit, assistant
   // edits just save. The in-progress text stays in this browser only
-  // (localStorage per session+message) and is restored on reopen.
+  // (localStorage per host+session+message) and is restored on reopen.
   function startEditMsg(idx: number, m: ChatMessage) {
-    editAttachments.clearAttachments();
-    setEditingAttachments(m.attachments || []);
-    setEditingMsgIdx(idx);
-    let text = messageText(m);
-    try {
-      const sid = opts.getSessionId();
-      const saved = sid ? localStorage.getItem(`llmgw-edit:${sid}:${idx}`) : null;
-      if (saved) text = saved;
-    } catch {}
-    setEditingMsgText(text);
+    batch(() => {
+      editAttachments.clearAttachments();
+      setEditingAttachments(m.attachments || []);
+      setEditingMsgIdx(idx);
+      editSource = { host: opts.getHostId(), sid: opts.getSessionId(), idx, source: sourceOf(m) };
+      let text = messageText(m);
+      try {
+        const saved = JSON.parse(localStorage.getItem(`${editDraftPrefix()}${idx}`) || "null");
+        if (saved?.source === editSource.source && typeof saved.text === "string") {
+          text = saved.text;
+          if (Array.isArray(saved.attachmentIds)) setEditingAttachments((m.attachments || []).filter((a) => saved.attachmentIds.includes(a.id)));
+        }
+      } catch {}
+      setEditingMsgText(text);
+      persistEditDraft();
+    });
   }
   function updateEditingMsgText(text: string) {
     setEditingMsgText(text);
     persistEditDraft();
   }
   function cancelEditMsg() {
-    editAttachments.clearAttachments();
-    setEditingAttachments([]);
-    const sid = opts.getSessionId();
-    const idx = editingMsgIdx();
-    if (sid && idx != null) clearEditDraft(sid, idx);
-    setEditingMsgIdx(null);
-    setEditingMsgText("");
+    batch(() => {
+      editAttachments.clearAttachments();
+      setEditingAttachments([]);
+      const idx = editingMsgIdx();
+      if (idx != null) clearEditDraft(idx);
+      editSource = null;
+      setEditingMsgIdx(null);
+      setEditingMsgText("");
+    });
   }
   async function saveEditMsg(idx: number, m: ChatMessage, getModel: () => string, getYolo: () => boolean) {
     const sid = opts.getSessionId();
+    const host = opts.getHostId();
+    const source = editSource;
     const text = editingMsgText().trim();
     if (savingEdit()) return;
     if (editAttachments.preparingAttachments()) { opts.toast("Wait for files to finish extracting", "err"); return; }
@@ -557,9 +588,9 @@ export function createTranscript(opts: {
           { id: "fork", label: "Fork & resend", hint: "Preserves here, resends in a copy" },
         ],
       });
-      if (!choice || opts.getSessionId() !== sid || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
+      if (!choice || opts.getHostId() !== host || opts.getSessionId() !== sid || editSource !== source || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
       attachmentIds = [...editingAttachments().map((a) => a.id), ...await Promise.all(editAttachments.pendingAttachments().map((a) => editAttachments.uploadOneAttachment(sid, a)))];
-      if (opts.getSessionId() !== sid || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
+      if (opts.getHostId() !== host || opts.getSessionId() !== sid || editSource !== source || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
       if (choice === "fork") {
         // Fork at this message carrying the edited text: the daemon
         // applies it to the boundary user message and resends from there.
@@ -587,7 +618,7 @@ export function createTranscript(opts: {
     });
     cancelEditMsg();
     if (regen) setSessionStatus("running");
-    } catch (e) { if (opts.getSessionId() === sid) opts.toast(e instanceof Error ? e.message : "Could not save message", "err"); }
+    } catch (e) { if (opts.getHostId() === host && opts.getSessionId() === sid) opts.toast(e instanceof Error ? e.message : "Could not save message", "err"); }
     finally { setSavingEdit(false); }
   }
   // --- Daemon events (called by the page dispatcher) ---
@@ -743,6 +774,7 @@ export function createTranscript(opts: {
    * cleaned up by their own domains; the page orchestrates).
    */
   function resetForSession() {
+    editSource = null;
     editAttachments.clearAttachments();
     setEditingAttachments([]);
     clearToolScrolls();

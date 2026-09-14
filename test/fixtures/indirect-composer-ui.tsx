@@ -3,6 +3,7 @@ import { render } from "solid-js/web";
 import { createComposer } from "../../web/src/indirect-code/hooks/useComposer";
 import { createTranscript } from "../../web/src/indirect-code/hooks/useTranscript";
 import { createReview } from "../../web/src/indirect-code/hooks/useReview";
+import { createMirror } from "../../web/src/indirect-code/hooks/useMirror";
 import { ComposerInput } from "../../web/src/indirect-code/components/composer/ComposerInput";
 import { ToolbarSend } from "../../web/src/indirect-code/components/composer/ToolbarSend";
 import { ScrollOverlays } from "../../web/src/indirect-code/components/composer/ScrollOverlays";
@@ -27,8 +28,7 @@ render(() => {
   };
   const t = createTranscript({
     ...opts,
-    showChoice: async () => "resend",
-    showConfirm: async () => true,
+    showChoice: async () => api.choose ? api.choose() : "resend",
     onTurnIdle: () => {},
     onUsageContext: () => {},
   });
@@ -61,7 +61,8 @@ render(() => {
     onQueueMessage: () => {},
     isCreatingSession: () => false,
   });
-  Object.assign(api, { c, t, review, setOnline, setHost, setSid, sid });
+  const mirror = createMirror({send, isOpen: () => false, getHostId: host});
+  Object.assign(api, { c, t, review, mirror, setOnline, setHost, setSid, sid });
   return (
     <RemoteCodeProvider
       host={{} as any}

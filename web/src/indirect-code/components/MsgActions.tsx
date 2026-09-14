@@ -53,7 +53,7 @@ export function UserMsgActions(props: MsgActionState & { onEdit: () => void }) {
 }
 
 /** Hover actions for assistant bubbles (fork/copy/regenerate). */
-export function AssistantMsgActions(props: MsgActionState & { onRegenerate: () => void }) {
+export function AssistantMsgActions(props: MsgActionState & { onRegenerate: () => void; duration?: string }) {
   return (
     <div class="flex items-center gap-0.5 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
       <MsgIconBtn tip="Fork conversation from here" icon="lucide:git-branch" disabled={props.forking || !props.canFork} onClick={props.onFork} />
@@ -61,6 +61,9 @@ export function AssistantMsgActions(props: MsgActionState & { onRegenerate: () =
         <MsgIconBtn tip="Copy" icon="lucide:copy" copied={props.copied} onClick={props.onCopy} />
       </Show>
       <MsgIconBtn tip="Regenerate response" icon="lucide:rotate-cw" onClick={props.onRegenerate} />
+      <Show when={props.duration}>
+        <span data-turn-duration class="ml-1.5 text-[11px] text-ink-500 tabular-nums" aria-label={`Turn duration: ${props.duration}`}>{props.duration}</span>
+      </Show>
     </div>
   );
 }

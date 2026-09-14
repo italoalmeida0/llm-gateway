@@ -5,9 +5,7 @@ import { CompactionBalloon } from "./CompactionBalloon";
 import { FileIcon } from "../presentation";
 import { elapsedLabel, messageText } from "../utils/format";
 import type { TranscriptRenderCtx } from "./TranscriptBlocks";
-import {
-  renderFinalMsg, renderSingleAssistant, renderTurnAggregate,
-} from "./TranscriptBlocks";
+import { AssistantTurnContent } from "./TranscriptBlocks";
 import { HistoryView } from "./HistoryView";
 import { ApprovalCard } from "./ApprovalCard";
 import { QuestionPanel } from "./QuestionModal";
@@ -15,7 +13,7 @@ import { QueueCard } from "./QueueCard";
 import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
 import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges } from "../ctx";
 import { TurnChangesBalloon } from "./TurnChangesBalloon";
-import { mapBalloonsToBlocks } from "../transcript";
+import { blockTurnDuration, mapBalloonsToBlocks } from "../transcript";
 
 export function TranscriptView() {
   const t = useTranscriptCtx();
@@ -306,18 +304,12 @@ export function TranscriptView() {
                 </div>
               </Show>
 
-              {block.kind === "series" ? <>
-                {renderTurnAggregate(rctx, block, isLast())}
-                <Show when={featuredFinal()}>
-                  <div class="w-full mt-2.5">
-                    {renderFinalMsg(rctx, block)}
-                  </div>
-                </Show>
-              </> : renderSingleAssistant(rctx, msg)}
+              <AssistantTurnContent ctx={rctx} block={block} finished={t.sessionStatus() !== "running" || !isLast()} />
 
               {/* Hover actions (chatbot-style) */}
               <Show when={(t.sessionStatus() !== "running" || !isLast()) && !isEditing()}>
                 <AssistantMsgActions
+                  duration={blockTurnDuration(block) != null ? elapsedLabel(blockTurnDuration(block)!) : undefined}
                   forking={t.forking()}
                   canFork={(block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx != null}
                   showCopy={textOf().trim() !== ""}

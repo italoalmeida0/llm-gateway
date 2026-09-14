@@ -460,7 +460,7 @@ describe("Indirect Code Relay and Pairing", () => {
     }
   }, 15000);
 
-  test("Real Go Daemon: pins, message edit/delete, projects, search, attachments", async () => {
+  test("Real Go Daemon: pins, message edits, projects, search, attachments", async () => {
     const pairRes = await fetch(`${GW}/api/indirect-code/pair`, {
       method: "POST",
       headers: { Authorization: `Bearer ${userToken}` },
@@ -523,7 +523,7 @@ describe("Indirect Code Relay and Pairing", () => {
           }, 25);
           const timer = setTimeout(() => {
             clearInterval(poll);
-            reject(new Error("timed out waiting for daemon message"));
+            reject(new Error(`timed out waiting for daemon message matching ${String(pred)}`));
           }, timeout);
         });
       const send = (obj: any) => clientWs.send(JSON.stringify({ hostId: featHostId, ...obj }));
@@ -579,17 +579,16 @@ describe("Indirect Code Relay and Pairing", () => {
       const hits = await waitFor((m) => m.type === "search_results");
       expect(hits.results.some((r: any) => r.sessionId === sid)).toBe(true);
 
-      // Edit first message without regen, then delete it
+      // Saved edits truncate stale replies and survive a fresh snapshot.
       send({ type: "edit_message", sessionId: sid, index: 0, text: "edited hello", regenerate: false });
       const edited = await waitFor(
         (m) => m.type === "session_content" && m.sessionId === sid && JSON.stringify(m.messages).includes("edited hello"),
       );
       expect(edited.messages.length).toBeGreaterThanOrEqual(1);
-      send({ type: "delete_message", sessionId: sid, index: 0 });
-      const afterDel = await waitFor(
-        (m) => m.type === "session_content" && m.sessionId === sid && !JSON.stringify(m.messages).includes("edited hello"),
-      );
-      expect(afterDel).toBeDefined();
+      send({ type: "get_session", sessionId: sid, requestId: "verify-edit" });
+      const afterEdit = await waitFor((m) => m.type === "session_data" && m.requestId === "verify-edit");
+      expect(afterEdit.session.messages).toHaveLength(1);
+      expect(JSON.stringify(afterEdit.session.messages)).toContain("edited hello");
 
       // Attachment upload + fetch round-trip (before the cascade tests wipe sessions)
       const helloB64 = Buffer.from("hello attachment").toString("base64");
@@ -653,6 +652,7 @@ describe("Indirect Code Relay and Pairing", () => {
       expect(afterHomeDel.items.some((p: any) => p.id === homeCreated.project.id)).toBe(true);
 
       // Nested session inside the project tree (cwd = <workDir>/sub)
+      mkdirSync(path.join(workDir, "sub"));
       send({ type: "create_session", cwd: `${workDir}/sub`, title: "Nested", model: "gpt-4o" });
       const nestedCreated = await waitFor((m) => m.type === "session_created" && m.session.cwd === `${workDir}/sub`);
       const nestedSid = nestedCreated.session.id;
@@ -763,7 +763,7 @@ describe("Indirect Code Relay and Pairing", () => {
           }, 25);
           const timer = setTimeout(() => {
             clearInterval(poll);
-            reject(new Error("timed out waiting for daemon message"));
+            reject(new Error(`timed out waiting for daemon message matching ${String(pred)}`));
           }, timeout);
         });
       const send = (obj: any) => clientWs.send(JSON.stringify({ hostId: dupHostId, ...obj }));

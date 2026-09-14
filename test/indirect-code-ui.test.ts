@@ -11,7 +11,7 @@ import {
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
-  buildRenderBlocks, cacheHitPct, finalTurnMessage, fmtUsd, fuzzySame, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
+  blockTurnDuration, buildRenderBlocks, cacheHitPct, finalTurnMessage, fmtUsd, fuzzySame, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
 } from "../web/src/indirect-code/transcript";
 import { specialTitle } from "../web/src/indirect-code/utils/titles";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
@@ -23,7 +23,7 @@ import {
   appendReasoningDelta, appendTextDelta, appendToolArgsDelta, appendToolResult,
   cutTail, finishTurn, mergeUsage, normalizeSessionMessages, stampDuration, upsertToolCall,
 } from "../web/src/indirect-code/transcript/updaters";
-import type { ChatMessage, ToolUnit, TurnBalloon } from "../web/src/indirect-code/types";
+import type { ChatMessage, ContentBlock, ToolUnit, TurnBalloon } from "../web/src/indirect-code/types";
 import { fileIcon } from "../web/src/indirect-code/files";
 
 describe("Indirect Code file presentation", () => {
@@ -102,7 +102,7 @@ test("turn aggregate keeps event order and features the long closing message", (
     {id:"four",role:"assistant",srcIdx:7,blocks:[{type:"reasoning",reasoning:"Testing"},{type:"tool_call",toolId:"d",toolName:"bash"}]},
     {id:"five",role:"assistant",srcIdx:9,blocks:[{type:"text",text:long}]},
   ];
-  const blocks = buildRenderBlocks(list, { hideToolMessages: true });
+  const blocks = buildRenderBlocks(list);
   expect(blocks).toHaveLength(1);
   expect(blocks[0].kind).toBe("series");
   if (blocks[0].kind === "series") {
@@ -113,14 +113,16 @@ test("turn aggregate keeps event order and features the long closing message", (
   }
 });
 
-test("text-only turns stay as plain singles (no aggregate)", () => {
+test("text-only turns feature one final, aggregating intermediate messages", () => {
   const list: ChatMessage[] = [
     {id:"u",role:"user",srcIdx:0,blocks:[{type:"text",text:"hi"}]},
     {id:"a",role:"assistant",srcIdx:1,blocks:[{type:"text",text:"Hello!"}]},
     {id:"b",role:"assistant",srcIdx:2,blocks:[{type:"text",text:"How can I help?"}]},
   ];
   const blocks = buildRenderBlocks(list);
-  expect(blocks.map((b) => b.kind)).toEqual(["single","single","single"]);
+  expect(blocks.map((b) => b.kind)).toEqual(["single","series"]);
+  expect(blocks[1].kind === "series" && blocks[1].finalMsgId).toBe("b");
+  expect(buildRenderBlocks(list.slice(0, 2)).map((b) => b.kind)).toEqual(["single", "single"]);
 });
 
 test("fuzzy duplicate progress notes hide, last wins", () => {
@@ -168,6 +170,26 @@ test("duplicate tool calls with the same id merge into one unit", () => {
   } else {
     throw new Error("expected series");
   }
+});
+
+test("replayed calls and results do not create duplicate tool cards", () => {
+  const call: ContentBlock = {type:"tool_call",toolId:"same",toolName:"bash",toolArgs:'{"command":"ls"}'};
+  const result: ContentBlock = {type:"tool_result",toolId:"same",toolResult:"done"};
+  for (const blocks of [[call,result,call,result], [result,call,result]]) {
+    const rendered = buildRenderBlocks([{id:"a",role:"assistant",blocks}])[0];
+    if (rendered.kind !== "series") throw new Error("Expected tool turn");
+    expect(rendered.units).toHaveLength(1);
+    expect(rendered.units[0].call).toEqual(call);
+    expect(rendered.units[0].result).toEqual(result);
+    expect(rendered.entries.flatMap((e) => e.kind === "tools" ? e.units : [])).toHaveLength(1);
+  }
+});
+
+test("duration is available with or without aggregate and ignores invalid metadata", () => {
+  const msg: ChatMessage = {id:"a",role:"assistant",blocks:[{type:"text",text:"Answer"}],turnDurationMs:83000};
+  expect(blockTurnDuration(buildRenderBlocks([msg])[0])).toBe(83000);
+  expect(blockTurnDuration(buildRenderBlocks([{...msg,turnDurationMs:Infinity},{...msg,id:"b"}])[0])).toBe(83000);
+  expect(blockTurnDuration(buildRenderBlocks([{...msg,turnDurationMs:NaN}])[0])).toBeUndefined();
 });
 
 test("final message is the last long text without tools (or with completion)", () => {
@@ -517,6 +539,12 @@ describe("Indirect Code toolSummary", () => {
 describe("Indirect Code tool segments", () => {
   const unit = (name: string, id: string): ToolUnit => ({
     call: { type: "tool_call", toolId: id, toolName: name, toolArgs: "{}" },
+  });
+  test("chunks long runs into five without moving earlier calls when appending", () => {
+    const units = Array.from({length:50}, (_,i) => unit(i % 2 ? "python" : "bash", String(i)));
+    expect(partitionToolSegs(units).map((s) => s.kind === "group" ? s.units.length : 1)).toEqual(Array(10).fill(5));
+    expect(partitionToolSegs(units.slice(0, 6)).map((s) => s.kind === "group" ? s.units.length : 1)).toEqual([5, 1]);
+    expect(partitionToolSegs([...units, unit("bash", "50")]).slice(0, 10)).toEqual(partitionToolSegs(units));
   });
   test("groups consecutive explore/command runs of 2+, keeps singles flat", () => {
     const segs = partitionToolSegs([unit("read", "a"), unit("glob", "b"), unit("edit", "c"), unit("bash", "d")]);
@@ -1113,7 +1141,7 @@ describe("completion signals and turn nudges", () => {
     };
 
     const cleaned = withoutTodoActivity([user, step1, res1, step2]);
-    const blocks = buildRenderBlocks(cleaned, { hideToolMessages: true });
+    const blocks = buildRenderBlocks(cleaned);
 
     // One turn aggregate: the write unit plus a visible text entry for a2
     // (completion text is exempt from hiding — enforced at render).

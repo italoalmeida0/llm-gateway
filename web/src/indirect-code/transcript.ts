@@ -1,20 +1,20 @@
 import type { ChatMessage, ContentBlock, RenderBlock, ToolUnit, TurnBalloon, TurnEntry } from "./types";
 import { displayToolArgs, withoutContinueNudges, withoutTodoActivity } from "./live";
 
-export function hasVisibleText(message: ChatMessage): boolean {
+function hasVisibleText(message: ChatMessage): boolean {
   return message.blocks.some((b) => b.type === "text" && !!b.text?.trim());
 }
 
-export function hasToolActivity(message: ChatMessage): boolean {
+function hasToolActivity(message: ChatMessage): boolean {
   return message.blocks.some((b) => b.type === "tool_call" || b.type === "tool_result");
 }
 
 /** Rough token estimate for hide-tool-messages: chars / 4. Messages with
  * >= LONG_MESSAGE_TOKENS always show even when hiding is enabled, so
  * genuinely useful agent output is never swallowed by the tool group. */
-export const LONG_MESSAGE_TOKENS = 50;
+const LONG_MESSAGE_TOKENS = 50;
 
-export function assistantTextTokens(message: ChatMessage): number {
+function assistantTextTokens(message: ChatMessage): number {
   const text = message.blocks
     .filter((b) => b.type === "text" && b.text)
     .map((b) => b.text as string)
@@ -66,10 +66,10 @@ export function cacheHitPct(usage: { inTok: number; cacheTok: number }): number 
 }
 
 /** Max chars for the live turn hint shown next to "Working · <time>". */
-export const TURN_HINT_MAX_CHARS = 100;
+const TURN_HINT_MAX_CHARS = 100;
 
 /** Single-line text of an assistant message (whitespace collapsed). */
-export function assistantSingleLine(message: ChatMessage): string {
+function assistantSingleLine(message: ChatMessage): string {
   return message.blocks
     .filter((b) => b.type === "text" && b.text)
     .map((b) => b.text as string)
@@ -158,9 +158,9 @@ export function finalTurnMessage(turnMsgs: ChatMessage[]): ChatMessage | null {
 /** Pair tool calls with results across a turn, in display order.
  * Duplicate calls with the same id (pre-created card + finalized call)
  * merge into one unit so no result-less orphan lingers mid-list. */
-export function pushCallUnit(units: ToolUnit[], byId: Map<string, ToolUnit>, block: ContentBlock): void {
+function pushCallUnit(units: ToolUnit[], byId: Map<string, ToolUnit>, block: ContentBlock): void {
   const existing = block.toolId ? byId.get(block.toolId) : undefined;
-  if (existing && existing.call && !existing.result) {
+  if (existing) {
     existing.call = block;
     return;
   }
@@ -178,8 +178,12 @@ function pairTurnUnits(turnMsgs: ChatMessage[]): ToolUnit[] {
         pushCallUnit(units, byId, block);
       } else if (block.type === "tool_result") {
         const unit = block.toolId ? byId.get(block.toolId) : undefined;
-        if (unit && !unit.result) unit.result = block;
-        else units.push({ id: block.toolId, result: block });
+        if (unit) unit.result = block;
+        else {
+          const orphan = { id: block.toolId, result: block };
+          units.push(orphan);
+          if (block.toolId) byId.set(block.toolId, orphan);
+        }
       }
     }
   }
@@ -214,12 +218,14 @@ function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
         pushCallUnit(run, byId, block);
       } else if (block.type === "tool_result") {
         const unit = block.toolId ? byId.get(block.toolId) : undefined;
-        if (unit && !unit.result) {
+        if (unit) {
           // Pairs wherever the call lives, even in an already-flushed run.
           unit.result = block;
         } else {
           if (!runMsg) runMsg = message;
-          run.push({ id: block.toolId, result: block });
+          const orphan = { id: block.toolId, result: block };
+          run.push(orphan);
+          if (block.toolId) byId.set(block.toolId, orphan);
         }
       } else if (block.type === "text" && !!block.text?.trim()) {
         flushRun();
@@ -248,13 +254,12 @@ function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
 }
 
 /** One aggregate per assistant turn: every message of a turn with tool
- * activity or thinking (texts, thinkings, tool runs) becomes ordered rows
- * of a single card. A turn with neither stays as plain single bubbles.
+ * activity, thinking or multiple messages becomes ordered rows of a single
+ * card. Only a turn consisting of one plain message stays a single bubble.
  * Keep the raw transcript and source indices intact, including while a new
  * step streams. */
 export function buildRenderBlocks(
   messages: ChatMessage[],
-  _options?: { hideToolMessages?: boolean },
 ): RenderBlock[] {
   const list = withoutContinueNudges(withoutTodoActivity(messages));
   const result: RenderBlock[] = [];
@@ -270,7 +275,7 @@ export function buildRenderBlocks(
     const tools = turnMsgs.some(hasToolActivity);
     const thoughts = turnMsgs.some((m) =>
       m.blocks.some((b) => b.type === "reasoning" && !!b.reasoning?.trim()));
-    if (!tools && !thoughts) {
+    if (!tools && !thoughts && turnMsgs.length === 1) {
       for (const m of turnMsgs) result.push({ kind: "single", msg: m });
     } else {
       result.push({
@@ -285,6 +290,12 @@ export function buildRenderBlocks(
     i = turnEnd;
   }
   return result;
+}
+
+/** Wall-clock duration belongs to the turn, regardless of its presentation. */
+export function blockTurnDuration(block: RenderBlock): number | undefined {
+  const messages = block.kind === "series" ? [block.msg, ...block.extras] : [block.msg];
+  return messages.find((m) => Number.isFinite(m.turnDurationMs) && (m.turnDurationMs ?? 0) > 0)?.turnDurationMs;
 }
 
 /** Strip only the daemon's terminal footer. Preserve actual command output. */
@@ -616,4 +627,3 @@ export function mapBalloonsToBlocks(
 
   return result;
 }
-

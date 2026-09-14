@@ -129,7 +129,6 @@ export { LogoMark };
 function RailItem(props: { item: NavItem; current: string; badge?: number }) {
   const active = () => isActive(props.item, props.current);
   return (
-    <Tooltip content={props.item.label} placement="right" delay={50}>
       <a
         href={`#${props.item.path}`}
         class={`gateway-nav relative flex h-9 w-9 lg:w-60 items-center justify-center lg:justify-start lg:px-2.5 gap-2.5 rounded-lg transition-colors duration-150 ${

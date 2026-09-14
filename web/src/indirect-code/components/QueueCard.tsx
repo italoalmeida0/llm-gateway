@@ -26,7 +26,7 @@ export function QueueCard() {
   return (
     <Show when={items().length > 0}>
       <div class={`${ui.convWidthClass()} mx-auto`}>
-        <div class="bg-ink-900 border border-line/70 rounded-xl px-3 py-2">
+        <div class="bg-ink-900 border border-line/70 rounded-xl px-3 py-1">
           <div class="flex items-center gap-2">
             <span class="text-xs font-semibold text-ink-200">Queued Messages</span>
             <span class="text-[11px] font-mono bg-ink-800 border border-line/60 rounded px-1.5 py-0.5 text-ink-300">
@@ -43,7 +43,7 @@ export function QueueCard() {
             </button>
           </div>
           <Show when={!collapsed()}>
-            <div class="mt-1 flex flex-col">
+            <div class="flex flex-col">
               <For each={items()}>
                 {(item) => (
                   <div class="py-1 border-t border-line/40 first:border-t-0">

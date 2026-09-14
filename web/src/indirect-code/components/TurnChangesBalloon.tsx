@@ -19,15 +19,15 @@ export interface TurnChangesBalloonProps {
 function statusMeta(status: TurnChangedFile["status"]) {
   switch (status) {
     case "new":
-      return { icon: "lucide:file-plus-2", cls: "text-emerald-400" };
+      return { icon: "lucide:file-plus", cls: "text-emerald-400" };
     case "modified":
       return { icon: "lucide:file-diff", cls: "text-amber-800 dark:text-amber-200" };
     case "deleted":
-      return { icon: "lucide:file-minus-2", cls: "text-red-400" };
+      return { icon: "lucide:file-minus", cls: "text-red-400" };
     case "binary":
-      return { icon: "lucide:file-warning", cls: "text-ink-400" };
+      return { icon: "lucide:file-exclamation-point", cls: "text-ink-400" };
     default:
-      return { icon: "lucide:file-warning", cls: "text-ink-400" };
+      return { icon: "lucide:file-exclamation-point", cls: "text-ink-400" };
   }
 }
 

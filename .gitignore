@@ -1,6 +1,8 @@
 node_modules/
 data/
 .env
+.env.*
+!.env.example
 *.log
 .DS_Store
 .banyancode
@@ -9,6 +11,8 @@ tmp/
 indirect-code-daemon/bin/
 indirect-code-daemon/code-daemon
 indirect-code-daemon/indirect-code
+# Default `go build ./cmd/daemon` output (binary named after the dir).
+indirect-code-daemon/cmd/daemon/daemon
 remote-code-ref/
 dist/
 # Web build output (gitignored) — but the daemon release binaries ARE committed.
@@ -16,5 +20,14 @@ dist/
 !indirect-code-daemon/dist/indirect-code-*
 !indirect-code-daemon/dist/indirect-install.*
 !indirect-code-daemon/dist/SHA256SUMS.txt
-/tmp
 .cache/iconify/
+/tmp
+# Editors / IDEs
+.vscode/
+.idea/
+# Python tooling
+__pycache__/
+*.py[cod]
+.mypy_cache/
+# Test coverage
+coverage/

@@ -25,7 +25,7 @@ const groups: Array<{ extensions: string; icon: string; tone: string }> = [
   { extensions: "r rmd", icon: "mdi:language-r", tone: "type" },
   { extensions: "hs lhs", icon: "mdi:language-haskell", tone: "kw" },
   { extensions: "f f90 f95 for", icon: "mdi:language-fortran", tone: "kw" },
-  { extensions: "dart ex exs erl hrl clj cljs cljc edn scala sc pl pm ml mli fs fsx vb zig nim sol groovy gradle asm s", icon: "lucide:file-code-2", tone: "kw" },
+  { extensions: "dart ex exs erl hrl clj cljs cljc edn scala sc pl pm ml mli fs fsx vb zig nim sol groovy gradle asm s", icon: "lucide:file-code", tone: "kw" },
   { extensions: "html htm xhtml", icon: "mdi:language-html5", tone: "meta" },
   { extensions: "css scss sass less styl", icon: "mdi:language-css3", tone: "kw" },
   { extensions: "xml xsl xslt xsd plist manifest", icon: "lucide:code-xml", tone: "meta" },

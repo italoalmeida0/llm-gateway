@@ -31,6 +31,7 @@ import { parseDaemonMessage, type DaemonMessage } from "./daemon-protocol";
 import { createNotice } from "./hooks/useNotice";
 import { createTurnNotify } from "./hooks/useTurnNotify";
 import { createPushSubscription } from "./hooks/usePushSubscription";
+import { createConvert } from "./hooks/useConvert";
 import { createModals } from "./hooks/useModals";
 import { createRelay } from "./hooks/useRelay";
 import { createMirror } from "./hooks/useMirror";
@@ -48,6 +49,9 @@ export default function IndirectCodePage() {
   // --- Domains (each hook owns its state; the page orchestrates) ---
   const notice = createNotice();
   const modals = createModals({ toast: notice.toast });
+  // Created early: only needs `send`, wired to the relay below.
+  let relaySend: (payload: any) => void = () => {};
+  const convert = createConvert({ send: (payload) => relaySend(payload) });
 
   const [draftMode, setDraftMode] = createSignal(true);
   const [creatingSession, setCreatingSession] = createSignal(false);
@@ -113,6 +117,7 @@ export default function IndirectCodePage() {
     isActiveHost: (hostId) => hosts.activeHostId() === hostId,
   });
   const wsOpen = () => relay.wsOpen();
+  relaySend = (payload) => relay.send(payload);
   const isHostOnline = () => hosts.activeHost()?.status === "online";
 
   const mirror = createMirror({
@@ -713,6 +718,13 @@ export default function IndirectCodePage() {
       }
       case "tool_approval_request": {
         transcript.noteApprovalRequest(msg);
+        break;
+      }
+      case "convert_request": {
+        convert.handleConvertRequest(msg);
+        break;
+      }
+      case "convert_resolved": {
         break;
       }
 

@@ -4,6 +4,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +27,11 @@ type ReadTool struct {
 	// BrainDir is the absolute path of the per-session private workspace.
 	// Scratch-space reads are never tracked: they are not user-facing changes.
 	BrainDir string
+	// Convert, when set, asks a connected browser to convert files the tool
+	// cannot parse natively (PDF, docx, odt, epub, rtf, rst, ipynb) using the
+	// same pipeline as attachments. Nil means no browser assist: binary
+	// files are refused as before.
+	Convert func(ctx context.Context, filename string, b64data string) (string, error)
 }
 
 type readArgs struct {
@@ -38,7 +44,7 @@ const readSchema = `{"type":"object","properties":{"path":{"type":"string","desc
 
 func (t *ReadTool) Name() string { return "read" }
 func (t *ReadTool) Description() string {
-	return "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
+	return "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. PDF, docx, odt, epub, rtf, rst and ipynb are converted to text when a browser is connected, otherwise refused as binary. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
 }
 func (t *ReadTool) Schema() json.RawMessage { return json.RawMessage(readSchema) }
 
@@ -104,7 +110,15 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		return core.ToolResult{}, err
 	}
 	if looksBinary(data) {
-		return core.ToolResult{}, fmt.Errorf("%s looks binary; refusing to read as text", a.Path)
+		// Files the tool cannot parse natively (PDF, docx, ...) get one
+		// chance via browser-assisted conversion; otherwise the plain
+		// binary refusal stands. Converted text flows through the normal
+		// text pipeline below (offset/limit + 2000-line/50KB window).
+		converted, ok := t.tryBrowserConvert(ctx, path, data)
+		if !ok {
+			return core.ToolResult{}, fmt.Errorf("%s looks binary; refusing to read as text", a.Path)
+		}
+		data = []byte(converted)
 	}
 	// Change tracking: first sighting of this path in the turn snapshots
 	// the full content (not the offset/limit window). Scratch-space reads
@@ -244,6 +258,34 @@ func (t *ReadTool) renderDisplay(allLines []string, startLine int, tr *truncatio
 // The 100MB cap applies only to text input. The model still receives pi's
 // 2000-line/50KB output window after this read succeeds.
 const maxReadFileBytes = 100 << 20
+
+// maxConvertBytes caps raw file bytes sent to the browser for conversion
+// (same 4MB budget as attachments).
+const maxConvertBytes = 4 << 20
+
+// convertibleExt lists attachment-pipeline formats (web/src/office.ts) the
+// read tool cannot parse natively but a connected browser can convert.
+var convertibleExt = map[string]bool{
+	".pdf": true, ".docx": true, ".odt": true, ".epub": true,
+	".rtf": true, ".rst": true, ".ipynb": true,
+}
+
+// tryBrowserConvert asks the browser hook to convert data to markdown text.
+// It reports false when conversion is unavailable so the caller falls back
+// to the plain binary refusal — the turn never hangs on a missing browser.
+func (t *ReadTool) tryBrowserConvert(ctx context.Context, abs string, data []byte) (string, bool) {
+	if t.Convert == nil || !convertibleExt[strings.ToLower(filepath.Ext(abs))] {
+		return "", false
+	}
+	if len(data) > maxConvertBytes {
+		return "", false
+	}
+	text, err := t.Convert(ctx, filepath.Base(abs), base64.StdEncoding.EncodeToString(data))
+	if err != nil || strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	return text, true
+}
 
 func readWholeFile(path string) ([]byte, error) {
 	f, err := os.Open(path)

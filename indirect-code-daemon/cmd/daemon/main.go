@@ -398,6 +398,7 @@ func isTextMime(mime, name string) bool {
 type ActiveSession struct {
 	toolStarts        map[string]int64
 	question          *pendingQuestion
+	convert           *pendingConvert
 	pendingApproval   *toolApproval
 	toolProgress      map[string]string
 	thinkingStartedAt int64
@@ -1030,6 +1031,7 @@ func (d *DaemonServer) quiesceSessions() {
 		}
 		act.pendingApproval = nil
 		act.question = nil
+		act.convert = nil
 		act.toolProgress = nil
 		act.toolStarts = nil
 		act.record.Status = "idle"
@@ -1101,6 +1103,8 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		d.handleUndoTurnChanges(raw)
 	case "question_response":
 		d.answerQuestions(raw)
+	case "convert_response":
+		d.answerFileConvert(raw)
 	case "check_workspace":
 		d.checkWorkspace(raw)
 	case "configure_session":
@@ -2304,6 +2308,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	}
 	act.record.Status = "running"
 	act.question = nil
+	act.convert = nil
 	act.record.TurnSeq++
 	turnSeq := act.record.TurnSeq
 	act.record.Turn = &TurnActivity{StartedAt: time.Now().UnixMilli(), Status: "running"}

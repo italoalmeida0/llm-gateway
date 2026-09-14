@@ -53,6 +53,7 @@ export type DaemonCommand = CommandBase &
   | { type: "search"; query: string; limit: number }
   | { type: "check_workspace"; requestId: string; sessionId: string; projectId?: string }
   | { type: "question_response"; sessionId: string; questionId: string; answers: string[][] }
+  | { type: "convert_response"; sessionId: string; requestId: string; text?: string; error?: string }
   | { type: "tool_approval_response"; sessionId: string; callId: string; approved: boolean; always: boolean }
   | { type: "set_draft"; sessionId: string; draft: string }
   | { type: "set_todos_open"; sessionId: string; open: boolean }
@@ -133,6 +134,8 @@ export type DaemonEvent = EventBase &
     | { type: "question_resolved"; sessionId?: string; questionId: string }
     | { type: "question_error"; sessionId?: string; questionId: string; message?: string }
     | { type: "tool_approval_request"; sessionId?: string; callId: string; tool: string; args: unknown }
+    | { type: "convert_request"; sessionId?: string; requestId: string; filename: string; data: string }
+    | { type: "convert_resolved"; sessionId?: string; requestId: string }
     | { type: "agent_event"; sessionId?: string; event?: AgentEvent }
     | { type: "error"; requestId?: string; sessionId?: string; message?: string; replyTo?: string }
   );

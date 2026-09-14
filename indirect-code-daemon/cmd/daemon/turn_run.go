@@ -191,7 +191,9 @@ func (r *turnRun) setupAgent() bool {
 	}
 
 	baseTools := []core.Tool{
-		&tools.ReadTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir},
+		&tools.ReadTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir, Convert: func(tctx context.Context, filename string, b64data string) (string, error) {
+			return r.d.requestFileConvert(tctx, r.act, r.myGen, r.cfg.HostID, filename, b64data)
+		}},
 		&tools.WriteTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir},
 		&tools.EditTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir},
 		&tools.BashTool{CWD: r.sessionCWD, Sandbox: sb},
@@ -570,6 +572,7 @@ func (r *turnRun) finishTurn() {
 	finishTurnActivity(r.act, r.ctx.Err() != nil)
 	r.act.pendingApproval = nil
 	r.act.question = nil
+	r.act.convert = nil
 	r.act.toolProgress = nil
 	r.act.toolStarts = nil
 	r.act.thinkingStartedAt = 0
@@ -642,6 +645,7 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
 	act.record.Status = "running"
 	act.record.TurnSeq = max(act.record.TurnSeq, j.TurnIndex)
 	act.question = nil
+	act.convert = nil
 	act.record.Turn = &TurnActivity{StartedAt: j.StartedAt, Status: "running"}
 	if act.record.Turn.StartedAt <= 0 {
 		act.record.Turn.StartedAt = now

@@ -45,7 +45,7 @@ export function NewProjectModal() {
           }}
         >
           <div class="pl-2.5 text-ink-400 shrink-0">
-            <Iconify icon="lucide:terminal" size={15} />
+            <Iconify icon="lucide:folder-tree" size={15} />
           </div>
           <input
             aria-label="Folder path on host"
@@ -72,11 +72,7 @@ export function NewProjectModal() {
 
         {/* Directory browser container */}
         <div class="rounded-xl border border-line bg-ink-950/60 overflow-hidden">
-          <div class="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-line bg-ink-900/50">
-            <div class="flex items-center gap-2 text-xs font-medium text-ink-200 min-w-0 truncate">
-              <Iconify icon="lucide:folder-tree" size={14} class="text-ink-400 shrink-0" />
-              <span class="truncate font-mono text-xs">{s.folderCurrent() || "Host Root"}</span>
-            </div>
+          <div class="flex items-center justify-end gap-3 px-4 py-2.5 border-b border-line bg-ink-900/50">
             <div class="flex items-center gap-2 shrink-0">
               <Show when={!s.folderLoading() && s.folderEntries()}>
                 <span class="text-[11px] text-ink-500 font-mono">

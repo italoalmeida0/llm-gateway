@@ -29,9 +29,7 @@ export interface RcSession {
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
-  draft?: string;
   todosOpen?: boolean;
-  editingMsg?: { index: number; text: string } | null;
   options?: { effort: string; mode: string; skills: string[]; access: string };
 }
 
@@ -51,7 +49,6 @@ export interface RcProject {
 /** Daemon configuration mirror (single doc per host). */
 export interface RcConfig {
   revision?: string;
-  newDraft?: string;
   lastSelection?: { model: string; effort: string; mode?:string; access?:string; skills?:string[] };
   id: string;
   hostId: string;
@@ -123,10 +120,6 @@ export function createDataLayer(opts: {
   }
 
   function normalizeSession(r: any, hostId: string): RcSession {
-    const rawEditing = r.editingMsg;
-    const editingMsg = rawEditing && typeof rawEditing.index === "number"
-      ? { index: rawEditing.index, text: String(rawEditing.text || "") }
-      : null;
     return {
       id: r.id,
       hostId,
@@ -139,9 +132,7 @@ export function createDataLayer(opts: {
       // now instead of rendering "20706d" via timeAgo.
       createdAt: typeof r.createdAt === "number" && r.createdAt > 0 ? r.createdAt : Date.now(),
       updatedAt: typeof r.updatedAt === "number" && r.updatedAt > 0 ? r.updatedAt : Date.now(),
-      draft: r.draft || "",
       todosOpen: typeof r.todosOpen === "boolean" ? r.todosOpen : undefined,
-      editingMsg,
       options: r.options ? {
         effort: r.options.effort || "medium",
         mode: r.options.mode || "build",
@@ -171,7 +162,6 @@ export function createDataLayer(opts: {
       id: c.id || "daemon",
       revision: c.revision,
       hostId,
-      newDraft: c.newDraft ?? c.new_draft ?? "",
       lastSelection: c.lastSelection ?? c.last_selection,
       settings: c.settings && typeof c.settings === "object" ? c.settings : {},
       mcpServers: c.mcpServers ?? c.mcp_servers ?? {},

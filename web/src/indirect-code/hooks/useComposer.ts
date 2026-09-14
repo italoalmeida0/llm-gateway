@@ -1,11 +1,5 @@
 import type { DaemonCommand } from "../daemon-protocol";
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  on,
-  onCleanup,
-} from "solid-js";
+import { createEffect, createMemo, createSignal } from "solid-js";
 import { REASONING_LEVELS, SLASH_COMMANDS } from "../constants";
 import { formatEffort, normalizeEffort } from "../utils/format";
 import type { ChatMessage } from "../types";
@@ -50,8 +44,6 @@ export function createComposer(opts: {
   /** Turn running: the page queues the message instead of sending. */
   onQueueMessage: (text: string, attachmentIds: string[], model: string, yolo: boolean) => void;
   isCreatingSession: () => boolean;
-  getSessionDraft?: () => string;
-  getNewDraft?: () => string;
 }) {
   const [inputPrompt, setInputPrompt] = createSignal("");
   const mentions = createMentions({
@@ -109,55 +101,9 @@ export function createComposer(opts: {
     } catch {}
   }
 
-  // Draft synchronization (via SignalDB mirror & daemon)
-  let lastSentDraft = "";
-  let draftTimer: ReturnType<typeof setTimeout> | undefined;
-  const recentSentDrafts = new Map<string, number>();
-  let lastPromptSentAt = 0;
-  let lastSentPromptText = "";
-
-  function purgeRecentSentDrafts() {
-    const now = Date.now();
-    for (const [key, time] of recentSentDrafts.entries()) {
-      if (now - time > 10000) recentSentDrafts.delete(key);
-    }
-  }
-
-  function flushPendingDraft() {
-    if (draftTimer) {
-      clearTimeout(draftTimer);
-      draftTimer = undefined;
-      const sid = currentSid ?? opts.getSessionId();
-      const text = inputPrompt();
-      if (lastSentDraft !== text && opts.isOpen()) {
-        lastSentDraft = text;
-        recentSentDrafts.set(`${sid || "new"}:${text}`, Date.now());
-        if (opts.isOpen()) {
-          opts.send({ type: "set_draft", sessionId: sid, draft: text });
-        }
-      }
-    }
-  }
-
-  function syncDraftToServer(sid: string, text: string) {
-    const hostId = opts.getHostId();
-    clearTimeout(draftTimer);
-    draftTimer = setTimeout(() => {
-      if (
-        lastSentDraft === text ||
-        !opts.isOpen() ||
-        opts.getHostId() !== hostId
-      )
-        return;
-      lastSentDraft = text;
-      recentSentDrafts.set(`${sid || "new"}:${text}`, Date.now());
-      purgeRecentSentDrafts();
-      if (opts.isOpen()) {
-        opts.send({ type: "set_draft", sessionId: sid, draft: text });
-      }
-    }, 350);
-  }
-  onCleanup(() => clearTimeout(draftTimer));
+  // Draft persistence (local only — drafts never leave this browser).
+  // The composer text is saved to localStorage per host+session (or per
+  // host for a not-yet-created conversation) and restored on switch.
 
   let currentSid: string | null = null;
   let currentHost = "";
@@ -165,96 +111,32 @@ export function createComposer(opts: {
     const sid = opts.getSessionId();
     const host = opts.getHostId();
     if (sid !== currentSid || host !== currentHost) {
-      if (host === currentHost) flushPendingDraft();
-      else {
-        clearTimeout(draftTimer);
-        recentSentDrafts.clear();
-      }
       currentHost = host;
       currentSid = sid;
-      if (sid) {
-        const serverDraft = opts.getSessionDraft?.() ?? "";
-        const localDraft = (() => {
-          try {
-            return (
-              localStorage.getItem(`llmgw-draft:${opts.getHostId()}:${sid}`) ||
-              ""
-            );
-          } catch {
-            return "";
-          }
-        })();
-        const draft = serverDraft || localDraft;
-        setInputPrompt(draft);
-        lastSentDraft = serverDraft;
-      } else {
-        const newDraft = opts.getNewDraft?.() ?? "";
-        setInputPrompt(newDraft);
-        lastSentDraft = newDraft;
-      }
+      setInputPrompt(readLocalDraft(host, sid));
     }
   });
 
-  createEffect(
-    on(
-      () =>
-        (opts.getSessionId()
-          ? opts.getSessionDraft?.()
-          : opts.getNewDraft?.()) ?? "",
-      (remote) => {
-        const sid = opts.getSessionId();
-        const current = inputPrompt();
+  function draftKey(host: string, sid: string) {
+    return sid ? `llmgw-draft:${host}:${sid}` : `llmgw-draft:${host}:new`;
+  }
 
-        // 1. If remote is identical to current, nothing to do
-        if (remote === current) return;
-
-        // 2. Active Focus Guard: if user is actively typing in the composer, NEVER overwrite the DOM
-        const isFocused =
-          typeof document !== "undefined" &&
-          document.activeElement?.id === "rc-composer";
-        if (isFocused) return;
-
-        // 3. Echo Suppression: if remote matches what this client recently sent, discard it
-        purgeRecentSentDrafts();
-        if (
-          recentSentDrafts.has(`${sid || "new"}:${remote}`) ||
-          remote === lastSentDraft
-        )
-          return;
-
-        // 4. Monotonic Prefix Guard: if local text already starts with remote and is longer, local is ahead
-        if (current.startsWith(remote) && current.length > remote.length)
-          return;
-
-        // 5. Post-Submit Suppression: prevent in-flight draft from resurrecting a prompt that was just sent
-        if (
-          Date.now() - lastPromptSentAt < 2500 &&
-          (remote === lastSentPromptText ||
-            (remote && lastSentPromptText.startsWith(remote)))
-        )
-          return;
-
-        // Apply remote update cleanly
-        setInputPrompt(remote);
-        lastSentDraft = remote;
-      },
-    ),
-  );
+  function readLocalDraft(host: string, sid: string): string {
+    try {
+      return localStorage.getItem(draftKey(host, sid)) || "";
+    } catch {
+      return "";
+    }
+  }
 
   createEffect(() => {
     const text = inputPrompt();
     const sid = opts.getSessionId();
-    opts.isOpen();
-    if (sid) {
-      try {
-        if (text)
-          localStorage.setItem(`llmgw-draft:${opts.getHostId()}:${sid}`, text);
-        else localStorage.removeItem(`llmgw-draft:${opts.getHostId()}:${sid}`);
-      } catch {}
-      syncDraftToServer(sid, text);
-    } else {
-      syncDraftToServer("", text);
-    }
+    const host = opts.getHostId();
+    try {
+      if (text) localStorage.setItem(draftKey(host, sid), text);
+      else localStorage.removeItem(draftKey(host, sid));
+    } catch {}
   });
 
   // Routes /commands: UI-backed ones are handled locally (modals, silent
@@ -336,16 +218,7 @@ export function createComposer(opts: {
           localStorage.removeItem(`llmgw-draft:${opts.getHostId()}:${sid}`);
       } catch {}
       if (routeSlash(text)) {
-        if (draftTimer) {
-          clearTimeout(draftTimer);
-          draftTimer = undefined;
-        }
         setInputPrompt("");
-        lastSentDraft = "";
-        recentSentDrafts.set(`${sid || "new"}:`, Date.now());
-        if (opts.isOpen()) {
-          opts.send({ type: "set_draft", sessionId: sid, draft: "" });
-        }
         return;
       }
       if (!sid) {
@@ -422,10 +295,6 @@ export function createComposer(opts: {
       if (opts.isSessionRunning()) {
         clearAttachments();
         if (inputPrompt().trim() === text) setInputPrompt("");
-        lastSentDraft = "";
-        if (sid && opts.isOpen()) {
-          opts.send({ type: "set_draft", sessionId: sid, draft: "" });
-        }
         opts.onQueueMessage(cleanText, attachmentIds, model, options.access === "full");
         return;
       }
@@ -443,19 +312,8 @@ export function createComposer(opts: {
         })),
         isTurnStart: true,
       };
-      lastPromptSentAt = Date.now();
-      lastSentPromptText = text;
-      if (draftTimer) {
-        clearTimeout(draftTimer);
-        draftTimer = undefined;
-      }
       opts.t.pushUserMessage(userMsg);
       if (inputPrompt().trim() === text) setInputPrompt("");
-      lastSentDraft = "";
-      recentSentDrafts.set(`${sid || "new"}:`, Date.now());
-      if (sid && opts.isOpen()) {
-        opts.send({ type: "set_draft", sessionId: sid, draft: "" });
-      }
       // Preserve any new text or attachments entered while the upload was in flight.
       for (const p of pending) attachments.removePendingAttachment(p.key);
       try {
@@ -493,7 +351,6 @@ export function createComposer(opts: {
     pickSlash,
     dismissSlash: () => setSlashDismissed(inputPrompt()),
     sendPrompt,
-    flushPendingDraft,
   };
 }
 

@@ -323,12 +323,6 @@ export function createTranscript(opts: {
     setTodos(r.todos || []);
     if (typeof r.todosOpen === "boolean") applyTodosOpenFromRemote(r.todosOpen);
     applySessionContent(sid, r.messages || r.Messages || [], r.compaction);
-    const em = r.editingMsg;
-    if (em && typeof em.index === "number") {
-      applyEditingMsgFromRemote(em.index, em.text || "");
-    } else {
-      applyEditingMsgFromRemote(null, "");
-    }
     showQuestion(r.question || null);
     setToolProgress(r.toolProgress || {});
     setToolStarts(r.toolStarts || {});
@@ -482,148 +476,56 @@ export function createTranscript(opts: {
       yolo: getYolo(),
     });
   }
-  let editMsgTimer: ReturnType<typeof setTimeout> | undefined;
-  let lastSentEditIdx: number | null = null;
-  let lastSentEditText = "";
-  const recentSentEdits = new Map<string, number>();
-  let lastStartedEditAt = 0;
-  let lastClosedEditAt = 0;
-
-  function purgeRecentSentEdits() {
-    const now = Date.now();
-    for (const [key, time] of recentSentEdits.entries()) {
-      if (now - time > 10000) recentSentEdits.delete(key);
-    }
+  function editDraftKey(): string | null {
+    const sid = opts.getSessionId();
+    if (sid == null || editingMsgIdx() == null) return null;
+    return `llmgw-edit:${sid}:${editingMsgIdx()}`;
   }
 
-  function flushPendingEdit() {
-    if (editMsgTimer) {
-      clearTimeout(editMsgTimer);
-      editMsgTimer = undefined;
-      const sid = opts.getSessionId();
-      const idx = editingMsgIdx();
+  function persistEditDraft() {
+    const key = editDraftKey();
+    if (!key) return;
+    try {
       const text = editingMsgText();
-      if (sid && idx != null && opts.isOpen()) {
-        lastSentEditIdx = idx;
-        lastSentEditText = text;
-        recentSentEdits.set(`${idx}:${text}`, Date.now());
-        opts.send({ type: "set_editing_msg", sessionId: sid, index: idx, text });
-      }
-    }
+      if (text) localStorage.setItem(key, text);
+      else localStorage.removeItem(key);
+    } catch {}
   }
 
-  function syncEditingMsg(sid: string, idx: number | null, text: string) {
-    clearTimeout(editMsgTimer);
-    if (!opts.isOpen()) return;
-    if (idx == null) {
-      lastSentEditIdx = null;
-      lastSentEditText = "";
-      opts.send({ type: "set_editing_msg", sessionId: sid, index: null, text: "" });
-      return;
-    }
-    editMsgTimer = setTimeout(() => {
-      if (opts.isOpen()) {
-        lastSentEditIdx = idx;
-        lastSentEditText = text;
-        recentSentEdits.set(`${idx}:${text}`, Date.now());
-        purgeRecentSentEdits();
-        opts.send({ type: "set_editing_msg", sessionId: sid, index: idx, text });
-      }
-    }, 350);
-  }
-  onCleanup(() => clearTimeout(editMsgTimer));
-
-  function applyEditingMsgFromRemote(idx: number | null, text: string) {
-    if (savingEdit()) return;
-    const currentIdx = editingMsgIdx();
-    const currentText = editingMsgText();
-
-    const isFocused = typeof document !== "undefined" && document.activeElement?.id === "rc-editing-msg";
-
-    if (idx == null) {
-      if (currentIdx == null) return;
-      // If user is actively typing in the editing textarea, do not close edit mode
-      if (isFocused) return;
-      // If user just started editing on this device, suppress stale pre-edit nulls
-      if (Date.now() - lastStartedEditAt < 2000) return;
-
-      lastSentEditIdx = null;
-      lastSentEditText = "";
-      setEditingMsgIdx(null);
-      setEditingMsgText("");
-      return;
-    }
-
-    // Suppress reopening if recently closed on this device
-    if (currentIdx == null && Date.now() - lastClosedEditAt < 2000) return;
-
-    // If identical, nothing to do
-    if (idx === currentIdx && text === currentText) return;
-
-    // If actively focused, local typing has authority: do not overwrite
-    if (isFocused) {
-      if (idx === currentIdx) return;
-      return;
-    }
-
-    // Echo suppression
-    purgeRecentSentEdits();
-    if (idx === lastSentEditIdx && (text === lastSentEditText || recentSentEdits.has(`${idx}:${text}`))) {
-      return;
-    }
-
-    // Monotonic prefix guard: if same message and local text already starts with remote and is longer
-    if (idx === currentIdx && currentText.startsWith(text) && currentText.length > text.length) {
-      return;
-    }
-
-    lastSentEditIdx = idx;
-    lastSentEditText = text;
-    if (idx !== editingMsgIdx()) { editAttachments.clearAttachments(); setEditingAttachments(messages().find((m) => m.srcIdx === idx)?.attachments || []); }
-    setEditingMsgIdx(idx);
-    setEditingMsgText(text);
+  function clearEditDraft(sid: string, idx: number) {
+    try {
+      localStorage.removeItem(`llmgw-edit:${sid}:${idx}`);
+    } catch {}
   }
 
   const editMentions = createMentions({ ...opts, getProjectId: () => opts.getProjectId?.() || "",
     text: editingMsgText, setText: updateEditingMsgText, inputId: "rc-editing-msg" });
 
   // Inline edit (chatbot startEditMessage): user edits resubmit, assistant
-  // edits just save.
+  // edits just save. The in-progress text stays in this browser only
+  // (localStorage per session+message) and is restored on reopen.
   function startEditMsg(idx: number, m: ChatMessage) {
     editAttachments.clearAttachments();
     setEditingAttachments(m.attachments || []);
-    lastStartedEditAt = Date.now();
     setEditingMsgIdx(idx);
-    const text = messageText(m);
+    let text = messageText(m);
+    try {
+      const sid = opts.getSessionId();
+      const saved = sid ? localStorage.getItem(`llmgw-edit:${sid}:${idx}`) : null;
+      if (saved) text = saved;
+    } catch {}
     setEditingMsgText(text);
-    lastSentEditIdx = idx;
-    lastSentEditText = text;
-    recentSentEdits.set(`${idx}:${text}`, Date.now());
-    const sid = opts.getSessionId();
-    if (sid && opts.isOpen()) {
-      opts.send({ type: "set_editing_msg", sessionId: sid, index: idx, text });
-    }
   }
   function updateEditingMsgText(text: string) {
     setEditingMsgText(text);
-    const sid = opts.getSessionId();
-    const idx = editingMsgIdx();
-    if (sid && idx != null) {
-      syncEditingMsg(sid, idx, text);
-    }
+    persistEditDraft();
   }
   function cancelEditMsg() {
     editAttachments.clearAttachments();
     setEditingAttachments([]);
-    clearTimeout(editMsgTimer);
-    editMsgTimer = undefined;
-    lastClosedEditAt = Date.now();
     const sid = opts.getSessionId();
-    if (sid && opts.isOpen() && editingMsgIdx() != null) {
-      opts.send({ type: "set_editing_msg", sessionId: sid, index: null, text: "" });
-    }
-    lastSentEditIdx = null;
-    lastSentEditText = "";
+    const idx = editingMsgIdx();
+    if (sid && idx != null) clearEditDraft(sid, idx);
     setEditingMsgIdx(null);
     setEditingMsgText("");
   }
@@ -844,7 +746,6 @@ export function createTranscript(opts: {
     editAttachments.clearAttachments();
     setEditingAttachments([]);
     clearToolScrolls();
-    flushPendingEdit();
     setTurnActivity(null); setTodos([]); setToolProgress({}); setToolStarts({});
     showQuestion(null);
     transcriptScroll.reset();
@@ -853,10 +754,6 @@ export function createTranscript(opts: {
     setSessionCompaction(null);
     setSessionStatus("idle");
     setPendingApproval(null);
-    clearTimeout(editMsgTimer);
-    editMsgTimer = undefined;
-    lastSentEditIdx = null;
-    lastSentEditText = "";
     setEditingMsgIdx(null);
     setEditingMsgText("");
     stopThinkingTimer();
@@ -900,7 +797,7 @@ export function createTranscript(opts: {
     copiedMsgId, copyMsg,
     thinkingStart, thinkingElapsed, thinkingIndex,
     stopThinkingTimer,
-    editingMsgIdx, editingMsgText, updateEditingMsgText, applyEditingMsgFromRemote, flushPendingEdit,
+    editingMsgIdx, editingMsgText, updateEditingMsgText,
     isAtBottom,
     chatContainerRef, setChatContainerRef, chatContentRef, setChatContentRef,
     transcriptScroll, scrollToBottom, pinAtBottom, onChatScroll,

@@ -77,7 +77,7 @@ export function ComposerInput() {
     placeholder="Ask anything, @ to mention, / for actions"
     value={c.inputPrompt()}
     onFocus={() => c.mentions.setFocused(true)}
-    onBlur={() => { c.mentions.setFocused(false); c.flushPendingDraft(); }}
+    onBlur={() => { c.mentions.setFocused(false); }}
     onSelect={(e) => c.mentions.setCaret(e.currentTarget.selectionStart)}
     onClick={(e) => c.mentions.setCaret(e.currentTarget.selectionStart)}
     onKeyUp={(e) => c.mentions.setCaret(e.currentTarget.selectionStart)}

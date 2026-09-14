@@ -273,7 +273,6 @@ try {
     const a = (window as any).composerUI;
     a.t.applySnapshot("session-a", {
       status: "idle",
-      editingMsg: { index: 3, text: "edited" },
       messages: [
         { role: "user", content: [{ text: "first" }] },
         {

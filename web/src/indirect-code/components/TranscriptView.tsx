@@ -234,7 +234,7 @@ export function TranscriptView() {
                     onDrop={(e) => {e.preventDefault(); void t.editAttachments.handleFiles(Array.from(e.dataTransfer?.files || []));}}
                     value={t.editingMsgText()}
                     onInput={(e) => {t.updateEditingMsgText(e.currentTarget.value); t.editMentions.setCaret(e.currentTarget.selectionStart);}}
-                    onBlur={() => {t.editMentions.setFocused(false); t.flushPendingEdit();}}
+                    onBlur={() => {t.editMentions.setFocused(false);}}
                     onKeyDown={(e) => {
                       if (e.isComposing || t.editMentions.keyDown(e)) return;
                       if (!ui.isMobile() && (e.ctrlKey || e.metaKey) && e.key === "Enter") {

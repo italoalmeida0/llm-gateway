@@ -227,8 +227,6 @@ export default function IndirectCodePage() {
       notice.toast("Queued — sends after agent finishes", "ok");
     },
     isCreatingSession: () => creatingSession(),
-    getSessionDraft: () => mirror.sessions().find((s) => s.id === activeSessionId())?.draft || "",
-    getNewDraft: () => mirror.configDoc()?.newDraft || "",
   });
 
   const projects = createProjects({
@@ -391,11 +389,6 @@ export default function IndirectCodePage() {
       if (s.model) options.setActiveModel(s.model);
       if (s.options) options.applyOptions(s.options);
       if (typeof s.todosOpen === "boolean") transcript.applyTodosOpenFromRemote(s.todosOpen);
-      if (s.editingMsg && typeof s.editingMsg.index === "number") {
-        transcript.applyEditingMsgFromRemote(s.editingMsg.index, s.editingMsg.text || "");
-      } else {
-        transcript.applyEditingMsgFromRemote(null, "");
-      }
     }
     transcript.fetchSession(sid);
     turnChanges.requestBalloons();
@@ -442,11 +435,6 @@ export default function IndirectCodePage() {
       if (s.model) options.setActiveModel(s.model);
       if (s.options) options.applyOptions(s.options);
       if (typeof s.todosOpen === "boolean") transcript.applyTodosOpenFromRemote(s.todosOpen);
-      if (s.editingMsg && typeof s.editingMsg.index === "number") {
-        transcript.applyEditingMsgFromRemote(s.editingMsg.index, s.editingMsg.text || "");
-      } else {
-        transcript.applyEditingMsgFromRemote(null, "");
-      }
     }
     transcript.fetchSession(id);
     turnChanges.requestBalloons();
@@ -463,7 +451,7 @@ export default function IndirectCodePage() {
       const hid = hosts.activeHostId();
       if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, "new");
     } catch {}
-    composer.setInputPrompt(mirror.configDoc()?.newDraft || "");
+    composer.setInputPrompt("");
     turnChanges.reset();
     notice.setAppNotice(null);
     options.applyOptions(options.getLastLocalSelection() || mirror.configDoc()?.lastSelection);
@@ -507,8 +495,15 @@ export default function IndirectCodePage() {
     transcript.purgeSession(id);
     review.purgeSessionFiles(id);
     queue.purgeQueue(id);
+    // Local drafts (composer + inline edits) live only in this browser:
+    // drop them together with the session trace.
     try {
-      localStorage.removeItem(`llmgw-draft:${id}`);
+      const keys: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && (k === `llmgw-draft:${hosts.activeHostId()}:${id}` || k.startsWith(`llmgw-edit:${id}:`))) keys.push(k);
+      }
+      for (const k of keys) localStorage.removeItem(k);
     } catch {}
   }
 
@@ -579,7 +574,6 @@ export default function IndirectCodePage() {
           if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, r.id);
         } catch {}
         composer.setInputPrompt(firstDraft);
-        try { localStorage.setItem(`llmgw-draft:${hosts.activeHostId()}:${r.id}`, firstDraft); } catch {}
         options.applyOptions(options.getLastLocalSelection() || r.options);
         // Attachments stay in the draft until upload succeeds on this new session.
         void composer.sendPrompt();
@@ -994,17 +988,12 @@ export default function IndirectCodePage() {
     }, 2000);
   });
 
-  // Sync active session state (todosOpen, editingMsg, options) from mirror to UI
+  // Sync active session state (todosOpen, options) from mirror to UI
   createEffect(() => {
     const s = activeSession();
     if (!s) return;
     if (typeof s.todosOpen === "boolean") {
       transcript.applyTodosOpenFromRemote(s.todosOpen);
-    }
-    if (s.editingMsg && typeof s.editingMsg.index === "number") {
-      transcript.applyEditingMsgFromRemote(s.editingMsg.index, s.editingMsg.text || "");
-    } else {
-      transcript.applyEditingMsgFromRemote(null, "");
     }
     if (s.model || s.options) {
       options.reconcileServerSelection(s.id, s.model, s.options, gatewayModels().map((m) => m.id), gatewayModels()[0]?.id || "");

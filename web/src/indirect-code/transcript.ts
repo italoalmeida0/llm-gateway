@@ -423,7 +423,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       const cmd = String(args.command || "").replace(/\s+/g, " ").trim();
       return {
         icon: "lucide:terminal",
-        verb: "Run",
+        verb: "Ran",
         target: cmd.length > 90 ? cmd.slice(0, 90) + "…" : cmd,
       };
     }
@@ -491,7 +491,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
         const target = `${baseNameOf(args.script) || args.script}${suffix}`;
         return {
           icon: "mdi:language-python",
-          verb: "Run",
+          verb: "Ran",
           target: target.length > 90 ? target.slice(0, 90) + "…" : target,
         };
       }
@@ -502,7 +502,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       const one = (first || "snippet").replace(/\s+/g, " ").trim();
       return {
         icon: "mdi:language-python",
-        verb: "Run",
+        verb: "Ran",
         target: one.length > 90 ? one.slice(0, 90) + "…" : one,
       };
     }

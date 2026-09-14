@@ -41,10 +41,7 @@ export function createMirror(opts: {
       prevSessions.every((s, i) =>
         s.id === sorted[i].id &&
         s.updatedAt === sorted[i].updatedAt &&
-        s.draft === sorted[i].draft &&
         s.todosOpen === sorted[i].todosOpen &&
-        s.editingMsg?.index === sorted[i].editingMsg?.index &&
-        s.editingMsg?.text === sorted[i].editingMsg?.text &&
         s.model === sorted[i].model
       )
     ) {

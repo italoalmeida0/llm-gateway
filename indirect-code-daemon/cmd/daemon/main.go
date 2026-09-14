@@ -72,7 +72,6 @@ type DaemonConfig struct {
 	Settings      HarnessSettings            `json:"settings"`
 	MCPServers    map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
 	Skills        map[string]SkillConfig     `json:"skills,omitempty"`
-	NewDraft      string                     `json:"new_draft,omitempty"`
 }
 
 // AttachmentRef is a file the user attached to a session. The bytes live on
@@ -103,18 +102,11 @@ type ProjectEntry struct {
 	Collapsed bool   `json:"collapsed,omitempty"`
 }
 
-type EditingMsgState struct {
-	Index int    `json:"index"`
-	Text  string `json:"text"`
-}
-
 // SessionRecord is the on-disk format for each local session.
 type SessionRecord struct {
 	Turn        *TurnActivity      `json:"turn,omitempty"`
 	Todos       []tools.TodoItem   `json:"todos,omitempty"`
 	TodosOpen   *bool              `json:"todosOpen,omitempty"`
-	Draft       string             `json:"draft,omitempty"`
-	EditingMsg  *EditingMsgState   `json:"editingMsg,omitempty"`
 	Options     SessionOptions     `json:"options"`
 	ID          string             `json:"id"`
 	CWD         string             `json:"cwd"`
@@ -158,9 +150,7 @@ type SessionSummary struct {
 	Pinned       bool             `json:"pinned"`
 	CreatedAt    int64            `json:"createdAt"`
 	UpdatedAt    int64            `json:"updatedAt"`
-	Draft        string           `json:"draft,omitempty"`
 	TodosOpen    *bool            `json:"todosOpen,omitempty"`
-	EditingMsg   *EditingMsgState `json:"editingMsg,omitempty"`
 	Options      *SessionOptions  `json:"options,omitempty"`
 }
 
@@ -171,7 +161,6 @@ func sessionListItem(s SessionSummary) map[string]any {
 		"pinned":       s.Pinned,
 		"createdAt":    s.CreatedAt,
 		"updatedAt":    s.UpdatedAt,
-		"draft":        s.Draft,
 		"options":      s.Options,
 	}
 }
@@ -233,7 +222,6 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
 		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
 		"turn": rec.Turn, "todos": rec.Todos, "todosOpen": rec.TodosOpen,
-		"draft": rec.Draft, "editingMsg": rec.EditingMsg,
 		"workspace": inspectWorkspace(rec.CWD),
 		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
 		"attachments":  rec.Attachments,
@@ -746,8 +734,6 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 		Turn        *TurnActivity    `json:"turn"`
 		Todos       []tools.TodoItem `json:"todos"`
 		TodosOpen   *bool            `json:"todosOpen"`
-		Draft       string           `json:"draft"`
-		EditingMsg  *EditingMsgState `json:"editingMsg"`
 		Options     SessionOptions   `json:"options"`
 		ID          string           `json:"id"`
 		CWD         string           `json:"cwd"`
@@ -783,8 +769,6 @@ func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
 	}
 	rec := &SessionRecord{
 		Turn: rawRec.Turn, Todos: rawRec.Todos, TodosOpen: rawRec.TodosOpen,
-		Draft:       rawRec.Draft,
-		EditingMsg:  rawRec.EditingMsg,
 		Options:     rawRec.Options,
 		ID:          rawRec.ID,
 		CWD:         resolvePath(rawRec.CWD),
@@ -838,9 +822,7 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 			Pinned:       rec.Pinned,
 			CreatedAt:    rec.CreatedAt,
 			UpdatedAt:    rec.UpdatedAt,
-			Draft:        rec.Draft,
 			TodosOpen:    rec.TodosOpen,
-			EditingMsg:   rec.EditingMsg,
 			Options:      &rec.Options,
 		})
 	}
@@ -894,9 +876,7 @@ type sessionRaw struct {
 	UpdatedAt   int64             `json:"updatedAt"`
 	Messages    []json.RawMessage `json:"messages"`
 	Attachments []AttachmentRef   `json:"attachments"`
-	Draft       string            `json:"draft"`
 	TodosOpen   *bool             `json:"todosOpen"`
-	EditingMsg  *EditingMsgState  `json:"editingMsg"`
 	Options     *SessionOptions   `json:"options"`
 }
 
@@ -944,9 +924,7 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 			Pinned:       r.Pinned,
 			CreatedAt:    r.CreatedAt,
 			UpdatedAt:    r.UpdatedAt,
-			Draft:        r.Draft,
 			TodosOpen:    r.TodosOpen,
-			EditingMsg:   r.EditingMsg,
 			Options:      r.Options,
 		})
 	}
@@ -1217,29 +1195,9 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 				"mcpServers":    d.mirroredMCP(),
 				"skills":        d.config.Skills,
 				"name":          d.config.Name,
-				"newDraft":      d.config.NewDraft,
 			}}, "")
 		default:
 			reply(nil, "unknown collection")
-		}
-
-	case "set_draft":
-		var req struct {
-			SessionID string `json:"sessionId"`
-			Draft     string `json:"draft"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		if req.SessionID != "" {
-			act, err := d.getOrCreateActiveSession(req.SessionID)
-			if err == nil {
-				act.mu.Lock()
-				act.record.Draft = req.Draft
-				_ = d.saveSession(act.record)
-				act.mu.Unlock()
-			}
-		} else {
-			d.config.NewDraft = req.Draft
-			_ = d.saveConfig()
 		}
 
 	case "set_todos_open":
@@ -1253,30 +1211,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			if err == nil {
 				act.mu.Lock()
 				act.record.TodosOpen = &req.Open
-				_ = d.saveSession(act.record)
-				act.mu.Unlock()
-			}
-		}
-
-	case "set_editing_msg":
-		var req struct {
-			SessionID string `json:"sessionId"`
-			Index     *int   `json:"index"`
-			Text      string `json:"text"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		if req.SessionID != "" {
-			act, err := d.getOrCreateActiveSession(req.SessionID)
-			if err == nil {
-				act.mu.Lock()
-				if req.Index != nil && *req.Index >= 0 {
-					act.record.EditingMsg = &EditingMsgState{
-						Index: *req.Index,
-						Text:  req.Text,
-					}
-				} else {
-					act.record.EditingMsg = nil
-				}
 				_ = d.saveSession(act.record)
 				act.mu.Unlock()
 			}
@@ -1531,14 +1465,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			removed = 0
 		}
 		broadcastTruncated(d, req.SessionID, req.Index, removed, rec.Messages, rec.Compaction, rec.Attachments)
-		rec.EditingMsg = nil
-		d.sessionsMu.RLock()
-		if act, ok := d.sessions[req.SessionID]; ok && act != nil {
-			act.mu.Lock()
-			act.record.EditingMsg = nil
-			act.mu.Unlock()
-		}
-		d.sessionsMu.RUnlock()
 		_ = d.saveSession(rec)
 		_ = d.sendWS(map[string]any{
 			"type":       "session_content",
@@ -1769,8 +1695,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"hostId":    d.config.HostID,
 			"session":   sessionPayload(rec),
 		})
-		d.config.NewDraft = ""
-		_ = d.saveConfig()
 
 	case "fork_session":
 		d.forkSession(raw)
@@ -1893,8 +1817,6 @@ func (d *DaemonServer) startPrompt(sessionID, text string, attachmentIDs []strin
 	if options != nil {
 		act.record.Options = normalizedOptions(*options)
 	}
-	act.record.Draft = ""
-	act.record.EditingMsg = nil
 	_ = d.saveSession(act.record)
 	if !d.config.Settings.NoAutoTitle && (act.record.Title == "" || act.record.Title == "New conversation") {
 		if t := instantTitle(cleanText); t != "" {
@@ -1973,7 +1895,6 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 		d.attachmentError("", sessionID, "Stop the current turn before running a command")
 		return
 	}
-	act.record.Draft = ""
 	var reply string
 
 	switch head {

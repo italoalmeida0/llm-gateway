@@ -44,10 +44,9 @@ func TestSettingsAtomicValidationConflictAndSecrets(t *testing.T) {
 		t.Fatal("secret values reached mirror or key names disappeared")
 	}
 	rev := configRevision(d.config)
-	d.config.NewDraft = "draft"
 	d.config.LastSelection = &ModelSelection{Model: "another"}
 	if configRevision(d.config) != rev {
-		t.Fatal("session choices/drafts conflict with editor")
+		t.Fatal("session choices conflict with editor")
 	}
 	response = wire(map[string]any{"type": "update_config", "requestId": "conflict", "expectedRevision": original, "skills": map[string]SkillConfig{}})
 	if response["success"] != false || len(d.config.Skills) != 1 {

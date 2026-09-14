@@ -58,9 +58,7 @@ export type DaemonCommand = CommandBase &
   | { type: "question_response"; sessionId: string; questionId: string; answers: string[][] }
   | { type: "convert_response"; sessionId: string; requestId: string; text?: string; error?: string }
   | { type: "tool_approval_response"; sessionId: string; callId: string; approved: boolean; always: boolean }
-  | { type: "set_draft"; sessionId: string; draft: string }
   | { type: "set_todos_open"; sessionId: string; open: boolean }
-  | { type: "set_editing_msg"; sessionId: string; index: number | null; text: string }
   | { type: "set_project_collapsed"; projectId: string; collapsed: boolean }
   | { type: "get_turn_changes"; sessionId: string; requestId?: string }
   | { type: "undo_turn_changes"; sessionId: string; turnIndex: number; path?: string; requestId?: string }

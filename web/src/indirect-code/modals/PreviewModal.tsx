@@ -14,7 +14,7 @@ export function PreviewModal() {
       open={!!file()}
       onClose={() => m.setPreviewFile(null)}
       title={file()?.name || "File Preview"}
-      subtitle="Inspect source code, review estimated token size, or truncate content before sending to agent."
+      subtitle="Inspect or download the attachment. Preview limits do not change the content sent to the agent."
       width="max-w-3xl"
       badge={
         <Show when={file()?.truncated}>
@@ -50,11 +50,11 @@ export function PreviewModal() {
                   <button
                     onClick={() => m.setShowTruncateInput(!m.showTruncateInput())}
                     class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-line bg-ink-900/60 text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-colors cursor-pointer"
-                    data-rc-tip="Truncate to reduce tokens"
-                    aria-label="Truncate to reduce tokens"
+                    data-rc-tip="Limit preview length"
+                    aria-label="Limit preview length"
                   >
                     <Iconify icon="lucide:scissors" size={13} />
-                    <span>Truncate</span>
+                    <span>Limit preview</span>
                   </button>
                 </Show>
                 <Show when={f().text}>
@@ -70,7 +70,7 @@ export function PreviewModal() {
                     <span>{m.previewCopied() ? "Copied!" : "Copy Code"}</span>
                   </button>
                 </Show>
-                <Show when={f().dataB64}>
+                <Show when={f().dataB64 != null}>
                   <button
                     onClick={m.downloadPreviewFile}
                     class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-line bg-ink-900/60 text-ink-300 hover:text-ink-100 hover:border-ink-500 transition-colors cursor-pointer"
@@ -91,7 +91,7 @@ export function PreviewModal() {
               <div class="flex flex-wrap items-center gap-3 p-3.5 rounded-xl bg-ink-950/70 border border-line">
                 <div class="flex items-center gap-1.5 text-ink-400 text-xs">
                   <Iconify icon="lucide:scissors" size={14} class="text-ink-400" />
-                  <span>Truncate to:</span>
+                  <span>Preview limit:</span>
                 </div>
                 <input
                   type="number"

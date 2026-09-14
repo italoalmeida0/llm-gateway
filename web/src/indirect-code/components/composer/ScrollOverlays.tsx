@@ -1,10 +1,13 @@
-import { For, Show } from "solid-js";
+import { createEffect, For, Show } from "solid-js";
+import { FloatMenu } from "../FloatMenu";
 import { Icon as Iconify } from "../../../components/icon";
 import { useComposerCtx, useTranscriptCtx } from "../../ctx";
 
 export function ScrollOverlays() {
   const c = useComposerCtx();
   const t = useTranscriptCtx();
+  let slashList: HTMLDivElement | undefined;
+  createEffect(() => {const index = c.slashIndex(); slashList?.querySelectorAll("button")[index]?.scrollIntoView({block:"nearest"});});
   return (
 <>
 {/* Floating pin-at-bottom (unlocks on any scroll gesture) */}
@@ -20,8 +23,8 @@ export function ScrollOverlays() {
   </div>
 </Show>
 {/* Slash Command Autocomplete Menu */}
-<Show when={c.slashMatches().length > 0}>
-  <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-full max-w-2xl rounded-xl border border-line bg-ink-900/95 shadow-2xl p-1.5 max-h-60 overflow-y-auto z-[60] backdrop-blur">
+<FloatMenu anchor={() => document.getElementById("rc-composer")} open={c.slashMatches().length > 0} placement="top-start" width="40rem">
+  <div ref={slashList} class="p-1.5 max-h-60 overflow-y-auto">
     <div class="px-2 py-1 text-[10px] uppercase font-bold text-ink-500 tracking-wider">
       Slash Commands
     </div>
@@ -45,7 +48,7 @@ export function ScrollOverlays() {
       )}
     </For>
   </div>
-</Show>
+</FloatMenu>
 </>
   );
 }

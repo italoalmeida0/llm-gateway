@@ -99,6 +99,13 @@ func previewIncoming(tfc *turnFileChanges) []filetrack.ChangedFile {
 // finishTurnTracking builds the final changed list, resets incoming, appends
 // the persistent balloon to the session record, and returns it for broadcast.
 func (d *DaemonServer) finishTurnTracking(act *ActiveSession, tfc *turnFileChanges) *filetrack.TurnChanges {
+	act.mu.Lock()
+	defer act.mu.Unlock()
+	return d.finishTurnTrackingLocked(act, tfc)
+}
+
+// Caller holds act.mu through the final completion save.
+func (d *DaemonServer) finishTurnTrackingLocked(act *ActiveSession, tfc *turnFileChanges) *filetrack.TurnChanges {
 	if tfc == nil {
 		return nil
 	}
@@ -112,14 +119,11 @@ func (d *DaemonServer) finishTurnTracking(act *ActiveSession, tfc *turnFileChang
 		At:        time.Now().UnixMilli(),
 		Files:     files,
 	}
-	act.mu.Lock()
 	if act.record != nil {
 		balloon.MessageIndex = len(act.record.Messages)
 		act.record.FileBalloons = append(act.record.FileBalloons, *balloon)
 		act.record.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(act.record)
 	}
-	act.mu.Unlock()
 	return balloon
 }
 
@@ -136,7 +140,7 @@ func (d *DaemonServer) broadcastFileBalloon(hostID, sessionID string, balloon *f
 		"hostId":    hostID,
 		"sessionId": sessionID,
 		"live":      false,
-		"balloon":   balloon,
+		"balloon":   fileBalloonPayload(*balloon),
 	})
 }
 
@@ -302,4 +306,16 @@ func undoOneFile(cwd string, f *filetrack.ChangedFile) undoFileResult {
 		res.Message = fmt.Sprintf("status %q cannot be undone", f.Status)
 		return res
 	}
+}
+
+// Disk uses historical snake_case keys; all foreground surfaces use camelCase.
+func fileBalloonPayload(b filetrack.TurnChanges) map[string]any {
+	return map[string]any{"turnIndex": b.TurnIndex, "at": b.At, "files": b.Files, "messageIndex": b.MessageIndex}
+}
+func fileBalloonPayloads(balloons []filetrack.TurnChanges) []map[string]any {
+	out := make([]map[string]any, 0, len(balloons))
+	for _, b := range balloons {
+		out = append(out, fileBalloonPayload(b))
+	}
+	return out
 }

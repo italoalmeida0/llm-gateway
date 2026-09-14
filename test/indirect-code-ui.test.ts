@@ -1436,3 +1436,45 @@ describe("Notify only for build/plan modes", () => {
     delete (globalThis as any).Notification;
   });
 });
+
+describe("Turn audit regressions", () => {
+  test("live messages retain turn identity and raw position through snapshots", async () => {
+    const { pushAssistantCarrier, mergeAssistantMessage } = await import("../web/src/indirect-code/transcript/updaters");
+    let list = pushAssistantCarrier([], 12, 9);
+    list = appendReasoningDelta(list, "Working");
+    list = mergeAssistantMessage(list, {index:12,turnIndex:9,message:{role:"assistant",content:[{text:"Done"}]}});
+    expect(list[0]).toMatchObject({id:"msg_12",srcIdx:12,turnIndex:9,streaming:false});
+    const raw = Array.from({length:13},(_,i) => i===12 ? {role:"assistant",turnIndex:9,content:[{text:"Done"}]} : {role:"tool",content:[]});
+    expect(normalizeSessionMessages(raw,list)[0].id).toBe(list[0].id);
+  });
+
+  test("short live hints never fall back into the previous turn", () => {
+    const list: ChatMessage[] = [
+      {id:"old",role:"assistant",turnIndex:8,blocks:[{type:"text",text:"Old hint"}]},
+      {id:"user",role:"user",blocks:[{type:"text",text:"New task"}]},
+      {id:"live",role:"assistant",blocks:[{type:"text",text:"Current hint"}]},
+    ];
+    expect(latestShortTurnMessage(list)).toBe("Current hint");
+    expect(latestShortTurnMessage(list.slice(0,2))).toBe("");
+    const map = mapBalloonsToBlocks(buildRenderBlocks(list),[{turnIndex:8,files:[{path:"old.ts",status:"modified"}]}]);
+    expect(map.get("old")?.[0].turnIndex).toBe(8);
+    expect(map.has("live")).toBe(false);
+  });
+
+  test("stamped turns cannot fuse when a user bubble is absent", () => {
+    const list: ChatMessage[] = [1,2].map((turnIndex) => ({id:String(turnIndex),role:"assistant",turnIndex,blocks:[{type:"reasoning",reasoning:"Work"}]}));
+    expect(buildRenderBlocks(list)).toHaveLength(2);
+  });
+
+  test("balloons normalize legacy wire keys and retain committed changes", async () => {
+    const { createTurnChanges } = await import("../web/src/indirect-code/hooks/useTurnChanges");
+    const tc = createTurnChanges({send:()=>{},getSessionId:()=>"s",toast:()=>{}});
+    const files = [{path:"a.ts",status:"new"}];
+    tc.noteBalloon({turn_index:3,message_index:6,files},false);
+    expect(tc.balloons()[0]).toMatchObject({turnIndex:3,messageIndex:6,live:false});
+    tc.dropAbove(5); // Raw index 5 keeps six messages, including the entire turn.
+    expect(tc.balloons()).toHaveLength(1);
+    tc.noteBalloon({turnIndex:3,files:[]},true);
+    expect(tc.balloons()).toHaveLength(1); // Late live empty must not delete committed changes.
+  });
+});

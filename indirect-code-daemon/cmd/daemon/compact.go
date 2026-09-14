@@ -98,7 +98,7 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 		"type":       "session_compacted",
 		"hostId":     cfg.HostID,
 		"sessionId":  sid,
-		"messages":   act.record.Messages,
+		"messages":   sanitizeMessagesForFrontend(act.record.Messages, act.record.Attachments),
 		"context":    act.record.Context,
 		"compaction": act.record.Compaction,
 		"usage":      act.record.Usage,

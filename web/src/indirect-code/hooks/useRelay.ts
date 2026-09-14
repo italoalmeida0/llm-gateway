@@ -30,6 +30,7 @@ export function createRelay(opts: {
   let disposed = false;
 
   function wsOpen() {
+    connectionState();
     try {
       return !!ws && (ws as WebSocket).readyState === WebSocket.OPEN;
     } catch {

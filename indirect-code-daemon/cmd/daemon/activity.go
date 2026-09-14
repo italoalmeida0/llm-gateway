@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
@@ -105,6 +106,10 @@ func finishTurnActivity(act *ActiveSession, cancelled bool) {
 }
 
 func modeToolRestriction(mode, tool string) string {
+	mode = normalizedOptions(SessionOptions{Mode: mode}).Mode
+	if strings.HasPrefix(tool, "mcp__") && mode != "build" {
+		return "MCP tools are only available in Build mode."
+	}
 	if mode == "talk" {
 		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "patch"} {
 			if tool == name {

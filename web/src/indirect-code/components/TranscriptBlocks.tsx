@@ -1,4 +1,6 @@
-import { createMemo, For, Show, onCleanup } from "solid-js";
+import { createEffect, createMemo, For, Show, onCleanup } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
+import { createDisclosure, DisclosureBody } from "./Disclosure";
 import { Streamdown } from "streamdown-solid";
 import { followTail } from "../utils/scrollMemory";
 import { Icon as Iconify } from "../../components/icon";
@@ -14,23 +16,17 @@ import { ToolEditBodies } from "./tool/ToolEditBodies";
 import { ToolSearchBodies } from "./tool/ToolSearchBodies";
 import { ToolQuestionBodies } from "./tool/ToolQuestionBodies";
 
-/** Closures da página que os blocos de transcript precisam para renderizar. */
+/** Reactive transcript state shared by aggregate rows. */
 export interface TranscriptRenderCtx {
   renderBlocks: () => RenderBlock[];
   sessionStatus: () => string;
   messages: () => ChatMessage[];
   thinkingStart: () => number | null;
   thinkingElapsed: () => number;
-  expandedThinking: () => Record<string, boolean>;
-  toolGroupOpen: () => Record<string, boolean>;
-  toolOpen: () => Record<string, boolean>;
   toolProgress: () => Record<string, string>;
-  toggleToolGroup: (id: string) => void;
-  toggleToolOpen: (id: string) => void;
   elapsedLabel: (ms: number) => string;
   specialProgress: (units: ToolUnit[]) => string | undefined;
   thinkingIndex: () => number;
-  setExpandedThinking: (v: Record<string, boolean> | ((p: Record<string, boolean>) => Record<string, boolean>)) => void;
   verboseChat: () => boolean;
   hideToolMessages: () => boolean;
   setPreviewFile: (v: import("../types").PreviewFile | null) => void;
@@ -47,15 +43,16 @@ export interface TranscriptRenderCtx {
 export function renderThinkingRow(
   ctx: TranscriptRenderCtx,
   entry: Extract<TurnEntry, { kind: "thinking" }>,
-  openByDefault: boolean,
-  hidden: boolean,
-  live: boolean,
-  streaming: boolean,
+  openByDefault: () => boolean,
+  hidden: () => boolean,
+  live: () => boolean,
+  streaming: () => boolean,
+  running: () => boolean,
 ) {
   const key = `${entry.msg.id}:think:${entry.nth}`;
-  const open = () => ctx.expandedThinking()[key] ?? openByDefault;
+  const { open, toggle } = createDisclosure(() => `${running()}:${live()}`, openByDefault);
   const label = () =>
-    live
+    live()
       ? `Thinking ${ctx.thinkingElapsed()}s`
       : entry.msg.thinkingDuration !== undefined
         ? `Thinking ${entry.msg.thinkingDuration}s`
@@ -63,13 +60,13 @@ export function renderThinkingRow(
           ? "Hide thinking"
           : "Thinking";
   return (
-    <div style={hidden ? { display: "none" } : undefined} data-thinking-row={key}>
+    <div style={hidden() ? { display: "none" } : undefined} data-thinking-row={key}>
       <div
-        onClick={() => ctx.setExpandedThinking((prev) => ({ ...prev, [key]: !open() }))}
+        onClick={toggle}
         class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
       >
         <Show
-          when={!live}
+          when={!live()}
           fallback={
             <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
           }
@@ -84,16 +81,16 @@ export function renderThinkingRow(
           class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
         />
       </div>
-      <Show when={open()}>
+      <DisclosureBody open={open()}>
         <div
-          ref={(el) => onCleanup(followTail(el, () => open() && streaming))}
+          ref={(el) => onCleanup(followTail(el, () => open() && streaming()))}
           class="rc-markdown w-full text-xs leading-relaxed break-words overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-64 pl-1 pb-1 text-ink-400"
         >
           <Streamdown components={transcriptMarkdownComponents}>
             {entry.block.reasoning || "(thinking…)"}
           </Streamdown>
         </div>
-      </Show>
+      </DisclosureBody>
     </div>
   );
 }
@@ -105,18 +102,19 @@ export function renderThinkingRow(
 export function renderTextRow(
   ctx: TranscriptRenderCtx,
   entry: Extract<TurnEntry, { kind: "text" }>,
-  openByDefault: boolean,
-  hidden: boolean,
-  streaming: boolean,
+  openByDefault: () => boolean,
+  hidden: () => boolean,
+  streaming: () => boolean,
+  running: () => boolean,
 ) {
   const key = `${entry.msg.id}:text:${entry.nth}`;
-  const open = () => ctx.toolOpen()[key] ?? openByDefault;
+  const { open, toggle } = createDisclosure(() => `${running()}:${streaming()}`, openByDefault);
   const preview = () =>
     (entry.block.text || "").replace(/\s+/g, " ").trim().slice(0, 80);
   return (
-    <div style={hidden ? { display: "none" } : undefined} data-text-row={key}>
+    <div style={hidden() ? { display: "none" } : undefined} data-text-row={key}>
       <div
-        onClick={() => ctx.toggleToolOpen(key)}
+        onClick={toggle}
         class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
       >
         <Iconify icon="lucide:message-circle" size={14} class="shrink-0 text-ink-500" />
@@ -128,14 +126,14 @@ export function renderTextRow(
           class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
         />
       </div>
-      <Show when={open()}>
+      <DisclosureBody open={open()}>
         <div
-          ref={(el) => onCleanup(followTail(el, () => open() && streaming))}
+          ref={(el) => onCleanup(followTail(el, () => open() && streaming()))}
           class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-96 pl-1 pb-1"
         >
           <Streamdown components={transcriptMarkdownComponents}>{entry.block.text}</Streamdown>
         </div>
-      </Show>
+      </DisclosureBody>
     </div>
   );
 }
@@ -144,7 +142,7 @@ export function renderTextRow(
  * The turn aggregate: one card per turn with every thinking, message and
  * tool run in event order. Open by default while the turn runs (verbose no
  * longer affects this), closed once it ends — unless toggled explicitly.
- * Question-only turns keep their inline rendering, exempt from the card.
+ * Questions stay collapsed here; the questionnaire renders separately.
  */
 export function renderTurnAggregate(
   ctx: TranscriptRenderCtx,
@@ -158,8 +156,7 @@ export function renderTurnAggregate(
     texts: series.entries.filter((e) => e.kind === "text").length,
     thoughts: series.entries.filter((e) => e.kind === "thinking").length,
   }));
-  const key = `${series.msg.id}:turn`;
-  const open = () => ctx.toolGroupOpen()[key] ?? running();
+  const { open, toggle } = createDisclosure(() => String(running()), running);
   /** The featured final renders below once idle; inside the card its rows
    * stay mounted with display:none so Solid keeps DOM identity. */
   const featured = () => series.finalMsgId != null && !running();
@@ -169,7 +166,14 @@ export function renderTurnAggregate(
    * entry arrives the previous one falls back to closed on its own. */
   const tailCall = () => [...series.units].reverse().find((u) => u.call) ?? null;
   const isActive = (u: ToolUnit) =>
-    running() && (u === tailCall() || (u.call?.toolId != null && ctx.toolProgress()[u.call.toolId] != null));
+    running() && !u.result && !!u.call?.toolId && (
+      ctx.toolStarts()[u.call.toolId] != null || ctx.toolProgress()[u.call.toolId] != null ||
+      ctx.pendingApproval()?.callId === u.call.toolId ||
+      ((series.extras.at(-1) ?? series.msg).streaming === true &&
+        (series.extras.at(-1) ?? series.msg).blocks.some((b) => b.toolId === u.call?.toolId) &&
+        u.call.toolId === tailCall()?.call?.toolId));
+  const isPending = (u: ToolUnit) => running() && !u.result && !!u.call?.toolId &&
+    (series.extras.at(-1) ?? series.msg).blocks.some((b) => b.type === "tool_call" && b.toolId === u.call?.toolId);
   const lastEntryIdx = () => series.entries.length - 1;
   /** A stale thinking timer (snapshot restart mid-tools) must not spin:
    * live only while the turn's tail is still thinking. */
@@ -191,10 +195,9 @@ export function renderTurnAggregate(
     return false;
   };
   return (
-    <Show when={series.units.every((u) => u.call?.toolName === "question")} fallback={
     <div class="w-full border-t border-line/60 overflow-hidden mt-1">
       <button
-        onClick={() => ctx.toggleToolGroup(key)}
+        onClick={toggle}
         class="w-full flex items-center gap-2 px-3 py-2 hover:bg-ink-900/60 transition-colors cursor-pointer text-left"
       >
         <Show
@@ -221,33 +224,33 @@ export function renderTurnAggregate(
           class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
         />
       </button>
-      <Show when={open()}>
+      <DisclosureBody open={open()}>
         <div class="border-t border-line/60 px-2 py-1.5 space-y-0.5">
           <For each={series.entries}>
             {(entry, ei) => {
-              const tail = ei() === lastEntryIdx();
+              const tail = () => ei() === lastEntryIdx();
               if (entry.kind === "tools") {
-                return renderToolSegs(ctx, entry.msg.id, `${series.msg.id}:e${ei()}`, entry.units, running(), isActive);
+                return renderToolSegs(ctx, entry.msg.id, () => entry.units, running, isActive, isPending);
               }
               if (entry.kind === "thinking") {
                 // Stale snapshot restarts must not spin: live only while
                 // the tail is still thinking AND the clock is actually on.
-                const live = tail && tailIsThinking() && running() && entry.isNewest &&
+                const live = () => tail() && tailIsThinking() && running() && entry.isNewest &&
                   entry.msg.id === lastTurnId() && ctx.thinkingStart() !== null;
-                const content = (entry.block.reasoning || "").trim() !== "";
-                return renderThinkingRow(ctx, entry, running() && tail && content, thinkingHidden(), live, running() && tail);
+                const content = () => (entry.block.reasoning || "").trim() !== "";
+                return renderThinkingRow(ctx, entry, () => live() && content(), thinkingHidden, live, live, running);
               }
               if (entry.kind === "text") {
-                const content = (entry.block.text || "").trim() !== "";
-                return renderTextRow(ctx, entry, running() && tail && content, textHidden(entry, ei()), running() && tail);
+                const content = () => (entry.block.text || "").trim() !== "";
+                const streaming = () => running() && tail() && entry.msg.streaming === true;
+                return renderTextRow(ctx, entry, () => streaming() && content(), () => textHidden(entry, ei()), streaming, running);
               }
               return renderImageBlock(ctx, entry.block);
             }}
           </For>
         </div>
-      </Show>
+      </DisclosureBody>
     </div>
-    }><For each={series.units}>{(unit, index) => renderToolUnit(ctx, series.msg.id, unit, index(), running(), isActive(unit))}</For></Show>
   );
 }
 
@@ -325,35 +328,36 @@ export function renderImageBlock(ctx: TranscriptRenderCtx, block: ContentBlock) 
  * aggregate card. Same grouping as before, keyed on the series card so
  * state never collides across fused messages.
  */
-export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt: string, units: ToolUnit[], running: boolean, isActive: (u: ToolUnit) => boolean = () => running) {
+export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, units: () => ToolUnit[], running: () => boolean, isActive: (u: ToolUnit) => boolean = running, isPending = isActive) {
   // Partition consecutive explore/command runs into collapsible groups
   // (pure helper — algorithm lives in utils/toolSegs, covered by tests).
-  const segs = partitionToolSegs(units);
-  // Chaves estáveis por identidade (não por posição): quando uma tool nova
-  // entra no fim do grupo, as chaves das anteriores não mudam e o Solid
-  // reutiliza o DOM — sem remount, sem scroll jump, sem re-abrir colapsado.
+  const [state, setState] = createStore<{ segs: (ToolSeg & { id: string })[] }>({ segs: [] });
+  createEffect(() => setState("segs", reconcile(
+    partitionToolSegs(units(), true).map((seg) => ({ ...seg, id: segKey(seg) })), { merge: true },
+  )));
+  // Key by the first call so a growing subgroup retains its DOM and scroll.
   const segKey = (seg: ToolSeg) =>
     seg.kind === "unit"
       ? `u:${seg.unit.call?.toolId || seg.unit.result?.toolId || "i" + seg.idx}`
       : `g:${seg.cat}:${seg.units[0]?.call?.toolId || seg.units[0]?.result?.toolId || "0"}`;
   return (
     <div class="w-full space-y-0.5" style={{ "overflow-anchor": "none" }}>
-      <For each={segs}>
+      <For each={state.segs}>
         {(seg) => {
           if (seg.kind === "unit")
             return (
               <div data-toolseg={segKey(seg)} style={{ "overflow-anchor": "none" }}>
-                {renderToolUnit(ctx, msgId, seg.unit, seg.idx, running, isActive(seg.unit))}
+                {renderToolUnit(ctx, msgId, seg.unit, seg.idx, running, () => isActive(seg.unit))}
               </div>
             );
-          const gkey = `${msgId}:${keySalt}:${segKey(seg)}`;
+          const active = () => running() && seg.units.some(isPending);
           // Sub-groups open while they hold live work; a finished group
           // (and its rows) falls back to closed on its own.
-          const open = () => ctx.toolGroupOpen()[gkey] ?? (running && seg.units.some(isActive));
+          const { open, toggle } = createDisclosure(() => `${running()}:${active()}`, active);
           return (
             <div class="w-full" data-toolseg={segKey(seg)} style={{ "overflow-anchor": "none" }}>
               <button
-                onClick={() => ctx.toggleToolGroup(gkey)}
+                onClick={toggle}
                 class="w-full flex items-center gap-1.5 pl-1 pr-1.5 py-1 rounded-lg hover:bg-ink-900/70 text-[13px] text-ink-400 hover:text-ink-200 cursor-pointer"
               >
                 <span class="font-medium">{groupTitle(seg.cat, seg.units)}</span>
@@ -363,19 +367,17 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
                   class={`text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
                 />
               </button>
-              <Show when={open()}>
+              <DisclosureBody open={open()}>
                 <div class="ml-3 border-l border-line/40 pl-1.5 space-y-0.5" style={{ "overflow-anchor": "none" }}>
                   <For each={seg.units}>
                     {(u) => {
-                      // Índice global estável: posição da unit na lista completa,
-                      // não no grupo — a chave da row (toolRowKey) não muda
-                      // quando o grupo cresce.
-                      const gi = units.indexOf(u);
-                      return renderToolUnit(ctx, msgId, u, gi >= 0 ? gi : 0, running, isActive(u));
+                      // Keep fallback keys relative to the complete tool run.
+                      const gi = units().findIndex((item) => item.call?.toolId === u.call?.toolId);
+                      return renderToolUnit(ctx, msgId, u, gi >= 0 ? gi : 0, running, () => isActive(u));
                     }}
                   </For>
                 </div>
-              </Show>
+              </DisclosureBody>
             </div>
           );
         }}
@@ -394,19 +396,19 @@ export function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, keySalt:
 // Preserve DOM/component identity across deltas. Rebuilding <For> entries
 // on every token remounted Markdown and collapsed its height before repaint.
 
-export function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean, active: boolean) {
+export function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: () => boolean, active: () => boolean) {
   const m = useToolUnitModel(ctx, msgId, u, ui, running, active);
-  const part = { ctx, msgId, u, m, running, active };
+  const part = { ctx, msgId, u, m, get running() { return running(); }, get active() { return active(); } };
   return (
     <div class="w-full">
       <ToolUnitHeader {...part} />
-      <Show when={m.open()}>
-        <div class="mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 overflow-hidden">
+      <DisclosureBody open={m.open()}>
+        <div class="mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 max-h-96 overflow-auto overscroll-contain [scrollbar-gutter:stable]">
           <ToolEditBodies {...part} />
           <ToolSearchBodies {...part} />
           <ToolQuestionBodies {...part} />
         </div>
-      </Show>
+      </DisclosureBody>
     </div>
   );
 }

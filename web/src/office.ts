@@ -14,8 +14,6 @@ import pdf2md from "@opendocsg/pdf2md";
 export const OFFICE_FORMATS: Record<string, string> = {
   docx: "docx",
   odt: "odt",
-  pptx: "pptx",
-  xlsx: "xlsx",
   epub: "epub",
   rtf: "rtf",
   rst: "rst",
@@ -65,7 +63,7 @@ function extOf(name: string): string {
 export function sniffFile(
   file: File,
   bytes: Uint8Array,
-): { blocked?: string; kind?: ExtractKind; officeFormat?: string } {
+): { blocked?: string; kind?: ExtractKind; officeFormat?: string; mime?: string } {
   const ext = extOf(file.name);
   let info: Array<{ extension?: string; mime?: string; typename?: string }>;
   try {
@@ -82,14 +80,28 @@ export function sniffFile(
       blocked: `The file '${file.name}' is an incompatible binary or media format and has been blocked for safety.`,
     };
   }
+  if (["pptx", "xlsx", "doc", "xls", "ppt"].includes(ext)) {
+    return { blocked: `Convert '${file.name}' to PDF, CSV or text before attaching it.` };
+  }
   if (OFFICE_FORMATS[ext]) return { kind: "office", officeFormat: OFFICE_FORMATS[ext] };
   const isPdf = ext === "pdf" || info.some((i) => i.typename === "pdf");
   if (isPdf) return { kind: "text", officeFormat: "pdf" };
   const isImage =
     (file.type || "").startsWith("image/") ||
     info.some((i) => (i.mime || "").startsWith("image/"));
-  if (isImage) return { kind: "image" };
+  if (isImage) {
+    const mime = info.find((i) => i.mime?.startsWith("image/"))?.mime || file.type;
+    if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mime)) {
+      return { blocked: `Unsupported image '${file.name}'. Use PNG, JPEG, GIF or WebP.` };
+    }
+    return { kind: "image", mime };
+  }
+  if (bytes.includes(0) || !isUTF8(bytes)) return { blocked: `Could not read '${file.name}' as text. Attach a text, PDF, Office document or supported image.` };
   return { kind: "text" };
+}
+
+function isUTF8(bytes: Uint8Array): boolean {
+  try { new TextDecoder("utf-8", { fatal: true }).decode(bytes); return true; } catch { return false; }
 }
 
 /** Extract readable content from raw bytes (pdf/office/text, not images). */
@@ -113,7 +125,7 @@ let pandocInstance: any = null;
 let pandocFS: Map<string, any> | null = null;
 let PandocFile: any = null;
 
-async function getPandoc(): Promise<{ instance: any; fs: Map<string, any>; File: any }> {
+async function initPandoc(): Promise<{ instance: any; fs: Map<string, any>; File: any }> {
   if (pandocInstance) return { instance: pandocInstance, fs: pandocFS!, File: PandocFile };
 
   // The 58MB engine ships as a static asset next to the bundle.
@@ -169,6 +181,11 @@ async function getPandoc(): Promise<{ instance: any; fs: Map<string, any>; File:
   return { instance, fs: pandocFS!, File };
 }
 
+let pandocReady: ReturnType<typeof initPandoc> | undefined;
+function getPandoc() {
+  return pandocReady ||= initPandoc().catch((error) => { pandocReady = undefined; throw error; });
+}
+
 export async function convertOfficeToMarkdown(
   bytes: Uint8Array,
   fileName: string,
@@ -189,10 +206,15 @@ export async function convertOfficeToMarkdown(
   fs.set("warnings", new File(new Uint8Array(), { readonly: false }));
   fs.set(fileName, new File(bytes, { readonly: true }));
 
+  try {
   instance.exports.convert(optsPtr, optsBytes.length);
 
   const stdout = new TextDecoder("utf-8", { fatal: false }).decode(outFile.data);
   const stderr = new TextDecoder("utf-8", { fatal: false }).decode(errFile.data);
   if (!stdout && stderr) throw new Error(stderr);
   return stdout;
+  } finally {
+    fs.clear();
+    instance.exports.free?.(optsPtr);
+  }
 }

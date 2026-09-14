@@ -23,9 +23,10 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		Index     *int   `json:"index"`
 		// Fork-&-resend (edit popup): apply this text to the boundary user
 		// message and re-run the turn on the copy.
-		EditText  string `json:"editText"`
-		EditModel string `json:"editModel"`
-		EditYOLO  bool   `json:"editYolo"`
+		EditText      string    `json:"editText"`
+		EditModel     string    `json:"editModel"`
+		EditYOLO      bool      `json:"editYolo"`
+		AttachmentIDs *[]string `json:"attachmentIds"`
 	}
 	if json.Unmarshal(raw, &req) != nil {
 		return
@@ -99,7 +100,12 @@ func (d *DaemonServer) forkSession(raw []byte) {
 	}
 	// Copy only attachments referenced by this prefix. Inline images already carry
 	// their bytes in the transcript; textual/binary attachment notes carry names.
-	transcript, _ := json.Marshal(rec.Messages)
+	used := map[string]bool{}
+	for _, msg := range rec.Messages {
+		for _, id := range messageAttachmentIDs(msg, attachments) {
+			used[id] = true
+		}
+	}
 	dir := filepath.Join(d.sessionsDir(), rec.ID, "attachments")
 	committed := false
 	defer func() {
@@ -108,9 +114,10 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		}
 	}()
 	for _, attachment := range attachments {
-		if !strings.Contains(string(transcript), attachment.Name) && !strings.Contains(string(transcript), attachment.Path) {
+		if !used[attachment.ID] && !selectedAttachment(req.AttachmentIDs, attachment.ID) {
 			continue
 		}
+		attachment.UploadKey = ""
 		paths := map[string]string{}
 		for _, pair := range []struct {
 			source string
@@ -137,10 +144,19 @@ func (d *DaemonServer) forkSession(raw []byte) {
 	// always the last user message of the copy.
 	resent := false
 	resentIdx := -1
-	if strings.TrimSpace(req.EditText) != "" {
+	var resentIDs []string
+	if strings.TrimSpace(req.EditText) != "" || req.AttachmentIDs != nil {
 		for i := len(rec.Messages) - 1; i >= 0; i-- {
 			if rec.Messages[i].Role != provider.RoleUser {
 				continue
+			}
+			resentIDs = messageAttachmentIDs(rec.Messages[i], rec.Attachments)
+			if req.AttachmentIDs != nil {
+				resentIDs = *req.AttachmentIDs
+			}
+			if err := validateAttachmentIDs(rec, resentIDs); err != nil {
+				fail(err)
+				return
 			}
 			replaced := false
 			for j, c := range rec.Messages[i].Content {
@@ -184,7 +200,7 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		if keep < 0 {
 			keep = len(rec.Messages)
 		}
-		d.truncateAndRun(rec.ID, keep, req.EditText, model, req.EditYOLO, nil)
+		d.truncateAndRun(rec.ID, keep, req.EditText, model, req.EditYOLO, resentIDs)
 	}
 }
 
@@ -223,4 +239,15 @@ func forkContentPaths(content []provider.Content, paths map[string]string) []pro
 		}
 	}
 	return content
+}
+
+func selectedAttachment(ids *[]string, id string) bool {
+	if ids != nil {
+		for _, candidate := range *ids {
+			if candidate == id {
+				return true
+			}
+		}
+	}
+	return false
 }

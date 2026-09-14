@@ -51,6 +51,7 @@ export interface RcProject {
 
 /** Daemon configuration mirror (single doc per host). */
 export interface RcConfig {
+  revision?: string;
   newDraft?: string;
   lastSelection?: { model: string; effort: string; mode?:string; access?:string; skills?:string[] };
   id: string;
@@ -175,6 +176,7 @@ export function createDataLayer(opts: {
   function normalizeConfig(c: any, hostId: string): RcConfig {
     return {
       id: c.id || "daemon",
+      revision: c.revision,
       hostId,
       newDraft: c.newDraft ?? c.new_draft ?? "",
       lastSelection: c.lastSelection ?? c.last_selection,

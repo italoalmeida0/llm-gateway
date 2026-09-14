@@ -216,7 +216,7 @@ func TestProviderErrorRetriesUntilRecovery(t *testing.T) {
 	defer upstream.Close()
 	defer upstream.CloseClientConnections()
 	d.config.GatewayURL = upstream.URL
-	rec := &SessionRecord{ID: "sess_int", CWD: t.TempDir(), Title: "t", Model: "m", Status: "idle"}
+	rec := &SessionRecord{ID: "sess_int", Options: SessionOptions{Mode: "talk"}, CWD: t.TempDir(), Title: "t", Model: "m", Status: "idle"}
 	act := &ActiveSession{record: rec, approvalReqs: map[string]chan bool{}}
 	d.sessions[rec.ID] = act
 

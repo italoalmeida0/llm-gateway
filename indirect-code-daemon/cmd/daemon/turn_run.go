@@ -27,10 +27,12 @@ import (
 // Nothing else ends a turn: provider errors retry inside the loop, so a
 // journal left behind can only mean the process died mid-turn.
 type TurnJournal struct {
-	TurnIndex int                     `json:"turnIndex"`
-	StartedAt int64                   `json:"startedAt"`
-	Model     string                  `json:"model,omitempty"`
-	Incoming  []filetrack.TrackedFile `json:"incoming,omitempty"`
+	Prompt        string                  `json:"prompt,omitempty"`
+	AttachmentIDs []string                `json:"attachmentIds,omitempty"`
+	TurnIndex     int                     `json:"turnIndex"`
+	StartedAt     int64                   `json:"startedAt"`
+	Model         string                  `json:"model,omitempty"`
+	Incoming      []filetrack.TrackedFile `json:"incoming,omitempty"`
 }
 
 // brainDir resolves the per-session private scratch space
@@ -140,6 +142,7 @@ func (d *DaemonServer) scanTurnJournals() []string {
 // turnRun carries the per-turn execution state shared by fresh turns and
 // crash-recovered resumes: one agent setup, one event sink, one finalizer.
 type turnRun struct {
+	mcp         map[string]*mcpConnection
 	d           *DaemonServer
 	cfg         DaemonConfig
 	act         *ActiveSession
@@ -156,13 +159,19 @@ type turnRun struct {
 	client      provider.Client
 	modelInfo   provider.Model
 	reg         core.Registry
-	previewTick int
 }
 
 // setupAgent builds the provider client, tools, registry, agent and all
 // turn hooks. Returns false when the turn was superseded before the first
 // model call (caller must return; the deferred finalizer still runs).
 func (r *turnRun) setupAgent() bool {
+	r.tfc.tracker.OnChange = func() {
+		r.act.mu.Lock()
+		defer r.act.mu.Unlock()
+		if r.act.gen == r.myGen {
+			r.persistIncoming()
+		}
+	}
 	apiBase := strings.TrimRight(r.cfg.GatewayURL, "/") + "/anthropic/v1"
 	r.modelInfo = gatewayModel(r.ctx, r.cfg.GatewayURL, r.cfg.DaemonToken, r.modelToUse)
 	if effort := canonicalReasoning(r.options.Effort); effort != "" && effort != "none" {
@@ -226,6 +235,7 @@ func (r *turnRun) setupAgent() bool {
 
 	r.agent = core.NewAgent(r.client, r.modelToUse, systemPromptWithBrain(r.cfg, r.sessionCWD, r.options, brainDir), initTools)
 	r.agent.TurnIndex = r.turnIndex
+	r.agent.PersistentTurns = true
 	r.agent.Reasoning = r.options.Effort
 	// Only the agent goroutine changes runtime fields. Commands write the session;
 	// each request reads a fresh snapshot, after the preceding tool batch finishes.
@@ -268,13 +278,15 @@ func (r *turnRun) setupAgent() bool {
 			r.agent.Client, r.agent.Model, r.agent.Reasoning = r.client, r.modelToUse, nextOptions.Effort
 			r.agent.MaxTokens = maxOutputTokens(r.modelInfo)
 			r.d.configMu.RLock()
-			system := systemPromptWithBrain(*r.d.config, r.sessionCWD, nextOptions, brainDir)
+			liveConfig := *r.d.config
+			system := systemPromptWithBrain(liveConfig, r.sessionCWD, nextOptions, brainDir)
 			r.d.configMu.RUnlock()
-			r.agent.SetSystem(system)
 			available := core.Registry{}
 			for name, tool := range r.reg {
 				available[name] = tool
 			}
+			r.syncMCP(requestCtx, liveConfig, nextOptions, available)
+			r.agent.SetSystem(system + r.mcpAvailability())
 			restrictModeTools(available, nextOptions.Mode)
 			r.agent.SetTools(available)
 			return nil
@@ -341,7 +353,7 @@ func (r *turnRun) setupAgent() bool {
 			"type":       "session_compacted",
 			"hostId":     r.cfg.HostID,
 			"sessionId":  rec.ID,
-			"messages":   rec.Messages,
+			"messages":   sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
 			"context":    rec.Context,
 			"compaction": rec.Compaction,
 			"usage":      rec.Usage,
@@ -434,10 +446,12 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 	switch e := ev.(type) {
 	case core.EvTurnStart:
 		payload["event"] = map[string]any{"type": "turn_start", "step": e.Step}
+	case core.EvUserMessage:
+		payload["event"] = map[string]any{"type": "user_message", "message": sanitizeMessagesForFrontend([]provider.Message{e.Message})[0], "index": len(r.act.record.Messages) - 1}
 	case core.EvAssistantMessage:
 		payload["event"] = map[string]any{"type": "assistant_message", "message": e.Message, "index": len(r.act.record.Messages) - 1}
 	case core.EvAssistantStart:
-		payload["event"] = map[string]any{"type": "assistant_start"}
+		payload["event"] = map[string]any{"type": "assistant_start", "index": len(r.act.record.Messages)}
 	case core.EvTextDelta:
 		payload["event"] = map[string]any{"type": "text_delta", "delta": e.Delta}
 	case core.EvReasoningDelta:
@@ -465,12 +479,8 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 		ev := map[string]any{
 			"type": "tool_result", "id": e.ID, "content": contentStr, "isError": e.Result.IsError, "startedAt": e.Result.StartedAt, "durationMs": e.Result.DurationMs,
 		}
-		// Live incoming-changes preview: after each finished tool,
-		// broadcast the current changed view. The tracker has its own
-		// mutex, so this is safe under r.act.mu (sendWS locks wsMu, never
-		// r.act.mu). Debounced to every 3rd tool result.
-		r.previewTick++
-		if r.tfc != nil && r.tfc.tracker.Count() > 0 && r.previewTick%5 == 0 {
+		// Publish after each result; path-keyed clients retain open diff state.
+		if r.tfc != nil && r.tfc.tracker.Count() > 0 {
 			r.d.broadcastLiveChanges(r.cfg.HostID, r.sessionID, r.tfc)
 			r.persistIncoming()
 		}
@@ -516,7 +526,7 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 			errText = e.Err.Error()
 		}
 		payload["event"] = map[string]any{
-			"type": "retry", "attempt": e.Attempt,
+			"type": "retry", "attempt": e.Attempt, "index": len(r.act.record.Messages),
 			"delayMs": int64(e.Delay / time.Millisecond), "error": errText,
 		}
 	case core.EvDone:
@@ -525,6 +535,9 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 		return
 	}
 
+	if event, ok := payload["event"].(map[string]any); ok {
+		event["turnIndex"] = r.turnIndex
+	}
 	_ = r.d.sendWS(payload)
 }
 
@@ -534,24 +547,25 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 // errors never reach a third ending — they retry inside the loop until
 // success or cancellation.
 func (r *turnRun) finishTurn() {
-	// Snapshot-based file changes: build the final balloon, reset
-	// incoming, persist, and broadcast. The balloon is persistent.
-	if balloon := r.d.finishTurnTracking(r.act, r.tfc); balloon != nil {
-		r.d.broadcastFileBalloon(r.cfg.HostID, r.sessionID, balloon)
-	}
-	// The turn truly ended: drop the crash journal. Incoming (journal)
-	// and final (record balloon) never coexist on disk; a crash between
-	// the balloon save above and this delete resumes into the abandon
-	// path (balloon already present), never into a duplicate turn.
-	r.d.deleteTurnJournal(r.sessionID)
-	r.act.mu.Lock()
-	r.act.fileChanges = nil
-	r.act.mu.Unlock()
+	r.closeMCP()
 	r.act.mu.Lock()
 	defer r.act.mu.Unlock()
+	// Shutdown/purge/new generations own the journal now. A stale finalizer
+	// must not touch files, history, or the replacement turn's recovery data.
 	if r.act.gen != r.myGen {
 		return
 	}
+	var balloon *filetrack.TurnChanges
+	alreadyCommitted := false
+	for _, b := range r.act.record.FileBalloons {
+		if r.tfc != nil && b.TurnIndex == r.tfc.turnIndex {
+			alreadyCommitted = true
+		}
+	}
+	if !alreadyCommitted {
+		balloon = r.d.finishTurnTrackingLocked(r.act, r.tfc)
+	}
+	r.act.fileChanges = nil
 	r.act.record.Status = "idle"
 	finishTurnActivity(r.act, r.ctx.Err() != nil)
 	r.act.pendingApproval = nil
@@ -567,7 +581,13 @@ func (r *turnRun) finishTurn() {
 		r.act.record.Context = estimateContext(r.agent, r.modelInfo)
 	}
 	r.act.record.UpdatedAt = time.Now().UnixMilli()
-	_ = r.d.saveSession(r.act.record)
+	if err := r.d.saveSession(r.act.record); err != nil {
+		return // Keep the journal until completion is durably committed.
+	}
+	r.d.deleteTurnJournal(r.sessionID)
+	if balloon != nil {
+		r.d.broadcastFileBalloon(r.cfg.HostID, r.sessionID, balloon)
+	}
 	r.act.cancel = nil
 	// Publish completion before a new turn can acquire this session.
 	_ = r.d.sendWS(map[string]any{"type": "session_data", "hostId": r.cfg.HostID, "session": sessionPayload(r.act.record)})
@@ -589,17 +609,17 @@ func isEmptyUsage(u provider.Usage) bool {
 
 // persistIncoming checkpoints the tracker's snapshot to the crash journal
 // so a restart can continue tracking (and rebuild the live changes view)
-// from it. Called on the live-preview tick, not per write.
+// from it. Called before tracked writes and after tool results.
 func (r *turnRun) persistIncoming() {
 	if r.tfc == nil || r.tfc.tracker.Count() == 0 {
 		return
 	}
-	r.d.writeTurnJournal(r.sessionID, &TurnJournal{
-		TurnIndex: r.turnIndex,
-		StartedAt: r.turnStarted.StartedAt,
-		Model:     r.modelToUse,
-		Incoming:  r.tfc.tracker.Snapshot(),
-	})
+	j, _ := r.d.readTurnJournal(r.sessionID)
+	if j == nil {
+		j = &TurnJournal{TurnIndex: r.turnIndex, StartedAt: r.turnStarted.StartedAt, Model: r.modelToUse}
+	}
+	j.Incoming = r.tfc.tracker.Snapshot()
+	r.d.writeTurnJournal(r.sessionID, j)
 }
 
 // resumeAgentTurn continues a turn interrupted by a daemon death: same
@@ -611,10 +631,21 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
 	cfg := *d.config
 	d.configMu.RUnlock()
 	now := time.Now().UnixMilli()
+	d.sessionsMu.RLock()
 	act.mu.Lock()
+	valid := d.sessions[act.record.ID] == act && act.cancel == nil && !turnResumeAbandoned(act.record, j)
+	d.sessionsMu.RUnlock()
+	if !valid {
+		act.mu.Unlock()
+		return
+	}
 	act.record.Status = "running"
+	act.record.TurnSeq = max(act.record.TurnSeq, j.TurnIndex)
 	act.question = nil
-	act.record.Turn = &TurnActivity{StartedAt: now, Status: "running"}
+	act.record.Turn = &TurnActivity{StartedAt: j.StartedAt, Status: "running"}
+	if act.record.Turn.StartedAt <= 0 {
+		act.record.Turn.StartedAt = now
+	}
 	act.toolProgress = map[string]string{}
 	act.toolStarts = map[string]int64{}
 	act.thinkingStartedAt = 0
@@ -664,7 +695,15 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
 	}()
 	// Continue only returns on AI conclusion or context cancellation;
 	// provider errors retry inside the loop, never surfacing here.
-	if err := r.agent.Continue(r.ctx, func(ev core.AgentEvent) { r.handleEvent(ev) }); err != nil && r.ctx.Err() == nil {
+	sink := func(ev core.AgentEvent) { r.handleEvent(ev) }
+	var err error
+	if !turnHasMessages(r.agent.History(), j.TurnIndex) {
+		prompt, images := d.turnPrompt(act, j.Prompt, j.AttachmentIDs, options.Mode)
+		err = r.agent.PromptWithMeta(r.ctx, prompt, images, d.promptMeta(act, j.Prompt, j.AttachmentIDs), sink)
+	} else {
+		err = r.agent.Continue(r.ctx, sink)
+	}
+	if err != nil && r.ctx.Err() == nil {
 		fmt.Printf("[WARN] resumed turn %d of session %s exited with live context: %v\n", r.turnIndex, r.sessionID, err)
 	}
 }
@@ -674,6 +713,9 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
 // from disk). A turn is only ever finished by the AI or by user cancel,
 // never by a dead process, a dropped network, or a dead gateway.
 func (d *DaemonServer) resumeInterruptedTurns() {
+	d.configMu.RLock()
+	hostID := d.config.HostID
+	d.configMu.RUnlock()
 	for _, sid := range d.scanTurnJournals() {
 		j, err := d.readTurnJournal(sid)
 		if err != nil || j == nil || j.TurnIndex <= 0 {
@@ -695,9 +737,20 @@ func (d *DaemonServer) resumeInterruptedTurns() {
 			rec.UpdatedAt = time.Now().UnixMilli()
 			_ = d.saveSession(rec)
 		}
+		stopped := abandon && rec.TurnSeq == j.TurnIndex && rec.Turn != nil &&
+			(rec.Turn.Status == "cancelling" || rec.Turn.Status == "cancelled")
+		cwd, gen := rec.CWD, act.gen
 		act.mu.Unlock()
 		switch {
 		case abandon:
+			if stopped {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				r := &turnRun{d: d, cfg: DaemonConfig{HostID: hostID}, act: act, sessionID: sid, myGen: gen, ctx: ctx,
+					tfc: &turnFileChanges{tracker: filetrack.RestoreTurnTracker(j.Incoming), turnIndex: j.TurnIndex, cwd: cwd, brainDir: d.brainDir(sid)}}
+				r.finishTurn()
+				continue
+			}
 			fmt.Printf("[INFO] Dropping stale turn journal: %s (turn %d)\n", sid, j.TurnIndex)
 			d.deleteTurnJournal(sid)
 		case blocked:
@@ -711,18 +764,29 @@ func (d *DaemonServer) resumeInterruptedTurns() {
 
 // turnResumeAbandoned reports whether a journaled turn must NOT resume: it
 // already produced its final balloon (crash landed in the finish window),
-// or its opening user message never reached the disk (crash landed before
-// the first append — nothing to continue).
+// was explicitly stopped, or has neither persisted messages nor a pending
+// opening prompt (an old journal created before the first message append).
 func turnResumeAbandoned(rec *SessionRecord, j *TurnJournal) bool {
+	if rec.TurnSeq > j.TurnIndex {
+		return true
+	}
+	if rec.TurnSeq == j.TurnIndex && rec.Turn != nil &&
+		(rec.Turn.Status == "completed" || rec.Turn.Status == "cancelled" || rec.Turn.Status == "cancelling") {
+		return true
+	}
 	for _, b := range rec.FileBalloons {
 		if b.TurnIndex == j.TurnIndex {
 			return true
 		}
 	}
-	for _, m := range rec.Messages {
-		if m.TurnIndex == j.TurnIndex {
-			return false
+	return !turnHasMessages(rec.Messages, j.TurnIndex) && j.Prompt == "" && len(j.AttachmentIDs) == 0
+}
+
+func turnHasMessages(messages []provider.Message, turnIndex int) bool {
+	for _, m := range messages {
+		if m.TurnIndex == turnIndex {
+			return true
 		}
 	}
-	return true
+	return false
 }

@@ -45,6 +45,7 @@ export function CodeBlock(props: {
     const text = clean();
     const lang = props.language;
     let cancelled = false;
+    onCleanup(() => { cancelled = true; });
 
     if (!hasGutter()) {
       void highlightCode(text, lang)
@@ -98,9 +99,6 @@ export function CodeBlock(props: {
         requestAnimationFrame(() => restoreToolScroll(props.scrollKey, containerRef));
       });
 
-    onCleanup(() => {
-      cancelled = true;
-    });
   });
 
   return (

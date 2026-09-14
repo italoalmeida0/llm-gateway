@@ -25,14 +25,16 @@ func (d *DaemonServer) handleGetTurnChanges(raw []byte) {
 		return
 	}
 	response := map[string]any{"type": "turn_changes", "hostId": d.config.HostID, "sessionId": req.SessionID, "requestId": req.RequestID}
-	defer func() { _ = d.sendWS(response) }()
 
 	act, err := d.getOrCreateActiveSession(req.SessionID)
 	if err != nil {
 		response["error"] = "This conversation is no longer available on the host."
+		_ = d.sendWS(response)
 		return
 	}
 	act.mu.Lock()
+	defer act.mu.Unlock()
+	defer func() { _ = d.sendWS(response) }()
 	var balloons []map[string]any
 	brainDir := d.brainDir(req.SessionID)
 	if act.record != nil {
@@ -40,10 +42,7 @@ func (d *DaemonServer) handleGetTurnChanges(raw []byte) {
 			if req.TurnIndex != nil && b.TurnIndex != *req.TurnIndex {
 				continue
 			}
-			balloons = append(balloons, map[string]any{
-				"turnIndex": b.TurnIndex, "at": b.At, "files": b.Files,
-				"messageIndex": b.MessageIndex,
-			})
+			balloons = append(balloons, fileBalloonPayload(b))
 		}
 	}
 	// Live view of the running turn, computed from the incoming snapshot.
@@ -70,7 +69,6 @@ func (d *DaemonServer) handleGetTurnChanges(raw []byte) {
 			}
 		}
 	}
-	act.mu.Unlock()
 	response["balloons"] = balloons
 	if live != nil {
 		response["live"] = live

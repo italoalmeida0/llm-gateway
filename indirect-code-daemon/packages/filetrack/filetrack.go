@@ -39,8 +39,11 @@ type TrackedFile struct {
 // TurnTracker is the per-turn hashmap: path -> first-seen snapshot.
 // It is the "incoming changes" area while the turn runs.
 type TurnTracker struct {
-	mu    sync.Mutex
-	files map[string]*TrackedFile
+	// OnChange checkpoints originals before the caller mutates the file.
+	// Set once before use. Called without mu held, so Snapshot is safe.
+	OnChange func()
+	mu       sync.Mutex
+	files    map[string]*TrackedFile
 }
 
 func NewTurnTracker() *TurnTracker {
@@ -53,6 +56,11 @@ func cleanPath(p string) string {
 
 // NoteRead records the content of a file seen via read. First sighting only.
 func (t *TurnTracker) NoteRead(absPath, content string) {
+	defer func() {
+		if t.OnChange != nil {
+			t.OnChange()
+		}
+	}()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	p := cleanPath(absPath)
@@ -67,6 +75,11 @@ func (t *TurnTracker) NoteRead(absPath, content string) {
 //   - file did not exist   -> mark as new (no content stored; the final
 //     content is read at end of turn if the file still exists).
 func (t *TurnTracker) NoteWrite(absPath string, existed bool, oldContent string) {
+	defer func() {
+		if t.OnChange != nil {
+			t.OnChange()
+		}
+	}()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	p := cleanPath(absPath)
@@ -83,6 +96,11 @@ func (t *TurnTracker) NoteWrite(absPath string, existed bool, oldContent string)
 // NoteEditBefore records the content of a file right before an edit.
 // First sighting only.
 func (t *TurnTracker) NoteEditBefore(absPath, beforeContent string) {
+	defer func() {
+		if t.OnChange != nil {
+			t.OnChange()
+		}
+	}()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	p := cleanPath(absPath)
@@ -94,6 +112,11 @@ func (t *TurnTracker) NoteEditBefore(absPath, beforeContent string) {
 
 // NoteBinaryNew marks a newly created non-text file (no content stored).
 func (t *TurnTracker) NoteBinaryNew(absPath string) {
+	defer func() {
+		if t.OnChange != nil {
+			t.OnChange()
+		}
+	}()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	p := cleanPath(absPath)

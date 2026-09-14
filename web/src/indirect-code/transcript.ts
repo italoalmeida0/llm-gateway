@@ -90,7 +90,11 @@ export function latestShortTurnMessage(messages: ChatMessage[]): string {
   }
   let turnMsgs: ChatMessage[];
   if (maxStamped > 0) {
-    turnMsgs = messages.filter((m) => m.turnIndex === maxStamped);
+    let start = messages.findIndex((m) => m.turnIndex === maxStamped);
+    for (let i = messages.length - 1; i > start; i--) {
+      if (isTurnStartMessage(messages[i]) && messages[i].turnIndex !== maxStamped) { start = i + 1; break; }
+    }
+    turnMsgs = messages.slice(start);
   } else {
     let start = 0;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -160,7 +164,7 @@ export function pushCallUnit(units: ToolUnit[], byId: Map<string, ToolUnit>, blo
     existing.call = block;
     return;
   }
-  const unit: ToolUnit = { call: block };
+  const unit: ToolUnit = { id: block.toolId, call: block };
   units.push(unit);
   if (block.toolId) byId.set(block.toolId, unit);
 }
@@ -175,7 +179,7 @@ function pairTurnUnits(turnMsgs: ChatMessage[]): ToolUnit[] {
       } else if (block.type === "tool_result") {
         const unit = block.toolId ? byId.get(block.toolId) : undefined;
         if (unit && !unit.result) unit.result = block;
-        else units.push({ result: block });
+        else units.push({ id: block.toolId, result: block });
       }
     }
   }
@@ -215,7 +219,7 @@ function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
           unit.result = block;
         } else {
           if (!runMsg) runMsg = message;
-          run.push({ result: block });
+          run.push({ id: block.toolId, result: block });
         }
       } else if (block.type === "text" && !!block.text?.trim()) {
         flushRun();
@@ -238,7 +242,9 @@ function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
       }
     }
   }
-  return entries;
+  return entries.map((entry, index) => ({ ...entry, id: entry.kind === "tools"
+    ? `${entry.msg.id}:tools:${entry.units[0]?.id || index}`
+    : `${entry.msg.id}:${entry.kind}:${"nth" in entry ? entry.nth : index}` }));
 }
 
 /** One aggregate per assistant turn: every message of a turn with tool
@@ -258,7 +264,8 @@ export function buildRenderBlocks(
     if (head.role === "user") { result.push({ kind: "single", msg: head }); continue; }
 
     let turnEnd = i;
-    while (turnEnd + 1 < list.length && list[turnEnd + 1].role !== "user") turnEnd++;
+    while (turnEnd + 1 < list.length && list[turnEnd + 1].role !== "user" &&
+      !(head.turnIndex && list[turnEnd + 1].turnIndex && head.turnIndex !== list[turnEnd + 1].turnIndex)) turnEnd++;
     const turnMsgs = list.slice(i, turnEnd + 1);
     const tools = turnMsgs.some(hasToolActivity);
     const thoughts = turnMsgs.some((m) =>
@@ -370,6 +377,9 @@ export function toolSummary(u: ToolUnit): ToolSummary {
   const name = u.call?.toolName || "tool";
   const args = displayToolArgs(u.call?.toolArgs);
   const res = u.result?.toolResult || "";
+  if (name.startsWith("mcp__")) {
+    return { icon: "lucide:plug", verb: "MCP", target: name.slice(5).replace(/_[a-f0-9]{12}$/, "").replaceAll("__", " / "), stat: u.result ? (u.result.isError ? "Failed" : "Complete") : undefined };
+  }
   switch (name) {
     case "question": {
       const qList = extractQuestionItems(args);
@@ -560,6 +570,7 @@ export function mapBalloonsToBlocks(
     // unstamped (legacy) messages.
     const stamped = typeof block.msg.turnIndex === "number" && block.msg.turnIndex > 0 ? block.msg.turnIndex : 0;
     if (stamped > 0) {
+      currentTurn = stamped;
       if (stamped > maxStampedTurn) maxStampedTurn = stamped;
       lastBlockOfTurn.set(stamped, blockId);
     } else {

@@ -49,7 +49,7 @@ func TestSessionChoicesPersistIndependentlyAndRememberLastSelection(t *testing.T
 	if inherited == nil || inherited.Model != "custom/two" || inherited.Options.Mode != "plan" || inherited.Options.Access != "full" || inherited.Options.Effort != "low" {
 		t.Fatal("new session did not inherit latest choices")
 	}
-	d.handleMessage([]byte(`{"type":"update_config","settings":{"temperature":0.2},"skills":{"review":{"name":"review","enabled":true},"style":{"name":"style","enabled":true}}}`))
+	d.handleMessage([]byte(`{"type":"update_config","settings":{"temperature":0.2},"skills":{"review":{"name":"review","body":"Review the code.","enabled":true},"style":{"name":"style","body":"Check consistency.","enabled":true}}}`))
 	var saved DaemonConfig
 	data, err := os.ReadFile(d.configPath)
 	if err != nil {

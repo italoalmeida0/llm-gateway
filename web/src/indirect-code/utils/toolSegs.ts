@@ -9,13 +9,13 @@ export type ToolSeg =
   | { kind: "group"; cat: "explore" | "command"; units: ToolUnit[] }
   | { kind: "unit"; unit: ToolUnit; idx: number };
 
-export function partitionToolSegs(units: ToolUnit[]): ToolSeg[] {
+export function partitionToolSegs(units: ToolUnit[], groupSingles = false): ToolSeg[] {
   const segs: ToolSeg[] = [];
   let run: ToolUnit[] = [];
   let runIdx: number[] = [];
   let runCat: "explore" | "command" | null = null;
   const flush = () => {
-    if (run.length >= 2 && runCat) segs.push({ kind: "group", cat: runCat, units: run });
+    if ((run.length >= 2 || (groupSingles && run.length > 0)) && runCat) segs.push({ kind: "group", cat: runCat, units: run });
     else run.forEach((unit, k) => segs.push({ kind: "unit", unit, idx: runIdx[k] }));
     run = [];
     runIdx = [];

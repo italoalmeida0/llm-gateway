@@ -141,7 +141,7 @@ func TestLiveChoicesApplyToNextRequestAndToolWithinSameTask(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("task timed out")
 	}
-	if calls.Load() != 4 {
+	if calls.Load() != 3 {
 		t.Fatalf("got %d requests", calls.Load())
 	}
 	rec, err := d.loadSession("live")

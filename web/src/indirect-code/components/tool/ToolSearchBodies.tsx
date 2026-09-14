@@ -208,6 +208,10 @@ export function ToolSearchBodies(props: ToolPartProps) {
             </Show>
           </Show>
         </Show>
+        <Show when={props.m.name().startsWith("mcp__")}>
+          <div class="px-3 pt-2 text-[11px] text-ink-500">Arguments</div>
+          <CodeBlock text={JSON.stringify(props.m.args(), null, 2)} language="json" scrollKey={`${props.m.key()}:arguments`} />
+        </Show>
         <Show when={props.m.name() !== "edit" && props.m.name() !== "read" && props.m.name() !== "write" && props.m.name() !== "python" && props.m.name() !== "search" && props.m.name() !== "inspect" && props.m.name() !== "glob" && props.m.name() !== "question" && props.m.name() !== "patch" && props.m.name() !== "search_web" && props.m.name() !== "fetch_url"}>
           <Show
             when={props.u.result?.toolResult || props.m.prog()}

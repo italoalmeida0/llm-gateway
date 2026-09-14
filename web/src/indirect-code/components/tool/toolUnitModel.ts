@@ -1,3 +1,4 @@
+import { createDisclosure } from "../Disclosure";
 import { createMemo } from "solid-js";
 import { tryParseArgs } from "../../utils/tools";
 import { toolSummary, terminalPresentation } from "../../transcript";
@@ -11,7 +12,7 @@ import type { TranscriptRenderCtx } from "../TranscriptBlocks";
  * Rows start open only while active (the turn's live tail) with
  * non-blank content, and closed otherwise — unless the user toggled
  * them explicitly. */
-export function useToolUnitModel(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: boolean, active: boolean) {
+export function useToolUnitModel(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: () => boolean, active: () => boolean) {
 const key = () => toolRowKey(msgId, u, ui);
 const sum = createMemo(() => toolSummary(u));
 const prog = () => (u.call?.toolId ? ctx.toolProgress()[u.call.toolId] : undefined);
@@ -24,7 +25,8 @@ const hasContent = createMemo(() => {
   if ((prog() || "").trim() !== "") return true;
   return Object.keys(args()).length > 0;
 });
-const open = () => ctx.toolOpen()[key()] ?? (running && active && hasContent());
+const { open, toggle } = createDisclosure(() => `${running()}:${active()}`,
+  () => running() && active() && !u.result && u.call?.toolName !== "question" && hasContent());
 const name = () => u.call?.toolName || "tool";
 // Full shell command for the highlighted header: commands[] joined with
 // the effective joiner (&& or ;), else the single command. Python rows
@@ -49,13 +51,13 @@ const fetchDetails = () => {
   return d as { url: string; host?: string; title?: string; content?: string; truncated?: boolean };
 };
 const elapsed = () => {
-  if (name() !== "bash" && name() !== "python") return "";
+  if (name() !== "bash" && name() !== "python" && !name().startsWith("mcp__")) return "";
   const duration = u.result?.toolDurationMs ?? terminal().durationMs;
   if (duration !== undefined) return ctx.elapsedLabel(duration);
   const start = ctx.toolStarts()[u.call?.toolId || ""];
-  return start ? ctx.elapsedLabel(ctx.turnClock() - start) : "";
+  return start && active() ? ctx.elapsedLabel(ctx.turnClock() - start) : "";
 };
-  return { key, open, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed };
+  return { key, open, toggle, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed };
 }
 
 export type ToolModel = ReturnType<typeof useToolUnitModel>;

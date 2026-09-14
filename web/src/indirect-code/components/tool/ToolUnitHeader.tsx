@@ -7,6 +7,7 @@ import type { ToolPartProps } from "./toolUnitModel";
 
 export function ToolUnitHeader(props: ToolPartProps) {
   const targetPath = () => {
+    if (props.m.name().startsWith("mcp__")) return "";
     const a = props.m.args();
     if (a.path) return String(a.path);
     if (a.file) return String(a.file);
@@ -18,7 +19,7 @@ export function ToolUnitHeader(props: ToolPartProps) {
 
   return (
     <div
-      onClick={() => props.ctx.toggleToolOpen(props.m.key())}
+      onClick={props.m.toggle}
       class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
     >
       <Show

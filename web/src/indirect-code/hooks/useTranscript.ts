@@ -2,6 +2,7 @@ import type { DaemonCommand } from "../daemon-protocol";
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { copyWithToast } from "../../ui";
+import { clearToolScrolls } from "../utils/scrollMemory";
 import { createTranscriptScroll } from "../scroll";
 import { buildRenderBlocks, latestShortTurnMessage } from "../transcript";
 import { elapsedLabel, messageText } from "../utils/format";
@@ -27,7 +28,9 @@ import type { SessionContext } from "../context";
 import type {
   ChatMessage, CompactionState, PendingApproval, RenderBlock, SessionUsage, ToolUnit,
 } from "../types";
-import type { TodoItem, TurnActivity } from "../viewTypes";
+import { createAttachmentDraft } from "./useAttachmentDraft";
+import { createMentions } from "./useMentions";
+import type { StoredAttachment, TodoItem, TurnActivity } from "../viewTypes";
 
 /** Transcript domain: messages, turn state, thinking, live tools,
  * scroll, render blocks, and per-message ops (extracted verbatim from RemoteCodePage —
@@ -36,6 +39,7 @@ export function createTranscript(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
   getSessionId: () => string;
+  getProjectId?: () => string;
   toast: (message: string, kind?: "ok" | "err") => void;
   showChoice: (o: { title: string; message: string; options: { id: string; label: string; hint?: string; primary?: boolean }[] }) => Promise<string | null>;
   showConfirm: (o: { title?: string; message?: string; confirmText?: string; cancelText?: string; danger?: boolean }) => Promise<boolean>;
@@ -47,6 +51,9 @@ export function createTranscript(opts: {
   onDiscardResendOrRegenerate?: (sessionId: string) => void;
   onForkKind?: (kind: "resend" | "regenerate" | "fork") => void;
 }) {
+  const [editingAttachments, setEditingAttachments] = createSignal<StoredAttachment[]>([]);
+  const editAttachments = createAttachmentDraft({ ...opts, additionalCount: () => editingAttachments().length });
+  const [savingEdit, setSavingEdit] = createSignal(false);
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [sessionStatus, setSessionStatus] = createSignal<"idle" | "running">("idle");
   const [sessionCompaction, setSessionCompaction] = createSignal<CompactionState | null>(null);
@@ -103,6 +110,7 @@ export function createTranscript(opts: {
   const [questionSubmitting, setQuestionSubmitting] = createSignal(false);
   const [questionError, setQuestionError] = createSignal("");
   function showQuestion(question: PendingQuestion | null) {
+    if (question && pendingQuestion()?.id === question.id) return;
     if (question) {
       const raw = (question as any).questions ?? (question as any).question;
       const normalized: PendingQuestion["questions"] = Array.isArray(raw)
@@ -143,18 +151,6 @@ export function createTranscript(opts: {
   // Live tool progress text per tool call id (cleared on result/turn_end).
   const [toolStarts, setToolStarts] = createSignal<Record<string, number>>({});
   const [toolProgress, setToolProgress] = createSignal<Record<string, string>>({});
-  const [toolOpen, setToolOpen] = createSignal<Record<string, boolean>>({});
-  const [toolGroupOpen, setToolGroupOpen] = createSignal<Record<string, boolean>>({});
-  function toggleToolOpen(key: string) {
-    setToolOpen((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }));
-  }
-  function toggleToolGroup(key: string) {
-    setToolGroupOpen((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }));
-  }
-  // Expanded thinking blocks: reasoning never starts open by itself —
-  // the exception is the live one (auto-opens while it streams, then keeps
-  // the user's toggle state after it ends).
-  const [expandedThinking, setExpandedThinking] = createSignal<Record<string, boolean>>({});
   // Copied-message feedback.
   const [copiedMsgId, setCopiedMsgId] = createSignal<string | null>(null);
   function copyMsg(id: string, text: string) {
@@ -229,7 +225,7 @@ export function createTranscript(opts: {
   createEffect(() => {
     const hide = opts.isHideToolMessages ? opts.isHideToolMessages() : true;
     const blocks = buildRenderBlocks(messages(), { hideToolMessages: hide }).map((block) => ({ ...block, id: block.msg.id }));
-    setRenderState("blocks", reconcile(blocks));
+    setRenderState("blocks", reconcile(blocks, { merge: true }));
   });
   const renderBlocks = () => renderState.blocks;
 
@@ -276,7 +272,7 @@ export function createTranscript(opts: {
   /** Raw daemon index of a render block's lead message. */
   function blockRawIdx(block: RenderBlock): number {
     const i = messages().findIndex((msg) => msg.id === block.msg.id);
-    return i >= 0 ? i : 0;
+    return block.msg.srcIdx ?? (i >= 0 ? i : 0);
   }
 
   /** Newest in-flight tool progress line inside a series (spinner sidecar). */
@@ -301,7 +297,7 @@ export function createTranscript(opts: {
     initialScrollSession = sessionId;
   }
   function applySessionContent(sessionId: string, rawMsgs: any[], compaction?: any) {
-    setMessages(normalizeSessionMessages(rawMsgs));
+    setMessages((prev) => normalizeSessionMessages(rawMsgs, prev));
     if (compaction !== undefined) {
       setSessionCompaction(compaction);
     }
@@ -326,6 +322,7 @@ export function createTranscript(opts: {
     setTurnClock(Date.now());
     setTodos(r.todos || []);
     if (typeof r.todosOpen === "boolean") applyTodosOpenFromRemote(r.todosOpen);
+    applySessionContent(sid, r.messages || r.Messages || [], r.compaction);
     const em = r.editingMsg;
     if (em && typeof em.index === "number") {
       applyEditingMsgFromRemote(em.index, em.text || "");
@@ -340,7 +337,7 @@ export function createTranscript(opts: {
     else stopThinkingTimer();
     if (r.usage) applyUsage(sid, r.usage, null);
     setSessionContexts((prev) => ({ ...prev, [sid]: r.context ?? null }));
-    applySessionContent(sid, r.messages || r.Messages || [], r.compaction);
+
   }
 
   // Point-in-time workspace received in the snapshot — redirected by the page via
@@ -388,7 +385,7 @@ export function createTranscript(opts: {
     opts.send({ type: "cancel", sessionId });
     if (sessionId === opts.getSessionId()) {
       setTurnActivity((turn) => turn ? { ...turn, status: "cancelling" } : null);
-      stopThinkingTimer();
+      if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
       transcriptScroll.detach();
     }
   }
@@ -435,23 +432,15 @@ export function createTranscript(opts: {
     // Search backwards from idx in messages() for the preceding user message.
     let userMsg: ChatMessage | null = null;
     let userIdx = -1;
-    for (let k = idx; k >= 0; k--) {
-      if (msgs[k]?.role === "user") {
+    for (let k = msgs.length - 1; k >= 0; k--) {
+      if (msgs[k]?.role === "user" && (msgs[k].srcIdx ?? k) <= idx) {
         userMsg = msgs[k];
         userIdx = k;
         break;
       }
     }
-    if (!userMsg) {
-      for (let k = msgs.length - 1; k >= 0; k--) {
-        if (msgs[k]?.role === "user") {
-          userMsg = msgs[k];
-          userIdx = k;
-          break;
-        }
-      }
-    }
-    const userRawIdx = typeof userMsg?.srcIdx === "number" ? userMsg.srcIdx : (userMsg ? userIdx : rawIdx(idx));
+    if (!userMsg) return;
+    const userRawIdx = typeof userMsg?.srcIdx === "number" ? userMsg.srcIdx : (userMsg ? userIdx : idx);
     const userText = userMsg ? messageText(userMsg) : "";
 
     const choice = await opts.showChoice({
@@ -462,7 +451,7 @@ export function createTranscript(opts: {
         { id: "fork", label: "Fork & regenerate", hint: "Preserves here, regenerates in a copy" },
       ],
     });
-    if (!choice) return;
+    if (!choice || opts.getSessionId() !== sid || !opts.isOpen() || sessionStatus() === "running") return;
     if (choice === "fork") {
       forkRequestId = crypto.randomUUID();
       setForking(true);
@@ -475,6 +464,7 @@ export function createTranscript(opts: {
         editText: userText,
         editModel: getModel(),
         editYolo: getYolo(),
+        attachmentIds: userMsg?.attachments?.map((a) => a.id),
       });
       return;
     }
@@ -544,6 +534,7 @@ export function createTranscript(opts: {
   onCleanup(() => clearTimeout(editMsgTimer));
 
   function applyEditingMsgFromRemote(idx: number | null, text: string) {
+    if (savingEdit()) return;
     const currentIdx = editingMsgIdx();
     const currentText = editingMsgText();
 
@@ -588,13 +579,19 @@ export function createTranscript(opts: {
 
     lastSentEditIdx = idx;
     lastSentEditText = text;
+    if (idx !== editingMsgIdx()) { editAttachments.clearAttachments(); setEditingAttachments(messages().find((m) => m.srcIdx === idx)?.attachments || []); }
     setEditingMsgIdx(idx);
     setEditingMsgText(text);
   }
 
+  const editMentions = createMentions({ ...opts, getProjectId: () => opts.getProjectId?.() || "",
+    text: editingMsgText, setText: updateEditingMsgText, inputId: "rc-editing-msg" });
+
   // Inline edit (chatbot startEditMessage): user edits resubmit, assistant
   // edits just save.
   function startEditMsg(idx: number, m: ChatMessage) {
+    editAttachments.clearAttachments();
+    setEditingAttachments(m.attachments || []);
     lastStartedEditAt = Date.now();
     setEditingMsgIdx(idx);
     const text = messageText(m);
@@ -616,6 +613,8 @@ export function createTranscript(opts: {
     }
   }
   function cancelEditMsg() {
+    editAttachments.clearAttachments();
+    setEditingAttachments([]);
     clearTimeout(editMsgTimer);
     editMsgTimer = undefined;
     lastClosedEditAt = Date.now();
@@ -631,11 +630,10 @@ export function createTranscript(opts: {
   async function saveEditMsg(idx: number, m: ChatMessage, getModel: () => string, getYolo: () => boolean) {
     const sid = opts.getSessionId();
     const text = editingMsgText().trim();
-    if (!sid || !opts.isOpen()) {
-      cancelEditMsg();
-      return;
-    }
-    if (!text) {
+    if (savingEdit()) return;
+    if (editAttachments.preparingAttachments()) { opts.toast("Wait for files to finish extracting", "err"); return; }
+    if (!sid || !opts.isOpen()) { opts.toast("Reconnect the host before saving", "err"); return; }
+    if (!text && !editingAttachments().length && !editAttachments.pendingAttachments().length) {
       opts.toast("Message cannot be empty", "err");
       return;
     }
@@ -644,7 +642,10 @@ export function createTranscript(opts: {
       opts.toast("Stop the current turn first", "err");
       return;
     }
-    const targetRawIdx = typeof m.srcIdx === "number" ? m.srcIdx : rawIdx(idx);
+    const targetRawIdx = typeof m.srcIdx === "number" ? m.srcIdx : idx;
+    setSavingEdit(true);
+    let attachmentIds: string[] | undefined;
+    try {
     if (regen) {
       const choice = await opts.showChoice({
         title: "Resend edited message?",
@@ -654,14 +655,16 @@ export function createTranscript(opts: {
           { id: "fork", label: "Fork & resend", hint: "Preserves here, resends in a copy" },
         ],
       });
-      if (!choice) return;
+      if (!choice || opts.getSessionId() !== sid || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
+      attachmentIds = [...editingAttachments().map((a) => a.id), ...await Promise.all(editAttachments.pendingAttachments().map((a) => editAttachments.uploadOneAttachment(sid, a)))];
+      if (opts.getSessionId() !== sid || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
       if (choice === "fork") {
         // Fork at this message carrying the edited text: the daemon
         // applies it to the boundary user message and resends from there.
         forkRequestId = crypto.randomUUID();
         setForking(true);
         opts.onForkKind?.("resend");
-        opts.send({ type: "fork_session", sessionId: sid, index: targetRawIdx, requestId: forkRequestId, editText: text, editModel: getModel(), editYolo: getYolo() });
+        opts.send({ type: "fork_session", sessionId: sid, index: targetRawIdx, requestId: forkRequestId, editText: text, editModel: getModel(), editYolo: getYolo(), attachmentIds });
         cancelEditMsg();
         return;
       }
@@ -678,9 +681,12 @@ export function createTranscript(opts: {
       model: getModel(),
       yolo: getYolo(),
       regenerate: regen,
+      attachmentIds,
     });
     cancelEditMsg();
     if (regen) setSessionStatus("running");
+    } catch (e) { if (opts.getSessionId() === sid) opts.toast(e instanceof Error ? e.message : "Could not save message", "err"); }
+    finally { setSavingEdit(false); }
   }
   async function deleteMsg(idx: number) {
     const sid = opts.getSessionId();
@@ -691,7 +697,7 @@ export function createTranscript(opts: {
       confirmText: "Delete",
       danger: true,
     });
-    if (ok) opts.send({ type: "delete_message", sessionId: sid, index: rawIdx(idx) });
+    if (ok && opts.getSessionId() === sid && opts.isOpen()) opts.send({ type: "delete_message", sessionId: sid, index: idx });
   }
 
   // --- Daemon events (called by the page dispatcher) ---
@@ -730,10 +736,17 @@ export function createTranscript(opts: {
     }
   }
   function handleAgentEvent(sessionId: string, ev: AgentEvent | undefined) {
-    if (!ev) return;
+    if (!ev || sessionId !== opts.getSessionId()) return;
     if (ev.type === "turn_start") {
       setSessionStatus("running");
       setTurnActivity((turn) => !turn || turn.endedAt ? { startedAt: Date.now(), status: "running" } : turn);
+    } else if (ev.type === "user_message") {
+      const user = normalizeSessionMessages([ev.message])[0];
+      if (user) setMessages((prev) => {
+        const i = prev.findIndex((m) => m.srcIdx === ev.index || (m.role === "user" && m.srcIdx == null));
+        const next = { ...user, id: i >= 0 ? prev[i].id : `msg_${ev.index}`, srcIdx: ev.index, turnIndex: ev.turnIndex };
+        return i >= 0 ? [...prev.slice(0,i),next,...prev.slice(i+1)] : [...prev,next];
+      });
     } else if (ev.type === "todo_update") {
       setTodos(ev.items || []);
     } else if (ev.type === "assistant_message") {
@@ -742,7 +755,7 @@ export function createTranscript(opts: {
     } else if (ev.type === "assistant_start") {
       // Each model step gets its own carrier. Tool loops cannot merge new
       // thinking into the previous assistant response.
-      setMessages((prev) => pushAssistantCarrier(prev));
+      setMessages((prev) => pushAssistantCarrier(prev, ev.index, ev.turnIndex));
     } else if (ev.type === "text_delta") {
       // First content chunk freezes the thinking clock (chatbot-style).
       if (thinkingStart() !== null) {
@@ -761,10 +774,12 @@ export function createTranscript(opts: {
     } else if (ev.type === "tool_use_end") {
       // No-op: the final tool_call event carries the full block.
     } else if (ev.type === "tool_execution_start") {
+      if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
       setToolStarts((prev) => ({ ...prev, [ev.id]: ev.startedAt }));
     } else if (ev.type === "tool_progress") {
       setToolProgress((prev) => ({ ...prev, [ev.id]: ((prev[ev.id] || "") + (ev.text || "")).slice(-65536) }));
     } else if (ev.type === "tool_call") {
+      if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
       appendToolCall(ev.id, ev.name, ev.args);
     } else if (ev.type === "tool_result") {
       setPendingApproval(null);
@@ -784,14 +799,18 @@ export function createTranscript(opts: {
       }
     } else if (ev.type === "compact_progress") {
       if (ev.text === "Compacting older context…") opts.toast(ev.text, "ok");
+    } else if (ev.type === "retry") {
+      if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
+      setMessages((prev) => prev.filter((m) => ev.index == null ? !m.streaming : m.srcIdx == null || m.srcIdx < ev.index));
     } else if (ev.type === "turn_end") {
+      setMessages((prev) => prev.map((m) => m.streaming ? { ...m, streaming: false } : m));
       // This ends one model call; tools and subsequent steps may still run.
       if (thinkingStart() !== null) {
         const dur = stopThinkingTimer();
         stampThinkingDuration(dur);
       }
       if (ev.usage || ev.cumulative) applyUsage(sessionId, ev.usage, ev.cumulative);
-      if (ev.cancelled || ev.stop === "aborted" || /context cancel(?:led|ed)/i.test(ev.error || "")) {
+      if (ev.cancelled || (ev.stop === "aborted" && turnActivity()?.status === "cancelling")) {
         showQuestion(null);
         setTurnActivity((turn) => turn ? { ...turn, status: "cancelled", endedAt: Date.now() } : null);
         setPendingApproval(null);
@@ -802,7 +821,7 @@ export function createTranscript(opts: {
       fetchSession(sessionId);
     } else if (ev.type === "error") {
       opts.toast(ev.message || "Agent error", "err");
-      setSessionStatus("idle");
+      fetchSession(sessionId);
     }
     scrollToBottom();
   }
@@ -834,6 +853,9 @@ export function createTranscript(opts: {
    * cleaned up by their own domains; the page orchestrates).
    */
   function resetForSession() {
+    editAttachments.clearAttachments();
+    setEditingAttachments([]);
+    clearToolScrolls();
     flushPendingEdit();
     setTurnActivity(null); setTodos([]); setToolProgress({}); setToolStarts({});
     showQuestion(null);
@@ -895,8 +917,6 @@ export function createTranscript(opts: {
     questionSubmitting, questionError, showQuestion, clearQuestion, answerQuestion,
     sessionUsage, activeUsage, sessionContexts, setSessionContexts,
     toolStarts, setToolStarts, toolProgress, setToolProgress,
-    toolOpen, toolGroupOpen, toggleToolOpen, toggleToolGroup,
-    expandedThinking, setExpandedThinking,
     copiedMsgId, copyMsg,
     thinkingStart, thinkingElapsed, thinkingIndex,
     startThinkingTimer, stopThinkingTimer,
@@ -917,6 +937,7 @@ export function createTranscript(opts: {
     forking, forkRequestId: () => forkRequestId,
     clearForkRequest: () => { forkRequestId = ""; }, setForking,
     forkMessage, regenerateMsg, startEditMsg, cancelEditMsg, saveEditMsg, deleteMsg,
+    editAttachments, editingAttachments, setEditingAttachments, savingEdit, editMentions,
     resetForSession, resetCaches, purgeSession, pushUserMessage, beginTurn,
     clearMessages,
   };

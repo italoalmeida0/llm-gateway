@@ -1,6 +1,7 @@
 import { createEffect, For, Show } from "solid-js";
 import { Icon as Iconify } from "../../../components/icon";
 import { useComposerCtx, useModal, useSession, useUI } from "../../ctx";
+import { MentionMenu } from "../MentionMenu";
 import { FileIcon } from "../../presentation";
 
 export function ComposerInput() {
@@ -26,6 +27,8 @@ export function ComposerInput() {
 
   return (
 <>
+<MentionMenu mentions={c.mentions} inputId="rc-composer" />
+<Show when={c.preparingAttachments() > 0}><p role="status" class="px-3.5 pt-2 text-xs text-ink-500">Preparing {c.preparingAttachments()} file(s)...</p></Show>
 {/* Attachment chips (chatbot-style) */}
 <Show when={c.pendingAttachments().length > 0}>
   <div class="flex flex-wrap gap-1.5 px-3.5 pt-3">
@@ -59,6 +62,7 @@ export function ComposerInput() {
               c.removePendingAttachment(att.key);
             }}
             class="absolute -top-1.5 -right-1.5 bg-ink-700 hover:bg-rose-500 rounded-full p-0.5 transition-colors shadow cursor-pointer"
+            disabled={c.sending()}
             data-rc-tip="Remove" aria-label="Remove"
           >
             <Iconify icon="lucide:x" size={10} />
@@ -74,14 +78,19 @@ export function ComposerInput() {
   <textarea
     id="rc-composer"
     ref={textareaRef}
-    disabled={s.creatingSession()}
+    disabled={s.creatingSession() || c.sending()}
     rows={1}
     class="flex-1 min-w-0 bg-transparent text-[13px] text-ink-100 placeholder:text-ink-500 focus:outline-none resize-none px-3.5 pt-3 pb-2 max-h-[160px] min-h-[56px] overflow-y-auto [scrollbar-gutter:stable]"
     placeholder="Ask anything, @ to mention, / for actions"
     value={c.inputPrompt()}
-    onBlur={() => c.flushPendingDraft()}
+    onFocus={() => c.mentions.setFocused(true)}
+    onBlur={() => { c.mentions.setFocused(false); c.flushPendingDraft(); }}
+    onSelect={(e) => c.mentions.setCaret(e.currentTarget.selectionStart)}
+    onClick={(e) => c.mentions.setCaret(e.currentTarget.selectionStart)}
+    onKeyUp={(e) => c.mentions.setCaret(e.currentTarget.selectionStart)}
     onInput={(e) => {
       c.setInputPrompt(e.currentTarget.value);
+      c.mentions.setCaret(e.currentTarget.selectionStart);
       const el = e.currentTarget;
       if (!el.value) {
         el.style.height = "";
@@ -117,7 +126,10 @@ export function ComposerInput() {
       } catch {}
     }}
     onKeyDown={(e) => {
+      if (e.isComposing) return;
+      if (c.mentions.keyDown(e)) return;
       if (c.slashMatches().length > 0) {
+        if (e.key === "Escape") { e.preventDefault(); c.dismissSlash(); return; }
         if (e.key === "ArrowDown") {
           e.preventDefault();
           c.setSlashIndex((prev) =>

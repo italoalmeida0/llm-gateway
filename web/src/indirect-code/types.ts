@@ -83,8 +83,10 @@ export interface ChatMessage {
   role: "user" | "assistant" | "tool";
   blocks: ContentBlock[];
   time?: number;
-  attachments?: string[];
+  attachments?: import("./viewTypes").StoredAttachment[];
   thinkingDuration?: number;
+  /** True only while this model response is streaming. */
+  streaming?: boolean;
   /** True when this message included a completion signal (mark_task_as_complete / mark_plan_as_ready_to_execute). */
   hasCompletion?: boolean;
   /**
@@ -118,6 +120,9 @@ export interface AgentSettings {
 }
 
 export interface MCPServerConfig {
+  disabled?: boolean;
+  envKeys?: string[];
+  headerKeys?: string[];
   command: string;
   args: string[];
   env?: Record<string, string>;
@@ -134,6 +139,7 @@ export interface SkillConfig {
 }
 
 export interface ToolUnit {
+  id?: string;
   call?: ContentBlock;
   result?: ContentBlock;
 }
@@ -144,11 +150,11 @@ export type ToolCat = "explore" | "command" | "edit" | "other";
  * render as tool-style rows, tool runs render as tool rows. Entries follow
  * message (wire) order; within a message, thinkings come first (they caused
  * what follows) then the remaining blocks in stored order. */
-export type TurnEntry =
+export type TurnEntry = { id?: string } & (
   | { kind: "thinking"; msg: ChatMessage; block: ContentBlock; /** stored newest-first index (0 = newest/live) */ nth: number; isNewest: boolean }
   | { kind: "text"; msg: ChatMessage; block: ContentBlock; /** text-block index within its message */ nth: number; /** fuzzy-duplicate of a later entry: display:none, last wins */ hidden?: boolean }
   | { kind: "image"; msg: ChatMessage; block: ContentBlock }
-  | { kind: "tools"; msg: ChatMessage; units: ToolUnit[] };
+  | { kind: "tools"; msg: ChatMessage; units: ToolUnit[] });
 
 /**
  * Display-only turn aggregate. The renderer calls this with

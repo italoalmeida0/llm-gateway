@@ -11,8 +11,9 @@ import type { TurnActivity } from "../viewTypes";
  * edit/delete/regenerate ops); "tool" envelopes never become a bubble.
  * The daemon stamps `turnIndex` (session turn sequence) on every message;
  * it is metadata only, nothing renders from it. */
-export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
+export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[] = []): ChatMessage[] {
   const out: ChatMessage[] = [];
+  const byIndex = new Map(previous.filter((m) => m.srcIdx != null).map((m) => [m.srcIdx, m]));
   let carrier: ChatMessage | null = null;
   const ensureCarrier = (srcIdx: number, wire: any): ChatMessage => {
     if (!carrier || carrier.role !== "assistant") {
@@ -38,8 +39,9 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
       // Newest thoughts first: the turn's last reasoning stays at the top.
       reason.reverse();
       const msg: ChatMessage = {
-        id: `msg_${idx}`,
+        id: byIndex.get(idx)?.id ?? `msg_${idx}`,
         role,
+        streaming: m.streaming === true,
         blocks: [...reason, ...rest],
         thinkingDuration: Number(m.meta?.thinking_ms) > 0 ? Math.max(1, Math.ceil(Number(m.meta.thinking_ms) / 1000)) : undefined,
         time: Date.now(),
@@ -64,9 +66,10 @@ export function normalizeSessionMessages(rawMsgs: any[]): ChatMessage[] {
     }
     const isStart = m.isTurnStart !== undefined ? Boolean(m.isTurnStart) : !m.midTurn;
     const msg: ChatMessage = {
-      id: `msg_${idx}`,
+      id: byIndex.get(idx)?.id ?? `msg_${idx}`,
       role: "user",
-      blocks: rest,
+      attachments: parseMessageAttachments(m),
+      blocks: typeof m.meta?.user_text === "string" ? [{ type: "text", text: m.meta.user_text }] : rest,
       time: Date.now(),
       srcIdx: idx,
       isTurnStart: isStart,
@@ -125,6 +128,8 @@ export function appendTextDelta(prev: ChatMessage[], delta: string): ChatMessage
     {
       id: `asst_${Date.now()}`,
       role: "assistant",
+      turnIndex: last?.turnIndex,
+      streaming: true,
       blocks: [{ type: "text", text: delta }],
       time: Date.now(),
     },
@@ -162,6 +167,8 @@ export function appendReasoningDelta(prev: ChatMessage[], delta: string): ChatMe
     {
       id: `asst_${Date.now()}`,
       role: "assistant",
+      turnIndex: last?.turnIndex,
+      streaming: true,
       blocks: [{ type: "reasoning", reasoning: delta }],
       time: Date.now(),
     },
@@ -203,6 +210,8 @@ export function upsertToolCall(prev: ChatMessage[], callId: string, name: string
     {
       id: `asst_${Date.now()}`,
       role: "assistant",
+      turnIndex: last?.turnIndex,
+      streaming: true,
       blocks: [toolBlock],
       time: Date.now(),
     },
@@ -259,6 +268,8 @@ export function appendToolResult(
     {
       id: `asst_${Date.now()}`,
       role: "assistant",
+      turnIndex: last?.turnIndex,
+      streaming: true,
       blocks: [resBlock],
       time: Date.now(),
     },
@@ -301,6 +312,8 @@ export function mergeAssistantMessage(prev: ChatMessage[], ev: any): ChatMessage
     blocks: normalized,
     time: Date.now(),
     srcIdx: ev.index,
+    turnIndex: ev.message?.turnIndex || ev.turnIndex || last?.turnIndex,
+    streaming: false,
     thinkingDuration: duration > 0 ? Math.max(1, Math.ceil(duration / 1000)) : last?.thinkingDuration,
   };
   return last?.role === "assistant" ? [...prev.slice(0, -1), message] : [...prev, message];
@@ -308,9 +321,14 @@ export function mergeAssistantMessage(prev: ChatMessage[], ev: any): ChatMessage
 
 /** New empty carrier per model step (tool loops do not merge new
  * thinking into the previous assistant response). */
-export function pushAssistantCarrier(prev: ChatMessage[]): ChatMessage[] {
-  return [...prev, {
-    id: `asst_${crypto.randomUUID()}`,
+export function pushAssistantCarrier(prev: ChatMessage[], index?: number, turnIndex?: number): ChatMessage[] {
+  // Retries replace an uncommitted response at the same raw position.
+  const kept = index == null ? prev : prev.filter((m) => m.srcIdx == null || m.srcIdx < index);
+  return [...kept, {
+    id: index == null ? `asst_${crypto.randomUUID()}` : `msg_${index}`,
+    srcIdx: index,
+    turnIndex: turnIndex || prev.at(-1)?.turnIndex,
+    streaming: true,
     role: "assistant",
     blocks: [],
     time: Date.now(),
@@ -326,4 +344,12 @@ export function finishTurn(turn: TurnActivity | null): TurnActivity | null {
         status: turn.status === "cancelling" ? "cancelled" : turn.status === "running" ? "completed" : turn.status,
       }
     : turn;
+}
+
+/** Message-local references, never guessed from filenames shared across turns. */
+export function parseMessageAttachments(message: any): import("../viewTypes").StoredAttachment[] {
+  try {
+    const refs = JSON.parse(message.meta?.attachments || "[]");
+    return Array.isArray(refs) ? refs.filter((a) => a && typeof a.id === "string" && typeof a.name === "string") : [];
+  } catch { return []; }
 }

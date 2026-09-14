@@ -1,4 +1,5 @@
 import type { DaemonCommand } from "../daemon-protocol";
+import { normalizeSkillSelection } from "../utils/settingsValidation";
 import { createSignal } from "solid-js";
 
 /** Session options (model/effort/mode/skills/access) + reconciliation with the
@@ -16,11 +17,11 @@ export function createSessionOptions(opts: {
   const [accessMenuOpen, setAccessMenuOpen] = createSignal(false);
   let modeBtn: HTMLButtonElement | undefined;
   let accessBtn: HTMLButtonElement | undefined;
-  function sessionOptions() { return { effort: effort(), mode: agentMode(), skills: selectedSkills(), access: yoloMode() ? "full" : "ask" }; }
+  function sessionOptions() { return { effort: effort(), mode: agentMode(), skills: normalizeSkillSelection(selectedSkills()), access: yoloMode() ? "full" : "ask" }; }
   let lastLocalSelection: ReturnType<typeof sessionOptions> & { model: string } | undefined;
   let pendingSessionChoice: { sessionId: string; choice: ReturnType<typeof sessionOptions> & { model: string } } | undefined;
   function matchesChoice(a: any, b: any) {
-    return a?.model === b?.model && a?.effort === b?.effort && a?.mode === b?.mode && a?.access === b?.access && JSON.stringify(a?.skills || []) === JSON.stringify(b?.skills || []);
+    return a?.model === b?.model && a?.effort === b?.effort && a?.mode === b?.mode && a?.access === b?.access && JSON.stringify(normalizeSkillSelection(a?.skills)) === JSON.stringify(normalizeSkillSelection(b?.skills));
   }
   function configureSession() {
     lastLocalSelection = { model: activeModel(), ...sessionOptions() };
@@ -31,7 +32,7 @@ export function createSessionOptions(opts: {
   function applyOptions(options: any) {
     setEffort(options?.effort || "medium");
     setAgentMode(options?.mode || "build");
-    setSelectedSkills(Array.isArray(options?.skills) ? options.skills : []);
+    setSelectedSkills(normalizeSkillSelection(options?.skills));
     setYoloMode(options?.access !== "ask");
   }
 

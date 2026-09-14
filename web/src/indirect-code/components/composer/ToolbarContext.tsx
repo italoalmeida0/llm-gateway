@@ -74,7 +74,7 @@ export function ToolbarContext() {
             icon="lucide:at-sign"
             onClick={() => {
               c.setAddContextOpen(false);
-              c.setInputPrompt((p) => p + "@");
+              c.mentions.begin();
               try {
                 document.querySelector<HTMLTextAreaElement>("#rc-composer")?.focus();
               } catch {}
@@ -115,7 +115,7 @@ export function ToolbarContext() {
           icon="lucide:at-sign"
           onClick={() => {
             c.setAddContextOpen(false);
-            c.setInputPrompt((p) => p + "@");
+            c.mentions.begin();
             try {
               document.querySelector<HTMLTextAreaElement>("#rc-composer")?.focus();
             } catch {}
@@ -183,8 +183,8 @@ export function ToolbarContext() {
             <span class="flex-1">Mode</span>
             <span class="text-ink-300 font-medium text-[11px] capitalize">
               {c.agentMode()}
-              <Show when={c.selectedSkills().length > 0}>
-                <span class="text-ink-500"> (+{c.selectedSkills().length})</span>
+              <Show when={c.selectedSkills().filter((name) => m.savedSkills()[name]?.enabled).length > 0}>
+                <span class="text-ink-500"> (+{c.selectedSkills().filter((name) => m.savedSkills()[name]?.enabled).length})</span>
               </Show>
             </span>
             <Iconify icon="lucide:chevron-right" size={13} class="text-ink-500 shrink-0 ml-1" />
@@ -277,7 +277,7 @@ export function ToolbarContext() {
           <div class="mt-1 border-t border-line pt-2">
             <p class="px-2 pb-1 font-medium text-ink-400">Additional skills</p>
             <For
-              each={Object.entries(m.skills()).filter(([, skill]) => skill.enabled)}
+              each={Object.entries(m.savedSkills()).filter(([, skill]) => skill.enabled)}
               fallback={<p class="p-2 text-ink-500">Create custom skills in Settings.</p>}
             >
               {([name, skill]) => (
@@ -408,7 +408,7 @@ export function ToolbarContext() {
     onClick={() => { const next = !c.modeMenuOpen(); ui.closeMenus(); c.setModeMenuOpen(next); }}
     class="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs hover:bg-elev cursor-pointer">
     <Iconify icon={c.agentMode() === "plan" ? "lucide:list-checks" : c.agentMode() === "learning" ? "lucide:graduation-cap" : c.agentMode() === "talk" ? "lucide:messages-square" : "lucide:hammer"} size={14} />
-    <span class="capitalize">{c.agentMode()}</span><Show when={c.selectedSkills().length > 0}><span class="text-ink-500">+{c.selectedSkills().length}</span></Show>
+    <span class="capitalize">{c.agentMode()}</span><Show when={c.selectedSkills().filter((name) => m.savedSkills()[name]?.enabled).length > 0}><span class="text-ink-500">+{c.selectedSkills().filter((name) => m.savedSkills()[name]?.enabled).length}</span></Show>
     <Iconify icon="lucide:chevron-down" size={11} />
   </button>
   <FloatMenu anchor={() => c.modeBtn} open={c.modeMenuOpen()} placement="top-start" width="20rem">
@@ -419,7 +419,7 @@ export function ToolbarContext() {
       </button>
     }</For>
     <div class="mt-1 border-t border-line pt-2"><p class="px-2 pb-1 font-medium text-ink-400">Additional skills</p>
-      <For each={Object.entries(m.skills()).filter(([,skill]) => skill.enabled)} fallback={<p class="p-2 text-ink-500">Create custom skills in Settings.</p>}>{([name, skill]) =>
+      <For each={Object.entries(m.savedSkills()).filter(([,skill]) => skill.enabled)} fallback={<p class="p-2 text-ink-500">Create custom skills in Settings.</p>}>{([name, skill]) =>
         <button role="menuitemcheckbox" aria-checked={c.selectedSkills().includes(name)} onClick={() => { c.setSelectedSkills((prev) => prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]); c.configureSession(); }} class="w-full rounded-lg px-2 py-2 flex items-center gap-2 text-left hover:bg-elev cursor-pointer">
           <Iconify icon="lucide:puzzle" size={14} /><span class="flex-1"><span class="text-ink-200">{name}</span><span class="block text-[11px] text-ink-500">{skill.description}</span></span><Show when={c.selectedSkills().includes(name)}><Iconify icon="lucide:check" size={14} /></Show>
         </button>

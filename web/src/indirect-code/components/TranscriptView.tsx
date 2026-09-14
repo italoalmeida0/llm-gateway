@@ -1,3 +1,4 @@
+import { MentionMenu } from "./MentionMenu";
 import { createMemo, For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { CompactionBalloon } from "./CompactionBalloon";
@@ -46,16 +47,10 @@ export function TranscriptView() {
     messages: t.messages,
     thinkingStart: t.thinkingStart,
     thinkingElapsed: t.thinkingElapsed,
-    expandedThinking: t.expandedThinking,
-    toolGroupOpen: t.toolGroupOpen,
-    toolOpen: t.toolOpen,
     toolProgress: t.toolProgress,
-    toggleToolGroup: t.toggleToolGroup,
-    toggleToolOpen: t.toggleToolOpen,
     elapsedLabel,
     specialProgress: t.specialProgress,
     thinkingIndex: t.thinkingIndex,
-    setExpandedThinking: t.setExpandedThinking,
     verboseChat: ui.verboseChat,
     hideToolMessages: () => !ui.verboseChat() || ui.hideToolMessages(),
     setPreviewFile: m.setPreviewFile,
@@ -184,14 +179,14 @@ export function TranscriptView() {
           {/* ===== USER ===== */}
           <Show when={msg.role === "user"}>
             <div class={isEditing() ? "w-full" : "flex flex-col items-end max-w-[90%] sm:max-w-[80%]"}>
-              <Show when={msg.attachments && msg.attachments.length > 0}>
+              <Show when={!isEditing() && msg.attachments && msg.attachments.length > 0}>
                 <div class={`flex flex-wrap gap-1.5 mb-1.5 ${isEditing() ? "justify-start" : "justify-end"}`}>
                   <For each={msg.attachments || []}>
-                    {(name) => (
-                      <span class="text-[11px] bg-ink-900 border border-line/70 px-2 py-1 rounded-lg text-ink-400 flex items-center gap-1.5">
-                        <FileIcon path={name} size={13} />
-                        {name}
-                      </span>
+                    {(file) => (
+                      <button onClick={() => m.openStoredPreview(s.activeSessionId(), file.id)} class="text-[11px] bg-ink-900 border border-line/70 px-2 py-1 rounded-lg text-ink-400 flex items-center gap-1.5">
+                        <FileIcon path={file.name} size={13} />
+                        {file.name}
+                      </button>
                     )}
                   </For>
                 </div>
@@ -200,9 +195,11 @@ export function TranscriptView() {
               <Show
                 when={isEditing()}
                 fallback={
-                  <div class="bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md">
-                    <p class="whitespace-pre-line text-sm leading-relaxed">{textOf()}</p>
-                  </div>
+                  <Show when={textOf().trim()}>
+                    <div class="bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md">
+                      <p class="whitespace-pre-line text-sm leading-relaxed">{textOf()}</p>
+                    </div>
+                  </Show>
                 }
               >
                 <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60 shadow-lg">
@@ -210,12 +207,33 @@ export function TranscriptView() {
                     <Iconify icon="lucide:pencil" size={13} />
                     <span>Editing message</span>
                   </div>
+                  <MentionMenu mentions={t.editMentions} inputId="rc-editing-msg" />
+                  <div class="flex flex-wrap gap-2 mb-2">
+                    <For each={t.editingAttachments()}>{(file) => <span class="flex items-center gap-1 text-xs text-ink-300">
+                      <button onClick={() => m.openStoredPreview(s.activeSessionId(), file.id)} class="cursor-pointer hover:underline">{file.name}</button>
+                      <button disabled={t.savingEdit()} aria-label={`Remove ${file.name}`} onClick={() => t.setEditingAttachments((prev) => prev.filter((a) => a.id !== file.id))} class="cursor-pointer p-1">×</button>
+                    </span>}</For>
+                    <For each={t.editAttachments.pendingAttachments()}>{(file) => <span class="flex items-center gap-1 text-xs text-ink-300">
+                      <button onClick={() => m.previewPending(file)} class="cursor-pointer hover:underline">{file.name}</button>
+                      <button disabled={t.savingEdit()} aria-label={`Remove ${file.name}`} onClick={() => t.editAttachments.removePendingAttachment(file.key)} class="cursor-pointer p-1">×</button>
+                    </span>}</For>
+                    <Show when={t.editAttachments.preparingAttachments()}><span role="status" class="text-xs text-ink-500">Preparing files...</span></Show>
+                  </div>
                   <textarea
                     id="rc-editing-msg"
+                    disabled={t.savingEdit()}
+                    onFocus={() => t.editMentions.setFocused(true)}
+                    onSelect={(e) => t.editMentions.setCaret(e.currentTarget.selectionStart)}
+                    onClick={(e) => t.editMentions.setCaret(e.currentTarget.selectionStart)}
+                    onKeyUp={(e) => t.editMentions.setCaret(e.currentTarget.selectionStart)}
+                    onPaste={(e) => { const files = Array.from(e.clipboardData?.files || []); if (files.length) { e.preventDefault(); void t.editAttachments.handleFiles(files); } }}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {e.preventDefault(); void t.editAttachments.handleFiles(Array.from(e.dataTransfer?.files || []));}}
                     value={t.editingMsgText()}
-                    onInput={(e) => t.updateEditingMsgText(e.currentTarget.value)}
-                    onBlur={() => t.flushPendingEdit()}
+                    onInput={(e) => {t.updateEditingMsgText(e.currentTarget.value); t.editMentions.setCaret(e.currentTarget.selectionStart);}}
+                    onBlur={() => {t.editMentions.setFocused(false); t.flushPendingEdit();}}
                     onKeyDown={(e) => {
+                      if (e.isComposing || t.editMentions.keyDown(e)) return;
                       if (!ui.isMobile() && (e.ctrlKey || e.metaKey) && e.key === "Enter") {
                         e.preventDefault();
                         t.saveEditMsg(rawIdx(), msg);
@@ -234,6 +252,9 @@ export function TranscriptView() {
                     }}
                   />
                   <div class="flex justify-end items-center gap-2 mt-2 pt-2 border-t border-line/40">
+                    <label class="mr-auto text-xs text-ink-300 cursor-pointer">Attach files
+                      <input type="file" multiple disabled={t.savingEdit()} class="hidden" onChange={(e) => {void t.editAttachments.handleFiles(e.currentTarget.files || []); e.currentTarget.value="";}} />
+                    </label>
                     <button
                       onClick={t.cancelEditMsg}
                       class="text-xs text-ink-400 hover:text-ink-100 px-3 py-1.5 rounded-lg hover:bg-ink-800 transition-colors cursor-pointer"
@@ -241,6 +262,7 @@ export function TranscriptView() {
                       Cancel
                     </button>
                     <button
+                      disabled={t.savingEdit() || t.editAttachments.preparingAttachments() > 0}
                       onClick={() => t.saveEditMsg(rawIdx(), msg)}
                       class="text-xs bg-ink-100 text-ink-950 px-3.5 py-1.5 rounded-lg hover:bg-accent-400 font-medium transition-colors cursor-pointer"
                     >

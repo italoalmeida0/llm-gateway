@@ -1,4 +1,5 @@
-import { createSignal } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
+import { createSignal, untrack } from "solid-js";
 import type { TurnBalloon, TurnChangedFile } from "../types";
 
 export type { TurnBalloon, TurnChangedFile };
@@ -8,6 +9,13 @@ export interface UndoFileResult {
   rel?: string;
   ok: boolean;
   message?: string;
+}
+
+/** Accept the old daemon's disk-shaped broadcasts as well as current wire data. */
+function normalizeBalloon(b: any): TurnBalloon {
+  return { ...b, turnIndex: b?.turnIndex ?? b?.turn_index,
+    messageIndex: b?.messageIndex ?? b?.message_index,
+    files: Array.isArray(b?.files) ? b.files : [] };
 }
 
 /** Per-turn file changes (snapshot-based, no git).
@@ -29,22 +37,31 @@ export function createTurnChanges(opts: {
     danger?: boolean;
   }) => Promise<boolean>;
 }) {
-  const [balloons, setBalloons] = createSignal<TurnBalloon[]>([]);
+  const [state, setState] = createStore<{ balloons: TurnBalloon[] }>({ balloons: [] });
+  const balloons = () => state.balloons;
+  function setBalloons(value: TurnBalloon[] | ((prev: TurnBalloon[]) => TurnBalloon[])) {
+    const next = typeof value === "function" ? untrack(() => value(state.balloons)) : value;
+    setState("balloons", reconcile(next.map((b) => ({ ...b, id: String(b.turnIndex),
+      files: b.files.map((f) => ({ ...f, id: f.path })),
+    })), { merge: true }));
+  }
   const [undoBusy, setUndoBusy] = createSignal<number | null>(null);
   const [expanded, setExpanded] = createSignal<Record<string, boolean>>({});
 
   function reset() {
     setBalloons([]);
     setUndoBusy(null);
+    setExpanded({});
   }
 
   function applySnapshot(r: any) {
-    const list = r?.fileBalloons ?? [];
-    setBalloons(
-      (Array.isArray(list) ? list : [])
+    const list = (Array.isArray(r?.fileBalloons) ? r.fileBalloons : []).map(normalizeBalloon);
+    setBalloons((prev) => [
+      ...prev.filter((b) => b.live && r?.status === "running" && (!r.turnSeq || b.turnIndex === r.turnSeq) && !list.some((item: any) => item.turnIndex === b.turnIndex)),
+      ...(Array.isArray(list) ? list : [])
         .filter((b: any) => (b?.files?.length || 0) > 0)
         .map((b: any) => ({ ...b, live: false })),
-    );
+    ]);
   }
 
   /** Authoritative tail cut (edit/regenerate): drop balloons anchored
@@ -54,16 +71,17 @@ export function createTurnChanges(opts: {
     setBalloons((prev) =>
       prev.filter(
         (b) =>
-          typeof b.messageIndex !== "number" || b.messageIndex <= 0 || b.messageIndex <= keepIndex,
+          typeof b.messageIndex !== "number" || b.messageIndex <= 0 || b.messageIndex <= keepIndex + 1,
       ),
     );
   }
 
   function upsert(balloon: any, live: boolean) {
+    balloon = normalizeBalloon(balloon);
     if (!balloon || typeof balloon.turnIndex !== "number") return;
     const files = balloon.files || [];
     if (files.length === 0) {
-      setBalloons((prev) => prev.filter((b) => b.turnIndex !== balloon.turnIndex));
+      setBalloons((prev) => prev.filter((b) => b.turnIndex !== balloon.turnIndex || (live && !b.live)));
       return;
     }
     const next: TurnBalloon = {
@@ -74,14 +92,9 @@ export function createTurnChanges(opts: {
       live,
     };
     setBalloons((prev) => {
-      const rest = prev.filter(
-        (b) => !(b.turnIndex === next.turnIndex && b.live === next.live),
-      );
-      // A finished balloon supersedes the live one of the same turn.
-      const filtered = live
-        ? rest
-        : rest.filter((b) => b.turnIndex !== next.turnIndex);
-      const out = [...filtered, next];
+      // Delayed live updates cannot replace the committed result.
+      if (live && prev.some((b) => b.turnIndex === next.turnIndex && !b.live)) return prev;
+      const out = [...prev.filter((b) => b.turnIndex !== next.turnIndex), next];
       out.sort((a, b) => a.turnIndex - b.turnIndex);
       return out;
     });
@@ -97,21 +110,15 @@ export function createTurnChanges(opts: {
   }
 
   function noteTurnChanges(msg: any) {
-    if (Array.isArray(msg?.balloons)) {
-      const list = msg.balloons.filter(
-        (b: any) => typeof b?.turnIndex === "number" && (b?.files?.length || 0) > 0,
-      );
-      list.sort((a: any, b: any) => a.turnIndex - b.turnIndex);
-      setBalloons((prev) => {
-        const live = prev.filter((b) => b.live && (b.files?.length || 0) > 0);
-        const merged = [...list.map((b: any) => ({ ...b, live: false })), ...live];
-        merged.sort((a, b) => a.turnIndex - b.turnIndex);
-        return merged;
-      });
-    }
-    if (msg?.live && typeof msg.live.turnIndex === "number") {
-      upsert(msg.live, true);
-    }
+    if (msg?.error) return;
+    const list: TurnBalloon[] = (Array.isArray(msg?.balloons) ? msg.balloons : [])
+      .map(normalizeBalloon)
+      .filter((b: any) => typeof b?.turnIndex === "number" && b?.files?.length > 0)
+      .map((b: any) => ({ ...b, live: false }));
+    if (typeof msg?.live?.turnIndex === "number" && msg.live.files?.length > 0 &&
+      !list.some((b) => b.turnIndex === msg.live.turnIndex)) list.push({ ...msg.live, live: true });
+    // Apply once: clearing and re-adding live rows would remount their open diffs.
+    setBalloons(list.sort((a, b) => a.turnIndex - b.turnIndex));
   }
 
   async function undoTurn(turnIndex: number, path?: string) {

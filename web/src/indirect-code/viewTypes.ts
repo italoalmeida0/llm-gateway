@@ -43,6 +43,7 @@ export interface PendingAttachment {
   loading?: boolean;
   loadError?: string;
   serverId?: string;
+  serverSessionId?: string;
   uploading?: boolean;
   uploadKey?: string;
 }

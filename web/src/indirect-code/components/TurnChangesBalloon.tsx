@@ -1,4 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
+import { DisclosureBody } from "./Disclosure";
 import { Icon as Iconify } from "../../components/icon";
 import { DiffView } from "./CodeBlock";
 import { FileIcon } from "../presentation";
@@ -34,7 +35,7 @@ function statusMeta(status: TurnChangedFile["status"]) {
  *  reveal the highlighted diff (like edit tool results). */
 function FileChangesRow(props: { f: TurnChangedFile; scrollKey: string }) {
   const [open, setOpen] = createSignal(false);
-  const meta = statusMeta(props.f.status);
+  const meta = () => statusMeta(props.f.status);
   const hasDiff = () => Boolean(props.f.diff);
 
   return (
@@ -56,8 +57,8 @@ function FileChangesRow(props: { f: TurnChangedFile; scrollKey: string }) {
         <span class="text-[11px] font-mono text-ink-200 truncate" title={props.f.path}>
           {props.f.rel || props.f.path}
         </span>
-        <span class={`text-[10px] uppercase tracking-wide flex items-center gap-1 shrink-0 ${meta.cls}`}>
-          <Iconify icon={meta.icon} size={12} />
+        <span class={`text-[10px] uppercase tracking-wide flex items-center gap-1 shrink-0 ${meta().cls}`}>
+          <Iconify icon={meta().icon} size={12} />
         </span>
         <Show when={(props.f.additions || 0) > 0 || (props.f.deletions || 0) > 0}>
           <span class="text-[10px] font-mono ml-auto shrink-0">
@@ -71,11 +72,11 @@ function FileChangesRow(props: { f: TurnChangedFile; scrollKey: string }) {
           </span>
         </Show>
       </div>
-      <Show when={open() && hasDiff()}>
+      <DisclosureBody open={open() && hasDiff()}>
         <div class="border-t border-line/30 bg-ink-950/40">
           <DiffView text={props.f.diff || ""} name={props.f.rel || props.f.path} scrollKey={props.scrollKey} />
         </div>
-      </Show>
+      </DisclosureBody>
       <Show when={open() && !hasDiff()}>
         <div class="px-2.5 py-1.5 text-[11px] text-ink-500 border-t border-line/30">
           {props.f.status === "binary" ? "Binary file — no textual diff." : "File too large for a textual diff."}
@@ -154,7 +155,7 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
           </Show>
         </div>
 
-        <Show when={props.expanded}>
+        <DisclosureBody open={props.expanded}>
           <div class="mt-2 flex flex-col gap-2">
             <For each={files()}>
               {(f) => (
@@ -165,7 +166,7 @@ export function TurnChangesBalloon(props: TurnChangesBalloonProps) {
               )}
             </For>
           </div>
-        </Show>
+        </DisclosureBody>
       </div>
     </div>
     </Show>

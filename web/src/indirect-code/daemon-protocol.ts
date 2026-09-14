@@ -35,9 +35,9 @@ export type DaemonCommand = CommandBase &
   | { type: "configure_session"; sessionId: string; model: string; options: Omit<SessionChoice, "model"> }
   | { type: "prompt"; sessionId: string; text: string; model: string; yolo: boolean; options: Omit<SessionChoice, "model">; attachmentIds: string[] }
   | { type: "cancel"; sessionId: string }
-  | { type: "fork_session"; sessionId: string; index: number; requestId?: string; editText?: string; editModel?: string; editYolo?: boolean }
+  | { type: "fork_session"; sessionId: string; index: number; requestId?: string; editText?: string; editModel?: string; editYolo?: boolean; attachmentIds?: string[] }
   | { type: "regenerate"; sessionId: string; index: number; text?: string; model: string; yolo: boolean }
-  | { type: "edit_message"; sessionId: string; index: number; text: string; model: string; yolo: boolean; regenerate: boolean }
+  | { type: "edit_message"; sessionId: string; index: number; text: string; model: string; yolo: boolean; regenerate: boolean; attachmentIds?: string[] }
   | { type: "delete_message"; sessionId: string; index: number }
   | { type: "create_session"; requestId: string; cwd: string; title: string; model: string; options: Omit<SessionChoice, "model"> }
   | { type: "delete_session"; sessionId: string }
@@ -45,8 +45,10 @@ export type DaemonCommand = CommandBase &
   | { type: "toggle_pin"; sessionId: string }
   | { type: "create_project"; path: string; requestId: string }
   | { type: "delete_project"; projectId: string }
+  | { type: "test_mcp"; requestId: string; expectedRevision?: string; name: string; server: MCPServerConfig }
   | { type: "browse_folders"; path: string; requestId: string }
   | { type: "upload_attachment"; requestId: string; sessionId: string; name: string; mime: string; data: string; text?: string }
+  | { type: "search_files"; requestId: string; sessionId: string; projectId: string; query: string }
   | { type: "get_attachment"; sessionId: string; attachmentId: string }
   | { type: "search"; query: string; limit: number }
   | { type: "check_workspace"; requestId: string; sessionId: string; projectId?: string }
@@ -58,6 +60,7 @@ export type DaemonCommand = CommandBase &
   | { type: "set_project_collapsed"; projectId: string; collapsed: boolean }
     | {
         type: "update_config";
+        expectedRevision?: string;
         requestId: string;
         // Go keys (snake_case): translation of UI keys in useSettings.
       settings: Record<string, unknown>;
@@ -76,11 +79,12 @@ interface EventBase {
   hostId?: string;
 }
 
-export type AgentEvent =
+export type AgentEvent = { turnIndex?: number } & (
   | { type: "turn_start" }
   | { type: "todo_update"; items?: TodoItem[] }
+  | { type: "user_message"; index: number; message: WireRecord }
   | { type: "assistant_message"; index?: number; message?: WireRecord }
-  | { type: "assistant_start" }
+  | { type: "assistant_start"; index?: number }
   | { type: "text_delta"; delta: string }
   | { type: "reasoning_delta"; delta?: string }
   | { type: "tool_use_start"; id: string; name: string }
@@ -95,13 +99,16 @@ export type AgentEvent =
   | { type: "turn_end"; usage?: unknown; cumulative?: unknown; cancelled?: boolean; stop?: string; error?: string }
   | { type: "turn_file_changes"; sessionId?: string; live?: boolean; balloon?: WireRecord }
   | { type: "done" }
-  | { type: "error"; message?: string };
+  | { type: "retry"; index?: number; attempt?: number; delayMs?: number; error?: string }
+  | { type: "error"; message?: string });
 
 export type DaemonEvent = EventBase &
   (
     | { type: "relay_connected" }
     | { type: "host_status"; status?: string }
     | { type: "change"; collection: string }
+    | { type: "config_updated"; requestId?: string; success?: boolean; error?: string; revision?: string }
+    | { type: "mcp_status"; requestId?: string; sessionId?: string; name: string; status: string; toolCount?: number; message?: string }
     | { type: "session_forked"; requestId?: string; session?: WireRecord; resent?: boolean }
     | { type: "session_created"; requestId?: string; session?: WireRecord }
     | { type: "project_created"; requestId?: string; project?: WireRecord }
@@ -113,7 +120,8 @@ export type DaemonEvent = EventBase &
     | { type: "attachment_uploaded"; requestId?: string; sessionId?: string; attachment?: WireRecord }
     | { type: "search_results"; query?: string; results?: WireRecord[] }
     | { type: "notice"; message?: string }
-    | { type: "attachment_data"; sessionId: string; attachment?: WireRecord }
+    | { type: "file_matches"; requestId: string; sessionId?: string; files?: string[]; error?: string; truncated?: boolean }
+    | { type: "attachment_data"; requestId?: string; sessionId: string; attachment?: WireRecord }
     | { type: "session_data"; requestId?: string; sessionId?: string; session?: WireRecord }
     | { type: "session_truncated"; sessionId?: string; keepIndex?: number }
     | { type: "session_content"; sessionId?: string; messages?: unknown[]; compaction?: unknown }

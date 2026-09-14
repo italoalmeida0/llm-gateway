@@ -106,6 +106,8 @@ export default function IndirectCodePage() {
       projects.setFolderLoading(false);
       mirror.dataLayer.disconnect();
       transcript.stopThinkingTimer();
+      composer.cancelUploads();
+      transcript.editAttachments.cancelUploads();
     },
     ensureAuth: () => hosts.loadHosts(),
     isActiveHost: (hostId) => hosts.activeHostId() === hostId,
@@ -142,6 +144,7 @@ export default function IndirectCodePage() {
     send: (payload) => relay.send(payload),
     isOpen: () => relay.wsOpen(),
     getSessionId: () => activeSessionId(),
+    getProjectId: () => projects.activeProject()?.id || "",
     toast: notice.toast,
     showChoice: modals.showChoice,
     showConfirm: modals.showConfirm,
@@ -165,6 +168,7 @@ export default function IndirectCodePage() {
   });
 
   const review = createReview({
+    getHostId: () => hosts.activeHostId(),
     send: (payload) => relay.send(payload),
     isOpen: () => relay.wsOpen(),
     getSessionId: () => activeSessionId(),
@@ -187,7 +191,9 @@ export default function IndirectCodePage() {
     isDisposed: () => relay.isDisposed(),
     getSessionId: () => activeSessionId(),
     getHostId: () => hosts.activeHostId(),
+    getProjectId: () => projects.activeProject()?.id || "",
     getModel: () => options.activeModel(),
+    getAvailableModels: () => gatewayModels().map((m) => m.id),
     getOptions: () => options.sessionOptions(),
     isSessionRunning: () => transcript.sessionStatus() === "running",
     isWorkspaceBlocked: () => workspace.workspaceBlocked(),
@@ -242,6 +248,8 @@ export default function IndirectCodePage() {
     isHostOnline,
     toast: notice.toast,
     getConfigDoc: () => mirror.configDoc(),
+ getHostId: () => hosts.activeHostId(),
+ refreshConfig: () => mirror.dataLayer.storeFor(hosts.activeHostId()).syncAll(),
   });
 
   // Turn-end notifications (Camada A: tab open). Fed BEFORE the
@@ -360,7 +368,6 @@ export default function IndirectCodePage() {
 
   function reloadSessionFromDaemon(sid: string) {
     if (!sid || sid !== activeSessionId()) return;
-    composer.clearAttachments();
     const s = mirror.sessions().find((x) => x.id === sid);
     if (s) {
       transcript.setSessionStatus(s.status);
@@ -506,6 +513,7 @@ export default function IndirectCodePage() {
       transcript.setForking(false);
       forkKind = null;
     }
+    if (settings.handleSettingsMessage(msg)) return;
     switch (msg.type) {
       case "relay_connected":
         break;
@@ -553,7 +561,7 @@ export default function IndirectCodePage() {
           if (hid) localStorage.setItem(`llmgw-rc-session:${hid}`, r.id);
         } catch {}
         composer.setInputPrompt(firstDraft);
-        try { localStorage.setItem(`llmgw-draft:${r.id}`, firstDraft); } catch {}
+        try { localStorage.setItem(`llmgw-draft:${hosts.activeHostId()}:${r.id}`, firstDraft); } catch {}
         options.applyOptions(options.getLastLocalSelection() || r.options);
         // Attachments stay in the draft until upload succeeds on this new session.
         void composer.sendPrompt();
@@ -596,7 +604,8 @@ export default function IndirectCodePage() {
         const a = msg.attachment;
         if (!a?.id) break;
         if (msg.sessionId) review.addSessionFile(msg.sessionId, a);
-        composer.noteAttachmentUploaded(msg.requestId, a);
+        composer.noteAttachmentUploaded(msg.requestId, a, msg.sessionId);
+        transcript.editAttachments.noteAttachmentUploaded(msg.requestId, a, msg.sessionId);
         break;
       }
 
@@ -610,6 +619,11 @@ export default function IndirectCodePage() {
         break;
       }
 
+      case "file_matches": {
+        composer.mentions.noteMatches(msg);
+        transcript.editMentions.noteMatches(msg);
+        break;
+      }
       case "attachment_data": {
         review.noteAttachmentData(msg);
         break;
@@ -718,6 +732,8 @@ export default function IndirectCodePage() {
         if (projects.isFolderRequest(msg.requestId)) { projects.setFolderLoading(false); projects.setFolderError(msg.message || "Could not browse folders"); break; }
         if (projects.isProjectCreation(msg.requestId) && projects.showNewProjectModal()) { projects.setFolderError(msg.message || "Could not create project"); break; }
         if (msg.sessionId && msg.sessionId !== activeSessionId()) break;
+        if (transcript.editAttachments.failUpload(msg.requestId, msg.message || "Upload failed")) break;
+        if (review.failPreview(msg.requestId, msg.message || "Preview failed")) break;
         if (composer.failUpload(msg.requestId, msg.message || "Upload failed")) break;
         if (msg.replyTo === "create_session") setCreatingSession(false);
         if (msg.message === "Remote host is offline") {

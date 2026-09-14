@@ -18,8 +18,10 @@ type liveBlock struct {
 }
 
 type liveAssistant struct {
-	Role    string      `json:"role"`
-	Content []liveBlock `json:"content"`
+	TurnIndex int         `json:"turnIndex"`
+	Streaming bool        `json:"streaming"`
+	Role      string      `json:"role"`
+	Content   []liveBlock `json:"content"`
 }
 
 // Caller holds act.mu, including while sending the corresponding event, so
@@ -27,11 +29,12 @@ type liveAssistant struct {
 func trackLiveEvent(act *ActiveSession, event core.AgentEvent) {
 	if _, ok := event.(core.EvAssistantStart); ok {
 		act.thinkingStartedAt = 0
-		act.live = &liveAssistant{Role: "assistant", Content: []liveBlock{}}
+		act.live = &liveAssistant{Role: "assistant", TurnIndex: act.record.TurnSeq, Streaming: true, Content: []liveBlock{}}
 		return
 	}
 	switch e := event.(type) {
 	case core.EvToolExecutionStart:
+		act.thinkingStartedAt = 0
 		if act.toolStarts == nil {
 			act.toolStarts = map[string]int64{}
 		}
@@ -40,7 +43,7 @@ func trackLiveEvent(act *ActiveSession, event core.AgentEvent) {
 		if act.thinkingStartedAt == 0 {
 			act.thinkingStartedAt = time.Now().UnixMilli()
 		}
-	case core.EvTextDelta, core.EvToolUseStart, core.EvTurnEnd:
+	case core.EvTextDelta, core.EvToolUseStart, core.EvToolCall, core.EvAssistantMessage, core.EvTurnEnd, core.EvRetry:
 		act.thinkingStartedAt = 0
 	case core.EvToolProgress:
 		if act.toolProgress == nil {
@@ -60,6 +63,8 @@ func trackLiveEvent(act *ActiveSession, event core.AgentEvent) {
 	}
 	blocks := &act.live.Content
 	switch e := event.(type) {
+	case core.EvTurnEnd, core.EvRetry:
+		act.live = nil
 	case core.EvTextDelta:
 		if len(*blocks) == 0 || (*blocks)[len(*blocks)-1].Text == "" {
 			*blocks = append(*blocks, liveBlock{})
@@ -111,7 +116,7 @@ func liveSessionPayload(act *ActiveSession) map[string]any {
 		return payload
 	}
 	messages := make([]any, 0, len(act.record.Messages)+1)
-	for _, message := range sanitizeMessagesForFrontend(act.record.Messages) {
+	for _, message := range sanitizeMessagesForFrontend(act.record.Messages, act.record.Attachments) {
 		messages = append(messages, message)
 	}
 	live := *act.live

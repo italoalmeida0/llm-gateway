@@ -15,13 +15,13 @@ export function ToolbarSend() {
       <button
         onClick={c.sendPrompt}
         disabled={
-          s.creatingSession() || !c.activeModel() ||
+          s.creatingSession() || c.sending() || c.preparingAttachments() > 0 || !c.activeModel() ||
           (s.activeSessionId()
             ? !c.inputPrompt().trim() && c.pendingAttachments().length === 0
             : (!c.inputPrompt().trim() && c.pendingAttachments().length === 0) || !s.activeProject())
         }
         class="ui-button ui-button-primary ui-button-sm w-8 h-8 p-0"
-        data-rc-tip={!s.activeSessionId() ? "Start conversation" : "Send"}
+        data-rc-tip={c.sending() ? "Uploading attachments..." : !s.activeSessionId() ? "Start conversation" : "Send"}
         aria-label={!s.activeSessionId() ? "Start conversation" : "Send"}
       >
         <Iconify icon="lucide:arrow-right" size={14} />

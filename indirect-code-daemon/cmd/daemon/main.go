@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -28,18 +28,12 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/filetrack"
+	"llm-gateway/indirect-code-daemon/packages/mcp"
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // MCPServerConfig describes one Model Context Protocol server entry.
-type MCPServerConfig struct {
-	Command   string            `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	Transport string            `json:"transport,omitempty"` // "stdio" | "streamable-http" | "sse"
-	URL       string            `json:"url,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-}
+type MCPServerConfig = mcp.Config
 
 // SkillConfig describes one custom user or project skill.
 type SkillConfig struct {
@@ -87,6 +81,7 @@ type DaemonConfig struct {
 // inlined as context instead of the raw bytes.
 type AttachmentRef struct {
 	ID        string `json:"id"`
+	UploadKey string `json:"uploadKey,omitempty"`
 	Name      string `json:"name"`
 	Mime      string `json:"mime"`
 	Size      int64  `json:"size"`
@@ -179,12 +174,24 @@ func sessionListItem(s SessionSummary) map[string]any {
 	}
 }
 
-func sanitizeMessagesForFrontend(msgs []provider.Message) []provider.Message {
+func sanitizeMessagesForFrontend(msgs []provider.Message, attachments ...[]AttachmentRef) []provider.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
 	out := make([]provider.Message, len(msgs))
 	for i, m := range msgs {
+		if _, modern := m.Meta["user_text"]; m.Role == provider.RoleUser && !modern && len(attachments) > 0 {
+			if ids := messageAttachmentIDs(m, attachments[0]); len(ids) > 0 {
+				meta := attachmentMessageMeta(messageUserText(m), ids, attachments[0])
+				for k, v := range m.Meta {
+					meta[k] = v
+				}
+				m.Meta = meta
+			}
+		}
+		if text, ok := m.Meta["user_text"]; m.Role == provider.RoleUser && ok {
+			m.Content = []provider.Content{provider.TextBlock{Text: text}}
+		}
 		if m.Role != provider.RoleTool {
 			out[i] = m
 			continue
@@ -226,11 +233,11 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"turn": rec.Turn, "todos": rec.Todos, "todosOpen": rec.TodosOpen,
 		"draft": rec.Draft, "editingMsg": rec.EditingMsg,
 		"workspace": inspectWorkspace(rec.CWD),
-		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages),
+		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
 		"attachments":  rec.Attachments,
 		"compaction":   rec.Compaction,
 		"turnSeq":      rec.TurnSeq,
-		"fileBalloons": rec.FileBalloons,
+		"fileBalloons": fileBalloonPayloads(rec.FileBalloons),
 	}
 }
 
@@ -409,13 +416,14 @@ type ActiveSession struct {
 
 // DaemonServer coordinates WebSocket connection, relay commands, and local sessions.
 type DaemonServer struct {
-	filesMu    sync.Mutex
-	configPath string
-	dataDir    string
-	config     *DaemonConfig
-	configMu   sync.RWMutex
-	wsConn     *websocket.Conn
-	wsMu       sync.Mutex
+	mcpTestBusy atomic.Bool
+	filesMu     sync.Mutex
+	configPath  string
+	dataDir     string
+	config      *DaemonConfig
+	configMu    sync.RWMutex
+	wsConn      *websocket.Conn
+	wsMu        sync.Mutex
 
 	sessionsMu sync.RWMutex
 	sessions   map[string]*ActiveSession
@@ -606,7 +614,7 @@ func (d *DaemonServer) saveConfig() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(d.configPath, data, 0o600); err != nil {
+	if err := writeConfigFile(d.configPath, data); err != nil {
 		return err
 	}
 	d.notifyChange("config")
@@ -742,6 +750,9 @@ func (d *DaemonServer) saveSession(rec *SessionRecord) error {
 }
 
 func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
+	if id == "" || strings.ContainsAny(id, "/\\") || id == "." || id == ".." {
+		return nil, fmt.Errorf("Invalid session ID")
+	}
 	filePath := filepath.Join(d.sessionsDir(), id+".json")
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -822,12 +833,12 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 
 	var summaries []SessionSummary
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".turn.json") {
 			continue
 		}
 		id := strings.TrimSuffix(e.Name(), ".json")
 		rec, err := d.loadSession(id)
-		if err != nil {
+		if err != nil || rec.ID != id || rec.ID == "" {
 			continue
 		}
 		summaries = append(summaries, SessionSummary{
@@ -913,7 +924,7 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 	}
 	var summaries []SessionSummary
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".turn.json") {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
@@ -970,7 +981,7 @@ func (d *DaemonServer) resetRunningSessions() {
 		return
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".turn.json") {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
@@ -993,10 +1004,9 @@ func (d *DaemonServer) resetRunningSessions() {
 	}
 }
 
-// quiesceSessions marks every active turn stale, cancels it and persists
-// "idle" — called on graceful shutdown (SIGTERM/SIGINT) so a restart never
-// inherits phantom "running" statuses. The turns' deferred finalizers see
-// the gen bump and skip their save.
+// quiesceSessions suspends execution on shutdown, preserving the journal and
+// original turn clock. Only an explicit user Stop marks the task cancelled.
+// Deferred finalizers see the generation bump and cannot commit stale work.
 func (d *DaemonServer) quiesceSessions() {
 	d.sessionsMu.Lock()
 	defer d.sessionsMu.Unlock()
@@ -1006,8 +1016,17 @@ func (d *DaemonServer) quiesceSessions() {
 		if act.cancel != nil {
 			act.cancel()
 		}
-		if act.record.Status == "running" {
-			finishTurnActivity(act, true)
+		if act.record.Status == "running" && act.fileChanges != nil {
+			started := int64(0)
+			if act.record.Turn != nil {
+				started = act.record.Turn.StartedAt
+			}
+			j, _ := d.readTurnJournal(act.record.ID)
+			if j == nil {
+				j = &TurnJournal{TurnIndex: act.fileChanges.turnIndex, StartedAt: started, Model: act.record.Model}
+			}
+			j.Incoming = act.fileChanges.tracker.Snapshot()
+			d.writeTurnJournal(act.record.ID, j)
 		}
 		act.pendingApproval = nil
 		act.question = nil
@@ -1194,9 +1213,10 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		case "config":
 			reply([]map[string]any{{
 				"id":            "daemon",
+				"revision":      configRevision(d.config),
 				"settings":      d.config.Settings,
 				"lastSelection": d.config.LastSelection,
-				"mcpServers":    d.config.MCPServers,
+				"mcpServers":    d.mirroredMCP(),
 				"skills":        d.config.Skills,
 				"name":          d.config.Name,
 				"newDraft":      d.config.NewDraft,
@@ -1448,19 +1468,20 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 	case "edit_message":
 		var req struct {
-			SessionID string `json:"sessionId"`
-			Index     int    `json:"index"`
-			Text      string `json:"text"`
-			Model     string `json:"model"`
-			YOLO      bool   `json:"yolo"`
-			Regen     bool   `json:"regenerate"`
+			SessionID     string    `json:"sessionId"`
+			Index         int       `json:"index"`
+			Text          string    `json:"text"`
+			Model         string    `json:"model"`
+			YOLO          bool      `json:"yolo"`
+			Regen         bool      `json:"regenerate"`
+			AttachmentIDs *[]string `json:"attachmentIds"`
 		}
 		_ = json.Unmarshal(raw, &req)
 		rec, err := d.loadSession(req.SessionID)
 		if err != nil || req.Index < 0 || req.Index >= len(rec.Messages) {
 			return
 		}
-		if !req.Regen && d.sessionRunning(req.SessionID) {
+		if d.sessionRunning(req.SessionID) {
 			_ = d.sendWS(map[string]any{
 				"type": "error", "hostId": d.config.HostID, "sessionId": req.SessionID,
 				"message": "Stop the current turn before editing",
@@ -1472,17 +1493,30 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			return
 		}
 		req.Text = core.SanitizeUserText(req.Text)
-		replaced := false
-		for i, c := range msg.Content {
-			if tb, ok := c.(provider.TextBlock); ok {
-				msg.Content[i] = provider.TextBlock{Text: req.Text, ThoughtSignature: tb.ThoughtSignature}
-				replaced = true
-				break
-			}
+		ids := messageAttachmentIDs(msg, rec.Attachments)
+		if req.AttachmentIDs != nil {
+			ids = *req.AttachmentIDs
 		}
-		if !replaced {
+		if err := validateAttachmentIDs(rec, ids); err != nil {
+			d.attachmentError("", req.SessionID, err.Error())
 			return
 		}
+		if strings.TrimSpace(req.Text) == "" && len(ids) == 0 {
+			d.attachmentError("", req.SessionID, "Message cannot be empty")
+			return
+		}
+		if req.Regen {
+			d.truncateAndRun(req.SessionID, req.Index, req.Text, req.Model, req.YOLO, ids)
+			return
+		}
+		// Rebuild attachment context as well as display metadata for a saved edit.
+		temporary := &ActiveSession{record: rec}
+		fullText, images := d.turnPrompt(temporary, req.Text, ids, normalizedOptions(rec.Options).Mode)
+		msg.Content = []provider.Content{provider.TextBlock{Text: fullText}}
+		for _, img := range images {
+			msg.Content = append(msg.Content, img)
+		}
+		msg.Meta = d.promptMeta(temporary, req.Text, ids)
 		// Truncate everything below the edited message: stale assistant
 		// replies (and later turns) no longer belong to this timeline.
 		before := len(rec.Messages)
@@ -1495,7 +1529,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		if removed < 0 {
 			removed = 0
 		}
-		broadcastTruncated(d, req.SessionID, req.Index, removed, rec.Messages, rec.Compaction)
+		broadcastTruncated(d, req.SessionID, req.Index, removed, rec.Messages, rec.Compaction, rec.Attachments)
 		rec.EditingMsg = nil
 		d.sessionsMu.RLock()
 		if act, ok := d.sessions[req.SessionID]; ok && act != nil {
@@ -1509,22 +1543,16 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"type":       "session_content",
 			"hostId":     d.config.HostID,
 			"sessionId":  rec.ID,
-			"messages":   sanitizeMessagesForFrontend(rec.Messages),
+			"messages":   sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
 			"compaction": rec.Compaction,
 		})
-		if req.Regen {
-			// Drop the edited message itself (and everything below): the
-			// turn re-sends the new text, so keeping it would duplicate it.
-			d.truncateAndRun(req.SessionID, req.Index, req.Text, req.Model, req.YOLO, nil)
-		} else {
-			d.sessionsMu.RLock()
-			if act, ok := d.sessions[req.SessionID]; ok {
-				act.mu.Lock()
-				act.record = rec
-				act.mu.Unlock()
-			}
-			d.sessionsMu.RUnlock()
+		d.sessionsMu.RLock()
+		if act, ok := d.sessions[req.SessionID]; ok {
+			act.mu.Lock()
+			act.record = rec
+			act.mu.Unlock()
 		}
+		d.sessionsMu.RUnlock()
 
 	case "regenerate":
 		var req struct {
@@ -1570,7 +1598,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		// Drop the resent user message itself (and everything below): the
 		// turn re-sends its text, so keeping it would duplicate it.
-		d.truncateAndRun(req.SessionID, userIdx, userText, req.Model, req.YOLO, nil)
+		d.truncateAndRun(req.SessionID, userIdx, messageUserText(rec.Messages[userIdx]), req.Model, req.YOLO, messageAttachmentIDs(rec.Messages[userIdx], rec.Attachments))
 
 	case "delete_message":
 		var req struct {
@@ -1607,148 +1635,16 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"type":       "session_content",
 			"hostId":     d.config.HostID,
 			"sessionId":  rec.ID,
-			"messages":   rec.Messages,
+			"messages":   sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
 			"compaction": rec.Compaction,
 		})
 
 	case "get_attachment":
-		var req struct {
-			SessionID    string `json:"sessionId"`
-			AttachmentID string `json:"attachmentId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		rec, err := d.loadSession(req.SessionID)
-		if err != nil {
-			return
-		}
-		for _, a := range rec.Attachments {
-			if a.ID != req.AttachmentID {
-				continue
-			}
-			data, err := os.ReadFile(a.Path)
-			if err != nil {
-				return
-			}
-			payload := map[string]any{
-				"id": a.ID, "name": a.Name, "mime": a.Mime, "size": a.Size,
-				"data": base64.StdEncoding.EncodeToString(data),
-			}
-			// Extracted text rides along (capped) so previews don't re-parse.
-			if a.TextPath != "" {
-				if tdata, err := os.ReadFile(a.TextPath); err == nil {
-					if len(tdata) > 256*1024 {
-						tdata = tdata[:256*1024]
-					}
-					payload["text"] = string(tdata)
-				}
-			}
-			_ = d.sendWS(map[string]any{
-				"type":       "attachment_data",
-				"hostId":     d.config.HostID,
-				"sessionId":  rec.ID,
-				"attachment": payload,
-			})
-			return
-		}
-
+		d.getAttachment(raw)
 	case "upload_attachment":
-		var req struct {
-			RequestID string `json:"requestId"`
-			SessionID string `json:"sessionId"`
-			Name      string `json:"name"`
-			Mime      string `json:"mime"`
-			Data      string `json:"data"`           // base64
-			Text      string `json:"text,omitempty"` // browser-extracted markdown (pdf/office)
-		}
-		_ = json.Unmarshal(raw, &req)
-		if req.SessionID == "" || req.Name == "" || req.Data == "" {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
-				"requestId": req.RequestID, "sessionId": req.SessionID,
-				"message": "Attachment needs a session, name and data",
-			})
-			return
-		}
-		rawBytes, err := base64.StdEncoding.DecodeString(req.Data)
-		if err != nil {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
-				"requestId": req.RequestID, "sessionId": req.SessionID,
-				"message": "Attachment data is not valid base64",
-			})
-			return
-		}
-		const maxAttachmentBytes = 4 << 20 // 4MB per file
-		if len(rawBytes) > maxAttachmentBytes {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
-				"requestId": req.RequestID, "sessionId": req.SessionID,
-				"message": "Attachment too large (max 4MB)",
-			})
-			return
-		}
-		rec, err := d.loadSession(req.SessionID)
-		if err != nil {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
-				"requestId": req.RequestID, "sessionId": req.SessionID,
-				"message": "Session not found",
-			})
-			return
-		}
-		dir := filepath.Join(d.sessionsDir(), rec.ID, "attachments")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
-				"requestId": req.RequestID, "sessionId": req.SessionID,
-				"message": "Failed to store attachment: " + err.Error(),
-			})
-			return
-		}
-		attID := fmt.Sprintf("att_%d", time.Now().UnixNano()/1000)
-		filePath := filepath.Join(dir, attID+"_"+safeFileName(req.Name))
-		if err := os.WriteFile(filePath, rawBytes, 0o600); err != nil {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
-				"requestId": req.RequestID, "sessionId": req.SessionID,
-				"message": "Failed to store attachment: " + err.Error(),
-			})
-			return
-		}
-		mime := req.Mime
-		if mime == "" {
-			mime = "application/octet-stream"
-		}
-		ref := AttachmentRef{
-			ID:   attID,
-			Name: filepath.Base(strings.TrimSpace(req.Name)),
-			Mime: mime,
-			Size: int64(len(rawBytes)),
-			Path: filePath,
-		}
-		if strings.TrimSpace(req.Text) != "" {
-			extracted := req.Text
-			if len([]rune(extracted)) > 512*1024 {
-				extracted = string([]rune(extracted)[:512*1024])
-			}
-			textPath := filepath.Join(dir, attID+"_extracted.md")
-			if err := os.WriteFile(textPath, []byte(extracted), 0o600); err == nil {
-				ref.TextPath = textPath
-				ref.TextChars = len([]rune(extracted))
-			}
-		}
-		rec.Attachments = append(rec.Attachments, ref)
-		rec.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(rec)
-		_ = d.sendWS(map[string]any{
-			"type":      "attachment_uploaded",
-			"hostId":    d.config.HostID,
-			"requestId": req.RequestID,
-			"sessionId": rec.ID,
-			"attachment": map[string]any{
-				"id": ref.ID, "name": ref.Name, "mime": ref.Mime, "size": ref.Size,
-			},
-		})
+		d.uploadAttachment(raw)
+	case "search_files":
+		d.searchMentionFiles(raw)
 
 	case "search":
 		var req struct {
@@ -1936,6 +1832,10 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 		if act != nil {
 			act.mu.Lock()
+			if act.record.Turn != nil && act.record.Turn.Status == "running" {
+				act.record.Turn.Status = "cancelling"
+				_ = d.saveSession(act.record)
+			}
 			if act.cancel != nil {
 				act.cancel()
 			}
@@ -1976,32 +1876,9 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 
 	case "update_config":
-		var req struct {
-			RequestID  string                     `json:"requestId"`
-			Settings   json.RawMessage            `json:"settings,omitempty"`
-			MCPServers map[string]MCPServerConfig `json:"mcpServers,omitempty"`
-			Skills     map[string]SkillConfig     `json:"skills,omitempty"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		if req.Settings != nil {
-			_ = json.Unmarshal(req.Settings, &d.config.Settings)
-		}
-		if req.MCPServers != nil {
-			d.config.MCPServers = req.MCPServers
-		}
-		if req.Skills != nil {
-			d.config.Skills = req.Skills
-		}
-		_ = d.saveConfig()
-		_ = d.sendWS(map[string]any{
-			"type":          "config_updated",
-			"hostId":        d.config.HostID,
-			"requestId":     req.RequestID,
-			"settings":      d.config.Settings,
-			"lastSelection": d.config.LastSelection,
-			"mcpServers":    d.config.MCPServers,
-			"skills":        d.config.Skills,
-		})
+		d.updateConfig(raw)
+	case "test_mcp":
+		d.testMCP(raw)
 
 	case "prompt":
 		var req struct {
@@ -2015,7 +1892,11 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		_ = json.Unmarshal(raw, &req)
 
 		cleanText := strings.TrimSpace(req.Text)
-		if strings.HasPrefix(cleanText, "/") {
+		if isSlashCommand(cleanText) {
+			if len(req.AttachmentIDs) > 0 {
+				d.attachmentError("", req.SessionID, "Send attachments in a message before running a command")
+				return
+			}
 			d.handleSlashCommand(req.SessionID, cleanText)
 			return
 		}
@@ -2028,6 +1909,22 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 				"sessionId": req.SessionID,
 				"message":   "Session not found: " + err.Error(),
 			})
+			return
+		}
+
+		act.mu.Lock()
+		err = validateAttachmentIDs(act.record, req.AttachmentIDs)
+		running := act.record.Status == "running"
+		act.mu.Unlock()
+		if err != nil {
+			d.attachmentError("", req.SessionID, err.Error())
+			return
+		}
+		if running {
+			d.attachmentError("", req.SessionID, "Turn already in flight")
+			return
+		}
+		if cleanText == "" && len(req.AttachmentIDs) == 0 {
 			return
 		}
 
@@ -2066,6 +1963,18 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 	}
 }
 
+func isSlashCommand(text string) bool {
+	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return false
+	}
+	switch strings.ToLower(parts[0]) {
+	case "/clear", "/compact", "/jail", "/unjail", "/skills", "/mcp", "/help":
+		return true
+	}
+	return false
+}
+
 func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 	act, err := d.getOrCreateActiveSession(sessionID)
 	if err != nil {
@@ -2087,6 +1996,11 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 	act.mu.Lock()
 	defer act.mu.Unlock()
 
+	if act.record.Status == "running" {
+		d.attachmentError("", sessionID, "Stop the current turn before running a command")
+		return
+	}
+	act.record.Draft = ""
 	var reply string
 
 	switch head {
@@ -2150,7 +2064,8 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 		b.WriteString("- `glob` — Fuzzy search directory tree with gitignore support\n\n")
 		if len(d.config.Skills) > 0 {
 			b.WriteString("**Custom Skills:**\n")
-			for name, sk := range d.config.Skills {
+			for _, name := range sortedKeys(d.config.Skills) {
+				sk := d.config.Skills[name]
 				status := "enabled"
 				if !sk.Enabled {
 					status = "disabled"
@@ -2164,10 +2079,15 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 
 	case "/mcp":
 		var b strings.Builder
-		b.WriteString("### 🔌 Configured MCP Servers\n\n")
+		b.WriteString("### 🔌 Configured MCP Servers\n\nTools connect during Build turns when jail is off. Use Settings > MCP servers to test a connection.\n\n")
 		if len(d.config.MCPServers) > 0 {
-			for name, s := range d.config.MCPServers {
-				b.WriteString(fmt.Sprintf("- **%s** (`%s`): `%s %s`\n", name, s.Transport, s.Command, strings.Join(s.Args, " ")))
+			for _, name := range sortedKeys(d.config.MCPServers) {
+				s := d.config.MCPServers[name]
+				status := "enabled"
+				if s.Disabled {
+					status = "disabled"
+				}
+				b.WriteString(fmt.Sprintf("- **%s** (%s)\n", name, status))
 			}
 		} else {
 			b.WriteString("*No MCP servers configured yet. Add them in Settings > MCP Servers.*\n")
@@ -2208,7 +2128,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 		"type":       "session_content",
 		"hostId":     d.config.HostID,
 		"sessionId":  act.record.ID,
-		"messages":   act.record.Messages,
+		"messages":   sanitizeMessagesForFrontend(act.record.Messages, act.record.Attachments),
 		"compaction": act.record.Compaction,
 	})
 }
@@ -2218,14 +2138,14 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 // broadcastTruncated tells clients to drop rendered messages below keepIdx
 // (the authoritative cut after edit/regenerate). Clients apply the same cut
 // optimistically; this event reconciles them (and other devices).
-func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int, msgs []provider.Message, compaction *core.CompactionState) {
+func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int, msgs []provider.Message, compaction *core.CompactionState, attachments ...[]AttachmentRef) {
 	_ = d.sendWS(map[string]any{
 		"type": "session_truncated", "hostId": d.config.HostID, "sessionId": sessionID,
 		"keepIndex": keepIdx, "removed": removed,
 	})
 	_ = d.sendWS(map[string]any{
 		"type": "session_content", "hostId": d.config.HostID, "sessionId": sessionID,
-		"messages":   sanitizeMessagesForFrontend(msgs),
+		"messages":   sanitizeMessagesForFrontend(msgs, attachments...),
 		"compaction": compaction,
 	})
 }
@@ -2269,6 +2189,18 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 		d.sessions[sessionID] = act
 	}
 	act.mu.Lock()
+	if act.record.Status == "running" {
+		act.mu.Unlock()
+		d.sessionsMu.Unlock()
+		d.attachmentError("", sessionID, "Stop the current turn first")
+		return
+	}
+	if err := validateAttachmentIDs(rec, attachmentIDs); err != nil {
+		act.mu.Unlock()
+		d.sessionsMu.Unlock()
+		d.attachmentError("", sessionID, err.Error())
+		return
+	}
 	if act.cancel != nil {
 		act.cancel()
 		act.cancel = nil
@@ -2302,7 +2234,7 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	act.mu.Unlock()
 	d.sessionsMu.Unlock()
 
-	broadcastTruncated(d, rec.ID, keep-1, removed, rec.Messages, rec.Compaction)
+	broadcastTruncated(d, rec.ID, keep-1, removed, rec.Messages, rec.Compaction, rec.Attachments)
 	go d.runAgentTurn(act, promptText, "", yolo, attachmentIDs)
 }
 
@@ -2388,13 +2320,12 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 		act.record.Model = requestedModel
 	}
 	act.record.UpdatedAt = time.Now().UnixMilli()
-	// Persist the running flip right away (not only in the finalizer) so
-	// synced clients on every device see live session status.
-	_ = d.saveSession(act.record)
 	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
 	tfc := beginTurnTracking(act, sessionCWD, turnSeq, d.brainDir(sessionID))
-	d.writeTurnJournal(sessionID, &TurnJournal{TurnIndex: turnSeq, StartedAt: act.record.Turn.StartedAt, Model: modelToUse})
+	d.writeTurnJournal(sessionID, &TurnJournal{TurnIndex: turnSeq, StartedAt: act.record.Turn.StartedAt, Model: modelToUse, Prompt: promptText, AttachmentIDs: attachmentIDs})
+	// Publish running state only after the recovery prompt exists.
+	_ = d.saveSession(act.record)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2434,94 +2365,14 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	// Stream events to WebSocket
 	sink := func(ev core.AgentEvent) { r.handleEvent(ev) }
 
-	// Resolve attachments: images ride as ImageBlocks, text files are inlined
-	// as context (capped), anything else becomes a short pointer note.
-	var images []provider.ImageBlock
-	var contextParts []string
-	if len(attachmentIDs) > 0 {
-		byID := map[string]AttachmentRef{}
-		act.mu.Lock()
-		for _, a := range act.record.Attachments {
-			byID[a.ID] = a
-		}
-		act.mu.Unlock()
-		const maxInlineChars = 48 * 1024
-		for _, id := range attachmentIDs {
-			ref, ok := byID[id]
-			if !ok {
-				continue
-			}
-			data, err := os.ReadFile(ref.Path)
-			if err != nil {
-				contextParts = append(contextParts, fmt.Sprintf("[Attachment %q could not be read: %s]", ref.Name, err.Error()))
-				continue
-			}
-			mime := ref.Mime
-			if strings.HasPrefix(strings.ToLower(mime), "image/") {
-				images = append(images, provider.ImageBlock{MimeType: mime, Data: data})
-				contextParts = append(contextParts, fmt.Sprintf("[Attached image: %s]", ref.Name))
-				continue
-			}
-			// Browser-extracted text (pdf/office) wins over raw bytes.
-			if ref.TextPath != "" {
-				if tdata, err := os.ReadFile(ref.TextPath); err == nil && utf8.Valid(tdata) {
-					text := string(tdata)
-					truncated := false
-					if len([]rune(text)) > maxInlineChars {
-						text = string([]rune(text)[:maxInlineChars])
-						truncated = true
-					}
-					note := ""
-					if truncated {
-						note = fmt.Sprintf(" (truncated to %d chars)", maxInlineChars)
-					}
-					contextParts = append(contextParts, fmt.Sprintf("[Attached file: %s%s]\n%s", ref.Name, note, text))
-					continue
-				}
-			}
-			if isTextMime(mime, ref.Name) && utf8.Valid(data) {
-				text := string(data)
-				truncated := false
-				if len([]rune(text)) > maxInlineChars {
-					text = string([]rune(text)[:maxInlineChars])
-					truncated = true
-				}
-				note := ""
-				if truncated {
-					note = fmt.Sprintf(" (truncated to %d chars of %d bytes; full file at %s)", maxInlineChars, len(data), ref.Path)
-				}
-				contextParts = append(contextParts, fmt.Sprintf("[Attached file: %s%s]\n%s", ref.Name, note, text))
-				continue
-			}
-			contextParts = append(contextParts, fmt.Sprintf("[Attached binary file: %s (%d bytes, stored at %s) — use tools to inspect it]", ref.Name, len(data), ref.Path))
-		}
-	}
-	fullPrompt := promptText
-	if len(contextParts) > 0 {
-		fullPrompt = promptText + "\n\n" + strings.Join(contextParts, "\n\n")
-	}
-
-	act.mu.Lock()
-	sysBlock := buildTurnSystemDirectives(act.record, options.Mode, time.Now())
-	if sysBlock != "" {
-		_ = d.saveSession(act.record)
-	}
-	act.mu.Unlock()
-
-	if sysBlock != "" {
-		if fullPrompt == "" {
-			fullPrompt = sysBlock
-		} else {
-			fullPrompt = sysBlock + "\n\n" + fullPrompt
-		}
-	}
+	fullPrompt, images := d.turnPrompt(act, promptText, attachmentIDs, options.Mode)
 
 	// Proactive compaction happens INSIDE the loop now (agent.AutoCompact,
 	// wired above): it is re-evaluated before every model request —
 	// including this turn's first one and every mid-run continuation.
 	// Prompt only returns on AI conclusion or context cancellation;
 	// provider errors retry inside the loop, never surfacing here.
-	if err := r.agent.Prompt(r.ctx, fullPrompt, images, sink); err != nil && ctx.Err() == nil {
+	if err := r.agent.PromptWithMeta(r.ctx, fullPrompt, images, d.promptMeta(act, promptText, attachmentIDs), sink); err != nil && ctx.Err() == nil {
 		fmt.Printf("[WARN] turn %d of session %s exited with live context: %v\n", turnSeq, sessionID, err)
 	}
 
@@ -2730,4 +2581,91 @@ func main() {
 			backoff = 30 * time.Second
 		}
 	}
+}
+
+// Resolve the durable prompt in both fresh and recovered turns.
+func (d *DaemonServer) turnPrompt(act *ActiveSession, promptText string, attachmentIDs []string, mode string) (string, []provider.ImageBlock) {
+	// Resolve attachments: images ride as ImageBlocks, text files are inlined
+	// as context (capped), anything else becomes a short pointer note.
+	var images []provider.ImageBlock
+	var contextParts []string
+	if len(attachmentIDs) > 0 {
+		byID := map[string]AttachmentRef{}
+		act.mu.Lock()
+		for _, a := range act.record.Attachments {
+			byID[a.ID] = a
+		}
+		act.mu.Unlock()
+		const maxInlineChars = 48 * 1024
+		for _, id := range attachmentIDs {
+			ref, ok := byID[id]
+			if !ok {
+				continue
+			}
+			data, err := os.ReadFile(ref.Path)
+			if err != nil {
+				contextParts = append(contextParts, fmt.Sprintf("[Attachment %q could not be read: %s]", ref.Name, err.Error()))
+				continue
+			}
+			mime := ref.Mime
+			if strings.HasPrefix(strings.ToLower(mime), "image/") {
+				images = append(images, provider.ImageBlock{MimeType: mime, Data: data})
+				contextParts = append(contextParts, fmt.Sprintf("[Attached image: %s]", ref.Name))
+				continue
+			}
+			// Browser-extracted text (pdf/office) wins over raw bytes.
+			if ref.TextPath != "" {
+				if tdata, err := os.ReadFile(ref.TextPath); err == nil && utf8.Valid(tdata) {
+					text := string(tdata)
+					truncated := false
+					if len([]rune(text)) > maxInlineChars {
+						text = string([]rune(text)[:maxInlineChars])
+						truncated = true
+					}
+					note := ""
+					if truncated {
+						note = fmt.Sprintf(" (truncated to %d chars)", maxInlineChars)
+					}
+					contextParts = append(contextParts, fmt.Sprintf("[Attached file: %s%s]\n%s", ref.Name, note, text))
+					continue
+				}
+			}
+			if isTextMime(mime, ref.Name) && utf8.Valid(data) {
+				text := string(data)
+				truncated := false
+				if len([]rune(text)) > maxInlineChars {
+					text = string([]rune(text)[:maxInlineChars])
+					truncated = true
+				}
+				note := ""
+				if truncated {
+					note = fmt.Sprintf(" (truncated to %d chars of %d bytes; full file at %s)", maxInlineChars, len(data), ref.Path)
+				}
+				contextParts = append(contextParts, fmt.Sprintf("[Attached file: %s%s]\n%s", ref.Name, note, text))
+				continue
+			}
+			contextParts = append(contextParts, fmt.Sprintf("[Attached binary file: %s (%d bytes, stored at %s) — use tools to inspect it]", ref.Name, len(data), ref.Path))
+		}
+	}
+	fullPrompt := promptText
+	if len(contextParts) > 0 {
+		fullPrompt = promptText + "\n\n" + strings.Join(contextParts, "\n\n")
+	}
+
+	act.mu.Lock()
+	sysBlock := buildTurnSystemDirectives(act.record, mode, time.Now())
+	if sysBlock != "" {
+		_ = d.saveSession(act.record)
+	}
+	act.mu.Unlock()
+
+	if sysBlock != "" {
+		if fullPrompt == "" {
+			fullPrompt = sysBlock
+		} else {
+			fullPrompt = sysBlock + "\n\n" + fullPrompt
+		}
+	}
+
+	return fullPrompt, images
 }

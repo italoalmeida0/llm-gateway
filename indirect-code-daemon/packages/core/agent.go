@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -160,6 +161,9 @@ type Agent struct {
 	// session only. Hosts set it before each turn; zero leaves
 	// messages unstamped (readers derive boundaries).
 	TurnIndex int
+	// PersistentTurns keeps daemon tasks alive across provider/compaction errors
+	// and requires a successful completion signal in modes that expose one.
+	PersistentTurns bool
 
 	// OnUsage, if set, fires after every turn's usage row arrives,
 	// carrying the cumulative usage for the session. Hosts wire
@@ -360,6 +364,12 @@ func (a *Agent) fireMessageAppended(m provider.Message) {
 // stops or an error occurs. Events are delivered via sink in order.
 // sink must not block the caller for long; buffer as needed.
 func (a *Agent) Prompt(ctx context.Context, text string, images []provider.ImageBlock, sink func(AgentEvent)) error {
+	return a.PromptWithMeta(ctx, text, images, nil, sink)
+}
+
+// PromptWithMeta preserves host-owned display and attachment metadata alongside
+// the provider content. Providers only serialize their supported wire fields.
+func (a *Agent) PromptWithMeta(ctx context.Context, text string, images []provider.ImageBlock, meta map[string]string, sink func(AgentEvent)) error {
 	if sink == nil {
 		sink = func(AgentEvent) {}
 	}
@@ -371,7 +381,7 @@ func (a *Agent) Prompt(ctx context.Context, text string, images []provider.Image
 	for _, img := range images {
 		content = append(content, img)
 	}
-	user := provider.Message{Role: provider.RoleUser, Content: content, Time: time.Now()}
+	user := provider.Message{Role: provider.RoleUser, Content: content, Time: time.Now(), Meta: meta}
 	a.stampTurn(&user)
 
 	a.mu.Lock()
@@ -391,6 +401,25 @@ func (a *Agent) Continue(ctx context.Context, sink func(AgentEvent)) error {
 		sink = func(AgentEvent) {}
 	}
 	sink = a.wrapSink(sink)
+	if a.PersistentTurns {
+		var assistant provider.Message
+		for _, msg := range a.History() {
+			if msg.TurnIndex != a.TurnIndex {
+				continue
+			}
+			if msg.Role == provider.RoleAssistant {
+				assistant = msg
+				if msg.Meta["turn_completed"] == "true" {
+					sink(EvDone{})
+					return nil
+				}
+			}
+			if msg.Role == provider.RoleTool && successfulCompletion(assistant, msg) {
+				sink(EvDone{})
+				return nil
+			}
+		}
+	}
 	return a.runLoop(ctx, sink)
 }
 
@@ -416,10 +445,23 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 	nudges := 0
 	completionNudges := 0
 	completedInTurn := false
+	preparationAttempt := 0
 	for step := 1; ; step++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Preparation is cached across steps and user messages. Only an
 		// explicit prompt/model/session change invokes BeforeStart again.
 		if err := a.prepareStart(ctx); err != nil {
+			if a.PersistentTurns && ctx.Err() == nil {
+				delay := a.retryDelay(preparationAttempt)
+				preparationAttempt++
+				sink(EvRetry{Attempt: preparationAttempt, Delay: delay, Err: err})
+				if err := sleepRetry(ctx, delay); err != nil {
+					return err
+				}
+				continue
+			}
 			sink(EvDone{})
 			return err
 		}
@@ -433,11 +475,21 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		a.mu.Unlock()
 		if autoCompact != nil {
 			if err := autoCompact(ctx, sink); err != nil {
+				if a.PersistentTurns && ctx.Err() == nil {
+					delay := a.retryDelay(preparationAttempt)
+					preparationAttempt++
+					sink(EvRetry{Attempt: preparationAttempt, Delay: delay, Err: err})
+					if err := sleepRetry(ctx, delay); err != nil {
+						return err
+					}
+					continue
+				}
 				sink(EvDone{})
 				return err
 			}
 		}
 
+		preparationAttempt = 0
 		sink(EvTurnStart{Step: step})
 		if a.BeforeTurn != nil {
 			if allowed, reason := a.BeforeTurn(step); !allowed {
@@ -469,10 +521,12 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 					continue
 				}
 			}
-			if !a.canRetryError(err, attempt) {
+			if ctx.Err() != nil || (!a.PersistentTurns && !a.canRetryError(err, attempt)) {
 				break
 			}
-			a.dropLastAssistantMessage()
+			if !a.PersistentTurns {
+				a.dropLastAssistantMessage()
+			}
 			delay := a.retryDelay(attempt)
 			sink(EvRetry{Attempt: attempt + 1, Delay: delay, Err: err})
 			if sleepErr := sleepRetry(ctx, delay); sleepErr != nil {
@@ -489,7 +543,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			nudges = 0
 			for _, c := range assistantMsg.Content {
 				if tc, ok := c.(provider.ToolCallBlock); ok {
-					if tc.Name == "mark_task_as_complete" || tc.Name == "mark_plan_as_ready_to_execute" {
+					if !a.PersistentTurns && (tc.Name == "mark_task_as_complete" || tc.Name == "mark_plan_as_ready_to_execute") {
 						completedInTurn = true
 					}
 				}
@@ -500,12 +554,9 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 				// Provider-executed (server) tools need no client results.
 				continue
 			}
-			a.stampTurn(&toolMsg)
-			a.mu.Lock()
-			a.messages = append(a.messages, toolMsg)
-			a.rev++
-			a.mu.Unlock()
-			a.fireMessageAppended(toolMsg)
+			if !a.PersistentTurns {
+				a.appendToolMessage(toolMsg)
+			}
 			// Note: the provider image mirror (openai/openai-codex) is
 			// derived per-turn inside BuildContext now — it is request-only
 			// and never appended to the transcript.
@@ -515,12 +566,19 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 				return err
 			}
 			_ = hadError
+			if a.PersistentTurns && successfulCompletion(assistantMsg, toolMsg) {
+				sink(EvDone{})
+				return nil
+			}
 			continue
 		}
 
 		// Terminal stop (end, length, error, aborted).
 		if ctx.Err() != nil || stop == provider.StopAborted {
 			sink(EvDone{})
+			if a.PersistentTurns {
+				return ctx.Err()
+			}
 			return nil
 		}
 
@@ -531,8 +589,13 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		// append a hidden user nudge and ask the model again, so the
 		// turn only completes on real output. Capped per turn; cancelled
 		// and aborted turns still end immediately.
-		if trimmedText == "" && !completedInTurn && nudges < maxContinueNudges {
+		if trimmedText == "" && !completedInTurn && (nudges < maxContinueNudges || a.PersistentTurns) {
 			nudges++
+			if a.PersistentTurns && nudges > maxContinueNudges {
+				if err := sleepRetry(ctx, a.retryDelay(nudges-maxContinueNudges-1)); err != nil {
+					return err
+				}
+			}
 			nudge := provider.Message{
 				Role:    provider.RoleUser,
 				Content: []provider.Content{provider.TextBlock{Text: ContinueNudgeText}},
@@ -551,7 +614,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		// When the model returns visible text without calling any tools:
 		// check if a completion tool is configured in the registry and has not yet been called in this turn.
 		// If so, prompt the model to either mark completion or continue working.
-		if trimmedText != "" && !completedInTurn && completionNudges < maxCompletionNudges {
+		if trimmedText != "" && !completedInTurn && (completionNudges < maxCompletionNudges || a.PersistentTurns) {
 			completionNudgeText := ""
 			a.mu.Lock()
 			tools := a.Tools
@@ -564,6 +627,11 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 
 			if completionNudgeText != "" {
 				completionNudges++
+				if a.PersistentTurns && completionNudges > maxCompletionNudges {
+					if err := sleepRetry(ctx, a.retryDelay(completionNudges-maxCompletionNudges-1)); err != nil {
+						return err
+					}
+				}
 				nudge := provider.Message{
 					Role:    provider.RoleUser,
 					Content: []provider.Content{provider.TextBlock{Text: completionNudgeText}},
@@ -766,6 +834,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		finalErr error
 		finalMsg provider.Message
 	)
+	gotDone := false
 	var thinkingStart time.Time
 	var thinkingTime time.Duration
 	var hadThinking bool
@@ -803,12 +872,16 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 				a.OnUsage(cum)
 			}
 		case provider.EventDone:
+			gotDone = true
 			stop = e.Stop
 			finalErr = e.Err
 			finalMsg = e.Message
 		}
 	}
 	finishThinking()
+	if a.PersistentTurns && finalErr == nil && (!gotDone || stop == provider.StopError || stop == provider.StopAborted) {
+		finalErr = io.ErrUnexpectedEOF
+	}
 	if !hadThinking {
 		for _, c := range finalMsg.Content {
 			if _, ok := c.(provider.ReasoningBlock); ok {
@@ -840,7 +913,23 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		finalMsg.Content = content
 		keep = len(content) > 0
 	}
-	if keep {
+	if keep && (!a.PersistentTurns || finalErr == nil || ctx.Err() != nil) {
+		// Commit text-mode completion with the response itself. Recovery must
+		// not ask for another response if the process dies before finalization.
+		if a.PersistentTurns && finalErr == nil && ctx.Err() == nil && stop != provider.StopToolUse && strings.TrimSpace(extractText(finalMsg)) != "" {
+			a.mu.Lock()
+			_, taskSignal := a.Tools["mark_task_as_complete"]
+			_, planSignal := a.Tools["mark_plan_as_ready_to_execute"]
+			a.mu.Unlock()
+			if !taskSignal && !planSignal {
+				meta := map[string]string{}
+				for key, value := range finalMsg.Meta {
+					meta[key] = value
+				}
+				meta["turn_completed"] = "true"
+				finalMsg.Meta = meta
+			}
+		}
 		emit := finalMsg
 		suppress := false
 
@@ -855,6 +944,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		suppress = suppressed
 
 		a.stampTurn(&finalMsg)
+		emit.TurnIndex = finalMsg.TurnIndex
 		a.mu.Lock()
 		a.messages = append(a.messages, finalMsg)
 		a.rev++
@@ -903,7 +993,16 @@ func (a *Agent) executeTools(ctx context.Context, msg provider.Message, sink fun
 				addedTools = append(addedTools, name)
 			}
 		}
+		if a.PersistentTurns {
+			// Commit each result before starting another tool. A crash in a later
+			// tool cannot erase an earlier completed action from recovery context.
+			a.appendToolMessage(provider.Message{Role: provider.RoleTool,
+				Content: []provider.Content{results[len(results)-1]}, Time: time.Now(), AddedToolNames: addedTools})
+		}
 		sink(EvToolResult{ID: tc.ID, Result: res, Details: res.Details})
+		if a.PersistentTurns && !res.IsError && (tc.Name == "mark_task_as_complete" || tc.Name == "mark_plan_as_ready_to_execute") {
+			break
+		}
 	}
 
 	return provider.Message{
@@ -1063,4 +1162,30 @@ func replaceText(msg provider.Message, replacement string) provider.Message {
 		out.Content = append(out.Content, provider.TextBlock{Text: replacement})
 	}
 	return out
+}
+
+// A call alone is not completion: validation, approval, and execution must succeed.
+func successfulCompletion(assistant, results provider.Message) bool {
+	ids := map[string]bool{}
+	for _, content := range assistant.Content {
+		if call, ok := content.(provider.ToolCallBlock); ok &&
+			(call.Name == "mark_task_as_complete" || call.Name == "mark_plan_as_ready_to_execute") {
+			ids[call.ID] = true
+		}
+	}
+	for _, content := range results.Content {
+		if result, ok := content.(provider.ToolResultBlock); ok && ids[result.CallID] && !result.IsError {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Agent) appendToolMessage(message provider.Message) {
+	a.stampTurn(&message)
+	a.mu.Lock()
+	a.messages = append(a.messages, message)
+	a.rev++
+	a.mu.Unlock()
+	a.fireMessageAppended(message)
 }

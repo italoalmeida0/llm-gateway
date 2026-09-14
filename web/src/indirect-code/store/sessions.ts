@@ -29,7 +29,6 @@ export interface RcSession {
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
-  messageCount: number;
   draft?: string;
   todosOpen?: boolean;
   editingMsg?: { index: number; text: string } | null;
@@ -140,12 +139,6 @@ export function createDataLayer(opts: {
       // now instead of rendering "20706d" via timeAgo.
       createdAt: typeof r.createdAt === "number" && r.createdAt > 0 ? r.createdAt : Date.now(),
       updatedAt: typeof r.updatedAt === "number" && r.updatedAt > 0 ? r.updatedAt : Date.now(),
-      messageCount:
-        typeof r.messageCount === "number"
-          ? r.messageCount
-          : Array.isArray(r.messages)
-            ? r.messages.length
-            : 0,
       draft: r.draft || "",
       todosOpen: typeof r.todosOpen === "boolean" ? r.todosOpen : undefined,
       editingMsg,

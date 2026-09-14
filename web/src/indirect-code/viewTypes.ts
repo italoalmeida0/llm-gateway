@@ -12,25 +12,6 @@ export interface TodoItem {
   status: "pending" | "in_progress" | "completed";
 }
 
-export interface ReviewFile {
-  state?: "exists" | "deleted" | "unavailable";
-  canUndo?: boolean;
-  truncated?: boolean;
-  path: string;
-  kind: string;
-  diff?: string;
-  binary?: boolean;
-  added?: number;
-  removed?: number;
-}
-
-export interface Review {
-  checkedAt?: number;
-  id: string;
-  files: ReviewFile[];
-  notice?: string;
-}
-
 export interface PendingAttachment {
   key: string;
   name: string;
@@ -41,7 +22,6 @@ export interface PendingAttachment {
   /** Browser-extracted markdown/text for pdf/office/plain files. */
   text?: string;
   loading?: boolean;
-  loadError?: string;
   serverId?: string;
   serverSessionId?: string;
   uploading?: boolean;

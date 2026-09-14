@@ -875,14 +875,6 @@ export function createTranscript(opts: {
       return next;
     });
   }
-  function clearQuestion() {
-    showQuestion(null);
-  }
-  function clearMessages() {
-    setMessages([]);
-    setSessionCompaction(null);
-  }
-  /** Optimistic user bubble (composer, before daemon ack). */
   function pushUserMessage(msg: ChatMessage) {
     setMessages((prev) => [...prev, msg]);
   }
@@ -898,36 +890,35 @@ export function createTranscript(opts: {
 
   return {
     // state
-    messages, sessionStatus, setSessionStatus, turnActivity, setTurnActivity,
-    todos, setTodos, todosOpen, setTodosOpen, toggleTodosOpen, applyTodosOpenFromRemote, turnClock, turnLabel, turnHint,
-    sessionCompaction, setSessionCompaction,
-    pendingApproval, setPendingApproval, pendingQuestion,
-    questionSubmitting, questionError, showQuestion, clearQuestion, answerQuestion,
-    sessionUsage, activeUsage, sessionContexts, setSessionContexts,
-    toolStarts, setToolStarts, toolProgress, setToolProgress,
+    messages, sessionStatus, setSessionStatus, turnActivity,
+    todos, todosOpen, toggleTodosOpen, applyTodosOpenFromRemote, turnClock, turnLabel, turnHint,
+    sessionCompaction,
+    pendingApproval, pendingQuestion,
+    questionSubmitting, questionError, showQuestion, answerQuestion,
+    activeUsage, sessionContexts, setSessionContexts,
+    toolStarts, toolProgress,
     copiedMsgId, copyMsg,
     thinkingStart, thinkingElapsed, thinkingIndex,
-    startThinkingTimer, stopThinkingTimer,
-    editingMsgIdx, setEditingMsgIdx, editingMsgText, setEditingMsgText, updateEditingMsgText, applyEditingMsgFromRemote, flushPendingEdit,
-    isAtBottom, setIsAtBottom,
+    stopThinkingTimer,
+    editingMsgIdx, editingMsgText, updateEditingMsgText, applyEditingMsgFromRemote, flushPendingEdit,
+    isAtBottom,
     chatContainerRef, setChatContainerRef, chatContentRef, setChatContentRef,
     transcriptScroll, scrollToBottom, pinAtBottom, onChatScroll,
-    renderBlocks, visibleBlocks, hiddenCount, growWindow, resetWindow,
+    renderBlocks, visibleBlocks, hiddenCount, growWindow,
     rawIdx, blockRawIdx, specialProgress,
     // session
     fetchSession, beginLoad, applySessionContent, applyUsage, applySnapshot,
     setWorkspaceSink, noteSessionDataRequestGuard,
     handleTruncated, handleStatusEvent, handleAgentEvent,
     noteApprovalRequest, noteQuestionResolved, noteQuestionError,
-    stampThinkingDuration, appendStreamingDelta, appendReasoningDelta,
-    appendToolCall, appendToolArgsDelta, appendToolResult, cutLiveTail,
+    appendReasoningDelta,
+    appendToolArgsDelta, appendToolResult,
     cancelTurnForSession, cancelCurrentTurn, respondApproval,
     forking, forkRequestId: () => forkRequestId,
     clearForkRequest: () => { forkRequestId = ""; }, setForking,
     forkMessage, regenerateMsg, startEditMsg, cancelEditMsg, saveEditMsg,
     editAttachments, editingAttachments, setEditingAttachments, savingEdit, editMentions,
     resetForSession, resetCaches, purgeSession, pushUserMessage, beginTurn,
-    clearMessages,
   };
 }
 

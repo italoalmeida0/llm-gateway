@@ -542,7 +542,6 @@ export function createSettings(opts: {
   }
   return {
     showConfigModal,
-    setShowConfigModal,
     settingsTab,
     setSettingsTab,
     savingSettings,
@@ -551,9 +550,7 @@ export function createSettings(opts: {
     daemonSettings,
     setDaemonSettings,
     mcpServers,
-    setMcpServers,
     skills,
-    setSkills,
     savedSkills,
     openSettings,
     cancelSettings,

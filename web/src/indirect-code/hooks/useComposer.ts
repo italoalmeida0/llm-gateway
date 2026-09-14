@@ -491,7 +491,6 @@ export function createComposer(opts: {
     setSlashIndex,
     slashMatches,
     pickSlash,
-    routeSlash,
     dismissSlash: () => setSlashDismissed(inputPrompt()),
     sendPrompt,
     flushPendingDraft,

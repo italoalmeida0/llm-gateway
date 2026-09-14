@@ -159,7 +159,6 @@ func (d *DaemonServer) broadcastLiveChanges(hostID, sessionID string, tfc *turnF
 		"live":      true,
 		"balloon": map[string]any{
 			"turnIndex": tfc.turnIndex,
-			"at":        time.Now().UnixMilli(),
 			"files":     previewIncoming(tfc),
 		},
 	})
@@ -309,8 +308,9 @@ func undoOneFile(cwd string, f *filetrack.ChangedFile) undoFileResult {
 }
 
 // Disk uses historical snake_case keys; all foreground surfaces use camelCase.
+// "at" is disk-only (ordering/forensics); the wire omits it — no surface reads it.
 func fileBalloonPayload(b filetrack.TurnChanges) map[string]any {
-	return map[string]any{"turnIndex": b.TurnIndex, "at": b.At, "files": b.Files, "messageIndex": b.MessageIndex}
+	return map[string]any{"turnIndex": b.TurnIndex, "files": b.Files, "messageIndex": b.MessageIndex}
 }
 func fileBalloonPayloads(balloons []filetrack.TurnChanges) []map[string]any {
 	out := make([]map[string]any, 0, len(balloons))

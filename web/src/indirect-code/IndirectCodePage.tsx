@@ -695,14 +695,6 @@ export default function IndirectCodePage() {
         break;
       }
 
-      case "session_cleared": {
-        if (msg.sessionId === activeSessionId()) {
-          transcript.clearMessages();
-          notice.toast("Transcript cleared", "ok");
-        }
-        break;
-      }
-
       case "session_compacted": {
         const sid = msg.sessionId;
         if (sid !== activeSessionId()) break;

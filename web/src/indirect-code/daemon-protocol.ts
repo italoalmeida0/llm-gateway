@@ -62,6 +62,8 @@ export type DaemonCommand = CommandBase &
   | { type: "set_todos_open"; sessionId: string; open: boolean }
   | { type: "set_editing_msg"; sessionId: string; index: number | null; text: string }
   | { type: "set_project_collapsed"; projectId: string; collapsed: boolean }
+  | { type: "get_turn_changes"; sessionId: string; requestId?: string }
+  | { type: "undo_turn_changes"; sessionId: string; turnIndex: number; path?: string; requestId?: string }
     | {
         type: "update_config";
         expectedRevision?: string;
@@ -120,7 +122,6 @@ export type DaemonEvent = EventBase &
     | { type: "turn_file_changes"; sessionId: string; live?: boolean; balloon?: WireRecord }
     | { type: "turn_changes"; sessionId: string; requestId?: string; balloons?: WireRecord[]; live?: WireRecord }
     | { type: "turn_changes_undone"; sessionId: string; requestId?: string; turnIndex?: number; results?: WireRecord[]; complete?: boolean; warning?: string; error?: string }
-    | { type: "changes_updated"; sessionId: string }
     | { type: "attachment_uploaded"; requestId?: string; sessionId?: string; attachment?: WireRecord }
     | { type: "search_results"; query?: string; results?: WireRecord[] }
     | { type: "notice"; message?: string }
@@ -130,7 +131,6 @@ export type DaemonEvent = EventBase &
     | { type: "session_truncated"; sessionId?: string; keepIndex?: number }
     | { type: "session_content"; sessionId?: string; messages?: unknown[]; compaction?: unknown }
     | { type: "session_status"; sessionId?: string; status?: string; turn?: WireRecord }
-    | { type: "session_cleared"; sessionId?: string }
     | { type: "session_compacted"; sessionId?: string; context?: SessionContext; messages?: unknown[]; auto?: boolean; compaction?: unknown; usage?: unknown }
     | { type: "workspace_status"; requestId?: string; workspace?: WireRecord }
     | { type: "question_request"; sessionId?: string; question?: WireRecord }
@@ -163,7 +163,6 @@ export type ProjectCreatedEvent = Extract<DaemonEvent, { type: "project_created"
 export type FoldersEvent = Extract<DaemonEvent, { type: "folders" }>;
 export type SearchResultsEvent = Extract<DaemonEvent, { type: "search_results" }>;
 export type AttachmentDataEvent = Extract<DaemonEvent, { type: "attachment_data" }>;
-export type ChangesUpdatedEvent = Extract<DaemonEvent, { type: "changes_updated" }>;
 export type WorkspaceStatusEvent = Extract<DaemonEvent, { type: "workspace_status" }>;
 
 /** Inbound boundary: object with recognizable envelope or null. */

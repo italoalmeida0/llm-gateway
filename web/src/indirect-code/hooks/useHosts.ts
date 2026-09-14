@@ -91,7 +91,7 @@ export function createHosts(opts: {
   }
 
   return {
-    hosts, setHosts, activeHostId, setActiveHostId, activeHost,
+    hosts, activeHostId, setActiveHostId, activeHost,
     hostMenuOpen, setHostMenuOpen, hostBtn,
     loadHosts, removeHost, noteHostStatus, markActiveHostOffline,
   };

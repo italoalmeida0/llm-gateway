@@ -133,7 +133,7 @@ export function createQueue(opts: {
     queues, queueOf, queueCollapsed, toggleCollapsed,
     editingQueueId, setEditingQueueId, editingQueueText, setEditingQueueText,
     editDraft, beginEdit, saveEdit,
-    noteQueue, purgeQueue, addToQueue, updateQueued, removeQueued, sendNow,
+    noteQueue, purgeQueue, addToQueue, removeQueued, sendNow,
   };
 }
 

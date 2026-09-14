@@ -136,10 +136,6 @@ export function createProjects(opts: {
     setPendingProjectId(p.id);
     return p;
   }
-  function noteProjectError(message: string) {
-    setFolderError(message);
-  }
-
   // Nested sidebar state: expanded projects (optimistic overlay + mirrored via SignalDB).
   const [optimisticCollapsed, setOptimisticCollapsed] = createSignal<Record<string, { collapsed: boolean; time: number }>>({});
 
@@ -333,7 +329,7 @@ export function createProjects(opts: {
     setFolderLoading, setFolderError,
     requestFolders, createProject, deleteProject, quickStartProject,
     pendingProjectId, setPendingProjectId,
-    noteFolders, noteProjectCreated, noteProjectError,
+    noteFolders, noteProjectCreated,
     isFolderRequest, isProjectCreation,
     isProjectExpanded, toggleProjectExpanded,
     sortedSessions, visibleSessions, sessionListToggle,

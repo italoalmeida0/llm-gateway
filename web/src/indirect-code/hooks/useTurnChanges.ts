@@ -1,6 +1,7 @@
 import { createStore, reconcile } from "solid-js/store";
 import { createSignal, untrack } from "solid-js";
 import type { TurnBalloon, TurnChangedFile } from "../types";
+import type { DaemonCommand } from "../daemon-protocol";
 
 export type { TurnBalloon, TurnChangedFile };
 
@@ -26,7 +27,7 @@ function normalizeBalloon(b: any): TurnBalloon {
  * internal detail — it only ever surfaces as live changes here.
  */
 export function createTurnChanges(opts: {
-  send: (payload: any) => void;
+  send: (payload: DaemonCommand) => void;
   getSessionId: () => string;
   toast: (message: string, kind?: "ok" | "err") => void;
   showConfirm?: (o: {
@@ -86,7 +87,6 @@ export function createTurnChanges(opts: {
     }
     const next: TurnBalloon = {
       turnIndex: balloon.turnIndex,
-      at: balloon.at,
       files,
       messageIndex: balloon.messageIndex,
       live,

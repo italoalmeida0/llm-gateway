@@ -71,7 +71,6 @@ export interface TurnChangedFile {
 
 export interface TurnBalloon {
   turnIndex: number;
-  at?: number;
   files: TurnChangedFile[];
   messageIndex?: number;
   /** True while the turn is still running (floats above the composer). */

@@ -158,7 +158,6 @@ type SessionSummary struct {
 	Pinned       bool             `json:"pinned"`
 	CreatedAt    int64            `json:"createdAt"`
 	UpdatedAt    int64            `json:"updatedAt"`
-	MessageCount int              `json:"messageCount"`
 	Draft        string           `json:"draft,omitempty"`
 	TodosOpen    *bool            `json:"todosOpen,omitempty"`
 	EditingMsg   *EditingMsgState `json:"editingMsg,omitempty"`
@@ -172,7 +171,6 @@ func sessionListItem(s SessionSummary) map[string]any {
 		"pinned":       s.Pinned,
 		"createdAt":    s.CreatedAt,
 		"updatedAt":    s.UpdatedAt,
-		"messageCount": s.MessageCount,
 		"draft":        s.Draft,
 		"options":      s.Options,
 	}
@@ -313,27 +311,6 @@ func (d *DaemonServer) saveProjects(list []ProjectEntry) error {
 	}
 	d.notifyChange("projects")
 	return nil
-}
-
-func safeFileName(name string) string {
-	base := filepath.Base(strings.TrimSpace(name))
-	if base == "" || base == "." || base == "/" {
-		base = "attachment"
-	}
-	var b strings.Builder
-	for _, r := range base {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('_')
-		}
-	}
-	out := b.String()
-	if len(out) > 120 {
-		ext := filepath.Ext(out)
-		out = out[:120-len(ext)] + ext
-	}
-	return out
 }
 
 // indexRunes reports the rune offset of the first occurrence of sub in s,
@@ -861,7 +838,6 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 			Pinned:       rec.Pinned,
 			CreatedAt:    rec.CreatedAt,
 			UpdatedAt:    rec.UpdatedAt,
-			MessageCount: len(rec.Messages),
 			Draft:        rec.Draft,
 			TodosOpen:    rec.TodosOpen,
 			EditingMsg:   rec.EditingMsg,
@@ -968,7 +944,6 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 			Pinned:       r.Pinned,
 			CreatedAt:    r.CreatedAt,
 			UpdatedAt:    r.UpdatedAt,
-			MessageCount: len(r.Messages),
 			Draft:        r.Draft,
 			TodosOpen:    r.TodosOpen,
 			EditingMsg:   r.EditingMsg,

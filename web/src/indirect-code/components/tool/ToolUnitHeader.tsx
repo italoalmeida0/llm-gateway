@@ -39,7 +39,7 @@ export function ToolUnitHeader(props: ToolPartProps) {
         <span class="inline-flex items-center gap-2 min-w-0" data-rc-tip={targetPath() ? absoluteRemotePath(targetPath(), props.ctx.activeSession()?.cwd || "", props.ctx.projects().find((p: { protected?: boolean }) => p.protected)?.path) : undefined}>
           <Show when={targetPath()}><FileIcon path={targetPath()} /></Show>
           <Show when={props.m.name() === "bash" || props.m.name() === "python"} fallback={
-            <span class="truncate text-ink-200 font-medium min-w-0">{props.m.sum().target}</span>
+            <span class="truncate text-ink-200 font-medium min-w-0">{props.m.name() === "sleep" && !props.u.result ? (props.m.sleepRemaining() || props.m.sum().target) : props.m.sum().target}</span>
           }>
             <span class="truncate text-ink-200 min-w-0 text-[12.5px]"><ShellCmd text={collapseCwd(props.m.bashHeaderCmd(), props.ctx.activeSession()?.cwd || "")} /></span>
           </Show>

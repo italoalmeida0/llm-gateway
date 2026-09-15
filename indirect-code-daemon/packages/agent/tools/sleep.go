@@ -56,6 +56,11 @@ func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 	wait := time.Duration(a.Seconds * float64(time.Second))
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
+	// No ticking progress: the row body stays empty while sleeping and the
+	// header shows a live remaining counter instead (computed client-side
+	// from the tool start). Progress events append forever, so a per-second
+	// tick would pile "29s left28s left…" into the transcript.
+	_ = progress
 
 	var wake <-chan struct{}
 	if t.Host != nil {
@@ -68,28 +73,6 @@ func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 	}
 
 	start := time.Now()
-	// Ticking progress so the UI row shows the wait live ("sleeping… 42s")
-	// instead of a silent spinner.
-	if progress != nil {
-		stopTick := make(chan struct{})
-		go func() {
-			tick := time.NewTicker(1 * time.Second)
-			defer tick.Stop()
-			for {
-				select {
-				case <-stopTick:
-					return
-				case <-tick.C:
-					elapsed := time.Since(start).Seconds()
-					remaining := a.Seconds - elapsed
-					if remaining > 0 {
-						progress(fmt.Sprintf("sleeping… %s left", humanizeSeconds(remaining)))
-					}
-				}
-			}
-		}()
-		defer close(stopTick)
-	}
 	select {
 	case <-ctx.Done():
 		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: "Sleep cancelled."}}}, nil

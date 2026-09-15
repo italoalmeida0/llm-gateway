@@ -21,6 +21,9 @@ const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
  * with nothing (pre-created card, empty call) stay shut until content
  * lands — the chevron still opens them manually. */
 const hasContent = createMemo(() => {
+  // Sleep rows are header-only: the body stays empty and the live
+  // remaining counter renders in the label (see sleepRemaining).
+  if (name() === "sleep") return false;
   if (((u.result?.toolDetails?.display ?? u.result?.toolResult) || "").trim() !== "") return true;
   if ((prog() || "").trim() !== "") return true;
   return Object.keys(args()).length > 0;
@@ -49,6 +52,16 @@ const fetchDetails = () => {
   const d: any = u.result?.toolDetails;
   if (!d || typeof d.url !== "string") return undefined;
   return d as { url: string; host?: string; title?: string; content?: string; truncated?: boolean };
+};
+/** Live remaining counter for a running sleep ("42s left"), computed
+ * from the tool start + the turn clock — no progress spam needed. */
+const sleepRemaining = () => {
+  if (name() !== "sleep" || u.result) return "";
+  const total = Number((args() as any)?.seconds);
+  if (!Number.isFinite(total) || total <= 0) return "";
+  const start = ctx.toolStarts()[u.call?.toolId || ""];
+  if (!start) return "";
+  return `${Math.max(0, Math.ceil(total - (ctx.turnClock() - start) / 1000))}s left`;
 };
 const elapsed = () => {
   if (name() !== "bash" && name() !== "python" && !name().startsWith("mcp__")) return "";
@@ -83,7 +96,7 @@ const bgStream = () => {
 /** True once the call carries a background job — the row renders as a
  * background run (badge, spinner while running). */
 const isDetachedBg = () => bgJobId() !== "";
-  return { key, open, toggle, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed, bgJobId, bgRunning, bgStream, isDetachedBg };
+  return { key, open, toggle, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed, sleepRemaining, bgJobId, bgRunning, bgStream, isDetachedBg };
 }
 
 export type ToolModel = ReturnType<typeof useToolUnitModel>;

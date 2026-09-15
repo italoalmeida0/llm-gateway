@@ -1594,3 +1594,46 @@ describe("Background tasks (bash/python detach)", () => {
     } as any).verb).toBe("Stopped");
   });
 });
+
+describe("Background hook (tail buffering + always-fold)", () => {
+  test("terminal jobs fold on every snapshot; live chunks buffer until the tail lands", async () => {
+    const { createBackground } = await import("../web/src/indirect-code/hooks/useBackground");
+    const { createRoot } = await import("solid-js");
+    const sent: any[] = [];
+    const folded: string[] = [];
+    createRoot((dispose) => {
+      const bg = createBackground({
+        send: (p) => { sent.push(p); },
+        isOpen: () => true,
+        getSessionId: () => "s1",
+        toast: () => {},
+        onTerminalResult: (job) => { folded.push(job.id); },
+      });
+      const done1 = { id: "bg_1", kind: "bash", sessionId: "s1", label: "sleep 30", status: "done", startedAt: 1, endedAt: 2, result: "out" };
+      // Terminal job never seen running: still folds (self-healing a
+      // missed bg_update instead of showing the AI notice forever).
+      bg.noteJobs([done1]);
+      expect(folded).toEqual(["bg_1"]);
+      // Repeated snapshots re-fold (idempotent downstream).
+      bg.noteJobs([done1]);
+      expect(folded).toEqual(["bg_1", "bg_1"]);
+      // Foreign sessions never fold.
+      bg.noteJobs([{ id: "bg_9", kind: "bash", sessionId: "other", label: "x", status: "done", startedAt: 1, result: "x" }]);
+      expect(folded).toEqual(["bg_1", "bg_1"]);
+      // Running job: tail requested, live chunks buffered (pre-detach
+      // history is not lost to a tail/live race).
+      bg.noteJobs([{ id: "bg_2", kind: "python", sessionId: "s1", label: "code", status: "running", startedAt: 1 }]);
+      expect(sent).toContainEqual({ type: "bg_tail", jobId: "bg_2" });
+      bg.noteOutput("bg_2", "live-1");
+      expect(bg.output()["bg_2"] || "").toBe("");
+      bg.noteTail("bg_2", "history-");
+      expect(bg.output()["bg_2"]).toBe("history-live-1");
+      bg.noteOutput("bg_2", "live-2");
+      expect(bg.output()["bg_2"]).toBe("history-live-1live-2");
+      // Finishing flushes the fold again (heals rows that mounted late).
+      bg.noteJobs([{ id: "bg_2", kind: "python", sessionId: "s1", label: "code", status: "done", startedAt: 1, endedAt: 2, result: "done" }]);
+      expect(folded[folded.length - 1]).toBe("bg_2");
+      dispose();
+    });
+  });
+});

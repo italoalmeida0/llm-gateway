@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { useBackground } from "../ctx";
+import { useBackground, useUI } from "../ctx";
 import { elapsedLabel } from "../utils/format";
 import { Icon as Iconify } from "../../components/icon";
 import { ShellCmd } from "./CodeBlock";
@@ -24,10 +24,11 @@ function shortLabel(cmd: string, max = 64) {
  */
 export function BackgroundCard() {
   const bg = useBackground();
+  const ui = useUI();
   const running = () => bg.sessionJobs().filter((j) => j.status === "running" && (j.kind === "bash" || j.kind === "python"));
   return (
     <Show when={running().length > 0}>
-      <div class="border-t border-line/60 px-3 py-2">
+      <div class={`${ui.convWidthClass()} mx-auto border-t border-line/60 px-3 py-2`}>
         <div class="text-[11px] uppercase tracking-wide text-ink-500 pb-1.5">
           Background tasks · {running().length} running
         </div>

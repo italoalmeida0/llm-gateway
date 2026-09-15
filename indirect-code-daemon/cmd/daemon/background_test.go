@@ -506,6 +506,18 @@ func mustBgID(t *testing.T, res core.ToolResult) string {
 	return ""
 }
 
+// Sleep rows are header-only (live remaining counter in the label), so
+// the tool must never emit progress ticks: progress events append
+// forever and would pile "29s left28s left…" into the transcript.
+func TestSleepEmitsNoProgress(t *testing.T) {
+	tool := &tools.SleepTool{}
+	if _, err := tool.Execute(context.Background(), []byte(`{"seconds":1}`), func(string) {
+		t.Error("sleep must not emit progress ticks")
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSleepWakesOnJobFinish(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("posix shell only")

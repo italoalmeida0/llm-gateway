@@ -1,7 +1,7 @@
 import { createDisclosure } from "../Disclosure";
 import { createMemo } from "solid-js";
 import { tryParseArgs } from "../../utils/tools";
-import { toolSummary, terminalPresentation } from "../../transcript";
+import { isHeaderOnlySleep, toolSummary, terminalPresentation } from "../../transcript";
 import { toolRowKey } from "../../utils/titles";
 import type { ToolUnit } from "../../types";
 import type { TranscriptRenderCtx } from "../TranscriptBlocks";
@@ -21,9 +21,9 @@ const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
  * with nothing (pre-created card, empty call) stay shut until content
  * lands — the chevron still opens them manually. */
 const hasContent = createMemo(() => {
-  // Sleep rows are header-only: the body stays empty and the live
-  // remaining counter renders in the label (see sleepRemaining).
-  if (name() === "sleep") return false;
+  // Sleep rows are header-only while running (live counter in the label,
+  // see sleepRemaining); finished sleeps report content like other tools.
+  if (isHeaderOnlySleep(name(), !!u.result)) return false;
   if (((u.result?.toolDetails?.display ?? u.result?.toolResult) || "").trim() !== "") return true;
   if ((prog() || "").trim() !== "") return true;
   return Object.keys(args()).length > 0;

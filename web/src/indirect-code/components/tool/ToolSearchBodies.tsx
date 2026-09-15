@@ -6,6 +6,7 @@ import { CodeBlock } from "../CodeBlock";
 import { FileIcon } from "../../presentation";
 import { recordToolScroll, restoreToolScroll } from "../../utils/scrollMemory";
 import { parseGlobList, parseInspectTree } from "../../utils/toolTrees";
+import { isHeaderOnlySleep } from "../../transcript";
 import type { ToolPartProps } from "./toolUnitModel";
 
 function flagBadge(flag: string) {
@@ -211,7 +212,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
           <div class="px-3 pt-2 text-[11px] text-ink-500">Arguments</div>
           <CodeBlock text={JSON.stringify(props.m.args(), null, 2)} language="json" scrollKey={`${props.m.key()}:arguments`} />
         </Show>
-        <Show when={props.m.name() !== "edit" && props.m.name() !== "read" && props.m.name() !== "write" && props.m.name() !== "python" && props.m.name() !== "search" && props.m.name() !== "inspect" && props.m.name() !== "glob" && props.m.name() !== "question" && props.m.name() !== "patch" && props.m.name() !== "search_web" && props.m.name() !== "fetch_url" && props.m.name() !== "sleep"}>
+        <Show when={props.m.name() !== "edit" && props.m.name() !== "read" && props.m.name() !== "write" && props.m.name() !== "python" && props.m.name() !== "search" && props.m.name() !== "inspect" && props.m.name() !== "glob" && props.m.name() !== "question" && props.m.name() !== "patch" && props.m.name() !== "search_web" && props.m.name() !== "fetch_url" && !isHeaderOnlySleep(props.m.name(), !!props.u.result)}>
           <Show
             when={props.u.result?.toolResult || props.m.prog() || props.m.bgRunning() || props.m.bgStream()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.m.name() === "question" ? "Waiting for your answers…" : props.ctx.pendingApproval()?.callId === props.u.call?.toolId ? "Waiting for approval…" : props.active ? "Running…" : null}</div>}

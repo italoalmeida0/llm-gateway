@@ -11,7 +11,7 @@ import {
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
 import {
-  blockTurnDuration, buildRenderBlocks, cacheHitPct, finalTurnMessage, fmtUsd, fuzzySame, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
+  blockTurnDuration, buildRenderBlocks, cacheHitPct, finalTurnMessage, fmtUsd, fuzzySame, isHeaderOnlySleep, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
 } from "../web/src/indirect-code/transcript";
 import { specialTitle } from "../web/src/indirect-code/utils/titles";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
@@ -1592,6 +1592,35 @@ describe("Background tasks (bash/python detach)", () => {
       call: { type: "tool_call", toolId: "t", toolName: "bg_cancel", toolArgs: JSON.stringify({ job_id: "bg_9" }) },
       result: { type: "tool_result", toolId: "t", toolResult: "cancelled" },
     } as any).verb).toBe("Stopped");
+  });
+
+  test("sleep rows are header-only while running, with a body once finished", () => {
+    expect(isHeaderOnlySleep("sleep", false)).toBe(true);
+    expect(isHeaderOnlySleep("sleep", true)).toBe(false);
+    expect(isHeaderOnlySleep("bash", false)).toBe(false);
+    expect(isHeaderOnlySleep("bash", true)).toBe(false);
+    expect(isHeaderOnlySleep("python", false)).toBe(false);
+  });
+
+  test("aggregate keeps detached bash and finished sleep units with their results", () => {
+    const list: ChatMessage[] = [
+      { id: "one", role: "assistant", srcIdx: 1, blocks: [
+        { type: "tool_call", toolId: "b", toolName: "bash", toolArgs: JSON.stringify({ command: "sleep 30 && echo done" }) },
+        { type: "tool_result", toolId: "b", toolResult: "moved to background", toolDetails: { background_job_id: "bg_1" } },
+        { type: "tool_call", toolId: "s", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 30 }) },
+        { type: "tool_result", toolId: "s", toolResult: "Woken early after 12s: a background task finished — its completion notice is now in context." },
+      ]},
+    ];
+    const blocks = buildRenderBlocks(list);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].kind).toBe("series");
+    if (blocks[0].kind === "series") {
+      expect(blocks[0].units.map((u) => u.call?.toolId)).toEqual(["b", "s"]);
+      // The finished sleep keeps its result text: the body gate must let it through.
+      const sleep = blocks[0].units.find((u) => u.call?.toolId === "s");
+      expect(sleep?.result?.toolResult).toContain("Woken early");
+      expect(isHeaderOnlySleep(sleep?.call?.toolName || "", !!sleep?.result)).toBe(false);
+    }
   });
 });
 

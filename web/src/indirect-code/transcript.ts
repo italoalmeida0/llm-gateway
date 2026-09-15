@@ -554,6 +554,15 @@ export function toolSummary(u: ToolUnit): ToolSummary {
   }
 }
 
+/** Sleep rows stay header-only while the timer runs (the live remaining
+ * counter renders in the label); once the result lands ("Slept …" /
+ * "Woken early …") the body renders like any other tool. Single source
+ * of truth for the row model and the body gate — they must agree, or
+ * expanding a finished sleep shows an empty body. */
+export function isHeaderOnlySleep(toolName: string, hasResult: boolean): boolean {
+  return toolName === "sleep" && !hasResult;
+}
+
 /** Determines if a chat message marks the beginning of an agent turn.
  * User messages initiate a turn by default, unless explicitly marked
  * as a mid-turn follow-up (midTurn: true or isTurnStart: false). */

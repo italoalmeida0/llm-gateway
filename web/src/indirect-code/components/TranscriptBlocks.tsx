@@ -9,6 +9,7 @@ import { isLongAssistantMessage } from "../transcript";
 import { partitionToolSegs } from "../utils/toolSegs";
 import type { ToolSeg } from "../utils/toolSegs";
 import { groupTitle, specialTitle } from "../utils/titles";
+import { formatDurationSecs } from "../utils/format";
 import { useToolUnitModel } from "./tool/toolUnitModel";
 import { transcriptMarkdownComponents } from "./MarkdownCode";
 import { ToolUnitHeader } from "./tool/ToolUnitHeader";
@@ -60,9 +61,9 @@ function renderThinkingRow(
   const { open, toggle } = createDisclosure(() => `${running()}:${live()}`, openByDefault);
   const label = () =>
     live()
-      ? `Thinking ${ctx.thinkingElapsed()}s`
+      ? `Thinking ${formatDurationSecs(ctx.thinkingElapsed())}`
       : entry.msg.thinkingDuration !== undefined
-        ? `Thinking ${entry.msg.thinkingDuration}s`
+        ? `Thinking ${formatDurationSecs(entry.msg.thinkingDuration)}`
         : open()
           ? "Hide thinking"
           : "Thinking";

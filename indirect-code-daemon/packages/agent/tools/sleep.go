@@ -83,14 +83,31 @@ func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 	}
 }
 
+// humanizeSeconds renders a duration in the "Xh Ym Zs" style. Zero parts
+// are omitted ("7s", "50m 10s", "2h 20m 2s").
+func formatHMS(total int) string {
+	if total < 60 {
+		return fmt.Sprintf("%ds", total)
+	}
+	h := total / 3600
+	m := (total % 3600) / 60
+	sec := total % 60
+	if h > 0 {
+		parts := fmt.Sprintf("%dh", h)
+		if m > 0 {
+			parts += fmt.Sprintf(" %dm", m)
+		}
+		if sec > 0 {
+			parts += fmt.Sprintf(" %ds", sec)
+		}
+		return parts
+	}
+	if sec > 0 {
+		return fmt.Sprintf("%dm %ds", m, sec)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
 func humanizeSeconds(s float64) string {
-	if s < 60 {
-		return fmt.Sprintf("%.0fs", s)
-	}
-	m := int(s) / 60
-	sec := int(s) % 60
-	if m < 60 {
-		return fmt.Sprintf("%dm%02ds", m, sec)
-	}
-	return fmt.Sprintf("%dh%02dm", m/60, m%60)
+	return formatHMS(int(s))
 }

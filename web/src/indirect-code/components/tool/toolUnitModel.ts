@@ -3,6 +3,7 @@ import { createMemo } from "solid-js";
 import { tryParseArgs } from "../../utils/tools";
 import { isHeaderOnlySleep, toolSummary, terminalPresentation } from "../../transcript";
 import { toolRowKey } from "../../utils/titles";
+import { formatDurationSecs } from "../../utils/format";
 import type { ToolUnit } from "../../types";
 import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 
@@ -56,15 +57,15 @@ const fetchDetails = () => {
   if (!d || typeof d.url !== "string") return undefined;
   return d as { url: string; host?: string; title?: string; content?: string; truncated?: boolean };
 };
-/** Live remaining counter for a running sleep ("42s left"), computed
- * from the tool start + the turn clock — no progress spam needed. */
+/** Live remaining counter for a running sleep ("42s left" / "1m 30s left"),
+ * computed from the tool start + the turn clock — no progress spam needed. */
 const sleepRemaining = () => {
   if (name() !== "sleep" || u.result) return "";
   const total = Number((args() as any)?.seconds);
   if (!Number.isFinite(total) || total <= 0) return "";
   const start = ctx.toolStarts()[u.call?.toolId || ""];
   if (!start) return "";
-  return `${Math.max(0, Math.ceil(total - (ctx.turnClock() - start) / 1000))}s left`;
+  return `${formatDurationSecs(Math.max(0, Math.ceil(total - (ctx.turnClock() - start) / 1000)))} left`;
 };
 const elapsed = () => {
   if (name() !== "bash" && name() !== "python" && !name().startsWith("mcp__")) return "";

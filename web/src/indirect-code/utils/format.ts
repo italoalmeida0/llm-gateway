@@ -14,9 +14,25 @@ export function timeAgo(ts: number) {
   return `${days}d`;
 }
 
+export function formatDurationSecs(totalSeconds: number) {
+  if (!Number.isFinite(totalSeconds)) return "—";
+  const total = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) {
+    const parts = [`${h}h`];
+    if (m > 0) parts.push(`${m}m`);
+    if (s > 0) parts.push(`${s}s`);
+    return parts.join(" ");
+  }
+  if (m > 0) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  return `${s}s`;
+}
+
 export function elapsedLabel(ms: number) {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  if (!Number.isFinite(ms)) return "—";
+  return formatDurationSecs(Math.floor(ms / 1000));
 }
 
 export function formatEffort(lvl: string): string {

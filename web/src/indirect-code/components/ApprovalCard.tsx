@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { FileIcon } from "../presentation";
 import { tryParseArgs } from "../utils/tools";
+import { formatDurationSecs } from "../utils/format";
 import { useBackground } from "../ctx";
 import type { PendingApproval } from "../types";
 
@@ -48,7 +49,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
                 <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
                   <Iconify icon="lucide:timer" size={14} class="text-ink-400 shrink-0" />
                   <span class="text-ink-500">Wait</span>
-                  <span class="font-mono text-ink-100">{String(args.seconds || "")}s</span>
+                  <span class="font-mono text-ink-100">{args.seconds ? formatDurationSecs(Number(args.seconds)) : ""}</span>
                   <span class="text-[11px] text-ink-600">ends early when a background task finishes</span>
                 </div>
               </Show>

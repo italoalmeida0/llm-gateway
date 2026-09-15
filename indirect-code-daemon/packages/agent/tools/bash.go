@@ -382,8 +382,9 @@ func renderBashDisplay(command, captured string, exitCode int, elapsed time.Dura
 	return sb.String()
 }
 
-// humanDuration renders a duration in the "Took X.Ys" style used by
-// the shell-log display.
+// humanDuration renders a duration in the "Took Xh Ym Zs" style used by
+// the shell-log display. Zero parts are omitted ("7s", "50m 10s",
+// "2h 20m 2s"); sub-minute keeps one decimal for precision.
 func humanDuration(d time.Duration) string {
 	switch {
 	case d < time.Millisecond:
@@ -394,11 +395,22 @@ func humanDuration(d time.Duration) string {
 	case d < time.Hour:
 		m := int(d.Minutes())
 		s := int(d.Seconds()) - m*60
-		return fmt.Sprintf("%dm%ds", m, s)
+		if s > 0 {
+			return fmt.Sprintf("%dm %ds", m, s)
+		}
+		return fmt.Sprintf("%dm", m)
 	default:
 		h := int(d.Hours())
 		m := int(d.Minutes()) - h*60
-		return fmt.Sprintf("%dh%dm", h, m)
+		s := int(d.Seconds()) - h*3600 - m*60
+		parts := fmt.Sprintf("%dh", h)
+		if m > 0 {
+			parts += fmt.Sprintf(" %dm", m)
+		}
+		if s > 0 {
+			parts += fmt.Sprintf(" %ds", s)
+		}
+		return parts
 	}
 }
 

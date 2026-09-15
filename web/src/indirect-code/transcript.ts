@@ -1,4 +1,5 @@
 import type { ChatMessage, ContentBlock, RenderBlock, ToolUnit, TurnBalloon, TurnEntry } from "./types";
+import { formatDurationSecs } from "./utils/format";
 import { displayToolArgs, withoutContinueNudges, withoutTodoActivity } from "./live";
 
 function hasVisibleText(message: ChatMessage): boolean {
@@ -300,7 +301,7 @@ export function blockTurnDuration(block: RenderBlock): number | undefined {
 
 /** Strip only the daemon's terminal footer. Preserve actual command output. */
 export function terminalPresentation(text: string): {output:string; durationMs?:number} {
-  const match = /\n\[exit -?\d+\](?: \(full output: ([^\n]+)\))? {2}Took ((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)\s*$/.exec(text);
+  const match = /\n\[exit -?\d+\](?: \(full output: ([^\n]+)\))? {2}Took ((?:\d+h ?)?(?:\d+m ?)?(?:[\d.]+s)?)\s*$/.exec(text);
   if (!match) return {output:text};
   return {output:text.slice(0, match.index).trimEnd() + (match[1] ? `\n\nFull output: ${match[1]}` : ""),
     durationMs:Array.from(match[2].matchAll(/([\d.]+)([hms])/g)).reduce((sum, part) => sum + Number(part[1])*({h:3600000,m:60000,s:1000}[part[2]] || 0), 0)};
@@ -447,7 +448,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       return {
         icon: "lucide:timer",
         verb: u.result ? "Slept" : "Sleeping",
-        target: Number.isFinite(s) ? `${s}s` : "",
+        target: Number.isFinite(s) ? formatDurationSecs(s) : "",
       };
     }
     case "bg_cancel": {

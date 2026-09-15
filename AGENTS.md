@@ -297,6 +297,15 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   Needs `dist/` + daemon binary built and `META_API_KEY` in `.env`;
   `CHROMIUM_PATH` falls back to PATH and the Playwright browser cache.
   Slow (~3 min, real model latency) — manual gate, not part of `bun test`.
+- `PLAYWRIGHT_MODULE=… CHROMIUM_PATH=… bun scripts/test-indirect-compaction-e2e.ts [manual|auto|chain|all]` —
+  full-stack compaction check (real gateway + daemon + Meta model + Chromium
+  on `#/code`: manual `/compact`, proactive auto-compact at a low threshold,
+  chained second compaction; asserts the dedicated balloon renders with no
+  duplicate `## Context Summary` user bubble, no raw `<system-reminder>` leak,
+  zero page errors). Shrinks the registry model's `context_length` so a small
+  window fires fast; heavy seeds read the `test/books` corpus (~1.1M tokens).
+  Needs `dist/` + daemon binary built and `META_API_KEY` in `.env`.
+  Slow (real model latency, ~15 min for all) — manual gate, not part of `bun test`.
 - `bun run seed` — mock usage data for the dev DB (`-- --days N`, `-- --keep`),
   seeds every existing key (replaces usage rows by default)
 

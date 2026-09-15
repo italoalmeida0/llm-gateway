@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 import { FileIcon } from "../presentation";
 import { MsgIconBtn } from "./MsgActions";
+import { Btn } from "../../ui";
 import { useModal, useQueue, useSession, useUI } from "../ctx";
 
 /**
@@ -114,7 +115,7 @@ function QueueEditRow(props: { queueId: string }) {
           </For>
         </div>
       </Show>
-      <div class="flex items-center gap-1">
+      <div class="flex items-center gap-2">
         <input
           ref={fileRef}
           type="file"
@@ -127,21 +128,22 @@ function QueueEditRow(props: { queueId: string }) {
         />
         <MsgIconBtn tip="Add attachments" icon="lucide:paperclip" compact onClick={() => fileRef?.click()} />
         <span class="flex-1" />
-        <button
+        <Btn
+          variant="outline"
+          size="sm"
           onClick={() => {
             q.setEditingQueueId(null);
             q.editDraft.clearAttachments();
           }}
-          class="px-2 py-1 rounded-md text-xs text-ink-400 hover:text-ink-200 hover:bg-ink-800 transition-colors cursor-pointer"
         >
           Cancel
-        </button>
-        <button
+        </Btn>
+        <Btn
+          size="sm"
           onClick={() => void q.saveEdit(props.queueId)}
-          class="px-2 py-1 rounded-md text-xs bg-accent-600 hover:bg-accent-500 text-white transition-colors cursor-pointer"
         >
           Save
-        </button>
+        </Btn>
       </div>
     </div>
   );

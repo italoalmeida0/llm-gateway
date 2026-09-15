@@ -13,6 +13,7 @@ import { QueueCard } from "./QueueCard";
 import { BackgroundCard } from "./BackgroundCard";
 import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
 import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges, useBackground } from "../ctx";
+import { Btn } from "../../ui";
 import { TurnChangesBalloon } from "./TurnChangesBalloon";
 import { blockTurnDuration, mapBalloonsToBlocks } from "../transcript";
 
@@ -207,10 +208,6 @@ export function TranscriptView() {
                 }
               >
                 <div class="w-full bg-ink-900 p-3 rounded-2xl border border-ink-500/60 shadow-lg">
-                  <div class="flex items-center gap-1.5 text-xs text-accent-400 font-medium mb-2 select-none">
-                    <Iconify icon="lucide:pencil" size={13} />
-                    <span>Editing message</span>
-                  </div>
                   <MentionMenu mentions={t.editMentions} inputId="rc-editing-msg" />
                   <div class="flex flex-wrap gap-2 mb-2">
                     <For each={t.editingAttachments()}>{(file) => <span class="flex items-center gap-1 text-xs text-ink-300">
@@ -258,22 +255,24 @@ export function TranscriptView() {
                     }}
                   />
                   <div class="flex justify-end items-center gap-2 mt-2 pt-2 border-t border-line/40">
-                    <label class="mr-auto text-xs text-ink-300 cursor-pointer">Attach files
+                    <label class="mr-auto cursor-pointer text-ink-400 hover:text-ink-100 transition-colors" aria-label="Attach files">
+                      <Iconify icon="lucide:paperclip" size={16} />
                       <input type="file" multiple disabled={t.savingEdit()} class="hidden" onChange={(e) => {void t.editAttachments.handleFiles(e.currentTarget.files || []); e.currentTarget.value="";}} />
                     </label>
-                    <button
+                    <Btn
+                      variant="outline"
+                      size="sm"
                       onClick={t.cancelEditMsg}
-                      class="text-xs text-ink-400 hover:text-ink-100 px-3 py-1.5 rounded-lg hover:bg-ink-800 transition-colors cursor-pointer"
                     >
                       Cancel
-                    </button>
-                    <button
+                    </Btn>
+                    <Btn
+                      size="sm"
                       disabled={t.savingEdit() || t.editAttachments.preparingAttachments() > 0}
                       onClick={() => t.saveEditMsg(rawIdx(), msg)}
-                      class="text-xs bg-ink-100 text-ink-950 px-3.5 py-1.5 rounded-lg hover:bg-accent-400 font-medium transition-colors cursor-pointer"
                     >
                       Save and Send
-                    </button>
+                    </Btn>
                   </div>
                 </div>
               </Show>

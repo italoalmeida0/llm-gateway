@@ -156,6 +156,14 @@ type Agent struct {
 	// flushed on a clean exit.
 	OnMessageAppended func(provider.Message)
 
+	// OnContextAppended, if set, fires when AppendUserContextQuiet
+	// injects a message into a live turn (without holding the agent
+	// lock). The loud OnMessageAppended is skipped on that path — the
+	// caller already holds the host's session lock that the hook
+	// would re-acquire — so hosts persist and broadcast through this
+	// one instead.
+	OnContextAppended func(provider.Message)
+
 	// TurnIndex is the host's current turn sequence, stamped onto every
 	// message the agent appends (user, assistant, tool). Unique per
 	// session only. Hosts set it before each turn; zero leaves
@@ -291,6 +299,34 @@ func (a *Agent) SetMessages(msgs []provider.Message) {
 // starting a model turn. Hosts use it for context gathered outside the agent
 // loop, such as the output of an explicitly invoked shell command.
 func (a *Agent) AppendUserContext(text string, meta map[string]string) {
+	a.appendUserContext(text, meta, true)
+}
+
+// AppendUserContextQuiet is AppendUserContext for callers that already
+// hold the HOST's session lock (act.mu). The persistence hook re-acquires
+// that same non-reentrant lock from inside fireMessageAppended, so firing
+// it here would self-deadlock the session. The message still joins the
+// transcript; the host is told through OnContextAppended (called WITHOUT
+// the agent lock, AFTER the message is in), which persists it and pushes
+// the updated transcript to clients — the loud hook (OnMessageAppended)
+// is deliberately skipped because it re-acquires the host lock.
+func (a *Agent) AppendUserContextQuiet(text string, meta map[string]string) {
+	msg := a.appendUserContext(text, meta, false)
+	if cb := a.onContextAppended(); cb != nil {
+		cb(msg)
+	}
+}
+
+// onContextAppended snapshots the hook without holding the agent lock
+// (the host callback takes the session lock itself).
+func (a *Agent) onContextAppended() func(provider.Message) {
+	a.mu.Lock()
+	cb := a.OnContextAppended
+	a.mu.Unlock()
+	return cb
+}
+
+func (a *Agent) appendUserContext(text string, meta map[string]string, fire bool) provider.Message {
 	msg := provider.Message{
 		Role:    provider.RoleUser,
 		Content: []provider.Content{provider.TextBlock{Text: text}},
@@ -302,7 +338,10 @@ func (a *Agent) AppendUserContext(text string, meta map[string]string) {
 	a.messages = append(a.messages, msg)
 	a.rev++
 	a.mu.Unlock()
-	a.fireMessageAppended(msg)
+	if fire {
+		a.fireMessageAppended(msg)
+	}
+	return msg
 }
 
 // Cost returns the cumulative usage.

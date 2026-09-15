@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,8 +75,6 @@ type PythonArgs struct {
 	Args []string `json:"args,omitempty"`
 	// Stdin is piped to the process (both modes).
 	Stdin string `json:"stdin,omitempty"`
-	// TimeoutSec caps execution (default 30, max 120).
-	TimeoutSec int `json:"timeoutSec,omitempty"`
 	// Env adds extra environment variables (SANDBOX-safe keys only).
 	Env map[string]string `json:"env,omitempty"`
 	// Workdir overrides the run directory (jailed to CWD when sandboxed).
@@ -85,22 +84,28 @@ type PythonArgs struct {
 // PythonTool executes Python 3 code or scripts. Like BashTool it is a
 // command-execution tool: the frontend renders it as a terminal card, it
 // participates in approval review, and the sandbox permission prompt covers
-// it. Disabled entirely when no Python 3 binary exists on the host.
+// it. Disabled entirely when no Python 3 binary exists on the host. There
+// is deliberately NO timeout parameter: like bash, a run still going after
+// AutoBackgroundAfter detaches into a background job.
 type PythonTool struct {
 	CWD     string
 	Sandbox *Sandbox
+	// Slow detaches long-running executions into a background job. Nil =
+	// legacy behavior (block until the script ends).
+	Slow SlowHook
 }
 
 func (t *PythonTool) Name() string { return "python" }
 
 func (t *PythonTool) Description() string {
-	return "Run Python 3 code (`code`) or a workspace script (`script` + `args`), with optional `stdin`, `timeoutSec` (default 30, max 120), `env` and `workdir`. " +
+	return "Run Python 3 code (`code`) or a workspace script (`script` + `args`), with optional `stdin`, `env` and `workdir`. " +
 		"Use for data analysis, quick calculations, file transforms, or running project scripts. " +
 		"Stdout/stderr are captured separately; a non-zero exit is reported with the exit code. " +
+		"There is no timeout: if the execution still runs after 10 seconds it automatically moves to the background (its output streams to a .log file, you are notified, and its result is delivered when it finishes — wait with the sleep tool, stop it with bg_cancel). " +
 		"Only available when a Python 3 interpreter exists on this machine."
 }
 
-const pythonSchema = `{"type":"object","properties":{"code":{"type":"string","description":"Python snippet to run as python3 -c <code>. Mutually exclusive with script."},"script":{"type":"string","description":"Workspace-relative path to a .py file to run."},"args":{"type":"array","items":{"type":"string"},"description":"Arguments appended after the script path."},"stdin":{"type":"string","description":"Text piped to the process stdin."},"timeoutSec":{"type":"number","description":"Execution timeout in seconds (default 30, max 120)."},"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra environment variables."},"workdir":{"type":"string","description":"Run directory (defaults to session CWD; jailed when sandboxed)."}}}`
+const pythonSchema = `{"type":"object","properties":{"code":{"type":"string","description":"Python snippet to run as python3 -c <code>. Mutually exclusive with script."},"script":{"type":"string","description":"Workspace-relative path to a .py file to run."},"args":{"type":"array","items":{"type":"string"},"description":"Arguments appended after the script path."},"stdin":{"type":"string","description":"Text piped to the process stdin."},"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra environment variables."},"workdir":{"type":"string","description":"Run directory (defaults to session CWD; jailed when sandboxed)."}}}`
 
 func (t *PythonTool) Schema() json.RawMessage { return json.RawMessage(pythonSchema) }
 
@@ -122,14 +127,6 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		return core.ToolResult{}, fmt.Errorf("python: `code` and `script` are mutually exclusive")
 	}
 
-	timeout := a.TimeoutSec
-	if timeout <= 0 {
-		timeout = 30
-	}
-	if timeout > 120 {
-		timeout = 120
-	}
-
 	// Resolve the working directory: session CWD by default, jailed when locked.
 	dir := t.CWD
 	if w := strings.TrimSpace(a.Workdir); w != "" {
@@ -149,7 +146,10 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 			return core.ToolResult{}, err
 		}
 		argv = []string{bin, "-c", code}
-		label = summarizeCode(code)
+		// The background job label is the raw code: the daemon keeps
+		// the first 300 chars (+ …), the frontend strips newlines and
+		// highlights it like the Ran command label.
+		label = code
 	} else {
 		abs := resolvePath(t.CWD, script)
 		if err := t.Sandbox.CheckPath(abs); err != nil {
@@ -170,16 +170,22 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 			return core.ToolResult{}, err
 		}
 		argv = append([]string{bin, abs}, a.Args...)
+		// Script mode: the label is the invocation (script + args).
+		label = strings.TrimSpace(script + " " + strings.Join(a.Args, " "))
 		if rel, err := filepath.Rel(t.CWD, abs); err == nil {
-			label = rel
-		} else {
-			label = script
+			label = strings.TrimSpace(rel + " " + strings.Join(a.Args, " "))
 		}
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(timeoutCtx, argv[0], argv[1:]...)
+	// Detach the process lifetime from the turn: once the execution
+	// outlives AutoBackgroundAfter it becomes a background job and the
+	// turn ending must not kill it — only an explicit stop does. The
+	// process binds to bgCtx, which is owned by the job after the detach
+	// (bg_cancel); there is deliberately NO defer bgCancel(): Execute
+	// returns the placeholder long before the script ends, and cancelling
+	// here would kill every detached run the moment the tool call returns.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(bgCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = pythonEnv(a.Env)
 	if a.Stdin != "" {
@@ -188,13 +194,165 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	var stdout, stderr bytes.Buffer
 	// Cap captured output at ~256KB per stream; the model gets the head,
 	// the full text stays in the session transcript via the journal.
-	cmd.Stdout = &cappedWriter{W: &stdout, Max: 256 * 1024}
-	cmd.Stderr = &cappedWriter{W: &stderr, Max: 256 * 1024}
+	// A fan-out sits in front of every sink: at detach time the job .log
+	// file and the live stream forwarder are attached WITHOUT touching
+	// exec's wiring (which captures cmd.Stdout once at Start — reassigning
+	// it later would silently keep writing to the old buffers only).
+	outFan, errFan := &fanOutWriter{}, &fanOutWriter{}
+	outFan.Add(&cappedWriter{W: &stdout, Max: 256 * 1024})
+	errFan.Add(&cappedWriter{W: &stderr, Max: 256 * 1024})
+	cmd.Stdout = outFan
+	cmd.Stderr = errFan
 
 	start := time.Now()
-	runErr := cmd.Run()
+	type pyOutcome struct {
+		runErr error
+	}
+	doneCh := make(chan pyOutcome, 1)
+	go func() {
+		doneCh <- pyOutcome{runErr: cmd.Run()}
+	}()
+	select {
+	case out := <-doneCh:
+		bgCancel()
+		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
+	case <-ctx.Done():
+		// Turn cancelled before the threshold: kill and keep legacy shape.
+		bgCancel()
+		out := <-doneCh
+		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
+	case <-time.After(AutoBackgroundAfter):
+	}
+	if t.Slow == nil {
+		out := <-doneCh
+		bgCancel()
+		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
+	}
+	// The daemon hands us the job's .log file (in the session's brain
+	// scratch space): from now on ALL output appends into it AND streams
+	// live to the frontend row, so the model can also tail the file with
+	// its own tools and the full output survives the delivery. The
+	// in-memory buffers keep feeding the final result.
+	jobID, logPath, stream, deliver := t.Slow("python", label, bgCancel)
+	var logFile *os.File
+	if logPath != "" {
+		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			// Flush under the fan-out lock: the process copy goroutine
+			// may be writing into these buffers right now.
+			outFan.WithLock(func() {
+				if stdout.Len() > 0 {
+					_, _ = f.Write(stdout.Bytes())
+				}
+			})
+			errFan.WithLock(func() {
+				if stderr.Len() > 0 {
+					_, _ = f.Write(stderr.Bytes())
+				}
+			})
+			outFan.Add(f)
+			errFan.Add(f)
+			logFile = f
+		}
+	}
+	if stream != nil {
+		outFan.Add(streamFuncWriter{fn: stream})
+		errFan.Add(streamFuncWriter{fn: stream})
+	}
+	go func() {
+		out := <-doneCh
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		res, _ := finishPythonCommand(out.runErr, stdout, stderr, start, nil)
+		text := ""
+		for _, c := range res.Content {
+			if tb, ok := c.(provider.TextBlock); ok {
+				text = tb.Text
+			}
+		}
+		// Stamp the delivery so the frontend knows this result belongs to
+		// a detached background job.
+		if det, ok := res.Details.(map[string]any); ok {
+			det["background_job_id"] = jobID
+			det["log_path"] = logPath
+			det["detached"] = true
+		}
+		deliver(text, res.IsError)
+	}()
+	return core.ToolResult{
+		Content: []provider.Content{provider.TextBlock{Text: pythonBackgroundNotice(jobID, logPath, label)}},
+		Details: map[string]any{"background_job_id": jobID, "log_path": logPath},
+	}, nil
+}
+
+// pythonBackgroundNotice mirrors bashBackgroundNotice for detached python
+// executions: where the output goes, how to force-stop it (bg_cancel) and
+// the automatic wake-up with a completion notice when the script ends.
+func pythonBackgroundNotice(jobID, logPath, label string) string {
+	var b strings.Builder
+	b.WriteString("Execution moved to background (still running).\n")
+	if logPath != "" {
+		fmt.Fprintf(&b, "All output (stdout+stderr) is being appended to: %s\n", logPath)
+		b.WriteString("You can follow it with your read tool — but there is no need to poll: you are woken automatically when the execution finishes, and the .log file is kept.\n")
+	} else {
+		b.WriteString("Output is captured in memory and delivered when the execution finishes.\n")
+	}
+	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q (task: %s).\n", jobID, ClipLabel(label))
+	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then (read the .log file for the output).\n")
+	b.WriteString("While waiting, use your sleep tool (e.g. seconds: 120) — it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.")
+	return b.String()
+}
+
+// fanOutWriter tees every write to a fixed set of sinks. Sinks can be
+// added later (under lock): the job .log file and the live stream
+// forwarder attach at detach time, while the process keeps writing into
+// the same writer exec captured at Start.
+type fanOutWriter struct {
+	mu sync.Mutex
+	ws []io.Writer
+}
+
+func (f *fanOutWriter) Add(w io.Writer) {
+	if w == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ws = append(f.ws, w)
+}
+
+func (f *fanOutWriter) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, w := range f.ws {
+		_, _ = w.Write(p)
+	}
+	return len(p), nil
+}
+
+// WithLock runs fn while no write is in flight (serializes against the
+// process copy goroutine).
+func (f *fanOutWriter) WithLock(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn()
+}
+
+// streamFuncWriter forwards writes to a stream function (live output).
+type streamFuncWriter struct {
+	fn func(string)
+}
+
+func (s streamFuncWriter) Write(p []byte) (int, error) {
+	if s.fn != nil && len(p) > 0 {
+		s.fn(string(p))
+	}
+	return len(p), nil
+}
+
+func finishPythonCommand(runErr error, stdout, stderr bytes.Buffer, start time.Time, progress func(string)) (core.ToolResult, error) {
+	_ = progress
 	duration := time.Since(start)
-	_ = label
 
 	out := strings.TrimRight(stdout.String(), "\n")
 	errOut := strings.TrimRight(stderr.String(), "\n")
@@ -215,9 +373,7 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	if text == "" {
 		text = "(no output)"
 	}
-	if timeoutCtx.Err() == context.DeadlineExceeded {
-		text += fmt.Sprintf("\n[exit timeout after %ds]", timeout)
-	} else if runErr != nil {
+	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			text += fmt.Sprintf("\n[exit %d]", exitErr.ExitCode())
 		} else {
@@ -228,9 +384,6 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	}
 	text += fmt.Sprintf("  Took %s", humanDuration(duration))
 
-	// The daemon streams tool_progress events from these results the same
-	// way it does for bash (see progress plumbing in cmd/daemon/main.go).
-	_ = progress
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: text}},
 	}, nil
@@ -245,18 +398,6 @@ func quoteForLog(code string) string {
 		return c[:max] + "…"
 	}
 	return c
-}
-
-// summarizeCode picks a one-line label for frontend summaries.
-func summarizeCode(code string) string {
-	for _, line := range strings.Split(code, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		return quoteForLog(line)
-	}
-	return "snippet"
 }
 
 // pythonEnv builds a hardened environment: system PATH/HOME/LANG plus

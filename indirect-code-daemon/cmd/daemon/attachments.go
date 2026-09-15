@@ -81,9 +81,17 @@ func validateAttachmentIDs(rec *SessionRecord, ids []string) error {
 }
 
 func (d *DaemonServer) promptMeta(act *ActiveSession, text string, ids []string) map[string]string {
+	return d.promptMetaWith(act, text, ids, nil)
+}
+
+func (d *DaemonServer) promptMetaWith(act *ActiveSession, text string, ids []string, extra map[string]string) map[string]string {
 	act.mu.Lock()
 	defer act.mu.Unlock()
-	return attachmentMessageMeta(text, ids, act.record.Attachments)
+	meta := attachmentMessageMeta(text, ids, act.record.Attachments)
+	for k, v := range extra {
+		meta[k] = v
+	}
+	return meta
 }
 
 func attachmentMessageMeta(text string, ids []string, attachments []AttachmentRef) map[string]string {

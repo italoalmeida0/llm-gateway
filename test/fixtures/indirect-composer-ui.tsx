@@ -77,6 +77,7 @@ render(() => {
       turnChanges={{} as any}
       composer={{ ...c, activeModel: () => "m" } as any}
       queue={{ queues: () => ({}), queueOf: () => [] } as any}
+      background={{ jobs: () => [], sessionJobs: () => [], running: () => [], output: () => ({}), clock: () => 0 } as any}
       modal={review as any}
       ui={{ isMobile: () => false } as any}
     >

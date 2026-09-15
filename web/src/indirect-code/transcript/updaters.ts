@@ -65,6 +65,11 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
       if (rest.length > 0) ensureCarrier(idx, m).blocks.push(...rest);
       return;
     }
+    if (typeof m.meta?.background_delivery === "string" && m.meta.background_delivery) {
+      // Background completion notices (system-reminders, model-facing
+      // only): never rendered, never a carrier — not even an empty one.
+      return;
+    }
     const isStart = m.isTurnStart !== undefined ? Boolean(m.isTurnStart) : !m.midTurn;
     const msg: ChatMessage = {
       id: byIndex.get(idx)?.id ?? `msg_${idx}`,
@@ -275,6 +280,45 @@ export function appendToolResult(
       time: Date.now(),
     },
   ];
+}
+
+/** Folds a finished background task into the originating tool row: the
+ * daemon's bg_update snapshot carries the terminal result; the row that
+ * still shows the detach placeholder (same background_job_id, not yet
+ * folded) absorbs it — text, detached stamp and a display snapshot for
+ * the terminal view. Idempotent: a second fold is a no-op. */
+export function foldBackgroundResult(
+  prev: ChatMessage[],
+  job: { id: string; result?: string; status?: string; endedAt?: number },
+): ChatMessage[] {
+  if (!job || typeof job.id !== "string") return prev;
+  let folded = false;
+  const next = prev.map((msg) => {
+    if (folded || msg.role !== "assistant") return msg;
+    let changed = false;
+    const blocks = msg.blocks.map((b) => {
+      if (folded || b.type !== "tool_result") return b;
+      const det = b.toolDetails as any;
+      if (!det || det.background_job_id !== job.id || det.detached) return b;
+      folded = true;
+      changed = true;
+      return {
+        ...b,
+        toolResult: typeof job.result === "string" ? job.result : b.toolResult,
+        isError: job.status === "error" ? true : b.isError,
+        toolDurationMs: typeof job.endedAt === "number" && typeof b.toolStartedAt === "number"
+          ? Math.max(0, job.endedAt - b.toolStartedAt)
+          : b.toolDurationMs,
+        toolDetails: {
+          ...(typeof det === "object" ? det : {}),
+          detached: true,
+          display: typeof job.result === "string" ? job.result : det.display,
+        },
+      };
+    });
+    return changed ? { ...msg, blocks } : msg;
+  });
+  return folded ? next : prev;
 }
 
 /** Stamps thinking duration onto the most recent assistant that actually

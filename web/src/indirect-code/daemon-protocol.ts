@@ -39,6 +39,9 @@ export type DaemonCommand = CommandBase &
   | { type: "queue_remove"; sessionId: string; queueId: string }
   | { type: "queue_send_now"; sessionId: string; queueId: string }
   | { type: "cancel"; sessionId: string }
+  | { type: "bg_list" }
+  | { type: "bg_cancel"; jobId: string }
+  | { type: "bg_tail"; jobId: string }
   | { type: "fork_session"; sessionId: string; index: number; requestId?: string; editText?: string; editModel?: string; editYolo?: boolean; attachmentIds?: string[] }
   | { type: "regenerate"; sessionId: string; index: number; text?: string; model: string; yolo: boolean }
   | { type: "edit_message"; sessionId: string; index: number; text: string; model: string; yolo: boolean; regenerate: boolean; attachmentIds?: string[] }
@@ -106,6 +109,19 @@ export type AgentEvent = { turnIndex?: number } & (
   | { type: "retry"; index?: number; attempt?: number; delayMs?: number; error?: string }
   | { type: "error"; message?: string });
 
+export interface BgJobWire {
+  id: string;
+  kind: "bash" | "python" | string;
+  sessionId: string;
+  label: string;
+  status: "running" | "done" | "error" | "cancelled" | string;
+  startedAt: number;
+  endedAt?: number;
+  result?: string;
+  /** Absolute path of the task's .log file (brain scratch space). */
+  logPath?: string;
+}
+
 export type DaemonEvent = EventBase &
   (
     | { type: "relay_connected" }
@@ -139,6 +155,10 @@ export type DaemonEvent = EventBase &
     | { type: "convert_resolved"; sessionId?: string; requestId: string }
     | { type: "session_queue"; sessionId?: string; queue: QueuedMessage[] }
     | { type: "agent_event"; sessionId?: string; event?: AgentEvent }
+    | { type: "bg_update"; jobs?: BgJobWire[] }
+    | { type: "bg_list"; jobs?: BgJobWire[] }
+    | { type: "bg_output"; jobId?: string; sessionId?: string; text?: string }
+    | { type: "bg_tail"; jobId?: string; text?: string; truncated?: boolean }
     | { type: "error"; requestId?: string; sessionId?: string; message?: string; replyTo?: string }
   );
 

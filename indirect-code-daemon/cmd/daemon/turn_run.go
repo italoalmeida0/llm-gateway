@@ -196,7 +196,7 @@ func (r *turnRun) setupAgent() bool {
 		}},
 		&tools.WriteTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir},
 		&tools.EditTool{CWD: r.sessionCWD, Sandbox: sb, Changes: r.tfc.tracker, BrainDir: brainDir},
-		&tools.BashTool{CWD: r.sessionCWD, Sandbox: sb},
+		&tools.BashTool{CWD: r.sessionCWD, Sandbox: sb, Slow: r.d.slowHook(r.sessionID)},
 		&tools.GlobTool{CWD: r.sessionCWD, Sandbox: sb},
 		&tools.SearchTool{CWD: r.sessionCWD, Sandbox: sb},
 		&tools.InspectTool{CWD: r.sessionCWD, Sandbox: sb},
@@ -206,8 +206,17 @@ func (r *turnRun) setupAgent() bool {
 	// The python tool is only advertised when a Python 3 interpreter exists
 	// on this machine (PythonAvailable probes PATH once and caches).
 	if _, err := tools.PythonAvailable(); err == nil {
-		baseTools = append(baseTools, &tools.PythonTool{CWD: r.sessionCWD, Sandbox: sb})
+		baseTools = append(baseTools, &tools.PythonTool{CWD: r.sessionCWD, Sandbox: sb, Slow: r.d.slowHook(r.sessionID)})
 	}
+	// bg_cancel lets the model force-stop one of its own background tasks
+	// (same plan/build/learning gating as sleep). Terminal tasks are
+	// followed via their .log file in the brain scratch space — there is
+	// deliberately no polling tool.
+	bgCancelTool := &tools.BgCancelTool{Host: r.d, SessionID: r.sessionID}
+	// sleep parks the model for a bounded wait and wakes early when any
+	// of the session's background tasks finishes (the "wait for the bg
+	// task" primitive instead of polling).
+	sleepTool := &tools.SleepTool{Host: r.d, SessionID: r.sessionID}
 
 	questionTool := &tools.QuestionTool{Ask: func(tctx context.Context, req tools.QuestionRequest) ([][]string, error) {
 		return r.d.askQuestions(tctx, r.act, r.myGen, r.cfg.HostID, req)
@@ -227,7 +236,7 @@ func (r *turnRun) setupAgent() bool {
 	}}
 	markTaskTool := &tools.MarkTaskAsCompleteTool{}
 	markPlanTool := &tools.MarkPlanAsReadyToExecuteTool{}
-	r.reg = core.NewRegistry(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool)...)
+	r.reg = core.NewRegistry(append(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool), bgCancelTool, sleepTool)...)
 
 	initTools := core.Registry{}
 	for name, tool := range r.reg {
@@ -329,6 +338,33 @@ func (r *turnRun) setupAgent() bool {
 		r.act.record.UpdatedAt = time.Now().UnixMilli()
 		_ = r.d.saveSession(r.act.record)
 		r.act.mu.Unlock()
+	}
+
+	// Quiet-context hook: background completion notices injected into the
+	// live turn (AppendUserContextQuiet — the caller holds act.mu, so the
+	// loud hook above would self-deadlock). Persist the record and push
+	// the updated transcript so every client sees the notice immediately
+	// (the frontend filters it from rendering) and it survives reloads.
+	r.agent.OnContextAppended = func(m provider.Message) {
+		r.act.mu.Lock()
+		if r.act.gen != r.myGen {
+			r.act.mu.Unlock()
+			return
+		}
+		if m.TurnIndex == 0 {
+			m.TurnIndex = r.turnIndex
+		}
+		r.act.record.Messages = append(r.act.record.Messages, m)
+		r.act.record.UpdatedAt = time.Now().UnixMilli()
+		_ = r.d.saveSession(r.act.record)
+		r.act.mu.Unlock()
+		_ = r.d.sendWS(map[string]any{
+			"type":       "session_content",
+			"hostId":     r.cfg.HostID,
+			"sessionId":  r.sessionID,
+			"messages":   sanitizeMessagesForFrontend(r.act.record.Messages, r.act.record.Attachments),
+			"compaction": r.act.record.Compaction,
+		})
 	}
 
 	// Persistent compaction hook: the chain head

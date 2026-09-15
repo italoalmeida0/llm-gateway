@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/provider"
@@ -496,41 +495,6 @@ func TestBashTailTruncation(t *testing.T) {
 	}
 }
 
-func TestBashTimeoutValidation(t *testing.T) {
-	tool := &BashTool{CWD: t.TempDir()}
-	zero := 0.0
-	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"command": "true", "timeout": zero}), nil); err == nil ||
-		!strings.Contains(err.Error(), "Invalid timeout: must be a finite number of seconds") {
-		t.Fatalf("want pi timeout error, got %v", err)
-	}
-	huge := 3000000.0
-	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"command": "true", "timeout": huge}), nil); err == nil ||
-		!strings.Contains(err.Error(), "Invalid timeout: maximum is 2147483.647 seconds") {
-		t.Fatalf("want pi max-timeout error, got %v", err)
-	}
-}
-
-func TestBashTimeoutExpires(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("posix shell only")
-	}
-	tool := &BashTool{CWD: t.TempDir()}
-	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"command": "sleep 5",
-		"timeout": 0.3,
-	}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.IsError {
-		t.Fatal("timeout must be an error result")
-	}
-	got := res.Content[0].(provider.TextBlock).Text
-	if !strings.Contains(got, "Command timed out after 0.3 seconds") {
-		t.Fatalf("want pi timeout message, got %q", got)
-	}
-}
-
 func TestWriteLineNumbers(t *testing.T) {
 	dir := t.TempDir()
 	tool := &WriteTool{CWD: dir}
@@ -633,32 +597,6 @@ func TestDumpToolsSchema(t *testing.T) {
 	t.Logf("\n=== TOOLS SCHEMA JSON ===\n%s\n=== END TOOLS SCHEMA JSON ===", string(data))
 }
 
-func TestResolveTimeoutMsSeconds(t *testing.T) {
-	// The timeout arg is documented in seconds; the resolved duration must
-	// match. (Regression: the multiplier used time.Millisecond, so every
-	// timeout fired 1000x too early.)
-	for _, tc := range []struct {
-		in   float64
-		want time.Duration
-	}{
-		{2, 2 * time.Second},
-		{0.5, 500 * time.Millisecond},
-		{0.3, 300 * time.Millisecond},
-		{120, 2 * time.Minute},
-	} {
-		got, err := resolveTimeoutMs(&tc.in)
-		if err != nil {
-			t.Fatalf("timeout %v: unexpected error: %v", tc.in, err)
-		}
-		if *got != tc.want {
-			t.Errorf("timeout %v: got %v, want %v", tc.in, *got, tc.want)
-		}
-	}
-	if got, err := resolveTimeoutMs(nil); err != nil || got != nil {
-		t.Errorf("nil timeout: got %v, %v; want nil, nil", got, err)
-	}
-}
-
 func TestReadPaginationTerminates(t *testing.T) {
 	// Regression: the trailing newline used to count as a phantom line, so
 	// the last suggested offset returned an empty page and the model looped.
@@ -717,22 +655,21 @@ func TestReadLongLineDeliversHead(t *testing.T) {
 	}
 }
 
-func TestBashTimeoutIsSeconds(t *testing.T) {
+func TestBashNoTimeout(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("posix shell only")
 	}
-	// End-to-end regression: `sleep 1` with timeout 30 must succeed. Before
-	// the seconds fix, 30 was interpreted as 30ms and this timed out.
+	// There is deliberately no timeout parameter: a command runs until it
+	// ends (or detaches into the background with a hook).
 	tool := &BashTool{CWD: t.TempDir()}
 	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"command": "sleep 1",
-		"timeout": 30,
+		"command": "sleep 1; echo ok",
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.IsError {
-		t.Fatalf("sleep 1 with timeout 30 must succeed, got: %q",
+		t.Fatalf("sleep 1 must succeed without any timeout, got: %q",
 			res.Content[0].(provider.TextBlock).Text)
 	}
 }

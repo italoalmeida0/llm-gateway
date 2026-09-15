@@ -51,6 +51,7 @@ render(() => {
       turnChanges={{} as any}
       composer={{} as any}
       queue={{ queues: () => ({}), queueOf: () => [] } as any}
+      background={{ jobs: () => [], sessionJobs: () => [], running: () => [], output: () => ({}), clock: () => 0 } as any}
       modal={m as any}
       ui={{ appNotice: () => null } as any}
     >

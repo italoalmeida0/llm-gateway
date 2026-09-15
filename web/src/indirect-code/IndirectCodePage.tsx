@@ -33,6 +33,7 @@ import { createTurnNotify } from "./hooks/useTurnNotify";
 import { createPushSubscription } from "./hooks/usePushSubscription";
 import { createConvert } from "./hooks/useConvert";
 import { createQueue } from "./hooks/useQueue";
+import { createBackground } from "./hooks/useBackground";
 import { createModals } from "./hooks/useModals";
 import { createRelay } from "./hooks/useRelay";
 import { createMirror } from "./hooks/useMirror";
@@ -165,6 +166,14 @@ export default function IndirectCodePage() {
     onForkKind: (kind: "resend" | "regenerate" | "fork") => {
       forkKind = kind;
     },
+  });
+
+  const background = createBackground({
+    send: (payload) => relay.send(payload),
+    isOpen: () => relay.wsOpen(),
+    getSessionId: () => activeSessionId(),
+    toast: notice.toast,
+    onTerminalResult: (job) => transcript.foldBgResult(job),
   });
 
   const queue = createQueue({
@@ -532,6 +541,7 @@ export default function IndirectCodePage() {
         if (msg.hostId === hosts.activeHostId() && msg.status === "online") {
           mirror.dataLayer.storeFor(msg.hostId).syncAll().catch((e) => console.warn("[rc-sync] syncAll:", e));
           if (activeSessionId()) transcript.fetchSession(activeSessionId());
+          background.refresh();
         }
         hosts.noteHostStatus(msg.hostId, msg.status);
         break;
@@ -670,6 +680,22 @@ export default function IndirectCodePage() {
       case "session_content": {
         if (msg.sessionId !== activeSessionId()) break;
         transcript.applySessionContent(msg.sessionId, msg.messages || [], msg.compaction);
+        break;
+      }
+
+      case "bg_update":
+      case "bg_list": {
+        background.noteJobs(msg.jobs);
+        break;
+      }
+
+      case "bg_output": {
+        if (typeof msg.jobId === "string") background.noteOutput(msg.jobId, typeof msg.text === "string" ? msg.text : "");
+        break;
+      }
+
+      case "bg_tail": {
+        if (typeof msg.jobId === "string") background.noteTail(msg.jobId, typeof msg.text === "string" ? msg.text : "");
         break;
       }
 
@@ -1127,6 +1153,7 @@ export default function IndirectCodePage() {
       turnChanges={turnChanges}
       composer={composerValue}
       queue={queue}
+      background={background}
       modal={modalValue}
       ui={uiValue}
     >

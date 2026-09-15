@@ -1,0 +1,722 @@
+package main
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"llm-gateway/indirect-code-daemon/packages/agent/tools"
+	"llm-gateway/indirect-code-daemon/packages/core"
+	"llm-gateway/indirect-code-daemon/packages/provider"
+)
+
+func testBgServer(t *testing.T) *DaemonServer {
+	t.Helper()
+	dir := t.TempDir()
+	d := &DaemonServer{
+		sessions: map[string]*ActiveSession{},
+		bgJobs:   map[string]*BgJob{},
+		config:   &DaemonConfig{HostID: "test-host"},
+		dataDir:  dir,
+	}
+	return d
+}
+
+func mkSession(t *testing.T, d *DaemonServer, id, mode string) {
+	t.Helper()
+	now := time.Now().UnixMilli()
+	rec := &SessionRecord{
+		Options:   normalizedOptions(SessionOptions{Mode: mode}),
+		ID:        id,
+		CWD:       t.TempDir(),
+		Title:     "parent",
+		Model:     "m",
+		Status:    "idle",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := d.saveSession(rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.getOrCreateActiveSession(id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// cancelText runs the bg_cancel tool and returns its model-facing text.
+func cancelText(t *testing.T, d *DaemonServer, caller, args string) (string, error) {
+	t.Helper()
+	tool := &tools.BgCancelTool{Host: d, SessionID: caller}
+	res, err := tool.Execute(context.Background(), []byte(args), nil)
+	if err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	for _, c := range res.Content {
+		if tb, ok := c.(provider.TextBlock); ok {
+			sb.WriteString(tb.Text)
+		}
+	}
+	return sb.String(), nil
+}
+
+func TestBashAutoBackground(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	old := tools.AutoBackgroundAfter
+	tools.AutoBackgroundAfter = 50 * time.Millisecond
+	defer func() { tools.AutoBackgroundAfter = old }()
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	// Drain the wake-up turn: the job finishes after the test's last
+	// assertion and must not write into a removed TempDir.
+	wakeups := make(chan string, 10)
+	d.runTurnHook = func(act *ActiveSession, prompt string) { wakeups <- prompt }
+	bash := &tools.BashTool{CWD: t.TempDir(), Sandbox: tools.NewSandbox(t.TempDir()), Slow: d.slowHook("sess_parent")}
+	res, err := bash.Execute(context.Background(), []byte(`{"command":"echo hi; sleep 5"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := ""
+	for _, c := range res.Content {
+		if tb, ok := c.(provider.TextBlock); ok {
+			text = tb.Text
+		}
+	}
+	if !strings.Contains(text, "moved to background") {
+		t.Fatalf("expected background placeholder, got %q", text)
+	}
+	var jobID, logPath string
+	if m, ok := res.Details.(map[string]any); ok {
+		jobID, _ = m["background_job_id"].(string)
+		logPath, _ = m["log_path"].(string)
+	}
+	if jobID == "" || logPath == "" {
+		t.Fatalf("expected job id and log path, got %q / %q", jobID, logPath)
+	}
+	j := d.bgGet(jobID)
+	if j == nil || j.Status != BgStatusRunning {
+		t.Fatalf("job must be running, got %+v", j)
+	}
+	select {
+	case <-j.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("job never finished")
+	}
+	if j.Status != BgStatusDone || !strings.Contains(j.Result, "hi") {
+		t.Fatalf("expected done with output, got %+v", j)
+	}
+	select {
+	case <-wakeups:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wake-up never arrived")
+	}
+}
+
+func TestSlowHookDeliveryIsSystemReminder(t *testing.T) {
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	wakeups := make(chan string, 10)
+	d.runTurnHook = func(act *ActiveSession, prompt string) { wakeups <- prompt }
+	hook := d.slowHook("sess_parent")
+	id, logPath, _, deliver := hook("bash", "sleep 1", nil)
+	j := d.bgGet(id)
+	if j == nil || j.Status != BgStatusRunning {
+		t.Fatal("job must be running")
+	}
+	if logPath == "" || !strings.HasSuffix(logPath, ".log") {
+		t.Fatalf("expected brain .log path, got %q", logPath)
+	}
+	deliver("secret-output", false)
+	if j.Status != BgStatusDone {
+		t.Fatalf("expected done, got %q", j.Status)
+	}
+	select {
+	case w := <-wakeups:
+		if !strings.Contains(w, "<system-reminder>") {
+			t.Fatalf("delivery must be a system-reminder, got %q", w)
+		}
+		if strings.Contains(w, "secret-output") {
+			t.Fatalf("delivery must NOT carry the result, got %q", w)
+		}
+		if !strings.Contains(w, logPath) {
+			t.Fatalf("delivery must name the .log path, got %q", w)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("wake-up turn never started")
+	}
+}
+
+func TestBgLogStreamsAndSurvives(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	old := tools.AutoBackgroundAfter
+	tools.AutoBackgroundAfter = 50 * time.Millisecond
+	defer func() { tools.AutoBackgroundAfter = old }()
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	bash := &tools.BashTool{CWD: t.TempDir(), Sandbox: tools.NewSandbox(t.TempDir()), Slow: d.slowHook("sess_parent")}
+	res, err := bash.Execute(context.Background(), []byte(`{"command":"echo early-out; sleep 30"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := ""
+	var jobID, logPath string
+	for _, c := range res.Content {
+		if tb, ok := c.(provider.TextBlock); ok {
+			text += tb.Text
+		}
+	}
+	if m, ok := res.Details.(map[string]any); ok {
+		jobID, _ = m["background_job_id"].(string)
+		logPath, _ = m["log_path"].(string)
+	}
+	if jobID == "" || logPath == "" {
+		t.Fatalf("expected job id and log path, got %q / %q", jobID, logPath)
+	}
+	if !strings.Contains(text, logPath) {
+		t.Fatalf("placeholder must name the .log path, got %q", text)
+	}
+	if !strings.Contains(text, "bg_cancel") || !strings.Contains(text, "sleep") {
+		t.Fatalf("placeholder must teach bg_cancel + sleep, got %q", text)
+	}
+	// The pre-detach output is flushed into the file right away.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(logPath); err == nil && strings.Contains(string(data), "early-out") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if data, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(data), "early-out") {
+		t.Fatalf("log must contain the pre-detach output, got %q (%v)", string(data), err)
+	}
+	// Cancel: the process dies, the log file is NOT deleted, nothing is
+	// delivered.
+	if _, err := cancelText(t, d, "sess_parent", `{"job_id":"`+jobID+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("log file must survive the cancel: %v", err)
+	}
+	j := d.bgGet(jobID)
+	if j.Status != BgStatusCancelled {
+		t.Fatalf("expected cancelled, got %q", j.Status)
+	}
+	// Foreign sessions see nothing in the card snapshot.
+	if views := d.bgJobViews("sess_other"); len(views) != 0 {
+		t.Fatalf("foreign session must not see the job, got %d", len(views))
+	}
+}
+
+func TestBgCancelOwnRunningJob(t *testing.T) {
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	hook := d.slowHook("sess_parent")
+	id, _, _, deliver := hook("bash", "sleep 30", nil)
+	out, err := cancelText(t, d, "sess_parent", `{"job_id":"`+id+`"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "cancelled") || !strings.Contains(out, "NOT be delivered") {
+		t.Fatalf("expected cancel notice, got %q", out)
+	}
+	j := d.bgGet(id)
+	if j.Status != BgStatusCancelled {
+		t.Fatalf("expected cancelled, got %q", j.Status)
+	}
+	select {
+	case <-j.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("job done never closed after cancel")
+	}
+	// The deliver path must be a no-op after cancellation: no result, no
+	// wake-up turn.
+	deliver("late output", false)
+	if j.Status != BgStatusCancelled || j.Result != "" {
+		t.Fatalf("cancelled job must not absorb a late result: %+v", j)
+	}
+}
+
+func TestBgCancelForeignAndUnknownDenied(t *testing.T) {
+	d := testBgServer(t)
+	mkSession(t, d, "sess_a", "build")
+	mkSession(t, d, "sess_b", "build")
+	hook := d.slowHook("sess_a")
+	id, _, _, _ := hook("bash", "sleep 30", nil)
+	if _, err := cancelText(t, d, "sess_b", `{"job_id":"`+id+`"}`); err == nil || !strings.Contains(err.Error(), "no background task") {
+		t.Fatalf("expected foreign denial, got %v", err)
+	}
+	if _, err := cancelText(t, d, "sess_a", `{"job_id":"bg_typo"}`); err == nil || !strings.Contains(err.Error(), "no background task") {
+		t.Fatalf("expected unknown-id denial, got %v", err)
+	}
+	// The foreign/unknown attempts must not touch the running job.
+	if j := d.bgGet(id); j.Status != BgStatusRunning {
+		t.Fatalf("job must stay running, got %q", j.Status)
+	}
+	if !d.bgCancelJob(id) {
+		t.Fatal("cancel after denials must still work")
+	}
+}
+
+func TestBgCancelFinishedJobIsNoop(t *testing.T) {
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	wakeups := make(chan string, 10)
+	d.runTurnHook = func(act *ActiveSession, prompt string) { wakeups <- prompt }
+	hook := d.slowHook("sess_parent")
+	id, _, _, deliver := hook("bash", "sleep 1", nil)
+	deliver("out", false)
+	select {
+	case <-wakeups:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wake-up never arrived")
+	}
+	out, err := cancelText(t, d, "sess_parent", `{"job_id":"`+id+`"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "already finished") {
+		t.Fatalf("expected already-finished notice, got %q", out)
+	}
+	if j := d.bgGet(id); j.Status != BgStatusDone {
+		t.Fatalf("done job must stay done, got %q", j.Status)
+	}
+}
+
+// TestBgCancelKillsDetachedBash pins the real fix: cancelling a detached
+// bash job kills the whole process group — the sleep actually dies instead
+// of running to completion as an orphan.
+func TestBgCancelKillsDetachedBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Skip("pgrep not available")
+	}
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	old := tools.AutoBackgroundAfter
+	tools.AutoBackgroundAfter = 50 * time.Millisecond
+	defer func() { tools.AutoBackgroundAfter = old }()
+	bash := &tools.BashTool{CWD: t.TempDir(), Sandbox: tools.NewSandbox(t.TempDir()), Slow: d.slowHook("sess_parent")}
+	res, err := bash.Execute(context.Background(), []byte(`{"command":"sleep 30"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jobID string
+	if m, ok := res.Details.(map[string]any); ok {
+		jobID, _ = m["background_job_id"].(string)
+	}
+	if jobID == "" {
+		t.Fatal("expected background_job_id in details")
+	}
+	j := d.bgGet(jobID)
+	if j == nil || j.Status != BgStatusRunning {
+		t.Fatalf("job must be running, got %+v", j)
+	}
+	alive := func() bool {
+		out, err := exec.Command("pgrep", "-f", "sleep 30").Output()
+		return err == nil && len(strings.TrimSpace(string(out))) > 0
+	}
+	if !alive() {
+		t.Fatal("detached sleep must be alive before cancel")
+	}
+	if _, err := cancelText(t, d, "sess_parent", `{"job_id":"`+jobID+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != BgStatusCancelled {
+		t.Fatalf("expected cancelled, got %q", j.Status)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !alive() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("detached sleep survived bg_cancel — process group was not killed")
+}
+
+// TestDetachedBashSurvivesTurnEnd pins the core guarantee: a bash command
+// that auto-backgrounds must NOT die when the turn context ends. The
+// process hangs off its own context; only an explicit stop kills it.
+func TestDetachedBashSurvivesTurnEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	old := tools.AutoBackgroundAfter
+	tools.AutoBackgroundAfter = 50 * time.Millisecond
+	defer func() { tools.AutoBackgroundAfter = old }()
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	wakeups := make(chan string, 10)
+	d.runTurnHook = func(act *ActiveSession, prompt string) { wakeups <- prompt }
+	bash := &tools.BashTool{CWD: t.TempDir(), Sandbox: tools.NewSandbox(t.TempDir()), Slow: d.slowHook("sess_parent")}
+	turnCtx, cancelTurn := context.WithCancel(context.Background())
+	type outcome struct {
+		res core.ToolResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := bash.Execute(turnCtx, []byte(`{"command":"echo detached-output; sleep 2"}`), nil)
+		done <- outcome{res, err}
+	}()
+	var jobID string
+	select {
+	case o := <-done:
+		if o.err != nil {
+			t.Fatal(o.err)
+		}
+		if m, ok := o.res.Details.(map[string]any); ok {
+			jobID, _ = m["background_job_id"].(string)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("placeholder never arrived")
+	}
+	if jobID == "" {
+		t.Fatal("expected background_job_id in details")
+	}
+	// The turn ends while the job runs: the process must survive it.
+	cancelTurn()
+	j := d.bgGet(jobID)
+	select {
+	case <-j.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("detached job never finished")
+	}
+	select {
+	case <-wakeups:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wake-up never arrived")
+	}
+	if j.Status != BgStatusDone {
+		t.Fatalf("detached job must complete despite the turn ending, got %q: %s", j.Status, j.Result)
+	}
+	if !strings.Contains(j.Result, "detached-output") {
+		t.Fatalf("detached job must deliver its real output, got %q", j.Result)
+	}
+}
+
+// TestDetachedPythonSurvivesExecuteReturn pins the python twin: the script
+// must not be cancelled when Execute returns the placeholder.
+func TestDetachedPythonSurvivesExecuteReturn(t *testing.T) {
+	if _, err := tools.PythonAvailable(); err != nil {
+		t.Skipf("no python3 on this machine: %v", err)
+	}
+	old := tools.AutoBackgroundAfter
+	tools.AutoBackgroundAfter = 50 * time.Millisecond
+	defer func() { tools.AutoBackgroundAfter = old }()
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	wakeups := make(chan string, 10)
+	d.runTurnHook = func(act *ActiveSession, prompt string) { wakeups <- prompt }
+	py := &tools.PythonTool{CWD: t.TempDir(), Sandbox: tools.NewSandbox(t.TempDir()), Slow: d.slowHook("sess_parent")}
+	res, err := py.Execute(context.Background(), []byte(`{"code":"import time; print('py-detached-ok', flush=True); time.sleep(1.5)"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jobID string
+	if m, ok := res.Details.(map[string]any); ok {
+		jobID, _ = m["background_job_id"].(string)
+	}
+	if jobID == "" {
+		t.Fatal("expected background_job_id in details")
+	}
+	j := d.bgGet(jobID)
+	select {
+	case <-j.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("detached python job never finished")
+	}
+	select {
+	case <-wakeups:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wake-up never arrived")
+	}
+	if j.Status != BgStatusDone {
+		t.Fatalf("detached python job must complete, got %q: %s", j.Status, j.Result)
+	}
+	if !strings.Contains(j.Result, "py-detached-ok") {
+		t.Fatalf("detached python job must deliver its real output, got %q", j.Result)
+	}
+}
+
+// TestPythonStreamsToLogAfterDetach pins the fan-out fix: output produced
+// AFTER the detach must reach the .log file too — not just the pre-detach
+// buffer flush. (Reassigning cmd.Stdout after Start would silently keep
+// writing to the old buffers only.)
+func TestPythonStreamsToLogAfterDetach(t *testing.T) {
+	if _, err := tools.PythonAvailable(); err != nil {
+		t.Skipf("no python3 on this machine: %v", err)
+	}
+	old := tools.AutoBackgroundAfter
+	tools.AutoBackgroundAfter = 50 * time.Millisecond
+	defer func() { tools.AutoBackgroundAfter = old }()
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	wakeups := make(chan string, 10)
+	d.runTurnHook = func(act *ActiveSession, prompt string) { wakeups <- prompt }
+	py := &tools.PythonTool{CWD: t.TempDir(), Sandbox: tools.NewSandbox(t.TempDir()), Slow: d.slowHook("sess_parent")}
+	res, err := py.Execute(context.Background(), []byte(`{"code":"import time; print('line-before', flush=True); time.sleep(2); print('line-after', flush=True)"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logPath string
+	if m, ok := res.Details.(map[string]any); ok {
+		logPath, _ = m["log_path"].(string)
+	}
+	if logPath == "" {
+		t.Fatal("expected log_path in details")
+	}
+	j := d.bgGet(mustBgID(t, res))
+	select {
+	case <-j.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("detached python job never finished")
+	}
+	select {
+	case <-wakeups:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wake-up never arrived")
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "line-before") || !strings.Contains(string(data), "line-after") {
+		t.Fatalf("log must contain pre- AND post-detach output, got %q", string(data))
+	}
+}
+
+func mustBgID(t *testing.T, res core.ToolResult) string {
+	t.Helper()
+	if m, ok := res.Details.(map[string]any); ok {
+		if id, _ := m["background_job_id"].(string); id != "" {
+			return id
+		}
+	}
+	t.Fatal("expected background_job_id in details")
+	return ""
+}
+
+func TestSleepWakesOnJobFinish(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	old := tools.AutoBackgroundAfter
+	tools.AutoBackgroundAfter = 50 * time.Millisecond
+	defer func() { tools.AutoBackgroundAfter = old }()
+
+	// A detached bash job; the sleep tool must wake when it finishes.
+	bash := &tools.BashTool{CWD: t.TempDir(), Sandbox: tools.NewSandbox(t.TempDir()), Slow: d.slowHook("sess_parent")}
+	go func() {
+		_, _ = bash.Execute(context.Background(), []byte(`{"command":"sleep 2; echo done-sleep"}`), nil)
+	}()
+	// Wait for the job to appear.
+	var jobID string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, v := range d.bgJobViews("sess_parent") {
+			if v.Status == BgStatusRunning {
+				jobID = v.ID
+			}
+		}
+		if jobID != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if jobID == "" {
+		t.Fatal("background job never appeared")
+	}
+
+	sleep := &tools.SleepTool{Host: d, SessionID: "sess_parent"}
+	start := time.Now()
+	res, err := sleep.Execute(context.Background(), []byte(`{"seconds":30}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("sleep must wake early, took %v", elapsed)
+	}
+	text := ""
+	for _, c := range res.Content {
+		if tb, ok := c.(provider.TextBlock); ok {
+			text += tb.Text
+		}
+	}
+	if !strings.Contains(text, "Woken early") {
+		t.Fatalf("expected early-wake notice, got %q", text)
+	}
+
+	// Cancel the job so the test leaves nothing running.
+	if _, err := d.CancelBackgroundJob("sess_parent", jobID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A session with no jobs sleeps the full (short) duration and never
+	// wakes early.
+	empty := &tools.SleepTool{Host: d, SessionID: "sess_nobody"}
+	start = time.Now()
+	if _, err := empty.Execute(context.Background(), []byte(`{"seconds":1}`), nil); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+		t.Fatalf("sleep without jobs must run its course, took %v", elapsed)
+	}
+}
+
+// TestDeliverIntoRunningTurnNoDeadlock pins the lock discipline: a notice
+// delivered into a LIVE turn must not self-deadlock. The delivery runs
+// without act.mu; the persistence hook re-acquires it — the reverse order
+// (append under act.mu with the loud hook) wedges the session forever.
+func TestDeliverIntoRunningTurnNoDeadlock(t *testing.T) {
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	act, _ := d.getOrCreateActiveSession("sess_parent")
+
+	// A live turn with the real persistence wiring: OnMessageAppended
+	// re-acquires act.mu exactly like turn_run.go does, and
+	// OnContextAppended persists + broadcasts the quiet delivery.
+	act.mu.Lock()
+	act.record.Status = "running"
+	act.mu.Unlock()
+	agent := core.NewAgent(nil, "m", "", nil)
+	broadcast := make(chan provider.Message, 4)
+	agent.OnMessageAppended = func(m provider.Message) {
+		act.mu.Lock()
+		act.record.Messages = append(act.record.Messages, m)
+		act.mu.Unlock()
+	}
+	agent.OnContextAppended = func(m provider.Message) {
+		act.mu.Lock()
+		act.record.Messages = append(act.record.Messages, m)
+		act.mu.Unlock()
+		broadcast <- m
+	}
+	act.mu.Lock()
+	act.agent = agent
+	act.mu.Unlock()
+
+	j := d.bgRegister(BgKindBash, "sess_parent", "sleep 1")
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		d.bgFinish(j, BgStatusDone, "command output")
+	}()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery deadlocked: bgFinish never returned")
+	}
+	if j.Status != BgStatusDone {
+		t.Fatalf("expected done, got %q", j.Status)
+	}
+	// The notice joined the live transcript (agent history), was persisted
+	// through OnContextAppended (record + broadcast), and carries no
+	// result text — only the log pointer contract.
+	if len(agent.History()) != 1 {
+		t.Fatalf("expected the delivery in agent history, got %d", len(agent.History()))
+	}
+	select {
+	case m := <-broadcast:
+		if m.Meta["background_delivery"] == "" {
+			t.Fatalf("broadcast message missing background_delivery meta: %+v", m.Meta)
+		}
+		for _, c := range m.Content {
+			if tb, ok := c.(provider.TextBlock); ok && strings.Contains(tb.Text, "command output") {
+				t.Fatalf("notice must not carry the result, got %q", tb.Text)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnContextAppended never fired — delivery would not persist or reach clients")
+	}
+	act.mu.Lock()
+	persisted := len(act.record.Messages)
+	status := act.record.Status
+	act.mu.Unlock()
+	if persisted != 1 {
+		t.Fatalf("delivery must persist through OnContextAppended, got %d persisted", persisted)
+	}
+	if status != "running" {
+		t.Fatalf("turn must stay running, got %q", status)
+	}
+}
+
+func TestPurgeCancelsJobs(t *testing.T) {
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	hook := d.slowHook("sess_parent")
+	id, _, _, _ := hook("bash", "sleep 30", nil)
+	d.purgeSession("sess_parent")
+	if j := d.bgGet(id); j.Status != BgStatusCancelled {
+		t.Fatalf("purge must cancel running jobs, got %+v", j)
+	}
+	if _, err := d.loadSession("sess_parent"); err == nil {
+		t.Fatal("parent must be gone")
+	}
+}
+
+func TestTruncateBgLabel(t *testing.T) {
+	// Short labels pass through untouched (no forced …).
+	if got := truncateBgLabel(""); got != "" {
+		t.Fatalf("got %q", got)
+	}
+	if got := truncateBgLabel("echo hi"); got != "echo hi" {
+		t.Fatalf("got %q", got)
+	}
+	// Exactly 300 chars stays whole.
+	exact := strings.Repeat("x", 300)
+	if got := truncateBgLabel(exact); got != exact {
+		t.Fatalf("exact-length label must not be cut, got len %d", len([]rune(got)))
+	}
+	// Longer input keeps the first 300 characters + … (rune-safe).
+	long := strings.Repeat("é", 250) + strings.Repeat("y", 100)
+	got := truncateBgLabel(long)
+	if r := []rune(got); len(r) != 301 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("bad truncation: len %d suffix %q", len(r), got)
+	}
+	if !strings.HasPrefix(got, strings.Repeat("é", 250)) {
+		t.Fatalf("truncation must keep the head: %q", got)
+	}
+}
+
+func TestBgRegisterTruncatesLabel(t *testing.T) {
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	j := d.bgRegister(BgKindBash, "sess_parent", strings.Repeat("z", 500), nil)
+	if r := []rune(j.Label); len(r) != 301 {
+		t.Fatalf("registered label must be truncated, got len %d", len(r))
+	}
+	d.bgCancelJob(j.ID)
+}
+
+func TestBgReadTail(t *testing.T) {
+	f, err := os.CreateTemp("", "bgtail-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString("0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if text, trunc := bgReadTail(f.Name(), 64); text != "0123456789" || trunc {
+		t.Fatalf("got %q trunc=%v", text, trunc)
+	}
+	if text, trunc := bgReadTail(f.Name(), 4); text != "6789" || !trunc {
+		t.Fatalf("got %q trunc=%v", text, trunc)
+	}
+	if text, _ := bgReadTail(f.Name()+"-missing", 64); text != "" {
+		t.Fatalf("missing file must read empty, got %q", text)
+	}
+}

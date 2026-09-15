@@ -432,10 +432,30 @@ export function toolSummary(u: ToolUnit): ToolSummary {
     }
     case "bash": {
       const cmd = String(args.command || "").replace(/\s+/g, " ").trim();
+      const bg = (u.result?.toolDetails as any)?.background_job_id;
+      // Detached runs (placeholder or folded result) read as background
+      // work in the turn and the card, never as a plain synchronous run.
+      const verb = typeof bg === "string" && bg ? "Background" : "Ran";
       return {
         icon: "lucide:terminal",
-        verb: "Ran",
+        verb,
         target: cmd.length > 90 ? cmd.slice(0, 90) + "…" : cmd,
+      };
+    }
+    case "sleep": {
+      const s = Number(args.seconds);
+      return {
+        icon: "lucide:timer",
+        verb: u.result ? "Slept" : "Sleeping",
+        target: Number.isFinite(s) ? `${s}s` : "",
+      };
+    }
+    case "bg_cancel": {
+      const id = String(args.job_id || "");
+      return {
+        icon: "lucide:octagon-x",
+        verb: u.result ? "Stopped" : "Stopping",
+        target: id ? `background task ${id.length > 14 ? id.slice(0, 14) + "…" : id}` : "background task",
       };
     }
     case "search": {
@@ -511,9 +531,11 @@ export function toolSummary(u: ToolUnit): ToolSummary {
         .map((l) => l.trim())
         .find((l) => l && !l.startsWith("#"));
       const one = (first || "snippet").replace(/\s+/g, " ").trim();
+      const bg = (u.result?.toolDetails as any)?.background_job_id;
+      const verb = typeof bg === "string" && bg ? "Background" : "Ran";
       return {
         icon: "mdi:language-python",
-        verb: "Ran",
+        verb,
         target: one.length > 90 ? one.slice(0, 90) + "…" : one,
       };
     }

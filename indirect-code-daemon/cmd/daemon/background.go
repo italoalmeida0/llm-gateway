@@ -1,0 +1,549 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"llm-gateway/indirect-code-daemon/packages/agent/tools"
+	"llm-gateway/indirect-code-daemon/packages/core"
+)
+
+// Background task kinds. Bash and python detach here when they outlive
+// tools.AutoBackgroundAfter (10s).
+const (
+	BgKindBash   = "bash"
+	BgKindPython = "python"
+)
+
+// Background job statuses surfaced in the background-tasks card.
+const (
+	BgStatusRunning   = "running"
+	BgStatusDone      = "done"
+	BgStatusError     = "error"
+	BgStatusCancelled = "cancelled"
+)
+
+// bgResultCap bounds the text kept on the finished job for the bg_list
+// snapshot (the .log file keeps the full output; the snapshot does not).
+const bgResultCap = 50 * 1024
+
+// bgStreamCap bounds one live output chunk broadcast to the frontend.
+const bgStreamCap = 16 * 1024
+
+// bgTailCap bounds the .log tail served to a (re)connecting client.
+const bgTailCap = 64 * 1024
+
+// BgJob is one background task: a detached bash/python process.
+// Process-local only (never persisted): a daemon restart drops running
+// jobs; the .log files survive on disk and can still be read.
+type BgJob struct {
+	ID        string
+	Kind      string
+	SessionID string // owner session
+	Label     string
+	Status    string
+	StartedAt int64
+	EndedAt   int64
+	Result    string
+	// LogPath is the absolute path of the job's .log file in the owner
+	// session's brain scratch space. The tool streams output into it; the
+	// file is never deleted, so it survives the delivery as the task's
+	// record.
+	LogPath string
+	ctx     context.Context
+	cancel  context.CancelFunc
+	stop    func() // force-stop for the detached process; nil = nothing to kill
+	done    chan struct{}
+	doneOnce sync.Once
+}
+
+func (j *BgJob) closeDone() {
+	j.doneOnce.Do(func() { close(j.done) })
+}
+
+func (d *DaemonServer) bgJobPayload(j *BgJob) map[string]any {
+	return map[string]any{
+		"id": j.ID, "kind": j.Kind, "sessionId": j.SessionID,
+		"label": j.Label,
+		"status": j.Status, "startedAt": j.StartedAt, "endedAt": j.EndedAt,
+		"result": j.Result, "logPath": j.LogPath,
+	}
+}
+
+func (d *DaemonServer) bgSnapshot() []map[string]any {
+	d.bgMu.Lock()
+	jobs := make([]*BgJob, 0, len(d.bgJobs))
+	for _, j := range d.bgJobs {
+		jobs = append(jobs, j)
+	}
+	d.bgMu.Unlock()
+	out := make([]map[string]any, 0, len(jobs))
+	for _, j := range jobs {
+		d.bgMu.Lock()
+		p := d.bgJobPayload(j)
+		d.bgMu.Unlock()
+		out = append(out, p)
+	}
+	return out
+}
+
+func (d *DaemonServer) broadcastBgJobs() {
+	_ = d.sendWS(map[string]any{
+		"type": "bg_update", "hostId": d.config.HostID, "jobs": d.bgSnapshot(),
+	})
+}
+
+// broadcastBgOutput forwards one live output chunk of a running job to the
+// frontend row (and any other client). Chunks are ephemeral: clients that
+// (re)connect mid-run fetch the .log tail via bg_tail instead.
+func (d *DaemonServer) broadcastBgOutput(jobID, sessionID, chunk string) {
+	if chunk == "" {
+		return
+	}
+	if len(chunk) > bgStreamCap {
+		chunk = chunk[len(chunk)-bgStreamCap:]
+	}
+	_ = d.sendWS(map[string]any{
+		"type": "bg_output", "hostId": d.config.HostID,
+		"jobId": jobID, "sessionId": sessionID, "text": chunk,
+	})
+}
+
+// WaitForAnyJob implements tools.SleepHost: a channel that closes when
+// any job owned by sessionID leaves the running state (done, error or
+// cancelled) — the sleep tool's early wake-up. hostDone closes the
+// channel too (turn ending must not park the tool forever). A session
+// with no running jobs right now still wakes later: the watcher polls
+// the registry lightly until a job appears or the host is done. The
+// watcher also exits when the returned channel is abandoned (the sleep
+// tool finishing its full duration): the sleep tool cancels hostDone on
+// return, so no goroutine leaks per sleep call.
+func (d *DaemonServer) WaitForAnyJob(sessionID string, hostDone <-chan struct{}) <-chan struct{} {
+	wake := make(chan struct{})
+	var fire sync.Once
+	wakeNow := func() { fire.Do(func() { close(wake) }) }
+
+	go func() {
+		tick := time.NewTicker(500 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			// Snapshot the done channels of every running job of this
+			// session and wait on them; new jobs are picked up on the
+			// next tick (a missed wake only delays it 500ms — the
+			// delivery broadcast arrives on its own anyway).
+			d.bgMu.Lock()
+			var dones []<-chan struct{}
+			for _, j := range d.bgJobs {
+				if j.SessionID == sessionID && j.Status == BgStatusRunning {
+					dones = append(dones, j.done)
+				}
+			}
+			d.bgMu.Unlock()
+
+			if len(dones) > 0 {
+				select {
+				case <-hostDone:
+					wakeNow()
+					return
+				case <-dones[0]:
+					wakeNow()
+					return
+				case <-tick.C:
+					// Re-snapshot: parallel jobs may have appeared.
+				}
+			} else {
+				select {
+				case <-hostDone:
+					wakeNow()
+					return
+				case <-tick.C:
+				}
+			}
+		}
+	}()
+	return wake
+}
+
+func (d *DaemonServer) bgGet(id string) *BgJob {
+	d.bgMu.Lock()
+	defer d.bgMu.Unlock()
+	return d.bgJobs[id]
+}
+
+// bgRegister creates a running job owned by sessionID. The job owns a
+// cancellation context (j.ctx/j.cancel): cancelling stops the underlying
+// work. stop, when non-nil, is the tool's own force-stop for a detached
+// process — bgCancelJob calls it before marking the job cancelled. done
+// closes when the terminal state is recorded (finish or cancel, whichever
+// wins).
+func (d *DaemonServer) bgRegister(kind, sessionID, label string, stop ...func()) *BgJob {
+	jobCtx, cancel := context.WithCancel(context.Background())
+	j := &BgJob{
+		ID:        fmt.Sprintf("bg_%d", time.Now().UnixNano()/1000),
+		Kind:      kind,
+		SessionID: sessionID,
+		Label:     truncateBgLabel(label),
+		Status:    BgStatusRunning,
+		StartedAt: time.Now().UnixMilli(),
+		ctx:       jobCtx,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+	}
+	if len(stop) > 0 {
+		j.stop = stop[0]
+	}
+	d.bgMu.Lock()
+	if d.bgJobs == nil {
+		d.bgJobs = map[string]*BgJob{}
+	}
+	d.bgJobs[j.ID] = j
+	d.bgMu.Unlock()
+	d.broadcastBgJobs()
+	return j
+}
+
+// bgFinish records the terminal state and kicks delivery to the owner.
+// Only the first terminal transition wins: a concurrent cancel beats a
+// late finish (cancelled jobs never deliver) and vice versa.
+func (d *DaemonServer) bgFinish(j *BgJob, status, result string) {
+	if len(result) > bgResultCap {
+		result = result[:bgResultCap] + "\n…[truncated]"
+	}
+	d.bgMu.Lock()
+	if j.Status != BgStatusRunning {
+		d.bgMu.Unlock()
+		return
+	}
+	j.Status = status
+	j.EndedAt = time.Now().UnixMilli()
+	j.Result = result
+	d.bgMu.Unlock()
+	d.broadcastBgJobs()
+	if status == BgStatusDone || status == BgStatusError {
+		d.deliverBgResult(j)
+	}
+	j.closeDone()
+}
+
+// cancelBackgroundJobs stops every running job owned by sessionID (used by
+// purge). Cancelled jobs never deliver results and never wake the parent.
+func (d *DaemonServer) cancelBackgroundJobs(sessionID string) {
+	d.bgMu.Lock()
+	var targets []*BgJob
+	for _, j := range d.bgJobs {
+		if j.Status == BgStatusRunning && j.SessionID == sessionID {
+			targets = append(targets, j)
+		}
+	}
+	d.bgMu.Unlock()
+	for _, j := range targets {
+		d.bgCancelJob(j.ID)
+	}
+}
+
+// bgCancelJob forces a stop: the process is killed, the job is marked
+// cancelled and no result is delivered.
+func (d *DaemonServer) bgCancelJob(id string) bool {
+	j := d.bgGet(id)
+	if j == nil {
+		return false
+	}
+	d.bgMu.Lock()
+	if j.Status != BgStatusRunning {
+		d.bgMu.Unlock()
+		return false
+	}
+	d.bgMu.Unlock()
+	if j.stop != nil {
+		j.stop()
+	}
+	if j.cancel != nil {
+		j.cancel()
+	}
+	d.bgMu.Lock()
+	if j.Status == BgStatusRunning {
+		j.Status = BgStatusCancelled
+		j.EndedAt = time.Now().UnixMilli()
+	}
+	d.bgMu.Unlock()
+	d.broadcastBgJobs()
+	j.closeDone()
+	return true
+}
+
+// CancelBackgroundJob implements tools.BgCancelHost: the model's bg_cancel
+// can only stop jobs owned by its own session. Already-finished jobs report
+// their current status instead of failing — cancelling a done job is a
+// no-op, not an error. Notices carry the human label (command summary),
+// never the raw bg_ id.
+func (d *DaemonServer) CancelBackgroundJob(callerSessionID, jobID string) (tools.BgCancelOutcome, error) {
+	j := d.bgGet(jobID)
+	if j == nil || j.SessionID != callerSessionID {
+		return tools.BgCancelOutcome{}, fmt.Errorf("bg_cancel: no background task %q in this session", jobID)
+	}
+	d.bgMu.Lock()
+	status, label := j.Status, d.bgJobLabel(j)
+	d.bgMu.Unlock()
+	if status != BgStatusRunning {
+		return tools.BgCancelOutcome{OK: false, Status: status, Notice: fmt.Sprintf("Background task %s already finished (status %s) — nothing to cancel.", label, status)},
+			nil
+	}
+	if !d.bgCancelJob(jobID) {
+		// Lost a race with a concurrent finish; report the terminal state.
+		d.bgMu.Lock()
+		status = j.Status
+		d.bgMu.Unlock()
+		return tools.BgCancelOutcome{OK: false, Status: status, Notice: fmt.Sprintf("Background task %s already finished (status %s) — nothing to cancel.", label, status)},
+			nil
+	}
+	return tools.BgCancelOutcome{OK: true, Status: BgStatusCancelled, Notice: fmt.Sprintf("Background task %s cancelled: the work is stopped and its result will NOT be delivered. Re-run it differently instead of waiting.", label)}, nil
+}
+
+// bgLabelMax is the job label length: the first 300 characters of the
+// bash command (or the python code / script invocation). The frontend
+// strips newlines, highlights it like the Ran command label and lets CSS
+// add the visual … at the card edge.
+const bgLabelMax = 300
+
+// truncateBgLabel keeps the first bgLabelMax characters (+ … when cut).
+func truncateBgLabel(s string) string {
+	r := []rune(s)
+	if len(r) <= bgLabelMax {
+		return s
+	}
+	return string(r[:bgLabelMax]) + "…"
+}
+
+// bgJobLabel renders the model-facing name of a job: the stored label —
+// never the raw bg_… id.
+func (d *DaemonServer) bgJobLabel(j *BgJob) string {
+	return j.Label
+}
+
+func (d *DaemonServer) handleBgList() {
+	_ = d.sendWS(map[string]any{
+		"type": "bg_list", "hostId": d.config.HostID, "jobs": d.bgSnapshot(),
+	})
+}
+
+func (d *DaemonServer) handleBgCancel(raw []byte) {
+	var req struct {
+		JobID string `json:"jobId"`
+	}
+	_ = json.Unmarshal(raw, &req)
+	if req.JobID == "" {
+		return
+	}
+	d.bgCancelJob(req.JobID)
+}
+
+// handleBgTail serves the tail of a job's .log file to a (re)connecting
+// client that missed the live bg_output stream.
+func (d *DaemonServer) handleBgTail(raw []byte) {
+	var req struct {
+		JobID string `json:"jobId"`
+	}
+	_ = json.Unmarshal(raw, &req)
+	if req.JobID == "" {
+		return
+	}
+	j := d.bgGet(req.JobID)
+	if j == nil {
+		return
+	}
+	d.bgMu.Lock()
+	logPath := j.LogPath
+	d.bgMu.Unlock()
+	text, truncated := bgReadTail(logPath, bgTailCap)
+	_ = d.sendWS(map[string]any{
+		"type": "bg_tail", "hostId": d.config.HostID,
+		"jobId": req.JobID, "text": text, "truncated": truncated,
+	})
+}
+
+// bgReadTail returns up to the last max bytes of path ("" when unreadable).
+func bgReadTail(path string, max int) (string, bool) {
+	if path == "" || max <= 0 {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	if len(data) <= max {
+		return string(data), false
+	}
+	return string(data[len(data)-max:]), true
+}
+
+// bgCompletionNotice is the system-reminder delivered to the owner session
+// when a background job finishes. It deliberately carries NO result text —
+// only the .log path — so the model reads the output itself instead of
+// paying the full result in context twice (once here, once on read).
+func (d *DaemonServer) bgCompletionNotice(j *BgJob) string {
+	state := "finished"
+	d.bgMu.Lock()
+	status, label, logPath := j.Status, d.bgJobLabel(j), j.LogPath
+	d.bgMu.Unlock()
+	if status == BgStatusError {
+		state = "finished with an error"
+	}
+	var sb strings.Builder
+	sb.WriteString("<system-reminder>\n")
+	fmt.Fprintf(&sb, "Background task %s %s.\n", label, state)
+	if logPath != "" {
+		fmt.Fprintf(&sb, "The output is NOT included here — read the full log at: %s\n", logPath)
+	}
+	sb.WriteString("Continue your work based on what the log shows.</system-reminder>")
+	return sb.String()
+}
+
+// deliverBgResult routes a finished job's completion notice to its owner
+// session: late-result into the live turn when one is running, otherwise
+// a wake-up turn.
+func (d *DaemonServer) deliverBgResult(j *BgJob) {
+	text := d.bgCompletionNotice(j)
+
+	d.sessionsMu.RLock()
+	act := d.sessions[j.SessionID]
+	d.sessionsMu.RUnlock()
+	if act == nil {
+		return
+	}
+	act.mu.Lock()
+	running := act.record.Status == "running" && act.agent != nil
+	// Snapshot the agent under the lock, then inject WITHOUT act.mu: the
+	// quiet append + OnContextAppended hook take their own locks (calling
+	// anything that re-acquires act.mu from under it would self-deadlock
+	// the session).
+	var agent *core.Agent
+	if running {
+		agent = act.agent
+	}
+	act.mu.Unlock()
+	if running {
+		// Late-result into the live turn. Wire shape stays role:user
+		// (providers reject orphan role:tool without a matching call),
+		// but the <system-reminder> envelope marks it as a background
+		// completion — never a common user message. The frontend filters
+		// it from the rendered transcript.
+		agent.AppendUserContextQuiet(text, map[string]string{
+			"background_delivery": j.ID, "background_kind": j.Kind,
+		})
+		_ = d.sendWS(map[string]any{"type": "agent_event", "hostId": d.config.HostID, "sessionId": j.SessionID,
+			"event": map[string]any{"type": "tool_progress", "text": fmt.Sprintf("Background %s %s finished — completion notice delivered to the running turn.", j.Kind, j.ID)}})
+		return
+	}
+	go d.startBgWakeUpJob(j.SessionID, text, j)
+}
+
+// startBgWakeUpJob opens a new turn on an idle session carrying a finished
+// background job's completion notice. At most one wake-up turn runs per
+// session: a fresh turn that won the race absorbs the notice instead.
+func (d *DaemonServer) startBgWakeUpJob(sessionID, text string, j *BgJob) {
+	act, err := d.getOrCreateActiveSession(sessionID)
+	if err != nil {
+		return
+	}
+	act.mu.Lock()
+	if act.record.Status == "running" {
+		// Lost the race with a fresh turn: fold into it as late-result.
+		// Snapshot the agent under the lock, then inject WITHOUT act.mu.
+		agent := act.agent
+		act.mu.Unlock()
+		if agent != nil {
+			agent.AppendUserContextQuiet(text, map[string]string{
+				"background_delivery": j.ID, "background_kind": j.Kind,
+			})
+		}
+		return
+	}
+	act.mu.Unlock()
+	if d.runTurnHook != nil {
+		d.runTurnHook(act, text)
+		return
+	}
+	d.runAgentTurnWithMeta(act, text, "", false, nil, map[string]string{
+		"background_delivery": j.ID, "background_kind": j.Kind,
+	})
+}
+
+// slowHook returns the tools.SlowHook wiring bash/python detach into jobs
+// owned by sessionID. The tool's force-stop rides along so bg_cancel can
+// kill the detached process. Each job gets a .log file in the session's
+// brain scratch space: the hook returns its absolute path, the tool
+// streams stdout+stderr into it (append mode) and the placeholder tells
+// the model the path. The log is never deleted — it survives the delivery
+// as the task's durable record.
+func (d *DaemonServer) slowHook(sessionID string) tools.SlowHook {
+	return func(kind, label string, stop func()) (string, string, func(string), func(string, bool)) {
+		j := d.bgRegister(kind, sessionID, label, stop)
+		logPath := d.bgLogFile(sessionID, j.ID)
+		d.bgMu.Lock()
+		j.LogPath = logPath
+		d.bgMu.Unlock()
+		d.broadcastBgJobs()
+		stream := func(chunk string) {
+			d.broadcastBgOutput(j.ID, j.SessionID, chunk)
+		}
+		var once sync.Once
+		return j.ID, logPath, stream, func(result string, isError bool) {
+			once.Do(func() {
+				if isError {
+					d.bgFinish(j, BgStatusError, result)
+				} else {
+					d.bgFinish(j, BgStatusDone, result)
+				}
+			})
+		}
+	}
+}
+
+// bgLogFile returns the absolute path of the job's .log file in the
+// session's brain scratch space. Empty brain dir (talk mode, unusable
+// session id) yields "" — the tool then falls back to its in-memory
+// accumulator only. The file is created lazily by the tool on first write.
+func (d *DaemonServer) bgLogFile(sessionID, jobID string) string {
+	brain := d.ensureBrainDir(sessionID)
+	if brain == "" {
+		return ""
+	}
+	return filepath.Join(brain, jobID+".log")
+}
+
+// BgJobView is the frontend-facing snapshot of one background job.
+type BgJobView struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Label     string `json:"label"`
+	Status    string `json:"status"`
+	StartedAt int64  `json:"startedAt"`
+	EndedAt   int64  `json:"endedAt"`
+	LogPath   string `json:"logPath,omitempty"`
+	Result    string `json:"result,omitempty"`
+}
+
+func (d *DaemonServer) bgJobViews(callerSessionID string) []BgJobView {
+	d.bgMu.Lock()
+	defer d.bgMu.Unlock()
+	out := make([]BgJobView, 0, len(d.bgJobs))
+	for _, j := range d.bgJobs {
+		if j.SessionID != callerSessionID {
+			continue
+		}
+		out = append(out, BgJobView{
+			ID: j.ID, Kind: j.Kind, Label: d.bgJobLabel(j), Status: j.Status,
+			StartedAt: j.StartedAt, EndedAt: j.EndedAt,
+			LogPath: j.LogPath, Result: j.Result,
+		})
+	}
+	return out
+}
+
+var _ = json.Marshal

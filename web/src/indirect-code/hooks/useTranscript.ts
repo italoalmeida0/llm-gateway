@@ -13,6 +13,7 @@ import { prettyArgs } from "../utils/wire";import {
   appendToolResult as reduceToolResult,
   cutTail,
   finishTurn,
+  foldBackgroundResult as reduceFoldBackground,
   mergeAssistantMessage,
   mergeUsage,
   normalizeSessionMessages,
@@ -365,6 +366,11 @@ export function createTranscript(opts: {
   }
   function appendToolResult(callId: string, result: string | undefined, isError?: boolean, startedAt?: number, durationMs?: number, details?: any) {
     setMessages((prev) => reduceToolResult(prev, callId, result, isError, startedAt, durationMs, details));
+  }
+  /** Folds a finished background task into the originating tool row
+   * (daemon bg_update snapshot → placeholder row). Idempotent. */
+  function foldBgResult(job: { id: string; result?: string; status?: string; endedAt?: number }) {
+    setMessages((prev) => reduceFoldBackground(prev, job));
   }
   // Drop rendered messages below a raw keep-index (optimistic edit/regen cut).
   function cutLiveTail(keepRawIdx: number) {
@@ -841,7 +847,7 @@ export function createTranscript(opts: {
     handleTruncated, handleStatusEvent, handleAgentEvent,
     noteApprovalRequest, noteQuestionResolved, noteQuestionError,
     appendReasoningDelta,
-    appendToolArgsDelta, appendToolResult,
+    appendToolArgsDelta, appendToolResult, foldBgResult,
     cancelTurnForSession, cancelCurrentTurn, respondApproval,
     forking, forkRequestId: () => forkRequestId,
     clearForkRequest: () => { forkRequestId = ""; }, setForking,

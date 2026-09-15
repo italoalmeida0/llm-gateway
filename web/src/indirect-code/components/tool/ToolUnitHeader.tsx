@@ -23,7 +23,7 @@ export function ToolUnitHeader(props: ToolPartProps) {
       class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
     >
       <Show
-        when={!(props.running && props.active && !props.u.result)}
+        when={!props.m.bgRunning() && !(props.running && props.active && !props.u.result)}
         fallback={
           <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
         }
@@ -62,6 +62,9 @@ export function ToolUnitHeader(props: ToolPartProps) {
         <span class="text-[11px] text-ink-600 shrink-0">{props.m.sum().stat}</span>
       </Show>
       <Show when={props.m.elapsed()}><span data-tool-duration class="text-[11px] text-ink-500 tabular-nums shrink-0">{props.m.elapsed()}</span></Show>
+      <Show when={props.m.isDetachedBg()}>
+        <span class="rounded border border-line px-1 py-px text-[10px] leading-tight text-ink-500 shrink-0">background</span>
+      </Show>
       <Iconify
         icon="lucide:chevron-down"
         size={12}

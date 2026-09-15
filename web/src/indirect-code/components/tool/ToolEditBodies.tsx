@@ -232,8 +232,8 @@ export function ToolEditBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "python"}>
           <Show
-            when={props.u.result?.toolResult || props.m.prog()}
-            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Running Python…" : null}</div>}
+            when={props.u.result?.toolResult || props.m.prog() || props.m.bgRunning() || props.m.bgStream()}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.m.bgRunning() ? "Running in background…" : props.active ? "Running Python…" : null}</div>}
           >
             <Show when={props.m.args().script}>
               <div class="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-ink-500">
@@ -245,7 +245,7 @@ export function ToolEditBodies(props: ToolPartProps) {
               <CodeBlock follow={() => props.m.open() && props.running} text={String(props.m.args().code || "")} language="python" scrollKey={`${props.m.key()}:code`} />
             </Show>
             <div class="border-t border-line/50">
-              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || "No output"} language={undefined} scrollKey={props.m.key()} />
+              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.bgRunning() ? (props.m.bgStream() || props.m.prog() || "Running in background…") : props.m.terminal().output || "No output"} language={undefined} scrollKey={props.m.key()} />
             </div>
           </Show>
         </Show>

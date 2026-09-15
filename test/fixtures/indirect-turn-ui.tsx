@@ -26,6 +26,7 @@ render(() => {
     thinkingStart: thinking, thinkingElapsed: () => 3, thinkingIndex: () => 0,
     toolProgress: () => ({}), toolStarts: starts,
     turnClock: () => 1100, elapsedLabel: () => "1s", specialProgress: () => undefined,
+    backgroundJobs: () => [], bgOutput: () => ({}), bgClock: () => 0,
     verboseChat: verbose, hideToolMessages: hideNotes,
     setPreviewFile: () => {}, activeSession: () => null, pendingApproval: () => null, projects: () => [],
   };

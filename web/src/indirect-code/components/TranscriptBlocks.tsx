@@ -35,6 +35,13 @@ export interface TranscriptRenderCtx {
   activeSession: () => import("../types").SessionSummary | null;
   pendingApproval: () => import("../types").PendingApproval | null;
   projects: () => import("../types").Project[];
+  /** Live background job registry — lets bash/python rows keep spinning
+   * and streaming after their detach, independent of the turn. */
+  backgroundJobs: () => import("../hooks/useBackground").BgTask[];
+  /** Per-job streamed output (bg_output chunks + bg_tail seed). */
+  bgOutput: () => Record<string, string>;
+  /** 1s ticker while any job runs, for elapsed labels. */
+  bgClock: () => number;
 }
 
 /** Thinking as a tool-style row: header (bot icon + timer) with a

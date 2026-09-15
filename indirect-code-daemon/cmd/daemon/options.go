@@ -193,7 +193,7 @@ func restrictModeTools(reg core.Registry, mode string) {
 	if mode == "talk" {
 		// Talk is conversational: only question + web research + checklist.
 		// No workspace access at all (not even read) — pure Q&A.
-		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "patch"} {
+		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "patch", "sleep", "bg_cancel"} {
 			delete(reg, name)
 		}
 		return

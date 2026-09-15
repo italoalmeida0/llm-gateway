@@ -400,6 +400,16 @@ type DaemonServer struct {
 	sessionsMu sync.RWMutex
 	sessions   map[string]*ActiveSession
 
+	// Background tasks (detached bash/python): process-local registry,
+	// never persisted. Guarded by bgMu; jobs broadcast bg_update.
+	bgMu   sync.Mutex
+	bgJobs map[string]*BgJob
+
+	// runTurnHook overrides turn execution (tests only): when set, both
+	// user turns and background wake-up turns call it instead of
+	// runAgentTurn, so tests never need a provider or network.
+	runTurnHook func(act *ActiveSession, prompt string)
+
 	// Change pings (SignalDB sync): one debounced timer per collection so a
 	// busy turn (a save per appended message) collapses into a single ping.
 	pingMu     sync.Mutex
@@ -840,6 +850,10 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 // The shared per-project review repo is KEPT: sibling sessions of the same
 // root still need it.
 func (d *DaemonServer) purgeSession(id string) {
+	// Stop the session's background jobs first: their .log files live in
+	// the brain dir removed below, and no completion notice may land in a
+	// deleted session. Cancelled jobs never deliver.
+	d.cancelBackgroundJobs(id)
 	d.sessionsMu.Lock()
 	if act, ok := d.sessions[id]; ok {
 		act.mu.Lock()
@@ -1713,6 +1727,15 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		_ = json.Unmarshal(raw, &req)
 		d.cancelTurn(req.SessionID)
 
+	case "bg_list":
+		d.handleBgList()
+
+	case "bg_cancel":
+		d.handleBgCancel(raw)
+
+	case "bg_tail":
+		d.handleBgTail(raw)
+
 	case "tool_approval_response":
 		var req struct {
 			Always    bool   `json:"always"`
@@ -2169,6 +2192,14 @@ func buildTurnSystemDirectives(rec *SessionRecord, mode string, now time.Time) s
 }
 
 func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string) {
+	d.runAgentTurnWithMeta(act, promptText, requestedModel, yolo, attachmentIDs, nil)
+}
+
+// runAgentTurnWithMeta runs a turn whose initial user message carries
+// extraMeta merged into promptMeta (background wake-ups stamp a
+// background_delivery key so the completion notice is never rendered as a
+// common user message, even though SanitizeUserText strips its tags).
+func (d *DaemonServer) runAgentTurnWithMeta(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string, extraMeta map[string]string) {
 	// A user message identical to the synthetic continue nudge must stay
 	// visible: strip the brackets so it no longer matches the hidden form.
 	promptText = core.SanitizeUserText(promptText)
@@ -2271,7 +2302,7 @@ func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedMod
 	// including this turn's first one and every mid-run continuation.
 	// Prompt only returns on AI conclusion or context cancellation;
 	// provider errors retry inside the loop, never surfacing here.
-	if err := r.agent.PromptWithMeta(r.ctx, fullPrompt, images, d.promptMeta(act, promptText, attachmentIDs), sink); err != nil && ctx.Err() == nil {
+	if err := r.agent.PromptWithMeta(r.ctx, fullPrompt, images, d.promptMetaWith(act, promptText, attachmentIDs, extraMeta), sink); err != nil && ctx.Err() == nil {
 		fmt.Printf("[WARN] turn %d of session %s exited with live context: %v\n", turnSeq, sessionID, err)
 	}
 

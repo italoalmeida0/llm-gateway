@@ -8,6 +8,7 @@ import type { Transcript } from "./hooks/useTranscript";
 import type { SessionOptions } from "./hooks/useSessionOptions";
 import type { Composer } from "./hooks/useComposer";
 import type { Queue } from "./hooks/useQueue";
+import type { Background } from "./hooks/useBackground";
 import type { Projects } from "./hooks/useProjects";
 import type { Workspace } from "./hooks/useWorkspace";
 import type { Modals } from "./hooks/useModals";
@@ -119,6 +120,7 @@ export const [TranscriptCtx, useTranscriptCtx] = defineCtx<TranscriptCtxValue>()
 export const [TurnChangesCtx, useTurnChanges] = defineCtx<ReturnType<typeof import("./hooks/useTurnChanges").createTurnChanges>>();
 export const [ComposerCtx, useComposerCtx] = defineCtx<ComposerCtxValue>();
 export const [QueueCtx, useQueue] = defineCtx<Queue>();
+export const [BackgroundCtx, useBackground] = defineCtx<Background>();
 export const [ModalCtx, useModal] = defineCtx<ModalCtxValue>();
 export const [UICtx, useUI] = defineCtx<UICtxValue>();
 
@@ -129,6 +131,7 @@ export interface RemoteCodeProviderValue {
   turnChanges: ReturnType<typeof import("./hooks/useTurnChanges").createTurnChanges>;
   composer: ComposerCtxValue;
   queue: Queue;
+  background: Background;
   modal: ModalCtxValue;
   ui: UICtxValue;
 }
@@ -142,9 +145,11 @@ export function RemoteCodeProvider(props: RemoteCodeProviderValue & { children: 
           <TurnChangesCtx.Provider value={props.turnChanges}>
           <ComposerCtx.Provider value={props.composer}>
           <QueueCtx.Provider value={props.queue}>
+          <BackgroundCtx.Provider value={props.background}>
             <ModalCtx.Provider value={props.modal}>
               <UICtx.Provider value={props.ui}>{props.children}</UICtx.Provider>
             </ModalCtx.Provider>
+          </BackgroundCtx.Provider>
           </QueueCtx.Provider>
           </ComposerCtx.Provider>
           </TurnChangesCtx.Provider>

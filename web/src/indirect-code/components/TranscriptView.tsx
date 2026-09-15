@@ -10,8 +10,9 @@ import { HistoryView } from "./HistoryView";
 import { ApprovalCard } from "./ApprovalCard";
 import { QuestionPanel } from "./QuestionModal";
 import { QueueCard } from "./QueueCard";
+import { BackgroundCard } from "./BackgroundCard";
 import { AssistantMsgActions, UserMsgActions } from "./MsgActions";
-import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges } from "../ctx";
+import { useComposerCtx, useHost, useSession, useTranscriptCtx, useModal, useUI, useTurnChanges, useBackground } from "../ctx";
 import { TurnChangesBalloon } from "./TurnChangesBalloon";
 import { blockTurnDuration, mapBalloonsToBlocks } from "../transcript";
 
@@ -23,6 +24,7 @@ export function TranscriptView() {
   const m = useModal();
   const ui = useUI();
   const tc = useTurnChanges();
+  const bg = useBackground();
   // Persistent balloons anchored to the last block of their turn.
   // When a new turn starts, the previous turn's balloon stays anchored above
   // the new turn's initiating message, never jumping to the tail.
@@ -58,6 +60,9 @@ export function TranscriptView() {
     activeSession: s.activeSession,
     pendingApproval: t.pendingApproval,
     projects: s.projects,
+    backgroundJobs: bg.jobs,
+    bgOutput: bg.output,
+    bgClock: bg.clock,
   });
   return (
 <>
@@ -361,6 +366,7 @@ export function TranscriptView() {
     respondApproval={t.respondApproval}
     setYoloMode={c.setYoloMode}
   />
+  <BackgroundCard />
   <QueueCard />
 </div>
 </div>

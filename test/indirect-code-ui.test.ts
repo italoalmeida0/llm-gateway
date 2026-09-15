@@ -21,7 +21,7 @@ import { parseDaemonMessage } from "../web/src/indirect-code/daemon-protocol";
 import { parseContentBlocks } from "../web/src/indirect-code/utils/wire";
 import {
   appendReasoningDelta, appendTextDelta, appendToolArgsDelta, appendToolResult,
-  cutTail, finishTurn, mergeUsage, normalizeSessionMessages, stampDuration, upsertToolCall,
+  cutTail, finishTurn, foldBackgroundResult, mergeUsage, normalizeSessionMessages, stampDuration, upsertToolCall,
 } from "../web/src/indirect-code/transcript/updaters";
 import type { ChatMessage, ContentBlock, ToolUnit, TurnBalloon } from "../web/src/indirect-code/types";
 import { fileIcon } from "../web/src/indirect-code/files";
@@ -1515,5 +1515,82 @@ describe("Turn audit regressions", () => {
     expect(tc.balloons()).toHaveLength(1);
     tc.noteBalloon({turnIndex:3,files:[]},true);
     expect(tc.balloons()).toHaveLength(1); // Late live empty must not delete committed changes.
+  });
+});
+
+describe("Background tasks (bash/python detach)", () => {
+  const placeholder = (): ChatMessage => ({
+    id: "a1", role: "assistant", time: 0,
+    blocks: [{
+      type: "tool_result", toolId: "t1",
+      toolResult: "Command moved to background (still running).",
+      toolStartedAt: 1000,
+      toolDetails: { background_job_id: "bg_1", log_path: "/brain/bg_1.log" },
+    }],
+  });
+
+  test("foldBackgroundResult folds the terminal result into the placeholder row", () => {
+    const folded = foldBackgroundResult([placeholder()], { id: "bg_1", result: "out\n[exit 0]", status: "done", endedAt: 5000 });
+    const b = folded[0].blocks[0] as any;
+    expect(b.toolResult).toBe("out\n[exit 0]");
+    expect(b.toolDetails.detached).toBe(true);
+    expect(b.toolDetails.display).toBe("out\n[exit 0]");
+    expect(b.toolDetails.background_job_id).toBe("bg_1");
+    expect(b.toolDurationMs).toBe(4000);
+  });
+
+  test("foldBackgroundResult is idempotent and ignores unknown jobs", () => {
+    const once = foldBackgroundResult([placeholder()], { id: "bg_1", result: "out", status: "done", endedAt: 2000 });
+    expect(foldBackgroundResult(once, { id: "bg_1", result: "out", status: "done", endedAt: 2000 })).toBe(once);
+    expect(foldBackgroundResult([placeholder()], { id: "bg_other", result: "x", status: "done" })).toHaveLength(1);
+    const untouched = foldBackgroundResult([placeholder()], { id: "bg_other", result: "x", status: "done" });
+    expect((untouched[0].blocks[0] as any).toolDetails.detached).toBeUndefined();
+  });
+
+  test("foldBackgroundResult marks errors", () => {
+    const folded = foldBackgroundResult([placeholder()], { id: "bg_1", result: "boom", status: "error", endedAt: 2000 });
+    expect((folded[0].blocks[0] as any).isError).toBe(true);
+  });
+
+  test("normalizeSessionMessages drops background deliveries (tagged and sanitized)", () => {
+    // Live-turn shape: tags survive the quiet append.
+    const tagged: any[] = [{
+      role: "user",
+      content: [{ type: "text", text: "<system-reminder>\nBackground task x finished.\n</system-reminder>" }],
+      meta: { background_delivery: "bg_1", background_kind: "bash" },
+    }];
+    expect(normalizeSessionMessages(tagged)).toEqual([]);
+    // Wake-up shape: SanitizeUserText stripped the tags, the meta flag remains.
+    const sanitized: any[] = [{
+      role: "user",
+      content: [{ type: "text", text: "Background task x finished." }],
+      meta: { user_text: "Background task x finished.", background_delivery: "bg_1", background_kind: "bash" },
+    }];
+    expect(normalizeSessionMessages(sanitized)).toEqual([]);
+    // A dropped delivery must not become the carrier for later tool results.
+    const withTool: any[] = [...sanitized, {
+      role: "assistant", content: [{ type: "tool_result", toolId: "t", toolResult: "r" }],
+    }];
+    expect(normalizeSessionMessages(withTool)).toHaveLength(1);
+  });
+
+  test("toolSummary reads detached runs as Background, plus sleep/bg_cancel", () => {
+    const bashBg = toolSummary({
+      call: { type: "tool_call", toolId: "t", toolName: "bash", toolArgs: JSON.stringify({ command: "sleep 30" }) },
+      result: { type: "tool_result", toolId: "t", toolResult: "moved to background", toolDetails: { background_job_id: "bg_1" } },
+    } as any);
+    expect(bashBg.verb).toBe("Background");
+    const bashSync = toolSummary({
+      call: { type: "tool_call", toolId: "t", toolName: "bash", toolArgs: JSON.stringify({ command: "ls" }) },
+      result: { type: "tool_result", toolId: "t", toolResult: "x" },
+    } as any);
+    expect(bashSync.verb).toBe("Ran");
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "t", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 120 }) },
+    } as any).verb).toBe("Sleeping");
+    expect(toolSummary({
+      call: { type: "tool_call", toolId: "t", toolName: "bg_cancel", toolArgs: JSON.stringify({ job_id: "bg_9" }) },
+      result: { type: "tool_result", toolId: "t", toolResult: "cancelled" },
+    } as any).verb).toBe("Stopped");
   });
 });

@@ -138,21 +138,22 @@ func TestPythonSandboxJail(t *testing.T) {
 	}
 }
 
-func TestPythonTimeout(t *testing.T) {
+// There is deliberately no timeout parameter: a run that would previously
+// have been cut off now runs to completion (or detaches, with a hook).
+func TestPythonNoTimeout(t *testing.T) {
 	if _, err := PythonAvailable(); err != nil {
 		t.Skipf("no python3 on this machine: %v", err)
 	}
 	dir := t.TempDir()
 	tool := &PythonTool{CWD: dir, Sandbox: NewSandbox(dir)}
 	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"code":       "import time; time.sleep(30)",
-		"timeoutSec": 1,
+		"code": "import time; time.sleep(1); print('done')",
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolResultText(t, res); !strings.Contains(got, "timeout") {
-		t.Fatalf("expected timeout marker, got %q", got)
+	if got := toolResultText(t, res); !strings.Contains(got, "done") || !strings.Contains(got, "[exit 0]") {
+		t.Fatalf("expected normal completion, got %q", got)
 	}
 }
 

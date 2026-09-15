@@ -54,10 +54,36 @@ const elapsed = () => {
   if (name() !== "bash" && name() !== "python" && !name().startsWith("mcp__")) return "";
   const duration = u.result?.toolDurationMs ?? terminal().durationMs;
   if (duration !== undefined) return ctx.elapsedLabel(duration);
+  // A running background job ticks off the background clock so the row
+  // keeps counting after the turn ends (and across reloads).
+  if (bgRunning()) {
+    const job = ctx.backgroundJobs().find((j) => j.id === bgJobId());
+    if (job && job.startedAt) return ctx.elapsedLabel(Math.max(0, ctx.bgClock() - job.startedAt));
+  }
   const start = ctx.toolStarts()[u.call?.toolId || ""];
   return start && active() ? ctx.elapsedLabel(ctx.turnClock() - start) : "";
 };
-  return { key, open, toggle, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed };
+/** Background job id when this call detached (placeholder or folded). */
+const bgJobId = () => {
+  const id = (u.result?.toolDetails as any)?.background_job_id;
+  return typeof id === "string" && id ? id : "";
+};
+/** True while the detached job is still running (registry-driven, so it
+ * survives the turn ending — the row keeps spinning and streaming). */
+const bgRunning = () => {
+  const id = bgJobId();
+  if (!id) return false;
+  return ctx.backgroundJobs().some((j) => j.id === id && j.status === "running");
+};
+/** Live streamed output for the running job (bg_output + bg_tail). */
+const bgStream = () => {
+  const id = bgJobId();
+  return id ? ctx.bgOutput()[id] || "" : "";
+};
+/** True once the call carries a background job — the row renders as a
+ * background run (badge, spinner while running). */
+const isDetachedBg = () => bgJobId() !== "";
+  return { key, open, toggle, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed, bgJobId, bgRunning, bgStream, isDetachedBg };
 }
 
 export type ToolModel = ReturnType<typeof useToolUnitModel>;

@@ -33,10 +33,13 @@ export function SettingsSkillsSection() {
               <div>• read (view files)</div>
               <div>• write (create files)</div>
               <div>• edit (modify files)</div>
-              <div>• bash (shell runner)</div>
+              <div>• bash (shell runner, auto-background)</div>
               <div>• glob (file search)</div>
               <div>• todo (task checklist)</div>
               <div>• question (ask user)</div>
+              <div>• python (python runner, auto-background)</div>
+              <div>• sleep (bounded wait, wakes early)</div>
+              <div>• bg_cancel (stop a background task)</div>
             </div>
           </div>
 

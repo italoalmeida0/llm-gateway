@@ -97,6 +97,7 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 			&tools.SearchWebTool{}, &tools.FetchURLTool{},
 			&tools.TodoTool{}, &tools.QuestionTool{},
 			&tools.MarkTaskAsCompleteTool{}, &tools.MarkPlanAsReadyToExecuteTool{},
+			&tools.SleepTool{}, &tools.BgCancelTool{},
 		)
 		restrictModeTools(reg, mode)
 		if mode == "talk" {
@@ -105,7 +106,7 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 					t.Fatalf("Talk must retain %s", keep)
 				}
 			}
-			for _, drop := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute"} {
+			for _, drop := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "sleep", "bg_cancel"} {
 				if reg[drop] != nil {
 					t.Fatalf("Talk must not expose %s (no workspace access)", drop)
 				}
@@ -113,7 +114,7 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 		} else {
 			// Build, Plan, and Learning share the exact same tool registry
 			// to guarantee >95% prefix KV cache hits across mode switches.
-			for _, want := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "todo", "question", "search_web", "fetch_url", "mark_task_as_complete", "mark_plan_as_ready_to_execute"} {
+			for _, want := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "todo", "question", "search_web", "fetch_url", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "sleep", "bg_cancel"} {
 				if reg[want] == nil {
 					t.Fatalf("Mode %s must expose %s in tool registry for KV cache reuse", mode, want)
 				}
@@ -175,9 +176,19 @@ func TestModesExposeTheirIntendedTools(t *testing.T) {
 	}
 
 	// Talk mode:
-	for _, tool := range []string{"read", "write", "edit", "bash", "python"} {
+	for _, tool := range []string{"read", "write", "edit", "bash", "python", "sleep", "bg_cancel"} {
 		if r := modeToolRestriction("talk", tool); r == "" {
 			t.Fatalf("talk should restrict workspace tool %s", tool)
+		}
+	}
+
+	// sleep/bg_cancel follow bash/python: plan, build and learning allow,
+	// talk (no workspace at all) restricts.
+	for _, mode := range []string{"plan", "build", "learning"} {
+		for _, tool := range []string{"sleep", "bg_cancel"} {
+			if r := modeToolRestriction(mode, tool); r != "" {
+				t.Fatalf("%s should allow %s, got %q", mode, tool, r)
+			}
 		}
 	}
 }

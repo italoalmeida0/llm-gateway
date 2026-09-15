@@ -128,11 +128,14 @@ func modeToolRestriction(mode, tool string) string {
 		return "MCP tools are only available in Build mode."
 	}
 	if mode == "talk" {
-		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "patch"} {
+		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "patch", "sleep", "bg_cancel"} {
 			if tool == name {
 				return "The session is in talk mode. Workspace tools are disabled."
 			}
 		}
+	}
+	if (tool == "sleep" || tool == "bg_cancel") && mode != "plan" && mode != "build" && mode != "learning" {
+		return tool + " is only available in plan, build and learning modes."
 	}
 	if (mode == "plan" || mode == "learning") && (tool == "write" || tool == "edit" || tool == "patch") {
 		return "The session is now in " + mode + " mode. Edit and create tools are disabled."

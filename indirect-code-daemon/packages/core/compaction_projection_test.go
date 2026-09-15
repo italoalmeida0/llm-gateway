@@ -82,6 +82,12 @@ func TestProjectionActiveHidesSummarizedPrefix(t *testing.T) {
 	if !strings.Contains(extractText(msgs[0]), "## Context Summary (compacted)") {
 		t.Fatalf("head must be the synthetic summary, got %q", extractText(msgs[0]))
 	}
+	// Wrapped in <system-reminder> so the frontend nudge filter hides it
+	// as a user bubble (the dedicated compaction balloon renders instead).
+	head := strings.TrimSpace(extractText(msgs[0]))
+	if !strings.HasPrefix(head, "<system-reminder>") || !strings.HasSuffix(head, "</system-reminder>") {
+		t.Fatalf("synthetic summary must be wrapped in <system-reminder>, got %q", extractText(msgs[0]))
+	}
 	if extractText(msgs[1]) != extractText(history[8]) {
 		t.Fatalf("tail must map verbatim from history")
 	}

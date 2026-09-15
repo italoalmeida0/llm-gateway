@@ -63,9 +63,11 @@ type CompactionState struct {
 }
 
 // summaryMessageText renders the summary as the synthetic user-message
-// text the model sees after a compaction.
+// text the model sees after a compaction. Wrapped in <system-reminder> so
+// the frontend's nudge filter hides it as a user bubble — the dedicated
+// compaction balloon renders the summary instead.
 func summaryMessageText(summary string) string {
-	return "## Context Summary (compacted)\n\n" + summary
+	return "<system-reminder>## Context Summary (compacted)\n\n" + summary + "</system-reminder>"
 }
 
 // projectionAnchor resolves a chain head against a history length to the

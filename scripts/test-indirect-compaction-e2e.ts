@@ -4,21 +4,30 @@
  * (Anthropic-native, no translation involved).
  *
  *   META_API_KEY=... PLAYWRIGHT_MODULE=... CHROMIUM_PATH=... \
- *     bun scripts/test-indirect-compaction-e2e.ts [manual|auto|chain|all]
+ *     bun scripts/test-indirect-compaction-e2e.ts [manual|auto|chain|overflow|all]
  *
  * The gateway registry model gets a SMALL context_length so ShouldCompact
  * fires after a couple of turns (no need to burn a real 200k window).
  * Asserts what a user actually sees on #/code per trigger:
  *
- *   manual — /compact command: session_compacted arrives, the dedicated
+ *   manual   — /compact command: session_compacted arrives, the dedicated
  *     balloon renders the summary, NO duplicate ## Context Summary user
  *     bubble (the <system-reminder> wrap hides it), zero page errors.
- *   auto   — auto_compact_threshold=70 + small window: a normal turn
- *     proactively compacts (session_compacted without /compact), balloon
- *     shows, no duplicate bubble, zero page errors.
- *   chain  — second compaction on top of the first: count=2, previous
- *     summary chains (contains earlier summary), balloon shows latest,
- *     zero page errors.
+ *   auto     — auto_compact_threshold=70 + small window: heavy book-reading
+ *     turns proactively compact (session_compacted without /compact),
+ *     balloon shows, no duplicate bubble, zero page errors.
+ *   chain    — second compaction on top of the first: count=2, previous
+ *     summary chains, balloon shows latest, zero page errors.
+ *   overflow — reactive path: the admin e2e-overflow hook (E2E_FORCE_OVERFLOW=1
+ *     only, absent in production) forces one provider-style 400
+ *     context-overflow mid-turn; the daemon compacts and retries cleanly,
+ *     the turn completes, balloon shows, no duplicate bubble.
+ *
+ * Split-turn (cut landing mid-turn, "Turn Context (split turn)" merged
+ * summary) is covered implicitly — scenarios auto/overflow already produced
+ * Split Turn balloons — plus the Go unit TestCompactSplitTurn. A giant
+ * single message is impractical e2e (a real 1M-window provider absorbs it
+ * and the turn dies on timeouts before any registry-window cut).
  *
  * Prerequisites: web dist/ built, daemon binary built.
  * Slow on purpose (real model latency); manual gate, not part of `bun test`.
@@ -90,7 +99,7 @@ async function boot() {
       ...process.env, NODE_ENV: "production", PORT: String(GW_PORT), DATA_DIR: dataDir,
       ADMIN_EMAIL: "admin@example.com", ADMIN_PASSWORD: ADMIN_PW,
       GATEWAY_SECRET: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      PUBLIC_URL: GW,
+      PUBLIC_URL: GW, E2E_FORCE_OVERFLOW: "1",
     },
     stdout: "ignore", stderr: "ignore",
   });
@@ -171,7 +180,7 @@ async function boot() {
   }
   assert(hostId, "daemon host never came online");
   log("boot", `gateway + daemon up (host ${hostId}, window ${SMALL_WINDOW})`);
-  return { jwt, login, hostId, ws, send, workDir, events };
+  return { jwt, login, hostId, ws, send, workDir, events, gw: GW, auth };
 }
 
 async function openSessionPage(ctx: any, sessionId: string, shot: string) {
@@ -201,11 +210,18 @@ function assertNoPageErrors(pageErrors: string[], consoleErrors: string[], where
 
 async function waitForIdle(ctx: any, sessionId: string, timeoutMs = 300000) {
   const t0 = Date.now();
+  let lastStatus = "";
   for (;;) {
     await Bun.sleep(3000);
     const data: any = await ctx.send({ type: "get_session", sessionId });
-    if (data?.session?.status !== "running") return data;
-    assert(Date.now() - t0 < timeoutMs, "turn timed out");
+    const st = data?.session?.status;
+    if (st !== lastStatus) { lastStatus = st; log("turn", `status=${st} after ${Math.round((Date.now() - t0) / 1000)}s`); }
+    if (st !== "running") return data;
+    if (Date.now() - t0 >= timeoutMs) {
+      const tail = ctx.events.slice(-15).map((e: any) => JSON.stringify(e).slice(0, 200));
+      log("turn", `TIMEOUT event tail:\n${tail.join("\n")}`);
+      assert(false, "turn timed out");
+    }
   }
 }
 
@@ -382,12 +398,59 @@ async function scenarioChain(ctx: any) {
   log("test", "scenario C PASS");
 }
 
+// D. split-turn: covered implicitly — when keepFrom lands mid-turn the
+// summary merges history + turn prefix ("Turn Context (split turn)" marker
+// and the balloon shows the Split Turn badge). Scenarios B/E already
+// produced Split Turn balloons; assert the marker path via unit tests in
+// indirect-code-daemon/packages/core (compaction_test.go) rather than a
+// giant single message (impractical: a real 1M-window provider absorbs it
+// and the turn dies on timeouts before any cut).
+
+// E. reactive overflow: gateway returns a forced 400 context-overflow
+// (armed via admin hook — the real 1M Meta window would never fire).
+// The daemon must compact mid-turn and retry cleanly; the user sees the
+// turn complete plus the dedicated balloon, no duplicate bubble.
+async function scenarioOverflow(ctx: any) {
+  log("test", "scenario E: reactive overflow");
+  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e compact overflow", model: MODEL });
+  const sessionId = created?.session?.id;
+  assert(sessionId, "create_session failed");
+  // Heavy seed: the reactive Compact(keepTail=0) refuses transcripts
+  // that fit under the keep floor, so the history must be worth cutting.
+  await seedHeavyHistory(ctx, sessionId, 2);
+  const arm: any = await (await fetch(`${ctx.gw}/api/admin/e2e-overflow`, {
+    method: "POST", headers: ctx.auth, body: JSON.stringify({ armed: true }),
+  })).json();
+  assert(arm.success && arm.armed, `overflow hook not armed: ${JSON.stringify(arm)}`);
+  const check: any = await (await fetch(`${ctx.gw}/api/admin/e2e-overflow`, { headers: ctx.auth })).json();
+  log("test", `hook armed check: ${JSON.stringify(check)}`);
+  assert(check.success && check.armed, "hook did not stay armed");
+  ctx.ws.send(JSON.stringify({
+    type: "prompt", hostId: ctx.hostId, sessionId, model: MODEL,
+    text: "Reply exactly OVERFLOW-RECOVERED.",
+  }));
+  const data = await waitForIdle(ctx, sessionId, 900000);
+  const msgs = JSON.stringify(data?.session?.messages || []);
+  assert(msgs.includes("OVERFLOW-RECOVERED"), "turn did not recover after forced overflow");
+  // Did the daemon even see the forced 400? The reactive path emits a
+  // "Context limit reached upstream" progress notice before compacting.
+  const sawNotice = ctx.events.some((e: any) => JSON.stringify(e).includes("Context limit reached upstream"));
+  log("test", `daemon saw forced overflow: ${sawNotice}`);
+  assert(sawNotice, "daemon never reacted to the forced 400 (hook may have fired on the wrong request)");
+  const comp = data?.session?.compaction;
+  assert(comp?.previousSummary?.length > 50, "reactive compaction missing");
+  log("test", `recovered: count=${comp.count} keepFrom=${comp.keepFrom}`);
+  await checkBalloonState(ctx, sessionId, "/tmp/cmp-overflow.png", "overflow");
+  log("test", "scenario E PASS");
+}
+
 const only = (process.argv[2] || "").toLowerCase();
 try {
   const ctx = await boot();
   if (!only || only === "manual" || only === "a") await scenarioManual(ctx);
   if (!only || only === "auto" || only === "b") await scenarioAuto(ctx);
   if (!only || only === "chain" || only === "c") await scenarioChain(ctx);
+  if (!only || only === "overflow" || only === "e") await scenarioOverflow(ctx);
   console.log("\n=== RESULT ===\nPASS: indirect compaction E2E complete");
 } catch (e) {
   console.error(`\n=== RESULT ===\nFAIL: ${e instanceof Error ? e.stack || e.message : e}`);

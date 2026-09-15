@@ -388,6 +388,18 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
 
   // ================= providers =================
 
+  // E2E hook: arm a one-shot forced context-overflow on the next proxied
+  // POST (compaction retry-path tests). Only registered when
+  // E2E_FORCE_OVERFLOW=1 — absent in production.
+  if (process.env.E2E_FORCE_OVERFLOW && path === "/api/admin/e2e-overflow" && req.method === "POST") {
+    const body = await readJsonBody(req, 1024).catch(() => ({} as any));
+    (globalThis as any).__e2eOverflowArmed = (body as any)?.armed !== false;
+    return ok({ armed: !!(globalThis as any).__e2eOverflowArmed }, req);
+  }
+  if (process.env.E2E_FORCE_OVERFLOW && path === "/api/admin/e2e-overflow" && req.method === "GET") {
+    return ok({ armed: !!(globalThis as any).__e2eOverflowArmed }, req);
+  }
+
   if (path === "/api/admin/providers" && req.method === "GET") {
     const rows = db
       .prepare<ProviderRow, []>("SELECT * FROM providers ORDER BY priority ASC, created_at ASC")

@@ -881,6 +881,24 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     const snap = await routerSnapshot();
     let routedPublicModel: string | null = null;
 
+    // E2E hook (compaction tests only): force a provider-style context
+    // overflow error without burning a real 1M window. Armed via the
+    // admin /api/admin/e2e-overflow endpoint (which only exists when
+    // E2E_FORCE_OVERFLOW=1, so production can never trigger it).
+    // One-shot: the first POST after arming fails with a 400 overflow,
+    // the daemon compacts and retries cleanly through to the provider.
+    if (process.env.E2E_FORCE_OVERFLOW && req.method === "POST" && !route.isModelsList) {
+      if ((globalThis as any).__e2eOverflowArmed) {
+        (globalThis as any).__e2eOverflowArmed = false;
+        console.log(`[e2e-overflow] forced 400 for ${route.upstreamPath}`);
+        return envelopeError(
+          proto, 400,
+          "This model's maximum context length is 48000 tokens. Please reduce the length of the messages.",
+          undefined, req,
+        );
+      }
+    }
+
     if (snap.mode === "router" && route.isModelsList) {
       return registryModelsResponse(req, snap, proto, route.modelId);
     }

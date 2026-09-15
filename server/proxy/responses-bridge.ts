@@ -652,6 +652,7 @@ export function responsesToChatBody(responsesText: string, fallbackModel: string
       prompt_tokens: u.inTok + u.cacheTok,
       completion_tokens: u.outTok,
       total_tokens: u.inTok + u.cacheTok + u.outTok,
+      prompt_tokens_details: { cached_tokens: u.cacheTok },
     },
   });
 }
@@ -1741,6 +1742,7 @@ export class ResponsesToChatStream {
           prompt_tokens: this.inTok + this.cacheTok,
           completion_tokens: outTok,
           total_tokens: this.inTok + this.cacheTok + outTok,
+          prompt_tokens_details: { cached_tokens: this.cacheTok },
         },
       ),
     );

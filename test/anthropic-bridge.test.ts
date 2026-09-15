@@ -341,6 +341,8 @@ describe("Anthropic SSE → OpenAI SSE translator (reverse)", () => {
     expect(s).toContain('{\\"cmd\\"');
     expect(s).toContain('"finish_reason":"tool_calls"');
     expect(s).toContain('"completion_tokens":7');
+    expect(s).toContain('"prompt_tokens":12');
+    expect(s).toContain('"prompt_tokens_details":{"cached_tokens":2}');
     expect(s.trimEnd().endsWith("data: [DONE]")).toBe(true);
     expect(t.result()).toMatchObject({ inTok: 10, cacheTok: 2, outTok: 7, estimated: false });
   });

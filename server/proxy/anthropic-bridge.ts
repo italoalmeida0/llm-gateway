@@ -922,14 +922,27 @@ function anthropicStopToOpenAI(stop: unknown, hasTools: boolean): string {
   }
 }
 
-function anthropicUsageToOpenAI(usage: unknown): { prompt_tokens: number; completion_tokens: number; total_tokens: number } {
+function anthropicUsageToOpenAI(usage: unknown): {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_tokens_details: { cached_tokens: number };
+} {
   const u = asRecord(usage);
   const input = Number(u.input_tokens ?? 0) || 0;
   const cacheRead = Number(u.cache_read_input_tokens ?? 0) || 0;
   const cacheCreation = Number(u.cache_creation_input_tokens ?? 0) || 0;
   const output = Number(u.output_tokens ?? 0) || 0;
   const prompt = input + cacheRead + cacheCreation;
-  return { prompt_tokens: prompt, completion_tokens: output, total_tokens: prompt + output };
+  // Keep the cache share visible: OpenAI clients (and the gateway's own
+  // splitPrompt accounting) read the cached share from here.
+  const cached = cacheRead + cacheCreation;
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: output,
+    total_tokens: prompt + output,
+    prompt_tokens_details: { cached_tokens: cached },
+  };
 }
 
 /**
@@ -1006,7 +1019,7 @@ export function anthropicErrorToOpenAI(status: number, bodyText: string): string
   return JSON.stringify({ error: { message, type, code: null } });
 }
 
-function openAIChunk(id: string, model: string, choice: Record<string, unknown>, usage?: Record<string, number>): Uint8Array {
+function openAIChunk(id: string, model: string, choice: Record<string, unknown>, usage?: Record<string, unknown>): Uint8Array {
   const payload: Record<string, unknown> = {
     id,
     object: "chat.completion.chunk",
@@ -1171,7 +1184,12 @@ export class AnthropicToOpenAIStream {
           id,
           model,
           { delta: {}, finish_reason: finish },
-          { prompt_tokens: prompt, completion_tokens: this.outTok, total_tokens: prompt + this.outTok },
+          {
+            prompt_tokens: prompt,
+            completion_tokens: this.outTok,
+            total_tokens: prompt + this.outTok,
+            prompt_tokens_details: { cached_tokens: this.cacheTok },
+          },
         ),
       );
       out.push(enc.encode("data: [DONE]\n\n"));

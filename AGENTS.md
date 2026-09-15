@@ -307,6 +307,15 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   window fires fast; heavy seeds read the `test/books` corpus (~1.1M tokens).
   Needs `dist/` + daemon binary built and `META_API_KEY` in `.env`.
   Slow (real model latency, ~15 min for all) — manual gate, not part of `bun test`.
+- `META_API_KEY=… bun scripts/test-usage-parity.ts` —
+  usage parity check (throwaway gateway + real Meta provider, all 3 native
+  protocols): direct Anthropic vs gateway Anthropic must match exactly;
+  gateway OpenAI-chat must report `prompt_tokens` = in+cache and
+  `prompt_tokens_details.cached_tokens` = cache total; gateway Responses
+  must report the same via `input_tokens_details`; the gateway's own
+  `/api/usage/breakdown` must record all legs with non-zero cache.
+  Repeats each leg so the 2nd call reports cache_read > 0.
+  Needs `META_API_KEY` in `.env`. Fast (~1 min) — manual gate, not part of `bun test`.
 - `bun run seed` — mock usage data for the dev DB (`-- --days N`, `-- --keep`),
   seeds every existing key (replaces usage rows by default)
 

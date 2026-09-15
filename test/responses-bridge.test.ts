@@ -211,7 +211,11 @@ describe("buffered response translation", () => {
     expect(c.choices[0].message.content).toBe("hi");
     expect(c.choices[0].message.tool_calls[0]).toMatchObject({ id: "call-1" });
     expect(c.choices[0].finish_reason).toBe("tool_calls");
-    expect(c.usage).toMatchObject({ prompt_tokens: 50, completion_tokens: 20 });
+    expect(c.usage).toMatchObject({
+      prompt_tokens: 50,
+      completion_tokens: 20,
+      prompt_tokens_details: { cached_tokens: 10 },
+    });
   });
 
   test("responses usage splits cached input", () => {

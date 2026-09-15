@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -538,6 +539,13 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 		contextUsage := r.act.record.Context
 		if !isEmptyUsage(e.Usage) {
 			contextUsage = contextFromUsage(e.Usage, r.modelInfo)
+			if r.agent != nil {
+				if local := estimateContext(r.agent, r.modelInfo); local != nil {
+					if resolved, warned := resolveContextUsage(e.Usage, contextUsage, local, r.act.record.ID); warned {
+						contextUsage = resolved
+					}
+				}
+			}
 			r.act.record.Context = contextUsage
 		}
 		_ = r.d.saveSession(r.act.record)
@@ -659,6 +667,24 @@ func (r *turnRun) finishTurn() {
 func isEmptyUsage(u provider.Usage) bool {
 	return u.InputTokens == 0 && u.OutputTokens == 0 &&
 		u.ReasoningTokens == 0 && u.CacheReadTokens == 0 && u.CacheWriteTokens == 0
+}
+
+// resolveContextUsage guards the session context display against buggy
+// providers (e.g. reporting prompt_tokens 0 on tool-heavy requests), which
+// would pin the UI near zero and blind proactive compaction. When the
+// provider claims zero input but the local chars/4 projection is clearly
+// larger, the local estimate wins (flagged estimated). Returns the resolved
+// context and whether the fallback fired (caller logs it).
+func resolveContextUsage(reported provider.Usage, fromReported, local *SessionContext, sessionID string) (*SessionContext, bool) {
+	if reported.InputTokens != 0 || reported.CacheReadTokens != 0 || reported.CacheWriteTokens != 0 {
+		return fromReported, false
+	}
+	if local == nil || fromReported == nil || local.UsedTokens <= fromReported.UsedTokens {
+		return fromReported, false
+	}
+	log.Printf("session %s: provider reported zero input tokens with %d estimated in context; using local estimate",
+		sessionID, local.UsedTokens)
+	return local, true
 }
 
 // persistIncoming checkpoints the tracker's snapshot to the crash journal

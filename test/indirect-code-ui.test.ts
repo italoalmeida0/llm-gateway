@@ -1701,4 +1701,45 @@ describe("Tool row model", () => {
       dispose();
     });
   });
+
+  test("folded bg rows survive a later full snapshot (normalize carries folds)", () => {
+    const wire: any[] = [{
+      role: "assistant",
+      content: [
+        { name: "bash", id: "c1", arguments: { command: "sleep 15" } },
+        { call_id: "c1", content: [{ text: "Command moved to background (still running)." }], is_error: false, started_at: 1000, duration_ms: 10009, details: { background_job_id: "bg_1", log_path: "/tmp/x.log" } },
+      ],
+    }];
+    const first = normalizeSessionMessages(wire);
+    const folded = foldBackgroundResult(first, { id: "bg_1", result: "done-gamma\n", status: "done", endedAt: 16005 });
+    const resBlock = (msgs: ChatMessage[]) => msgs.flatMap((m) => m.blocks).find((b) => b.type === "tool_result");
+    const fb = resBlock(folded);
+    expect(fb?.toolResult).toBe("done-gamma\n");
+    expect((fb?.toolDetails as any)?.detached).toBe(true);
+    // Full duration (15s), not the 10s foreground slice.
+    expect(fb?.toolDurationMs).toBe(15005);
+    // A later snapshot (turn end, fetch, reconnect) rebuilds from the same
+    // wire — the folded result must ride along, not revert to the
+    // "still running" placeholder.
+    const again = normalizeSessionMessages(wire, folded);
+    const rb = resBlock(again);
+    expect(rb?.toolResult).toBe("done-gamma\n");
+    expect((rb?.toolDetails as any)?.detached).toBe(true);
+    expect(rb?.toolDurationMs).toBe(15005);
+  });
+
+  test("terminal fold with empty output blanks the body instead of lying", () => {
+    const wire: any[] = [{
+      role: "assistant",
+      content: [
+        { name: "bash", id: "c1", arguments: { command: "sleep 15" } },
+        { call_id: "c1", content: [{ text: "Command moved to background (still running)." }], is_error: false, started_at: 1000, duration_ms: 10009, details: { background_job_id: "bg_1" } },
+      ],
+    }];
+    const first = normalizeSessionMessages(wire);
+    const folded = foldBackgroundResult(first, { id: "bg_1", status: "cancelled", endedAt: 12000 });
+    const rb = folded.flatMap((m) => m.blocks).find((b) => b.type === "tool_result");
+    expect(rb?.toolResult).toBe("");
+    expect((rb?.toolDetails as any)?.detached).toBe(true);
+  });
 });

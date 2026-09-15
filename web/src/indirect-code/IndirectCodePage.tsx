@@ -100,7 +100,7 @@ export default function IndirectCodePage() {
           }
         }
       }).catch((e) => console.warn("[rc-sync] syncAll:", e));
-      if (activeSessionId()) { transcript.fetchSession(activeSessionId()); turnChanges.requestBalloons(); }
+      if (activeSessionId()) { transcript.fetchSession(activeSessionId()); turnChanges.requestBalloons(); background.refresh(); }
     },
     onClose: () => {
       options.resetPendingChoice();
@@ -446,6 +446,10 @@ export default function IndirectCodePage() {
     }
     transcript.fetchSession(id);
     turnChanges.requestBalloons();
+    // The terminal snapshots that fold bg results into rows only arrive
+    // on transitions — a freshly opened session needs its own, or
+    // finished jobs would sit on the "still running" placeholder.
+    background.refresh();
   }
 
   // Open a centered draft without creating a conversation on the host.

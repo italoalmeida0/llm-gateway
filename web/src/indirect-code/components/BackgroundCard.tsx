@@ -52,6 +52,7 @@ export function BackgroundCard() {
                   class="shrink-0 rounded border border-line px-1.5 py-0.5 text-[11px] text-ink-400 hover:text-ink-100 hover:border-ink-500"
                   onClick={() => bg.stop(job.id)}
                   title="Stop this background task"
+                  data-bg-stop={job.id}
                 >
                   Stop
                 </button>

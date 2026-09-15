@@ -2,7 +2,9 @@
 
 ## What this is
 
-A self-hosted LLM API gateway (Bun only). One upstream provider; many users with
+A self-hosted LLM API gateway: a Bun gateway + a Go agent daemon
+(`indirect-code-daemon/`, its own `go.mod`) — two projects, one repo; run
+each project's gates from its own root. One upstream provider; many users with
 their own gateway keys, budgets and dashboards. Think simplified self-hosted LiteLLM.
 
 ## Architecture (read this first)
@@ -122,8 +124,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   pipe (daemon → all of the user's clients; client → target daemon by hostId).
   **The Go daemon owns ALL truth** (sessions/projects/config on its disk). The
   page mirrors it with SignalDB (`@signaldb/core|solid|sync|indexeddb`,
-  user-sanctioned) via `web/src/rcStore.ts`: one store per hostId, IndexedDB
-  persistence (`rc:<host>:<collection>`), pull-through-sync. **No pushes and
+  user-sanctioned) via `web/src/indirect-code/store/sessions.ts`
+  (`hooks/useMirror.ts`): one store per hostId, IndexedDB persistence
+  (`rc:<host>:<collection>`), pull-through-sync. **No pushes and
   no per-field WS events for mirrored data**: mutations are daemon commands
   (`create_session`, `delete_project`, `rename_session`, …); every persistence
   funnel on the daemon (`saveSession`/`saveProjects`/`saveConfig`/
@@ -138,6 +141,21 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   their assistant carrier for display (`srcIdx` maps rendered messages back to
   raw daemon indices for edit/delete/regenerate). Slash palette only lists
   commands that are not already configurable in the UI.
+  - **Daemon project** (`indirect-code-daemon/`, Go 1.25: `cmd/daemon` +
+    `packages/agent|core|provider|…`; external deps are gorilla/websocket,
+    sergi/go-diff, x/image, x/net — keep both projects' dep lists minimal).
+    The bg registry is **memory-only**: a restart drops running jobs (only
+    their `.log` files survive, still readable). Background tasks (bash/python
+    only): a command outliving `AutoBackgroundAfter` (10s) detaches — the
+    tool returns a placeholder naming the brain `.log`, output streams there
+    (append, never deleted); finish/error delivers a completion notice
+    (system-reminder, NEVER with result text — the model reads the `.log`);
+    the model's `bg_cancel` stays silent (its caller learns from the tool
+    result) while a dashboard Stop delivers a cancellation notice; `sleep`
+    wakes early on any job transition. The frontend folds terminal snapshots
+    into the originating row client-side (`detached` mark — the server never
+    sends it, so `normalizeSessionMessages` carries folds across snapshots
+    and the page re-requests `bg_list` on session open).
 - **Animations**: `usal` (see `web/src/motion.ts` — config once, `once:true`
   + `forwards:true`; helpers `usal()`/`usalItems()`/`CountUp`). USAL observes
   DOM mutations, no manual restarts needed. **Never put `data-usal` on
@@ -179,7 +197,8 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   by `web/src/sortable.ts`; rows carry `data-id` + a `[data-handle]` grip,
   the reordered ids are POSTed to the matching `/reorder` / `PUT …/targets`
   endpoint), `@signaldb/core|solid|sync|indexeddb` (Indirect Code offline
-  mirror, user-sanctioned — only imported by `web/src/rcStore.ts`) and
+  mirror, user-sanctioned — only imported by
+  `web/src/indirect-code/store/sessions.ts`) and
   `solid-charts` (charts, user-sanctioned — composable SVG
   `Chart`/`Axis`/`Bar`/`Area`/`Line` components in `web/src/charts.tsx`; colors
   are passed from the `--chart-*` CSS vars so white/dark flip for free; chart
@@ -236,15 +255,24 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 ## Commands
 
 - After implementation changes, always leave fresh local builds available for
-  the user to test: `bun run build` produces `dist/`, and from
-  `indirect-code-daemon/`, `go build -o bin/indirect-code ./cmd/daemon` produces
-  the daemon. Keep these generated artifacts locally (gitignored). The gateway
+  the user to test: `bun run build` (SPA into `dist/` + every daemon platform),
+  `bun run build:web` for the SPA alone, `bun run build:daemon` for a
+  single-platform daemon binary. `dist/` and `indirect-code-daemon/bin/` are
+  gitignored local artifacts; the release binaries in
+  `indirect-code-daemon/dist/` (+ `SHA256SUMS.txt`) ARE committed — refresh
+  them via `bun run build:daemon:all` whenever daemon code changes. The gateway
   backend runs directly with `bun start`; it does not require a separate build.
 - `bun run dev` / `bun run dev:web` — backend :3000 / frontend dev :5700 (proxies /api,/v1)
-- `bun run build` — build SPA into `dist/`
+- `bun run build` — full release: SPA into `dist/` + all daemon platforms into
+  `indirect-code-daemon/dist/`
 - `bun run lint` — ESLint 10 flat config (`eslint.config.js`: TS + eslint-plugin-solid); keep it at zero
 - `bun run typecheck` — `tsc --noEmit`; keep it at zero
-- `bun test` — must stay green (unit + black-box integration with fake upstream)
+- `bun test` — must stay green (unit + black-box integration with fake upstream;
+  covers the Bun side only — Go and browser gates below are separate)
+- From `indirect-code-daemon/`: `go test ./...` must stay green (real commands,
+  tight `AutoBackgroundAfter` overrides). No Go linter is configured and
+  `gofmt` is not enforced (baseline has unformatted files) — match the
+  surrounding style, don't reformat unrelated files.
 - `bun run bench` — perf harness; do not let non-stream overhead regress wildly
 - `bun run perf:sim` — day-by-day growth sim (real gateway+upstream, HTTP
   measurements per checkpoint up to 10y; `PERF_MAX_DAYS=N` to shorten)
@@ -255,6 +283,16 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   write path before/after migration-013 indexes, optional live HTTP pass;
   writes a markdown report (see docs/performance/results)
 - `bun run fake-upstream` — fake provider for manual testing (:3399, key `sk-fake-secret`)
+- `PLAYWRIGHT_MODULE=… CHROMIUM_PATH=… bun scripts/test-indirect-turn-ui.ts`
+  (also `test-indirect-composer-ui.ts`, `test-indirect-settings-ui.ts`) —
+  component checks in real Chromium against fixture bundles (fast, no model).
+  Playwright is always an external install, never an app dependency.
+- `PLAYWRIGHT_MODULE=… CHROMIUM_PATH=… bun scripts/test-indirect-bg-e2e.ts [finish|cancel]` —
+  full-stack background check (real gateway + daemon + model + Chromium on
+  `#/code`: finish-fold/duration, manual-cancel notice, zero page errors).
+  Needs `dist/` + daemon binary built and `META_API_KEY` in `.env`;
+  `CHROMIUM_PATH` falls back to PATH and the Playwright browser cache.
+  Slow (~3 min, real model latency) — manual gate, not part of `bun test`.
 - `bun run seed` — mock usage data for the dev DB (`-- --days N`, `-- --keep`),
   seeds every existing key (replaces usage rows by default)
 
@@ -309,9 +347,22 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - `Modal` renders via `<Portal>` and entrance animations use fill-mode
   `backwards` (never `both`): a retained `transform` creates a containing
   block that breaks `position: fixed` descendants (modal spawns off-screen).
+- Solid memos evaluate EAGERLY: a `createMemo` reading a `const` declared
+  below it throws a TDZ `ReferenceError` on first render (broke every tool row
+  on expand) — declare row-model helpers ABOVE the memos. tsc/eslint/`bun test`
+  cannot catch this; only the browser does (the bg-e2e script asserts zero
+  page errors for exactly this reason).
+- Daemon restarts drop the bg registry (memory-only): detached rows stay
+  unfolded with no snapshot to fold from — only the `.log` files survive
+  (still readable via the path in the placeholder).
 
 ## Testing philosophy
 
 Integration tests spawn REAL child processes (gateway + fake upstream) and drive
 HTTP — assert behavior at the boundary, including security (lockouts, traversal,
 budget exhaustion, revocation). When you add a route, add its black-box test.
+Go tests (`go test ./...` from `indirect-code-daemon/`) follow the same spirit
+with real commands and tight `AutoBackgroundAfter` overrides — no mocks for
+process behavior. Browser checks are Playwright scripts, never `bun test`:
+`scripts/test-indirect-*.ts` for components (fixture bundles, fast) and
+`scripts/test-indirect-bg-e2e.ts` for the full stack (slow, real model).

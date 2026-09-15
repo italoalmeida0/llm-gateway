@@ -14,6 +14,30 @@ import type { TurnActivity } from "../viewTypes";
 export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[] = []): ChatMessage[] {
   const out: ChatMessage[] = [];
   const byIndex = new Map(previous.filter((m) => m.srcIdx != null).map((m) => [m.srcIdx, m]));
+  // Folds are client-side only (the server never sends detached rows): a
+  // later full snapshot (turn end, fetch, reconnect) must not wipe the
+  // folded result text back to the "still running" placeholder. Carry the
+  // terminal fields forward by tool call id — job ids are unique per
+  // detach, so a carried fold always belongs to the same logical call.
+  const prevFolded = new Map<string, ContentBlock>();
+  for (const m of previous) {
+    for (const b of m.blocks || []) {
+      if (b.type === "tool_result" && b.toolId && (b.toolDetails as any)?.detached) prevFolded.set(b.toolId, b);
+    }
+  }
+  const carryFold = (b: ContentBlock): ContentBlock => {
+    if (b.type !== "tool_result" || !b.toolId || (b.toolDetails as any)?.detached) return b;
+    if (!(b.toolDetails as any)?.background_job_id) return b;
+    const folded = prevFolded.get(b.toolId);
+    if (!folded || !(folded.toolDetails as any)?.detached) return b;
+    return {
+      ...b,
+      toolResult: folded.toolResult,
+      toolDurationMs: folded.toolDurationMs ?? b.toolDurationMs,
+      isError: folded.isError,
+      toolDetails: { ...(b.toolDetails as any), detached: true, display: (folded.toolDetails as any)?.display },
+    };
+  };
   let carrier: ChatMessage | null = null;
   const ensureCarrier = (srcIdx: number, wire: any): ChatMessage => {
     if (!carrier || carrier.role !== "assistant") {
@@ -42,7 +66,7 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
         id: byIndex.get(idx)?.id ?? `msg_${idx}`,
         role,
         streaming: m.streaming === true,
-        blocks: [...reason, ...rest],
+        blocks: [...reason, ...rest.map(carryFold)],
         thinkingDuration: Number(m.meta?.thinking_ms) > 0 ? Math.max(1, Math.ceil(Number(m.meta.thinking_ms) / 1000)) : undefined,
         turnDurationMs: Number(m.meta?.turn_ms) > 0 ? Number(m.meta.turn_ms) : undefined,
         time: Date.now(),
@@ -56,7 +80,7 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
     // user / tool envelope: split tool results away from real content.
     const rest: ContentBlock[] = [];
     for (const b of blocks) {
-      if (b.type === "tool_result") ensureCarrier(idx, m).blocks.push(b);
+      if (b.type === "tool_result") ensureCarrier(idx, m).blocks.push(carryFold(b));
       else rest.push(b);
     }
     if (role === "tool" || rest.length === 0) {
@@ -302,9 +326,13 @@ export function foldBackgroundResult(
       if (!det || det.background_job_id !== job.id || det.detached) return b;
       folded = true;
       changed = true;
+      // A terminal job with empty output folds to blank text (the body
+      // then reads "No output") — never keep the "still running"
+      // placeholder for a job that already ended.
+      const text = typeof job.result === "string" && job.result !== "" ? job.result : undefined;
       return {
         ...b,
-        toolResult: typeof job.result === "string" ? job.result : b.toolResult,
+        toolResult: text ?? "",
         isError: job.status === "error" ? true : b.isError,
         toolDurationMs: typeof job.endedAt === "number" && typeof b.toolStartedAt === "number"
           ? Math.max(0, job.endedAt - b.toolStartedAt)
@@ -312,7 +340,7 @@ export function foldBackgroundResult(
         toolDetails: {
           ...(typeof det === "object" ? det : {}),
           detached: true,
-          display: typeof job.result === "string" ? job.result : det.display,
+          display: text ?? (typeof det.display === "string" && det.display !== "" ? det.display : undefined),
         },
       };
     });

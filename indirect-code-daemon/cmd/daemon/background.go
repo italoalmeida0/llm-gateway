@@ -243,13 +243,17 @@ func (d *DaemonServer) cancelBackgroundJobs(sessionID string) {
 	}
 	d.bgMu.Unlock()
 	for _, j := range targets {
-		d.bgCancelJob(j.ID)
+		d.bgCancelJob(j.ID, "")
 	}
 }
 
 // bgCancelJob forces a stop: the process is killed, the job is marked
-// cancelled and no result is delivered.
-func (d *DaemonServer) bgCancelJob(id string) bool {
+// cancelled and no completion notice is delivered. by names who stopped
+// it ("user" dashboard stop, "assistant" bg_cancel tool, "" silent e.g.
+// purge): a named stop records a terminal Result marker (so the folded
+// row reads truthfully instead of the stale "still running" placeholder)
+// and a [cancelled by …] line in the .log.
+func (d *DaemonServer) bgCancelJob(id, by string) bool {
 	j := d.bgGet(id)
 	if j == nil {
 		return false
@@ -267,14 +271,39 @@ func (d *DaemonServer) bgCancelJob(id string) bool {
 		j.cancel()
 	}
 	d.bgMu.Lock()
+	stopped := false
 	if j.Status == BgStatusRunning {
 		j.Status = BgStatusCancelled
 		j.EndedAt = time.Now().UnixMilli()
+		stopped = true
+	}
+	label, logPath := d.bgJobLabel(j), j.LogPath
+	if stopped && by != "" {
+		j.Result = fmt.Sprintf("Background task %s cancelled by %s.", label, by)
+		if logPath != "" {
+			j.Result += fmt.Sprintf("\nPartial output (if any) is in the .log at: %s", logPath)
+		}
 	}
 	d.bgMu.Unlock()
+	if stopped && by != "" {
+		d.bgAppendLogLine(logPath, fmt.Sprintf("\n[cancelled by %s]\n", by))
+	}
 	d.broadcastBgJobs()
 	j.closeDone()
 	return true
+}
+
+// bgAppendLogLine best-effort appends one marker line to a job's .log.
+func (d *DaemonServer) bgAppendLogLine(logPath, line string) {
+	if logPath == "" || line == "" {
+		return
+	}
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(line)
 }
 
 // CancelBackgroundJob implements tools.BgCancelHost: the model's bg_cancel
@@ -294,7 +323,10 @@ func (d *DaemonServer) CancelBackgroundJob(callerSessionID, jobID string) (tools
 		return tools.BgCancelOutcome{OK: false, Status: status, Notice: fmt.Sprintf("Background task %s already finished (status %s) — nothing to cancel.", label, status)},
 			nil
 	}
-	if !d.bgCancelJob(jobID) {
+	// The caller is the model itself: it learns from this tool result, so
+	// no cancellation notice is delivered — but the stop is still
+	// attributed in the .log and the folded row ("assistant").
+	if !d.bgCancelJob(jobID, "assistant") {
 		// Lost a race with a concurrent finish; report the terminal state.
 		d.bgMu.Lock()
 		status = j.Status
@@ -340,7 +372,15 @@ func (d *DaemonServer) handleBgCancel(raw []byte) {
 	if req.JobID == "" {
 		return
 	}
-	d.bgCancelJob(req.JobID)
+	// Manual (dashboard) stop: unlike the model's bg_cancel tool — whose
+	// caller learns from the tool result — nothing else tells the AI, so
+	// a cancellation notice is delivered on top of the .log attribution.
+	if !d.bgCancelJob(req.JobID, "user") {
+		return
+	}
+	if j := d.bgGet(req.JobID); j != nil {
+		d.deliverBgCancel(j)
+	}
 }
 
 // handleBgTail serves the tail of a job's .log file to a (re)connecting
@@ -404,12 +444,27 @@ func (d *DaemonServer) bgCompletionNotice(j *BgJob) string {
 	return sb.String()
 }
 
-// deliverBgResult routes a finished job's completion notice to its owner
-// session: late-result into the live turn when one is running, otherwise
-// a wake-up turn.
-func (d *DaemonServer) deliverBgResult(j *BgJob) {
-	text := d.bgCompletionNotice(j)
+// bgCancelledNotice is the system-reminder delivered to the owner session
+// when a background job is stopped from the dashboard. Like the
+// completion notice it carries no result text — only the .log path.
+func (d *DaemonServer) bgCancelledNotice(j *BgJob) string {
+	d.bgMu.Lock()
+	label, logPath := d.bgJobLabel(j), j.LogPath
+	d.bgMu.Unlock()
+	var sb strings.Builder
+	sb.WriteString("<system-reminder>\n")
+	fmt.Fprintf(&sb, "Background task %s was cancelled by the user.\n", label)
+	if logPath != "" {
+		fmt.Fprintf(&sb, "Partial output (if any) is in the .log at: %s\n", logPath)
+	}
+	sb.WriteString("Do not wait for it — continue your work another way.</system-reminder>")
+	return sb.String()
+}
 
+// routeBgNotice delivers one background notice to the owner session:
+// late-result into the live turn when one is running, otherwise a
+// wake-up turn. progressVerb completes the live-path event text.
+func (d *DaemonServer) routeBgNotice(j *BgJob, text, progressVerb string) {
 	d.sessionsMu.RLock()
 	act := d.sessions[j.SessionID]
 	d.sessionsMu.RUnlock()
@@ -431,16 +486,30 @@ func (d *DaemonServer) deliverBgResult(j *BgJob) {
 		// Late-result into the live turn. Wire shape stays role:user
 		// (providers reject orphan role:tool without a matching call),
 		// but the <system-reminder> envelope marks it as a background
-		// completion — never a common user message. The frontend filters
+		// delivery — never a common user message. The frontend filters
 		// it from the rendered transcript.
 		agent.AppendUserContextQuiet(text, map[string]string{
 			"background_delivery": j.ID, "background_kind": j.Kind,
 		})
 		_ = d.sendWS(map[string]any{"type": "agent_event", "hostId": d.config.HostID, "sessionId": j.SessionID,
-			"event": map[string]any{"type": "tool_progress", "text": fmt.Sprintf("Background %s %s finished — completion notice delivered to the running turn.", j.Kind, j.ID)}})
+			"event": map[string]any{"type": "tool_progress", "text": fmt.Sprintf("Background %s %s %s delivered to the running turn.", j.Kind, j.ID, progressVerb)}})
 		return
 	}
 	go d.startBgWakeUpJob(j.SessionID, text, j)
+}
+
+// deliverBgResult routes a finished job's completion notice to its owner
+// session: late-result into the live turn when one is running, otherwise
+// a wake-up turn.
+func (d *DaemonServer) deliverBgResult(j *BgJob) {
+	d.routeBgNotice(j, d.bgCompletionNotice(j), "finished — completion notice")
+}
+
+// deliverBgCancel routes a dashboard-cancelled job's cancellation notice
+// to its owner session (same channel as completions, so sleepers wake
+// and the turn learns the task is gone instead of waiting it out).
+func (d *DaemonServer) deliverBgCancel(j *BgJob) {
+	d.routeBgNotice(j, d.bgCancelledNotice(j), "cancelled — cancellation notice")
 }
 
 // startBgWakeUpJob opens a new turn on an idle session carrying a finished

@@ -235,11 +235,15 @@ func TestBgCancelOwnRunningJob(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("job done never closed after cancel")
 	}
-	// The deliver path must be a no-op after cancellation: no result, no
-	// wake-up turn.
+	// The deliver path must be a no-op after cancellation: no status
+	// change, no wake-up turn, and the cancellation marker (not the late
+	// output) stays as the folded result.
 	deliver("late output", false)
-	if j.Status != BgStatusCancelled || j.Result != "" {
-		t.Fatalf("cancelled job must not absorb a late result: %+v", j)
+	if j.Status != BgStatusCancelled {
+		t.Fatalf("cancelled job must stay cancelled, got %q", j.Status)
+	}
+	if !strings.Contains(j.Result, "cancelled by assistant") || strings.Contains(j.Result, "late output") {
+		t.Fatalf("late finish must not overwrite the cancellation marker, got %q", j.Result)
 	}
 }
 
@@ -259,7 +263,7 @@ func TestBgCancelForeignAndUnknownDenied(t *testing.T) {
 	if j := d.bgGet(id); j.Status != BgStatusRunning {
 		t.Fatalf("job must stay running, got %q", j.Status)
 	}
-	if !d.bgCancelJob(id) {
+	if !d.bgCancelJob(id, "") {
 		t.Fatal("cancel after denials must still work")
 	}
 }
@@ -341,6 +345,128 @@ func TestBgCancelKillsDetachedBash(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("detached sleep survived bg_cancel — process group was not killed")
+}
+
+// TestManualCancelNotifiesOwner pins the dashboard-stop contract: a manual
+// stop attributes the cancel in the .log ("user"), folds a truthful
+// terminal marker into the row, and delivers a cancellation notice so the
+// AI learns the task is gone (the model's own bg_cancel stays silent —
+// its caller learns from the tool result).
+func TestManualCancelNotifiesOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	old := tools.AutoBackgroundAfter
+	tools.AutoBackgroundAfter = 50 * time.Millisecond
+	defer func() { tools.AutoBackgroundAfter = old }()
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	wakeups := make(chan string, 10)
+	d.runTurnHook = func(act *ActiveSession, prompt string) { wakeups <- prompt }
+	bash := &tools.BashTool{CWD: t.TempDir(), Sandbox: tools.NewSandbox(t.TempDir()), Slow: d.slowHook("sess_parent")}
+	res, err := bash.Execute(context.Background(), []byte(`{"command":"sleep 30"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jobID, logPath string
+	if m, ok := res.Details.(map[string]any); ok {
+		jobID, _ = m["background_job_id"].(string)
+		logPath, _ = m["log_path"].(string)
+	}
+	if jobID == "" || logPath == "" {
+		t.Fatal("expected background_job_id and log_path in details")
+	}
+	// The wire snapshot carries the owner session (the card + the fold
+	// scope rows by it).
+	found := false
+	for _, p := range d.bgSnapshot() {
+		if p["id"] == jobID {
+			found = true
+			if p["sessionId"] != "sess_parent" {
+				t.Fatalf("snapshot must carry the owner session, got %v", p["sessionId"])
+			}
+		}
+	}
+	if !found {
+		t.Fatal("detached job missing from snapshot")
+	}
+	d.handleBgCancel([]byte(`{"jobId":"` + jobID + `"}`))
+	j := d.bgGet(jobID)
+	if j.Status != BgStatusCancelled {
+		t.Fatalf("expected cancelled, got %q", j.Status)
+	}
+	if !strings.Contains(j.Result, "cancelled by user") {
+		t.Fatalf("folded row must name the cancellation, got %q", j.Result)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "[cancelled by user]") {
+		t.Fatalf(".log must record the manual stop, got %q", string(raw))
+	}
+	select {
+	case prompt := <-wakeups:
+		if !strings.Contains(prompt, "cancelled by the user") {
+			t.Fatalf("cancel notice must explain the stop, got %q", prompt)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("manual cancel delivered no notice — the AI would keep waiting")
+	}
+}
+
+// TestToolCancelStaysSilent pins the bg_cancel tool contract: the model
+// learns from the tool result (no wake-up notice), while the stop is
+// still attributed in the .log ("assistant") and the folded row.
+func TestToolCancelStaysSilent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	old := tools.AutoBackgroundAfter
+	tools.AutoBackgroundAfter = 50 * time.Millisecond
+	defer func() { tools.AutoBackgroundAfter = old }()
+	d := testBgServer(t)
+	mkSession(t, d, "sess_parent", "build")
+	wakeups := make(chan string, 10)
+	d.runTurnHook = func(act *ActiveSession, prompt string) { wakeups <- prompt }
+	bash := &tools.BashTool{CWD: t.TempDir(), Sandbox: tools.NewSandbox(t.TempDir()), Slow: d.slowHook("sess_parent")}
+	res, err := bash.Execute(context.Background(), []byte(`{"command":"sleep 30"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jobID, logPath string
+	if m, ok := res.Details.(map[string]any); ok {
+		jobID, _ = m["background_job_id"].(string)
+		logPath, _ = m["log_path"].(string)
+	}
+	if jobID == "" || logPath == "" {
+		t.Fatal("expected background_job_id and log_path in details")
+	}
+	out, err := cancelText(t, d, "sess_parent", `{"job_id":"`+jobID+`"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "cancelled") {
+		t.Fatalf("expected cancellation outcome, got %q", out)
+	}
+	if j := d.bgGet(jobID); j.Status != BgStatusCancelled {
+		t.Fatalf("expected cancelled, got %q", j.Status)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "[cancelled by assistant]") {
+		t.Fatalf(".log must record the tool stop, got %q", string(raw))
+	}
+	if j := d.bgGet(jobID); !strings.Contains(j.Result, "cancelled by assistant") {
+		t.Fatalf("folded row must name the cancellation, got %q", j.Result)
+	}
+	select {
+	case prompt := <-wakeups:
+		t.Fatalf("tool cancel must not wake the session, got %q", prompt)
+	case <-time.After(500 * time.Millisecond):
+	}
 }
 
 // TestDetachedBashSurvivesTurnEnd pins the core guarantee: a bash command
@@ -709,7 +835,7 @@ func TestBgRegisterTruncatesLabel(t *testing.T) {
 	if r := []rune(j.Label); len(r) != 301 {
 		t.Fatalf("registered label must be truncated, got len %d", len(r))
 	}
-	d.bgCancelJob(j.ID)
+	d.bgCancelJob(j.ID, "")
 }
 
 func TestBgReadTail(t *testing.T) {

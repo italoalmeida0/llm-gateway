@@ -1666,3 +1666,39 @@ describe("Background hook (tail buffering + always-fold)", () => {
     });
   });
 });
+
+describe("Tool row model", () => {
+  test("builds without throwing: eager memos must not read consts declared below them", async () => {
+    const { useToolUnitModel } = await import("../web/src/indirect-code/components/tool/toolUnitModel");
+    const { createRoot } = await import("solid-js");
+    const ctx: any = {
+      toolProgress: () => ({}),
+      toolStarts: () => ({ s1: 100000 }),
+      turnClock: () => 105000,
+      elapsedLabel: (ms: number) => `${ms}ms`,
+      backgroundJobs: () => [],
+      bgOutput: () => ({}),
+      bgClock: () => 0,
+    };
+    const sleepUnit: any = {
+      call: { type: "tool_call", toolId: "s1", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 30 }) },
+    };
+    const bashUnit: any = {
+      call: { type: "tool_call", toolId: "b1", toolName: "bash", toolArgs: JSON.stringify({ command: "echo hi" }) },
+      result: { type: "tool_result", toolId: "b1", toolResult: "hi" },
+    };
+    createRoot((dispose) => {
+      // Before the reorder this threw `ReferenceError: Cannot access 'name'
+      // before initialization` out of the hook — the eager hasContent memo
+      // read a const declared below it, breaking every tool row on expand.
+      const sleep = useToolUnitModel(ctx, "m1", sleepUnit, 0, () => true, () => true);
+      expect(sleep.name()).toBe("sleep");
+      expect(sleep.open()).toBe(false); // header-only while running
+      expect(sleep.sleepRemaining()).toBe("25s left");
+      const bash = useToolUnitModel(ctx, "m1", bashUnit, 1, () => false, () => false);
+      expect(bash.sum().verb).toBe("Ran");
+      expect(bash.open()).toBe(false);
+      dispose();
+    });
+  });
+});

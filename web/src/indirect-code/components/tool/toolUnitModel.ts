@@ -17,6 +17,10 @@ const key = () => toolRowKey(msgId, u, ui);
 const sum = createMemo(() => toolSummary(u));
 const prog = () => (u.call?.toolId ? ctx.toolProgress()[u.call.toolId] : undefined);
 const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
+/** Declared before hasContent: Solid memos evaluate eagerly, so a memo
+ * calling name() before this const initializes throws a TDZ
+ * ReferenceError and breaks every tool row on expand. */
+const name = () => u.call?.toolName || "tool";
 /** Anything worth showing: result output, streamed args/progress. Rows
  * with nothing (pre-created card, empty call) stay shut until content
  * lands — the chevron still opens them manually. */
@@ -30,7 +34,6 @@ const hasContent = createMemo(() => {
 });
 const { open, toggle } = createDisclosure(() => `${running()}:${active()}`,
   () => running() && active() && !u.result && u.call?.toolName !== "question" && hasContent());
-const name = () => u.call?.toolName || "tool";
 // Full shell command for the highlighted header: commands[] joined with
 // the effective joiner (&& or ;), else the single command. Python rows
 // show script + args or the first code line (same as the summary).

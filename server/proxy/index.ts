@@ -881,12 +881,13 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     const snap = await routerSnapshot();
     let routedPublicModel: string | null = null;
 
-    // E2E hook (compaction tests only): force a provider-style context
-    // overflow error without burning a real 1M window. Armed via the
-    // admin /api/admin/e2e-overflow endpoint (which only exists when
-    // E2E_FORCE_OVERFLOW=1, so production can never trigger it).
-    // One-shot: the first POST after arming fails with a 400 overflow,
-    // the daemon compacts and retries cleanly through to the provider.
+    // TEST-ONLY E2E hook (scripts/test-indirect-compaction-e2e.ts): force a
+    // provider-style context overflow error without burning a real 1M
+    // window. Armed via the admin /api/admin/e2e-overflow endpoint (which
+    // only exists when E2E_FORCE_OVERFLOW=1, so production can never
+    // trigger it). One-shot: the first POST after arming fails with a 400
+    // overflow, the daemon compacts and retries cleanly through to the
+    // provider. Never remove the env gate.
     if (process.env.E2E_FORCE_OVERFLOW && req.method === "POST" && !route.isModelsList) {
       if ((globalThis as any).__e2eOverflowArmed) {
         (globalThis as any).__e2eOverflowArmed = false;

@@ -388,9 +388,10 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
 
   // ================= providers =================
 
-  // E2E hook: arm a one-shot forced context-overflow on the next proxied
-  // POST (compaction retry-path tests). Only registered when
-  // E2E_FORCE_OVERFLOW=1 — absent in production.
+  // TEST-ONLY E2E hook (scripts/test-indirect-compaction-e2e.ts): arm a
+  // one-shot forced context-overflow on the next proxied POST. Only
+  // registered when E2E_FORCE_OVERFLOW=1 — absent in production.
+  // Never remove the env gate.
   if (process.env.E2E_FORCE_OVERFLOW && path === "/api/admin/e2e-overflow" && req.method === "POST") {
     const body = await readJsonBody(req, 1024).catch(() => ({} as any));
     (globalThis as any).__e2eOverflowArmed = (body as any)?.armed !== false;

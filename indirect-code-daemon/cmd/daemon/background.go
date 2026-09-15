@@ -12,6 +12,7 @@ import (
 
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 	"llm-gateway/indirect-code-daemon/packages/core"
+	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // Background task kinds. Bash and python detach here when they outlive
@@ -510,6 +511,167 @@ func (d *DaemonServer) deliverBgResult(j *BgJob) {
 // and the turn learns the task is gone instead of waiting it out).
 func (d *DaemonServer) deliverBgCancel(j *BgJob) {
 	d.routeBgNotice(j, d.bgCancelledNotice(j), "cancelled — cancellation notice")
+}
+
+// orphanBgTask is a detached placeholder in the transcript whose job is
+// gone from the registry with no delivery behind it — the previous
+// process died holding it. The registry is memory-only, so after a
+// restart every placeholder is suspect until proven informed.
+type orphanBgTask struct {
+	id, kind, label, logPath string
+}
+
+// bgDetailsMap normalizes tool details to a plain map. In-memory blocks
+// carry map[string]any, but a disk round-trip changes the shape:
+// HydrateMessageObject keeps Details as json.RawMessage (raw JSON), so a
+// scan that only accepts the map form silently finds nothing on every
+// real restart — exactly the path this reconciliation exists for.
+func bgDetailsMap(details any) map[string]any {
+	switch d := details.(type) {
+	case map[string]any:
+		return d
+	case json.RawMessage:
+		var m map[string]any
+		if json.Unmarshal(d, &m) == nil {
+			return m
+		}
+	case []byte:
+		var m map[string]any
+		if json.Unmarshal(d, &m) == nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// bgDetailString reads one string field from persisted tool details.
+func bgDetailString(details any, key string) string {
+	if s, ok := bgDetailsMap(details)[key].(string); ok {
+		return s
+	}
+	return ""
+}
+
+// bgCallLabel rebuilds the human label for a detached call from its
+// persisted arguments, mirroring the registry label shape.
+func bgCallLabel(call provider.ToolCallBlock) string {
+	var args map[string]any
+	_ = json.Unmarshal(call.Arguments, &args)
+	switch call.Name {
+	case BgKindPython:
+		if s, _ := args["script"].(string); s != "" {
+			return truncateBgLabel(s)
+		}
+		if code, _ := args["code"].(string); code != "" {
+			for _, l := range strings.Split(code, "\n") {
+				if t := strings.TrimSpace(l); t != "" && !strings.HasPrefix(t, "#") {
+					return truncateBgLabel(t)
+				}
+			}
+		}
+		return "snippet"
+	default:
+		if cmd, _ := args["command"].(string); strings.Join(strings.Fields(cmd), " ") != "" {
+			return truncateBgLabel(strings.Join(strings.Fields(cmd), " "))
+		}
+		if call.Name != "" {
+			return call.Name
+		}
+		return "command"
+	}
+}
+
+// findRestartOrphans scans history for detached placeholders (tool results
+// carrying background_job_id) with no live registry entry and no delivery
+// behind them. A job counts as informed when a notice stamped its
+// background_delivery meta, or when a bg_cancel result closed it (its
+// details carry cancelled:true — the model learned from that tool call,
+// no restart notice needed). Job ids are unique per detach, so each
+// orphan reports exactly once.
+func findRestartOrphans(hist []provider.Message, live map[string]bool) []orphanBgTask {
+	informed := map[string]bool{}
+	for _, m := range hist {
+		if m.Meta != nil {
+			if id := m.Meta["background_delivery"]; id != "" {
+				informed[id] = true
+			}
+		}
+	}
+	calls := map[string]provider.ToolCallBlock{}
+	for _, m := range hist {
+		for _, c := range m.Content {
+			if tc, ok := c.(provider.ToolCallBlock); ok {
+				calls[tc.ID] = tc
+			}
+		}
+	}
+	var out []orphanBgTask
+	seen := map[string]bool{}
+	for _, m := range hist {
+		for _, c := range m.Content {
+			tr, ok := c.(provider.ToolResultBlock)
+			if !ok {
+				continue
+			}
+			id := bgDetailString(tr.Details, "background_job_id")
+			if id == "" || live[id] || informed[id] || seen[id] {
+				continue
+			}
+			if cancelled, _ := bgDetailsMap(tr.Details)["cancelled"].(bool); cancelled {
+				informed[id] = true
+				continue
+			}
+			seen[id] = true
+			call := calls[tr.CallID]
+			kind := call.Name
+			if kind != BgKindBash && kind != BgKindPython {
+				kind = BgKindBash
+			}
+			out = append(out, orphanBgTask{
+				id: id, kind: kind,
+				label:   bgCallLabel(call),
+				logPath: bgDetailString(tr.Details, "log_path"),
+			})
+		}
+	}
+	return out
+}
+
+// bgRestartNotice is the system-reminder injected into a resumed turn for
+// each task orphaned by the previous process. Like completion notices it
+// carries no result text — only the .log path.
+func bgRestartNotice(o orphanBgTask) string {
+	var sb strings.Builder
+	sb.WriteString("<system-reminder>\n")
+	fmt.Fprintf(&sb, "Background task %s was lost in the daemon restart.\n", o.label)
+	sb.WriteString("It will NOT report back — do NOT wait for it.\n")
+	if o.logPath != "" {
+		fmt.Fprintf(&sb, "Partial output (if any) is in the .log at: %s\n", o.logPath)
+	}
+	sb.WriteString("Read the log and re-run the command if you still need a fresh result.</system-reminder>")
+	return sb.String()
+}
+
+// injectRestartNotices informs a resumed turn about detached tasks the
+// previous process dropped (see findRestartOrphans). Each orphan reports
+// exactly once: the notice stamps background_delivery, so a later scan —
+// including after another crash — skips it. Must run AFTER the
+// Prompt-vs-Continue decision: the injected message carries the turn index
+// and would otherwise flip an empty history into Continue, swallowing the
+// opening prompt.
+func (r *turnRun) injectRestartNotices() {
+	d := r.d
+	d.bgMu.Lock()
+	live := make(map[string]bool, len(d.bgJobs))
+	for id := range d.bgJobs {
+		live[id] = true
+	}
+	d.bgMu.Unlock()
+	for _, o := range findRestartOrphans(r.agent.History(), live) {
+		r.agent.AppendUserContextQuiet(bgRestartNotice(o), map[string]string{
+			"background_delivery": o.id, "background_kind": o.kind,
+		})
+	}
 }
 
 // startBgWakeUpJob opens a new turn on an idle session carrying a finished

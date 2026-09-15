@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"runtime"
@@ -466,6 +470,177 @@ func TestToolCancelStaysSilent(t *testing.T) {
 	case prompt := <-wakeups:
 		t.Fatalf("tool cancel must not wake the session, got %q", prompt)
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// bgHistory builds a transcript with one detached bash placeholder.
+func bgHistory(callID string, details map[string]any) []provider.Message {
+	return []provider.Message{
+		{Role: provider.RoleUser, TurnIndex: 5, Content: []provider.Content{
+			provider.TextBlock{Text: "run it"},
+		}},
+		{Role: provider.RoleAssistant, TurnIndex: 5, Content: []provider.Content{
+			provider.ToolCallBlock{ID: callID, Name: "bash", Arguments: json.RawMessage(`{"command":"sleep 60"}`)},
+		}},
+		{Role: provider.RoleTool, TurnIndex: 5, Content: []provider.Content{
+			provider.ToolResultBlock{CallID: callID, StartedAt: 1, DurationMs: 10009,
+				Content: []provider.Content{provider.TextBlock{Text: "Command moved to background (still running)."}},
+				Details: details},
+		}},
+	}
+}
+
+func bgDetails(jobID string) map[string]any {
+	return map[string]any{"background_job_id": jobID, "log_path": "/tmp/orphan.log"}
+}
+
+// hydrateRoundTrip mirrors production: saveSession/loadSession decodes
+// tool details into json.RawMessage, NOT map[string]any. A scan tested
+// only on in-memory structs passes while finding nothing on every real
+// restart — hydrate before scanning.
+func hydrateRoundTrip(t *testing.T, msgs []provider.Message) []provider.Message {
+	t.Helper()
+	out := make([]provider.Message, 0, len(msgs))
+	for _, m := range msgs {
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hm, err := core.HydrateMessageObject(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, hm)
+	}
+	return out
+}
+
+// TestFindRestartOrphans pins the boot-scan decision: a detached
+// placeholder with no live job and no delivery behind it reports once,
+// with the label rebuilt from the call; delivered, live, tool-cancelled
+// and plain results never report.
+func TestFindRestartOrphans(t *testing.T) {
+	// Both detail shapes: hydrated (the only shape a restart ever sees)
+	// and in-memory maps.
+	if bgDetailString(map[string]any{"k": "v"}, "k") != "v" ||
+		bgDetailString(json.RawMessage(`{"k":"v"}`), "k") != "v" {
+		t.Fatal("bgDetailString must read map and raw-JSON details")
+	}
+	hist := hydrateRoundTrip(t, bgHistory("c1", bgDetails("bg_9")))
+	orphans := findRestartOrphans(hist, map[string]bool{})
+	if len(orphans) != 1 {
+		t.Fatalf("uninformed orphan must report, got %+v", orphans)
+	}
+	o := orphans[0]
+	if o.id != "bg_9" || o.kind != "bash" || o.label != "sleep 60" || o.logPath != "/tmp/orphan.log" {
+		t.Fatalf("wrong orphan fields: %+v", o)
+	}
+	if !strings.Contains(bgRestartNotice(o), "lost in the daemon restart") || !strings.Contains(bgRestartNotice(o), "/tmp/orphan.log") {
+		t.Fatalf("notice must explain the restart and point at the log: %q", bgRestartNotice(o))
+	}
+	// A delivered completion notice informs: no report.
+	delivered := append(append([]provider.Message{}, hist...), hydrateRoundTrip(t, []provider.Message{{
+		Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "<system-reminder/>"}},
+		Meta: map[string]string{"background_delivery": "bg_9", "background_kind": "bash"},
+	}})...)
+	if out := findRestartOrphans(delivered, map[string]bool{}); len(out) != 0 {
+		t.Fatalf("delivered job must not report: %+v", out)
+	}
+	// A live registry entry is not an orphan.
+	if out := findRestartOrphans(hist, map[string]bool{"bg_9": true}); len(out) != 0 {
+		t.Fatalf("live job must not report: %+v", out)
+	}
+	// A bg_cancel close (cancelled:true details) informed the model
+	// through that tool call — no restart notice needed.
+	cancelled := hydrateRoundTrip(t, bgHistory("c1", map[string]any{"background_job_id": "bg_9", "cancelled": true, "status": "cancelled"}))
+	if out := findRestartOrphans(cancelled, map[string]bool{}); len(out) != 0 {
+		t.Fatalf("tool-cancelled job must not report: %+v", out)
+	}
+	// Plain results and duplicates never report.
+	plain := hydrateRoundTrip(t, bgHistory("c1", nil))
+	if out := findRestartOrphans(plain, map[string]bool{}); len(out) != 0 {
+		t.Fatalf("result without job details must not report: %+v", out)
+	}
+	dup := append(append([]provider.Message{}, hist...), hist[2])
+	if out := findRestartOrphans(dup, map[string]bool{}); len(out) != 1 {
+		t.Fatalf("duplicate placeholder must report once, got %+v", out)
+	}
+	// Python labels come from the first meaningful code line.
+	pyHist := hydrateRoundTrip(t, []provider.Message{
+		{Role: provider.RoleAssistant, TurnIndex: 5, Content: []provider.Content{
+			provider.ToolCallBlock{ID: "p1", Name: "python", Arguments: json.RawMessage(`{"code":"# wait\nimport time\ntime.sleep(60)"}`)},
+		}},
+		{Role: provider.RoleTool, TurnIndex: 5, Content: []provider.Content{
+			provider.ToolResultBlock{CallID: "p1", Content: []provider.Content{provider.TextBlock{Text: "moved"}},
+				Details: map[string]any{"background_job_id": "bg_py"}},
+		}},
+	})
+	if out := findRestartOrphans(pyHist, map[string]bool{}); len(out) != 1 || out[0].label != "import time" || out[0].kind != "python" {
+		t.Fatalf("python orphan mislabeled: %+v", out)
+	}
+}
+
+// TestResumeInjectsRestartNotice pins the reported gap end to end: a turn
+// interrupted while its background task was still running resumes with a
+// restart notice in context — the agent learns the task will not report
+// back instead of waiting on a dead job id.
+func TestResumeInjectsRestartNotice(t *testing.T) {
+	d := testDaemon(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/indirect-code/models" {
+			fmt.Fprint(w, `{"models":[{"id":"m","limit":{"context":100000,"output":1000}}]}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Recovered\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer upstream.Close()
+	d.config.GatewayURL = upstream.URL
+	rec := &SessionRecord{ID: "recover-bg", CWD: t.TempDir(), Model: "m", Status: "idle", TurnSeq: 5,
+		Options: SessionOptions{Mode: "talk"}, Turn: &TurnActivity{StartedAt: 123, Status: "running"},
+		Messages: bgHistory("c1", bgDetails("bg_9"))}
+	d.saveSession(rec)
+	// Reload from disk exactly like production startup does: the scan
+	// must handle hydrated (raw-JSON) tool details, not just the
+	// in-memory map form this test builds above.
+	loaded, err := d.loadSession(rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	act := &ActiveSession{record: loaded}
+	d.sessions[rec.ID] = act
+	j := &TurnJournal{TurnIndex: 5, StartedAt: 123, Prompt: "original"}
+	d.writeTurnJournal(rec.ID, j)
+	d.resumeAgentTurn(act, j)
+	saved, err := d.loadSession(rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices := 0
+	for _, m := range saved.Messages {
+		if m.Meta["background_delivery"] != "bg_9" {
+			continue
+		}
+		notices++
+		text := ""
+		for _, c := range m.Content {
+			if tb, ok := c.(provider.TextBlock); ok {
+				text += tb.Text
+			}
+		}
+		if !strings.Contains(text, "lost in the daemon restart") || !strings.Contains(text, "/tmp/orphan.log") {
+			t.Fatalf("restart notice must explain + point at log: %q", text)
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("expected exactly one restart notice, got %d", notices)
+	}
+	if journal, _ := d.readTurnJournal(rec.ID); journal != nil {
+		t.Fatal("finished recovery kept journal")
 	}
 }
 

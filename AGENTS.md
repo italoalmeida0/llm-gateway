@@ -152,10 +152,14 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
     (system-reminder, NEVER with result text — the model reads the `.log`);
     the model's `bg_cancel` stays silent (its caller learns from the tool
     result) while a dashboard Stop delivers a cancellation notice; `sleep`
-    wakes early on any job transition. The frontend folds terminal snapshots
-    into the originating row client-side (`detached` mark — the server never
-    sends it, so `normalizeSessionMessages` carries folds across snapshots
-    and the page re-requests `bg_list` on session open).
+    wakes early on any job transition. A restart orphans running jobs
+    (registry gone, processes keep running detached): the resumed turn gets
+    one restart notice per uninformed placeholder (`findRestartOrphans` —
+    skips delivered, live and tool-cancelled jobs), never a re-run. The
+    frontend folds terminal snapshots into the originating row client-side
+    (`detached` mark — the server never sends it, so
+    `normalizeSessionMessages` carries folds across snapshots and the page
+    re-requests `bg_list` on session open).
 - **Animations**: `usal` (see `web/src/motion.ts` — config once, `once:true`
   + `forwards:true`; helpers `usal()`/`usalItems()`/`CountUp`). USAL observes
   DOM mutations, no manual restarts needed. **Never put `data-usal` on

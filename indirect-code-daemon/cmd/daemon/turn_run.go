@@ -753,7 +753,13 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
 	// provider errors retry inside the loop, never surfacing here.
 	sink := func(ev core.AgentEvent) { r.handleEvent(ev) }
 	var err error
-	if !turnHasMessages(r.agent.History(), j.TurnIndex) {
+	freshPrompt := !turnHasMessages(r.agent.History(), j.TurnIndex)
+	// After the Prompt-vs-Continue decision (never before — the injected
+	// notice carries this turn index and would flip an empty history into
+	// Continue, swallowing the opening prompt): tell the resumed turn
+	// about background tasks the previous process dropped.
+	r.injectRestartNotices()
+	if freshPrompt {
 		prompt, images := d.turnPrompt(act, j.Prompt, j.AttachmentIDs, options.Mode)
 		err = r.agent.PromptWithMeta(r.ctx, prompt, images, d.promptMeta(act, j.Prompt, j.AttachmentIDs), sink)
 	} else {

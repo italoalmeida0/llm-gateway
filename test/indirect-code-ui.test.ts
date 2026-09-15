@@ -1062,6 +1062,7 @@ describe("completion signals and turn nudges", () => {
       { id: "u3", role: "user", blocks: [{ type: "text", text: "<system-reminder>If you have completed the task, call mark_task_as_complete...</system-reminder>" }] },
       { id: "u4", role: "user", blocks: [{ type: "text", text: "<system-reminder>If your plan is ready, call mark_plan_as_ready_to_execute...</system-reminder>" }] },
       { id: "u5", role: "user", blocks: [{ type: "text", text: "  <system-reminder>custom anything</system-reminder>  " }] },
+      { id: "u6", role: "user", blocks: [{ type: "text", text: "<system-reminder>## Context Summary (compacted)\n\nDid things.</system-reminder>" }] },
       { id: "a1", role: "assistant", blocks: [{ type: "text", text: "Done" }] },
     ];
     const filtered = withoutContinueNudges(msgs);
@@ -1074,6 +1075,7 @@ describe("completion signals and turn nudges", () => {
     expect(isSyntheticNudge("<system-reminder>You should continue what you are doing.</system-reminder>")).toBe(true);
     expect(isSyntheticNudge("<system-reminder>If you have completed the task, call mark_task_as_complete.</system-reminder>")).toBe(true);
     expect(isSyntheticNudge("<system-reminder>If your plan is ready, call mark_plan_as_ready_to_execute.</system-reminder>")).toBe(true);
+    expect(isSyntheticNudge("<system-reminder>## Context Summary (compacted)\n\nDid things.</system-reminder>")).toBe(true);
     expect(isSyntheticNudge("Regular user message")).toBe(false);
     expect(isSyntheticNudge("hello <system-reminder>mid</system-reminder>")).toBe(false);
   });

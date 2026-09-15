@@ -188,6 +188,26 @@ func UsageTotal(u provider.Usage) int {
 	return u.InputTokens + u.OutputTokens
 }
 
+// usageDivergenceFloor is the fraction of the local estimate below which a
+// provider-reported total is treated as under-reporting: providers sometimes
+// report zero/absurdly low input (e.g. prompt_tokens 0 on tool-heavy
+// requests). Over-reporting is trusted — the provider knows its own wire
+// format overhead better than chars/4 ever will, and compacting early is
+// safe while compacting late overflows for real.
+const usageDivergenceFloor = 2
+
+// EffectiveUsageTotal reconciles a provider-reported usage total against an
+// independent local estimate (chars/4 over the projected context). Returns
+// the reported total when it is credible (>= estimate/floor); otherwise the
+// local estimate, so a lying provider can delay compaction by at most one
+// floor factor instead of blinding it entirely.
+func EffectiveUsageTotal(reportedTotal, localEstimate int) int {
+	if localEstimate > 0 && reportedTotal*usageDivergenceFloor < localEstimate {
+		return localEstimate
+	}
+	return reportedTotal
+}
+
 // TrailingTokens estimates the unsummarized tail: messages after the last
 // assistant usage snapshot plus the current turn's new messages. This
 // avoids undercounting long tool-heavy turns that have not yet reported usage.

@@ -431,16 +431,19 @@ func (r *turnRun) setupAgent() bool {
 		threshold := r.cfg.Settings.AutoCompactThreshold
 		usage := r.agent.LastTurnUsage()
 		msgs := r.agent.Messages() // projected context
-		needs := core.ShouldCompact(window, core.UsageTotal(usage), core.TrailingTokens(msgs, usage))
+		// Same guard as MaybeAutoCompact: our own estimate floors the
+		// provider-reported total so under-reporting cannot blind us.
+		used := core.EffectiveUsageTotal(core.UsageTotal(usage), core.EstimateConversationTokens(msgs))
+		needs := core.ShouldCompact(window, used, core.TrailingTokens(msgs, usage))
 		if !needs && threshold > 0 {
-			used := core.UsageTotal(usage) + core.TrailingTokens(msgs, usage)
+			used := used + core.TrailingTokens(msgs, usage)
 			needs = used*100 >= threshold*window
 		}
 		if !needs {
 			// Usable formula stays as a final safety net:
 			// contextWindow - outputBudget - 20,000 buffer.
 			if usable := window - maxOutputTokens(r.modelInfo) - 20000; usable > 0 {
-				used := core.UsageTotal(usage) + core.TrailingTokens(msgs, usage)
+				used := used + core.TrailingTokens(msgs, usage)
 				needs = used >= usable
 			}
 		}
@@ -671,20 +674,21 @@ func isEmptyUsage(u provider.Usage) bool {
 
 // resolveContextUsage guards the session context display against buggy
 // providers (e.g. reporting prompt_tokens 0 on tool-heavy requests), which
-// would pin the UI near zero and blind proactive compaction. When the
-// provider claims zero input but the local chars/4 projection is clearly
-// larger, the local estimate wins (flagged estimated). Returns the resolved
-// context and whether the fallback fired (caller logs it).
+// would pin the UI near zero and blind proactive compaction. Same rule as
+// core.EffectiveUsageTotal: the local estimate floors the reported total
+// (over-reporting is trusted). Returns the resolved context and whether
+// the fallback fired (caller logs it).
 func resolveContextUsage(reported provider.Usage, fromReported, local *SessionContext, sessionID string) (*SessionContext, bool) {
-	if reported.InputTokens != 0 || reported.CacheReadTokens != 0 || reported.CacheWriteTokens != 0 {
+	if local == nil || fromReported == nil {
 		return fromReported, false
 	}
-	if local == nil || fromReported == nil || local.UsedTokens <= fromReported.UsedTokens {
-		return fromReported, false
+	reportedTotal := reported.InputTokens + reported.CacheReadTokens + reported.CacheWriteTokens + reported.OutputTokens
+	if core.EffectiveUsageTotal(reportedTotal, local.UsedTokens) != reportedTotal {
+		log.Printf("session %s: provider reported %d tokens with %d estimated in context; using local estimate",
+			sessionID, reportedTotal, local.UsedTokens)
+		return local, true
 	}
-	log.Printf("session %s: provider reported zero input tokens with %d estimated in context; using local estimate",
-		sessionID, local.UsedTokens)
-	return local, true
+	return fromReported, false
 }
 
 // persistIncoming checkpoints the tracker's snapshot to the crash journal

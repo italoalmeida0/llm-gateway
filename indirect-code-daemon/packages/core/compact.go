@@ -255,7 +255,10 @@ func (a *Agent) MaybeAutoCompact(ctx context.Context, window int, sink func(delt
 	if len(msgs) <= CompactionMinMessages {
 		return false, nil
 	}
-	if !ShouldCompact(window, UsageTotal(usage), TrailingTokens(msgs, usage)) {
+	// Never trust the provider blindly: reconcile against our own estimate
+	// so an under-reporting provider cannot blind proactive compaction.
+	used := EffectiveUsageTotal(UsageTotal(usage), EstimateConversationTokens(msgs))
+	if !ShouldCompact(window, used, TrailingTokens(msgs, usage)) {
 		return false, nil
 	}
 	summary, err := a.Compact(ctx, 0, sink)

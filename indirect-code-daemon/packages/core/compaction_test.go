@@ -204,6 +204,32 @@ func TestTrailingTokensOnlyCountsAfterLastAssistant(t *testing.T) {
 	}
 }
 
+func TestEffectiveUsageTotalFloorsUnderReporting(t *testing.T) {
+	// Credible report passes through untouched.
+	if got := EffectiveUsageTotal(1000, 900); got != 1000 {
+		t.Fatalf("credible report: got %d, want 1000", got)
+	}
+	// Over-reporting is trusted (provider wire overhead).
+	if got := EffectiveUsageTotal(5000, 900); got != 5000 {
+		t.Fatalf("over-report: got %d, want 5000", got)
+	}
+	// Zero/absurdly low report with large local context: local wins.
+	if got := EffectiveUsageTotal(0, 23000); got != 23000 {
+		t.Fatalf("zero report: got %d, want 23000", got)
+	}
+	if got := EffectiveUsageTotal(400, 1000); got != 1000 {
+		t.Fatalf("low report: got %d, want 1000", got)
+	}
+	// Boundary: exactly half is still credible.
+	if got := EffectiveUsageTotal(500, 1000); got != 500 {
+		t.Fatalf("boundary: got %d, want 500", got)
+	}
+	// No local signal: nothing to reconcile against.
+	if got := EffectiveUsageTotal(0, 0); got != 0 {
+		t.Fatalf("empty: got %d, want 0", got)
+	}
+}
+
 func mustRaw(s string) json.RawMessage {
 	var v any
 	if err := json.Unmarshal([]byte(s), &v); err != nil {

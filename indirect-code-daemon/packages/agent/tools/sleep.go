@@ -26,6 +26,24 @@ type SleepHost interface {
 	WaitForAnyJob(sessionID string, done <-chan struct{}) <-chan struct{}
 }
 
+// BgFreshnessHost is an optional SleepHost extension: it reports a task
+// that finished just before the sleep started, so a long sleep decided
+// on stale state returns immediately instead of waiting out the full
+// duration for an event that already happened.
+type BgFreshnessHost interface {
+	// RecentBgFinish returns the label and age of the session's most
+	// recently finished job (any terminal status) — but only when no
+	// session job is still running (otherwise the watcher owns the wait).
+	// ok=false when there is nothing freshly finished to skip for.
+	RecentBgFinish(sessionID string) (label string, ago time.Duration, ok bool)
+}
+
+// sleepFreshGrace bounds the staleness window: a job that finished less
+// than this ago (a model roundtrip) when a LONG sleep starts means the
+// sleep was decided before the completion landed — return immediately.
+// Short sleeps always run (cheap; preserves pacing/backoff uses).
+const sleepFreshGrace = 60 * time.Second
+
 // SleepTool parks the model for a bounded wait — the "wait for the
 // background task" primitive. It ends early when a background task of the
 // session finishes (the system-reminder delivery lands in context right
@@ -38,7 +56,7 @@ type SleepTool struct {
 func (*SleepTool) Name() string { return "sleep" }
 
 func (*SleepTool) Description() string {
-	return `Wait for a bounded number of seconds. Use it to pause while a background task (a bash/python command that went to the background after 10s) runs, instead of polling in a tight loop. The wait ends EARLY — with a notice — as soon as one of your background tasks finishes, so prefer overestimating: sleep(120) returns immediately when the task completes after 5s. Available in plan, build and learning modes only.`
+	return `Wait for a bounded number of seconds. Use it to pause while a background task (a bash/python command that went to the background after 10s) runs, instead of polling in a tight loop. The wait ends EARLY — with a notice — as soon as one of your background tasks finishes, so prefer overestimating: sleep(120) returns immediately when the task completes after 5s. If the task already finished just before the sleep starts, a long sleep is skipped at once (the notice is already in context). Available in plan, build and learning modes only.`
 }
 
 func (*SleepTool) Schema() json.RawMessage {
@@ -54,6 +72,17 @@ func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 		return core.ToolResult{}, fmt.Errorf("seconds must be between 1 and 3600")
 	}
 	wait := time.Duration(a.Seconds * float64(time.Second))
+	// Stale-decision shortcut: the job finished after the model asked for
+	// this sleep but before it started executing (detach at 10s, finish at
+	// 11s, sleep issued from a stale roundtrip). Its delivery notice is
+	// already in context — waiting the full duration would dead-wait.
+	if t.Host != nil && wait > sleepFreshGrace {
+		if fh, ok := t.Host.(BgFreshnessHost); ok {
+			if label, ago, found := fh.RecentBgFinish(t.SessionID); found && ago < sleepFreshGrace {
+				return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Background task %s finished %s ago — its delivery notice is already in context above (read the .log file for the output). Skipping the %s wait. If you still want to pause (e.g. rate-limit backoff), sleep again.", label, humanizeSeconds(ago.Seconds()), humanizeSeconds(a.Seconds))}}}, nil
+			}
+		}
+	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	// No ticking progress: the row body stays empty while sleeping and the

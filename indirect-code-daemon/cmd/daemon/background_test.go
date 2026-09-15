@@ -644,6 +644,36 @@ func TestResumeInjectsRestartNotice(t *testing.T) {
 	}
 }
 
+// TestRecentBgFinish pins the staleness source: most recent terminal job
+// per session, skipped while anything still runs (the watcher owns that
+// wait), empty registry reports nothing.
+func TestRecentBgFinish(t *testing.T) {
+	d := testBgServer(t)
+	now := time.Now().UnixMilli()
+	d.bgJobs["old"] = &BgJob{ID: "old", SessionID: "s1", Label: "old cmd", Status: BgStatusDone, EndedAt: now - 300_000}
+	d.bgJobs["new"] = &BgJob{ID: "new", SessionID: "s1", Label: "new cmd", Status: BgStatusError, EndedAt: now - 3_000}
+	d.bgJobs["run"] = &BgJob{ID: "run", SessionID: "s1", Label: "run cmd", Status: BgStatusRunning}
+	d.bgJobs["other"] = &BgJob{ID: "other", SessionID: "s2", Label: "other cmd", Status: BgStatusDone, EndedAt: now - 1_000}
+	// A running job vetoes the shortcut even with a fresh finish around.
+	if _, _, ok := d.RecentBgFinish("s1"); ok {
+		t.Fatal("must not report while a session job still runs")
+	}
+	delete(d.bgJobs, "run")
+	label, ago, ok := d.RecentBgFinish("s1")
+	if !ok || label != "new cmd" {
+		t.Fatalf("must report the most recent finish, got %q %v %v", label, ago, ok)
+	}
+	if ago < 2*time.Second || ago > 30*time.Second {
+		t.Fatalf("age must track EndedAt, got %s", ago)
+	}
+	if _, _, ok := d.RecentBgFinish("s2"); !ok {
+		t.Fatal("other session must still report its own finish")
+	}
+	if _, _, ok := d.RecentBgFinish("nobody"); ok {
+		t.Fatal("empty registry must report nothing")
+	}
+}
+
 // TestDetachedBashSurvivesTurnEnd pins the core guarantee: a bash command
 // that auto-backgrounds must NOT die when the turn context ends. The
 // process hangs off its own context; only an explicit stop kills it.

@@ -513,6 +513,43 @@ func (d *DaemonServer) deliverBgCancel(j *BgJob) {
 	d.routeBgNotice(j, d.bgCancelledNotice(j), "cancelled — cancellation notice")
 }
 
+// RecentBgFinish implements tools.BgFreshnessHost: the label and age of
+// the session's most recently finished background job (any terminal
+// status) — but only when no session job is still running (otherwise the
+// normal watcher owns the wait), else ok=false. The sleep tool uses it to
+// skip a stale long wait when the task finished just before the sleep
+// started — for a running turn, finish and delivery are synchronous, so a
+// recently finished job always has its notice in context already.
+func (d *DaemonServer) RecentBgFinish(sessionID string) (string, time.Duration, bool) {
+	d.bgMu.Lock()
+	defer d.bgMu.Unlock()
+	var (
+		bestLabel  string
+		bestEnd    int64
+		anyRunning bool
+	)
+	for _, j := range d.bgJobs {
+		if j.SessionID != sessionID {
+			continue
+		}
+		if j.Status == BgStatusRunning {
+			anyRunning = true
+			continue
+		}
+		if j.EndedAt <= 0 {
+			continue
+		}
+		if j.EndedAt > bestEnd {
+			bestEnd = j.EndedAt
+			bestLabel = d.bgJobLabel(j)
+		}
+	}
+	if anyRunning || bestEnd <= 0 {
+		return "", 0, false
+	}
+	return bestLabel, time.Since(time.UnixMilli(bestEnd)), true
+}
+
 // orphanBgTask is a detached placeholder in the transcript whose job is
 // gone from the registry with no delivery behind it — the previous
 // process died holding it. The registry is memory-only, so after a

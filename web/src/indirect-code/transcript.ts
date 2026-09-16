@@ -485,7 +485,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       const isPreview = args.dryRun === true;
       const verb = isPreview ? (name === "patch" ? "Preview patch" : "Preview edit") : (name === "patch" ? "Patch" : "Edited");
       // Prefer the frontend-only display rendering (details.display); the
-      // AI-visible text is pi's one-line confirmation with no diff.
+      // AI-visible text is a one-line confirmation with no diff.
       const st = diffStat(u.result?.toolDetails?.display ?? res);
       return {
         icon: "lucide:file-diff",

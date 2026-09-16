@@ -6,20 +6,20 @@ import (
 	"strings"
 )
 
-// Port of pi's truncate.ts (badlogic pi-mono, packages/coding-agent/src/core/tools).
-// The AI-visible output of read/write/edit/bash mirrors pi exactly, so the
-// truncation math and notice formats must match byte-for-byte.
+// Bounded output truncation for tool results.
+// The AI-visible output of read/write/edit/bash shares the same truncation
+// math and notice formats, so they must stay byte-for-byte consistent.
 
 const (
 	defaultMaxLines = 2000
 	defaultMaxBytes = 50 * 1024 // 50KB
 )
 
-// truncationResult mirrors pi's TruncationResult.
+// truncationResult describes a truncated output window.
 type truncationResult struct {
 	content          string
 	truncated        bool
-	truncatedBy      string // "lines", "bytes", or "" (null in pi)
+	truncatedBy      string // "lines", "bytes", or "" (not truncated)
 	totalLines       int
 	totalBytes       int
 	outputLines      int
@@ -30,7 +30,7 @@ type truncationResult struct {
 	maxBytes         int
 }
 
-// formatSize mirrors pi's formatSize: "123B", "50.0KB", "1.5MB".
+// formatSize renders byte counts as "123B", "50.0KB", "1.5MB".
 func formatSize(bytes int) string {
 	if bytes < 1024 {
 		return fmt.Sprintf("%dB", bytes)
@@ -40,7 +40,7 @@ func formatSize(bytes int) string {
 	return strconv.FormatFloat(float64(bytes)/(1024*1024), 'f', 1, 64) + "MB"
 }
 
-// splitLinesForCounting mirrors pi's splitLinesForCounting: split on "\n",
+// splitLinesForCounting splits on "\n",
 // dropping the phantom empty line produced by a trailing newline.
 func splitLinesForCounting(content string) []string {
 	if len(content) == 0 {

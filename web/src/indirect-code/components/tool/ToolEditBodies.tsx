@@ -87,7 +87,7 @@ export function ToolEditBodies(props: ToolPartProps) {
 
   const sections = createMemo(() => {
     // The daemon now sends the rich rendering in details.display (the
-    // AI-visible text is pi's one-line confirmation); fall back to parsing
+    // AI-visible text is a one-line confirmation); fall back to parsing
     // the result text for sessions recorded before the split.
     const res = (props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || "";
     return parseEditResults(res, defaultPath());

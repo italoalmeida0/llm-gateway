@@ -21,7 +21,7 @@ func editDisplay(t *testing.T, res core.ToolResult) string {
 }
 
 // TestEditPreviewReturnsDiffWithoutWriting: Preview validates and diffs
-// without writing; the AI-visible content is pi's one-line confirmation.
+// without writing; the AI-visible content is a one-line confirmation.
 func TestEditPreviewReturnsDiffWithoutWriting(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.txt")
@@ -98,7 +98,7 @@ func TestEditAmbiguous(t *testing.T) {
 	}
 	want := "Found 2 occurrences of the text in a.txt. The text must be unique."
 	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("want pi duplicate error, got %q", err)
+		t.Fatalf("want duplicate error, got %q", err)
 	}
 }
 
@@ -116,7 +116,7 @@ func TestEditNotFoundPiError(t *testing.T) {
 	}
 	want := "Could not find the exact text in destination.txt. The old text must match exactly including all whitespace and newlines."
 	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("want pi not-found error, got %q", err)
+		t.Fatalf("want not-found error, got %q", err)
 	}
 }
 
@@ -137,7 +137,7 @@ func TestEditOverlapPiError(t *testing.T) {
 	}
 	want := "edits[0] and edits[1] overlap in a.txt. Merge them into one edit or target disjoint regions."
 	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("want pi overlap error, got %q", err)
+		t.Fatalf("want overlap error, got %q", err)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestEditNoChangePiError(t *testing.T) {
 	}
 	want := "No changes made to a.txt. The replacement produced identical content."
 	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("want pi no-change error, got %q", err)
+		t.Fatalf("want no-change error, got %q", err)
 	}
 }
 
@@ -172,13 +172,13 @@ func TestEditEmptyOldTextPiError(t *testing.T) {
 		t.Fatal("want empty oldText error")
 	}
 	if !strings.Contains(err.Error(), "oldText must not be empty in a.txt.") {
-		t.Fatalf("want pi empty-oldText error, got %q", err)
+		t.Fatalf("want empty-oldText error, got %q", err)
 	}
 }
 
 func TestEditFuzzyMatchTrailingWhitespace(t *testing.T) {
 	// The model's oldText omits the trailing whitespace the file has.
-	// pi's fuzzy match (per-line trailing-whitespace trim) must recover.
+	// Fuzzy match (per-line trailing-whitespace trim) must recover.
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
 	os.WriteFile(p, []byte("func main() {\n\tfmt.Println(\"hi\")   \n}\n"), 0o644)
@@ -284,13 +284,13 @@ func TestEditPrepareArgumentsNormalizations(t *testing.T) {
 		t.Fatalf("single-object edits failed: %q", string(b))
 	}
 
-	// Empty edits must fail with pi's validation message.
+	// Empty edits must fail with the validation message.
 	_, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "n.txt",
 		"edits": []map[string]any{},
 	}), nil)
 	if err == nil || !strings.Contains(err.Error(), "Edit tool input is invalid. edits must contain at least one replacement.") {
-		t.Fatalf("want pi validation error, got %v", err)
+		t.Fatalf("want validation error, got %v", err)
 	}
 }
 
@@ -305,6 +305,6 @@ func TestEditMissingFilePiError(t *testing.T) {
 		t.Fatal("want missing file error")
 	}
 	if !strings.Contains(err.Error(), "Could not edit file: nope.txt.") {
-		t.Fatalf("want pi access error, got %q", err)
+		t.Fatalf("want access error, got %q", err)
 	}
 }

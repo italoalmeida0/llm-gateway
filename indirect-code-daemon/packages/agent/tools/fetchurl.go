@@ -26,9 +26,7 @@ type FetchURLArgs struct {
 	TimeoutSec int `json:"timeoutSec,omitempty"`
 }
 
-// FetchURLTool downloads a page and extracts readable text. Port of
-// remote-code-ref/mcp-web-search fetch pipeline (security.ts + http.ts +
-// extractors/html.ts + extractors/text.ts), minus Chrome/PDF/media: HTML
+// FetchURLTool downloads a page and extracts readable text. HTML
 // via Readability-simplified extraction (x/net/html), text/code via
 // content-type, PDFs and media refused with a clear message.
 type FetchURLTool struct {
@@ -193,9 +191,8 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// guardSSRF blocks private/loopback/link-local/metadata targets. Port of
-// the reference security.ts: same private ranges, same cloud metadata IP,
-// same localhost names — plus file:// never reaches here (scheme check).
+// guardSSRF blocks private/loopback/link-local/metadata targets: private ranges,
+// cloud metadata IPs and localhost names — plus file:// never reaches here (scheme check).
 func guardSSRF(host string) error {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {
@@ -251,8 +248,8 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// extractArticle is a Readability-simplified main-content extraction, ported
-// from the reference extractors/html.ts: strip noise tags, drop nav/footer/
+// extractArticle is a Readability-simplified main-content extraction:
+// strip noise tags, drop nav/footer/
 // hidden subtrees, unwrap links (keeping hrefs), then pick the highest
 // text-density block among article/main candidates (fallback: body).
 func extractArticle(r io.Reader) string {
@@ -268,7 +265,7 @@ func extractArticle(r io.Reader) string {
 	var b strings.Builder
 	renderReadable(best, &b)
 	text := strings.TrimSpace(b.String())
-	// Collapse 3+ blank lines (reference html.ts behavior).
+	// Collapse 3+ blank lines.
 	for strings.Contains(text, "\n\n\n") {
 		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
 	}

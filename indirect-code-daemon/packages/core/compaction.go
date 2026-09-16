@@ -325,7 +325,7 @@ func toolArgPath(raw string) string {
 }
 
 // FormatFileOperations renders read/modified file lists for the update
-// prompt. Port of formatFileOperations.
+// prompt.
 func FormatFileOperations(ops FileOps) string {
 	var sb strings.Builder
 	if len(ops.Read) > 0 {

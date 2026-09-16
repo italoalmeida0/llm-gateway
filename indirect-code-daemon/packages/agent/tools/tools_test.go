@@ -49,7 +49,7 @@ func TestReadText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// pi style: raw content, no line prefixes, no notice.
+	// Expected style: raw content, no line prefixes, no notice.
 	got := res.Content[0].(provider.TextBlock).Text
 	if got != "hello\nworld\n" {
 		t.Fatalf("want raw content, got %q", got)
@@ -118,7 +118,7 @@ func TestReadLargeImageResizesAndAddsPiHints(t *testing.T) {
 	}
 	text := res.Content[0].(provider.TextBlock).Text
 	if !strings.Contains(text, "Read image file [image/png]") || !strings.Contains(text, "original 3000x1000, displayed at 2000x667") {
-		t.Fatalf("missing pi resize hint: %q", text)
+		t.Fatalf("missing resize hint: %q", text)
 	}
 	block, ok := res.Content[1].(provider.ImageBlock)
 	if !ok {
@@ -139,7 +139,7 @@ func TestReadOffsetLimit(t *testing.T) {
 	os.WriteFile(p, []byte("1\n2\n3\n4\n5\n"), 0o644)
 	tool := &ReadTool{CWD: dir}
 	res, _ := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "a.txt", "offset": 2, "limit": 2}), nil)
-	// pi style: raw lines plus the actionable continuation notice.
+	// Expected style: raw lines plus the actionable continuation notice.
 	got := res.Content[0].(provider.TextBlock).Text
 	wantAI := "2\n3\n\n[2 more lines in file. Use offset=4 to continue.]"
 	if got != wantAI {
@@ -186,7 +186,7 @@ func TestReadOffsetBeyondEOF(t *testing.T) {
 	tool := &ReadTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "a.txt", "offset": 99}), nil)
 	if err == nil || !strings.Contains(err.Error(), "Offset 99 is beyond end of file (2 lines total)") {
-		t.Fatalf("want pi offset error, got %v", err)
+		t.Fatalf("want offset error, got %v", err)
 	}
 }
 
@@ -214,7 +214,7 @@ func TestWriteCreatesDirs(t *testing.T) {
 	if string(b) != "hi" {
 		t.Fatalf("got %q", string(b))
 	}
-	// pi style: one-line confirmation.
+	// Expected style: one-line confirmation.
 	if got := res.Content[0].(provider.TextBlock).Text; got != "Successfully wrote to sub/a.txt" {
 		t.Fatalf("AI content = %q", got)
 	}
@@ -345,11 +345,11 @@ func TestEditGuidance(t *testing.T) {
 	editProperties := items["properties"].(map[string]any)
 	oldText := editProperties["oldText"].(map[string]any)
 	if got, _ := oldText["description"].(string); !strings.Contains(got, "must be unique in the original file") {
-		t.Fatalf("oldText schema description missing pi guidance: %q", got)
+		t.Fatalf("oldText schema description missing guidance: %q", got)
 	}
-	// pi schema: only path and edits, nothing else.
+	// Schema: only path and edits, nothing else.
 	if len(properties) != 2 {
-		t.Fatalf("edit schema must expose only path+edits (pi parity), got %d properties", len(properties))
+		t.Fatalf("edit schema must expose only path+edits, got %d properties", len(properties))
 	}
 }
 
@@ -442,7 +442,7 @@ func TestBashSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// pi style: raw merged output, no prompt echo, no [exit N] footer.
+	// Expected style: raw merged output, no prompt echo, no [exit N] footer.
 	got := res.Content[0].(provider.TextBlock).Text
 	if got != "hi\n" && got != "hi" {
 		t.Fatalf("got %q", got)
@@ -488,7 +488,7 @@ func TestBashFailure(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("want error")
 	}
-	// pi style: output + status appended, no [exit N] footer.
+	// Expected style: output + status appended, no [exit N] footer.
 	got := res.Content[0].(provider.TextBlock).Text
 	if !strings.Contains(got, "Command exited with code 1") {
 		t.Fatalf("got %q", got)
@@ -514,12 +514,12 @@ func TestBashTailTruncation(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := res.Content[0].(provider.TextBlock).Text
-	// pi style: keep the LAST 2000 lines and point at the full output file.
+	// Expected style: keep the LAST 2000 lines and point at the full output file.
 	if !strings.Contains(got, "1001") || strings.Contains(got, "\n1\n") {
 		t.Fatalf("tail truncation must keep the last lines:\n%s", got[:80])
 	}
 	if !strings.Contains(got, "[Showing lines 1001-3000 of 3000. Full output: ") {
-		t.Fatalf("want pi truncation notice, got:\n%s", got[len(got)-200:])
+		t.Fatalf("want truncation notice, got:\n%s", got[len(got)-200:])
 	}
 	details := res.Details.(map[string]any)
 	if fp, _ := details["full_output_path"].(string); fp == "" {
@@ -538,7 +538,7 @@ func TestWriteLineNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// pi style: one-line confirmation only.
+	// Expected style: one-line confirmation only.
 	got := res.Content[0].(provider.TextBlock).Text
 	if got != "Successfully wrote to file.txt" {
 		t.Fatalf("AI content = %q", got)
@@ -562,7 +562,7 @@ func TestEditLineNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// pi style: one-line confirmation only.
+	// Expected style: one-line confirmation only.
 	if got := res.Content[0].(provider.TextBlock).Text; got != "Successfully replaced 1 block(s) in e.txt." {
 		t.Fatalf("AI content = %q", got)
 	}

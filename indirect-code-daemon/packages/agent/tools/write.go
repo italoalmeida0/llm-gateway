@@ -38,7 +38,6 @@ const writeSchema = `{"type":"object","properties":{"path":{"type":"string","des
 
 func (t *WriteTool) Name() string { return "write" }
 func (t *WriteTool) Description() string {
-	// Mirrors pi's write tool description.
 	return "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories."
 }
 func (t *WriteTool) Schema() json.RawMessage { return json.RawMessage(writeSchema) }
@@ -99,7 +98,7 @@ func (t *WriteTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 		totalLines++ // count the last unterminated line
 	}
 	return core.ToolResult{
-		// Mirrors pi: a one-line confirmation; the model already knows
+		// A one-line confirmation; the model already knows
 		// what it wrote and does not need the content echoed back.
 		Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Successfully wrote to %s", a.Path)}},
 		Details: map[string]any{

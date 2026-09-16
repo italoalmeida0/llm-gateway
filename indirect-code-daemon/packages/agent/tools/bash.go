@@ -81,7 +81,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	cmd.Env = os.Environ()
 	setProcessGroup(cmd)
 
-	// Merged stdout+stderr through one pipe, like pi.
+	// Merged stdout+stderr through one pipe.
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -280,7 +280,7 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 	snapshot := output.snapshot(true)
 	output.closeTempFile()
 
-	// pi's formatOutput: tail-truncated content plus an actionable notice
+	// Tail-truncated content plus an actionable notice
 	// pointing at the temp file with the complete output.
 	outputText := snapshot.content
 	if outputText == "" {
@@ -311,7 +311,7 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 
 	isErr := false
 	// Abort (turn cancelled pre-detach) and stop (bg_cancel / process
-	// killed) mirror pi's error messages. There is no timeout: a detached
+	// killed) use short status lines. There is no timeout: a detached
 	// job that ends after any amount of time reports its real output.
 	switch {
 	case ctxErr != nil:
@@ -418,7 +418,7 @@ func humanDuration(d time.Duration) string {
 }
 
 // ---------------------------------------------------------------------------
-// outputAccumulator: port of pi's OutputAccumulator
+// outputAccumulator: bounded rolling output buffer
 // ---------------------------------------------------------------------------
 
 // outputAccumulator keeps a bounded rolling tail in memory plus the running
@@ -523,7 +523,7 @@ func (a *outputAccumulator) redirectToFile(path string) {
 	a.tempPath = path
 }
 
-// getLastLineBytes mirrors pi's getLastLineBytes: byte length of the last
+// getLastLineBytes returns the byte length of the last
 // (possibly still open) line.
 func (a *outputAccumulator) getLastLineBytes() int {
 	a.mu.Lock()
@@ -543,7 +543,7 @@ type outputSnapshot struct {
 	fullOutputPath  string
 }
 
-// snapshot mirrors pi's snapshot({persistIfTruncated}): tail-truncate the
+// snapshot tail-truncates the rolling tail,
 // rolling tail, then overlay the true running totals.
 func (a *outputAccumulator) snapshot(persistIfTruncated bool) outputSnapshot {
 	a.mu.Lock()

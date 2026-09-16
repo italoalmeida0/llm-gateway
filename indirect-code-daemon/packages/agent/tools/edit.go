@@ -13,10 +13,10 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// EditTool edits a single file using exact text replacement, mirroring pi's
-// edit tool: every edits[].oldText must match a unique, non-overlapping region
-// of the ORIGINAL file (edits are not applied incrementally), with fuzzy
-// matching (trailing whitespace / smart quotes / dashes / special spaces
+// EditTool edits a single file using exact text replacement: every
+// edits[].oldText must match a unique, non-overlapping region of the
+// ORIGINAL file (edits are not applied incrementally), with fuzzy matching
+// (trailing whitespace / smart quotes / dashes / special spaces
 // normalization) as a fallback when an exact match fails.
 type EditTool struct {
 	CWD     string
@@ -27,22 +27,21 @@ type EditTool struct {
 	BrainDir string
 }
 
-// piEdit is one targeted replacement, exactly like pi's replaceEditSchema.
-type piEdit struct {
+// textEdit is one targeted replacement.
+type textEdit struct {
 	OldText string `json:"oldText"`
 	NewText string `json:"newText"`
 }
 
 type editArgs struct {
 	Path  string   `json:"path"`
-	Edits []piEdit `json:"edits"`
+	Edits []textEdit `json:"edits"`
 }
 
 const editSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},"newText":{"type":"string","description":"Replacement text for this targeted edit."}},"required":["oldText","newText"]}}},"required":["path","edits"]}`
 
 func (t *EditTool) Name() string { return "edit" }
 func (t *EditTool) Description() string {
-	// Mirrors pi's edit tool description.
 	return "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes."
 }
 func (t *EditTool) Schema() json.RawMessage { return json.RawMessage(editSchema) }
@@ -56,7 +55,7 @@ func (t *EditTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	return t.executeInternal(ctx, raw, false, progress)
 }
 
-// prepareEditArguments mirrors pi's prepareEditArguments: some models send
+// prepareEditArguments normalizes the raw arguments: some models send
 // edits as a JSON string instead of an array, or a single edit object. All
 // shapes are normalized into the canonical {path, edits[]} form.
 func prepareEditArguments(raw json.RawMessage) (editArgs, error) {
@@ -71,28 +70,28 @@ func prepareEditArguments(raw json.RawMessage) (editArgs, error) {
 	}
 
 	if editsRaw, ok := generic["edits"]; ok {
-		// edits as JSON string (Opus/GLM style degenerate input).
+		// edits as JSON string (some models send degenerate input).
 		var s string
 		if err := json.Unmarshal(editsRaw, &s); err == nil {
 			trimmed := strings.TrimSpace(s)
 			if trimmed != "" {
-				var arr []piEdit
+				var arr []textEdit
 				if err := json.Unmarshal([]byte(trimmed), &arr); err == nil && len(arr) > 0 {
 					a.Edits = append(a.Edits, arr...)
 				} else {
-					var one piEdit
+					var one textEdit
 					if err := json.Unmarshal([]byte(trimmed), &one); err == nil && (one.OldText != "" || one.NewText != "") {
 						a.Edits = append(a.Edits, one)
 					}
 				}
 				// Unparseable string: leave empty; validation below reports
-				// it with pi's message (validateEditInput equivalent).
+				// it with the invalid-input message below.
 			}
 		} else if err := json.Unmarshal(editsRaw, &a.Edits); err == nil {
 			// edits as array.
 		} else {
 			// edits as a single edit object.
-			var one piEdit
+			var one textEdit
 			if err := json.Unmarshal(editsRaw, &one); err == nil && (one.OldText != "" || one.NewText != "") {
 				a.Edits = append(a.Edits, one)
 			}
@@ -111,7 +110,7 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 		return core.ToolResult{}, fmt.Errorf("path is required")
 	}
 	if len(a.Edits) == 0 {
-		// Mirrors pi's validateEditInput.
+		// Empty edits are invalid.
 		return core.ToolResult{}, fmt.Errorf("Edit tool input is invalid. edits must contain at least one replacement.")
 	}
 
@@ -121,7 +120,7 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 		return core.ToolResult{}, err
 	}
 
-	// Check if file exists and is readable/writable. Mirrors pi's error text.
+	// Check if file exists and is readable/writable.
 	if _, err := os.Stat(abs); err != nil {
 		return core.ToolResult{}, fmt.Errorf("Could not edit file: %s. %s.", path, err)
 	}
@@ -129,7 +128,7 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 	if err != nil {
 		return core.ToolResult{}, fmt.Errorf("Could not edit file: %s. %s.", path, err)
 	}
-	// Daemon safety rails (pi reads any file; these guards keep pathological
+	// Daemon safety rails (these guards keep pathological
 	// inputs from corrupting binary files or burning daemon memory).
 	if !isText(data) {
 		return core.ToolResult{}, fmt.Errorf("Could not edit file: %s. binary file rejected.", path)
@@ -150,7 +149,7 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 	}
 
 	// Strip BOM before matching. The model will not include an invisible BOM
-	// in oldText. Mirrors pi.
+	// in oldText.
 	bom := ""
 	content := string(data)
 	if strings.HasPrefix(content, "\uFEFF") {
@@ -182,7 +181,7 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 	display := t.renderDisplay(path, baseContent, newContent, len(a.Edits))
 
 	return core.ToolResult{
-		// Mirrors pi: a one-line confirmation; the diff is frontend-only.
+		// A one-line confirmation; the diff is frontend-only.
 		Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(a.Edits), path)}},
 		Details: map[string]any{
 			"display": display,
@@ -213,16 +212,16 @@ func (t *EditTool) renderDisplay(path, baseContent, newContent string, matches i
 }
 
 // ---------------------------------------------------------------------------
-// pi edit engine (port of pi's edit-diff.ts applyEditsToNormalizedContent)
+// Edit engine (exact + fuzzy text replacement)
 // ---------------------------------------------------------------------------
 
-// normalizeToLF mirrors pi's normalizeToLF.
+// normalizeToLF converts CRLF/CR line endings to LF.
 func normalizeToLF(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	return strings.ReplaceAll(text, "\r", "\n")
 }
 
-// restoreLineEndings mirrors pi's restoreLineEndings.
+// restoreLineEndings converts LF back to the original ending.
 func restoreLineEndings(text, ending string) string {
 	if ending == "\r\n" {
 		return strings.ReplaceAll(text, "\n", "\r\n")
@@ -230,7 +229,7 @@ func restoreLineEndings(text, ending string) string {
 	return text
 }
 
-// detectLineEnding mirrors pi's detectLineEnding: the first occurrence wins.
+// detectLineEnding detects the file ending: the first occurrence wins.
 func detectLineEnding(content string) string {
 	crlfIdx := strings.Index(content, "\r\n")
 	lfIdx := strings.Index(content, "\n")
@@ -246,10 +245,10 @@ func detectLineEnding(content string) string {
 	return "\n"
 }
 
-// normalizeForFuzzyMatch mirrors pi's normalizeForFuzzyMatch: strip trailing
+// normalizeForFuzzyMatch prepares text for fuzzy search: strip trailing
 // whitespace per line, normalize smart quotes to ASCII, Unicode dashes/hyphens
-// to ASCII hyphen, and special Unicode spaces to regular space. (pi also
-// applies NFKC; the explicit replacements below cover the practical cases.)
+// to ASCII hyphen, and special Unicode spaces to regular space. (NFKC-style
+// normalization; the explicit replacements below cover the practical cases.)
 func normalizeForFuzzyMatch(text string) string {
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
@@ -301,7 +300,7 @@ type fuzzyMatchResult struct {
 	usedFuzzy bool
 }
 
-// fuzzyFindText mirrors pi's fuzzyFindText: exact match first, then fuzzy
+// fuzzyFindText locates text: exact match first, then fuzzy
 // match in normalized space.
 func fuzzyFindText(content, oldText string) fuzzyMatchResult {
 	if idx := strings.Index(content, oldText); idx != -1 {
@@ -366,16 +365,16 @@ type textReplacement struct {
 	newText    string
 }
 
-// applyEditsToNormalizedContent ports pi's function of the same name: all
+// applyEditsToNormalizedContent applies every edit: all
 // edits are matched against the same original content; replacements are then
 // applied in reverse order so offsets stay stable. If any edit needs fuzzy
 // matching, the operation runs in fuzzy-normalized content space and then
 // overlays those line-level changes onto the original content so unchanged
 // line blocks keep their original bytes.
-func applyEditsToNormalizedContent(normalizedContent string, edits []piEdit, path string) (string, string, error) {
-	normalizedEdits := make([]piEdit, len(edits))
+func applyEditsToNormalizedContent(normalizedContent string, edits []textEdit, path string) (string, string, error) {
+	normalizedEdits := make([]textEdit, len(edits))
 	for i, e := range edits {
-		normalizedEdits[i] = piEdit{
+		normalizedEdits[i] = textEdit{
 			OldText: normalizeToLF(e.OldText),
 			NewText: normalizeToLF(e.NewText),
 		}
@@ -467,7 +466,7 @@ func applyReplacements(content string, replacements []textReplacement, offset in
 }
 
 // splitLinesWithEndings splits content into lines that keep their trailing
-// newline (pi's /[^\n]*\n|[^\n]+/g).
+// newline (each line keeps its trailing newline).
 func splitLinesWithEndings(content string) []string {
 	var lines []string
 	start := 0
@@ -523,7 +522,7 @@ func getReplacementLineRange(lines []lineSpan, r textReplacement) (int, int, err
 	return startLine, endLine + 1, nil
 }
 
-// applyReplacementsPreservingUnchangedLines ports pi's function: replacements
+// applyReplacementsPreservingUnchangedLines overlays matches: replacements
 // matched against the normalized base are widened to the lines they touch;
 // touched lines are rewritten from the normalized base and every other line
 // is copied back from the original so unchanged blocks keep their bytes.
@@ -531,7 +530,7 @@ func applyReplacementsPreservingUnchangedLines(originalContent, baseContent stri
 	originalLines := splitLinesWithEndings(originalContent)
 	baseLines := getLineSpans(baseContent)
 	if len(originalLines) != len(baseLines) {
-		// Mirrors pi's error.
+		// Base and original must agree on line count.
 		return "", fmt.Errorf("Cannot preserve unchanged lines because the base content has a different line count.")
 	}
 

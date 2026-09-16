@@ -19,7 +19,7 @@ import (
 const (
 	imageMaxWidth  = 2000
 	imageMaxHeight = 2000
-	// Same as pi: 4.5MB of base64 payload, below providers' 5MB limit.
+	// 4.5MB of base64 payload, below providers' 5MB limit.
 	imageMaxBase64Bytes = int(4.5 * 1024 * 1024)
 	imageJPEGQuality    = 80
 )
@@ -40,7 +40,7 @@ var (
 	errImageTooLarge    = errors.New("[Image omitted: could not be resized below the inline image size limit.]")
 )
 
-// processImage is the Go equivalent of pi's processImage/resizeImage. It
+// processImage normalizes images for inline delivery. It
 // normalizes supported images, limits dimensions to 2000x2000, tries PNG and
 // JPEG encodings, then progressively reduces dimensions until the encoded
 // base64 payload is below 4.5MB.
@@ -58,7 +58,7 @@ func processImage(input []byte, detectedMIME string) (*processedImage, error) {
 	inputBase64Size := ((len(input) + 2) / 3) * 4
 
 	// PNG/JPEG/GIF/WebP can be passed through when already within limits.
-	// BMP is converted to PNG, matching pi's normalizeImage behavior.
+	// BMP is converted to PNG.
 	if mimeType != "image/png" || format == "png" {
 		if originalWidth <= imageMaxWidth && originalHeight <= imageMaxHeight && inputBase64Size < imageMaxBase64Bytes {
 			return &processedImage{

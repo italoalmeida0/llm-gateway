@@ -255,7 +255,7 @@ func (t *ReadTool) renderDisplay(allLines []string, startLine int, tr *truncatio
 	return sb.String()
 }
 
-// The 100MB cap applies only to text input. The model still receives pi's
+// The 100MB cap applies only to text input. The model still receives the
 // 2000-line/50KB output window after this read succeeds.
 const maxReadFileBytes = 100 << 20
 

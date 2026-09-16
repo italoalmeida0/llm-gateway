@@ -136,3 +136,92 @@ func TestSearchBadRegex(t *testing.T) {
 		t.Fatal("expected missing pattern error")
 	}
 }
+
+func TestSearchOnlyMatching(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("foo one foo two\nnothing\nfoo three foo four\n"), 0o644)
+	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "foo", "onlyMatching": true,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := toolResultText(t, res)
+	// 4 matches (one entry per match, not per line).
+	if !strings.HasPrefix(got, "4 matches") {
+		t.Fatalf("expected 4 matches header, got:\n%s", got)
+	}
+	if !strings.Contains(got, "a.txt:1:1: foo") || !strings.Contains(got, "a.txt:1:9: foo") {
+		t.Fatalf("expected per-match cols, got:\n%s", got)
+	}
+}
+
+func TestSearchCount(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("foo foo\nfoo\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("nothing\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "c.txt"), []byte("foo\n"), 0o644)
+	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "foo", "count": true,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := toolResultText(t, res)
+	if !strings.Contains(got, "4 matches in 2 files") {
+		t.Fatalf("expected aggregate header, got:\n%s", got)
+	}
+	if !strings.Contains(got, "a.txt: 3 matches") || !strings.Contains(got, "c.txt: 1 match") {
+		t.Fatalf("expected per-file counts, got:\n%s", got)
+	}
+	if strings.Contains(got, "b.txt") {
+		t.Fatalf("b.txt has no match and must be absent, got:\n%s", got)
+	}
+}
+
+func TestSearchFilesOnly(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("foo\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("nothing\n"), 0o644)
+	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "foo", "filesOnly": true,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := toolResultText(t, res)
+	if !strings.Contains(got, "1 file") || !strings.Contains(got, "a.txt") {
+		t.Fatalf("expected files-only listing, got:\n%s", got)
+	}
+	if strings.Contains(got, "b.txt") || strings.Contains(got, ":1:") {
+		t.Fatalf("no line/col expected in filesOnly, got:\n%s", got)
+	}
+}
+
+func TestSearchWideContext(t *testing.T) {
+	dir := t.TempDir()
+	var sb strings.Builder
+	for i := 0; i < 15; i++ {
+		sb.WriteString("filler line\n")
+	}
+	sb.WriteString("TARGET here\n")
+	for i := 0; i < 15; i++ {
+		sb.WriteString("filler line\n")
+	}
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte(sb.String()), 0o644)
+	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "TARGET", "contextLines": 10,
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := toolResultText(t, res)
+	// 10 lines of context each side: lines 6..26 around line 16.
+	if !strings.Contains(got, "6:filler") || !strings.Contains(got, "26:filler") {
+		t.Fatalf("wide context missing, got:\n%s", got)
+	}
+}

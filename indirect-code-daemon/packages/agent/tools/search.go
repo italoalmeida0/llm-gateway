@@ -26,10 +26,20 @@ type SearchArgs struct {
 	Exclude []string `json:"exclude,omitempty"`
 	// MaxResults caps returned matches (default 50, max 200).
 	MaxResults int `json:"maxResults,omitempty"`
-	// ContextLines includes N lines before/after each match (default 0, max 5).
+	// ContextLines includes N lines before/after each match (default 0, max 20).
 	ContextLines int `json:"contextLines,omitempty"`
 	// CaseSensitive enables case-sensitive matching (default false).
 	CaseSensitive bool `json:"caseSensitive,omitempty"`
+	// OnlyMatching returns only the matched substrings per line (grep -o):
+	// one entry per match with col pointing at the match start instead of
+	// one entry per matching line.
+	OnlyMatching bool `json:"onlyMatching,omitempty"`
+	// Count returns per-file match counts instead of individual matches
+	// (grep -c): one "file: N matches" line per file with matches.
+	Count bool `json:"count,omitempty"`
+	// FilesOnly returns only file paths with at least one match (grep -l),
+	// one path per line, no line/col/text.
+	FilesOnly bool `json:"filesOnly,omitempty"`
 	// RespectGitignore skips gitignored files (default true).
 	RespectGitignore *bool `json:"respectGitignore,omitempty"`
 	// MaxFileBytes skips files larger than this (default 1MB).
@@ -55,10 +65,10 @@ type SearchTool struct {
 func (t *SearchTool) Name() string { return "search" }
 
 func (t *SearchTool) Description() string {
-	return "Search file contents with an RE2 regular expression. Params: `pattern` (required regex), `path` (file/dir scope, default '.'), `include`/`exclude` globs, `maxResults` (default 50, max 200), `contextLines` (default 0, max 5), `caseSensitive` (default false), `respectGitignore` (default true). Returns structured matches [{file, line, col, text}] — open hits with read."
+	return "Search file contents with an RE2 regular expression. Params: `pattern` (required regex), `path` (file/dir scope, default '.'), `include`/`exclude` globs, `maxResults` (default 50, max 200), `contextLines` (default 0, max 20), `caseSensitive` (default false), `onlyMatching` (grep -o: one entry per match), `count` (grep -c: per-file counts), `filesOnly` (grep -l: paths only), `respectGitignore` (default true). Returns structured matches [{file, line, col, text}] — open hits with read."
 }
 
-const searchSchema = `{"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"RE2 regular expression to find."},"path":{"type":"string","description":"Workspace-relative file or dir scope (default '.')."},"include":{"type":"array","items":{"type":"string"},"description":"File glob patterns to include (e.g. ['*.ts', '*.tsx'])."},"exclude":{"type":"array","items":{"type":"string"},"description":"File glob patterns to exclude (e.g. ['dist/**', '*.min.js'])."},"maxResults":{"type":"number","description":"Maximum number of matches to return (default 50, max 200)."},"contextLines":{"type":"number","description":"Number of context lines before and after each match (default 0, max 5)."},"caseSensitive":{"type":"boolean","description":"Case-sensitive search (default false)."},"respectGitignore":{"type":"boolean","description":"Skip files ignored by git (default true)."},"maxFileBytes":{"type":"number","description":"Skip files larger than this size in bytes (default 1MB)."}}}`
+const searchSchema = `{"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"RE2 regular expression to find."},"path":{"type":"string","description":"Workspace-relative file or dir scope (default '.')."},"include":{"type":"array","items":{"type":"string"},"description":"File glob patterns to include (e.g. ['*.ts', '*.tsx'])."},"exclude":{"type":"array","items":{"type":"string"},"description":"File glob patterns to exclude (e.g. ['dist/**', '*.min.js'])."},"maxResults":{"type":"number","description":"Maximum number of matches to return (default 50, max 200)."},"contextLines":{"type":"number","description":"Number of context lines before and after each match (default 0, max 20)."},"caseSensitive":{"type":"boolean","description":"Case-sensitive search (default false)."},"onlyMatching":{"type":"boolean","description":"Return only the matched substrings, one entry per match (grep -o)."},"count":{"type":"boolean","description":"Return per-file match counts instead of matches (grep -c)."},"filesOnly":{"type":"boolean","description":"Return only matching file paths, one per line (grep -l)."},"respectGitignore":{"type":"boolean","description":"Skip files ignored by git (default true)."},"maxFileBytes":{"type":"number","description":"Skip files larger than this size in bytes (default 1MB)."}}}`
 
 func (t *SearchTool) Schema() json.RawMessage { return json.RawMessage(searchSchema) }
 
@@ -82,8 +92,13 @@ func (t *SearchTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	if ctxLines < 0 {
 		ctxLines = 0
 	}
-	if ctxLines > 5 {
-		ctxLines = 5
+	if ctxLines > 20 {
+		ctxLines = 20
+	}
+	// count/filesOnly are aggregate modes: context and per-match text add
+	// nothing, so they are ignored there (no error — permissive parsing).
+	if a.Count || a.FilesOnly {
+		ctxLines = 0
 	}
 	maxBytes := a.MaxFileBytes
 	if maxBytes <= 0 {
@@ -171,6 +186,11 @@ func (t *SearchTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	sort.Strings(files)
 
 	var matches []SearchMatch
+	// counts/files accumulate aggregate modes (grep -c / grep -l).
+	counts := map[string]int{}
+	var countOrder []string
+	var filesOnly []string
+	filesSeen := map[string]bool{}
 	truncated := false
 outer:
 	for _, f := range files {
@@ -187,6 +207,46 @@ outer:
 		}
 		lines := strings.Split(string(data), "\n")
 		for i, ln := range lines {
+			if a.Count {
+				if n := len(re.FindAllStringIndex(ln, -1)); n > 0 {
+					if counts[slash(rel)] == 0 {
+						countOrder = append(countOrder, slash(rel))
+					}
+					counts[slash(rel)] += n
+				}
+				continue
+			}
+			if a.FilesOnly {
+				if re.MatchString(ln) && !filesSeen[slash(rel)] {
+					filesSeen[slash(rel)] = true
+					filesOnly = append(filesOnly, slash(rel))
+					if len(filesOnly) >= maxResults {
+						truncated = true
+						break outer
+					}
+					break
+				}
+				continue
+			}
+			if a.OnlyMatching {
+				for _, loc := range re.FindAllStringIndex(ln, -1) {
+					m := SearchMatch{File: slash(rel), Line: i + 1, Col: loc[0] + 1, Text: trimLine(ln[loc[0]:loc[1]])}
+					if ctxLines > 0 {
+						for k := i - ctxLines; k <= i+ctxLines; k++ {
+							if k < 0 || k >= len(lines) || k == i {
+								continue
+							}
+							m.Context = append(m.Context, fmt.Sprintf("%d:%s", k+1, trimLine(lines[k])))
+						}
+					}
+					matches = append(matches, m)
+					if len(matches) >= maxResults {
+						truncated = true
+						break outer
+					}
+				}
+				continue
+			}
 			loc := re.FindStringIndex(ln)
 			if loc == nil {
 				continue
@@ -209,22 +269,64 @@ outer:
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d match%s", len(matches), plural(len(matches)))
-	if truncated {
-		fmt.Fprintf(&b, " (capped at %d — narrow `path` or `include`)", maxResults)
+	if a.Count {
+		total := 0
+		for _, f := range countOrder {
+			total += counts[f]
+		}
+		fmt.Fprintf(&b, "%d match%s in %d file%s\n", total, plural(total), len(countOrder), filePlural(len(countOrder)))
+		for _, f := range countOrder {
+			if len(countOrder) > maxResults {
+				truncated = true
+				break
+			}
+			fmt.Fprintf(&b, "%s: %d match%s\n", f, counts[f], plural(counts[f]))
+		}
+		if len(countOrder) == 0 {
+			b.WriteString("(no matches)")
+		}
+		if truncated {
+			fmt.Fprintf(&b, "(capped at %d — narrow `path` or `include`)", maxResults)
+		}
+		return core.ToolResult{
+			Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+		},
+		nil
 	}
-	b.WriteString("\n")
+	if a.FilesOnly {
+		fmt.Fprintf(&b, "%d file%s\n", len(filesOnly), plural(len(filesOnly)))
+		for _, f := range filesOnly {
+			fmt.Fprintf(&b, "%s\n", f)
+		}
+		if len(filesOnly) == 0 {
+			b.WriteString("(no matches)")
+		}
+		if truncated {
+			fmt.Fprintf(&b, "(capped at %d — narrow `path` or `include`)", maxResults)
+		}
+		return core.ToolResult{
+			Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+		},
+		nil
+	}
+
+	var nb strings.Builder
+	fmt.Fprintf(&nb, "%d match%s", len(matches), plural(len(matches)))
+	if truncated {
+		fmt.Fprintf(&nb, " (capped at %d — narrow `path` or `include`)", maxResults)
+	}
+	nb.WriteString("\n")
 	for _, m := range matches {
-		fmt.Fprintf(&b, "%s:%d:%d: %s\n", m.File, m.Line, m.Col, m.Text)
+		fmt.Fprintf(&nb, "%s:%d:%d: %s\n", m.File, m.Line, m.Col, m.Text)
 		for _, c := range m.Context {
-			fmt.Fprintf(&b, "  %s\n", c)
+			fmt.Fprintf(&nb, "  %s\n", c)
 		}
 	}
 	if len(matches) == 0 {
-		b.WriteString("(no matches)")
+		nb.WriteString("(no matches)")
 	}
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+		Content: []provider.Content{provider.TextBlock{Text: nb.String()}},
 	}, nil
 }
 
@@ -243,6 +345,13 @@ func plural(n int) string {
 		return ""
 	}
 	return "es"
+}
+
+func filePlural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // matchAnyGlob reports whether rel matches any of the glob patterns.

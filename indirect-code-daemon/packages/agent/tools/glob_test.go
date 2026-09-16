@@ -365,3 +365,55 @@ func TestGlobSandboxing(t *testing.T) {
 		t.Fatal("expected sandboxing error for path outside sandbox")
 	}
 }
+
+func TestGlobCaseInsensitiveAndType(t *testing.T) {
+	dir := t.TempDir()
+	files := []string{"Main.GO", "readme.md", "Pkg/Util.GO"}
+	for _, f := range files {
+		p := filepath.Join(dir, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tool := &GlobTool{CWD: dir}
+
+	// Case-sensitive default: lowercase pattern misses Main.GO.
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "*.go"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := res.Content[0].(provider.TextBlock).Text; strings.Contains(text, "Main.GO") {
+		t.Fatalf("case-sensitive should miss Main.GO, got:\n%s", text)
+	}
+	// caseInsensitive finds it (find -iname).
+	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "*.go", "caseInsensitive": true}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := res.Content[0].(provider.TextBlock).Text; !strings.Contains(text, "Main.GO") {
+		t.Fatalf("caseInsensitive should find Main.GO, got:\n%s", text)
+	}
+	// type=d lists matching directories with trailing slash.
+	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "pkg", "type": "d", "caseInsensitive": true}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := res.Content[0].(provider.TextBlock).Text; !strings.Contains(text, "Pkg/") {
+		t.Fatalf("type=d should list Pkg/, got:\n%s", text)
+	}
+	// type=f never lists directories.
+	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "*", "type": "f"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := res.Content[0].(provider.TextBlock).Text; strings.Contains(text, "Pkg/") && !strings.Contains(text, "Pkg/Util.GO") {
+		t.Fatalf("type=f must not list bare dirs, got:\n%s", text)
+	}
+	// Invalid type errors.
+	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "*", "type": "x"}), nil); err == nil {
+		t.Fatal("expected error for invalid type")
+	}
+}

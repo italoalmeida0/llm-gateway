@@ -88,6 +88,8 @@ export interface InspectEntry {
   flag: string;
   size?: string;
   lines?: number;
+  /** Modification time as printed ("2006-01-02 15:04"). */
+  mtime?: string;
 }
 
 export interface InspectTree {
@@ -98,7 +100,7 @@ export interface InspectTree {
   entries: InspectEntry[];
 }
 
-const inspectMeta = /^([^,()]+?)(?:,\s*(\d+)\s*lines?)?$/;
+const inspectMeta = /^([^,()]+?)(?:,\s*(\d+)\s*lines?)?(?:,\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}))?$/;
 
 function parseEntryLine(line: string, forceDepthZero: boolean): InspectEntry | null {
   const m = line.match(/^( *)(?:\[([^\]]*)\] ?)?(.*)$/);
@@ -125,6 +127,7 @@ function parseEntryLine(line: string, forceDepthZero: boolean): InspectEntry | n
     if (mm) {
       entry.size = mm[1].trim();
       if (mm[2] !== undefined) entry.lines = parseInt(mm[2], 10);
+      if (mm[3] !== undefined) entry.mtime = mm[3];
     } else {
       entry.size = b[3].trim();
     }

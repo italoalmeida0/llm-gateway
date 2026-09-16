@@ -30,13 +30,19 @@ type globArgs struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path,omitempty"`
 	Hidden  bool   `json:"hidden,omitempty"`
+	// CaseInsensitive matches names case-insensitively (find -iname).
+	CaseInsensitive bool `json:"caseInsensitive,omitempty"`
+	// Type filters entries: "f" files only, "d" directories only
+	// (find -type). Empty means both (files match the pattern, dirs are
+	// listed when they match too).
+	Type string `json:"type,omitempty"`
 }
 
-const globSchema = `{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match files against (e.g. \"**/*.go\", \"*.json\", \"src/**/*.ts\")"},"path":{"type":"string","description":"Directory to search within, relative to CWD (defaults to \".\")"},"hidden":{"type":"boolean","description":"Whether to include hidden files and directories (default false)"}},"required":["pattern"]}`
+const globSchema = `{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match files against (e.g. \"**/*.go\", \"*.json\", \"src/**/*.ts\")"},"path":{"type":"string","description":"Directory to search within, relative to CWD (defaults to \".\")"},"hidden":{"type":"boolean","description":"Whether to include hidden files and directories (default false)"},"caseInsensitive":{"type":"boolean","description":"Match names case-insensitively (find -iname, default false)"},"type":{"type":"string","description":"Entry type filter: \"f\" files only, \"d\" directories only (find -type, default both)"}},"required":["pattern"]}`
 
 func (t *GlobTool) Name() string { return "glob" }
 func (t *GlobTool) Description() string {
-	return "Find files by NAME pattern (e.g. \"**/*.go\", \"*.json\", \"src/**/*.ts\"). Honors .gitignore rules. For file CONTENT use search (glob finds names, search finds text) — then read or inspect the hits."
+	return "Find files by NAME pattern (e.g. \"**/*.go\", \"*.json\", \"src/**/*.ts\"). Honors .gitignore rules. Params: `caseInsensitive` (find -iname), `type` (\"f\" files / \"d\" dirs, like find -type). For file CONTENT use search (glob finds names, search finds text) — then read or inspect the hits."
 }
 func (t *GlobTool) Schema() json.RawMessage { return json.RawMessage(globSchema) }
 
@@ -48,8 +54,15 @@ func (t *GlobTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	if strings.TrimSpace(a.Pattern) == "" {
 		return core.ToolResult{}, fmt.Errorf("pattern is required")
 	}
+	if a.Type != "" && a.Type != "f" && a.Type != "d" {
+		return core.ToolResult{}, fmt.Errorf("type must be \"f\" or \"d\"")
+	}
 
-	re, hasSlash, err := compileGlob(a.Pattern)
+	pattern := a.Pattern
+	if a.CaseInsensitive {
+		pattern = strings.ToLower(pattern)
+	}
+	re, hasSlash, err := compileGlob(pattern)
 	if err != nil {
 		return core.ToolResult{}, err
 	}
@@ -157,15 +170,54 @@ func (t *GlobTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 				}
 				stack.Push(path, ignoreRel)
 				pushed = append(pushed, relSlash)
+				if a.Type == "d" {
+					// Directories match too when filtering by type.
+					name := d.Name()
+					if a.CaseInsensitive {
+						name = strings.ToLower(name)
+					}
+					matched := false
+					if hasSlash {
+						target := relSlash
+						if a.CaseInsensitive {
+							target = strings.ToLower(target)
+						}
+						matched = re.MatchString(target)
+					} else {
+						matched = re.MatchString(name)
+					}
+					if matched {
+						match := t.globDisplayPath(givenSearchDir, a.Path, relSlash) + "/"
+						matches = append(matches, match)
+						if progress != nil {
+							progress(match + "\n")
+						}
+						if len(matches) >= maxGlobMatches {
+							truncated = true
+							return filepath.SkipAll
+						}
+					}
+				}
 				return nil
 			}
 
+			if a.Type == "d" {
+				return nil
+			}
 			// Check if file matches the glob pattern.
 			matched := false
+			name := d.Name()
+			if a.CaseInsensitive {
+				name = strings.ToLower(name)
+			}
 			if hasSlash {
-				matched = re.MatchString(relSlash)
+				target := relSlash
+				if a.CaseInsensitive {
+					target = strings.ToLower(target)
+				}
+				matched = re.MatchString(target)
 			} else {
-				matched = re.MatchString(d.Name())
+				matched = re.MatchString(name)
 			}
 
 			if matched {

@@ -826,6 +826,13 @@ describe("Tool mini-UI parsers", () => {
     expect(parseInspectTree("garbage without structure")).toBeNull();
   });
 
+  test("parseInspectTree reads mtimes and aggregated dir sizes", () => {
+    const raw = "./ (3 entries)\n    sub/ (10B, 2026-09-16 10:00)\n    a.txt (8B, 2 lines, 2026-09-16 10:01)\n";
+    const t = parseInspectTree(raw);
+    expect(t?.entries[0]).toMatchObject({ name: "sub", isDir: true, size: "10B", mtime: "2026-09-16 10:00" });
+    expect(t?.entries[1]).toMatchObject({ name: "a.txt", size: "8B", lines: 2, mtime: "2026-09-16 10:01" });
+  });
+
   test("parseGlobList reads file lists and truncation", () => {
     expect(parseGlobList("No files matched the pattern.")).toMatchObject({ none: true, files: [] });
     const g = parseGlobList("g/a.ts\ng/b.ts\n\n(Truncated: showing first 500 matches)");

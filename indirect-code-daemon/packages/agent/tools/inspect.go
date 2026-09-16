@@ -32,12 +32,19 @@ type InspectArgs struct {
 	Include []string `json:"include,omitempty"`
 	// Exclude skips entries by glob(s).
 	Exclude []string `json:"exclude,omitempty"`
+	// CaseInsensitive matches include/exclude globs case-insensitively
+	// (find -iname semantics for the name filters).
+	CaseInsensitive bool `json:"caseInsensitive,omitempty"`
+	// Type filters entries: "f" files only, "d" directories only
+	// (find -type). Empty means both.
+	Type string `json:"type,omitempty"`
 }
 
 type inspectEntry struct {
-	rel   string
-	isDir bool
-	size  int64
+	rel     string
+	isDir   bool
+	size    int64
+	modTime time.Time
 }
 
 // InspectTool replaces ls/cat/head/wc -l with one structured call: a tree
@@ -51,10 +58,10 @@ type InspectTool struct {
 func (t *InspectTool) Name() string { return "inspect" }
 
 func (t *InspectTool) Description() string {
-	return "List a directory tree with sizes, line counts and git status flags. Params: `path` (default '.'), `depth` (default 1, max 5), `showHidden` (default false), `gitStatus` (default true), `maxEntries` (default 200, max 1000), `include`/`exclude` globs. Single files report size + line count + git flag."
+	return "List a directory tree with sizes, line counts, mtimes and git status flags. Params: `path` (default '.'), `depth` (default 1, max 5), `showHidden` (default false), `gitStatus` (default true), `maxEntries` (default 200, max 1000), `include`/`exclude` globs, `caseInsensitive` (iname-style name filters), `type` (\"f\" files / \"d\" dirs). Single files report size + line count + git flag."
 }
 
-const inspectSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Directory or file path to inspect (defaults to '.')."},"depth":{"type":"number","description":"Maximum directory recursion depth (default 1, max 5)."},"showHidden":{"type":"boolean","description":"Include hidden files and dotfiles (default false)."},"gitStatus":{"type":"boolean","description":"Annotate files with git status flags (M/A/D/??) (default true)."},"maxEntries":{"type":"number","description":"Maximum entries to return (default 200, max 1000)."},"include":{"type":"array","items":{"type":"string"},"description":"Glob patterns to include."},"exclude":{"type":"array","items":{"type":"string"},"description":"Glob patterns to exclude."}}}`
+const inspectSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Directory or file path to inspect (defaults to '.')."},"depth":{"type":"number","description":"Maximum directory recursion depth (default 1, max 5)."},"showHidden":{"type":"boolean","description":"Include hidden files and dotfiles (default false)."},"gitStatus":{"type":"boolean","description":"Annotate files with git status flags (M/A/D/??) (default true)."},"maxEntries":{"type":"number","description":"Maximum entries to return (default 200, max 1000)."},"include":{"type":"array","items":{"type":"string"},"description":"Glob patterns to include."},"exclude":{"type":"array","items":{"type":"string"},"description":"Glob patterns to exclude."},"caseInsensitive":{"type":"boolean","description":"Match include/exclude globs case-insensitively (default false)."},"type":{"type":"string","description":"Entry type filter: \"f\" files only, \"d\" directories only (default both)."}}}`
 
 func (t *InspectTool) Schema() json.RawMessage { return json.RawMessage(inspectSchema) }
 
@@ -88,6 +95,15 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 	wantGit := true
 	if a.GitStatus != nil {
 		wantGit = *a.GitStatus
+	}
+	if a.Type != "" && a.Type != "f" && a.Type != "d" {
+		return core.ToolResult{}, fmt.Errorf("inspect: type must be \"f\" or \"d\"")
+	}
+	include := a.Include
+	exclude := a.Exclude
+	if a.CaseInsensitive {
+		include = lowerGlobs(a.Include)
+		exclude = lowerGlobs(a.Exclude)
 	}
 
 	st, err := os.Stat(abs)
@@ -148,13 +164,17 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 				return nil
 			}
 		}
-		if !matchAnyGlob(a.Include, relSlash, true) {
+		matchTarget := relSlash
+		if a.CaseInsensitive {
+			matchTarget = strings.ToLower(relSlash)
+		}
+		if !matchAnyGlob(include, matchTarget, true) {
 			if d.IsDir() {
 				// Still descend: children may match.
 			} else {
 				return nil
 			}
-		} else if matchAnyGlob(a.Exclude, relSlash, false) {
+		} else if matchAnyGlob(exclude, matchTarget, false) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -168,12 +188,21 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 			return nil
 		}
 		var size int64
-		if !d.IsDir() {
-			if info, err := d.Info(); err == nil {
+		var modTime time.Time
+		if info, err := d.Info(); err == nil {
+			modTime = info.ModTime()
+			if !d.IsDir() {
 				size = info.Size()
 			}
 		}
-		entries = append(entries, inspectEntry{rel: relSlash, isDir: d.IsDir(), size: size})
+		if a.Type == "f" && d.IsDir() {
+			// Still descend: children may match.
+			return nil
+		}
+		if a.Type == "d" && !d.IsDir() {
+			return nil
+		}
+		entries = append(entries, inspectEntry{rel: relSlash, isDir: d.IsDir(), size: size, modTime: modTime})
 		if len(entries) >= maxEntries {
 			truncated = true
 			return filepath.SkipAll
@@ -207,8 +236,13 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 		indent := strings.Repeat("  ", strings.Count(name, "/"))
 		base := filepath.Base(name)
 		flag := gitFlags[e.rel]
+		mtime := ""
+		if !e.modTime.IsZero() {
+			mtime = ", " + e.modTime.Format("2006-01-02 15:04")
+		}
 		if e.isDir {
-			fmt.Fprintf(&b, "%s%s%s/\n", indent, flagField(flag), base)
+			size := dirSize(filepath.Join(t.CWD, filepath.FromSlash(e.rel)))
+			fmt.Fprintf(&b, "%s%s%s/ (%s%s)\n", indent, flagField(flag), base, humanBytes(size), mtime)
 			continue
 		}
 		extra := ""
@@ -217,11 +251,44 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 				extra = fmt.Sprintf(", %d lines", countLines(data))
 			}
 		}
-		fmt.Fprintf(&b, "%s%s%s (%s%s)\n", indent, flagField(flag), base, humanBytes(e.size), extra)
+		fmt.Fprintf(&b, "%s%s%s (%s%s%s)\n", indent, flagField(flag), base, humanBytes(e.size), extra, mtime)
 	}
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
 	}, nil
+}
+
+// lowerGlobs lowercases glob patterns for case-insensitive matching.
+func lowerGlobs(patterns []string) []string {
+	out := make([]string, len(patterns))
+	for i, p := range patterns {
+		out[i] = strings.ToLower(p)
+	}
+	return out
+}
+
+// dirSize sums file sizes under dir (single level walk, best-effort).
+// Symlink loops and unreadable entries are skipped silently.
+func dirSize(dir string) int64 {
+	var total int64
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if p == dir {
+			return nil
+		}
+		if !d.IsDir() {
+			if info, err := d.Info(); err == nil {
+				total += info.Size()
+			}
+		}
+		return nil
+	})
+	return total
 }
 
 func flagField(flag string) string {

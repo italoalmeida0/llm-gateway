@@ -44,6 +44,9 @@ export function ToolSearchBodies(props: ToolPartProps) {
               <span class="text-ink-300">/{String(props.m.args().pattern || "")}/</span>
               <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">regex</span>
               {props.m.args().path && String(props.m.args().path) !== "." ? <span class="ml-1.5">in {String(props.m.args().path)}</span> : null}
+              {props.m.args().onlyMatching ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">only-matching</span> : null}
+              {props.m.args().count ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">count</span> : null}
+              {props.m.args().filesOnly ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">files-only</span> : null}
             </div>
             <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
           </Show>
@@ -89,6 +92,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
                             <span class="shrink-0 font-mono text-[10.5px] text-ink-500">
                               {e.size}
                               {e.lines !== undefined ? ` · ${e.lines} lines` : ""}
+                              {e.mtime ? ` · ${e.mtime}` : ""}
                             </span>
                           </Show>
                         </li>
@@ -124,7 +128,9 @@ export function ToolSearchBodies(props: ToolPartProps) {
                       <For each={g().files}>
                         {(f) => (
                           <li class="flex items-center gap-1.5 rounded-md px-1.5 py-[3px] hover:bg-ink-900/70 text-[12px]">
-                            <FileIcon path={f} size={13} />
+                            <Show when={f.endsWith("/")} fallback={<FileIcon path={f} size={13} />}>
+                              <Iconify icon="lucide:folder" size={13} class="shrink-0 text-ink-500" />
+                            </Show>
                             <span class="truncate font-mono text-ink-200">{f}</span>
                           </li>
                         )}

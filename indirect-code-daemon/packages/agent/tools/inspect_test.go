@@ -63,3 +63,46 @@ func TestInspectHiddenAndDepth(t *testing.T) {
 		t.Fatalf("depth 1 should hide deep.txt, got:\n%s", got)
 	}
 }
+
+func TestInspectMtimeDirSizeType(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\ntwo\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "UPPER.TXT"), []byte("x"), 0o644)
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+	os.WriteFile(filepath.Join(dir, "sub", "b.go"), []byte("0123456789"), 0o644)
+	tool := &InspectTool{CWD: dir, Sandbox: NewSandbox(dir)}
+
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "."}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := toolResultText(t, res)
+	// mtime on files and aggregated size on dirs.
+	if !strings.Contains(got, "a.txt (8B, 2 lines, ") {
+		t.Fatalf("expected mtime on file row, got:\n%s", got)
+	}
+	if !strings.Contains(got, "sub/ (10B, ") {
+		t.Fatalf("expected aggregated dir size, got:\n%s", got)
+	}
+	// type=f hides dirs, type=d hides files.
+	res, _ = tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": ".", "type": "f"}), nil)
+	if got := toolResultText(t, res); strings.Contains(got, "sub/") {
+		t.Fatalf("type=f must hide dirs, got:\n%s", got)
+	}
+	res, _ = tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": ".", "type": "d"}), nil)
+	if got := toolResultText(t, res); strings.Contains(got, "a.txt") {
+		t.Fatalf("type=d must hide files, got:\n%s", got)
+	}
+	// caseInsensitive include matches UPPER.TXT with lowercase pattern.
+	res, _ = tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": ".", "include": []string{"*.txt"}}), nil)
+	if got := toolResultText(t, res); strings.Contains(got, "UPPER.TXT") {
+		t.Fatalf("sensitive include should miss UPPER.TXT, got:\n%s", got)
+	}
+	res, _ = tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": ".", "include": []string{"*.txt"}, "caseInsensitive": true}), nil)
+	if got := toolResultText(t, res); !strings.Contains(got, "UPPER.TXT") {
+		t.Fatalf("insensitive include should find UPPER.TXT, got:\n%s", got)
+	}
+	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": ".", "type": "x"}), nil); err == nil {
+		t.Fatal("expected error for invalid type")
+	}
+}

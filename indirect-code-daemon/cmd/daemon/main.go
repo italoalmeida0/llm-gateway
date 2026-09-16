@@ -2475,6 +2475,34 @@ func main() {
 		fmt.Println("[INFO] Tip: To switch to another gateway link or user account, run: ./indirect-code -connect <new-url>")
 	}
 
+	// Python check: managed copy in the Indirect Code folder -> PATH ->
+	// standalone download (astral-sh/python-build-standalone). Failure only
+	// DISABLES the python tool — startup continues.
+	if bin, err := tools.EnsurePython(dataDir); err != nil {
+		fmt.Printf("[PYTHON] unavailable (%v); python tool disabled\n", err)
+		tools.SetPythonOverride("", err)
+	} else {
+		fmt.Printf("[PYTHON] using %s\n", bin)
+		tools.SetPythonOverride(bin, nil)
+	}
+
+	// Terminal check BEFORE anything else: unix probes bash -> managed
+	// unish (auto-downloaded from the unish releases) -> zsh -> sh,
+	// Windows requires unish. No usable shell = refuse to start, since
+	// every turn depends on terminal commands.
+	if err := tools.EnsureShell(dataDir); err != nil {
+		// No shell, but a valid python exists: the daemon still starts —
+		// the bash tool stays advertised but refuses with "unavailable"
+		// when used, while the python tool works normally. Only when
+		// NEITHER shell NOR python works does the daemon refuse to start.
+		if bin, perr := tools.PythonAvailable(); perr == nil && bin != "" {
+			fmt.Printf("[SHELL] no shell available (%v); bash tool disabled, python tool active\n", err)
+		} else {
+			fmt.Printf("Terminal unavailable: %v (and no usable python either)\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// A previous run dying mid-turn must not brick sessions forever.
 	server.resetRunningSessions()
 	// Turns interrupted by the death resume where they died: same index,

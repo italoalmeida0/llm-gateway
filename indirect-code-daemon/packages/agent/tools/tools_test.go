@@ -355,45 +355,77 @@ func TestEditGuidance(t *testing.T) {
 
 func TestResolveShell(t *testing.T) {
 	notFound := errors.New("not found")
+	okProbe := func(path, flag string) bool { return true }
+	noProbe := func(path, flag string) bool { return false }
 	tests := []struct {
 		name     string
 		goos     string
 		binBash  bool
 		pathBash string
 		pathErr  error
+		probe    func(path, flag string) bool
 		want     shellCommand
 	}{
 		{
 			name: "prefers /bin/bash",
-			goos: "linux", binBash: true, pathBash: "/usr/local/bin/bash",
+			goos: "linux", binBash: true, pathBash: "/usr/local/bin/bash", probe: okProbe,
 			want: shellCommand{path: "/bin/bash", flag: "-c", isBash: true},
 		},
 		{
 			name: "uses bash from PATH",
-			goos: "linux", pathBash: "/usr/local/bin/bash",
+			goos: "linux", pathBash: "/usr/local/bin/bash", probe: okProbe,
 			want: shellCommand{path: "/usr/local/bin/bash", flag: "-c", isBash: true},
 		},
 		{
+			name: "skips bash that fails its probe",
+			goos: "linux", binBash: true, pathBash: "/usr/local/bin/bash", probe: noProbe,
+			want: shellCommand{},
+		},
+		{
 			name: "falls back to POSIX sh",
-			goos: "linux", pathErr: notFound,
+			goos: "linux", pathErr: notFound, probe: okProbe,
 			want: shellCommand{path: "/bin/sh", flag: "-c"},
 		},
 		{
-			name: "uses Command Prompt on Windows",
-			goos: "windows", binBash: true, pathBash: "/usr/local/bin/bash",
-			want: shellCommand{path: "cmd", flag: "/C"},
+			name: "no shell when every probe fails",
+			goos: "linux", pathErr: notFound, probe: noProbe,
+			want: shellCommand{},
+		},
+		{
+			name: "uses unish from PATH on Windows",
+			goos: "windows", binBash: true, pathBash: "/usr/local/bin/bash", probe: okProbe,
+			want: shellCommand{path: `C:\tools\unish.exe`, flag: "-c", isBash: true},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			probe := tt.probe
+			if probe == nil {
+				probe = okProbe
+			}
 			got := resolveShell(tt.goos, func(path string) bool {
-				return path == "/bin/bash" && tt.binBash
-			}, func(name string) (string, error) {
-				if name != "bash" {
-					t.Fatalf("unexpected PATH lookup for %q", name)
+				if path == "/bin/bash" {
+					return tt.binBash
 				}
-				return tt.pathBash, tt.pathErr
-			})
+				if path == "/bin/sh" {
+					// /bin/sh exists on the test matrix unless the probe
+					// itself fails (the "no shell" case).
+					return true
+				}
+				return false
+			}, func(name string) (string, error) {
+				switch name {
+				case "bash":
+					return tt.pathBash, tt.pathErr
+				case "unish":
+					if tt.goos == "windows" && tt.name == "uses unish from PATH on Windows" {
+						return `C:\tools\unish.exe`, nil
+					}
+					return "", notFound
+				default:
+					return "", notFound
+				}
+			}, probe)
 			if got != tt.want {
 				t.Fatalf("resolveShell() = %+v, want %+v", got, tt.want)
 			}

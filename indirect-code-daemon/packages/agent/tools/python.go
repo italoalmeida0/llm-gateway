@@ -17,13 +17,18 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// Python detection is resolved once per process and cached. The tool is only
-// advertised when a binary was actually found (see PythonAvailable); sessions
-// started on machines without Python never see the tool in the registry.
+// Python detection is pinned once at daemon startup (EnsurePython: managed
+// copy in the Indirect Code folder -> PATH -> standalone download) and
+// cached. The tool is only advertised when a binary was actually verified
+// (see PythonAvailable); Execute refuses with a clear error when disabled.
 var (
-	pythonOnce sync.Once
-	pythonBin  string
-	pythonErr  error
+	pythonOnce   sync.Once
+	pythonBin    string
+	pythonErr    error
+	pythonPinMu  sync.RWMutex
+	pythonPinned bool
+	pythonPinBin string
+	pythonPinErr error
 )
 
 // findPythonBin locates a usable Python 3 interpreter, preferring python3
@@ -58,8 +63,16 @@ func findPythonBin() (string, error) {
 }
 
 // PythonAvailable reports whether this machine can run the python tool.
-// Result is cached after the first probe.
+// The startup-pinned interpreter (EnsurePython) wins; without a pin it
+// falls back to lazy PATH probing so tests and REPL-style uses keep
+// working. Result is cached after the first probe.
 func PythonAvailable() (string, error) {
+	pythonPinMu.RLock()
+	pinned, bin, err := pythonPinned, pythonPinBin, pythonPinErr
+	pythonPinMu.RUnlock()
+	if pinned {
+		return bin, err
+	}
 	pythonOnce.Do(func() {
 		pythonBin, pythonErr = findPythonBin()
 	})
@@ -111,7 +124,10 @@ func (t *PythonTool) Schema() json.RawMessage { return json.RawMessage(pythonSch
 
 func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
 	bin, err := PythonAvailable()
-	if err != nil {
+	if err != nil || bin == "" {
+		if err == nil {
+			err = fmt.Errorf("no usable Python 3 interpreter on this host")
+		}
 		return core.ToolResult{}, fmt.Errorf("python tool unavailable: %v", err)
 	}
 	var a PythonArgs

@@ -51,6 +51,9 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	if strings.TrimSpace(a.Command) == "" {
 		return core.ToolResult{}, fmt.Errorf("command is required")
 	}
+	if s := currentShell(); s.path == "" {
+		return core.ToolResult{}, fmt.Errorf("terminal unavailable: no usable shell on this host (bash, unish, zsh and sh all failed their startup probe)")
+	}
 	if err := t.Sandbox.CheckCommand(a.Command); err != nil {
 		return core.ToolResult{}, err
 	}
@@ -598,29 +601,98 @@ type shellCommand struct {
 }
 
 func currentShell() shellCommand {
-	return resolveShell(runtime.GOOS, isExecutableFile, exec.LookPath)
+	shellMu.RLock()
+	o := shellOverride
+	shellMu.RUnlock()
+	if o != nil {
+		return *o
+	}
+	return resolveShell(runtime.GOOS, isExecutableFile, exec.LookPath, probeShellPath)
+}
+
+// SetShellOverride pins the shell used by BashTool. The daemon calls it
+// once at startup from ensureShell, after probing the
+// bash -> unish -> zsh -> sh chain (unish-only on Windows), so every
+// command in the process uses the verified shell. isBash marks
+// bash-compatible syntax (bash itself and unish, which is bash-like).
+func SetShellOverride(path, flag string, isBash bool) {
+	shellMu.Lock()
+	defer shellMu.Unlock()
+	shellOverride = &shellCommand{path: path, flag: flag, isBash: isBash}
+}
+
+// ClearShellOverride drops the pinned shell (tests only).
+func ClearShellOverride() {
+	shellMu.Lock()
+	defer shellMu.Unlock()
+	shellOverride = nil
+}
+
+// probeShellPath runs a trivial command through a candidate shell: a binary
+// that merely exists but cannot execute (wrong arch, corrupt download)
+// must NOT be selected.
+func probeShellPath(path, flag string) bool {
+	if path == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, flag, "echo shell-probe-ok").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "shell-probe-ok")
 }
 
 // ShellDescription reports the shell used to run commands (e.g.
-// "/bin/bash -c", "cmd /C"). Surfaced in the system prompt so the model
-// writes compatible commands on the first try.
+// "/bin/bash -c", "<dataDir>/bin/unish -c"). Surfaced in the system
+// prompt so the model writes compatible commands on the first try.
 func ShellDescription() string {
 	s := currentShell()
+	if s.path == "" {
+		return "(no shell available)"
+	}
 	return s.path + " " + s.flag
 }
 
-func resolveShell(goos string, executable func(string) bool, lookPath func(string) (string, error)) shellCommand {
+// resolveShell picks the terminal for BashTool. Unix chain: bash
+// (/bin/bash, then PATH) -> unish (PATH here; the managed data-dir copy is
+// pinned via SetShellOverride at startup) -> zsh -> sh. Every candidate is
+// probed with a trivial command so an unexecutable binary is skipped.
+// Windows uses unish only (same PATH lookup here; startup pins the managed
+// copy and refuses to start when it is unusable).
+func resolveShell(goos string, executable func(string) bool, lookPath func(string) (string, error), probe func(path, flag string) bool) shellCommand {
 	if goos == "windows" {
-		return shellCommand{path: "cmd", flag: "/C"}
+		if path, err := lookPath("unish"); err == nil && probe(path, "-c") {
+			return shellCommand{path: path, flag: "-c", isBash: true}
+		}
+		return shellCommand{}
 	}
-	if executable("/bin/bash") {
+	if executable("/bin/bash") && probe("/bin/bash", "-c") {
 		return shellCommand{path: "/bin/bash", flag: "-c", isBash: true}
 	}
-	if path, err := lookPath("bash"); err == nil {
+	if path, err := lookPath("bash"); err == nil && probe(path, "-c") {
 		return shellCommand{path: path, flag: "-c", isBash: true}
 	}
-	return shellCommand{path: "/bin/sh", flag: "-c"}
+	if path, err := lookPath("unish"); err == nil && probe(path, "-c") {
+		return shellCommand{path: path, flag: "-c", isBash: true}
+	}
+	if path, err := lookPath("zsh"); err == nil && probe(path, "-c") {
+		return shellCommand{path: path, flag: "-c"}
+	}
+	if executable("/bin/sh") && probe("/bin/sh", "-c") {
+		return shellCommand{path: "/bin/sh", flag: "-c"}
+	}
+	if path, err := lookPath("sh"); err == nil && probe(path, "-c") {
+		return shellCommand{path: path, flag: "-c"}
+	}
+	return shellCommand{}
 }
+
+var (
+	shellMu       sync.RWMutex
+	shellOverride *shellCommand
+)
 
 func isExecutableFile(path string) bool {
 	info, err := os.Stat(path)

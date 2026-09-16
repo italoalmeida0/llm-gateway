@@ -144,7 +144,9 @@ export function createDataLayer(opts: {
 
   function normalizeProject(p: any, hostId: string): RcProject {
     const rawPath = String(p.path || "");
-    const fallback = rawPath.replace(/\/+$/, "").split("/").pop() || rawPath || "/";
+    // Windows hosts echo `C:\work\TAP`: strip both separators so the
+    // fallback name is `TAP`, not the whole path.
+    const fallback = rawPath.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || rawPath || "/";
     return {
       id: p.id,
       hostId,

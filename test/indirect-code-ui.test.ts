@@ -9,7 +9,7 @@ import {
   sanitizeUserText,
   stripLeadingSystemPrompt,
 } from "../web/src/indirect-code/live";
-import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity } from "../web/src/indirect-code/paths";
+import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity, sameRemotePath } from "../web/src/indirect-code/paths";
 import {
   blockTurnDuration, buildRenderBlocks, cacheHitPct, finalTurnMessage, fmtUsd, fuzzySame, isHeaderOnlySleep, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
 } from "../web/src/indirect-code/transcript";
@@ -17,6 +17,7 @@ import { specialTitle } from "../web/src/indirect-code/utils/titles";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
 import { followTail } from "../web/src/indirect-code/utils/scrollMemory";
 import { parseGlobList, parseInspectTree, parseQuestionQA } from "../web/src/indirect-code/utils/toolTrees";
+import { parseEditResults } from "../web/src/indirect-code/utils/toolEdits";
 import { parseDaemonMessage } from "../web/src/indirect-code/daemon-protocol";
 import { parseContentBlocks } from "../web/src/indirect-code/utils/wire";
 import {
@@ -832,6 +833,21 @@ describe("Tool mini-UI parsers", () => {
     expect(parseGlobList("")).toBeNull();
   });
 
+  test("parseEditResults keeps windows drive letters out of the error split", () => {
+    // Daemon header: `✓ C:/work/TAP/src/foo.ts (2 matches)` — the `C:`
+    // colon is a drive letter, not the `path: message` error separator.
+    const applied = parseEditResults("APPLIED.\n\n✓ C:/work/TAP/src/foo.ts (2 matches)\n1:+const x = 1");
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({ file: "C:/work/TAP/src/foo.ts", status: "applied", matches: 2 });
+    const backslash = parseEditResults("APPLIED.\n\n✓ C:\\work\\TAP\\src\\foo.ts (1 match)\n1:+x");
+    expect(backslash).toHaveLength(1);
+    expect(backslash[0]).toMatchObject({ file: "C:\\work\\TAP\\src\\foo.ts", status: "applied", matches: 1 });
+    // A real error (`path: message`, colon + space) still splits.
+    const failed = parseEditResults("✗ src/foo.ts: oldText not found");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ file: "src/foo.ts", status: "error", error: "oldText not found" });
+  });
+
   test("parseQuestionQA joins questions with recorded answers", () => {
     const args = {
       questions: [
@@ -873,6 +889,17 @@ describe("collapseCwd", () => {
     expect(collapseCwd("  cd . && echo hi", "/proj")).toBe("echo hi");
     // A cd into a DIFFERENT directory is meaningful: keep it.
     expect(collapseCwd("cd /other && ls", "/proj")).toBe("cd /other && ls");
+    // Windows compares case-insensitively: casing drift must still collapse.
+    expect(collapseCwd("cd c:\\work\\tap && build", "C:\\Work\\TAP")).toBe("build");
+    expect(collapseCwd("cd C:/WORK/TAP && build", "c:\\work\\tap")).toBe("build");
+  });
+
+  test("compares remote paths across separator and case styles", () => {
+    expect(sameRemotePath("C:\\work\\TAP", "c:/work/tap")).toBe(true);
+    expect(sameRemotePath("\\\\server\\share\\dir", "//server/share/dir")).toBe(true);
+    expect(sameRemotePath("/home/user/TAP", "/home/user/tap")).toBe(false);
+    expect(sameRemotePath("/home/user", "/home/user")).toBe(true);
+    expect(sameRemotePath("", "/home/user")).toBe(false);
   });
 });
 

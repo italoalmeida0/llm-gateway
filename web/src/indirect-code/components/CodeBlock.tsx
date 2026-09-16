@@ -12,8 +12,12 @@ interface CodeRow {
 }
 
 function cleanNotice(text: string): string {
+  // Tolerate CRLF: daemon hosts on Windows echo file bytes verbatim, so
+  // the notice (and every display line) may end with `\r\n`. Without the
+  // `\r?`, the notice survives as a stray first line and numbered lines
+  // keep a trailing `\r` that leaks into highlight/copy.
   return (text || "").replace(
-    /^\[Note: The line prefix "[^"]+" is for line identification only and is not part of the file content\.\]\n?/,
+    /^\[Note: The line prefix "[^"]+" is for line identification only and is not part of the file content\.\]\r?\n?/,
     "",
   );
 }
@@ -38,7 +42,9 @@ export function CodeBlock(props: {
   const [rawHtml, setRawHtml] = createSignal<string | null>(null);
 
   const clean = () => cleanNotice(props.text || "");
-  const rawLines = () => clean().split("\n");
+  // Strip a trailing `\r` per line (CRLF file read on a Windows host):
+  // it would otherwise leak into highlight/copy and break gutter parsing.
+  const rawLines = () => clean().split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
   const hasGutter = () => !props.bare && rawLines().some((l) => /^\d+:/.test(l));
 
   createEffect(() => {

@@ -1,5 +1,6 @@
 import type { DaemonCommand } from "../daemon-protocol";
 import { createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
+import { sameRemotePath } from "../paths";
 import type { WorkspaceStatus } from "../viewTypes";
 import type { WorkspaceStatusEvent } from "../daemon-protocol";
 
@@ -17,7 +18,13 @@ export function createWorkspace(opts: {
 }) {
   const [workspace, setWorkspace] = createSignal<WorkspaceStatus | null>(null);
   const workspacePath = createMemo(() => opts.getSessionId() ? opts.getSessionCwd() : opts.getProjectPath());
-  const workspaceState = () => workspace()?.path === workspacePath() ? workspace()?.status : opts.getFolderStatus();
+  const workspaceState = () => {
+    // The daemon echoes `filepath.Abs` (native `\` on Windows) while the
+    // mirrored cwd may use `/`: compare separator/case-insensitively so
+    // the polled status is picked up instead of falling back to stale data.
+    const live = workspace();
+    return live && sameRemotePath(live.path || "", workspacePath()) ? live.status : opts.getFolderStatus();
+  };
   const workspaceBlocked = () => workspaceState() === "missing" || workspaceState() === "unavailable";
   let workspaceRequest = "";
   function checkWorkspace() {
@@ -26,7 +33,7 @@ export function createWorkspace(opts: {
     opts.send({ type: "check_workspace", requestId: workspaceRequest, sessionId: opts.getSessionId(), projectId: opts.getProjectId() });
   }
   function noteWorkspaceStatus(msg: WorkspaceStatusEvent) {
-    if (msg.requestId === workspaceRequest && msg.workspace?.path === workspacePath()) setWorkspace(msg.workspace);
+    if (msg.requestId === workspaceRequest && msg.workspace && sameRemotePath(msg.workspace.path || "", workspacePath())) setWorkspace(msg.workspace);
   }
   createEffect(() => {
     workspacePath(); opts.getHostId(); opts.isConnected();

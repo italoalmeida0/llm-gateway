@@ -16,10 +16,22 @@ function comparable(path: string): string {
   return /^[a-z]:/i.test(value) || value.startsWith("//") ? value.toLowerCase() : value;
 }
 
+/** Path equality across separator/case styles: `C:\work\TAP` equals
+ * `c:/work/tap` (Windows/UNC compare case-insensitively, like the OS),
+ * while POSIX paths compare exactly. Use it for daemon round-trips where
+ * one side echoes `filepath.Abs` (native `\`) and the other the stored
+ * cwd (`/`): strict `===` never converges there and the UI falls back to
+ * stale folder status forever. */
+export function sameRemotePath(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return comparable(a) === comparable(b);
+}
+
 /** Each conversation belongs to exactly one project: the deepest ancestor. */
 export function projectForDirectory<T extends { id: string; path: string; protected?:boolean }>(cwd: string, projects: T[]): T | undefined {
   const home = projects.find((p) => p.protected);
-  const directory = comparable(cwd === "" || cwd === "~" ? home?.path || "" : home && cwd.startsWith("~/") ? home.path + cwd.slice(1) : cwd);
+  const directory = comparable(cwd === "" || cwd === "~" ? home?.path || "" : home && (cwd.startsWith("~/") || cwd.startsWith("~\\")) ? home.path + cwd.slice(1) : cwd);
   if (!directory) return home;
   let match: T | undefined;
   let length = -1;
@@ -43,6 +55,9 @@ export function collapseCwd(cmd: string, cwd: string): string {
   if (!cmd || !cwd) return cmd;
   const base = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
   if (!base || base === "/") return cmd;
+  // Windows compares case-insensitively: `C:\Work` must collapse `c:\work`.
+  // Match case-sensitively first (exact), then case-insensitively so the
+  // displayed casing is preserved while the cwd prefix still collapses.
   const variants = [base];
   const back = base.replace(/\//g, "\\");
   if (back !== base) variants.push(back);
@@ -50,11 +65,24 @@ export function collapseCwd(cmd: string, cwd: string): string {
   for (const v of variants) {
     if (v) out = out.split(v).join(".");
   }
+  if (/^[a-z]:[\\/]/i.test(base)) {
+    const ci = (hay: string, needle: string): string => {
+      let i = hay.toLowerCase().indexOf(needle.toLowerCase());
+      while (i >= 0) {
+        hay = hay.slice(0, i) + "." + hay.slice(i + needle.length);
+        i = hay.toLowerCase().indexOf(needle.toLowerCase(), i + 1);
+      }
+      return hay;
+    };
+    for (const v of variants) {
+      if (v) out = ci(out, v);
+    }
+  }
   return out.replace(/^\s*cd\s+\.\s*&&\s*/, "").trimStart() || out.trimStart();
 }
 
 export function absoluteRemotePath(path: string, cwd: string, home = ""): string {
-  if (home && (path === "~" || path.startsWith("~/"))) path = home + path.slice(1);
+  if (home && (path === "~" || path.startsWith("~/") || path.startsWith("~\\"))) path = home + path.slice(1);
   const value = normalized(/^(?:[a-z]:[\\/]|[\\/])/i.test(path) ? path : `${cwd}/${path}`);
   return /^[a-z]:[\\/]/i.test(cwd) || cwd.startsWith("\\\\") ? value.replace(/\//g, "\\") : value;
 }

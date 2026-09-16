@@ -23,11 +23,11 @@ export function Composer() {
   <div class="w-full max-w-2xl mx-auto my-auto shrink-0">
   <StatusBanners />
     <Show when={!s.workspaceBlocked()} fallback={
-      <div role="status" class="rounded-2xl border border-line bg-elev px-4 py-4 text-sm text-ink-300" data-workspace-unavailable>
+      <div role="status" class="rounded-2xl border border-line bg-elev px-4 py-3 text-sm text-ink-300" data-workspace-unavailable>
         <div class="flex items-center gap-2 font-medium text-ink-100"><Iconify icon="lucide:folder-x" size={17} />{s.workspaceState() === "missing" ? "The project folder was deleted" : "The project folder is unavailable"}</div>
-        <p class="mt-2 text-xs text-ink-500">{s.workspaceState() === "missing" ? "Recreate this folder on the host to continue this conversation." : "Restore access to this folder on the host to continue."}</p>
-        <p class="mt-2 font-mono text-xs break-all">{s.workspacePath()}</p>
-        <div class="mt-3 flex gap-3"><button onClick={s.checkWorkspace} class="text-xs text-ink-200 hover:underline cursor-pointer">Check again</button><Show when={t.sessionStatus() === "running"}><button onClick={t.cancelCurrentTurn} class="text-xs text-ink-200 hover:underline cursor-pointer">Stop turn</button></Show></div>
+        <p class="mt-1.5 text-xs text-ink-500">{s.workspaceState() === "missing" ? "Recreate this folder on the host to continue this conversation." : "Restore access to this folder on the host to continue."}</p>
+        <p class="font-mono text-xs break-all">{s.workspacePath()}</p>
+        <div class="mt-2 flex gap-3"><button onClick={s.checkWorkspace} class="text-xs text-ink-200 hover:underline cursor-pointer">Check again</button><Show when={t.sessionStatus() === "running"}><button onClick={t.cancelCurrentTurn} class="text-xs text-ink-200 hover:underline cursor-pointer">Stop turn</button></Show></div>
       </div>
     }>
     <div class="rc-composer relative flex flex-col">

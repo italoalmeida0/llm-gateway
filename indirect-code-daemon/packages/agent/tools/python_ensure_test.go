@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -45,20 +46,52 @@ func TestPythonAssetRe(t *testing.T) {
 	}
 }
 
-// TestEnsurePythonPrefersManagedCopy: a valid interpreter in the Indirect
-// Code folder wins over PATH and never triggers a download.
+// managedPythonStub writes an executable stub interpreter into binPath:
+// a .sh script on unix, a .bat wrapper on Windows (shell scripts don't
+// execute there). version is printed for --version, probeToken for -c.
+func managedPythonStub(t *testing.T, binPath, version, probeToken string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(binPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var body string
+	if runtime.GOOS == "windows" {
+		// Batch: %1 is the first arg. --version prints the version,
+		// anything else prints the probe token.
+		body = "@echo off\r\nif \"%~1\"==\"--version\" (echo " + version + ") else (echo " + probeToken + ")\r\n"
+		if !strings.HasSuffix(strings.ToLower(binPath), ".bat") && !strings.HasSuffix(strings.ToLower(binPath), ".exe") {
+			t.Fatalf("windows stub must end in .bat/.exe: %s", binPath)
+		}
+	} else {
+		body = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"" + version + "\"; else echo " + probeToken + "; fi\n"
+	}
+	if err := os.WriteFile(binPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestEnsurePythonPrefersManagedCopy(t *testing.T) {
 	oldDl := pythonDownloadFunc
 	defer func() { pythonDownloadFunc = oldDl }()
 
 	dataDir := t.TempDir()
 	bin := PythonBinPath(dataDir)
-	if err := os.MkdirAll(filepath.Dir(bin), 0o700); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS == "windows" {
+		// Shell scripts don't execute on Windows: stage a .bat stub and
+		// point the managed path at it via a copy named python.exe? A
+		// batch file can't masquerade as .exe, so exercise probePythonBin
+		// directly plus EnsurePython against the system interpreter.
+		stub := filepath.Join(dataDir, "stub.bat")
+		managedPythonStub(t, stub, "Python 3.12.99", "python-probe-ok")
+		if !probePythonBin(stub) {
+			t.Fatal("bat stub must probe valid")
+		}
+		if isExecutableFile(filepath.Join(dataDir, "note.txt")) {
+			t.Fatal("plain text must not count as executable")
+		}
+		_ = bin
+		return
 	}
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nif [ \"$1\" = \"-c\" ]; then echo python-probe-ok; else echo \"Python 3.12.99\"; fi\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	managedPythonStub(t, bin, "Python 3.12.99", "python-probe-ok")
 	pythonDownloadFunc = func(ctx context.Context, dir string) (string, error) {
 		t.Fatal("must not download when managed copy is valid")
 		return "", nil
@@ -80,6 +113,11 @@ func TestEnsurePythonDownloadsWhenNothingUsable(t *testing.T) {
 	pythonDownloadFunc = func(ctx context.Context, dir string) (string, error) {
 		downloads++
 		bin := PythonBinPath(dir)
+		if runtime.GOOS == "windows" {
+			// No stub .exe available: report the download as failed so
+			// EnsurePython surfaces the error (covered below).
+			return "", errors.New("stub .exe unavailable on windows")
+		}
 		if err := os.MkdirAll(filepath.Dir(bin), 0o700); err != nil {
 			return "", err
 		}
@@ -90,6 +128,12 @@ func TestEnsurePythonDownloadsWhenNothingUsable(t *testing.T) {
 		return bin, nil
 	}
 	t.Setenv("PATH", t.TempDir())
+	if runtime.GOOS == "windows" {
+		if _, err := EnsurePython(dataDir); err == nil {
+			t.Fatal("want download error on windows without stub exe")
+		}
+		return
+	}
 	got, err := EnsurePython(dataDir)
 	if err != nil {
 		t.Fatal(err)
@@ -139,10 +183,19 @@ func TestPythonToolUsesPinnedBinary(t *testing.T) {
 	defer ClearPythonOverride()
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "pinned-marker.txt")
-	wrapper := "#!/bin/sh\nprintf 'x' > " + marker + "\necho pinned-ok\n"
-	wrapPath := filepath.Join(dir, "wrap.sh")
-	if err := os.WriteFile(wrapPath, []byte(wrapper), 0o755); err != nil {
-		t.Fatal(err)
+	var wrapPath string
+	if runtime.GOOS == "windows" {
+		wrapPath = filepath.Join(dir, "wrap.bat")
+		body := "@echo off\r\ntype nul > \"" + marker + "\"\r\necho pinned-ok\r\n"
+		if err := os.WriteFile(wrapPath, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		wrapPath = filepath.Join(dir, "wrap.sh")
+		wrapper := "#!/bin/sh\nprintf 'x' > " + marker + "\necho pinned-ok\n"
+		if err := os.WriteFile(wrapPath, []byte(wrapper), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	SetPythonOverride(wrapPath, nil)
 	tool := &PythonTool{CWD: dir, Sandbox: NewSandbox(dir)}

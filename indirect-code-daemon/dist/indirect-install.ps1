@@ -94,11 +94,17 @@ Write-Host "[indirect] pairing and starting in background (log: $LogFile) ..."
 Start-Process -FilePath $Bin -ArgumentList $daemonArgs -WindowStyle Hidden `
   -RedirectStandardOutput $LogFile -RedirectStandardError $ErrFile
 
-Start-Sleep -Seconds 2
-if (Test-Path $PidFile) {
-  $pidRaw = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
-  $pid2 = ""
-  if ($null -ne $pidRaw) { $pid2 = "$pidRaw".Trim() }
+# First start downloads unish/python runtimes (~30s+), so poll for the pid.
+$pid2 = ""
+for ($i = 0; $i -lt 45; $i++) {
+  Start-Sleep -Seconds 2
+  if (Test-Path $PidFile) {
+    $pidRaw = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($null -ne $pidRaw) { $pid2 = "$pidRaw".Trim() }
+    if ($pid2) { break }
+  }
+}
+if ($pid2) {
   $proc2 = Get-Process -Id $pid2 -ErrorAction SilentlyContinue
   if ($proc2) {
     Write-Host "[indirect] daemon running in background (pid $pid2)."

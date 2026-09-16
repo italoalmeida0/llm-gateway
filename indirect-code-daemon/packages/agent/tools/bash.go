@@ -694,11 +694,6 @@ var (
 	shellOverride *shellCommand
 )
 
-func isExecutableFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
-}
-
 func newShellCmd(ctx context.Context, command string) *exec.Cmd {
 	shell := currentShell()
 	return exec.CommandContext(ctx, shell.path, shell.flag, command)

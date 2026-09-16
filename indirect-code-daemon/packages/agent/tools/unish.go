@@ -214,7 +214,16 @@ func downloadUnish(ctx context.Context, tag, asset, dest string) error {
 		}
 	}
 	if err := os.Rename(tmpName, dest); err != nil {
-		return fmt.Errorf("unish: install: %w", err)
+		// Windows refuses to replace an in-use .exe: remove first, then
+		// move. If the old binary is locked by a running daemon the
+		// remove fails and we surface a clear error instead of a
+		// cryptic rename failure.
+		if rerr := os.Remove(dest); rerr != nil && !os.IsNotExist(rerr) {
+			return fmt.Errorf("unish: install: %w (remove: %v)", err, rerr)
+		}
+		if err := os.Rename(tmpName, dest); err != nil {
+			return fmt.Errorf("unish: install: %w", err)
+		}
 	}
 	return nil
 }

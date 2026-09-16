@@ -3,10 +3,17 @@
 package tools
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
 )
+
+// isExecutableFile reports whether path can be executed (unix exec bits).
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
+}
 
 // setProcessGroup puts the command in its own process group so
 // killProcessGroup can target the entire tree including background

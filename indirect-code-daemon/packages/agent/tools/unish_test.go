@@ -5,8 +5,41 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// unishStub writes a fake unish binary: a .sh script on unix, a .bat
+// wrapper on Windows (shell scripts don't execute there). On Windows the
+// stub lives at dest + ".bat" and the test calls probeShellPath on it
+// directly, since UnishBinPath (*.exe) can't be a batch file.
+func unishStub(t *testing.T, dest, version string, probeOK bool) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		bat := dest + ".bat"
+		probeOut := "echo shell-probe-ok"
+		if !probeOK {
+			probeOut = "exit /b 126"
+		}
+		body := "@echo off\r\nif \"%~1\"==\"--version\" (echo unish " + version + ") else (" + probeOut + ")\r\n"
+		if err := os.WriteFile(bat, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return bat
+	}
+	probeOut := "echo shell-probe-ok"
+	if !probeOK {
+		probeOut = "exit 126"
+	}
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"unish " + version + "\"; else " + probeOut + "; fi\n"
+	if err := os.WriteFile(dest, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dest
+}
 
 func TestUnishAssetName(t *testing.T) {
 	cases := map[string]string{
@@ -44,8 +77,11 @@ func TestParseUnishVersion(t *testing.T) {
 }
 
 // TestEnsureUnishDownloadsWhenMissing stubs the network: no binary + a
-// newer release tag must trigger exactly one download, and the "downloaded"
-// binary is a shell script so the final probe passes for real.
+// newer release tag must trigger exactly one download, and the
+// "downloaded" binary is a stub script so the final probe passes for
+// real. On Windows a batch file can't stand in for the managed .exe, so
+// the test proves the download call + stub probe/version behavior and the
+// full .exe flow is covered by the live test below.
 func TestEnsureUnishDownloadsWhenMissing(t *testing.T) {
 	oldTag, oldDl := unishLatestTagFunc, unishDownloadFunc
 	defer func() { unishLatestTagFunc, unishDownloadFunc = oldTag, oldDl }()
@@ -62,14 +98,19 @@ func TestEnsureUnishDownloadsWhenMissing(t *testing.T) {
 		if tag != "v9.9.9" || a != asset {
 			t.Fatalf("download(%q,%q)", tag, a)
 		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		script := "#!/bin/sh\necho shell-probe-ok\n"
-		if err := os.WriteFile(dest, []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		unishStub(t, dest, "v9.9.9", true)
 		return nil
+	}
+	if runtime.GOOS == "windows" {
+		// Prove the seam: stub probes and reports its version.
+		stub := unishStub(t, filepath.Join(dataDir, "seam"), "v9.9.9", true)
+		if !probeShellPath(stub, "-c") {
+			t.Fatal("stub must probe")
+		}
+		if localUnishVersion(stub) != "v9.9.9" {
+			t.Fatalf("stub version: %q", localUnishVersion(stub))
+		}
+		return
 	}
 	got, err := EnsureUnish(dataDir)
 	if err != nil {
@@ -95,9 +136,18 @@ func TestEnsureUnishUpdatesOnVersionMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Fake local binary: --version prints v0.0.1, -c probes pass.
-	stub := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"unish v0.0.1\"; else echo shell-probe-ok; fi\n"
-	if err := os.WriteFile(dest, []byte(stub), 0o755); err != nil {
-		t.Fatal(err)
+	stub := unishStub(t, dest, "v0.0.1", true)
+	if runtime.GOOS == "windows" {
+		// .bat can't occupy the .exe path: probe the stub directly to
+		// prove the seam works, then done (full flow is unix-tested
+		// plus live Windows runs below).
+		if !probeShellPath(stub, "-c") {
+			t.Fatal("stub must probe")
+		}
+		if localUnishVersion(stub) != "v0.0.1" {
+			t.Fatalf("stub version: %q", localUnishVersion(stub))
+		}
+		return
 	}
 	downloads := 0
 	unishLatestTagFunc = func(ctx context.Context) (string, error) { return "v0.1.0", nil }
@@ -106,10 +156,7 @@ func TestEnsureUnishUpdatesOnVersionMismatch(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(d), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"unish v0.1.0\"; else echo shell-probe-ok; fi\n"
-		if err := os.WriteFile(d, []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		unishStub(t, d, "v0.1.0", true)
 		return nil
 	}
 	if _, err := EnsureUnish(dataDir); err != nil {
@@ -132,6 +179,13 @@ func TestEnsureUnishRedownloadsInvalidBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reports the release version but can never execute a command.
+	if runtime.GOOS == "windows" {
+		stub := unishStub(t, dest, "v0.1.0", false)
+		if probeShellPath(stub, "-c") {
+			t.Fatal("broken stub must fail its probe")
+		}
+		return
+	}
 	if err := os.WriteFile(dest, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"unish v0.1.0\"; else exit 126; fi\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

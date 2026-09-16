@@ -25,9 +25,6 @@ const (
 	// CompactionMinMessages is the minimum history length worth
 	// compacting. Below this there is nothing meaningful to summarize.
 	CompactionMinMessages = 6
-	// CompactionImageTokenEstimate is the per-image cost used when no
-	// usage numbers are available: 1500 tokens.
-	CompactionImageTokenEstimate = 1500
 )
 
 // CompactionState is the incremental state chained across compactions
@@ -130,116 +127,24 @@ type FileOps struct {
 	Modified []string
 }
 
-// EstimateMessageTokens approximates a single message's token cost.
-// Port of estimateMessageTokens: ceil(chars/4) per text/tool block, with
-// image blocks estimated at a flat cost when no usage is attached.
-func EstimateMessageTokens(m provider.Message) int {
-	tokens := 0
-	for _, c := range m.Content {
-		switch b := c.(type) {
-		case provider.TextBlock:
-			tokens += (len(b.Text) + 3) / 4
-		case provider.ReasoningBlock:
-			// Encrypted blobs ride the wire verbatim — count them too.
-			tokens += (len(b.Summary) + len(b.Encrypted) + 3) / 4
-		case provider.ToolCallBlock:
-			tokens += (len(b.Name) + len(b.Arguments) + 3) / 4
-		case provider.ToolResultBlock:
-			tokens += toolResultChars(b) / 4
-		case provider.ImageBlock:
-			if n := len(b.Data); n > 0 {
-				// Keep a rough chars/4 on bytes so large screenshots still move
-				// the needle, floored at the flat estimate.
-				if est := (n + 3) / 4; est > CompactionImageTokenEstimate {
-					tokens += est
-				} else {
-					tokens += CompactionImageTokenEstimate
-				}
-			} else {
-				tokens += CompactionImageTokenEstimate
-			}
-		}
-	}
-	return tokens
-}
-
-// toolResultChars counts the characters inside a tool result block.
-func toolResultChars(b provider.ToolResultBlock) int {
-	n := 0
-	for _, c := range b.Content {
-		if t, ok := c.(provider.TextBlock); ok {
-			n += len(t.Text)
-		}
-	}
-	return n
-}
-
-// EstimateConversationTokens sums EstimateMessageTokens over a window.
-func EstimateConversationTokens(msgs []provider.Message) int {
-	total := 0
-	for _, m := range msgs {
-		total += EstimateMessageTokens(m)
-	}
-	return total
-}
-
-// UsageTotal returns input+output tokens used by ShouldCompact.
-func UsageTotal(u provider.Usage) int {
-	return u.InputTokens + u.OutputTokens
-}
-
-// usageDivergenceFloor is the fraction of the local estimate below which a
-// provider-reported total is treated as under-reporting: providers sometimes
-// report zero/absurdly low input (e.g. prompt_tokens 0 on tool-heavy
-// requests). Over-reporting is trusted — the provider knows its own wire
-// format overhead better than chars/4 ever will, and compacting early is
-// safe while compacting late overflows for real.
-const usageDivergenceFloor = 2
-
-// EffectiveUsageTotal reconciles a provider-reported usage total against an
-// independent local estimate (chars/4 over the projected context). Returns
-// the reported total when it is credible (>= estimate/floor); otherwise the
-// local estimate, so a lying provider can delay compaction by at most one
-// floor factor instead of blinding it entirely.
-func EffectiveUsageTotal(reportedTotal, localEstimate int) int {
-	if localEstimate > 0 && reportedTotal*usageDivergenceFloor < localEstimate {
-		return localEstimate
-	}
-	return reportedTotal
-}
-
-// TrailingTokens estimates the unsummarized tail: messages after the last
-// assistant usage snapshot plus the current turn's new messages. This
-// avoids undercounting long tool-heavy turns that have not yet reported usage.
-func TrailingTokens(msgs []provider.Message, usage provider.Usage) int {
-	// usage.TotalTokens already accounts for everything up to the last
-	// assistant message that reported it. Anything after the last
-	// assistant message in the transcript is unaccounted trailing context.
-	lastAssistant := -1
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == provider.RoleAssistant {
-			lastAssistant = i
-			break
-		}
-	}
-	trailing := 0
-	for i := lastAssistant + 1; i < len(msgs); i++ {
-		trailing += EstimateMessageTokens(msgs[i])
-	}
-	_ = usage
-	return trailing
+// contextTokens counts the request payload (system + tools + messages)
+// with btdby4 — the daemon's single ruler for context occupancy.
+// Provider-reported usage numbers are metrics only (cost display,
+// session stats) and never drive compaction decisions.
+func contextTokens(system string, tools []provider.Tool, msgs []provider.Message) int {
+	return provider.ContextTokens(system, tools, msgs)
 }
 
 // ShouldCompact reports whether the session should auto-compact before the
-// next model call: usage + trailing estimate vs window minus reserve.
+// next model call: counted context vs window minus reserve.
 //
 // window <= 0 means unknown: fall back to false and let the caller
 // apply its own heuristic.
-func ShouldCompact(window int, usageTotal, trailingEstimate int) bool {
+func ShouldCompact(window int, countedContext int) bool {
 	if window <= 0 {
 		return false
 	}
-	return usageTotal+trailingEstimate > window-CompactionReserveTokens
+	return countedContext > window-CompactionReserveTokens
 }
 
 // SerializeConversation renders messages into a <conversation> XML-ish
@@ -529,17 +434,35 @@ func findTurnStartIndex(msgs []provider.Message, cutIndex int) int {
 // and never cutting in the middle of a tool result sequence, including
 // the split-turn detection: if the boundary falls
 // at an assistant message mid-turn, the turn is split into a prefix
-// (summarized) and a suffix (retained).
+// (summarized) and a suffix (retained). Counts the payload once with
+// btdby4 and walks back with the per-message breakdown.
 func FindCutPoint(msgs []provider.Message, keepRecent int) CutPoint {
+	_, perMsg := provider.ContextTokensByMessage("", nil, msgs)
+	return FindCutPointMsgs(msgs, keepRecent, perMsg)
+}
+
+// FindCutPointMsgs is FindCutPoint with a caller-supplied per-message
+// breakdown (same order as msgs), so a caller that already counted the
+// payload does not recount.
+func FindCutPointMsgs(msgs []provider.Message, keepRecent int, perMsg []int) CutPoint {
 	if len(msgs) == 0 {
 		return CutPoint{Index: 0, TurnStartIndex: -1}
 	}
-	// Walk back accumulating token estimates until the keep floor is met.
+	// Walk back accumulating counted tokens until the keep floor is met.
+	// perMsg (btdby4 per-message breakdown) avoids recounting when the
+	// caller already counted the payload.
 	acc := 0
 	idx := len(msgs)
 	for idx > 0 && acc < keepRecent {
 		idx--
-		acc += EstimateMessageTokens(msgs[idx])
+		n := 0
+		if idx < len(perMsg) {
+			n = perMsg[idx]
+		}
+		if n <= 0 {
+			n = provider.ContextTokens("", nil, msgs[idx:idx+1])
+		}
+		acc += n
 	}
 	if idx <= 0 {
 		return CutPoint{Index: 0, TurnStartIndex: -1}

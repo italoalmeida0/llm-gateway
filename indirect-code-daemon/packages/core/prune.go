@@ -59,14 +59,9 @@ func PruneOldToolResults(msgs []provider.Message) []provider.Message {
 				continue
 			}
 
-			// Calculate size of this tool result
-			var totalChars int
-			for _, inner := range trb.Content {
-				if tb, ok := inner.(provider.TextBlock); ok {
-					totalChars += len(tb.Text)
-				}
-			}
-			estimatedTokens := totalChars / 4
+			// Size of this tool result, counted with the same ruler
+			// as the rest of the context pipeline.
+			estimatedTokens := provider.ContextTokens("", nil, []provider.Message{m})
 
 			if isRecentTurn && recentToolTokens+estimatedTokens <= PruneProtectTokens {
 				recentToolTokens += estimatedTokens

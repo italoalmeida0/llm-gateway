@@ -263,6 +263,15 @@ func (a *Agent) ContextSnapshot() (system string, tools []provider.Tool, message
 	return a.System, a.Tools.Specs(), messages
 }
 
+// ContextTools returns the system prompt and tool specs under the same
+// lock as the transcript snapshot, so hosts can count the full request
+// payload without racing a tool-registry replacement.
+func (a *Agent) ContextTools() (string, []provider.Tool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.System, a.Tools.Specs()
+}
+
 // Revision returns a monotonically increasing transcript version.
 // It is cheap to query and changes whenever Messages() would return
 // different transcript content because of append/set operations.
@@ -361,8 +370,8 @@ func (a *Agent) SeedCost(u provider.Usage) {
 }
 
 // LastTurnUsage returns the per-turn usage of the most recent
-// completed turn. Drives the "context used" gauge in the status bar
-// without waiting for the next turn to land.
+// completed turn. Metrics only (per-turn usage event for the UI):
+// it never drives context occupancy, which is always counted locally.
 func (a *Agent) LastTurnUsage() provider.Usage {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -370,8 +379,8 @@ func (a *Agent) LastTurnUsage() provider.Usage {
 }
 
 // SeedLastTurnUsage primes the per-turn snapshot. Used on resume so
-// the gauge reflects the prompt size of the last turn in the session
-// file instead of starting at zero.
+// the per-turn usage event reflects the last turn in the session file
+// instead of starting at zero.
 func (a *Agent) SeedLastTurnUsage(u provider.Usage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

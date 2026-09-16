@@ -147,14 +147,14 @@ func TestCompactNonDestructiveEndToEnd(t *testing.T) {
 	}
 }
 
-// bigTokenHistory builds a transcript over the 20k keep floor (~1500
-// tokens/message) so the auto path has something worth summarizing.
-// Small transcripts correctly refuse with "fits under the keep floor".
+// bigTokenHistory builds a transcript over the 20k keep floor so the
+// auto path has something worth summarizing. Small transcripts correctly
+// refuse with "fits under the keep floor".
 func bigTokenHistory(pairs int) []provider.Message {
 	var msgs []provider.Message
 	for i := 0; i < pairs; i++ {
-		msgs = append(msgs, textMsg(provider.RoleUser, "user message "+strings.Repeat("x", 6000)))
-		msgs = append(msgs, textMsg(provider.RoleAssistant, "assistant reply "+strings.Repeat("y", 6000)))
+		msgs = append(msgs, textMsg(provider.RoleUser, "user message "+strings.Repeat("x", 8000)))
+		msgs = append(msgs, textMsg(provider.RoleAssistant, "assistant reply "+strings.Repeat("y", 8000)))
 	}
 	return msgs
 }
@@ -164,15 +164,13 @@ func TestMaybeAutoCompactTriggerAndNoop(t *testing.T) {
 	newSeeded := func() *Agent {
 		client := &scriptableFakeClient{summaries: []string{"auto summary"}}
 		a := NewAgent(client, "m", "", nil)
-		a.SetMessages(bigTokenHistory(8)) // ~24k tokens
-		// Last-turn usage approximates the prompt the model just saw.
-		a.SeedLastTurnUsage(provider.Usage{InputTokens: 12000, OutputTokens: 500})
+		a.SetMessages(bigTokenHistory(8)) // ~24k counted tokens
 		return a
 	}
 
-	// Tight window: usage blows past window-reserve -> compacts.
+	// Tight window: counted payload blows past window-reserve -> compacts.
 	a := newSeeded()
-	did, err := a.MaybeAutoCompact(context.Background(), 25000, nil)
+	did, err := a.MaybeAutoCompact(context.Background(), 20000, nil)
 	if err != nil {
 		t.Fatalf("MaybeAutoCompact: %v", err)
 	}
@@ -210,8 +208,7 @@ func TestMaybeAutoCompactTriggerAndNoop(t *testing.T) {
 func TestRunLoopAutoCompactBeforeNextResponse(t *testing.T) {
 	client := &scriptableFakeClient{summaries: []string{"run summary"}}
 	a := NewAgent(client, "m", "", nil)
-	a.SetMessages(bigTokenHistory(8)) // ~24k tokens
-	a.SeedLastTurnUsage(provider.Usage{InputTokens: 15000, OutputTokens: 500})
+	a.SetMessages(bigTokenHistory(8)) // ~18k counted tokens
 
 	autoFired := false
 	a.AutoCompact = func(ctx context.Context, sink func(AgentEvent)) error {

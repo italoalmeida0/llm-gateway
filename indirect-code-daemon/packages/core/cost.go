@@ -6,9 +6,9 @@ import "llm-gateway/indirect-code-daemon/packages/provider"
 //
 // Total is the cumulative usage shown in the status bar's "$x.xx"
 // readout. LastTurn is the per-turn usage of the most recent
-// completed turn; the UI uses LastTurn.InputTokens+cache as a
-// proxy for "current context size" so the X%/Ymax gauge tracks the
-// prompt size that just went to the model.
+// completed turn, surfaced as a metrics event for the UI. Context
+// occupancy is never derived from these numbers: the daemon always
+// counts the request payload locally (btdby4).
 type CostTracker struct {
 	Total    provider.Usage
 	LastTurn provider.Usage

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -10,14 +9,17 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
+// estimateContext counts the live request payload (system + tools +
+// projected messages) with btdby4 — the daemon's single ruler for
+// context occupancy. Provider-reported usage is metrics only and never
+// feeds this number. Estimated stays false: the count is trusted, not
+// an approximation.
 func estimateContext(agent *core.Agent, model provider.Model) *SessionContext {
 	system, tools, messages := agent.ContextSnapshot()
-	data, _ := json.Marshal(struct {
-		System   string
-		Tools    []provider.Tool
-		Messages []provider.Message
-	}{system, tools, messages})
-	return &SessionContext{UsedTokens: (len(data) + 3) / 4, WindowTokens: model.ContextWindow, Model: model.ID, Estimated: true}
+	return &SessionContext{
+		UsedTokens:   provider.ContextTokens(system, tools, messages),
+		WindowTokens: model.ContextWindow, Model: model.ID, Estimated: false,
+	}
 }
 
 // Manual compaction uses the same summarizer as automatic compaction. Preserve

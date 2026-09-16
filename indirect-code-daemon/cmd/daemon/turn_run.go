@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -429,21 +428,17 @@ func (r *turnRun) setupAgent() bool {
 			return nil
 		}
 		threshold := r.cfg.Settings.AutoCompactThreshold
-		usage := r.agent.LastTurnUsage()
 		msgs := r.agent.Messages() // projected context
-		// Same guard as MaybeAutoCompact: our own estimate floors the
-		// provider-reported total so under-reporting cannot blind us.
-		used := core.EffectiveUsageTotal(core.UsageTotal(usage), core.EstimateConversationTokens(msgs))
-		needs := core.ShouldCompact(window, used, core.TrailingTokens(msgs, usage))
+		system, tools := r.agent.ContextTools()
+		used := provider.ContextTokens(system, tools, msgs)
+		needs := core.ShouldCompact(window, used)
 		if !needs && threshold > 0 {
-			used := used + core.TrailingTokens(msgs, usage)
 			needs = used*100 >= threshold*window
 		}
 		if !needs {
 			// Usable formula stays as a final safety net:
 			// contextWindow - outputBudget - 20,000 buffer.
 			if usable := window - maxOutputTokens(r.modelInfo) - 20000; usable > 0 {
-				used := used + core.TrailingTokens(msgs, usage)
 				needs = used >= usable
 			}
 		}
@@ -535,21 +530,18 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 	case core.EvToolExecutionStart:
 		payload["event"] = map[string]any{"type": "tool_execution_start", "id": e.ID, "startedAt": e.StartedAt}
 	case core.EvUsage:
+		// Provider usage is metrics only (cost display, session stats):
+		// it accumulates into Usage/Cost and never drives context
+		// occupancy. The context gauge is always the counted request
+		// payload (btdby4), refreshed here so the UI tracks the latest
+		// turn without waiting for the next one.
 		r.act.record.Usage = e.Cumulative
-		// An aborted stream reports an all-zero row (sendDone on cancel);
-		// it carries no occupancy information and must not clobber a good
-		// estimate (or an earlier accurate row) with zeros.
 		contextUsage := r.act.record.Context
-		if !isEmptyUsage(e.Usage) {
-			contextUsage = contextFromUsage(e.Usage, r.modelInfo)
-			if r.agent != nil {
-				if local := estimateContext(r.agent, r.modelInfo); local != nil {
-					if resolved, warned := resolveContextUsage(e.Usage, contextUsage, local, r.act.record.ID); warned {
-						contextUsage = resolved
-					}
-				}
+		if r.agent != nil {
+			if counted := estimateContext(r.agent, r.modelInfo); counted != nil {
+				contextUsage = counted
+				r.act.record.Context = counted
 			}
-			r.act.record.Context = contextUsage
 		}
 		_ = r.d.saveSession(r.act.record)
 		payload["event"] = map[string]any{
@@ -662,33 +654,6 @@ func (r *turnRun) finishTurn() {
 	if !cancelled || sendNow {
 		r.d.promoteQueueHead(sessionID)
 	}
-}
-
-// isEmptyUsage reports whether a usage row carries no token counts at
-// all — the shape sendDone emits when a stream dies before its first
-// usage event (e.g. user cancel). Such rows must never zero the context.
-func isEmptyUsage(u provider.Usage) bool {
-	return u.InputTokens == 0 && u.OutputTokens == 0 &&
-		u.ReasoningTokens == 0 && u.CacheReadTokens == 0 && u.CacheWriteTokens == 0
-}
-
-// resolveContextUsage guards the session context display against buggy
-// providers (e.g. reporting prompt_tokens 0 on tool-heavy requests), which
-// would pin the UI near zero and blind proactive compaction. Same rule as
-// core.EffectiveUsageTotal: the local estimate floors the reported total
-// (over-reporting is trusted). Returns the resolved context and whether
-// the fallback fired (caller logs it).
-func resolveContextUsage(reported provider.Usage, fromReported, local *SessionContext, sessionID string) (*SessionContext, bool) {
-	if local == nil || fromReported == nil {
-		return fromReported, false
-	}
-	reportedTotal := reported.InputTokens + reported.CacheReadTokens + reported.CacheWriteTokens + reported.OutputTokens
-	if core.EffectiveUsageTotal(reportedTotal, local.UsedTokens) != reportedTotal {
-		log.Printf("session %s: provider reported %d tokens with %d estimated in context; using local estimate",
-			sessionID, reportedTotal, local.UsedTokens)
-		return local, true
-	}
-	return fromReported, false
 }
 
 // persistIncoming checkpoints the tracker's snapshot to the crash journal

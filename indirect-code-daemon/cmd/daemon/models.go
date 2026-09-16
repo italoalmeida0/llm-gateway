@@ -118,15 +118,6 @@ type SessionContext struct {
 	Estimated    bool   `json:"estimated"`
 }
 
-// The latest request is the context occupancy; cumulative input counts the
-// same history repeatedly. Output is included only for this latest response.
-func contextFromUsage(u provider.Usage, model provider.Model) *SessionContext {
-	return &SessionContext{
-		UsedTokens:   u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens,
-		WindowTokens: model.ContextWindow, Model: model.ID,
-	}
-}
-
 const (
 	DefaultOutputTokenMax          = 32000
 	DefaultReasoningOutputTokenMax = 64000

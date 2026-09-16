@@ -28,10 +28,10 @@ func toolTurn(name, args, output string) (provider.Message, provider.Message) {
 	return asst, tool
 }
 
-func TestEstimateMessageTokensCharsOverFour(t *testing.T) {
-	m := textMsg(provider.RoleUser, "abcdefgh") // 8 chars -> 2 tokens
-	if got := EstimateMessageTokens(m); got != 2 {
-		t.Fatalf("EstimateMessageTokens = %d, want 2", got)
+func TestContextTokensCountsPayload(t *testing.T) {
+	m := textMsg(provider.RoleUser, "abcdefgh")
+	if got := provider.ContextTokens("", nil, []provider.Message{m}); got <= 0 {
+		t.Fatalf("ContextTokens = %d, want > 0", got)
 	}
 }
 
@@ -85,7 +85,7 @@ func TestFindCutPointKeepsFloorAndToolPairs(t *testing.T) {
 	msgs = append(msgs, asst, tool)
 	msgs = append(msgs, textMsg(provider.RoleUser, strings.Repeat("w", 400)))
 
-	cut := FindCutPoint(msgs, 400) // ~4 messages of 100 tokens each
+	cut := FindCutPoint(msgs, 40) // small floor: a few counted messages
 	if cut.Index <= 0 || cut.Index >= len(msgs) {
 		t.Fatalf("cut out of range: %+v (len=%d)", cut, len(msgs))
 	}
@@ -97,13 +97,13 @@ func TestFindCutPointKeepsFloorAndToolPairs(t *testing.T) {
 }
 
 func TestShouldCompactReserveMath(t *testing.T) {
-	if !ShouldCompact(100000, 80000, 5000) { // 85k > 100k-16384
+	if !ShouldCompact(100000, 85000) { // 85k > 100k-16384
 		t.Fatal("expected compact")
 	}
-	if ShouldCompact(100000, 50000, 1000) {
+	if ShouldCompact(100000, 51000) {
 		t.Fatal("expected no compact")
 	}
-	if ShouldCompact(0, 999999, 999999) {
+	if ShouldCompact(0, 999999) {
 		t.Fatal("unknown window must not compact")
 	}
 }
@@ -190,44 +190,6 @@ func extractTestText(m provider.Message) string {
 		}
 	}
 	return ""
-}
-
-func TestTrailingTokensOnlyCountsAfterLastAssistant(t *testing.T) {
-	msgs := []provider.Message{
-		textMsg(provider.RoleUser, strings.Repeat("a", 400)),
-		textMsg(provider.RoleAssistant, strings.Repeat("b", 400)),
-		textMsg(provider.RoleUser, strings.Repeat("c", 40)),
-	}
-	got := TrailingTokens(msgs, provider.Usage{InputTokens: 1000})
-	if got != 10 { // 40 chars -> 10 tokens
-		t.Fatalf("TrailingTokens = %d, want 10", got)
-	}
-}
-
-func TestEffectiveUsageTotalFloorsUnderReporting(t *testing.T) {
-	// Credible report passes through untouched.
-	if got := EffectiveUsageTotal(1000, 900); got != 1000 {
-		t.Fatalf("credible report: got %d, want 1000", got)
-	}
-	// Over-reporting is trusted (provider wire overhead).
-	if got := EffectiveUsageTotal(5000, 900); got != 5000 {
-		t.Fatalf("over-report: got %d, want 5000", got)
-	}
-	// Zero/absurdly low report with large local context: local wins.
-	if got := EffectiveUsageTotal(0, 23000); got != 23000 {
-		t.Fatalf("zero report: got %d, want 23000", got)
-	}
-	if got := EffectiveUsageTotal(400, 1000); got != 1000 {
-		t.Fatalf("low report: got %d, want 1000", got)
-	}
-	// Boundary: exactly half is still credible.
-	if got := EffectiveUsageTotal(500, 1000); got != 500 {
-		t.Fatalf("boundary: got %d, want 500", got)
-	}
-	// No local signal: nothing to reconcile against.
-	if got := EffectiveUsageTotal(0, 0); got != 0 {
-		t.Fatalf("empty: got %d, want 0", got)
-	}
 }
 
 func mustRaw(s string) json.RawMessage {

@@ -677,35 +677,10 @@ func (c *openaiClient) runStream(ctx context.Context, resp *http.Response, req R
 	}
 }
 
-// estimateRequestTokens estimates the token size of a request before dispatch.
-// 1 token ~ 4 characters, with an added 10% safety margin.
+// estimateRequestTokens counts the request payload with btdby4 — the
+// daemon's single ruler for context occupancy — so the max_tokens clamp
+// guarantees input + max_output fits within the context window.
 func estimateRequestTokens(req Request) int {
-	totalChars := len(req.System)
-	for _, m := range req.Messages {
-		for _, c := range m.Content {
-			switch v := c.(type) {
-			case TextBlock:
-				totalChars += len(v.Text)
-			case ReasoningBlock:
-				// Summaries and replayed encrypted blobs both ride the wire.
-				totalChars += len(v.Summary) + len(v.Encrypted)
-			case ToolCallBlock:
-				totalChars += len(v.Name) + len(v.Arguments)
-			case ToolResultBlock:
-				for _, inner := range v.Content {
-					if tb, ok := inner.(TextBlock); ok {
-						totalChars += len(tb.Text)
-					}
-				}
-			}
-		}
-	}
-	for _, t := range req.Tools {
-		totalChars += len(t.Name) + len(t.Description) + len(t.Schema)
-	}
-	if totalChars <= 0 {
-		return 0
-	}
-	return (totalChars + 3) / 4
+	return ContextTokens(req.System, req.Tools, req.Messages)
 }
 

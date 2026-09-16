@@ -106,8 +106,11 @@ func TestBuildRequestClampFloor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := outputBudget(t, out); got != 14 {
-		t.Fatalf("output budget = %d; want 14 (window - window/8, still positive)", got)
+	// Counted input ("hi" = 13 with the generic safety margin) exceeds
+	// the static reserve (16/8 = 2), so reserve expands to input+256
+	// and the budget clamps to the floor of 1.
+	if got := outputBudget(t, out); got != 1 {
+		t.Fatalf("output budget = %d; want 1 (counted input overflows tiny window)", got)
 	}
 }
 

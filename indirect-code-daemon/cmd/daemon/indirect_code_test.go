@@ -122,10 +122,6 @@ func TestGatewayMetadataUnknownLimits(t *testing.T) {
 	if fallback.ID != "custom/alias" || fallback.ContextWindow != 1024000 {
 		t.Fatal("removed model did not fall back to first catalog entry")
 	}
-	u := provider.Usage{InputTokens: 400000, CacheReadTokens: 32000, OutputTokens: 500}
-	if contextFromUsage(u, model).UsedTokens != 432500 {
-		t.Fatal("wrong current context")
-	}
 }
 
 func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
@@ -250,8 +246,13 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 	if !timed {
 		t.Fatal("tool timing did not survive persistence and hydration")
 	}
-	if stored.Usage.OutputTokens != 1000 || stored.Context.UsedTokens != 432500 || stored.Context.WindowTokens != 1024000 {
+	// Provider usage stays metrics-only; the context gauge is the
+	// counted request payload, never the reported token numbers.
+	if stored.Usage.OutputTokens != 1000 || stored.Context.WindowTokens != 1024000 {
 		t.Fatalf("wrong persisted usage/context: %+v %+v", stored.Usage, stored.Context)
+	}
+	if stored.Context.Estimated || stored.Context.UsedTokens <= 0 {
+		t.Fatalf("context must be counted, not estimated: %+v", stored.Context)
 	}
 	reasoning := false
 	for _, m := range stored.Messages {
@@ -287,8 +288,13 @@ func TestAgentTaskLifecycleReasoningAndPersistentUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Usage.OutputTokens != 2000 || stored.Context.UsedTokens != 432500 {
-		t.Fatalf("context confused with cumulative usage: %+v", stored)
+	// Context is the counted live payload, not cumulative usage: output
+	// accumulates across turns while the gauge tracks the current window.
+	if stored.Usage.OutputTokens != 2000 {
+		t.Fatalf("usage did not accumulate: %+v", stored.Usage)
+	}
+	if stored.Context.Estimated || stored.Context.UsedTokens <= 0 {
+		t.Fatalf("context must be counted, not estimated: %+v", stored.Context)
 	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -391,8 +397,8 @@ func TestManualCompactPreservesHistoryUntilSummarySucceeds(t *testing.T) {
 			if saved.Compaction.KeepFrom < 1 || saved.Compaction.KeepFrom > 3 {
 				t.Fatalf("keep-tail ~70%% of 10 messages => anchor 1..3, got %d", saved.Compaction.KeepFrom)
 			}
-			if saved.Context == nil || !saved.Context.Estimated || saved.Context.WindowTokens != 1024000 {
-				t.Fatal("compacted context is not explicitly estimated from configured window")
+			if saved.Context == nil || saved.Context.Estimated || saved.Context.WindowTokens != 1024000 {
+				t.Fatal("compacted context must be counted from configured window, not estimated")
 			}
 		})
 	}

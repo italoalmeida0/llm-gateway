@@ -54,7 +54,8 @@ func (a *Agent) Compact(ctx context.Context, keepTail int, sink func(delta strin
 			keepFrom = 0
 		}
 	} else {
-		keepFrom = FindCutPoint(msgs, keepTokens).Index
+		_, perMsg := provider.ContextTokensByMessage(a.System, a.Tools.Specs(), msgs)
+		keepFrom = FindCutPointMsgs(msgs, keepTokens, perMsg).Index
 	}
 	// On the auto path: when the whole transcript fits under
 	// the keep floor, FindCutPoint returns 0 — meaning "nothing worth
@@ -248,17 +249,16 @@ func (a *Agent) MaybeAutoCompact(ctx context.Context, window int, sink func(delt
 	a.mu.Lock()
 	history := append([]provider.Message(nil), a.messages...)
 	state := a.compactionStateLocked()
-	usage := a.cost.LastTurn
 	a.mu.Unlock()
 
 	msgs := projectMessages(history, state)
 	if len(msgs) <= CompactionMinMessages {
 		return false, nil
 	}
-	// Never trust the provider blindly: reconcile against our own estimate
-	// so an under-reporting provider cannot blind proactive compaction.
-	used := EffectiveUsageTotal(UsageTotal(usage), EstimateConversationTokens(msgs))
-	if !ShouldCompact(window, used, TrailingTokens(msgs, usage)) {
+	// Single ruler: the counted request payload. Provider usage is
+	// metrics only and never feeds this decision.
+	system, tools := a.System, a.Tools.Specs()
+	if !ShouldCompact(window, provider.ContextTokens(system, tools, msgs)) {
 		return false, nil
 	}
 	summary, err := a.Compact(ctx, 0, sink)
@@ -412,8 +412,10 @@ func (a *Agent) setCompactionStateLocked(state *CompactionState) {
 // hybridKeepFloor computes the keep floor: a 20k-token floor, raised
 // to 30% of the transcript when the transcript is large (so 1M-token
 // windows keep working context instead of summarizing 98% away).
+// Counts are btdby4 payload tokens (system/tools excluded here: the
+// floor only walks the message tail).
 func hybridKeepFloor(msgs []provider.Message) int {
-	total := EstimateConversationTokens(msgs)
+	total := provider.ContextTokens("", nil, msgs)
 	floor := CompactionKeepRecentTokens
 	if thirty := total * 30 / 100; thirty > floor {
 		floor = thirty

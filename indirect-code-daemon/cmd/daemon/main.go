@@ -48,7 +48,7 @@ type HarnessSettings struct {
 	Model                string  `json:"model,omitempty"`
 	Reasoning            string  `json:"reasoning,omitempty"` // "off" | "low" | "medium" | "high"
 	Temperature          float32 `json:"temperature,omitempty"`
-	AutoCompactThreshold int     `json:"auto_compact_threshold"`  // 0=off, 70, 80, 85, 90
+	AutoCompactThreshold int     `json:"auto_compact_threshold"`  // 0=off, 80, 85, 90, 95
 	NoAutoTitle          bool    `json:"no_auto_title,omitempty"` // disable LLM session titles
 	JailByDefault        bool    `json:"jail_by_default"`
 	AutoSwarmEnabled     bool    `json:"auto_swarm_enabled"`
@@ -570,7 +570,7 @@ func (d *DaemonServer) loadConfig() error {
 		}
 	}
 	if !thresholdPresent && cfg.Settings.AutoCompactThreshold == 0 {
-		cfg.Settings.AutoCompactThreshold = 80
+		cfg.Settings.AutoCompactThreshold = 95
 	}
 	if cfg.Settings.ToolRender == "" {
 		cfg.Settings.ToolRender = "box"
@@ -663,7 +663,7 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 	if d.config == nil {
 		d.config = &DaemonConfig{
 			Settings: HarnessSettings{
-				AutoCompactThreshold: 80,
+				AutoCompactThreshold: 95,
 				RespectGitignore:     true,
 				ToolRender:           "box",
 				Reasoning:            "medium",

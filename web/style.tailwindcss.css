@@ -519,11 +519,6 @@ body {
     .ui-button-ghost:hover, .ui-segment:hover { color: var(--ink-100); background-color: var(--ink-800); }
     .ui-field:hover:not(:focus):not(:disabled), .ui-switch-card:hover, .ui-card-interactive:hover { border-color: var(--control-border); }
   }
-  @media (pointer: coarse) {
-    .ui-button, .ui-segment { min-height: 2.5rem; }
-    .ui-field { min-height: 2.75rem; font-size: 1rem; }
-    .ui-dialog :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea) { font-size: 1rem; }
-  }
   @media (max-width: 639px) {
     .ui-dialog-full { max-height: 100dvh; height: 100dvh; border-radius: 0; border-width: 0; }
     .ui-dialog-backdrop:has(.ui-dialog-full) { padding: 0; }

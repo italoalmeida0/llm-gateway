@@ -155,8 +155,9 @@ function renderTurnAggregate(
   ctx: TranscriptRenderCtx,
   series: RenderBlockSeries,
 ) {
-  // NOTE: ctx.renderBlocks() is the FULL list (window only affects the <For>);
-  // the running turn is always the newest block, which is always visible.
+  // NOTE: ctx.renderBlocks() is the FULL list (sealed blocks + live
+  // tail; the <For> in TranscriptView slices by seal); the running turn
+  // is always the newest block, which always renders.
   const running = createMemo(() => ctx.renderBlocks().at(-1)?.msg.id === series.msg.id && ctx.sessionStatus() === "running");
   const summary = createMemo(() => specialTitle(series.units, {
     texts: series.entries.filter((e) => e.kind === "text").length,

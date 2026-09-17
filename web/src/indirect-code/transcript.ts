@@ -582,11 +582,23 @@ export function isTurnStartMessage(msg: ChatMessage): boolean {
 export function mapBalloonsToBlocks(
   blocks: (RenderBlock & { id?: string })[],
   balloons: TurnBalloon[],
+  oldestLoadedTurn = 0,
 ): Map<string, TurnBalloon[]> {
   const result = new Map<string, TurnBalloon[]>();
   if (!blocks || blocks.length === 0) return result;
 
-  const validBalloons = (balloons || []).filter((b) => (b.files?.length || 0) > 0);
+  // Pagination frontier: committed balloons of turns below the oldest
+  // loaded turn are not rendered yet — hide them instead of pinning
+  // them onto the nearest visible block (that fallback stays for
+  // pruned/compacted turns AT or ABOVE the frontier). Live balloons
+  // always show (current turn). 0/undefined = everything loaded.
+  const validBalloons = (balloons || []).filter((b) => {
+    if ((b.files?.length || 0) === 0) return false;
+    if (b.live) return true;
+    const tIdx = typeof b.turnIndex === "number" ? b.turnIndex : 0;
+    if (oldestLoadedTurn > 0 && tIdx > 0 && tIdx < oldestLoadedTurn) return false;
+    return true;
+  });
   if (validBalloons.length === 0) return result;
 
   // Deduplicate by turnIndex: finished balloon (live === false) supersedes live balloon

@@ -30,7 +30,7 @@ export function TranscriptView() {
   // When a new turn starts, the previous turn's balloon stays anchored above
   // the new turn's initiating message, never jumping to the tail.
   const balloonsByBlockId = createMemo(() =>
-    mapBalloonsToBlocks(t.renderBlocks(), tc.balloons()),
+    mapBalloonsToBlocks(t.renderBlocks(), tc.balloons(), t.historyOldestTurn()),
   );
   const balloonsForBlock = (block: any) =>
     balloonsByBlockId().get(block.id || block.msg.id) || [];
@@ -134,7 +134,7 @@ export function TranscriptView() {
       skipped for actions, and the lead keeps its own raw index so
       every per-message op still maps 1:1 to the daemon
       transcript — fusing is purely visual. */}
-  <Show when={t.historyHasOlder() || t.hiddenCount() > 0}>
+  <Show when={t.historyHasOlder() || t.hiddenSeals() > 0}>
     <div class="flex justify-center">
       <button
         onClick={() => t.loadOlder()}
@@ -142,12 +142,13 @@ export function TranscriptView() {
         class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-ink-900 border border-line/70 text-ink-300 shadow hover:text-ink-100 cursor-pointer disabled:opacity-60"
       >
         <Iconify icon="lucide:chevron-up" size={13} />
-        {/* Server cursor first: while older turns exist on the daemon,
-            the button pages turns (counts are turns, not render blocks).
-            Local hidden blocks only matter once everything is loaded. */}
+        {/* Whole sealed blocks only: while older turns exist on the
+            daemon the button fetches the next seal; otherwise it reveals
+            the next hidden seal. No bubble math — seams always fall on
+            turn boundaries. */}
         <span>{t.loadingOlder() ? "Loading…" : t.historyHasOlder()
           ? `Load older turns (${t.historyHiddenTurns()} hidden)`
-          : `Load ${Math.min(20, t.hiddenCount())} older (${t.hiddenCount()} hidden)`}</span>
+          : `Load older turns (${t.hiddenSeals()} hidden)`}</span>
       </button>
     </div>
   </Show>

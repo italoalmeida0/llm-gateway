@@ -229,15 +229,33 @@ export function createTranscript(opts: {
   const renderBlocks = () => renderState.blocks;
 
   /**
-   * Transcript window: only the newest WINDOW_BLOCKS render. Scrolling near
-   * the top ("load older") grows the window by WINDOW_STEP; switching
-   * sessions or receiving a fresh full transcript resets it. Solid's <For>
-   * only creates DOM for the slice, so a 500-message session mounts ~10
-   * bubbles until the reader scrolls up.
+   * Sealed history blocks: the daemon ships whole turns per page
+   * (get_session tail + get_history pages), and the frontend renders
+   * whole sealed blocks — never a slice cut mid-block. Each entry notes
+   * its turn range [oldestTurn, newestTurn] plus whether the daemon said
+   * more exists below (hasOlder at seal time). Block seams always fall
+   * on turn boundaries, so balloons (keyed by TurnIndex) can never land
+   * on the wrong turn.
+   *
+   * The live tail (streaming turn + anything appended after the last
+   * seal) renders above the seals and is NOT a block: it grows until
+   * the next snapshot/page seals it. Solid's <For> only creates DOM for
+   * sealed blocks + tail, so a huge session mounts a few dozen bubbles.
    */
-  const WINDOW_BLOCKS = 10;
-  const WINDOW_STEP = 20;
-  const [windowSize, setWindowSize] = createSignal(WINDOW_BLOCKS);
+  interface SealedBlock {
+    oldestTurn: number;
+    newestTurn: number;
+    /** First raw message index of the block (srcIdx base). */
+    firstIndex: number;
+    /** Message count at seal time (detects tail growth). */
+    msgCount: number;
+    /** hasOlder reported by the daemon when this block was sealed. */
+    hasOlderBelow: boolean;
+  }
+  const [sealedBlocks, setSealedBlocks] = createSignal<SealedBlock[]>([]);
+  /** Turn-anchored render budget: how many NEWEST sealed blocks render.
+   * Grows by whole blocks only (never +N bubbles mid-block). */
+  const [sealedBudget, setSealedBudget] = createSignal(1);
   // Server-driven history pagination (turn blocks): the daemon sends the
   // tail block plus a cursor; older blocks arrive via get_history.
   // historyArmed starts FALSE so the initial top-scroll never auto-loads
@@ -245,35 +263,76 @@ export function createTranscript(opts: {
   const [historyCursor, setHistoryCursor] = createSignal<{ oldestTurn: number; hasOlder: boolean; totalTurns: number } | null>(null);
   const [historyArmed, setHistoryArmed] = createSignal(false);
   const [loadingOlder, setLoadingOlder] = createSignal(false);
-  const visibleBlocks = () => {
-    const all = renderState.blocks;
-    return all.length <= windowSize() ? all : all.slice(all.length - windowSize());
+  /**
+   * Visible seals: the newest `sealedBudget` sealed blocks, by turn.
+   * Messages are filtered to the visible turn range — the live tail
+   * (anything past the newest seal) always renders. When nothing is
+   * sealed yet (small session, pre-pagination), everything renders.
+   */
+  const visibleTurnFloor = () => {
+    const seals = sealedBlocks();
+    if (seals.length === 0) return 0;
+    const show = seals.slice(Math.max(0, seals.length - sealedBudget()));
+    if (show.length === 0) return 0;
+    return show[0].oldestTurn;
   };
-  const hiddenCount = () => Math.max(0, renderState.blocks.length - windowSize());
-  function growWindow() {
-    setWindowSize((n) => Math.min(n + WINDOW_STEP, renderState.blocks.length));
+  const visibleBlocks = () => {
+    const floor = visibleTurnFloor();
+    if (floor <= 0) return renderState.blocks;
+    return renderState.blocks.filter((b) => {
+      const t = typeof b.msg.turnIndex === "number" && b.msg.turnIndex > 0 ? b.msg.turnIndex : 0;
+      // Unstamped (turn 0) system notices ride with the tail — always show.
+      // Stamped blocks below the floor belong to hidden seals.
+      // Blocks ABOVE the newest seal (live tail) always show.
+      if (t <= 0) return true;
+      const seals = sealedBlocks();
+      const newestSealTop = seals.length > 0 ? seals[seals.length - 1].newestTurn : 0;
+      if (newestSealTop > 0 && t > newestSealTop) return true;
+      return t >= floor;
+    });
+  };
+  /** Sealed blocks not yet revealed (whole blocks, never bubbles). */
+  const hiddenSeals = () => Math.max(0, sealedBlocks().length - sealedBudget());
+  /** Reveal one more sealed block (whole turns, never mid-block). */
+  function revealSeal() {
+    setSealedBudget((n) => Math.min(n + 1, Math.max(1, sealedBlocks().length)));
   }
-  function resetWindow() {
-    setWindowSize(WINDOW_BLOCKS);
+  /** Clear all seal notes (session switch / truncate): the next
+   * snapshot or page re-seals from scratch. */
+  function clearSeals() {
+    setSealedBlocks([]);
+    setSealedBudget(1);
   }
   function resetHistory() {
     setHistoryCursor(null);
     setHistoryArmed(false);
     setLoadingOlder(false);
+    clearSeals();
   }
-  /** Unified "load older": local hidden blocks first, else daemon page.
-   * The button always routes here; the first click arms scroll loading
-   * (local and daemon alike) until the session is switched. */
+  /** Unified "load older": reveal one more sealed block, fetching it
+   * first when the daemon holds older turns. Every click moves exactly
+   * one whole-turn seal (the counter always moves while hasOlder). Once
+   * everything is loaded AND revealed, the button hides. The first click
+   * arms scroll loading until the session is switched. */
   function loadOlder() {
     // First manual request arms scroll-driven loading from here on.
     setHistoryArmed(true);
-    if (hiddenCount() > 0) {
-      growWindow();
+    if (historyHasOlder() && !loadingOlder()) {
+      requestOlderHistory();
       return;
     }
+    if (hiddenSeals() > 0) {
+      revealSeal();
+      return;
+    }
+    // Nothing revealed-pending and daemon says more exists (cursor race
+    // after truncate): fetch it.
     requestOlderHistory();
   }
   const historyHasOlder = () => historyCursor()?.hasOlder ?? false;
+  /** Oldest turn loaded locally (pagination frontier for balloons).
+   * 0 when no cursor (full transcript) — everything renders. */
+  const historyOldestTurn = () => historyCursor()?.oldestTurn ?? 0;
   const historyHiddenTurns = () => {
     const cur = historyCursor();
     if (!cur || !cur.hasOlder) return 0;
@@ -286,6 +345,24 @@ export function createTranscript(opts: {
     if (!sid || !cur || !cur.hasOlder || cur.oldestTurn <= 0 || loadingOlder()) return;
     setLoadingOlder(true);
     opts.send({ type: "get_history", sessionId: sid, beforeTurn: cur.oldestTurn });
+  }
+  /** Seal a daemon block: note its turn range + raw base. Duplicate
+   * seals (same oldestTurn) are ignored — retries never double-note. */
+  function sealBlock(rawMsgs: any[], history: any) {
+    if (!history || typeof history.oldestTurn !== "number") return;
+    const oldestTurn = history.oldestTurn;
+    const newestTurn = typeof history.newestTurn === "number" ? history.newestTurn : oldestTurn;
+    const firstIndex = typeof history.firstIndex === "number" ? history.firstIndex : 0;
+    setSealedBlocks((prev) => {
+      if (prev.some((s) => s.oldestTurn === oldestTurn && s.newestTurn === newestTurn)) return prev;
+      const next = [...prev, {
+        oldestTurn, newestTurn, firstIndex,
+        msgCount: Array.isArray(rawMsgs) ? rawMsgs.length : 0,
+        hasOlderBelow: !!history.hasOlder,
+      }];
+      next.sort((a, b) => a.oldestTurn - b.oldestTurn);
+      return next;
+    });
   }
   /** Prepend one daemon history page, keeping the viewport anchored. */
   async function noteHistoryPage(rawMsgs: any[], history: any) {
@@ -304,6 +381,11 @@ export function createTranscript(opts: {
       const known = new Set(prev.map((m) => m.id));
       return [...page.filter((m) => !known.has(m.id)), ...prev];
     });
+    // Seal the arriving block (whole turns, newest last) and reveal
+    // exactly it: budget +1 exposes this seal; older seals stay hidden
+    // until further clicks. Seams always fall on turn boundaries.
+    sealBlock(rawMsgs, history);
+    setSealedBudget((n) => n + 1);
     if (history && typeof history.oldestTurn === "number") {
       setHistoryCursor({
         oldestTurn: history.oldestTurn,
@@ -330,22 +412,20 @@ export function createTranscript(opts: {
     // switch, like pin-at-bottom re-pinning). Without a click, scroll
     // does nothing — opening a session at the top never auto-loads.
     if (!historyArmed()) return;
-    if (hiddenCount() > 0) {
-      growWindow();
+    // Same rule as the button: fetch-then-reveal, one whole seal at a
+    // time. Revealing a hidden seal needs no fetch.
+    if (historyHasOlder()) {
+      if (!loadingOlder()) requestOlderHistory();
       return;
     }
-    // No local hidden blocks left: ask the daemon for the next older
-    // turn block.
-    if (!loadingOlder()) requestOlderHistory();
-  }
-  // While a turn streams and the reader follows the tail, keep the window
-  // pinned to the newest blocks (otherwise fresh units would render outside
-  // the slice and appear stuck).
-  createEffect(() => {
-    if (sessionStatus() === "running" && isAtBottom()) {
-      setWindowSize((n) => Math.max(n, renderState.blocks.length));
+    if (hiddenSeals() > 0) {
+      revealSeal();
+      return;
     }
-  });
+  }
+  // The live tail always renders (no window to pin): streaming needs
+  // no budget adjustment. Sealed blocks below stay as the reader left
+  // them until "load older" reveals more.
 
   // Rendered position → raw daemon transcript index (normalization merges
   // tool envelopes, so naive For indices mismatch the raw array).
@@ -417,7 +497,8 @@ export function createTranscript(opts: {
   }
   async function applySessionContent(sessionId: string, rawMsgs: any[], compaction?: any, history?: any) {
     if (history && typeof history.oldestTurn === "number") {
-      // Paged snapshot: merge the tail over previously loaded older pages.
+      // Paged snapshot: merge the tail over previously loaded older pages,
+      // then seal it (newest seal; budget reveals it immediately).
       const base = typeof history.firstIndex === "number" ? history.firstIndex : 0;
       const tail = await normalizeAsync(rawMsgs, base);
       if (sessionId !== opts.getSessionId()) return; // stale while worker ran
@@ -425,6 +506,9 @@ export function createTranscript(opts: {
         const ids = new Set(tail.map((m) => m.id));
         return [...prev.filter((m) => !ids.has(m.id)), ...tail];
       });
+      sealBlock(rawMsgs, history);
+      // Fresh tail snapshot: reveal it (newest seal visible).
+      setSealedBudget((n) => Math.max(n, sealedBlocks().length));
     } else if ((rawMsgs?.length ?? 0) >= WORKER_MIN_MESSAGES) {
       const tail = await normalizeAsync(rawMsgs, 0);
       if (sessionId !== opts.getSessionId()) return;
@@ -788,7 +872,8 @@ export function createTranscript(opts: {
         const cut = prev.findIndex((m) => (m.srcIdx ?? -1) > keep);
         return cut < 0 ? prev : prev.slice(0, cut);
       });
-      // The past changed: drop the cursor (a fresh tail arrives next).
+      // The past changed: drop seals + cursor (a fresh tail arrives
+      // next and re-seals).
       resetHistory();
       showQuestion(null);
     }
@@ -934,7 +1019,6 @@ export function createTranscript(opts: {
     setTurnActivity(null); setTodos([]); setToolProgress({}); setToolStarts({});
     showQuestion(null);
     transcriptScroll.reset();
-    resetWindow();
     resetHistory();
     setMessages([]);
     setSessionCompaction(null);
@@ -968,11 +1052,11 @@ export function createTranscript(opts: {
     // their own turn even while reading further up.
     transcriptScroll.reset();
     setIsAtBottom(true);
-    // Collapse the history window back to the fresh tail: the reader
-    // already reviewed the past before sending (ocultar, not descarregar
-    // — data stays in messages(), only the render window shrinks).
-    // Older blocks stay one click away on the load-older button.
-    resetWindow();
+    // Collapse to the newest seal (fresh tail): the reader already
+    // reviewed the past before sending (ocultar, not descarregar —
+    // data AND seal notes stay, only the reveal budget shrinks).
+    // Older seals stay one click away on the load-older button.
+    setSealedBudget(1);
     setTurnActivity({ startedAt: Date.now(), status: "running" });
   }
 
@@ -992,8 +1076,8 @@ export function createTranscript(opts: {
     isAtBottom,
     chatContainerRef, setChatContainerRef, chatContentRef, setChatContentRef,
     transcriptScroll, scrollToBottom, pinAtBottom, onChatScroll,
-    renderBlocks, visibleBlocks, hiddenCount, growWindow,
-    loadOlder, historyHasOlder, historyHiddenTurns, loadingOlder,
+    renderBlocks, visibleBlocks, hiddenSeals, revealSeal,
+    loadOlder, historyHasOlder, historyHiddenTurns, historyOldestTurn, loadingOlder,
     noteHistoryPage, requestOlderHistory,
     rawIdx, blockRawIdx, specialProgress,
     // session

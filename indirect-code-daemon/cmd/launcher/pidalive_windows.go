@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // pidAlive reports whether pid (decimal) names a live process.
@@ -38,4 +39,34 @@ func terminatePid(n int) error {
 		}
 	}
 	return nil
+}
+
+// terminateParentWait: taskkill, wait, then /F. Returns error if the
+// process is still alive afterwards.
+func terminateParentWait(pid string, grace time.Duration) error {
+	if !pidAlive(pid) {
+		return nil // already gone
+	}
+	n, err := parsePid(pid)
+	if err != nil {
+		return err
+	}
+	_ = n
+	_ = exec.Command("taskkill", "/PID", pid).Run()
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if !pidAlive(pid) {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	_ = exec.Command("taskkill", "/F", "/PID", pid).Run()
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !pidAlive(pid) {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("pid %s refuses to die", pid)
 }

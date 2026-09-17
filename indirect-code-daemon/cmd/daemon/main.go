@@ -541,6 +541,7 @@ func (d *DaemonServer) removePidFile() {
 // the pidfile and exits. Used by SIGINT/SIGTERM AND by the remote
 // shutdown message (frontend "Desconectar") so both paths behave alike.
 func (d *DaemonServer) gracefulShutdown(reason string) {
+	d.removeServingProof()
 	fmt.Printf("\n[SHUTDOWN] %s\n", reason)
 	d.stopEvictionSweeper()
 	d.quiesceSessions()
@@ -2592,6 +2593,11 @@ func (d *DaemonServer) connectWebSocket() error {
 	d.wsMu.Unlock()
 
 	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", d.config.GatewayURL)
+	// Proof-of-serving (handoff protocol): after the WS is up, declare in
+	// writing that THIS binary serves THIS dataDir. The takeover launcher
+	// reads serving.json (version must match) BEFORE killing the old
+	// daemon — never trust a pidfile alone (version skew proved it lies).
+	d.writeServingProof()
 	// Fresh (re)connect: re-check for updates + push state to clients.
 	go d.checkForUpdates("reconnect")
 
@@ -2761,6 +2767,9 @@ func main() {
 	// Idle sessions idle too long (or too many residents) are dropped
 	// from RAM and reloaded on next touch — disk stays the truth.
 	server.startEvictionSweeper()
+	// Stale tmp files (crash between CreateTemp and Rename) accumulate
+	// forever without a sweep — a slow disk-full leak. Hourly, >1h old.
+	go server.sweepTmpLoop()
 	// Self-update: check on start, every 10min, and on reconnect.
 	// Stops with the process (no explicit shutdown needed).
 	updateStop := make(chan struct{})
@@ -2769,6 +2778,11 @@ func main() {
 
 	// Track the background process so install scripts and --stop can find it.
 	server.writePidFile()
+	// Stale handoff markers from a crashed takeover must never gate a
+	// fresh boot: a new process never serves a leftover proof.
+	_ = os.Remove(servingProofPath(dataDir))
+	_ = os.Remove(filepath.Join(dataDir, "handoff.json"))
+	_ = os.Remove(filepath.Join(dataDir, "standby-ready.json"))
 
 	// Graceful shutdown handling
 	sigChan := make(chan os.Signal, 1)

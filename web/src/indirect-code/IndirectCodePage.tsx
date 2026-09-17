@@ -948,6 +948,9 @@ export default function IndirectCodePage() {
 
   // Mount logic
   onMount(() => {
+    // Post-update reload toast (set by noteDone before location.reload;
+    // consumed once here so no stale notice survives to the next update).
+    daemonUpdate.consumePostReloadToast();
     void Promise.allSettled([loadGatewayModels(), hosts.loadHosts()]).then(() => {
       if (!relay.isDisposed() && hosts.hosts().length === 0) modals.generatePairingToken({ silent: true });
     });

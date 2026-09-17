@@ -6,6 +6,7 @@ import { sendTurnPush, type TurnPush } from "../push";
 
 export type WsData =
   | { type: "daemon"; hostId: string; userId: string }
+  | { type: "daemon-shadow"; hostId: string; userId: string }
   | { type: "client"; userId: string };
 
 const daemons = new Map<string, ServerWebSocket<WsData>>();
@@ -37,6 +38,9 @@ export async function handleIndirectCodeUpgrade(
   server: Server<WsData>,
 ): Promise<Response | undefined> {
   // Daemon WebSocket: /api/indirect-code/daemon/ws?token=<daemonToken>
+  // Shadow prover: ?shadow=1 connects WITHOUT registering (takeover proof:
+  // the new daemon proves it serves while the old one still owns the host).
+  const isShadow = url.searchParams.get("shadow") === "1";
   if (path === "/api/indirect-code/daemon/ws") {
     let token = url.searchParams.get("token") || "";
     if (!token) {
@@ -59,7 +63,9 @@ export async function handleIndirectCodeUpgrade(
     }
 
     const upgraded = server.upgrade(req, {
-      data: { type: "daemon", hostId: host.id, userId: host.user_id },
+      data: isShadow
+        ? { type: "daemon-shadow", hostId: host.id, userId: host.user_id }
+        : { type: "daemon", hostId: host.id, userId: host.user_id },
     });
     if (upgraded) return undefined;
     return new Response("upgrade failed", { status: 400 });
@@ -98,7 +104,11 @@ export async function handleIndirectCodeUpgrade(
 
 export const remoteRelayWsHandlers = {
   open(ws: ServerWebSocket<WsData>) {
-    if (ws.data.type === "daemon") {
+    if (ws.data.type === "daemon-shadow") {
+      // Takeover prover: visible in logs only. Never registered, never
+      // routed, never flips status — the old daemon still owns the host.
+      console.log(`[RELAY] Daemon shadow prover: ${ws.data.hostId} (user: ${ws.data.userId})`);
+    } else if (ws.data.type === "daemon") {
       const { hostId, userId } = ws.data;
       daemons.set(hostId, ws);
 
@@ -138,7 +148,9 @@ export const remoteRelayWsHandlers = {
       return;
     }
 
-    if (ws.data.type === "daemon") {
+    if (ws.data.type === "daemon-shadow") {
+      return; // prover traffic never touches clients
+    } else if (ws.data.type === "daemon") {
       // Message originating from Daemon -> forward to user's web client(s)
       const { userId } = ws.data;
       broadcastToUser(userId, rawStr);
@@ -177,7 +189,9 @@ export const remoteRelayWsHandlers = {
   },
 
   close(ws: ServerWebSocket<WsData>, code: number, _reason: string) {
-    if (ws.data.type === "daemon") {
+    if (ws.data.type === "daemon-shadow") {
+      console.log(`[RELAY] Daemon shadow prover gone: ${ws.data.hostId} (code: ${code})`);
+    } else if (ws.data.type === "daemon") {
       const { hostId, userId } = ws.data;
       if (daemons.get(hostId) === ws) {
         daemons.delete(hostId);

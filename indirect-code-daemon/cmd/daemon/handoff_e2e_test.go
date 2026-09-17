@@ -15,7 +15,15 @@ import (
 func TestHandoffPrimitivesE2E(t *testing.T) {
 	// Hermetic mirror: serves a fake launcher script for self-verify.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("#!/bin/sh\necho 'indirect-code launcher vE2E.2'\n"))
+		// Fake launcher: valid --version output + >1MB body (passes both
+		// the version gate and the suspicious-size floor; a truncated
+		// download / HTML error page would fail at least one).
+		pad := make([]byte, 2<<20)
+		for i := range pad {
+			pad[i] = '#'
+		}
+		w.Write([]byte("#!/bin/sh\necho 'indirect-code launcher vE2E.2'\nexit 0\n#"))
+		w.Write(pad)
 	}))
 	defer srv.Close()
 	t.Setenv("INDIRECT_REPO_RAW", srv.URL)

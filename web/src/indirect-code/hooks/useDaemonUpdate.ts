@@ -76,10 +76,29 @@ export function createDaemonUpdate(opts: {
 
   function noteDone(version: string) {
     setApplying(false);
-    opts.toast(`Daemon updated to ${version}`, "ok");
+    // Reload so the whole SPA reboots against the new daemon (fresh
+    // protocol, fresh state). Persist the toast across the reload; the
+    // boot path shows it once and clears it (cleanup = no stale-notice
+    // breach on the NEXT update).
+    try {
+      localStorage.setItem("llmgw-update-done", version || "done");
+    } catch {}
+    setTimeout(() => window.location.reload(), 1200);
+    opts.toast(`Daemon updated to ${version} — reloading…`, "ok");
   }
 
-  return { info, applying, noteUpdate, checkNow, toggle, apply, cancel, noteFailed, noteDone };
+  /** Boot cleanup: show + clear a pending post-reload update toast. */
+  function consumePostReloadToast() {
+    let v: string | null = null;
+    try {
+      v = localStorage.getItem("llmgw-update-done");
+      if (v) localStorage.removeItem("llmgw-update-done");
+    } catch {}
+    if (v) opts.toast(`Daemon updated to ${v}`, "ok");
+    return v;
+  }
+
+  return { info, applying, noteUpdate, checkNow, toggle, apply, cancel, noteFailed, noteDone, consumePostReloadToast };
 }
 
 export type DaemonUpdate = ReturnType<typeof createDaemonUpdate>;

@@ -1113,3 +1113,33 @@ func metaStartOffset(f *os.File, size int64) (int64, error) {
 	}
 	return off, nil
 }
+
+// sweepTmpLoop removes stale tmp orphans hourly (plus one immediate
+// pass), across sessions/ and every slot's sessions+bin. Uses the shared
+// sweepTmpOrphans helper (same prefixes + age rule as its unit test).
+func (d *DaemonServer) sweepTmpLoop() {
+	d.sweepTmpDirs()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	// No stop channel: process-lifetime loop like the update checker.
+	for range ticker.C {
+		d.sweepTmpDirs()
+	}
+}
+
+// sweepTmpDirs walks all tmp-capable dirs (legacy + slotted).
+func (d *DaemonServer) sweepTmpDirs() {
+	dirs := []string{d.sessionsDir(), filepath.Join(d.dataDir, "bin")}
+	if entries, err := os.ReadDir(filepath.Join(d.dataDir, "slots")); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				dirs = append(dirs,
+					filepath.Join(d.dataDir, "slots", e.Name(), "sessions"),
+					filepath.Join(d.dataDir, "slots", e.Name(), "bin"))
+			}
+		}
+	}
+	for _, dir := range dirs {
+		sweepTmpOrphans(dir, time.Hour)
+	}
+}

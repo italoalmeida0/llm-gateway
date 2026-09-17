@@ -80,8 +80,16 @@ func (d *DaemonServer) beginHandoff() {
 		return
 	}
 	version := st.available
-	if version == "" || version == daemonVersion {
+	if version == "" {
 		st.mu.Unlock()
+		return
+	}
+	if version == daemonVersion {
+		// Stale manifest / cached asset / double click: swapping a daemon
+		// for itself must never freeze, disconnect or kill anything.
+		st.lastError = "already on " + version
+		st.mu.Unlock()
+		d.broadcastUpdateState()
 		return
 	}
 	st.handoffBusy = true
@@ -224,6 +232,9 @@ func selfVerifyBinary(path, wantVersion, kind string) error {
 	}
 	if !strings.Contains(string(out), wantVersion) {
 		return fmt.Errorf("%s version mismatch: want %q, got %q", kind, wantVersion, strings.TrimSpace(string(out)))
+	}
+	if st, err := os.Stat(path); err != nil || st.Size() < 1<<20 {
+		return fmt.Errorf("%s binary suspiciously small (%v)", kind, err)
 	}
 	return nil
 }

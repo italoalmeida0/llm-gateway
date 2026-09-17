@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -84,8 +85,19 @@ func selfVerifyDaemon(path, want string) error {
 	return nil
 }
 
+// sharedRootFor resolves the shared root from a slot dir
+// (<root>/slots/slot-x -> <root>).
+func sharedRootFor(slotDir string) string {
+	parent := filepath.Dir(slotDir)
+	if filepath.Base(parent) == "slots" {
+		return filepath.Dir(parent)
+	}
+	return slotDir
+}
+
 // startStandby launches the new daemon with --standby (loads storage,
-// binds nothing, connects no WS) against the inactive slot.
+// shadow-connects, writes serving.json) against the inactive slot. The
+// caller waits serving proof via waitServingProof().
 func startStandby(daemonPath, slotDir, version string) (*standbyProc, error) {
 	_ = version
 	shared := sharedRootFor(slotDir)
@@ -96,40 +108,6 @@ func startStandby(daemonPath, slotDir, version string) (*standbyProc, error) {
 		return nil, err
 	}
 	return &standbyProc{cmd: cmd, dataDir: slotDir}, nil
-}
-
-// healthCheckStandby waits for the standby daemon's readiness probe:
-// it writes standby-ready.json in its data dir when storage loads OK.
-// Death is detected via Wait (ProcessState stays nil until Wait returns
-// — polling it alone would hang the full timeout on a dead standby).
-func healthCheckStandby(s *standbyProc, slotDir string) error {
-	ready := filepath.Join(slotDir, "standby-ready.json")
-	exited := make(chan error, 1)
-	go func() { exited <- s.cmd.Wait() }()
-	deadline := time.Now().Add(2 * time.Minute)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for time.Now().Before(deadline) {
-		select {
-		case err := <-exited:
-			return fmt.Errorf("standby exited early: %v", err)
-		case <-ticker.C:
-			if _, err := os.Stat(ready); err == nil {
-				return nil
-			}
-		}
-	}
-	return fmt.Errorf("standby not ready in time")
-}
-
-// sharedRootFor resolves the shared root from a slot dir
-// (<root>/slots/slot-x -> <root>).
-func sharedRootFor(slotDir string) string {
-	parent := filepath.Dir(slotDir)
-	if filepath.Base(parent) == "slots" {
-		return filepath.Dir(parent)
-	}
-	return slotDir
 }
 
 // terminateParent asks the old daemon to exit gracefully (SIGTERM;
@@ -154,3 +132,31 @@ func newOSExecCmd(path, arg string) *exec.Cmd {
 
 // osExecCmd aliases exec.Cmd for fetch.go.
 type osExecCmd = exec.Cmd
+
+// servingProof mirrors the daemon's serving.json declaration.
+type servingProof struct {
+	Version     string `json:"version"`
+	Pid         int    `json:"pid"`
+	ConnectedAt int64  `json:"connectedAt"`
+	Sessions    int    `json:"sessions"`
+}
+
+// waitServingProof waits for slotDir/serving.json with matching version
+// AND a live pid. Stale files (crash leftovers) fail the pid check and
+// are ignored — readers must always verify liveness, never trust bytes.
+func waitServingProof(slotDir, expectVersion string, timeout time.Duration) error {
+	path := filepath.Join(slotDir, "serving.json")
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(path); err == nil {
+			var p servingProof
+			if jerr := json.Unmarshal(raw, &p); jerr == nil && p.Version == expectVersion && p.Pid > 0 {
+				if pidAlive(fmt.Sprint(p.Pid)) {
+					return nil
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("no serving proof for %s in time", expectVersion)
+}

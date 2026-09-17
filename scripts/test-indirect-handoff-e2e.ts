@@ -72,7 +72,8 @@ async function main() {
   // Fake gateway WS: accepts daemon sockets, keeps them open, and can
   // SEND commands (the daemon handleMessages anything on the socket).
   // Tracks connects/disconnects + forwards daemon_update_apply on demand.
-  let connects: number[] = [];
+  const connects: number[] = [];
+  const shadowConnects: number[] = [];
   let disconnects = 0;
   let daemonSock: any = null;
   let sawFreeze = false;
@@ -81,13 +82,21 @@ async function main() {
     fetch: (req, server) => {
       const u = new URL(req.url);
       if (u.pathname === "/api/indirect-code/daemon/ws") {
+        (req as any).__shadow = u.searchParams.get("shadow") === "1";
         if (server.upgrade(req)) return undefined as any;
         return new Response("up", { status: 426 });
       }
       return new Response("nf", { status: 404 });
     },
     websocket: {
-      open: (ws) => { connects.push(Date.now()); daemonSock = ws; },
+      open: (ws) => {
+        // Bun upgrade drops custom props; detect shadow via query is not
+        // available here — count all, distinguish by timing (shadow comes
+        // while old still connected, before any disconnect).
+        if (disconnects === 0 && connects.length >= 1) shadowConnects.push(Date.now());
+        connects.push(Date.now());
+        if (disconnects === 0) daemonSock = ws;
+      },
       message: (_ws, data) => {
         try {
           const m = JSON.parse(String(data));
@@ -127,20 +136,53 @@ async function main() {
   const t0 = Date.now();
   while (!sawFreeze && Date.now() - t0 < 60000) await sleep(500);
   assert(sawFreeze, "daemon froze (late freeze after launcher verify)");
-  console.log("frozen; waiting for promote (new daemon connects)...");
-  await waitConnect(2, 120000);
+  console.log("frozen; waiting for shadow proof (new daemon serves)...");
+  // Proof-before-death: serving.json with vH2 must appear while the old
+  // daemon is still connected (disconnects==0). This is THE regression
+  // test for the version-skew kill bug.
+  const proofPath = join(root, "slots", "slot-b", "serving.json");
+  const tProof = Date.now();
+  let proofOk = false;
+  while (Date.now() - tProof < 120000) {
+    try {
+      const p = JSON.parse(readFileSync(proofPath, "utf8"));
+      if (p.version === "vH2" && p.pid > 0) { proofOk = true; break; }
+    } catch {}
+    await sleep(500);
+  }
+  assert(proofOk, "serving.json proof with vH2");
+  assert(disconnects === 0, "old daemon still alive at proof time (proof-before-death)");
+  assert(shadowConnects.length >= 1, "shadow WS connected");
+  console.log("proof OK while old alive; waiting for promote (old dies, new connects)...");
+  // connects counts old + shadow + promoted-new; disconnects counts old +
+  // shadow-close. Wait for the old daemon's death AND the promoted connect.
+  const tProm = Date.now();
+  while ((disconnects < 1 || connects.length < 3) && Date.now() - tProm < 120000) await sleep(500);
   assert(disconnects >= 1, "old daemon disconnected");
+  assert(connects.length >= 3, `promoted daemon connected (connects=${connects.length})`);
   console.log("new daemon connected; settling...");
   await sleep(5000);
   const active = readFileSync(join(root, "slots", "active"), "utf8").trim();
   assert.equal(active, "b", `active slot = ${active}`);
   assert(existsSync(join(root, "slots", "slot-b", "sessions", "s1.jsonl")), "session in new slot");
   assert(!existsSync(join(root, "slots", "slot-a")), "old slot cleaned");
-  assert(connects.length >= 2, "new daemon connected");
+  assert(connects.length >= 3, "new daemon connected");
   console.log(`handoff OK: connects=${connects.length} disconnects=${disconnects}`);
+  const cleanupProcs = () => {
+    // Kill ONLY processes under this run's work dir (never broad pkill:
+    // a wide pattern once killed the real VPS daemon).
+    try {
+      const out = execFileSync("ps", ["-eo", "pid,args"], { encoding: "utf8" });
+      for (const line of out.split("\n")) {
+        if (line.includes(work) && !line.includes("ps -eo")) {
+          const pid = parseInt(line.trim().split(/\s+/)[0], 10);
+          if (pid > 0 && pid !== process.pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
+        }
+      }
+    } catch {}
+  };
+  cleanupProcs();
   proc.kill("SIGKILL");
-  await sleep(500);
-  try { execFileSync("pkill", ["-f", join(root, "slots", "slot-b", "bin", "indirect-code-linux-amd64")]); } catch {}
   await sleep(500);
   mirrorSrv.stop();
   gw.stop();

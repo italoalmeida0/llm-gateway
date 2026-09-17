@@ -3,22 +3,26 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"llm-gateway/indirect-code-daemon/internal/migrations"
 )
 
-// Standby mode (update takeover): the new daemon loads the migrated slot
-// storage, writes standby-ready.json, and waits. It binds NOTHING and
-// connects NO websocket. On handoff "promoted" it execs itself WITHOUT
-// --standby (same binary, same slot dir) so normal boot (resume, sweeper,
-// pidfile, WS) runs exactly once, through the normal path.
+// Standby mode (update takeover), v2: the new daemon loads the migrated
+// slot storage, SHADOW-connects to the gateway (?shadow=1: tracked, never
+// routed, never flips status — the old daemon still owns the host), writes
+// serving.json (proof, WITH post-WS timestamp), and waits. On handoff
+// "promoted" it execs itself WITHOUT --standby (same binary, same slot
+// dir) so normal boot (resume, sweeper, pidfile, WS) runs exactly once.
 //
-// Why re-exec instead of continuing in-process: the normal main() path is
-// the only tested boot sequence. Standby shares the storage-load code,
-// then hands off to it — zero divergent boot logic.
+// Why shadow-connect instead of no-WS: the takeover gates the old daemon's
+// death on proof that the replacement serves END-TO-END (storage + WS +
+// version). A no-WS standby can only prove storage — the version-skew bug
+// proved that insufficient.
 
 func runStandby(dataDir, cfgPath string) int {
 	// Load + verify storage (same guards as normal boot, minus serving).
@@ -27,6 +31,7 @@ func runStandby(dataDir, cfgPath string) int {
 		dataDir:    dataDir,
 		sessions:   make(map[string]*ActiveSession),
 	}
+	server.initSharedDir()
 	if v, err := migrations.StoredVersion(dataDir); err != nil || v != migrations.CurrentVersion {
 		fmt.Printf("[STANDBY] storage v%d (want %d): %v\n", v, migrations.CurrentVersion, err)
 		return 1
@@ -36,13 +41,18 @@ func runStandby(dataDir, cfgPath string) int {
 		fmt.Printf("[STANDBY] sessions: %v\n", err)
 		return 1
 	}
-	ready := map[string]any{"ready": true, "version": daemonVersion, "at": time.Now().UnixMilli()}
-	raw, _ := json.Marshal(ready)
-	if err := os.WriteFile(filepath.Join(dataDir, "standby-ready.json"), raw, 0o600); err != nil {
-		fmt.Printf("[STANDBY] probe: %v\n", err)
+	if err := server.loadConfig(); err != nil || server.config == nil {
+		fmt.Printf("[STANDBY] config: %v\n", err)
 		return 1
 	}
-	fmt.Printf("[STANDBY] ready (%s), waiting for promote...\n", daemonVersion)
+	// Shadow-connect: proves WS end-to-end without owning the host.
+	if err := server.connectShadow(); err != nil {
+		fmt.Printf("[STANDBY] shadow connect: %v\n", err)
+		return 1
+	}
+	// Proof AFTER the WS is up (post-WS timestamp = end-to-end proof).
+	server.writeServingProof()
+	fmt.Printf("[STANDBY] serving proof written (%s), waiting for promote...\n", daemonVersion)
 	handoff := filepath.Join(dataDir, "handoff.json")
 	deadline := time.Now().Add(15 * time.Minute)
 	for time.Now().Before(deadline) {
@@ -56,10 +66,10 @@ func runStandby(dataDir, cfgPath string) int {
 			}
 			// Plain "promoted" token (launcher writes it).
 			if string(raw) == "promoted\n" || string(raw) == "promoted" {
-				return execSelf(dataDir)
+				return execSelf(dataDir, cfgPath)
 			}
 			if err := json.Unmarshal(raw, &doc); err == nil && doc.State == "promoted" {
-				return execSelf(dataDir)
+				return execSelf(dataDir, cfgPath)
 			}
 			if len(raw) > 0 {
 				fmt.Printf("[STANDBY] refused: %s\n", string(raw))
@@ -70,6 +80,34 @@ func runStandby(dataDir, cfgPath string) int {
 	}
 	fmt.Printf("[STANDBY] promote timeout\n")
 	return 1
+}
+
+// servingProofPath is the proof-of-serving file (written after WS
+// connect, removed on clean exit). The takeover launcher gates the old
+// daemon's death on this file's version field.
+func servingProofPath(dataDir string) string {
+	return filepath.Join(dataDir, "serving.json")
+}
+
+// writeServingProof declares in writing: version, pid, connect time,
+// session count. Called right after the WS connects.
+func (d *DaemonServer) writeServingProof() {
+	d.sessionsMu.RLock()
+	n := len(d.sessions)
+	d.sessionsMu.RUnlock()
+	raw, _ := json.Marshal(map[string]any{
+		"version":     daemonVersion,
+		"pid":         os.Getpid(),
+		"connectedAt": time.Now().UnixMilli(),
+		"sessions":    n,
+	})
+	_ = os.WriteFile(servingProofPath(d.dataDir), raw, 0o600)
+}
+
+// removeServingProof deletes the proof (clean exit only — crashes leave a
+// stale file, which readers must treat as ABSENT: always check pid alive).
+func (d *DaemonServer) removeServingProof() {
+	_ = os.Remove(servingProofPath(d.dataDir))
 }
 
 // verifySessionsStandby parses every session meta tail (read-only).
@@ -103,15 +141,26 @@ func verifySessionsStandby(d *DaemonServer) error {
 // execSelf re-execs this binary without --standby so the single tested
 // boot path runs (resume, sweeper, pidfile, WS). Unix: syscall.Exec;
 // Windows: spawn + exit with child's code.
-func execSelf(dataDir string) int {
+func execSelf(dataDir, cfgPath string) int {
 	exe, err := os.Executable()
 	if err != nil {
 		fmt.Printf("[STANDBY] exe: %v\n", err)
 		return 1
 	}
-	args := []string{"--data-dir", dataDir}
+	args := []string{"--data-dir", dataDir, "--config", cfgPath}
+	// Drop --standby (mode flip) AND --data-dir/--config + values (already
+	// pinned above): Go flags take the LAST occurrence, so duplicates
+	// would work by accident — be explicit instead.
+	skipNext := false
 	for _, a := range os.Args[1:] {
-		if a == "--standby" {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if a == "--standby" || a == "--data-dir" || a == "--config" {
+			if a != "--standby" {
+				skipNext = true
+			}
 			continue
 		}
 		args = append(args, a)
@@ -121,4 +170,37 @@ func execSelf(dataDir string) int {
 		fmt.Printf("[STANDBY] exec: %v\n", err)
 	}
 	return code
+}
+
+// connectShadow dials the gateway in shadow mode (?shadow=1) and holds the
+// socket open. The relay tracks but never routes shadow traffic — the open
+// socket itself proves WS end-to-end. Closed on promote (exec replaces us).
+func (d *DaemonServer) connectShadow() error {
+	u, err := url.Parse(d.config.GatewayURL)
+	if err != nil {
+		return err
+	}
+	scheme := "ws"
+	if u.Scheme == "https" {
+		scheme = "wss"
+	}
+	wsURL := fmt.Sprintf("%s://%s/api/indirect-code/daemon/ws?token=%s&shadow=1", scheme, u.Host, url.QueryEscape(d.config.DaemonToken))
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		return err
+	}
+	d.wsMu.Lock()
+	d.wsConn = conn
+	d.wsMu.Unlock()
+	// Drain (relay sends nothing to shadows, but never block the reader).
+	go func() {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	fmt.Printf("[STANDBY] shadow WS connected\n")
+	return nil
 }

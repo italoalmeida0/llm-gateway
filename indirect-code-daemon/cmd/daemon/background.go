@@ -785,33 +785,4 @@ func (d *DaemonServer) bgLogFile(sessionID, jobID string) string {
 	return filepath.Join(brain, jobID+".log")
 }
 
-// BgJobView is the frontend-facing snapshot of one background job.
-type BgJobView struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Label     string `json:"label"`
-	Status    string `json:"status"`
-	StartedAt int64  `json:"startedAt"`
-	EndedAt   int64  `json:"endedAt"`
-	LogPath   string `json:"logPath,omitempty"`
-	Result    string `json:"result,omitempty"`
-}
-
-func (d *DaemonServer) bgJobViews(callerSessionID string) []BgJobView {
-	d.bgMu.Lock()
-	defer d.bgMu.Unlock()
-	out := make([]BgJobView, 0, len(d.bgJobs))
-	for _, j := range d.bgJobs {
-		if j.SessionID != callerSessionID {
-			continue
-		}
-		out = append(out, BgJobView{
-			ID: j.ID, Kind: j.Kind, Label: d.bgJobLabel(j), Status: j.Status,
-			StartedAt: j.StartedAt, EndedAt: j.EndedAt,
-			LogPath: j.LogPath, Result: j.Result,
-		})
-	}
-	return out
-}
-
 var _ = json.Marshal

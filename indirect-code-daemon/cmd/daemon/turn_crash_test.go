@@ -15,7 +15,7 @@ import (
 )
 
 // A real process boundary: kill while the next provider request is in flight,
-// then recover the same disk journal in a fresh process.
+// then recover the same WAL in a fresh process.
 func TestDaemonProcessCrashRecoversSameTurn(t *testing.T) {
 	dataDir, cwd := t.TempDir(), t.TempDir()
 	var calls atomic.Int32
@@ -78,10 +78,15 @@ func TestDaemonProcessCrashRecoversSameTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = first.Wait()
-	journal, err := observer.readTurnJournal("crash")
-	if err != nil || journal == nil || len(journal.Incoming) != 1 {
-		t.Fatalf("original file snapshot was not durable: %v", err)
+	header, herr := observer.readWALHeader("crash")
+	if herr != nil || header == nil || header.TurnIndex != 1 {
+		t.Fatalf("crash WAL header was not durable: %v", herr)
 	}
+	fused, _, ferr := observer.loadSessionFused("crash")
+	if ferr != nil || len(walLatestIncoming(mustReadWAL(t, observer, "crash"), header.Incoming)) != 1 {
+		t.Fatalf("original file snapshot was not durable: %v", ferr)
+	}
+	_ = fused
 	second, cancelSecond := worker()
 	defer cancelSecond()
 	if out, err := second.CombinedOutput(); err != nil {
@@ -117,6 +122,15 @@ func TestDaemonProcessCrashRecoversSameTurn(t *testing.T) {
 	}
 }
 
+func mustReadWAL(t *testing.T, d *DaemonServer, sid string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(d.walPath(sid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func TestTurnCrashWorker(t *testing.T) {
 	dataDir := os.Getenv("TURN_CRASH_DATA")
 	if dataDir == "" {
@@ -134,10 +148,17 @@ func TestTurnCrashWorker(t *testing.T) {
 	} else {
 		act := &ActiveSession{record: rec}
 		d.sessions[rec.ID] = act
-		journal, err := d.readTurnJournal(rec.ID)
-		if err != nil || journal == nil {
-			t.Fatal("missing crash journal")
+		header, herr := d.readWALHeader(rec.ID)
+		if herr != nil || header == nil {
+			t.Fatal("missing crash WAL")
 		}
-		d.resumeAgentTurn(act, journal)
+		fused, _, ferr := d.loadSessionFused(rec.ID)
+		if ferr != nil {
+			t.Fatal(ferr)
+		}
+		act.record = fused
+		resumeHeader := cloneWALHeader(header)
+		resumeHeader.Incoming = walLatestIncoming(mustReadWAL(t, d, rec.ID), header.Incoming)
+		d.resumeAgentTurn(act, resumeHeader)
 	}
 }

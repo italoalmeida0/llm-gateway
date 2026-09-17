@@ -235,7 +235,7 @@ func TestBrainFilesNeverBecomeBalloons(t *testing.T) {
 	}
 	act := &ActiveSession{record: &SessionRecord{ID: "s-brain", CWD: dir}}
 	tfc := beginTurnTracking(act, dir, 1, brain)
-	// Simulate tools that tracked brain paths anyway (old journal shape).
+	// Simulate tools that tracked brain paths anyway (old snapshot shape).
 	tfc.tracker.NoteRead(brainFile, "scratch\n")
 	tfc.tracker.NoteWrite(normalFile, true, "package main\n")
 	if err := os.WriteFile(normalFile, []byte("package main\n\n// touched\n"), 0o644); err != nil {
@@ -259,7 +259,7 @@ func TestBrainFilesNeverBecomeBalloons(t *testing.T) {
 	if len(stripped) != 1 || len(stripped[0].Files) != 1 || stripped[0].Files[0].Path != normalFile {
 		t.Fatalf("stripBrainBalloonFiles wrong: %+v", stripped)
 	}
-	// Journal restore path filters too.
+	// Tracker restore path filters too.
 	restored := dropBrainTracked([]filetrack.TrackedFile{{Path: brainFile}, {Path: normalFile}}, brain)
 	if len(restored) != 1 || restored[0].Path != normalFile {
 		t.Fatalf("dropBrainTracked wrong: %+v", restored)

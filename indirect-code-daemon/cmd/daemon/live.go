@@ -98,7 +98,7 @@ func trackLiveEvent(act *ActiveSession, event core.AgentEvent) {
 }
 
 func liveSessionPayload(act *ActiveSession) map[string]any {
-	payload := sessionPayload(act.record)
+	payload := pagedHistoryBlock(sessionPayload(act.record), act.record)
 	payload["pendingApproval"] = act.pendingApproval
 	payload["question"] = act.question
 	starts := map[string]int64{}

@@ -288,7 +288,11 @@ func TestLegacyAttachmentDisplayAndSessionFileValidation(t *testing.T) {
 	if err := d.saveSession(&SessionRecord{ID: "real", Messages: []provider.Message{original}, Attachments: attachments}); err != nil {
 		t.Fatal(err)
 	}
-	d.writeTurnJournal("real", &TurnJournal{TurnIndex: 1})
+	ww, werr := d.openWAL("real", &walHeader{TurnIndex: 1})
+	if werr != nil {
+		t.Fatal(werr)
+	}
+	_ = ww.close()
 	if sessions := d.listSessions(); len(sessions) != 1 || sessions[0].ID != "real" {
 		t.Fatalf("recovery sidecar leaked into sessions: %v", sessions)
 	}

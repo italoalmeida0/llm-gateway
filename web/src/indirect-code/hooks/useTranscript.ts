@@ -238,6 +238,13 @@ export function createTranscript(opts: {
   const WINDOW_BLOCKS = 10;
   const WINDOW_STEP = 20;
   const [windowSize, setWindowSize] = createSignal(WINDOW_BLOCKS);
+  // Server-driven history pagination (turn blocks): the daemon sends the
+  // tail block plus a cursor; older blocks arrive via get_history.
+  // historyArmed starts FALSE so the initial top-scroll never auto-loads
+  // (the button shows first; the first click arms scroll loading).
+  const [historyCursor, setHistoryCursor] = createSignal<{ oldestTurn: number; hasOlder: boolean; totalTurns: number } | null>(null);
+  const [historyArmed, setHistoryArmed] = createSignal(false);
+  const [loadingOlder, setLoadingOlder] = createSignal(false);
   const visibleBlocks = () => {
     const all = renderState.blocks;
     return all.length <= windowSize() ? all : all.slice(all.length - windowSize());
@@ -249,10 +256,87 @@ export function createTranscript(opts: {
   function resetWindow() {
     setWindowSize(WINDOW_BLOCKS);
   }
+  function resetHistory() {
+    setHistoryCursor(null);
+    setHistoryArmed(false);
+    setLoadingOlder(false);
+  }
+  /** Unified "load older": local hidden blocks first, else daemon page.
+   * The button always routes here; the first click arms scroll loading
+   * (local and daemon alike) until the session is switched. */
+  function loadOlder() {
+    // First manual request arms scroll-driven loading from here on.
+    setHistoryArmed(true);
+    if (hiddenCount() > 0) {
+      growWindow();
+      return;
+    }
+    requestOlderHistory();
+  }
+  const historyHasOlder = () => historyCursor()?.hasOlder ?? false;
+  const historyHiddenTurns = () => {
+    const cur = historyCursor();
+    if (!cur || !cur.hasOlder) return 0;
+    return Math.max(0, cur.oldestTurn - 1);
+  };
+  /** Ask the daemon for the next older turn block (cursor = oldest known turn). */
+  function requestOlderHistory() {
+    const sid = opts.getSessionId();
+    const cur = historyCursor();
+    if (!sid || !cur || !cur.hasOlder || cur.oldestTurn <= 0 || loadingOlder()) return;
+    setLoadingOlder(true);
+    opts.send({ type: "get_history", sessionId: sid, beforeTurn: cur.oldestTurn });
+  }
+  /** Prepend one daemon history page, keeping the viewport anchored. */
+  async function noteHistoryPage(rawMsgs: any[], history: any) {
+    const base = typeof history?.firstIndex === "number" ? history.firstIndex : 0;
+    const el = chatContainerRef();
+    const prevHeight = el ? el.scrollHeight : 0;
+    const prevTop = el ? el.scrollTop : 0;
+    const page = await normalizeAsync(rawMsgs, base);
+    // Stale guard: the container detached (session switched) while the
+    // worker ran — drop the page instead of splicing it anywhere.
+    if (!el?.isConnected) {
+      setLoadingOlder(false);
+      return;
+    }
+    setMessages((prev) => {
+      const known = new Set(prev.map((m) => m.id));
+      return [...page.filter((m) => !known.has(m.id)), ...prev];
+    });
+    if (history && typeof history.oldestTurn === "number") {
+      setHistoryCursor({
+        oldestTurn: history.oldestTurn,
+        hasOlder: !!history.hasOlder,
+        totalTurns: history.totalTurns ?? 0,
+      });
+    } else {
+      setHistoryCursor((c) => (c ? { ...c, hasOlder: false } : c));
+    }
+    setLoadingOlder(false);
+    // Anchor: the content above grew by (newHeight - prevHeight); shift
+    // scrollTop by the same delta so the reader stays on the same bubble.
+    if (el) {
+      const grown = el.scrollHeight - prevHeight;
+      if (grown > 0) el.scrollTop = prevTop + grown;
+    }
+  }
   function onChatScroll() {
     transcriptScroll.measure();
     const el = chatContainerRef();
-    if (el && el.scrollTop < 400 && hiddenCount() > 0) growWindow();
+    if (!el || el.scrollTop >= 400) return;
+    // Button-first: nothing loads on scroll until the user opts in with
+    // one click on the load-older button (arming resets on session
+    // switch, like pin-at-bottom re-pinning). Without a click, scroll
+    // does nothing — opening a session at the top never auto-loads.
+    if (!historyArmed()) return;
+    if (hiddenCount() > 0) {
+      growWindow();
+      return;
+    }
+    // No local hidden blocks left: ask the daemon for the next older
+    // turn block.
+    if (!loadingOlder()) requestOlderHistory();
   }
   // While a turn streams and the reader follows the tail, keep the window
   // pinned to the newest blocks (otherwise fresh units would render outside
@@ -284,6 +368,42 @@ export function createTranscript(opts: {
     return undefined;
   }
 
+  // --- History worker (normalize off the main thread) ---
+  // Pages/snapshots above this size go through the worker; small ones
+  // stay synchronous (no postMessage round-trip overhead).
+  const WORKER_MIN_MESSAGES = 50;
+  let historyWorker: Worker | null = null;
+  let historyWorkerSeq = 0;
+  const historyWorkerWaiters = new Map<number, (page: ChatMessage[]) => void>();
+  function getHistoryWorker(): Worker | null {
+    if (historyWorker) return historyWorker;
+    try {
+      // Served from dist/workers/history-worker.js (separate build
+      // entry in build.ts); same-origin with the dashboard always.
+      historyWorker = new Worker("workers/history-worker.js", { type: "module" });
+      historyWorker.onmessage = (ev: MessageEvent<{ seq: number; page: ChatMessage[] }>) => {
+        const w = historyWorkerWaiters.get(ev.data?.seq);
+        if (w) {
+          historyWorkerWaiters.delete(ev.data.seq);
+          w(Array.isArray(ev.data.page) ? ev.data.page : []);
+        }
+      };
+    } catch {
+      historyWorker = null;
+    }
+    return historyWorker;
+  }
+  /** Normalize via worker when large, synchronously when small/absent. */
+  function normalizeAsync(rawMsgs: any[], indexBase: number): Promise<ChatMessage[]> | ChatMessage[] {
+    const w = (rawMsgs?.length ?? 0) >= WORKER_MIN_MESSAGES ? getHistoryWorker() : null;
+    if (!w) return normalizeSessionMessages(rawMsgs, [], indexBase);
+    return new Promise((resolve) => {
+      const seq = ++historyWorkerSeq;
+      historyWorkerWaiters.set(seq, resolve);
+      w.postMessage({ seq, rawMsgs, indexBase });
+    });
+  }
+
   // --- Session fetch (get_session with dedicated requestId) ---
   let transcriptRequestId = "";
   let initialScrollSession = "";
@@ -295,8 +415,23 @@ export function createTranscript(opts: {
   function beginLoad(sessionId: string) {
     initialScrollSession = sessionId;
   }
-  function applySessionContent(sessionId: string, rawMsgs: any[], compaction?: any) {
-    setMessages((prev) => normalizeSessionMessages(rawMsgs, prev));
+  async function applySessionContent(sessionId: string, rawMsgs: any[], compaction?: any, history?: any) {
+    if (history && typeof history.oldestTurn === "number") {
+      // Paged snapshot: merge the tail over previously loaded older pages.
+      const base = typeof history.firstIndex === "number" ? history.firstIndex : 0;
+      const tail = await normalizeAsync(rawMsgs, base);
+      if (sessionId !== opts.getSessionId()) return; // stale while worker ran
+      setMessages((prev) => {
+        const ids = new Set(tail.map((m) => m.id));
+        return [...prev.filter((m) => !ids.has(m.id)), ...tail];
+      });
+    } else if ((rawMsgs?.length ?? 0) >= WORKER_MIN_MESSAGES) {
+      const tail = await normalizeAsync(rawMsgs, 0);
+      if (sessionId !== opts.getSessionId()) return;
+      setMessages(() => tail as ChatMessage[]);
+    } else {
+      setMessages((prev) => normalizeSessionMessages(rawMsgs, prev));
+    }
     restoreEditDraft();
     if (compaction !== undefined) {
       setSessionCompaction(compaction);
@@ -320,9 +455,19 @@ export function createTranscript(opts: {
     setSessionCompaction(r.compaction ?? null);
     setTurnActivity(r.turn || null);
     setTurnClock(Date.now());
+    if (r.history && typeof r.history.oldestTurn === "number") {
+      setHistoryCursor({
+        oldestTurn: r.history.oldestTurn,
+        hasOlder: !!r.history.hasOlder,
+        totalTurns: r.history.totalTurns ?? 0,
+      });
+    } else {
+      setHistoryCursor(null);
+    }
+    setLoadingOlder(false);
     setTodos(r.todos || []);
     if (typeof r.todosOpen === "boolean") applyTodosOpenFromRemote(r.todosOpen);
-    applySessionContent(sid, r.messages || r.Messages || [], r.compaction);
+    applySessionContent(sid, r.messages || r.Messages || [], r.compaction, r.history);
     showQuestion(r.question || null);
     setToolProgress(r.toolProgress || {});
     setToolStarts(r.toolStarts || {});
@@ -643,6 +788,8 @@ export function createTranscript(opts: {
         const cut = prev.findIndex((m) => (m.srcIdx ?? -1) > keep);
         return cut < 0 ? prev : prev.slice(0, cut);
       });
+      // The past changed: drop the cursor (a fresh tail arrives next).
+      resetHistory();
       showQuestion(null);
     }
   }
@@ -788,6 +935,7 @@ export function createTranscript(opts: {
     showQuestion(null);
     transcriptScroll.reset();
     resetWindow();
+    resetHistory();
     setMessages([]);
     setSessionCompaction(null);
     setSessionStatus("idle");
@@ -820,6 +968,11 @@ export function createTranscript(opts: {
     // their own turn even while reading further up.
     transcriptScroll.reset();
     setIsAtBottom(true);
+    // Collapse the history window back to the fresh tail: the reader
+    // already reviewed the past before sending (ocultar, not descarregar
+    // — data stays in messages(), only the render window shrinks).
+    // Older blocks stay one click away on the load-older button.
+    resetWindow();
     setTurnActivity({ startedAt: Date.now(), status: "running" });
   }
 
@@ -840,6 +993,8 @@ export function createTranscript(opts: {
     chatContainerRef, setChatContainerRef, chatContentRef, setChatContentRef,
     transcriptScroll, scrollToBottom, pinAtBottom, onChatScroll,
     renderBlocks, visibleBlocks, hiddenCount, growWindow,
+    loadOlder, historyHasOlder, historyHiddenTurns, loadingOlder,
+    noteHistoryPage, requestOlderHistory,
     rawIdx, blockRawIdx, specialProgress,
     // session
     fetchSession, beginLoad, applySessionContent, applyUsage, applySnapshot,

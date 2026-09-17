@@ -40,7 +40,7 @@ func TestForkCopiesPrefixOptionsAttachmentsAndLeavesSourceUntouched(t *testing.T
 			var fork *SessionRecord
 			for _, summary := range d.listSessions() {
 				if summary.ID != "source" {
-					fork, _ = d.loadSession(summary.ID)
+					fork, _, _ = d.loadSessionFused(summary.ID)
 				}
 			}
 			expected := index + 1
@@ -114,7 +114,7 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 		t.Fatal("no fork created")
 	}
 	countEdited := func() int {
-		fork, _ := d.loadSession(forkID)
+		fork, _, _ := d.loadSessionFused(forkID)
 		if fork == nil {
 			return 0
 		}
@@ -137,7 +137,7 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 	// can never satisfy it).
 	targetSeq := srcSeq + 1
 	stamped := func() bool {
-		fork, _ := d.loadSession(forkID)
+		fork, _, _ := d.loadSessionFused(forkID)
 		if fork == nil {
 			return false
 		}
@@ -161,7 +161,7 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 	}
 
 	// Source keeps the original text.
-	src, _ := d.loadSession("src-edit")
+	src, _, _ := d.loadSessionFused("src-edit")
 	if src.Messages[0].Content[0].(provider.TextBlock).Text != "original question" {
 		t.Fatal("source mutated")
 	}
@@ -221,7 +221,7 @@ func TestRegeneratePicksLastUserMessageInMultiTurn(t *testing.T) {
 
 	// Check that the re-run message appended by Prompt is "second question", NOT "first question"
 	stamped := func() (bool, string) {
-		s, _ := d.loadSession("multi-turn")
+		s, _, _ := d.loadSessionFused("multi-turn")
 		if s == nil {
 			return false, ""
 		}
@@ -314,7 +314,7 @@ func TestForkAndRegenerate(t *testing.T) {
 
 	// Prove Prompt ran on the fork with q2
 	stamped := func() (bool, string) {
-		fork, _ := d.loadSession(forkID)
+		fork, _, _ := d.loadSessionFused(forkID)
 		if fork == nil {
 			return false, ""
 		}

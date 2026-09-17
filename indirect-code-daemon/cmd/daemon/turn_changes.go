@@ -22,7 +22,7 @@ type turnFileChanges struct {
 	// brainDir is the per-session private workspace: scratch-space files
 	// are never user-facing changes, so preview/finish filter them out.
 	// This is defense-in-depth on top of the tools skipping brain paths
-	// at tracking time (old crash journals may still carry them).
+	// at tracking time.
 	brainDir string
 }
 
@@ -41,7 +41,7 @@ func beginTurnTracking(act *ActiveSession, cwd string, turnIndex int, brainDir s
 
 // dropBrainTracked removes tracked paths living under the per-session
 // private workspace. Tools already skip brain paths at tracking time;
-// this is defense-in-depth for crash journals written before the skip
+// this is defense-in-depth for snapshots taken before the skip
 // existed (or restored from disk). Empty brainDir never matches.
 func dropBrainTracked(in []filetrack.TrackedFile, brainDir string) []filetrack.TrackedFile {
 	if brainDir == "" || len(in) == 0 {
@@ -214,7 +214,14 @@ func (d *DaemonServer) undoTurnChanges(act *ActiveSession, turnIndex int, onlyPa
 					}
 				}
 				act.record.UpdatedAt = time.Now().UnixMilli()
-				_ = d.saveSession(act.record)
+				if act.record.Status == "running" && act.wal != nil {
+					// Balloon flags are memory + commit; the WAL has no
+					// balloon event, so force a fused-consistent commit
+					// marker via meta (commit writes full record).
+					d.appendWALEvent(act, walEvent{Type: walTypeMeta})
+				} else {
+					_ = d.saveSession(act.record)
+				}
 			}
 			act.mu.Unlock()
 		}

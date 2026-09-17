@@ -103,6 +103,18 @@ export function createTurnChanges(opts: {
   function noteBalloon(balloon: any, live: boolean) {
     upsert(balloon, live);
   }
+  /** Prepend one history page's balloons (committed, dedupe by turn). */
+  function noteHistoryBalloons(list: any[]) {
+    if (!Array.isArray(list)) return;
+    const pages = list.map(normalizeBalloon).filter((b: any) => b && typeof b.turnIndex === "number" && (b.files?.length || 0) > 0);
+    if (pages.length === 0) return;
+    setBalloons((prev) => {
+      const known = new Set(prev.map((b) => b.turnIndex));
+      const merged = [...pages.filter((b) => !known.has(b.turnIndex)).map((b) => ({ ...b, live: false })), ...prev];
+      merged.sort((a, b) => a.turnIndex - b.turnIndex);
+      return merged;
+    });
+  }
 
   function requestBalloons() {
     if (!opts.getSessionId()) return;
@@ -196,6 +208,7 @@ export function createTurnChanges(opts: {
     dropAbove,
     applySnapshot,
     noteBalloon,
+    noteHistoryBalloons,
     requestBalloons,
     noteTurnChanges,
     noteUndone,

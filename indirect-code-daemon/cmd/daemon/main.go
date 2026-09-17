@@ -232,6 +232,47 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 	}
 }
 
+// pagedHistoryBlock swaps a full payload's transcript for the tail
+// history block (whole turns up to the token budget) plus the cursor
+// the client passes back to get_history. Call with the record lock
+// held. Every session_data/session_created/session_forked event goes
+// through here so no path ships a full transcript anymore.
+func pagedHistoryBlock(p map[string]any, rec *SessionRecord) map[string]any {
+	block := sliceHistoryBlock(rec.Messages, rec.FileBalloons, 0)
+	p["messages"] = sanitizeMessagesForFrontend(block.Messages, rec.Attachments)
+	p["fileBalloons"] = fileBalloonPayloads(block.Balloons)
+	p["history"] = map[string]any{
+		"oldestTurn": block.OldestTurn,
+		"newestTurn": block.NewestTurn,
+		"hasOlder":   block.HasOlder,
+		"totalTurns": block.TotalTurns,
+		"firstIndex": block.FirstIndex,
+	}
+	return p
+}
+
+// sessionPayloadPaged is the gradual-loading shape: the tail history
+// block (whole turns up to the token budget) plus the cursor the client
+// passes back to get_history. Everything else is identical to
+// sessionPayload — small metadata, always sent whole.
+func sessionPayloadPaged(rec *SessionRecord, beforeTurn int) map[string]any {
+	if beforeTurn > 0 {
+		p := sessionPayload(rec)
+		block := sliceHistoryBlock(rec.Messages, rec.FileBalloons, beforeTurn)
+		p["messages"] = sanitizeMessagesForFrontend(block.Messages, rec.Attachments)
+		p["fileBalloons"] = fileBalloonPayloads(block.Balloons)
+		p["history"] = map[string]any{
+			"oldestTurn": block.OldestTurn,
+			"newestTurn": block.NewestTurn,
+			"hasOlder":   block.HasOlder,
+			"totalTurns": block.TotalTurns,
+			"firstIndex": block.FirstIndex,
+		}
+		return p
+	}
+	return pagedHistoryBlock(sessionPayload(rec), rec)
+}
+
 func projectPayload(p ProjectEntry) map[string]any {
 	return map[string]any{
 		"id": p.ID, "name": p.Name, "path": p.Path,
@@ -381,9 +422,18 @@ type ActiveSession struct {
 	approvalReqs      map[string]chan bool
 	// fileChanges is the live incoming-changes area of the running turn.
 	fileChanges *turnFileChanges
+	// wal is the buffered write-ahead log handle while a turn runs.
+	// Non-nil exactly while Status==running in WAL mode: the session
+	// JSON on disk stays frozen and every mutation appends one JSONL
+	// line, committed with a single save at turn end.
+	wal *walWriter
 	// gen counts started turns; a stale turn's finalizer skips when it no
 	// longer matches, so edit/regenerate can't corrupt the new turn.
 	gen int
+	// lastUsedUnixMilli is the LRU clock for idle eviction (RAM only,
+	// never persisted). Refreshed on every touch; sessions idle past
+	// the cutoff are dropped from the map and reloaded on next use.
+	lastUsedUnixMilli int64
 }
 
 // DaemonServer coordinates WebSocket connection, relay commands, and local sessions.
@@ -399,6 +449,10 @@ type DaemonServer struct {
 
 	sessionsMu sync.RWMutex
 	sessions   map[string]*ActiveSession
+
+	// Idle eviction sweeper state (RAM-only LRU, see session_eviction.go).
+	evictMu   sync.Mutex
+	evictStop chan struct{}
 
 	// Background tasks (detached bash/python): process-local registry,
 	// never persisted. Guarded by bgMu; jobs broadcast bg_update.
@@ -477,6 +531,7 @@ func (d *DaemonServer) removePidFile() {
 // shutdown message (frontend "Desconectar") so both paths behave alike.
 func (d *DaemonServer) gracefulShutdown(reason string) {
 	fmt.Printf("\n[SHUTDOWN] %s\n", reason)
+	d.stopEvictionSweeper()
 	d.quiesceSessions()
 	d.wsMu.Lock()
 	if d.wsConn != nil {
@@ -815,7 +870,7 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 
 	var summaries []SessionSummary
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".turn.json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
 			continue
 		}
 		id := strings.TrimSuffix(e.Name(), ".json")
@@ -845,10 +900,10 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 
 // purgeSession removes a session completely: any in-flight turn is marked
 // stale and cancelled (its deferred save can't resurrect the transcript),
-// then the JSON record and the attachment folder are wiped from disk and a
-// session_deleted event goes out. Deletions are always 100%, never hides.
-// The shared per-project review repo is KEPT: sibling sessions of the same
-// root still need it.
+// then the JSON record, the WAL and the attachment folder are wiped from
+// disk and a session_deleted event goes out. Deletions are always 100%,
+// never hides. The shared per-project review repo is KEPT: sibling
+// sessions of the same root still need it.
 func (d *DaemonServer) purgeSession(id string) {
 	// Stop the session's background jobs first: their .log files live in
 	// the brain dir removed below, and no completion notice may land in a
@@ -866,9 +921,9 @@ func (d *DaemonServer) purgeSession(id string) {
 	}
 	d.sessionsMu.Unlock()
 	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".json"))
+	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".wal.jsonl"))
 	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id))
 	_ = os.RemoveAll(d.brainDir(id))
-	d.deleteTurnJournal(id)
 	_ = d.sendWS(map[string]any{
 		"type":      "session_deleted",
 		"hostId":    d.config.HostID,
@@ -905,7 +960,7 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 	}
 	var summaries []SessionSummary
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".turn.json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
@@ -916,16 +971,10 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 		if err := json.Unmarshal(data, &r); err != nil {
 			continue
 		}
-		// Ghost guard: turn-journal sidecars (<id>.turn.json) are
-		// crash-recovery records, not sessions — they carry no
-		// id/title/cwd/updatedAt. Neither are corrupt leftovers (empty id
-		// or content id ≠ filename; every save writes rec.ID+".json").
-		// Listing any of them shows a blank row in the sidebar whose
-		// click always fails with "Session not found", since loadSession
-		// reads id+".json".
-		if strings.HasSuffix(e.Name(), ".turn.json") {
-			continue
-		}
+		// Ghost guard: corrupt leftovers (empty id or content id ≠
+		// filename; every save writes rec.ID+".json"). Listing any of
+		// them shows a blank row in the sidebar whose click always fails
+		// with "Session not found", since loadSession reads id+".json".
 		if r.ID == "" || strings.TrimSuffix(e.Name(), ".json") != r.ID {
 			continue
 		}
@@ -948,9 +997,11 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 	return summaries
 }
 
-// resetRunningSessions flips records left "running" by a previous process
-// (crash/kill/power loss mid-turn) back to "idle". No turn can be in flight
-// at boot; without this the stale flag permanently refuses new prompts with
+// resetRunningSessions handles records left "running" by a previous
+// process (crash/kill/power loss mid-turn). Sessions WITH a WAL are left
+// running: resumeInterruptedTurns replays them. Sessions with NO recovery
+// data are flipped back to idle — no turn can be in flight at boot, and
+// without this the stale flag permanently refuses new prompts with
 // "Turn already in flight".
 func (d *DaemonServer) resetRunningSessions() {
 	dir := d.sessionsDir()
@@ -959,7 +1010,12 @@ func (d *DaemonServer) resetRunningSessions() {
 		return
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".turn.json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
+			continue
+		}
+		sid := strings.TrimSuffix(e.Name(), ".json")
+		// A WAL means resume owns this session.
+		if _, err := os.Stat(filepath.Join(dir, sid+".wal.jsonl")); err == nil {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
@@ -982,9 +1038,10 @@ func (d *DaemonServer) resetRunningSessions() {
 	}
 }
 
-// quiesceSessions suspends execution on shutdown, preserving the journal and
-// original turn clock. Only an explicit user Stop marks the task cancelled.
-// Deferred finalizers see the generation bump and cannot commit stale work.
+// quiesceSessions suspends execution on shutdown, committing the WAL so
+// the frozen JSON plus replayed log become one durable record. Only an
+// explicit user Stop marks the task cancelled. Deferred finalizers see
+// the generation bump and cannot commit stale work.
 func (d *DaemonServer) quiesceSessions() {
 	d.sessionsMu.Lock()
 	defer d.sessionsMu.Unlock()
@@ -995,16 +1052,9 @@ func (d *DaemonServer) quiesceSessions() {
 			act.cancel()
 		}
 		if act.record.Status == "running" && act.fileChanges != nil {
-			started := int64(0)
-			if act.record.Turn != nil {
-				started = act.record.Turn.StartedAt
-			}
-			j, _ := d.readTurnJournal(act.record.ID)
-			if j == nil {
-				j = &TurnJournal{TurnIndex: act.fileChanges.turnIndex, StartedAt: started, Model: act.record.Model}
-			}
-			j.Incoming = act.fileChanges.tracker.Snapshot()
-			d.writeTurnJournal(act.record.ID, j)
+			// Snapshot the tracker into the WAL before committing, so a
+			// later resume (or audit) sees the final incoming state.
+			d.appendWALEvent(act, walEvent{Type: walTypeIncoming, Incoming: act.fileChanges.tracker.Snapshot()})
 		}
 		act.pendingApproval = nil
 		act.question = nil
@@ -1013,7 +1063,21 @@ func (d *DaemonServer) quiesceSessions() {
 		act.toolProgress = nil
 		act.toolStarts = nil
 		act.record.Status = "idle"
-		_ = d.saveSession(act.record)
+		if act.record.Turn != nil && act.record.Turn.Status == "running" {
+			act.record.Turn.Status = "cancelled"
+			act.record.Turn.EndedAt = time.Now().UnixMilli()
+		}
+		if act.wal != nil {
+			// Graceful shutdown commits: the turn will NOT resume —
+			// the record carries everything, the WAL is removed.
+			if act.record.Turn != nil && act.record.Turn.Status == "running" {
+				act.record.Turn.Status = "cancelled"
+				act.record.Turn.EndedAt = time.Now().UnixMilli()
+			}
+			_ = d.commitWAL(act)
+		} else {
+			_ = d.saveSession(act.record)
+		}
 		act.mu.Unlock()
 	}
 }
@@ -1023,10 +1087,11 @@ func (d *DaemonServer) getOrCreateActiveSession(id string) (*ActiveSession, erro
 	defer d.sessionsMu.Unlock()
 
 	if act, ok := d.sessions[id]; ok {
+		touchSession(act)
 		return act, nil
 	}
 
-	rec, err := d.loadSession(id)
+	rec, _, err := d.loadSessionFused(id)
 	if err != nil {
 		return nil, err
 	}
@@ -1035,6 +1100,7 @@ func (d *DaemonServer) getOrCreateActiveSession(id string) (*ActiveSession, erro
 		record:       rec,
 		approvalReqs: make(map[string]chan bool),
 	}
+	touchSession(act)
 	d.sessions[id] = act
 	return act, nil
 }
@@ -1121,17 +1187,67 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		d.sessionsMu.RUnlock()
 		if act != nil {
 			act.mu.Lock()
-			reply(liveSessionPayload(act))
+			reply(pagedHistoryBlock(liveSessionPayload(act), act.record))
+			touchSession(act)
 			act.mu.Unlock()
 			return
 		}
 		// Reading history must not keep every opened transcript in memory.
-		rec, err := d.loadSession(req.SessionID)
+		// Fused read: frozen JSON + WAL replay when a turn is running.
+		rec, _, err := d.loadSessionFused(req.SessionID)
 		if err != nil {
 			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "sessionId": req.SessionID, "message": "Session not found"})
 			return
 		}
-		reply(sessionPayload(rec))
+		reply(sessionPayloadPaged(rec, 0))
+
+	case "get_history":
+		// Older history page: turns strictly below beforeTurn, newest
+		// last, up to the token budget. Pure read — never hydrates RAM
+		// (fused disk load when the session is not resident).
+		var hreq struct {
+			SessionID  string `json:"sessionId"`
+			BeforeTurn int    `json:"beforeTurn"`
+		}
+		_ = json.Unmarshal(raw, &hreq)
+		if hreq.SessionID == "" || hreq.BeforeTurn <= 0 {
+			return
+		}
+		d.sessionsMu.RLock()
+		hact := d.sessions[hreq.SessionID]
+		d.sessionsMu.RUnlock()
+		var hmsgs []provider.Message
+		var hbals []filetrack.TurnChanges
+		var hatts []AttachmentRef
+		if hact != nil {
+			hact.mu.Lock()
+			hmsgs = append([]provider.Message{}, hact.record.Messages...)
+			hbals = append([]filetrack.TurnChanges{}, hact.record.FileBalloons...)
+			hatts = append([]AttachmentRef{}, hact.record.Attachments...)
+			touchSession(hact)
+			hact.mu.Unlock()
+		} else {
+			hrec, _, herr := d.loadSessionFused(hreq.SessionID)
+			if herr != nil {
+				_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "sessionId": hreq.SessionID, "message": "Session not found"})
+				return
+			}
+			hmsgs, hbals, hatts = hrec.Messages, hrec.FileBalloons, hrec.Attachments
+		}
+		hblock := sliceHistoryBlock(hmsgs, hbals, hreq.BeforeTurn)
+		_ = d.sendWS(map[string]any{
+			"type": "session_content", "hostId": d.config.HostID, "sessionId": hreq.SessionID,
+			"page":         true,
+			"messages":     sanitizeMessagesForFrontend(hblock.Messages, hatts),
+			"fileBalloons": fileBalloonPayloads(hblock.Balloons),
+			"history": map[string]any{
+				"oldestTurn": hblock.OldestTurn,
+				"newestTurn": hblock.NewestTurn,
+				"hasOlder":   hblock.HasOlder,
+				"totalTurns": hblock.TotalTurns,
+				"firstIndex": hblock.FirstIndex,
+			},
+		})
 
 	case "rename_session":
 		var req struct {
@@ -1154,7 +1270,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		act.record.Title = title
 		act.record.TitleSource = "manual"
 		act.record.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(act.record)
+		touchSession(act)
+		if act.record.Status == "running" && act.wal != nil {
+			d.appendWALEvent(act, walEvent{Type: walTypeTitle, Title: title, TitleSource: "manual"})
+		} else {
+			_ = d.saveSession(act.record)
+		}
 		sid := act.record.ID
 		act.mu.Unlock()
 		_ = d.sendWS(map[string]any{
@@ -1225,7 +1346,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			if err == nil {
 				act.mu.Lock()
 				act.record.TodosOpen = &req.Open
-				_ = d.saveSession(act.record)
+				act.record.UpdatedAt = time.Now().UnixMilli()
+				if act.record.Status == "running" && act.wal != nil {
+					d.appendWALEvent(act, walEvent{Type: walTypeMeta})
+				} else {
+					_ = d.saveSession(act.record)
+				}
 				act.mu.Unlock()
 			}
 		}
@@ -1390,19 +1516,28 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		if req.SessionID == "" {
 			return
 		}
-		rec, err := d.loadSession(req.SessionID)
+		rec, _, err := d.loadSessionFused(req.SessionID)
 		if err != nil {
 			return
 		}
 		rec.Pinned = !rec.Pinned
 		rec.UpdatedAt = time.Now().UnixMilli()
-		_ = d.saveSession(rec)
+		// Pin flips go through the live record so a running turn's WAL
+		// stays the single source of post-freeze mutations.
 		d.sessionsMu.RLock()
-		if act, ok := d.sessions[req.SessionID]; ok {
+		if act, ok := d.sessions[req.SessionID]; ok && act != nil {
 			act.mu.Lock()
 			act.record.Pinned = rec.Pinned
 			act.record.UpdatedAt = rec.UpdatedAt
+			touchSession(act)
+			if act.record.Status == "running" && act.wal != nil {
+				d.appendWALEvent(act, walEvent{Type: walTypeMeta})
+			} else {
+				_ = d.saveSession(act.record)
+			}
 			act.mu.Unlock()
+		} else {
+			_ = d.saveSession(rec)
 		}
 		d.sessionsMu.RUnlock()
 		_ = d.sendWS(map[string]any{
@@ -1578,7 +1713,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 					strings.Contains(strings.ToLower(s.CWD), lq)
 				snippet := ""
 				count := 0
-				rec, err := d.loadSession(s.ID)
+				rec, _, err := d.loadSessionFused(s.ID)
 				if err == nil {
 					for _, m := range rec.Messages {
 						for _, c := range m.Content {
@@ -1707,7 +1842,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			"type":      "session_created",
 			"requestId": req.RequestID,
 			"hostId":    d.config.HostID,
-			"session":   sessionPayload(rec),
+			"session":   sessionPayloadPaged(rec, 0),
 		})
 
 	case "fork_session":
@@ -1759,7 +1894,13 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 				act.record.Options.Access = "full"
 				d.rememberSelection(act.record.Model, act.record.Options)
 				d.allowPendingTools(act)
-				_ = d.saveSession(act.record)
+				act.record.UpdatedAt = time.Now().UnixMilli()
+				if act.record.Status == "running" && act.wal != nil {
+					opts := act.record.Options
+					d.appendWALEvent(act, walEvent{Type: walTypeOptions, Options: &opts})
+				} else {
+					_ = d.saveSession(act.record)
+				}
 				_ = d.sendWS(map[string]any{"type": "session_data", "hostId": d.config.HostID, "session": liveSessionPayload(act)})
 			}
 			if ch, ok := act.approvalReqs[req.CallID]; ok {
@@ -1870,9 +2011,15 @@ func (d *DaemonServer) cancelTurn(sessionID string) {
 
 	if act != nil {
 		act.mu.Lock()
+		touchSession(act)
 		if act.record.Turn != nil && act.record.Turn.Status == "running" {
 			act.record.Turn.Status = "cancelling"
-			_ = d.saveSession(act.record)
+			act.record.UpdatedAt = time.Now().UnixMilli()
+			if act.wal != nil {
+				d.appendWALEvent(act, walEvent{Type: walTypeTurnState, TurnStatus: "cancelling"})
+			} else {
+				_ = d.saveSession(act.record)
+			}
 		}
 		if act.cancel != nil {
 			act.cancel()
@@ -1944,7 +2091,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 		_ = d.sendWS(map[string]any{
 			"type":    "session_created",
 			"hostId":  d.config.HostID,
-			"session": sessionPayload(rec),
+			"session": sessionPayloadPaged(rec, 0),
 		})
 		return
 
@@ -2092,7 +2239,10 @@ func dropBalloonsAbove(in []filetrack.TurnChanges, keep int) []filetrack.TurnCha
 // in-flight turn is cancelled first and a generation counter keeps the old
 // turn's deferred finalizer from clobbering the new one.
 func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, model string, yolo bool, attachmentIDs []string) {
-	rec, err := d.loadSession(sessionID)
+	// Truncation needs the fused view (a WAL may hold uncommitted tail),
+	// but it is refused while a turn runs (see below), so by commit time
+	// no WAL exists and the fused read equals the JSON.
+	rec, _, err := d.loadSessionFused(sessionID)
 	if err != nil {
 		return
 	}
@@ -2226,7 +2376,7 @@ func (d *DaemonServer) runAgentTurnWithMeta(act *ActiveSession, promptText, requ
 	}
 
 	if act.record.CWD != "" && inspectWorkspace(act.record.CWD).Status != "available" {
-		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": sessionPayload(act.record)})
+		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": pagedHistoryBlock(sessionPayload(act.record), act.record)})
 		act.mu.Unlock()
 		return
 	}
@@ -2253,13 +2403,50 @@ func (d *DaemonServer) runAgentTurnWithMeta(act *ActiveSession, promptText, requ
 	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
 	tfc := beginTurnTracking(act, sessionCWD, turnSeq, d.brainDir(sessionID))
-	d.writeTurnJournal(sessionID, &TurnJournal{TurnIndex: turnSeq, StartedAt: act.record.Turn.StartedAt, Model: modelToUse, Prompt: promptText, AttachmentIDs: attachmentIDs})
-	// Publish running state only after the recovery prompt exists.
-	_ = d.saveSession(act.record)
+	// WAL mode: freeze the JSON (single running-state commit) and open the
+	// append log whose header carries the recovery prompt. Every mid-turn
+	// mutation appends one line; the next full JSON rewrite is the commit
+	// in finishTurn.
+	ww, err := d.openWAL(sessionID, &walHeader{TurnIndex: turnSeq, StartedAt: act.record.Turn.StartedAt, Model: modelToUse, Prompt: promptText, AttachmentIDs: attachmentIDs})
+	if err != nil {
+		act.record.Status = "idle"
+		act.record.TurnSeq--
+		act.record.Turn = nil
+		act.fileChanges = nil
+		act.mu.Unlock()
+		_ = d.sendWS(map[string]any{
+			"type":      "error",
+			"hostId":    cfg.HostID,
+			"sessionId": sessionID,
+			"message":   "Could not start turn: " + err.Error(),
+		})
+		return
+	}
+	act.wal = ww
+	// Publish running state only after the recovery header exists.
+	if err := d.saveSessionSync(act.record); err != nil {
+		d.discardWAL(act)
+		_ = os.Remove(d.walPath(sessionID))
+		act.wal = nil
+		act.record.Status = "idle"
+		act.record.TurnSeq--
+		act.record.Turn = nil
+		act.fileChanges = nil
+		act.mu.Unlock()
+		_ = d.sendWS(map[string]any{
+			"type":      "error",
+			"hostId":    cfg.HostID,
+			"sessionId": sessionID,
+			"message":   "Could not start turn: " + err.Error(),
+		})
+		return
+	}
+	d.notifyChange("sessions")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	act.cancel = cancel
+	touchSession(act)
 	act.gen++
 	myGen := act.gen
 	options := normalizedOptions(act.record.Options)
@@ -2509,6 +2696,9 @@ func main() {
 	// restored incoming tracker, transcript replayed from disk. A turn is
 	// only ever finished by the AI or by user cancel.
 	server.resumeInterruptedTurns()
+	// Idle sessions idle too long (or too many residents) are dropped
+	// from RAM and reloaded on next touch — disk stays the truth.
+	server.startEvictionSweeper()
 
 	// Track the background process so install scripts and --stop can find it.
 	server.writePidFile()

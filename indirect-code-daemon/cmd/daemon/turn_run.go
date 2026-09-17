@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,130 +14,6 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/filetrack"
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
-
-// TurnJournal is the crash-recovery record for one running turn, stored in
-// a sidecar file next to the session (<id>.turn.json) — never inside the
-// session record itself, so history pulls and the sessions mirror stay
-// lean no matter how much incoming content a turn accumulates.
-//
-// On-disk rule: a turn's data lives in exactly one place. While the turn
-// runs, only the journal exists (incoming snapshot, no final balloon).
-// When the turn truly ends (AI finished or user cancelled), the final
-// balloon (if any) is appended to the record and the journal is deleted.
-// Nothing else ends a turn: provider errors retry inside the loop, so a
-// journal left behind can only mean the process died mid-turn.
-type TurnJournal struct {
-	Prompt        string                  `json:"prompt,omitempty"`
-	AttachmentIDs []string                `json:"attachmentIds,omitempty"`
-	TurnIndex     int                     `json:"turnIndex"`
-	StartedAt     int64                   `json:"startedAt"`
-	Model         string                  `json:"model,omitempty"`
-	Incoming      []filetrack.TrackedFile `json:"incoming,omitempty"`
-}
-
-// brainDir resolves the per-session private scratch space
-// (<dataDir>/brain/<sessionID>), refusing traversal. It is created lazily
-// and allowed through the jail so the model always has somewhere to put
-// temporary files, test scripts and experiment output.
-func (d *DaemonServer) brainDir(sessionID string) string {
-	if sessionID == "" || filepath.Base(sessionID) != sessionID {
-		return ""
-	}
-	return filepath.Join(d.dataDir, "brain", sessionID)
-}
-
-// ensureBrainDir creates the scratch space (0700, like the data dir).
-// Returns "" when the session id is unusable.
-func (d *DaemonServer) ensureBrainDir(sessionID string) string {
-	dir := d.brainDir(sessionID)
-	if dir == "" {
-		return ""
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return ""
-	}
-	return dir
-}
-
-// turnJournalPath resolves the sidecar path, refusing traversal.
-func (d *DaemonServer) turnJournalPath(sessionID string) string {
-	if sessionID == "" || filepath.Base(sessionID) != sessionID {
-		return ""
-	}
-	return filepath.Join(d.sessionsDir(), sessionID+".turn.json")
-}
-
-// writeTurnJournal persists the journal atomically (tmp + rename), without
-// a sessions change ping: the journal is daemon-internal, no mirror reads
-// it, so per-tool-tick checkpoints must not fan out to clients.
-func (d *DaemonServer) writeTurnJournal(sessionID string, j *TurnJournal) {
-	p := d.turnJournalPath(sessionID)
-	if p == "" {
-		return
-	}
-	data, err := json.MarshalIndent(j, "", "  ")
-	if err != nil {
-		return
-	}
-	if err := os.MkdirAll(d.sessionsDir(), 0o700); err != nil {
-		return
-	}
-	tmp, err := os.CreateTemp(d.sessionsDir(), ".turn-*")
-	if err != nil {
-		return
-	}
-	defer os.Remove(tmp.Name())
-	if _, err = tmp.Write(data); err != nil {
-		tmp.Close()
-		return
-	}
-	if err = tmp.Close(); err != nil {
-		return
-	}
-	_ = os.Rename(tmp.Name(), p)
-}
-
-// readTurnJournal returns nil (no error) when no journal exists.
-func (d *DaemonServer) readTurnJournal(sessionID string) (*TurnJournal, error) {
-	p := d.turnJournalPath(sessionID)
-	if p == "" {
-		return nil, nil
-	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var j TurnJournal
-	if err := json.Unmarshal(data, &j); err != nil {
-		return nil, err
-	}
-	return &j, nil
-}
-
-func (d *DaemonServer) deleteTurnJournal(sessionID string) {
-	if p := d.turnJournalPath(sessionID); p != "" {
-		_ = os.Remove(p)
-	}
-}
-
-func (d *DaemonServer) scanTurnJournals() []string {
-	entries, err := os.ReadDir(d.sessionsDir())
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".turn.json") {
-			continue
-		}
-		out = append(out, strings.TrimSuffix(name, ".turn.json"))
-	}
-	return out
-}
 
 // turnRun carries the per-turn execution state shared by fresh turns and
 // crash-recovered resumes: one agent setup, one event sink, one finalizer.
@@ -228,9 +104,9 @@ func (r *turnRun) setupAgent() bool {
 			return context.Canceled
 		}
 		r.act.record.Todos = append([]tools.TodoItem{}, items...)
-		if err := r.d.saveSession(r.act.record); err != nil {
-			return err
-		}
+		r.act.record.UpdatedAt = time.Now().UnixMilli()
+		// WAL mode: memory + append, zero JSON rewrites mid-turn.
+		r.d.appendWALEvent(r.act, walEvent{Type: walTypeTodos, Todos: append([]tools.TodoItem{}, items...)})
 		_ = r.d.sendWS(map[string]any{"type": "agent_event", "hostId": r.cfg.HostID, "sessionId": r.sessionID, "event": map[string]any{"type": "todo_update", "items": items}})
 		return nil
 	}}
@@ -276,8 +152,9 @@ func (r *turnRun) setupAgent() bool {
 			nextOptions = normalizedOptions(r.act.record.Options)
 			if r.modelInfo.ID != nextModel {
 				r.act.record.Model = r.modelInfo.ID
-				_ = r.d.saveSession(r.act.record)
-				_ = r.d.sendWS(map[string]any{"type": "session_data", "hostId": r.cfg.HostID, "session": liveSessionPayload(r.act)})
+				r.act.record.UpdatedAt = time.Now().UnixMilli()
+				r.d.appendWALEvent(r.act, walEvent{Type: walTypeModel, Model: r.modelInfo.ID})
+				_ = r.d.sendWS(map[string]any{"type": "session_data", "hostId": r.cfg.HostID, "session": pagedHistoryBlock(liveSessionPayload(r.act), r.act.record)})
 			}
 			r.act.mu.Unlock()
 			requestModel := r.modelInfo
@@ -322,6 +199,8 @@ func (r *turnRun) setupAgent() bool {
 	r.agent.BeforeToolExecute = r.d.toolApprovalHook(r.ctx, r.act, r.myGen, r.cfg.HostID)
 
 	// Persistent transcript hook: whenever a message is added, record it
+	// in memory + WAL append (the frozen JSON is untouched until the
+	// turn commits). Recovery replays the WAL, so no message is lost.
 	r.agent.OnMessageAppended = func(m provider.Message) {
 		r.act.mu.Lock()
 		if r.act.gen != r.myGen {
@@ -336,7 +215,7 @@ func (r *turnRun) setupAgent() bool {
 		}
 		r.act.record.Messages = append(r.act.record.Messages, m)
 		r.act.record.UpdatedAt = time.Now().UnixMilli()
-		_ = r.d.saveSession(r.act.record)
+		r.d.appendWALEvent(r.act, walMsgEvent(m))
 		r.act.mu.Unlock()
 	}
 
@@ -356,7 +235,7 @@ func (r *turnRun) setupAgent() bool {
 		}
 		r.act.record.Messages = append(r.act.record.Messages, m)
 		r.act.record.UpdatedAt = time.Now().UnixMilli()
-		_ = r.d.saveSession(r.act.record)
+		r.d.appendWALEvent(r.act, walMsgEvent(m))
 		r.act.mu.Unlock()
 		_ = r.d.sendWS(map[string]any{
 			"type":       "session_content",
@@ -385,7 +264,10 @@ func (r *turnRun) setupAgent() bool {
 		r.act.record.UpdatedAt = time.Now().UnixMilli()
 		r.act.record.Context = estimateContext(r.agent, r.modelInfo)
 		rec := *r.act.record
-		_ = r.d.saveSession(r.act.record)
+		usageCopy := rec.Usage
+		ctxCopy := rec.Context
+		stateCopy := *state
+		r.d.appendWALEvent(r.act, walEvent{Type: walTypeCompaction, Compaction: &stateCopy, Usage: &usageCopy, Context: ctxCopy})
 		r.act.mu.Unlock()
 		_ = r.d.sendWS(map[string]any{
 			"type":       "session_compacted",
@@ -402,7 +284,9 @@ func (r *turnRun) setupAgent() bool {
 		r.act.mu.Lock()
 		if r.act.gen == r.myGen {
 			r.act.record.Usage = cumulative
-			_ = r.d.saveSession(r.act.record)
+			r.act.record.UpdatedAt = time.Now().UnixMilli()
+			usageCopy := cumulative
+			r.d.appendWALEvent(r.act, walEvent{Type: walTypeUsage, Usage: &usageCopy})
 		}
 		r.act.mu.Unlock()
 	}
@@ -459,7 +343,9 @@ func (r *turnRun) setupAgent() bool {
 	r.act.mu.Lock()
 	if r.act.record.Context == nil {
 		r.act.record.Context = estimateContext(r.agent, r.modelInfo)
-		_ = r.d.saveSession(r.act.record)
+		r.act.record.UpdatedAt = time.Now().UnixMilli()
+		ctxCopy := r.act.record.Context
+		r.d.appendWALEvent(r.act, walEvent{Type: walTypeUsage, Context: ctxCopy})
 	}
 	r.act.mu.Unlock()
 
@@ -543,7 +429,9 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 				r.act.record.Context = counted
 			}
 		}
-		_ = r.d.saveSession(r.act.record)
+		r.act.record.UpdatedAt = time.Now().UnixMilli()
+		usageCopy := e.Cumulative
+		r.d.appendWALEvent(r.act, walEvent{Type: walTypeUsage, Usage: &usageCopy, Context: contextUsage})
 		payload["event"] = map[string]any{
 			"type": "usage", "usage": e.Usage, "cumulative": e.Cumulative, "context": contextUsage,
 		}
@@ -583,17 +471,16 @@ func (r *turnRun) handleEvent(ev core.AgentEvent) {
 }
 
 // finishTurn runs when the turn truly ends (AI finished, user cancelled):
-// final balloon, journal removal (incoming and final never coexist on
-// disk), idle flip, persistence and completion broadcast. Provider
-// errors never reach a third ending — they retry inside the loop until
-// success or cancellation.
+// final balloon, then the SINGLE full JSON commit of the turn (WAL mode)
+// and WAL removal. Provider errors never reach a third ending — they
+// retry inside the loop until success or cancellation.
 func (r *turnRun) finishTurn() {
 	r.closeMCP()
 	r.act.mu.Lock()
 	// NOTE: no defer Unlock here — the tail below unlocks manually so queue
 	// promotion (which re-acquires the session lock) can run synchronously
 	// before returning. Every return path must unlock explicitly.
-	// Shutdown/purge/new generations own the journal now. A stale finalizer
+	// Shutdown/purge/new generations own the WAL now. A stale finalizer
 	// must not touch files, history, or the replacement turn's recovery data.
 	if r.act.gen != r.myGen {
 		r.act.mu.Unlock()
@@ -629,11 +516,16 @@ func (r *turnRun) finishTurn() {
 		r.act.record.Context = estimateContext(r.agent, r.modelInfo)
 	}
 	r.act.record.UpdatedAt = time.Now().UnixMilli()
-	if err := r.d.saveSession(r.act.record); err != nil {
+	// Single commit: the frozen JSON is rewritten once with the complete
+	// post-turn state, then the WAL is deleted. A crash before the
+	// commit replays the WAL; a crash after it is detected by the
+	// commit-window check and drops the stale log.
+	if err := r.d.commitWAL(r.act); err != nil {
 		r.act.mu.Unlock()
-		return // Keep the journal until completion is durably committed.
+		return // Keep the WAL until completion is durably committed.
 	}
-	r.d.deleteTurnJournal(r.sessionID)
+	touchSession(r.act)
+	r.d.notifyChange("sessions")
 	if balloon != nil {
 		r.d.broadcastFileBalloon(r.cfg.HostID, r.sessionID, balloon)
 	}
@@ -656,26 +548,23 @@ func (r *turnRun) finishTurn() {
 	}
 }
 
-// persistIncoming checkpoints the tracker's snapshot to the crash journal
-// so a restart can continue tracking (and rebuild the live changes view)
+// persistIncoming checkpoints the tracker's snapshot to the WAL so a
+// restart can continue tracking (and rebuild the live changes view)
 // from it. Called before tracked writes and after tool results.
+// Append-only: one small line instead of a full JSON rewrite.
 func (r *turnRun) persistIncoming() {
 	if r.tfc == nil || r.tfc.tracker.Count() == 0 {
 		return
 	}
-	j, _ := r.d.readTurnJournal(r.sessionID)
-	if j == nil {
-		j = &TurnJournal{TurnIndex: r.turnIndex, StartedAt: r.turnStarted.StartedAt, Model: r.modelToUse}
-	}
-	j.Incoming = r.tfc.tracker.Snapshot()
-	r.d.writeTurnJournal(r.sessionID, j)
+	r.d.appendWALEvent(r.act, walEvent{Type: walTypeIncoming, Incoming: r.tfc.tracker.Snapshot()})
 }
 
 // resumeAgentTurn continues a turn interrupted by a daemon death: same
 // turn index (numbering never advances for a turn that never ended),
-// tracker restored from the journal, transcript replayed from disk via
-// Continue (no duplicated user message).
-func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
+// tracker restored from the WAL header, transcript replayed from the
+// fused record via Continue (no duplicated user message). The resumed
+// turn checkpoints to a fresh header-only WAL and appends from there.
+func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *walHeader) {
 	d.configMu.RLock()
 	cfg := *d.config
 	d.configMu.RUnlock()
@@ -704,9 +593,32 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
 		act.record.Options.Access = "ask"
 	}
 	act.record.UpdatedAt = now
-	_ = d.saveSession(act.record)
 	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
+	// WAL checkpoint: the fused record (frozen JSON + replayed WAL) is
+	// now durable via the freeze below, so the old log lines are
+	// truncated to a fresh header. Without this a second crash would
+	// replay the pre-crash lines twice. The header keeps the recovery
+	// prompt and the latest tracker snapshot.
+	if act.wal != nil {
+		d.discardWAL(act)
+	}
+	ww, werr := d.openWAL(sessionID, &walHeader{TurnIndex: j.TurnIndex, StartedAt: act.record.Turn.StartedAt, Model: modelToUse, Prompt: j.Prompt, AttachmentIDs: j.AttachmentIDs, Incoming: j.Incoming})
+	if werr != nil {
+		act.mu.Unlock()
+		return
+	}
+	act.wal = ww
+	// Freeze the resumed running state (single rewrite); deltas append.
+	if err := d.saveSessionSync(act.record); err != nil {
+		d.discardWAL(act)
+		_ = os.Remove(d.walPath(sessionID))
+		act.wal = nil
+		act.mu.Unlock()
+		return
+	}
+	touchSession(act)
+	d.notifyChange("sessions")
 	tfc := &turnFileChanges{
 		tracker:   filetrack.RestoreTurnTracker(dropBrainTracked(j.Incoming, d.brainDir(sessionID))),
 		turnIndex: j.TurnIndex,
@@ -765,27 +677,56 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *TurnJournal) {
 	}
 }
 
-// resumeInterruptedTurns replays every crash journal found at boot: the
-// turn continues where it died (same index, restored tracker, transcript
-// from disk). A turn is only ever finished by the AI or by user cancel,
-// never by a dead process, a dropped network, or a dead gateway.
+// resumeInterruptedTurns replays every WAL found at boot: the turn
+// continues where it died (same index, restored tracker, fused
+// transcript via Continue). A turn is only ever finished by the AI or by
+// user cancel, never by a dead process, a dropped network, or a dead
+// gateway.
 func (d *DaemonServer) resumeInterruptedTurns() {
 	d.configMu.RLock()
 	hostID := d.config.HostID
 	d.configMu.RUnlock()
-	for _, sid := range d.scanTurnJournals() {
-		j, err := d.readTurnJournal(sid)
-		if err != nil || j == nil || j.TurnIndex <= 0 {
-			d.deleteTurnJournal(sid)
+	for _, sid := range d.scanWALs() {
+		header, herr := d.readWALHeader(sid)
+		if herr != nil || header == nil || header.TurnIndex <= 0 {
+			fmt.Printf("[INFO] Dropping corrupt WAL: %s (%v)\n", sid, herr)
+			_ = os.Remove(d.walPath(sid))
+			continue
+		}
+		// Fuse frozen JSON + WAL before deciding: the fused record is
+		// what the turn will continue from.
+		fused, _, ferr := d.loadSessionFused(sid)
+		if ferr != nil {
+			fmt.Printf("[INFO] Dropping unreadable WAL: %s (%v)\n", sid, ferr)
+			_ = os.Remove(d.walPath(sid))
+			continue
+		}
+		// The WAL body may carry a newer tracker snapshot than the
+		// header: the last incoming event wins.
+		j := header
+		if data, rerr := os.ReadFile(d.walPath(sid)); rerr == nil {
+			j = cloneWALHeader(header)
+			j.Incoming = walLatestIncoming(data, header.Incoming)
+		}
+		// Commit-window detection: the JSON already carries the finished
+		// turn (commit landed, WAL removal did not). Drop the stale log.
+		if fused.TurnSeq > j.TurnIndex ||
+			(fused.TurnSeq == j.TurnIndex && fused.Turn != nil &&
+				(fused.Turn.Status == "completed" || fused.Turn.Status == "cancelled")) {
+			fmt.Printf("[INFO] Dropping committed WAL: %s (turn %d)\n", sid, j.TurnIndex)
+			_ = os.Remove(d.walPath(sid))
 			continue
 		}
 		act, err := d.getOrCreateActiveSession(sid)
 		if err != nil {
-			// Session purged while the daemon was down: orphan journal.
-			d.deleteTurnJournal(sid)
+			// Session purged while the daemon was down: orphan WAL.
+			_ = os.Remove(d.walPath(sid))
 			continue
 		}
 		act.mu.Lock()
+		// Swap in the fused record so the resumed turn sees the full
+		// pre-crash transcript (frozen JSON + replayed WAL).
+		act.record = fused
 		rec := act.record
 		abandon := turnResumeAbandoned(rec, j)
 		blocked := !abandon && rec.CWD != "" && inspectWorkspace(rec.CWD).Status != "available"
@@ -808,10 +749,10 @@ func (d *DaemonServer) resumeInterruptedTurns() {
 				r.finishTurn()
 				continue
 			}
-			fmt.Printf("[INFO] Dropping stale turn journal: %s (turn %d)\n", sid, j.TurnIndex)
-			d.deleteTurnJournal(sid)
+			fmt.Printf("[INFO] Dropping stale WAL: %s (turn %d)\n", sid, j.TurnIndex)
+			_ = os.Remove(d.walPath(sid))
 		case blocked:
-			fmt.Printf("[INFO] Turn %d of %s waits for workspace; journal kept\n", j.TurnIndex, sid)
+			fmt.Printf("[INFO] Turn %d of %s waits for workspace; WAL kept\n", j.TurnIndex, sid)
 		default:
 			fmt.Printf("[INFO] Resuming interrupted turn %d of session %s\n", j.TurnIndex, sid)
 			go d.resumeAgentTurn(act, j)
@@ -819,11 +760,31 @@ func (d *DaemonServer) resumeInterruptedTurns() {
 	}
 }
 
-// turnResumeAbandoned reports whether a journaled turn must NOT resume: it
+// walLatestIncoming folds walTypeIncoming snapshots in order; the last
+// one wins. Falls back to the header seed when the body has none.
+func walLatestIncoming(data []byte, fallback []filetrack.TrackedFile) []filetrack.TrackedFile {
+	out := fallback
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		line = bytes.TrimRight(line, "\r")
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var ev walEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		if ev.Type == walTypeIncoming && ev.Incoming != nil {
+			out = ev.Incoming
+		}
+	}
+	return out
+}
+
+// turnResumeAbandoned reports whether a WAL turn must NOT resume: it
 // already produced its final balloon (crash landed in the finish window),
 // was explicitly stopped, or has neither persisted messages nor a pending
-// opening prompt (an old journal created before the first message append).
-func turnResumeAbandoned(rec *SessionRecord, j *TurnJournal) bool {
+// opening prompt (a header written before the first message append).
+func turnResumeAbandoned(rec *SessionRecord, j *walHeader) bool {
 	if rec.TurnSeq > j.TurnIndex {
 		return true
 	}

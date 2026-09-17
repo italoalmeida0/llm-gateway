@@ -31,6 +31,7 @@ export interface SessionChoice {
 export type DaemonCommand = CommandBase &
   (
   | { type: "get_session"; sessionId: string; requestId?: string }
+  | { type: "get_history"; sessionId: string; beforeTurn: number }
   | { type: "pull"; collection: string }
   | { type: "configure_session"; sessionId: string; model: string; options: Omit<SessionChoice, "model"> }
   | { type: "prompt"; sessionId: string; text: string; model: string; yolo: boolean; options: Omit<SessionChoice, "model">; attachmentIds: string[] }

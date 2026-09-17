@@ -48,10 +48,10 @@ func (d *DaemonServer) handleGetTurnChanges(raw []byte) {
 	// Live view of the running turn, computed from the incoming snapshot.
 	// Same shape as a balloon; the frontend renders it above the composer.
 	// When the tracker is not in memory (fresh boot, turn not yet resumed),
-	// rebuild the same view from the persisted crash journal: the frontend
+	// rebuild the same view from the persisted WAL header: the frontend
 	// always receives changes, never daemon-internal incoming.
 	var live any
-	journal, _ := d.readTurnJournal(req.SessionID)
+	walHeader, _ := d.readWALHeader(req.SessionID)
 	if act.fileChanges != nil && act.fileChanges.tracker.Count() > 0 {
 		if files := previewIncoming(act.fileChanges); len(files) > 0 {
 			live = map[string]any{
@@ -60,11 +60,11 @@ func (d *DaemonServer) handleGetTurnChanges(raw []byte) {
 			}
 		}
 	}
-	if live == nil && journal != nil && len(journal.Incoming) > 0 {
-		incoming := append([]filetrack.TrackedFile(nil), journal.Incoming...)
+	if live == nil && walHeader != nil && len(walHeader.Incoming) > 0 {
+		incoming := append([]filetrack.TrackedFile(nil), walHeader.Incoming...)
 		if files := filetrack.PreviewChanged(dropBrainTracked(incoming, brainDir), act.record.CWD); len(files) > 0 {
 			live = map[string]any{
-				"turnIndex": journal.TurnIndex,
+				"turnIndex": walHeader.TurnIndex,
 				"files":     files,
 			}
 		}
@@ -108,7 +108,7 @@ func (d *DaemonServer) handleUndoTurnChanges(raw []byte) {
 	}
 	// Push the refreshed session (Undone flags are persisted on balloons).
 	act.mu.Lock()
-	payload := sessionPayload(act.record)
+	payload := pagedHistoryBlock(sessionPayload(act.record), act.record)
 	act.mu.Unlock()
 	_ = d.sendWS(map[string]any{"type": "session_data", "hostId": d.config.HostID, "session": payload})
 }

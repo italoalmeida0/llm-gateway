@@ -134,14 +134,17 @@ export function TranscriptView() {
       skipped for actions, and the lead keeps its own raw index so
       every per-message op still maps 1:1 to the daemon
       transcript — fusing is purely visual. */}
-  <Show when={t.hiddenCount() > 0}>
+  <Show when={t.hiddenCount() > 0 || t.historyHasOlder()}>
     <div class="flex justify-center">
       <button
-        onClick={() => t.growWindow()}
-        class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-ink-900 border border-line/70 text-ink-300 shadow hover:text-ink-100 cursor-pointer"
+        onClick={() => t.loadOlder()}
+        disabled={t.loadingOlder()}
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-ink-900 border border-line/70 text-ink-300 shadow hover:text-ink-100 cursor-pointer disabled:opacity-60"
       >
         <Iconify icon="lucide:chevron-up" size={13} />
-        <span>Load {Math.min(20, t.hiddenCount())} older ({t.hiddenCount()} hidden)</span>
+        <span>{t.loadingOlder() ? "Loading…" : t.hiddenCount() > 0
+          ? `Load ${Math.min(20, t.hiddenCount())} older (${t.hiddenCount()} hidden)`
+          : `Load older turns (${t.historyHiddenTurns()} hidden)`}</span>
       </button>
     </div>
   </Show>

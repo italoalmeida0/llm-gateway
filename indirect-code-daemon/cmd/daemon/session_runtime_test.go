@@ -187,9 +187,9 @@ func TestListSessionSummariesSkipsGhosts(t *testing.T) {
 	}
 	// Healthy session: listed.
 	write("sess_ok.json", `{"id":"sess_ok","cwd":"/tmp","title":"Hi","createdAt":1,"updatedAt":2}`)
-	// Turn-journal sidecar: valid JSON, no session fields — must never
-	// appear as a blank sidebar row.
-	write("sess_old.turn.json", `{"turnIndex":3,"startedAt":1,"model":"m"}`)
+	// WAL sidecar: JSONL, no session fields — must never appear as a
+	// blank sidebar row.
+	write("sess_old.wal.jsonl", `{"v":1,"type":"header","header":{"turnIndex":3,"startedAt":1,"model":"m"}}`)
 	// Valid JSON but no id: ghost (blank row, unopenable).
 	write("empty.json", `{}`)
 	// Content id does not match the filename: loadSession(id+".json")

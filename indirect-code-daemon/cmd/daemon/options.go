@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 	"llm-gateway/indirect-code-daemon/packages/core"
@@ -50,6 +51,22 @@ func normalizedOptions(o SessionOptions) SessionOptions {
 	return o
 }
 
+// optionsEqual compares two SessionOptions (Skills is a slice).
+func optionsEqual(a, b SessionOptions) bool {
+	if a.Effort != b.Effort || a.Mode != b.Mode || a.Access != b.Access {
+		return false
+	}
+	if len(a.Skills) != len(b.Skills) {
+		return false
+	}
+	for i := range a.Skills {
+		if a.Skills[i] != b.Skills[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // Called by the dispatcher with configMu held. Selection is saved on the
 // session; every explicit choice also becomes the default for new sessions.
 func (d *DaemonServer) configureSession(raw []byte) {
@@ -69,11 +86,15 @@ func (d *DaemonServer) configureSession(raw []byte) {
 			return
 		}
 		act.mu.Lock()
+		modelChanged := req.Model != "" && req.Model != act.record.Model
+		optsNorm := normalizedOptions(req.Options)
+		optionsChanged := !optionsEqual(act.record.Options, optsNorm)
 		if req.Model != "" {
 			act.record.Model = req.Model
 		}
 		req.Model = act.record.Model
-		act.record.Options = req.Options
+		act.record.Options = optsNorm
+		touchSession(act)
 		if pending := act.pendingApproval; pending != nil && modeToolRestriction(req.Options.Mode, pending.Tool) != "" {
 			if ch := act.approvalReqs[pending.CallID]; ch != nil {
 				select {
@@ -85,8 +106,21 @@ func (d *DaemonServer) configureSession(raw []byte) {
 		if req.Options.Access == "full" {
 			d.allowPendingTools(act)
 		}
-		_ = d.saveSession(act.record)
-		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": d.config.HostID, "session": liveSessionPayload(act)})
+		act.record.UpdatedAt = time.Now().UnixMilli()
+		// WAL mode: a live turn owns persistence — mutate memory + append.
+		// Idle sessions save directly as before.
+		if act.record.Status == "running" && act.wal != nil {
+			if modelChanged {
+				d.appendWALEvent(act, walEvent{Type: walTypeModel, Model: act.record.Model})
+			}
+			if optionsChanged {
+				opts := act.record.Options
+				d.appendWALEvent(act, walEvent{Type: walTypeOptions, Options: &opts})
+			}
+		} else {
+			_ = d.saveSession(act.record)
+		}
+		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": d.config.HostID, "session": pagedHistoryBlock(liveSessionPayload(act), act.record)})
 		act.mu.Unlock()
 	}
 	d.rememberSelection(req.Model, req.Options)

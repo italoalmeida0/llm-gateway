@@ -185,7 +185,7 @@ func (d *DaemonServer) forkSession(raw []byte) {
 		return
 	}
 	committed = true
-	_ = d.sendWS(map[string]any{"type": "session_forked", "requestId": req.RequestID, "hostId": d.config.HostID, "session": sessionPayload(rec), "resent": resent})
+	_ = d.sendWS(map[string]any{"type": "session_forked", "requestId": req.RequestID, "hostId": d.config.HostID, "session": sessionPayloadPaged(rec, 0), "resent": resent})
 	if resent {
 		// Re-run the turn on the copy from the edited text, dropping the
 		// edited boundary message itself: the turn re-sends it, so keeping

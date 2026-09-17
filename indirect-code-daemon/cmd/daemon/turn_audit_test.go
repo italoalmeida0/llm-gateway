@@ -25,16 +25,20 @@ func TestStaleFinalizerCannotCommitChangesOrDeleteRecovery(t *testing.T) {
 	if err := os.WriteFile(path, []byte("new"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	d.writeTurnJournal("stale", &TurnJournal{TurnIndex: 2, Prompt: "replacement"})
+	ww, err := d.openWAL("stale", &walHeader{TurnIndex: 2, Prompt: "replacement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	act.wal = ww
 	r := &turnRun{d: d, act: act, sessionID: "stale", ctx: context.Background(), myGen: 1, tfc: tfc}
 	r.finishTurn()
-	j, _ := d.readTurnJournal("stale")
-	if j == nil || j.TurnIndex != 2 || len(act.record.FileBalloons) != 0 || tfc.tracker.Count() != 1 {
+	h, _ := d.readWALHeader("stale")
+	if h == nil || h.TurnIndex != 2 || len(act.record.FileBalloons) != 0 || tfc.tracker.Count() != 1 {
 		t.Fatal("stale finalizer modified the live turn")
 	}
 }
 
-func TestShutdownPreservesTurnClockAndJournalThroughDeferredCleanup(t *testing.T) {
+func TestShutdownCommitsWALThroughDeferredCleanup(t *testing.T) {
 	d := testDaemon(t)
 	cwd := t.TempDir()
 	act := &ActiveSession{record: &SessionRecord{ID: "resume", CWD: cwd, Status: "running", TurnSeq: 4, Turn: &TurnActivity{StartedAt: 123, Status: "running"}}, gen: 1}
@@ -44,16 +48,27 @@ func TestShutdownPreservesTurnClockAndJournalThroughDeferredCleanup(t *testing.T
 	tfc := beginTurnTracking(act, cwd, 4, "")
 	tfc.tracker.NoteWrite(filepath.Join(cwd, "new"), false, "")
 	d.sessions["resume"] = act
-	d.writeTurnJournal("resume", &TurnJournal{TurnIndex: 4, StartedAt: 123, Prompt: "original"})
+	ww, err := d.openWAL("resume", &walHeader{TurnIndex: 4, StartedAt: 123, Prompt: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	act.wal = ww
+	if err := d.saveSession(act.record); err != nil {
+		t.Fatal(err)
+	}
 	d.quiesceSessions()
 	(&turnRun{d: d, act: act, sessionID: "resume", ctx: ctx, myGen: 1, tfc: tfc}).finishTurn()
-	j, _ := d.readTurnJournal("resume")
-	rec, err := d.loadSession("resume")
-	if err != nil || j == nil || len(j.Incoming) != 1 || j.Prompt != "original" || rec.Turn.StartedAt != 123 || rec.Turn.EndedAt != 0 || rec.Turn.Status != "running" {
-		t.Fatalf("shutdown lost resumable state: %v %+v", err, j)
+	// Graceful shutdown commits: JSON carries the state, WAL is gone,
+	// and the stale finalizer changed nothing (turn stays cancelled).
+	if h, _ := d.readWALHeader("resume"); h != nil {
+		t.Fatal("shutdown left a WAL behind")
 	}
-	if turnResumeAbandoned(rec, j) {
-		t.Fatal("shutdown was mistaken for user Stop")
+	rec, err := d.loadSession("resume")
+	if err != nil || rec.Turn.StartedAt != 123 || rec.Turn.Status != "cancelled" || rec.Status != "idle" {
+		t.Fatalf("shutdown lost committed state: %v %+v", err, rec.Turn)
+	}
+	if len(tfc.tracker.Snapshot()) != 1 {
+		t.Fatal("shutdown lost tracker snapshot")
 	}
 }
 
@@ -68,7 +83,7 @@ func TestStopIsDurableBeforeToolCleanup(t *testing.T) {
 	if err != nil || ctx.Err() == nil || rec.Turn.Status != "cancelling" {
 		t.Fatalf("stop intent not persisted: %v", err)
 	}
-	if !turnResumeAbandoned(rec, &TurnJournal{TurnIndex: 1, Prompt: "must not restart"}) {
+	if !turnResumeAbandoned(rec, &walHeader{TurnIndex: 1, Prompt: "must not restart"}) {
 		t.Fatal("stopped turn would restart")
 	}
 }
@@ -156,9 +171,12 @@ func TestRecoveryRetainsOriginalTurnAndPendingPrompt(t *testing.T) {
 			d.saveSession(rec)
 			act := &ActiveSession{record: rec}
 			d.sessions[rec.ID] = act
-			j := &TurnJournal{TurnIndex: 5, StartedAt: 123, Prompt: "original"}
-			d.writeTurnJournal(rec.ID, j)
-			d.resumeAgentTurn(act, j)
+			ww, werr := d.openWAL(rec.ID, &walHeader{TurnIndex: 5, StartedAt: 123, Prompt: "original"})
+			if werr != nil {
+				t.Fatal(werr)
+			}
+			act.wal = ww
+			d.resumeAgentTurn(act, &walHeader{TurnIndex: 5, StartedAt: 123, Prompt: "original"})
 			saved, err := d.loadSession(rec.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -171,8 +189,8 @@ func TestRecoveryRetainsOriginalTurnAndPendingPrompt(t *testing.T) {
 					t.Fatal("recovery advanced the turn number")
 				}
 			}
-			if journal, _ := d.readTurnJournal(rec.ID); journal != nil {
-				t.Fatal("finished recovery kept journal")
+			if h, _ := d.readWALHeader(rec.ID); h != nil {
+				t.Fatal("finished recovery kept WAL")
 			}
 		})
 	}

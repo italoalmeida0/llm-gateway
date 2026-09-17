@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"time"
 
@@ -49,7 +50,28 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 	act.cancel = cancel
 	act.record.Status = "running"
 	messages := append([]provider.Message(nil), act.record.Messages...)
-	_ = d.saveSession(act.record)
+	// Manual compaction runs as a WAL turn too: freeze + header-only WAL
+	// (no user prompt), deltas append, single commit at the end.
+	ww, werr := d.openWAL(sid, &walHeader{TurnIndex: act.record.TurnSeq + 1, StartedAt: time.Now().UnixMilli(), Model: model})
+	if werr != nil {
+		act.record.Status = "idle"
+		act.cancel = nil
+		act.mu.Unlock()
+		_ = d.sendWS(map[string]any{"type": "error", "hostId": cfg.HostID, "sessionId": sid, "message": "Could not compact: " + werr.Error()})
+		return
+	}
+	act.wal = ww
+	if serr := d.saveSessionSync(act.record); serr != nil {
+		d.discardWAL(act)
+		_ = os.Remove(d.walPath(sid))
+		act.wal = nil
+		act.record.Status = "idle"
+		act.cancel = nil
+		act.mu.Unlock()
+		_ = d.sendWS(map[string]any{"type": "error", "hostId": cfg.HostID, "sessionId": sid, "message": "Could not compact: " + serr.Error()})
+		return
+	}
+	d.notifyChange("sessions")
 	act.mu.Unlock()
 	_ = d.sendWS(map[string]any{"type": "session_status", "hostId": cfg.HostID, "sessionId": sid, "status": "running"})
 	defer func() {
@@ -60,8 +82,15 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 		}
 		act.record.Status = "idle"
 		act.cancel = nil
-		_ = d.saveSession(act.record)
-		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": sessionPayload(act.record)})
+		if act.wal != nil {
+			// Compaction aborted (error above): commit partial state so
+			// the WAL never lingers; the frozen JSON is untouched.
+			_ = d.commitWAL(act)
+		} else {
+			_ = d.saveSession(act.record)
+		}
+		d.notifyChange("sessions")
+		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": pagedHistoryBlock(sessionPayload(act.record), act.record)})
 		_ = d.sendWS(map[string]any{"type": "session_status", "hostId": cfg.HostID, "sessionId": sid, "status": "idle"})
 	}()
 	info := gatewayModel(ctx, cfg.GatewayURL, cfg.DaemonToken, model)
@@ -95,7 +124,19 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 	act.record.Usage = agent.Cost()
 	act.record.Context = estimateContext(agent, info)
 	act.record.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(act.record)
+	// Compaction replaces history wholesale: persist the WAL events that
+	// describe the new state, then commit once. (Replay applies the same
+	// snapshot, so crash recovery sees the compacted view.)
+	for _, m := range act.record.Messages {
+		mc := m
+		d.appendWALEvent(act, walMsgEvent(mc))
+	}
+	usageCopy := act.record.Usage
+	ctxCopy := act.record.Context
+	stateCopy := *act.record.Compaction
+	d.appendWALEvent(act, walEvent{Type: walTypeCompaction, Compaction: &stateCopy, Usage: &usageCopy, Context: ctxCopy})
+	_ = d.commitWAL(act)
+	d.notifyChange("sessions")
 	_ = d.sendWS(map[string]any{
 		"type":       "session_compacted",
 		"hostId":     cfg.HostID,

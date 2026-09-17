@@ -52,6 +52,41 @@ func (d *DaemonServer) broadcastQueue(rec *SessionRecord) {
 	})
 }
 
+// mutateQueue runs fn against the live record when the session is in
+// memory, else against a fused disk load. In WAL mode (running turn)
+// the mutation goes to memory + WAL append; idle sessions save
+// directly. Returns the updated record (nil when not found).
+func (d *DaemonServer) mutateQueue(sessionID string, fn func(rec *SessionRecord) bool) *SessionRecord {
+	d.sessionsMu.RLock()
+	act := d.sessions[sessionID]
+	d.sessionsMu.RUnlock()
+	if act != nil {
+		act.mu.Lock()
+		defer act.mu.Unlock()
+		if !fn(act.record) {
+			return nil
+		}
+		act.record.UpdatedAt = time.Now().UnixMilli()
+		if act.record.Status == "running" && act.wal != nil {
+			d.appendWALEvent(act, walEvent{Type: walTypeQueue, Queue: append([]QueuedMessage{}, act.record.Queue...)})
+		} else {
+			_ = d.saveSession(act.record)
+		}
+		touchSession(act)
+		return act.record
+	}
+	rec, _, err := d.loadSessionFused(sessionID)
+	if err != nil {
+		return nil
+	}
+	if !fn(rec) {
+		return nil
+	}
+	rec.UpdatedAt = time.Now().UnixMilli()
+	_ = d.saveSession(rec)
+	return rec
+}
+
 func (d *DaemonServer) handleQueueAdd(raw []byte) {
 	var req struct {
 		SessionID     string   `json:"sessionId"`
@@ -61,29 +96,34 @@ func (d *DaemonServer) handleQueueAdd(raw []byte) {
 		YOLO          bool     `json:"yolo"`
 	}
 	_ = json.Unmarshal(raw, &req)
-	rec, err := d.loadSession(req.SessionID)
-	if err != nil {
-		return
-	}
 	req.Text = core.SanitizeUserText(req.Text)
-	if err := validateAttachmentIDs(rec, req.AttachmentIDs); err != nil {
-		d.attachmentError("", req.SessionID, err.Error())
-		return
-	}
-	if len(rec.Queue) >= maxQueueItems {
-		d.attachmentError("", req.SessionID, fmt.Sprintf("Queue is full (max %d messages)", maxQueueItems))
-		return
-	}
 	if len(req.AttachmentIDs) == 0 {
 		req.AttachmentIDs = nil
 	}
-	rec.Queue = append(rec.Queue, QueuedMessage{
+	item := QueuedMessage{
 		ID: randomQueueID(), Text: req.Text, AttachmentIDs: req.AttachmentIDs,
 		Model: req.Model, YOLO: req.YOLO, CreatedAt: time.Now().UnixMilli(),
+	}
+	// Validate against the fused record (frozen JSON + WAL replay).
+	fused, _, ferr := d.loadSessionFused(req.SessionID)
+	if ferr != nil {
+		return
+	}
+	if err := validateAttachmentIDs(fused, req.AttachmentIDs); err != nil {
+		d.attachmentError("", req.SessionID, err.Error())
+		return
+	}
+	if len(fused.Queue) >= maxQueueItems {
+		d.attachmentError("", req.SessionID, fmt.Sprintf("Queue is full (max %d messages)", maxQueueItems))
+		return
+	}
+	rec := d.mutateQueue(req.SessionID, func(r *SessionRecord) bool {
+		r.Queue = append(r.Queue, item)
+		return true
 	})
-	rec.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(rec)
-	d.syncActiveRecord(rec)
+	if rec == nil {
+		return
+	}
 	d.broadcastQueue(rec)
 }
 
@@ -95,34 +135,34 @@ func (d *DaemonServer) handleQueueUpdate(raw []byte) {
 		AttachmentIDs []string `json:"attachmentIds"`
 	}
 	_ = json.Unmarshal(raw, &req)
-	rec, err := d.loadSession(req.SessionID)
-	if err != nil {
-		return
-	}
 	req.Text = core.SanitizeUserText(req.Text)
-	if err := validateAttachmentIDs(rec, req.AttachmentIDs); err != nil {
-		d.attachmentError("", req.SessionID, err.Error())
-		return
-	}
 	if len(req.AttachmentIDs) == 0 {
 		req.AttachmentIDs = nil
 	}
-	found := false
-	for i, q := range rec.Queue {
-		if q.ID != req.QueueID {
-			continue
-		}
-		rec.Queue[i].Text = req.Text
-		rec.Queue[i].AttachmentIDs = req.AttachmentIDs
-		found = true
-		break
-	}
-	if !found {
+	fused, _, err := d.loadSessionFused(req.SessionID)
+	if err != nil {
 		return
 	}
-	rec.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(rec)
-	d.syncActiveRecord(rec)
+	if err := validateAttachmentIDs(fused, req.AttachmentIDs); err != nil {
+		d.attachmentError("", req.SessionID, err.Error())
+		return
+	}
+	rec := d.mutateQueue(req.SessionID, func(r *SessionRecord) bool {
+		found := false
+		for i, q := range r.Queue {
+			if q.ID != req.QueueID {
+				continue
+			}
+			r.Queue[i].Text = req.Text
+			r.Queue[i].AttachmentIDs = req.AttachmentIDs
+			found = true
+			break
+		}
+		return found
+	})
+	if rec == nil {
+		return
+	}
 	d.broadcastQueue(rec)
 }
 
@@ -132,27 +172,26 @@ func (d *DaemonServer) handleQueueRemove(raw []byte) {
 		QueueID   string `json:"queueId"`
 	}
 	_ = json.Unmarshal(raw, &req)
-	rec, err := d.loadSession(req.SessionID)
-	if err != nil {
-		return
-	}
-	kept := rec.Queue[:0]
-	for _, q := range rec.Queue {
-		if q.ID != req.QueueID {
-			kept = append(kept, q)
+	rec := d.mutateQueue(req.SessionID, func(r *SessionRecord) bool {
+		kept := r.Queue[:0]
+		for _, q := range r.Queue {
+			if q.ID != req.QueueID {
+				kept = append(kept, q)
+			}
 		}
-	}
-	if len(kept) == len(rec.Queue) {
+		if len(kept) == len(r.Queue) {
+			return false
+		}
+		if len(kept) == 0 {
+			r.Queue = nil
+		} else {
+			r.Queue = kept
+		}
+		return true
+	})
+	if rec == nil {
 		return
 	}
-	if len(kept) == 0 {
-		rec.Queue = nil
-	} else {
-		rec.Queue = kept
-	}
-	rec.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(rec)
-	d.syncActiveRecord(rec)
 	d.broadcastQueue(rec)
 }
 
@@ -167,27 +206,26 @@ func (d *DaemonServer) handleQueueSendNow(raw []byte) {
 		QueueID   string `json:"queueId"`
 	}
 	_ = json.Unmarshal(raw, &req)
-	rec, err := d.loadSession(req.SessionID)
-	if err != nil {
-		return
-	}
-	idx := -1
-	for i, q := range rec.Queue {
-		if q.ID == req.QueueID {
-			idx = i
-			break
+	rec := d.mutateQueue(req.SessionID, func(r *SessionRecord) bool {
+		idx := -1
+		for i, q := range r.Queue {
+			if q.ID == req.QueueID {
+				idx = i
+				break
+			}
 		}
-	}
-	if idx < 0 {
+		if idx < 0 {
+			return false
+		}
+		item := r.Queue[idx]
+		rest := append([]QueuedMessage(nil), r.Queue[:idx]...)
+		rest = append(rest, r.Queue[idx+1:]...)
+		r.Queue = append([]QueuedMessage{item}, rest...)
+		return true
+	})
+	if rec == nil {
 		return
 	}
-	item := rec.Queue[idx]
-	rest := append([]QueuedMessage(nil), rec.Queue[:idx]...)
-	rest = append(rest, rec.Queue[idx+1:]...)
-	rec.Queue = append([]QueuedMessage{item}, rest...)
-	rec.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(rec)
-	d.syncActiveRecord(rec)
 	d.broadcastQueue(rec)
 	if !d.sessionRunning(req.SessionID) {
 		d.promoteQueueHead(req.SessionID)
@@ -208,8 +246,8 @@ func (d *DaemonServer) handleQueueSendNow(raw []byte) {
 // promoteQueueHead shifts the head item and starts it as a new turn.
 // No-op when the queue is empty or a turn is already running.
 func (d *DaemonServer) promoteQueueHead(sessionID string) {
-	rec, err := d.loadSession(sessionID)
-	if err != nil || len(rec.Queue) == 0 {
+	fused, _, err := d.loadSessionFused(sessionID)
+	if err != nil || len(fused.Queue) == 0 {
 		return
 	}
 	d.sessionsMu.RLock()
@@ -222,30 +260,25 @@ func (d *DaemonServer) promoteQueueHead(sessionID string) {
 		if running {
 			return
 		}
-	} else if rec.Status == "running" {
+	} else if fused.Status == "running" {
 		return
 	}
-	head, ok := shiftQueue(rec)
-	if !ok {
+	var head QueuedMessage
+	rec := d.mutateQueue(sessionID, func(r *SessionRecord) bool {
+		h, ok := shiftQueue(r)
+		if !ok {
+			return false
+		}
+		head = h
+		return true
+	})
+	if rec == nil {
 		return
 	}
-	rec.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(rec)
-	d.syncActiveRecord(rec)
 	d.broadcastQueue(rec)
 	d.startPrompt(sessionID, head.Text, head.AttachmentIDs, head.Model, head.YOLO, nil)
 }
 
-// syncActiveRecord points the live session at the freshly saved record.
-func (d *DaemonServer) syncActiveRecord(rec *SessionRecord) {
-	d.sessionsMu.RLock()
-	defer d.sessionsMu.RUnlock()
-	if act, ok := d.sessions[rec.ID]; ok && act != nil {
-		act.mu.Lock()
-		act.record = rec
-		act.mu.Unlock()
-	}
-}
 
 // shiftQueue removes and returns the head item. Returns false when empty.
 func shiftQueue(rec *SessionRecord) (QueuedMessage, bool) {

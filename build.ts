@@ -33,6 +33,24 @@ async function build() {
     process.exit(1);
   }
 
+  // History normalize worker (standalone, outside the SPA bundle): the
+  // transcript instantiates it via a static URL so large history blocks
+  // parse off the main thread.
+  console.log("[build] Bundling history worker...");
+  const workerResult = await Bun.build({
+    entrypoints: [path.join(ROOT, "web", "src", "indirect-code", "transcript", "history-worker.ts")],
+    outdir: path.join(distDir, "workers"),
+    target: "browser",
+    minify: true,
+    sourcemap: "none",
+    plugins: [solidPlugin],
+  });
+  if (!workerResult.success) {
+    console.error("[build] worker failed:");
+    for (const log of workerResult.logs) console.error(log);
+    process.exit(1);
+  }
+
   // Static legal pages + any other public assets (served as-is by the backend).
   if (existsSync(path.join(ROOT, "web", "public"))) {
     cpSync(path.join(ROOT, "web", "public"), distDir, { recursive: true });

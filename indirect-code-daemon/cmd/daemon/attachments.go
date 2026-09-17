@@ -297,12 +297,20 @@ func (d *DaemonServer) uploadAttachment(raw []byte) {
 	previous := rec.Attachments
 	rec.Attachments = append(append([]AttachmentRef{}, previous...), ref)
 	rec.UpdatedAt = time.Now().UnixMilli()
-	if err := d.saveSession(rec); err != nil {
+	touchSession(act)
+	// Uploads land on the live record; a running turn appends the new
+	// attachment list instead of rewriting the frozen JSON. The commit
+	// persists the full record once.
+	if act.wal != nil && rec.Status == "running" {
+		d.appendWALEvent(act, walEvent{Type: walTypeAttach, Attachments: append([]AttachmentRef{}, rec.Attachments...)})
+		committed = true
+	} else if err := d.saveSession(rec); err != nil {
 		rec.Attachments = previous
 		fail("Could not save attachment")
 		return
+	} else {
+		committed = true
 	}
-	committed = true
 	_ = d.sendWS(map[string]any{"type": "attachment_uploaded", "hostId": d.config.HostID, "requestId": req.RequestID, "sessionId": rec.ID, "attachment": messageAttachment{ref.ID, ref.Name, ref.Mime, ref.Size}})
 }
 

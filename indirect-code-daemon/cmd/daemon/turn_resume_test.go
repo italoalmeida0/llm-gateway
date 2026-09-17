@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,30 +13,50 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-func TestTurnJournalRoundTrip(t *testing.T) {
+func TestWALRoundTrip(t *testing.T) {
 	d := testDaemon(t)
-	j := &TurnJournal{
+	header := &walHeader{
 		TurnIndex: 4,
 		StartedAt: 123456,
 		Model:     "m",
+		Prompt:    "do it",
 		Incoming: []filetrack.TrackedFile{
 			{Path: "/w/a.txt", Before: "old", HasBefore: true},
 			{Path: "/w/b.txt", HasBefore: false, CreatedWithWrite: true},
 		},
 	}
-	d.writeTurnJournal("sess_j", j)
-	if got := d.scanTurnJournals(); len(got) != 1 || got[0] != "sess_j" {
+	ww, err := d.openWAL("sess_j", header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ww.append(walMsgEvent(provider.Message{Role: provider.RoleUser, TurnIndex: 4, Content: []provider.Content{provider.TextBlock{Text: "hi"}}})); err != nil {
+		t.Fatal(err)
+	}
+	if err := ww.close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.scanWALs(); len(got) != 1 || got[0] != "sess_j" {
 		t.Fatalf("scan = %v; want [sess_j]", got)
 	}
-	back, err := d.readTurnJournal("sess_j")
+	back, err := d.readWALHeader("sess_j")
 	if err != nil || back == nil {
 		t.Fatalf("read: %v %+v", err, back)
 	}
-	if back.TurnIndex != 4 || back.StartedAt != 123456 || back.Model != "m" {
+	if back.TurnIndex != 4 || back.StartedAt != 123456 || back.Model != "m" || back.Prompt != "do it" {
 		t.Fatalf("header lost: %+v", back)
 	}
 	if len(back.Incoming) != 2 {
 		t.Fatalf("incoming = %d; want 2", len(back.Incoming))
+	}
+	// Replay fuses the appended message onto the frozen base.
+	base := &SessionRecord{ID: "sess_j"}
+	data, err := os.ReadFile(d.walPath("sess_j"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fused, h, err := replayWAL(base, data)
+	if err != nil || h == nil || len(fused.Messages) != 1 {
+		t.Fatalf("replay: %v %+v %d", err, h, len(fused.Messages))
 	}
 	// Tracker restore keeps first-sighting semantics: the restored entry
 	// wins over later touches, exactly as an uninterrupted turn.
@@ -49,18 +68,15 @@ func TestTurnJournalRoundTrip(t *testing.T) {
 			t.Fatalf("restore lost first sighting: %+v", f)
 		}
 	}
-	// Missing journal reads as nil without error; traversal refused.
-	if j2, err := d.readTurnJournal("nope"); err != nil || j2 != nil {
-		t.Fatalf("missing journal: %v %+v", err, j2)
+	// Missing WAL reads as nil without error; traversal refused.
+	if h2, err := d.readWALHeader("nope"); err != nil || h2 != nil {
+		t.Fatalf("missing wal: %v %+v", err, h2)
 	}
-	if p := d.turnJournalPath("../evil"); p != "" {
+	if p := d.walPath("../evil"); p != "" {
 		t.Fatalf("traversal accepted: %q", p)
 	}
-	d.deleteTurnJournal("sess_j")
-	if _, err := os.Stat(filepath.Join(d.sessionsDir(), "sess_j.turn.json")); !os.IsNotExist(err) {
-		t.Fatalf("journal not deleted")
-	}
-	if got := d.scanTurnJournals(); len(got) != 0 {
+	_ = os.Remove(d.walPath("sess_j"))
+	if got := d.scanWALs(); len(got) != 0 {
 		t.Fatalf("scan after delete = %v", got)
 	}
 }
@@ -71,7 +87,7 @@ func TestTurnResumeAbandoned(t *testing.T) {
 	msg := func(turn int) provider.Message {
 		return provider.Message{Role: provider.RoleUser, TurnIndex: turn}
 	}
-	j := &TurnJournal{TurnIndex: 3}
+	j := &walHeader{TurnIndex: 3}
 	full := &SessionRecord{
 		Messages:     []provider.Message{msg(1), msg(3)},
 		FileBalloons: []filetrack.TurnChanges{{TurnIndex: 1}},
@@ -181,7 +197,7 @@ func TestCancelBeforeFirstUsageKeepsContext(t *testing.T) {
 // TestProviderErrorRetriesUntilRecovery enforces the single-stop
 // contract: a turn ends ONLY by AI conclusion or user cancel. A failing
 // upstream never parks the turn — it keeps retrying on backoff (still
-// "running", journal kept) and concludes alone once the upstream
+// "running", WAL kept) and concludes alone once the upstream
 // recovers, with zero user action in between.
 func TestProviderErrorRetriesUntilRecovery(t *testing.T) {
 	d := testDaemon(t)
@@ -227,7 +243,7 @@ func TestProviderErrorRetriesUntilRecovery(t *testing.T) {
 	}()
 
 	// While the upstream keeps failing the turn must stay alive and
-	// retrying: still running, journal kept, never parked, never ended.
+	// retrying: still running, WAL kept, never parked, never ended.
 	time.Sleep(2500 * time.Millisecond)
 	select {
 	case <-done:
@@ -240,8 +256,8 @@ func TestProviderErrorRetriesUntilRecovery(t *testing.T) {
 	if status != "running" {
 		t.Fatalf("failing upstream must keep retrying: status = %q", status)
 	}
-	if j, err := d.readTurnJournal(rec.ID); err != nil || j == nil || j.TurnIndex != 1 {
-		t.Fatalf("retrying turn must keep its journal: %+v %v", j, err)
+	if h, herr := d.readWALHeader(rec.ID); herr != nil || h == nil || h.TurnIndex != 1 {
+		t.Fatalf("retrying turn must keep its WAL: %+v %v", h, herr)
 	}
 
 	// The upstream recovers: the turn concludes alone, no user action.
@@ -259,8 +275,8 @@ func TestProviderErrorRetriesUntilRecovery(t *testing.T) {
 	if stored.Status != "idle" {
 		t.Fatalf("recovered turn must conclude: status = %q", stored.Status)
 	}
-	if j, _ := d.readTurnJournal(rec.ID); j != nil {
-		t.Fatal("concluded turn must drop the journal")
+	if h, _ := d.readWALHeader(rec.ID); h != nil {
+		t.Fatal("concluded turn must drop the WAL")
 	}
 	sawAnswer := false
 	for _, m := range stored.Messages {

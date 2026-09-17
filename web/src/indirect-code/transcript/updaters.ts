@@ -11,8 +11,12 @@ import type { TurnActivity } from "../viewTypes";
  * edit/delete/regenerate ops); "tool" envelopes never become a bubble.
  * The daemon stamps `turnIndex` (session turn sequence) on every message;
  * it is metadata only, nothing renders from it. */
-export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[] = []): ChatMessage[] {
+export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[] = [], indexBase = 0): ChatMessage[] {
   const out: ChatMessage[] = [];
+  // Paged blocks carry their raw transcript offset (history.firstIndex):
+  // srcIdx must stay global so edit/delete/regenerate map back to the
+  // daemon array. Full snapshots use base 0 (positions are already raw).
+  const at = (idx: number) => idx + indexBase;
   const byIndex = new Map(previous.filter((m) => m.srcIdx != null).map((m) => [m.srcIdx, m]));
   // Folds are client-side only (the server never sends detached rows): a
   // later full snapshot (turn end, fetch, reconnect) must not wipe the
@@ -63,14 +67,14 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
       // Newest thoughts first: the turn's last reasoning stays at the top.
       reason.reverse();
       const msg: ChatMessage = {
-        id: byIndex.get(idx)?.id ?? `msg_${idx}`,
+        id: byIndex.get(at(idx))?.id ?? `msg_${at(idx)}`,
         role,
         streaming: m.streaming === true,
         blocks: [...reason, ...rest.map(carryFold)],
         thinkingDuration: Number(m.meta?.thinking_ms) > 0 ? Math.max(1, Math.ceil(Number(m.meta.thinking_ms) / 1000)) : undefined,
         turnDurationMs: Number(m.meta?.turn_ms) > 0 ? Number(m.meta.turn_ms) : undefined,
         time: Date.now(),
-        srcIdx: idx,
+        srcIdx: at(idx),
         turnIndex: typeof m.turnIndex === "number" ? m.turnIndex : undefined,
       };
       out.push(msg);
@@ -80,13 +84,13 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
     // user / tool envelope: split tool results away from real content.
     const rest: ContentBlock[] = [];
     for (const b of blocks) {
-      if (b.type === "tool_result") ensureCarrier(idx, m).blocks.push(carryFold(b));
+      if (b.type === "tool_result") ensureCarrier(at(idx), m).blocks.push(carryFold(b));
       else rest.push(b);
     }
     if (role === "tool" || rest.length === 0) {
       // "tool" envelopes never become bubbles; a user envelope holding
       // only tool results must not render as an empty user bubble.
-      if (rest.length > 0) ensureCarrier(idx, m).blocks.push(...rest);
+      if (rest.length > 0) ensureCarrier(at(idx), m).blocks.push(...rest);
       return;
     }
     if (typeof m.meta?.background_delivery === "string" && m.meta.background_delivery) {
@@ -96,12 +100,12 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
     }
     const isStart = m.isTurnStart !== undefined ? Boolean(m.isTurnStart) : !m.midTurn;
     const msg: ChatMessage = {
-      id: byIndex.get(idx)?.id ?? `msg_${idx}`,
+      id: byIndex.get(at(idx))?.id ?? `msg_${at(idx)}`,
       role: "user",
       attachments: parseMessageAttachments(m),
       blocks: typeof m.meta?.user_text === "string" ? [{ type: "text", text: m.meta.user_text }] : rest,
       time: Date.now(),
-      srcIdx: idx,
+      srcIdx: at(idx),
       isTurnStart: isStart,
       midTurn: Boolean(m.midTurn),
       turnIndex: typeof m.turnIndex === "number" ? m.turnIndex : undefined,

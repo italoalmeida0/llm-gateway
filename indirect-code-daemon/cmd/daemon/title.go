@@ -96,5 +96,10 @@ func (d *DaemonServer) maybeAutoTitle(act *ActiveSession, gen int, client provid
 	act.record.Title = title
 	act.record.TitleSource = "generated"
 	act.record.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(act.record) // change ping drives every client's mirror
+	touchSession(act)
+	if act.record.Status == "running" && act.wal != nil {
+		d.appendWALEvent(act, walEvent{Type: walTypeTitle, Title: title, TitleSource: "generated"})
+	} else {
+		_ = d.saveSession(act.record) // change ping drives every client's mirror
+	}
 }

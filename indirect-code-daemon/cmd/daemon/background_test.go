@@ -213,8 +213,10 @@ func TestBgLogStreamsAndSurvives(t *testing.T) {
 		t.Fatalf("expected cancelled, got %q", j.Status)
 	}
 	// Foreign sessions see nothing in the card snapshot.
-	if views := d.bgJobViews("sess_other"); len(views) != 0 {
-		t.Fatalf("foreign session must not see the job, got %d", len(views))
+	for _, v := range d.bgSnapshot() {
+		if v["sessionId"] == "sess_other" {
+			t.Fatalf("foreign session must not see the job: %+v", v)
+		}
 	}
 }
 
@@ -613,9 +615,12 @@ func TestResumeInjectsRestartNotice(t *testing.T) {
 	}
 	act := &ActiveSession{record: loaded}
 	d.sessions[rec.ID] = act
-	j := &TurnJournal{TurnIndex: 5, StartedAt: 123, Prompt: "original"}
-	d.writeTurnJournal(rec.ID, j)
-	d.resumeAgentTurn(act, j)
+	ww, werr := d.openWAL(rec.ID, &walHeader{TurnIndex: 5, StartedAt: 123, Prompt: "original"})
+	if werr != nil {
+		t.Fatal(werr)
+	}
+	act.wal = ww
+	d.resumeAgentTurn(act, &walHeader{TurnIndex: 5, StartedAt: 123, Prompt: "original"})
 	saved, err := d.loadSession(rec.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -639,8 +644,8 @@ func TestResumeInjectsRestartNotice(t *testing.T) {
 	if notices != 1 {
 		t.Fatalf("expected exactly one restart notice, got %d", notices)
 	}
-	if journal, _ := d.readTurnJournal(rec.ID); journal != nil {
-		t.Fatal("finished recovery kept journal")
+	if h, _ := d.readWALHeader(rec.ID); h != nil {
+		t.Fatal("finished recovery kept WAL")
 	}
 }
 
@@ -868,9 +873,9 @@ func TestSleepWakesOnJobFinish(t *testing.T) {
 	var jobID string
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, v := range d.bgJobViews("sess_parent") {
-			if v.Status == BgStatusRunning {
-				jobID = v.ID
+		for _, v := range d.bgSnapshot() {
+			if v["sessionId"] == "sess_parent" && v["status"] == BgStatusRunning {
+				jobID, _ = v["id"].(string)
 			}
 		}
 		if jobID != "" {

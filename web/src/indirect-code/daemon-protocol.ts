@@ -67,6 +67,7 @@ export type DaemonCommand = CommandBase &
   | { type: "get_turn_changes"; sessionId: string; requestId?: string }
   | { type: "daemon_update_check" }
   | { type: "daemon_update_apply" }
+  | { type: "daemon_update_cancel" }
   | { type: "daemon_update_toggle"; enabled: boolean }
   | { type: "undo_turn_changes"; sessionId: string; turnIndex: number; path?: string; requestId?: string }
     | {
@@ -149,7 +150,9 @@ export type DaemonEvent = EventBase &
     | { type: "session_truncated"; sessionId?: string; keepIndex?: number }
     | { type: "session_content"; sessionId?: string; messages?: unknown[]; compaction?: unknown }
     | { type: "session_status"; sessionId?: string; status?: string; turn?: WireRecord }
-    | { type: "daemon_update"; current?: string; available?: string; staged?: string; checkedAt?: number; autoUpdate?: boolean; error?: string }
+    | { type: "daemon_update"; current?: string; available?: string; staged?: string; checkedAt?: number; autoUpdate?: boolean; frozen?: boolean; freezeStage?: string; error?: string }
+    | { type: "update_failed"; reason?: string }
+    | { type: "update_done"; version?: string }
     | { type: "session_compacted"; sessionId?: string; context?: SessionContext; messages?: unknown[]; auto?: boolean; compaction?: unknown; usage?: unknown }
     | { type: "workspace_status"; requestId?: string; workspace?: WireRecord }
     | { type: "question_request"; sessionId?: string; question?: WireRecord }

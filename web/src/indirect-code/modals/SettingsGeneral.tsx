@@ -233,7 +233,7 @@ export function SettingsGeneralSection() {
       <span>
         <span class="text-ink-200 font-medium">Auto-update daemon</span>
         <span class="block text-[11px] text-ink-500 font-normal mt-0.5">
-          Check on start, reconnect and every 10 minutes. New versions are staged and applied on restart.
+          Check on start, reconnect and every 10 minutes. Applying runs the full-slot handoff (freeze, copy, takeover, promote).
         </span>
       </span>
     </label>
@@ -246,7 +246,7 @@ export function SettingsGeneralSection() {
           let s = `Running ${i.current}`;
           if (i.available && i.available !== i.current) s += ` — ${i.available} available`;
           else if (i.checkedAt) s += " — up to date";
-          if (i.staged && i.staged !== i.current) s += ` (staged ${i.staged})`;
+          if (i.frozen) s += ` (updating: ${i.freezeStage || "…"})`;
           return s + ".";
         })()}
       </span>
@@ -255,9 +255,9 @@ export function SettingsGeneralSection() {
       <button class="btn btn-xs" onClick={() => du.checkNow()}>
         Check now
       </button>
-      <Show when={(() => { const i = du.info(); return !!i && !!i.staged && i.staged !== i.current; })()}>
+      <Show when={(() => { const i = du.info(); return !!i && !!i.available && i.available !== i.current && !i.frozen; })()}>
         <button class="btn btn-xs btn-primary" disabled={du.applying()} onClick={() => du.apply()}>
-          {du.applying() ? "Restarting…" : "Restart to update"}
+          {du.applying() ? "Updating…" : "Update now"}
         </button>
       </Show>
     </div>

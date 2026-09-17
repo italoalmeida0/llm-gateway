@@ -17,7 +17,7 @@ func TestApplyGatewayPricingFirstMatchWins(t *testing.T) {
 	// Gateway serves USD per token; the provider model prices USD per 1M.
 	applyGatewayPricing(&m, map[string]float64{
 		"prompt": 0.000003, "input": 99,
-		"completion": 0.000015,
+		"completion":        0.000015,
 		"input_cache_reads": 0.0000003,
 		"cache_write":       0.0000006,
 	})
@@ -170,10 +170,10 @@ func TestCompletionToolsModeRestrictions(t *testing.T) {
 	// to maximize KV cache reuse across mode switches.
 	for _, mode := range []string{"build", "plan", "learning"} {
 		reg := core.Registry{
-			"write":                        nil,
-			"edit":                         nil,
-			"bash":                         nil,
-			"mark_task_as_complete":        nil,
+			"write":                         nil,
+			"edit":                          nil,
+			"bash":                          nil,
+			"mark_task_as_complete":         nil,
 			"mark_plan_as_ready_to_execute": nil,
 		}
 		restrictModeTools(reg, mode)
@@ -189,8 +189,8 @@ func TestCompletionToolsModeRestrictions(t *testing.T) {
 	}
 
 	talkReg := core.Registry{
-		"read":                         nil,
-		"mark_task_as_complete":        nil,
+		"read":                          nil,
+		"mark_task_as_complete":         nil,
 		"mark_plan_as_ready_to_execute": nil,
 	}
 	restrictModeTools(talkReg, "talk")

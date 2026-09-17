@@ -56,21 +56,24 @@ func TestAutoUpdateDefaultTrue(t *testing.T) {
 	}
 }
 
-func TestStageSkipsCurrent(t *testing.T) {
+func TestBeginHandoffGuards(t *testing.T) {
 	d := testDaemon(t)
-	d.stageUpdate(&versionManifest{Daemon: releaseAsset{Version: daemonVersion}})
+	// No available version: no-op, never freezes.
+	d.beginHandoff()
+	if d.isFrozen() {
+		t.Fatal("handoff without available must not freeze")
+	}
+	// Concurrent calls: second is a no-op.
 	st := d.updateChecker()
 	st.mu.Lock()
-	defer st.mu.Unlock()
-	if st.staged != "" {
-		t.Fatal("must not stage current version")
-	}
-}
-
-func TestApplyWithoutStaged(t *testing.T) {
-	d := testDaemon(t)
-	if d.applyStagedUpdate() {
-		t.Fatal("apply without staged must return false (no exit)")
+	st.handoffBusy = true
+	st.mu.Unlock()
+	st.mu.Lock()
+	st.available = "vX"
+	st.mu.Unlock()
+	d.beginHandoff()
+	if d.isFrozen() {
+		t.Fatal("busy handoff must not freeze")
 	}
 }
 

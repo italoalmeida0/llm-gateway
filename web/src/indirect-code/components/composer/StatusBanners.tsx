@@ -42,16 +42,16 @@ export function StatusBanners() {
 </Show>
 <Show when={(() => { const i = ui.daemonUpdate.info(); return !!i && !!i.available && i.available !== i.current; })()}>{(() => {
   const i = ui.daemonUpdate.info()!;
-  const ready = !!i.staged && i.staged !== i.current;
+  const busy = ui.daemonUpdate.applying() || i.frozen;
   return (
     <div role="status" class="mb-3 flex items-start gap-2 rounded-xl border border-line bg-elev px-3 py-2.5 text-xs text-ink-300">
       <Iconify icon="lucide:arrow-down-to-line" size={15} class="text-ink-400" />
       <span class="min-w-0 flex-1 break-words">
-        Daemon update available: {i.available}{ready ? ` (staged ${i.staged})` : " (downloading…)"}.
+        Daemon update available: {i.available}{i.frozen ? ` (${i.freezeStage || "updating…"})` : ""}.
       </span>
-      <Show when={ready}>
-        <button onClick={() => ui.daemonUpdate.apply()} disabled={ui.daemonUpdate.applying()} class="text-ink-200 hover:underline cursor-pointer disabled:opacity-60">
-          {ui.daemonUpdate.applying() ? "Restarting…" : "Restart to update"}
+      <Show when={!i.frozen}>
+        <button onClick={() => ui.daemonUpdate.apply()} disabled={busy} class="text-ink-200 hover:underline cursor-pointer disabled:opacity-60">
+          {busy ? "Updating…" : "Update now"}
         </button>
       </Show>
     </div>

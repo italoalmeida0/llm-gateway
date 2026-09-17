@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 	"llm-gateway/indirect-code-daemon/packages/core"
@@ -81,6 +82,48 @@ func (d *DaemonServer) sessionFile(id string) string {
 // validSessionID refuses traversal (shared with the legacy .json guard).
 func validSessionID(id string) bool {
 	return id != "" && !strings.ContainsAny(id, "/\\") && id != "." && id != ".."
+}
+
+// tmpOrphanPrefixes lists tmp file prefixes our writers use (all
+// tmp+rename, never valid data). sweepTmpOrphans removes stale ones.
+var tmpOrphanPrefixes = []string{".session-", ".migrate-", ".storage-version-", ".daemon-", ".launcher-", ".dl-"}
+
+// sweepTmpOrphans removes crashed-run tmp files older than maxAge in dir
+// (non-recursive). Returns the count removed.
+func sweepTmpOrphans(dir string, maxAge time.Duration) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	now := time.Now()
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		match := false
+		for _, p := range tmpOrphanPrefixes {
+			if len(name) > len(p) && name[:len(p)] == p {
+				match = true
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) < maxAge {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // splitRecord breaks a record into per-turn lines + meta. Messages with

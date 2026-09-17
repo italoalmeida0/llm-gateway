@@ -1,8 +1,7 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,150 +51,44 @@ func daemonAssetName() string {
 	return name
 }
 
-// resolveDaemon ensures a daemon binary exists locally and returns its
-// path. Pinned builds use the pin; otherwise the newest staged
-// daemon-<version> wins (update restarts land here), falling back to a
-// fresh "latest" download.
-func resolveDaemon(dataDir string) (string, error) {
-	binDir := filepath.Join(dataDir, "bin")
-	if daemonPinnedVersion != "" {
-		return resolvePinned(binDir, daemonPinnedVersion)
-	}
-	if best := newestStaged(binDir); best != "" {
-		return best, nil
-	}
-	return resolvePinned(binDir, "latest")
-}
-
-// newestStaged picks the highest-version staged daemon binary.
-func newestStaged(binDir string) string {
-	entries, err := os.ReadDir(binDir)
+// resolveSlotDaemon resolves the daemon binary for normal boot.
+// Slotted root (slots/active exists): <root>/slots/slot-<a|b>/bin.
+// First-ever boot (no slots/): self-install slot-a (copy launcher binary,
+// download daemon latest, write active) then resolve.
+func resolveSlotDaemon(dataDir string) (string, string, error) {
+	raw, err := os.ReadFile(filepath.Join(dataDir, "slots", "active"))
 	if err != nil {
-		return ""
-	}
-	var best, bestVer string
-	for _, e := range entries {
-		name := e.Name()
-		if !e.IsDir() || len(name) < 8 || name[:7] != "daemon-" {
-			continue
+		if !os.IsNotExist(err) {
+			return "", "", err
 		}
-		ver := name[7:]
-		local := filepath.Join(binDir, name, daemonAssetName())
-		if runtime.GOOS == "windows" {
-			local = filepath.Join(binDir, name, "indirect-code.exe")
+		if err := installSlotA(dataDir); err != nil {
+			return "", "", err
 		}
-		st, err := os.Stat(local)
-		if err != nil || st.IsDir() || st.Size() == 0 {
-			continue
-		}
-		if best == "" || compareVersions(ver, bestVer) > 0 {
-			best, bestVer = local, ver
+		raw, err = os.ReadFile(filepath.Join(dataDir, "slots", "active"))
+		if err != nil {
+			return "", "", err
 		}
 	}
-	return best
-}
-
-// compareVersions orders dotted versions ("latest" sorts below any real
-// version; non-semver compares lexically).
-func compareVersions(a, b string) int {
-	if a == b {
-		return 0
-	}
-	if a == "latest" {
-		return -1
-	}
-	if b == "latest" {
-		return 1
-	}
-	pa, pb := splitVer(a), splitVer(b)
-	for i := 0; i < len(pa) && i < len(pb); i++ {
-		if pa[i] != pb[i] {
-			if pa[i] < pb[i] {
-				return -1
-			}
-			return 1
+	slot := ""
+	for _, c := range strings.TrimSpace(string(raw)) {
+		if c == 'a' || c == 'b' {
+			slot = string(c)
+			break
 		}
 	}
-	if len(pa) < len(pb) {
-		return -1
+	if slot == "" {
+		return "", "", fmt.Errorf("slots/active corrupt")
 	}
-	if len(pa) > len(pb) {
-		return 1
-	}
-	if a < b {
-		return -1
-	}
-	return 1
-}
-
-func splitVer(v string) []int {
-	v = strings.TrimPrefix(strings.TrimPrefix(v, "v"), "V")
-	var out []int
-	for _, p := range strings.Split(v, ".") {
-		n := 0
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				break
-			}
-			n = n*10 + int(c-'0')
-		}
-		out = append(out, n)
-	}
-	return out
-}
-
-func resolvePinned(binDir, version string) (string, error) {
-	daemonDir := filepath.Join(binDir, "daemon-"+version)
+	binDir := filepath.Join(dataDir, "slots", "slot-"+slot, "bin")
 	asset := daemonAssetName()
-	local := filepath.Join(daemonDir, asset)
+	local := filepath.Join(binDir, asset)
 	if runtime.GOOS == "windows" {
-		local = filepath.Join(daemonDir, "indirect-code.exe")
+		local = filepath.Join(binDir, "indirect-code.exe")
 	}
-	if st, err := os.Stat(local); err == nil && !st.IsDir() && st.Size() > 0 {
-		return local, nil
+	if st, err := os.Stat(local); err != nil || st.IsDir() || st.Size() == 0 {
+		return "", "", fmt.Errorf("slot %s has no daemon binary", slot)
 	}
-	if err := downloadDaemon(binDir, daemonDir, asset, local); err != nil {
-		return "", err
-	}
-	return local, nil
-}
-
-// downloadDaemon fetches the asset + verifies SHA256 against the
-// published SHA256SUMS.txt (best-effort when the sums file is missing:
-// download proceeds, verification is skipped with a warning — same
-// policy as install.sh).
-func downloadDaemon(binDir, daemonDir, asset, local string) error {
-	base := releaseBase()
-	if err := os.MkdirAll(daemonDir, 0o700); err != nil {
-		return err
-	}
-	fmt.Printf("[FETCH] downloading %s ...\n", asset)
-	tmp, err := os.CreateTemp(daemonDir, ".daemon-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := fetchURL(base+"/"+asset, tmp); err != nil {
-		tmp.Close()
-		return fmt.Errorf("download %s: %w", asset, err)
-	}
-	tmp.Close()
-	if err := verifyChecksum(base, asset, tmpName); err != nil {
-		fmt.Printf("[FETCH] warning: %v (continuing)\n", err)
-	} else {
-		fmt.Printf("[FETCH] checksum OK\n")
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(tmpName, 0o755); err != nil {
-			return err
-		}
-	}
-	if err := os.Rename(tmpName, local); err != nil {
-		return err
-	}
-	_ = binDir
-	return nil
+	return local, slot, nil
 }
 
 func fetchURL(url string, w io.Writer) error {
@@ -212,43 +105,192 @@ func fetchURL(url string, w io.Writer) error {
 	return err
 }
 
-// verifyChecksum checks the file against SHA256SUMS.txt from the mirror.
-func verifyChecksum(base, asset, local string) error {
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(base + "/SHA256SUMS.txt")
+// installSlotA bootstraps slots/ on first-ever boot: copies THIS launcher
+// binary into slot-a/bin, downloads the latest daemon into slot-a/bin,
+// self-verifies both via --version, writes slots/active=a.
+// Legacy dataDir (sessions/ at top level, pre-slot installs): sessions are
+// MOVED (rename, instant) into slot-a/sessions so history is preserved.
+func installSlotA(dataDir string) error {
+	slotsDir := filepath.Join(dataDir, "slots")
+	slotA := filepath.Join(slotsDir, "slot-a")
+	binDir := filepath.Join(slotA, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		return err
+	}
+	// 1. Copy own binary (the running launcher) into the slot.
+	exe, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("sums unavailable: %w", err)
+		return fmt.Errorf("own binary: %w", err)
+	}
+	launcherName := daemonAssetName()
+	launcherName = "indirect-launcher-" + launcherName[len("indirect-code-"):]
+	if runtime.GOOS == "windows" {
+		launcherName = "indirect-launcher.exe"
+	}
+	if err := copyFileLink(exe, filepath.Join(binDir, launcherName)); err != nil {
+		return fmt.Errorf("install launcher: %w", err)
+	}
+	// 2. Download latest daemon (version resolved from manifest).
+	ver, asset, err := latestDaemonAsset()
+	if err != nil {
+		return err
+	}
+	local := filepath.Join(binDir, asset)
+	if runtime.GOOS == "windows" {
+		local = filepath.Join(binDir, "indirect-code.exe")
+	}
+	if err := downloadToMirror(mirrorBase()+"/"+asset, local); err != nil {
+		return err
+	}
+	// 3. Self-verify both.
+	if err := selfVerifyLauncher(filepath.Join(binDir, launcherName), ""); err != nil {
+		return fmt.Errorf("self verify launcher: %w", err)
+	}
+	if err := selfVerifyDaemon(local, ver); err != nil {
+		return fmt.Errorf("self verify daemon: %w", err)
+	}
+	// 4. Adopt legacy sessions/ (rename, instant) when present.
+	if _, err := os.Stat(filepath.Join(dataDir, "sessions")); err == nil {
+		if _, err := os.Stat(filepath.Join(slotA, "sessions")); os.IsNotExist(err) {
+			if err := os.Rename(filepath.Join(dataDir, "sessions"), filepath.Join(slotA, "sessions")); err != nil {
+				return fmt.Errorf("adopt sessions: %w", err)
+			}
+		}
+	}
+	// 5. Flip active.
+	if err := os.MkdirAll(slotsDir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(slotsDir, "active"), []byte("a\n"), 0o600)
+}
+
+// mirrorBase resolves the release mirror (env override supported).
+func mirrorBase() string {
+	if v := os.Getenv("INDIRECT_REPO_RAW"); v != "" {
+		return v
+	}
+	return defaultReleaseBase
+}
+
+// latestDaemonAsset resolves (version, asset) for this platform from the
+// manifest.
+func latestDaemonAsset() (string, string, error) {
+	m, err := fetchVersionsManifest()
+	if err != nil {
+		return "", "", err
+	}
+	key := runtime.GOOS + "-" + runtime.GOARCH
+	asset := m.Daemon.Assets[key]
+	if asset == "" {
+		return "", "", fmt.Errorf("no daemon asset for %s", key)
+	}
+	return m.Daemon.Version, asset, nil
+}
+
+// downloadToMirror fetches url -> local (tmp+rename, executable bit).
+func downloadToMirror(url, local string) error {
+	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(local), ".dl-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := fetchURL(url, tmp); err != nil {
+		tmp.Close()
+		return err
+	}
+	tmp.Close()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(tmpName, 0o755); err != nil {
+			return err
+		}
+	}
+	return os.Rename(tmpName, local)
+}
+
+// copyFileLink hardlinks (same device) or copies bytes.
+func copyFileLink(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
+// selfVerifyLauncher runs `bin --version` (empty want = just runs).
+func selfVerifyLauncher(path, want string) error {
+	done := make(chan struct{})
+	var out []byte
+	var runErr error
+	go func() {
+		defer close(done)
+		out, runErr = runVersionCmd(path)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("launcher --version timed out")
+	}
+	if runErr != nil {
+		return fmt.Errorf("launcher --version failed: %v (%s)", runErr, strings.TrimSpace(string(out)))
+	}
+	if want != "" && !strings.Contains(string(out), want) {
+		return fmt.Errorf("launcher version mismatch: want %q, got %q", want, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// versionManifest mirrors dist/versions.json (daemon + launcher assets).
+type versionManifest struct {
+	Daemon   releaseAsset `json:"daemon"`
+	Launcher releaseAsset `json:"launcher"`
+}
+
+type releaseAsset struct {
+	Version string            `json:"version"`
+	Assets  map[string]string `json:"assets"`
+	Sums    map[string]string `json:"sums"`
+}
+
+// fetchVersionsManifest downloads + parses versions.json.
+func fetchVersionsManifest() (*versionManifest, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(mirrorBase() + "/versions.json")
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("sums HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("versions.json HTTP %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var want string
-	for _, line := range strings.Split(string(body), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 2 && f[1] == asset {
-			want = f[0]
-			break
-		}
+	var m versionManifest
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
 	}
-	if want == "" {
-		return fmt.Errorf("no sum for %s", asset)
+	if m.Daemon.Version == "" {
+		return nil, fmt.Errorf("manifest missing daemon version")
 	}
-	f, err := os.Open(local)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return err
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != want {
-		return fmt.Errorf("checksum mismatch for %s", asset)
-	}
-	return nil
+	return &m, nil
 }

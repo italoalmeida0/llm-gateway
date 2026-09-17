@@ -21,6 +21,7 @@ echo "==> Building Indirect Code v${VERSION}"
 # Keep binaries small: ~100MB total for 6 targets matters in git history.
 LDFLAGS="-s -w"
 DAEMON_LDFLAGS="-s -w -X main.daemonVersion=${VERSION}"
+LAUNCHER_LDFLAGS="-s -w -X main.launcherVersion=${VERSION}"
 TARGETS=(
   "linux amd64"
   "linux arm64"
@@ -42,7 +43,7 @@ for target in "${TARGETS[@]}"; do
   [[ "$goos" == "windows" ]] && lname="${lname}.exe"
   echo "==> $lname (launcher)"
   (cd "$DAEMON_DIR" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-    go build -trimpath -ldflags "$LDFLAGS" -o "dist/$lname" ./cmd/launcher)
+    go build -trimpath -ldflags "$LAUNCHER_LDFLAGS" -o "dist/$lname" ./cmd/launcher)
 done
 
 (cd "$OUT" && sha256sum indirect-code-* indirect-launcher-* > SHA256SUMS.txt)

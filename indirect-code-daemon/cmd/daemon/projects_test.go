@@ -114,4 +114,3 @@ func TestLoadProjectsRepairsCorruptedRootProject(t *testing.T) {
 		t.Fatal("corrupted root project protected flag was not cleared")
 	}
 }
-

@@ -56,11 +56,11 @@ type BgJob struct {
 	// session's brain scratch space. The tool streams output into it; the
 	// file is never deleted, so it survives the delivery as the task's
 	// record.
-	LogPath string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	stop    func() // force-stop for the detached process; nil = nothing to kill
-	done    chan struct{}
+	LogPath  string
+	ctx      context.Context
+	cancel   context.CancelFunc
+	stop     func() // force-stop for the detached process; nil = nothing to kill
+	done     chan struct{}
 	doneOnce sync.Once
 }
 
@@ -71,7 +71,7 @@ func (j *BgJob) closeDone() {
 func (d *DaemonServer) bgJobPayload(j *BgJob) map[string]any {
 	return map[string]any{
 		"id": j.ID, "kind": j.Kind, "sessionId": j.SessionID,
-		"label": j.Label,
+		"label":  j.Label,
 		"status": j.Status, "startedAt": j.StartedAt, "endedAt": j.EndedAt,
 		"result": j.Result, "logPath": j.LogPath,
 	}

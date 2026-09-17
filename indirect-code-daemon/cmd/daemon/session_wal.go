@@ -104,7 +104,7 @@ func (d *DaemonServer) brainDir(sessionID string) string {
 	if sessionID == "" || filepath.Base(sessionID) != sessionID {
 		return ""
 	}
-	return filepath.Join(d.dataDir, "brain", sessionID)
+	return filepath.Join(d.sharedRoot(), "brain", sessionID)
 }
 
 // ensureBrainDir creates the scratch space (0700, like the data dir).

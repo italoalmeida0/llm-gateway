@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -21,4 +22,14 @@ func pidAlive(pid string) bool {
 	}
 	_ = os.Getpid
 	return true
+}
+
+// parsePid parses a decimal pid.
+func parsePid(s string) (int, error) {
+	return strconv.Atoi(strings.TrimSpace(s))
+}
+
+// terminatePid sends SIGTERM (graceful: daemon disconnects WS + exits).
+func terminatePid(n int) error {
+	return syscall.Kill(n, syscall.SIGTERM)
 }

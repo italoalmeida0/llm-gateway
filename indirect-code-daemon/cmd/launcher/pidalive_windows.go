@@ -22,3 +22,20 @@ func pidAlive(pid string) bool {
 	}
 	return strings.Contains(string(out), strconv.Itoa(n))
 }
+
+// parsePid parses a decimal pid.
+func parsePid(s string) (int, error) {
+	return strconv.Atoi(strings.TrimSpace(s))
+}
+
+// terminatePid uses taskkill (graceful enough: daemon handles console
+// close via signal.Notify; force only as fallback).
+func terminatePid(n int) error {
+	if out, err := exec.Command("taskkill", "/PID", strconv.Itoa(n)).CombinedOutput(); err != nil {
+		// Already dead?
+		if pidAlive(strconv.Itoa(n)) {
+			return fmt.Errorf("taskkill: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}

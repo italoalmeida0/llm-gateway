@@ -7,7 +7,9 @@ import {
   onMount,
   onCleanup,
   Show,
+  For,
 } from "solid-js";
+import { useUI, useHost } from "./ctx";
 import { RemoteHints } from "./presentation";
 import { projectForDirectory } from "./paths";
 import { contextDisplay, type GatewayModel } from "./context";
@@ -47,6 +49,49 @@ import { createProjects } from "./hooks/useProjects";
 import { createWorkspace } from "./hooks/useWorkspace";
 import { createHosts } from "./hooks/useHosts";
 import { createSettings } from "./hooks/useSettings";
+
+/** Full-screen update freeze: while the daemon handoff is frozen, block
+ * everything on this host except switching hosts / connecting another /
+ * cancelling the update. Stages stream from daemon_update.freezeStage. */
+function UpdateFreezeOverlay() {
+  const ui = useUI();
+  const hosts = useHost();
+  const frozen = () => ui.daemonUpdate.info()?.frozen ?? false;
+  const stage = () => ui.daemonUpdate.info()?.freezeStage || "preparing update";
+  return (
+    <Show when={frozen()}>
+      <div class="fixed inset-0 z-[80] flex items-center justify-center bg-ink-950/90 backdrop-blur-sm">
+        <div class="w-[min(420px,90vw)] rounded-2xl border border-line bg-elev p-6 text-center shadow-2xl">
+          <div class="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-2 border-line border-t-brand-500" />
+          <h2 class="text-base font-semibold text-ink-100">Updating daemon…</h2>
+          <p class="mt-1 text-xs text-ink-400">{stage()}</p>
+          <p class="mt-3 text-[11px] text-ink-500">
+            Sessions are paused safely — nothing is lost. You can switch hosts meanwhile.
+          </p>
+          <div class="mt-4 flex items-center justify-center gap-2">
+            <button class="btn btn-xs" onClick={() => ui.daemonUpdate.cancel()}>
+              Cancel update
+            </button>
+          </div>
+          <div class="mt-4 border-t border-line pt-3 text-left">
+            <p class="mb-2 text-[11px] font-medium text-ink-400">Other hosts</p>
+            <For each={hosts.hosts()}>
+              {(h) => (
+                <button
+                  class="mb-1 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-xs hover:bg-ink-800 cursor-pointer"
+                  onClick={() => hosts.setActiveHostId(h.id)}
+                >
+                  <span class="text-ink-200">{h.name || h.id}</span>
+                  <span class="text-[11px] text-ink-500">{h.status}</span>
+                </button>
+              )}
+            </For>
+          </div>
+        </div>
+      </div>
+    </Show>
+  );
+}
 
 export default function IndirectCodePage() {
   // --- Domains (each hook owns its state; the page orchestrates) ---
@@ -742,6 +787,15 @@ export default function IndirectCodePage() {
         break;
       }
 
+      case "update_failed": {
+        daemonUpdate.noteFailed(String((msg as any).reason ?? "unknown error"));
+        break;
+      }
+      case "update_done": {
+        daemonUpdate.noteDone(String((msg as any).version ?? ""));
+        break;
+      }
+
       case "bg_update":
       case "bg_list": {
         background.noteJobs(msg.jobs);
@@ -1259,6 +1313,7 @@ export default function IndirectCodePage() {
       <ConfirmModal />
       <PairModal />
       <SettingsModal />
+      <UpdateFreezeOverlay />
     </div>
     </RemoteCodeProvider>
   );

@@ -47,7 +47,10 @@ func TestPermissionsChangeWithinTurnIncludingWaitingRead(t *testing.T) {
 	if !<-result || act.record.Options.Access != "ask" {
 		t.Fatal("Allow once changed the access mode")
 	}
-	go func() { allowed, _, _ := hook(provider.ToolCallBlock{ID: "write-pending", Name: "write"}); result <- allowed }()
+	go func() {
+		allowed, _, _ := hook(provider.ToolCallBlock{ID: "write-pending", Name: "write"})
+		result <- allowed
+	}()
 	waitApproval(t, act, "write-pending")
 	d.handleMessage([]byte(`{"type":"configure_session","sessionId":"live-access","options":{"access":"full"}}`))
 	if !<-result {

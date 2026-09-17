@@ -279,7 +279,6 @@ func (d *DaemonServer) promoteQueueHead(sessionID string) {
 	d.startPrompt(sessionID, head.Text, head.AttachmentIDs, head.Model, head.YOLO, nil)
 }
 
-
 // shiftQueue removes and returns the head item. Returns false when empty.
 func shiftQueue(rec *SessionRecord) (QueuedMessage, bool) {
 	if len(rec.Queue) == 0 {

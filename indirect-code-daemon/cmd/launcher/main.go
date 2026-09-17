@@ -26,7 +26,9 @@ import (
 	"llm-gateway/indirect-code-daemon/internal/migrations"
 )
 
-const launcherVersion = 1
+// launcherVersion is stamped at build time via ldflags
+// (-X main.launcherVersion=vX.Y.Z); dev builds report "dev".
+var launcherVersion = "dev"
 
 func main() {
 	dataDirFlag := flag.String("data-dir", "", "Path to daemon data directory")
@@ -38,10 +40,17 @@ func main() {
 	stopFlag := flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
 	connectFlag := flag.String("connect", "", "Pairing connect URL (forwarded to the daemon)")
 	nameFlag := flag.String("name", "", "Host display name (forwarded to the daemon)")
+	// Takeover mode uses its own flags (--from-slot etc.): intercept BEFORE
+	// flag.Parse(), which would exit on unknown flags.
+	for _, a := range os.Args[1:] {
+		if a == "--takeover" {
+			dataDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid := parseTakeoverFlags(os.Args[1:])
+			os.Exit(runTakeover(dataDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid))
+		}
+	}
 	flag.Parse()
-
 	if *versionFlag {
-		fmt.Printf("indirect-code launcher v%d\n", launcherVersion)
+		fmt.Printf("indirect-code launcher %s\n", launcherVersion)
 		return
 	}
 
@@ -50,9 +59,10 @@ func main() {
 		dataDir = defaultDataDir()
 	}
 	daemonPath := *daemonFlag
+	activeSlot := ""
 	if daemonPath == "" {
 		var err error
-		daemonPath, err = resolveDaemon(dataDir)
+		daemonPath, activeSlot, err = resolveSlotDaemon(dataDir)
 		if err != nil {
 			fmt.Printf("[FETCH] failed: %v\n", err)
 			os.Exit(1)
@@ -107,47 +117,28 @@ func main() {
 		return
 	}
 
-	// 4. Supervise: run the daemon; on exit code 42 (update restart)
-	// re-resolve (newest staged wins) and run again. Any other exit
-	// ends the launcher. Consecutive 42s are bounded: a broken binary
-	// that instantly re-requests restart must not hot-loop forever.
-	restarts := 0
+	// 4. Run the daemon once (slot-aware path resolved above). Handoff
+	// restarts are driven by takeover (the NEW launcher runs the new
+	// daemon) — no exit-code protocol. Unexpected exits restart with
+	// backoff a few times (crash resilience), then give up.
+	if activeSlot != "" {
+		daemonArgs = append([]string{"--slot", activeSlot}, daemonArgs...)
+	}
+	crashes := 0
 	for {
 		fmt.Printf("[LAUNCH] starting daemon %s (data: %s)\n", daemonPath, dataDir)
 		code, err := execDaemon(daemonPath, dataDir, daemonArgs)
-		if err != nil && code != 42 {
-			fmt.Printf("[LAUNCH] failed: %v\n", err)
-			os.Exit(1)
-		}
-		if code != 42 {
+		if err == nil {
 			os.Exit(code)
 		}
-		restarts++
-		if restarts > 5 {
-			fmt.Printf("[LAUNCH] update restart looped %d times — refusing to continue (broken staged binary?). Remove bin/daemon-* and retry.\n", restarts-1)
-			os.Exit(1)
+		fmt.Printf("[LAUNCH] daemon exited %d: %v\n", code, err)
+		crashes++
+		if crashes > 3 {
+			fmt.Printf("[LAUNCH] daemon keeps exiting — giving up. Check daemon.log.\n")
+			os.Exit(code)
 		}
-		// Backoff: instant 42s (crashing new binary) shouldn't spin.
-		time.Sleep(time.Duration(restarts) * 2 * time.Second)
-		fmt.Printf("[LAUNCH] update restart #%d: re-resolving daemon...\n", restarts)
-		if *daemonFlag == "" {
-			np, rerr := resolveDaemon(dataDir)
-			if rerr != nil {
-				fmt.Printf("[LAUNCH] re-resolve failed: %v\n", rerr)
-				os.Exit(1)
-			}
-			daemonPath = np
-		}
-		// Re-run migrations (a new daemon version may need a new schema).
-		if applied, merr := migrations.Migrate(dataDir); merr != nil {
-			fmt.Printf("[MIGRATE] failed: %v\n", merr)
-			os.Exit(1)
-		} else if len(applied) > 0 {
-			fmt.Printf("[MIGRATE] applied: %v\n", applied)
-		}
-		if verr := verifyAll(dataDir, daemonPath); verr != nil {
-			fmt.Printf("[VERIFY] failed: %v\n", verr)
-			os.Exit(1)
-		}
+		wait := time.Duration(crashes) * 5 * time.Second
+		fmt.Printf("[LAUNCH] restarting in %v (crash #%d)...\n", wait, crashes)
+		time.Sleep(wait)
 	}
 }

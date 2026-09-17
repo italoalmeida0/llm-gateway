@@ -98,6 +98,12 @@ func writeVersion(dataDir string, v int) error {
 	return os.Rename(tmpName, versionFile(dataDir))
 }
 
+// MigrateDir runs the chain with dir as the data root (used for slot
+// takeover: the inactive slot dir is a full data root).
+func MigrateDir(dir string) ([]int, error) {
+	return Migrate(dir)
+}
+
 // Migrate applies every pending migration in order and returns the list
 // of applied versions (empty when already current). Each migration is
 // verified after apply; a failed migration aborts the chain WITHOUT

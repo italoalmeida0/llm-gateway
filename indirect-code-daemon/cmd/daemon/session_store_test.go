@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
@@ -310,5 +311,28 @@ func TestVerifyJSONL(t *testing.T) {
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(raw), &probe); err != nil || probe.Kind != "meta" {
 		t.Fatal("valid meta line rejected")
+	}
+}
+
+func TestSweepTmpOrphans(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name string, age time.Duration) {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, []byte("x"), 0o600)
+		os.Chtimes(p, time.Now().Add(-age), time.Now().Add(-age))
+	}
+	mk(".session-123", 2*time.Hour) // stale -> removed
+	mk(".session-456", time.Minute) // fresh (live writer?) -> kept
+	mk(".migrate-abc", 3*time.Hour) // stale -> removed
+	mk("s1.jsonl", 5*time.Hour)     // real data -> kept
+	mk("notes.txt", 5*time.Hour)    // unknown -> kept
+	mk(".wal.jsonl", 5*time.Hour)   // no prefix match (needs longer name) -> kept
+	if n := sweepTmpOrphans(dir, time.Hour); n != 2 {
+		t.Fatalf("swept = %d; want 2", n)
+	}
+	for _, want := range []string{".session-456", "s1.jsonl", "notes.txt", ".wal.jsonl"} {
+		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+			t.Fatalf("%s should survive: %v", want, err)
+		}
 	}
 }

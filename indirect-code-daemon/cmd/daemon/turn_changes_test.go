@@ -152,7 +152,6 @@ func TestUndoRefusesToDeleteChangedNewFile(t *testing.T) {
 	}
 }
 
-
 func TestDropBalloonsAboveKeepsPrefix(t *testing.T) {
 	in := []filetrack.TurnChanges{
 		{TurnIndex: 1, MessageIndex: 2},

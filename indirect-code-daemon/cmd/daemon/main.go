@@ -287,7 +287,7 @@ func projectPayload(p ProjectEntry) map[string]any {
 }
 
 func (d *DaemonServer) projectsFile() string {
-	return filepath.Join(d.dataDir, "projects.json")
+	return filepath.Join(d.sharedRoot(), "projects.json")
 }
 
 func (d *DaemonServer) loadProjects() []ProjectEntry {
@@ -445,10 +445,14 @@ type DaemonServer struct {
 	filesMu     sync.Mutex
 	configPath  string
 	dataDir     string
-	config      *DaemonConfig
-	configMu    sync.RWMutex
-	wsConn      *websocket.Conn
-	wsMu        sync.Mutex
+	// sharedDir roots shared (unslotted) state: brain, python, unish,
+	// projects, config, pidfile. Equals dataDir in legacy single-root
+	// mode; the slots root when dataDir is a slot dir (takeover path).
+	sharedDir string
+	config    *DaemonConfig
+	configMu  sync.RWMutex
+	wsConn    *websocket.Conn
+	wsMu      sync.Mutex
 
 	sessionsMu sync.RWMutex
 	sessions   map[string]*ActiveSession
@@ -519,11 +523,11 @@ func defaultDataDir() string {
 var errDaemonRevoked = errors.New("daemon credentials revoked by gateway")
 
 func (d *DaemonServer) pidFile() string {
-	return filepath.Join(d.dataDir, "daemon.pid")
+	return filepath.Join(d.sharedRoot(), "daemon.pid")
 }
 
 func (d *DaemonServer) writePidFile() {
-	if err := os.MkdirAll(d.dataDir, 0o700); err != nil {
+	if err := os.MkdirAll(d.sharedRoot(), 0o700); err != nil {
 		return
 	}
 	_ = os.WriteFile(d.pidFile(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
@@ -599,6 +603,25 @@ func isRevokedDialError(resp *http.Response, err error) bool {
 
 func (d *DaemonServer) sessionsDir() string {
 	return filepath.Join(d.dataDir, "sessions")
+}
+
+// sharedRoot returns the shared state root, initializing it once.
+func (d *DaemonServer) sharedRoot() string {
+	if d.sharedDir != "" {
+		return d.sharedDir
+	}
+	return d.dataDir
+}
+
+// initSharedDir resolves sharedDir from dataDir: when dataDir is a slot
+// dir (<root>/slots/slot-x), shared is <root>; otherwise dataDir itself.
+func (d *DaemonServer) initSharedDir() {
+	parent := filepath.Dir(d.dataDir)
+	if filepath.Base(parent) == "slots" {
+		d.sharedDir = filepath.Dir(parent)
+		return
+	}
+	d.sharedDir = d.dataDir
 }
 
 func resolvePath(p string) string {
@@ -1062,6 +1085,10 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 	case "convert_response":
 		d.answerFileConvert(raw)
 	case "queue_add":
+		if d.isFrozen() {
+			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
+			break
+		}
 		d.handleQueueAdd(raw)
 	case "queue_update":
 		d.handleQueueUpdate(raw)
@@ -1162,6 +1189,10 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		})
 
 	case "rename_session":
+		if d.isFrozen() {
+			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
+			break
+		}
 		var req struct {
 			SessionID string `json:"sessionId"`
 			Title     string `json:"title"`
@@ -1460,6 +1491,10 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		})
 
 	case "edit_message":
+		if d.isFrozen() {
+			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
+			break
+		}
 		var req struct {
 			SessionID     string    `json:"sessionId"`
 			Index         int       `json:"index"`
@@ -1865,9 +1900,13 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		// (Go mutexes are not reentrant).
 		go d.checkForUpdates("manual")
 	case "daemon_update_apply":
-		if !d.applyStagedUpdate() {
-			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "No staged update to apply"})
-		}
+		// Full-slot handoff (replaces the old exit-42 restart): download
+		// launcher -> late freeze -> copy -> takeover -> promote.
+		// Failure anywhere before promote unfreezes, WS never dropped.
+		go d.beginHandoff()
+	case "daemon_update_cancel":
+		// Frontend cancel button during freeze: abort + unfreeze.
+		go d.abortHandoff("cancelled by user")
 	case "daemon_update_toggle":
 		var treq struct {
 			Enabled bool `json:"enabled"`
@@ -1902,6 +1941,16 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 // single entry for user prompts: the "prompt" command, queue promotion
 // (auto-start and send-now) all flow through here.
 func (d *DaemonServer) startPrompt(sessionID, text string, attachmentIDs []string, model string, yolo bool, options *SessionOptions) {
+	// Handoff freeze: park nothing, reject with a clear message (the
+	// frontend blocks the UI, this is defense-in-depth). Running turns
+	// continue untouched.
+	if d.isFrozen() {
+		_ = d.sendWS(map[string]any{
+			"type": "error", "hostId": d.config.HostID, "sessionId": sessionID,
+			"message": "Daemon updating — try again in a moment",
+		})
+		return
+	}
 	cleanText := strings.TrimSpace(text)
 	if isSlashCommand(cleanText) {
 		if len(attachmentIDs) > 0 {
@@ -2571,6 +2620,8 @@ func main() {
 	dataDirFlag := flag.String("data-dir", "", "Path to daemon data directory")
 	stopFlag := flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
 	versionFlag := flag.Bool("version", false, "Print daemon version and exit")
+	standbyFlag := flag.Bool("standby", false, "Standby mode: load storage, write readiness probe, wait for handoff promote (update takeover)")
+	slotFlag := flag.String("slot", "", "Active slot id (a|b), informational: passed by the launcher; dataDir already points at the slot")
 	flag.Parse()
 	if *versionFlag {
 		fmt.Printf("indirect-code daemon %s\n", daemonVersion)
@@ -2580,6 +2631,19 @@ func main() {
 	dataDir := *dataDirFlag
 	if dataDir == "" {
 		dataDir = defaultDataDir()
+	}
+	_ = *slotFlag
+	if *standbyFlag {
+		cfgPath := *configFlag
+		if cfgPath == "" {
+			// Shared config (slot mode) or slot-local (legacy): mirror
+			// the initSharedDir rule without a server yet.
+			cfgPath = filepath.Join(dataDir, "config.json")
+			if pp := filepath.Dir(dataDir); filepath.Base(pp) == "slots" {
+				cfgPath = filepath.Join(filepath.Dir(pp), "config.json")
+			}
+		}
+		os.Exit(runStandby(dataDir, cfgPath))
 	}
 	// Local fallback kill: works even with broken storage or the gateway
 	// offline (only reads daemon.pid + signals — never touches storage).
@@ -2596,12 +2660,15 @@ func main() {
 	if configPath == "" {
 		configPath = filepath.Join(dataDir, "config.json")
 	}
+	// NOTE: configPath stays dataDir-relative for legacy mode; slot mode
+	// passes an explicit --config pointing at the shared root (launcher).
 
 	server := &DaemonServer{
 		configPath: configPath,
 		dataDir:    dataDir,
 		sessions:   make(map[string]*ActiveSession),
 	}
+	server.initSharedDir()
 
 	// If -connect was explicitly passed, ALWAYS perform pairing to the new link (disconnects from old gateway)
 	if *connectFlag != "" {
@@ -2669,6 +2736,11 @@ func main() {
 		}
 	}
 
+	// Crashed runs leave tmp files (tmp+rename writers): sweep stale ones.
+	if n := sweepTmpOrphans(server.sessionsDir(), time.Hour); n > 0 {
+		fmt.Printf("[INFO] swept %d tmp orphans\n", n)
+	}
+	sweepTmpOrphans(dataDir, time.Hour)
 	// A previous run dying mid-turn must not brick sessions forever.
 	server.resetRunningSessions()
 	// Turns interrupted by the death resume where they died: same index,

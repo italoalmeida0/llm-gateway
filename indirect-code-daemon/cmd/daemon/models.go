@@ -37,8 +37,8 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 				Context int `json:"context"`
 				Output  int `json:"output"`
 			} `json:"limit"`
-			ContextLength   int               `json:"context_length"`
-			MaxOutputLength int               `json:"max_output_length"`
+			ContextLength   int                `json:"context_length"`
+			MaxOutputLength int                `json:"max_output_length"`
 			Pricing         map[string]float64 `json:"pricing"`
 			Reasoning       struct {
 				Efforts []string `json:"efforts"`
@@ -136,4 +136,3 @@ func maxOutputTokens(model provider.Model) int {
 	}
 	return cap
 }
-

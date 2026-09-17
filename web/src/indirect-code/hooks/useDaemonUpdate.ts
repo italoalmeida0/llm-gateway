@@ -4,9 +4,10 @@ import type { DaemonCommand } from "../daemon-protocol";
 export interface DaemonUpdateInfo {
   current: string;
   available: string;
-  staged: string;
   checkedAt: number;
   autoUpdate: boolean;
+  frozen: boolean;
+  freezeStage: string;
   error?: string;
 }
 
@@ -24,15 +25,15 @@ export function createDaemonUpdate(opts: {
     setInfo({
       current: String(msg.current ?? ""),
       available: String(msg.available ?? ""),
-      staged: String(msg.staged ?? ""),
       checkedAt: Number(msg.checkedAt ?? 0),
       autoUpdate: msg.autoUpdate !== false,
+      frozen: !!msg.frozen,
+      freezeStage: String(msg.freezeStage ?? ""),
       error: typeof msg.error === "string" ? msg.error : undefined,
     });
-    if (applying() && String(msg.staged ?? "") !== "") {
-      // Apply acknowledged (staged arrived after our apply click while a
-      // restart was already in flight) — nothing to do.
-      setApplying(false);
+    if (applying() && msg.frozen) {
+      // Handoff started (freeze broadcast arrived after our apply click).
+      // Keep applying=true until update_done/failed or timeout.
     }
   }
 
@@ -48,18 +49,37 @@ export function createDaemonUpdate(opts: {
 
   function apply() {
     const cur = info();
-    if (!cur || !cur.staged || cur.staged === cur.current) {
-      opts.toast("No staged update to apply", "err");
+    if (!cur || !cur.available || cur.available === cur.current) {
+      opts.toast("No update available to apply", "err");
       return;
     }
+    // Full-slot handoff: the daemon downloads the launcher, freezes late,
+    // copies, takes over and promotes. Failure unfreezes, WS never drops.
+    // The daemon reports frozen/freezeStage, then update_done/failed.
     setApplying(true);
     opts.send({ type: "daemon_update_apply" });
-    opts.toast(`Restarting into ${cur.staged}…`, "ok");
-    // If the daemon never restarts (e.g. apply rejected), unstick.
-    setTimeout(() => setApplying(false), 15000);
+    opts.toast(`Updating to ${cur.available}…`, "ok");
+    // Unstick if the daemon never reports back (it always broadcasts on
+    // freeze/fail/done, but never trust the network).
+    setTimeout(() => setApplying(false), 600000);
   }
 
-  return { info, applying, noteUpdate, checkNow, toggle, apply };
+  function cancel() {
+    opts.send({ type: "daemon_update_cancel" });
+    setApplying(false);
+  }
+
+  function noteFailed(reason: string) {
+    setApplying(false);
+    opts.toast(`Update failed: ${reason}`, "err");
+  }
+
+  function noteDone(version: string) {
+    setApplying(false);
+    opts.toast(`Daemon updated to ${version}`, "ok");
+  }
+
+  return { info, applying, noteUpdate, checkNow, toggle, apply, cancel, noteFailed, noteDone };
 }
 
 export type DaemonUpdate = ReturnType<typeof createDaemonUpdate>;

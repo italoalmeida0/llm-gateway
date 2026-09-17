@@ -1028,32 +1028,3 @@ func metaStartOffset(f *os.File, size int64) (int64, error) {
 	}
 	return off, nil
 }
-
-// storageSchemaVersion mirrors migrations.CurrentVersion (kept in sync by
-// convention; the launcher is the source of truth).
-const storageSchemaVersion = 1
-
-// checkStorageVersion fails fast when the data dir is not at the version
-// this daemon understands. Fresh installs (no version file) are accepted
-// and stamped current by the launcher; a daemon started directly on a
-// fresh dir stamps it too (single-writer bootstrap).
-func checkStorageVersion(dataDir string) error {
-	path := dataDir + "/storage_version.json"
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("storage version unreadable: %w (run the launcher)", err)
-	}
-	var doc struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("storage version corrupt: %w (run the launcher)", err)
-	}
-	if doc.Version != storageSchemaVersion {
-		return fmt.Errorf("storage v%d not supported by this daemon (v%d) — run the launcher to migrate", doc.Version, storageSchemaVersion)
-	}
-	return nil
-}

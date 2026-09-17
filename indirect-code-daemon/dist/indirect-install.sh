@@ -75,9 +75,13 @@ chmod +x "$BIN_DIR/indirect-code"
 if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
   if curl -fsSL --max-time 15 "${REPO_RAW}/SHA256SUMS.txt" -o "$DATA_DIR/SHA256SUMS.txt" 2>/dev/null; then
     (cd "$BIN_DIR" && cp "$DATA_DIR/SHA256SUMS.txt" . 2>/dev/null || true
-     (sha256sum -c --status <(grep " $ASSET\$" SHA256SUMS.txt) 2>/dev/null \
-       || shasum -a 256 -c <(grep " $ASSET\$" SHA256SUMS.txt) >/dev/null 2>&1) \
-     && echo "[indirect] checksum OK" || echo "[indirect] warning: checksum mismatch (continuing)")
+     expected="$(grep " ${ASSET}\$" SHA256SUMS.txt 2>/dev/null | awk '{print $1}')"
+     actual="$(sha256sum indirect-code 2>/dev/null | awk '{print $1}' || shasum -a 256 indirect-code 2>/dev/null | awk '{print $1}')"
+     if [[ -n "$expected" && "$expected" == "$actual" ]]; then
+       echo "[indirect] checksum OK"
+     else
+       echo "[indirect] warning: checksum mismatch (continuing)"
+     fi)
   fi
 fi
 

@@ -41,7 +41,7 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Printf("indirect-code launcher v%d (storage v%d)\n", launcherVersion, migrations.CurrentVersion)
+		fmt.Printf("indirect-code launcher v%d\n", launcherVersion)
 		return
 	}
 

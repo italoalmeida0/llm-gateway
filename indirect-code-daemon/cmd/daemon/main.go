@@ -2584,13 +2584,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Storage contract: the launcher owns migrations. The daemon assumes
-	// the current format and fails fast otherwise — zero legacy branches.
-	if err := checkStorageVersion(dataDir); err != nil {
-		fmt.Printf("[FATAL] %v\n", err)
-		os.Exit(3)
-	}
-
 	configPath := *configFlag
 	if configPath == "" {
 		configPath = filepath.Join(dataDir, "config.json")

@@ -24,7 +24,7 @@ func defaultDataDir() string {
 }
 
 // verifyAll checks distribution + storage integrity after migrations:
-// daemon binary executable, storage version current, sessions parseable.
+// daemon binary executable, sessions parseable.
 func verifyAll(dataDir, daemonPath string) error {
 	st, err := os.Stat(daemonPath)
 	if err != nil {
@@ -34,9 +34,6 @@ func verifyAll(dataDir, daemonPath string) error {
 		}
 	} else if st.IsDir() {
 		return fmt.Errorf("daemon path is a directory: %s", daemonPath)
-	}
-	if err := verifyStorageVersion(dataDir); err != nil {
-		return err
 	}
 	return verifySessions(dataDir)
 }

@@ -7,22 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"llm-gateway/indirect-code-daemon/internal/migrations"
 )
-
-// verifyStorageVersion fails when the data dir is not at the version the
-// daemon understands (migrations must have run first).
-func verifyStorageVersion(dataDir string) error {
-	stored, err := migrations.StoredVersion(dataDir)
-	if err != nil {
-		return fmt.Errorf("storage version: %w", err)
-	}
-	if stored != migrations.CurrentVersion {
-		return fmt.Errorf("storage v%d != current v%d (run launcher without --verify-only to migrate)", stored, migrations.CurrentVersion)
-	}
-	return nil
-}
 
 // verifySessions scans every session file for structural sanity:
 // JSONL sessions must end with a meta line; legacy JSON sessions must

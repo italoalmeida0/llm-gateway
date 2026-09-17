@@ -8,9 +8,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON_DIR="$ROOT/indirect-code-daemon"
 OUT="$DAEMON_DIR/dist"
 mkdir -p "$OUT"
+# Static version from dist/versions.json (overridable via INDIRECT_VERSION env var)
+VERSION="${INDIRECT_VERSION:-$(python3 -c 'import json, os; print(json.load(open(os.path.join("'"$OUT"'", "versions.json")))["daemon"]["version"])' 2>/dev/null || echo "1.0.0")}"
+echo "==> Building Indirect Code v${VERSION}"
 
 # Keep binaries small: ~100MB total for 6 targets matters in git history.
-LDFLAGS="-s -w"
+LDFLAGS="-s -w -X main.daemonVersion=${VERSION}"
 TARGETS=(
   "linux amd64"
   "linux arm64"
@@ -38,7 +41,6 @@ done
 (cd "$OUT" && sha256sum indirect-code-* indirect-launcher-* > SHA256SUMS.txt)
 
 # versions.json: self-update manifest (daemon + launcher check this).
-VERSION="${INDIRECT_VERSION:-$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || date -u +%Y%m%d-%H%M)}"
 python3 - "$OUT" "$VERSION" <<'PYEOF'
 import json, os, sys
 out, version = sys.argv[1], sys.argv[2]

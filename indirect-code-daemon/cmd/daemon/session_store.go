@@ -533,9 +533,9 @@ func (d *DaemonServer) rewriteTailAppend(path string, tailSize int64, tl turnLin
 	if err != nil {
 		return err
 	}
-	defer src.Close()
 	st, err := src.Stat()
 	if err != nil {
+		src.Close()
 		return err
 	}
 	keep := st.Size() - tailSize
@@ -545,14 +545,17 @@ func (d *DaemonServer) rewriteTailAppend(path string, tailSize int64, tl turnLin
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".session-*")
 	if err != nil {
+		src.Close()
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := io.CopyN(tmp, src, keep); err != nil {
+		src.Close()
 		tmp.Close()
 		return err
 	}
+	src.Close() // Explicitly close src so Windows allows renaming over path
 	tl.V, tl.Kind = storeVersion, "turn"
 	meta.V, meta.Kind = storeVersion, "meta"
 	for _, v := range []any{&tl, &meta} {
@@ -607,9 +610,9 @@ func (d *DaemonServer) rewriteMetaOnly(id string, meta metaLine) error {
 	if err != nil {
 		return err
 	}
-	defer src.Close()
 	st, err := src.Stat()
 	if err != nil {
+		src.Close()
 		return err
 	}
 	keep := st.Size() - tailSize
@@ -619,14 +622,17 @@ func (d *DaemonServer) rewriteMetaOnly(id string, meta metaLine) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".session-*")
 	if err != nil {
+		src.Close()
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := io.CopyN(tmp, src, keep); err != nil {
+		src.Close()
 		tmp.Close()
 		return err
 	}
+	src.Close() // Explicitly close src so Windows allows renaming over path
 	meta.V, meta.Kind = storeVersion, "meta"
 	data, err := json.Marshal(&meta)
 	if err != nil {
@@ -758,9 +764,9 @@ func (d *DaemonServer) truncateTail(id string, keepTurn int, meta metaLine) erro
 	if err != nil {
 		return err
 	}
-	defer src.Close()
 	spans, err := scanSpans(src)
 	if err != nil {
+		src.Close()
 		return err
 	}
 	var keepEnd int64
@@ -774,14 +780,17 @@ func (d *DaemonServer) truncateTail(id string, keepTurn int, meta metaLine) erro
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".session-*")
 	if err != nil {
+		src.Close()
 		return err
 	}
 	tmpName := tmp.Name()
 	if err := copyPrefixTo(src, tmp, keepEnd); err != nil {
+		src.Close()
 		tmp.Close()
 		os.Remove(tmpName)
 		return err
 	}
+	src.Close() // Explicitly close src so Windows allows renaming over path
 	meta.V, meta.Kind = storeVersion, "meta"
 	if err := appendJSONLLine(tmp, &meta); err != nil {
 		tmp.Close()
@@ -804,9 +813,9 @@ func (d *DaemonServer) persistEdited(id string, firstDirtyTurn int, suffixMsgs [
 	if err != nil {
 		return err
 	}
-	defer src.Close()
 	spans, err := scanSpans(src)
 	if err != nil {
+		src.Close()
 		return err
 	}
 	var keepEnd int64
@@ -849,14 +858,17 @@ func (d *DaemonServer) persistEdited(id string, firstDirtyTurn int, suffixMsgs [
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".session-*")
 	if err != nil {
+		src.Close()
 		return err
 	}
 	tmpName := tmp.Name()
 	if err := copyPrefixTo(src, tmp, keepEnd); err != nil {
+		src.Close()
 		tmp.Close()
 		os.Remove(tmpName)
 		return err
 	}
+	src.Close() // Explicitly close src so Windows allows renaming over path
 	for i := range suffixLines {
 		suffixLines[i].V, suffixLines[i].Kind = storeVersion, "turn"
 		if err := appendJSONLLine(tmp, &suffixLines[i]); err != nil {

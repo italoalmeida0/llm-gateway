@@ -134,7 +134,7 @@ export function TranscriptView() {
       skipped for actions, and the lead keeps its own raw index so
       every per-message op still maps 1:1 to the daemon
       transcript — fusing is purely visual. */}
-  <Show when={t.hiddenCount() > 0 || t.historyHasOlder()}>
+  <Show when={t.historyHasOlder() || t.hiddenCount() > 0}>
     <div class="flex justify-center">
       <button
         onClick={() => t.loadOlder()}
@@ -142,9 +142,12 @@ export function TranscriptView() {
         class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-ink-900 border border-line/70 text-ink-300 shadow hover:text-ink-100 cursor-pointer disabled:opacity-60"
       >
         <Iconify icon="lucide:chevron-up" size={13} />
-        <span>{t.loadingOlder() ? "Loading…" : t.hiddenCount() > 0
-          ? `Load ${Math.min(20, t.hiddenCount())} older (${t.hiddenCount()} hidden)`
-          : `Load older turns (${t.historyHiddenTurns()} hidden)`}</span>
+        {/* Server cursor first: while older turns exist on the daemon,
+            the button pages turns (counts are turns, not render blocks).
+            Local hidden blocks only matter once everything is loaded. */}
+        <span>{t.loadingOlder() ? "Loading…" : t.historyHasOlder()
+          ? `Load older turns (${t.historyHiddenTurns()} hidden)`
+          : `Load ${Math.min(20, t.hiddenCount())} older (${t.hiddenCount()} hidden)`}</span>
       </button>
     </div>
   </Show>

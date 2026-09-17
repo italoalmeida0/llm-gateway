@@ -57,12 +57,23 @@ export function createTurnChanges(opts: {
 
   function applySnapshot(r: any) {
     const list = (Array.isArray(r?.fileBalloons) ? r.fileBalloons : []).map(normalizeBalloon);
-    setBalloons((prev) => [
-      ...prev.filter((b) => b.live && r?.status === "running" && (!r.turnSeq || b.turnIndex === r.turnSeq) && !list.some((item: any) => item.turnIndex === b.turnIndex)),
-      ...(Array.isArray(list) ? list : [])
+    setBalloons((prev) => {
+      // Dedupe by turn: the incoming list wins per turn (same rule as
+      // noteHistoryBalloons). Without this every session_data re-append
+      // duplicates the tail balloons.
+      const incoming = (Array.isArray(list) ? list : [])
         .filter((b: any) => (b?.files?.length || 0) > 0)
-        .map((b: any) => ({ ...b, live: false })),
-    ]);
+        .map((b: any) => ({ ...b, live: false }));
+      const incomingTurns = new Set(incoming.map((b: any) => b.turnIndex));
+      return [
+        ...prev.filter(
+          (b) =>
+            (b.live && r?.status === "running" && (!r.turnSeq || b.turnIndex === r.turnSeq) && !incomingTurns.has(b.turnIndex)) ||
+            (!b.live && !incomingTurns.has(b.turnIndex)),
+        ),
+        ...incoming,
+      ].sort((a, b) => a.turnIndex - b.turnIndex);
+    });
   }
 
   /** Authoritative tail cut (edit/regenerate): drop balloons anchored

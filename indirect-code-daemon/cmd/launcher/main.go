@@ -21,7 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
+	"time"
 
 	"llm-gateway/indirect-code-daemon/internal/migrations"
 )
@@ -107,9 +107,11 @@ func main() {
 		return
 	}
 
-	// 4. Supervise: exec the daemon; on exit code 42 (update restart)
-	// re-resolve (newest staged wins) and exec again. Any other exit
-	// ends the launcher.
+	// 4. Supervise: run the daemon; on exit code 42 (update restart)
+	// re-resolve (newest staged wins) and run again. Any other exit
+	// ends the launcher. Consecutive 42s are bounded: a broken binary
+	// that instantly re-requests restart must not hot-loop forever.
+	restarts := 0
 	for {
 		fmt.Printf("[LAUNCH] starting daemon %s (data: %s)\n", daemonPath, dataDir)
 		code, err := execDaemon(daemonPath, dataDir, daemonArgs)
@@ -120,11 +122,21 @@ func main() {
 		if code != 42 {
 			os.Exit(code)
 		}
-		fmt.Printf("[LAUNCH] update restart: re-resolving daemon...\n")
+		restarts++
+		if restarts > 5 {
+			fmt.Printf("[LAUNCH] update restart looped %d times — refusing to continue (broken staged binary?). Remove bin/daemon-* and retry.\n", restarts-1)
+			os.Exit(1)
+		}
+		// Backoff: instant 42s (crashing new binary) shouldn't spin.
+		time.Sleep(time.Duration(restarts) * 2 * time.Second)
+		fmt.Printf("[LAUNCH] update restart #%d: re-resolving daemon...\n", restarts)
 		if *daemonFlag == "" {
-			if np, rerr := resolveDaemon(dataDir); rerr == nil {
-				daemonPath = np
+			np, rerr := resolveDaemon(dataDir)
+			if rerr != nil {
+				fmt.Printf("[LAUNCH] re-resolve failed: %v\n", rerr)
+				os.Exit(1)
 			}
+			daemonPath = np
 		}
 		// Re-run migrations (a new daemon version may need a new schema).
 		if applied, merr := migrations.Migrate(dataDir); merr != nil {
@@ -138,19 +150,4 @@ func main() {
 			os.Exit(1)
 		}
 	}
-}
-
-// defaultDaemonPath resolves "indirect-code" next to the launcher binary,
-// falling back to PATH lookup.
-func defaultDaemonPath() string {
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		for _, name := range []string{"indirect-code", "indirect-code.exe"} {
-			cand := filepath.Join(dir, name)
-			if st, err := os.Stat(cand); err == nil && !st.IsDir() {
-				return cand
-			}
-		}
-	}
-	return "indirect-code"
 }

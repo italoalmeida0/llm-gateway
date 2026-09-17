@@ -1859,8 +1859,11 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 	case "update_config":
 		d.updateConfig(raw)
 	case "daemon_update_check":
+		// Async only: checkForUpdates broadcasts at the end. A direct
+		// broadcastUpdateState() here would deadlock — handleMessage
+		// holds configMu and broadcast reads it via autoUpdateEnabled
+		// (Go mutexes are not reentrant).
 		go d.checkForUpdates("manual")
-		d.broadcastUpdateState()
 	case "daemon_update_apply":
 		if !d.applyStagedUpdate() {
 			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "No staged update to apply"})
@@ -1874,10 +1877,10 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		// mutate directly like updateConfig does.
 		d.config.AutoUpdate = &treq.Enabled
 		_ = d.saveConfig()
-		if treq.Enabled {
-			go d.checkForUpdates("toggle-on")
-		}
-		d.broadcastUpdateState()
+		// Async: broadcastUpdateState reads configMu (held here) — never
+		// call it synchronously from the dispatcher. checkForUpdates
+		// broadcasts at the end, outside the lock.
+		go d.checkForUpdates("toggle")
 	case "test_mcp":
 		d.testMCP(raw)
 

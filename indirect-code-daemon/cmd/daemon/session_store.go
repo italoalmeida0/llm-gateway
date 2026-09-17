@@ -370,14 +370,19 @@ func (d *DaemonServer) readMetaTail(id string) (metaLine, error) {
 	// the meta is the last VALID line.
 	if err := json.Unmarshal(line, &meta); err != nil || meta.Kind != "meta" {
 		prev, perr := readSecondToLastLine(f)
-		if perr != nil {
+		if perr == nil {
+			var m2 metaLine
+			if jerr := json.Unmarshal(prev, &m2); jerr == nil && m2.Kind == "meta" {
+				return m2, nil
+			}
+		}
+		// Probe missed (giant meta beyond 64KB, or deeper damage):
+		// full scan, which tolerates exactly one torn tail line.
+		_, full, ferr := d.readSessionFile(id)
+		if ferr != nil {
 			return meta, fmt.Errorf("no meta line")
 		}
-		var m2 metaLine
-		if err := json.Unmarshal(prev, &m2); err != nil || m2.Kind != "meta" {
-			return meta, fmt.Errorf("no meta line")
-		}
-		return m2, nil
+		return full, nil
 	}
 	return meta, nil
 }
@@ -501,7 +506,8 @@ func (d *DaemonServer) appendTurnLine(id string, tl turnLine, meta metaLine) err
 }
 
 // hasMetaTail checks the file ends with a valid meta line, returning its
-// byte size (including trailing newline) for rewriteTailAppend.
+// EXACT byte size (line + line terminator as on disk) for rewriteTailAppend.
+// Never guesses +1: \r\n vs \n vs missing-newline all measure exactly.
 func hasMetaTail(path string) (bool, int64) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -512,9 +518,25 @@ func hasMetaTail(path string) (bool, int64) {
 	if err != nil || st.Size() == 0 {
 		return false, 0
 	}
-	line, err := readLastLine(f)
-	if err != nil {
+	// Read the tail (meta lines are small; 64KB covers queue/todos/options
+	// plus hundreds of attachments) and split off the last non-empty line
+	// with its terminator.
+	n := int64(64 * 1024)
+	if st.Size() < n {
+		n = st.Size()
+	}
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, st.Size()-n); err != nil {
 		return false, 0
+	}
+	trimmed := bytes.TrimRight(buf, "\r\n")
+	if len(bytes.TrimSpace(trimmed)) == 0 {
+		return false, 0
+	}
+	lastNL := bytes.LastIndexByte(trimmed, '\n')
+	line := trimmed
+	if lastNL >= 0 {
+		line = trimmed[lastNL+1:]
 	}
 	var probe struct {
 		Kind string `json:"kind"`
@@ -523,7 +545,10 @@ func hasMetaTail(path string) (bool, int64) {
 	if err := json.Unmarshal(line, &probe); err != nil || probe.Kind != "meta" || probe.ID == "" {
 		return false, 0
 	}
-	return true, int64(len(line)) + 1 // + trailing newline
+	// Tail size = file size - offset of this line's first byte.
+	lineStartInBuf := len(trimmed) - len(line)
+	tailSize := st.Size() - (st.Size() - n + int64(lineStartInBuf))
+	return true, tailSize
 }
 
 // rewriteTailAppend replaces the meta tail with turn+meta in one
@@ -695,9 +720,14 @@ func scanSpans(f *os.File) ([]lineSpan, error) {
 				Kind string `json:"kind"`
 				Turn int    `json:"turn"`
 			}
-			if jerr := json.Unmarshal(trimmed, &probe); jerr == nil {
-				spans = append(spans, lineSpan{turn: probe.Turn, start: off, end: off + n, isMeta: probe.Kind == "meta"})
+			if jerr := json.Unmarshal(trimmed, &probe); jerr != nil {
+				// Fail closed on corrupt middle lines (never silently
+				// propagate garbage through truncate/persist). A torn
+				// TAIL (crash mid-append) is the caller's case: it reads
+				// the file end and tolerates exactly one partial line.
+				return nil, fmt.Errorf("corrupt line at offset %d", off)
 			}
+			spans = append(spans, lineSpan{turn: probe.Turn, start: off, end: off + n, isMeta: probe.Kind == "meta"})
 		}
 		off += n
 		if err != nil {

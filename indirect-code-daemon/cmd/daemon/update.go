@@ -58,12 +58,12 @@ type releaseAsset struct {
 
 // updateState is the daemon's self-update runtime (guarded by mu).
 type updateState struct {
-	mu           sync.Mutex
-	available    string // manifest version when != running ("" = none)
-	staged       string // version downloaded + verified, ready to apply
-	checkedAt    int64
-	lastError    string
-	restartArmed bool // auto-restart when idle (autoUpdate path)
+	mu        sync.Mutex
+	available string // manifest version when != running ("" = none)
+	staged    string // version downloaded + verified, ready to apply
+	checkedAt int64
+	lastError string
+	staging   bool // stageUpdate in flight (prevents double downloads)
 }
 
 func (d *DaemonServer) updateChecker() *updateState {
@@ -153,6 +153,19 @@ func (d *DaemonServer) stageUpdate(m *versionManifest) {
 	if v == "" || v == daemonVersion {
 		return
 	}
+	st := d.updateChecker()
+	st.mu.Lock()
+	if st.staging || st.staged == v {
+		st.mu.Unlock()
+		return
+	}
+	st.staging = true
+	st.mu.Unlock()
+	defer func() {
+		st.mu.Lock()
+		st.staging = false
+		st.mu.Unlock()
+	}()
 	key := runtime.GOOS + "-" + runtime.GOARCH
 	asset := m.Daemon.Assets[key]
 	if asset == "" {
@@ -201,8 +214,13 @@ func (d *DaemonServer) stageUpdate(m *versionManifest) {
 		}
 	}
 	if err := os.Rename(tmpName, local); err != nil {
-		d.setUpdateError(err.Error())
-		return
+		// Windows: rename onto an existing file fails — a concurrent
+		// (or previous) stager may have won the race. If a valid binary
+		// is in place, treat as staged instead of erroring.
+		if st, serr := os.Stat(local); serr != nil || st.IsDir() || st.Size() == 0 {
+			d.setUpdateError(err.Error())
+			return
+		}
 	}
 	d.setUpdateStaged(v)
 }

@@ -63,6 +63,9 @@ type HarnessSettings struct {
 
 // DaemonConfig holds credentials and gateway connection details.
 type DaemonConfig struct {
+	// AutoUpdate enables staged self-updates (nil = default true).
+	// Frontend toggle; daemon checks + stages, restart applies.
+	AutoUpdate    *bool                      `json:"auto_update,omitempty"`
 	LastSelection *ModelSelection            `json:"last_selection,omitempty"`
 	GatewayURL    string                     `json:"gateway_url"`
 	DaemonToken   string                     `json:"daemon_token"`
@@ -142,26 +145,26 @@ type SessionRecord struct {
 
 // SessionSummary is returned to the web client for listing.
 type SessionSummary struct {
-	ID           string           `json:"id"`
-	CWD          string           `json:"cwd"`
-	Title        string           `json:"title"`
-	Model        string           `json:"model"`
-	Status       string           `json:"status"`
-	Pinned       bool             `json:"pinned"`
-	CreatedAt    int64            `json:"createdAt"`
-	UpdatedAt    int64            `json:"updatedAt"`
-	TodosOpen    *bool            `json:"todosOpen,omitempty"`
-	Options      *SessionOptions  `json:"options,omitempty"`
+	ID        string          `json:"id"`
+	CWD       string          `json:"cwd"`
+	Title     string          `json:"title"`
+	Model     string          `json:"model"`
+	Status    string          `json:"status"`
+	Pinned    bool            `json:"pinned"`
+	CreatedAt int64           `json:"createdAt"`
+	UpdatedAt int64           `json:"updatedAt"`
+	TodosOpen *bool           `json:"todosOpen,omitempty"`
+	Options   *SessionOptions `json:"options,omitempty"`
 }
 
 // sessionListItem serializes a summary for the web client.
 func sessionListItem(s SessionSummary) map[string]any {
 	return map[string]any{
 		"id": s.ID, "cwd": s.CWD, "title": s.Title, "model": s.Model, "status": s.Status,
-		"pinned":       s.Pinned,
-		"createdAt":    s.CreatedAt,
-		"updatedAt":    s.UpdatedAt,
-		"options":      s.Options,
+		"pinned":    s.Pinned,
+		"createdAt": s.CreatedAt,
+		"updatedAt": s.UpdatedAt,
+		"options":   s.Options,
 	}
 }
 
@@ -449,6 +452,10 @@ type DaemonServer struct {
 
 	sessionsMu sync.RWMutex
 	sessions   map[string]*ActiveSession
+
+	// Self-update runtime (see update.go).
+	updateMu sync.Mutex
+	update   *updateState
 
 	// Idle eviction sweeper state (RAM-only LRU, see session_eviction.go).
 	evictMu   sync.Mutex
@@ -758,28 +765,7 @@ func (d *DaemonServer) sendWS(msg any) error {
 // Session Storage Helpers
 
 func (d *DaemonServer) saveSession(rec *SessionRecord) error {
-	dir := d.sessionsDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	filePath := filepath.Join(dir, rec.ID+".json")
-	data, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".session-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err = tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(tmp.Name(), filePath); err != nil {
+	if err := d.saveSessionSync(rec); err != nil {
 		return err
 	}
 	d.notifyChange("sessions")
@@ -787,76 +773,16 @@ func (d *DaemonServer) saveSession(rec *SessionRecord) error {
 }
 
 func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
-	if id == "" || strings.ContainsAny(id, "/\\") || id == "." || id == ".." {
+	if !validSessionID(id) {
 		return nil, fmt.Errorf("Invalid session ID")
 	}
-	filePath := filepath.Join(d.sessionsDir(), id+".json")
-	data, err := os.ReadFile(filePath)
+	lines, meta, err := d.readSessionFile(id)
 	if err != nil {
 		return nil, err
 	}
-	var rawRec struct {
-		Turn        *TurnActivity    `json:"turn"`
-		Todos       []tools.TodoItem `json:"todos"`
-		TodosOpen   *bool            `json:"todosOpen"`
-		Options     SessionOptions   `json:"options"`
-		ID          string           `json:"id"`
-		CWD         string           `json:"cwd"`
-		Title       string           `json:"title"`
-		TitleSource string           `json:"titleSource"`
-		// Dynamic system-directive state (date/mode change detection).
-		// Written by buildTurnSystemDirectives; must round-trip or every
-		// restart re-injects the date/mode reminder and busts the
-		// prompt-cache prefix the directive scheme exists to protect.
-		LastDate    string                `json:"lastDate"`
-		LastMode    string                `json:"lastMode"`
-		Usage       provider.Usage        `json:"usage"`
-		Context     *SessionContext       `json:"context"`
-		Model       string                `json:"model"`
-		Status      string                `json:"status"`
-		Pinned      bool                  `json:"pinned"`
-		CreatedAt   int64                 `json:"createdAt"`
-		UpdatedAt   int64                 `json:"updatedAt"`
-		Messages    []json.RawMessage     `json:"messages"`
-		Attachments []AttachmentRef       `json:"attachments"`
-		Compaction  *core.CompactionState `json:"compaction,omitempty"`
-		TurnSeq     int                   `json:"turnSeq,omitempty"`
-		// FileBalloons must round-trip: dropping them here wipes the
-		// persistent per-turn balloons (and resets TurnSeq) on every
-		// load→save cycle — restart, edit, delete, pin.
-		FileBalloons []filetrack.TurnChanges `json:"fileBalloons,omitempty"`
-		// Queue must round-trip like FileBalloons: dropping it here would
-		// wipe waiting messages on every load→save cycle.
-		Queue []QueuedMessage `json:"queue,omitempty"`
-	}
-	if err := json.Unmarshal(data, &rawRec); err != nil {
-		return nil, err
-	}
-	rec := &SessionRecord{
-		Turn: rawRec.Turn, Todos: rawRec.Todos, TodosOpen: rawRec.TodosOpen,
-		Options:     rawRec.Options,
-		ID:          rawRec.ID,
-		CWD:         resolvePath(rawRec.CWD),
-		Title:       rawRec.Title,
-		TitleSource: rawRec.TitleSource,
-		LastDate:    rawRec.LastDate, LastMode: rawRec.LastMode,
-		Usage: rawRec.Usage, Context: rawRec.Context,
-		Model:        rawRec.Model,
-		Status:       rawRec.Status,
-		Pinned:       rawRec.Pinned,
-		CreatedAt:    rawRec.CreatedAt,
-		UpdatedAt:    rawRec.UpdatedAt,
-		Attachments:  rawRec.Attachments,
-		Compaction:   rawRec.Compaction,
-		TurnSeq:      rawRec.TurnSeq,
-		FileBalloons: rawRec.FileBalloons,
-		Queue:        rawRec.Queue,
-	}
-	for _, mBytes := range rawRec.Messages {
-		msg, err := core.HydrateMessageObject(mBytes)
-		if err == nil {
-			rec.Messages = append(rec.Messages, msg)
-		}
+	rec := assembleRecord(lines, meta)
+	if rec.ID != id || rec.ID == "" {
+		return nil, fmt.Errorf("session id mismatch")
 	}
 	return rec, nil
 }
@@ -870,25 +796,25 @@ func (d *DaemonServer) listSessions() []SessionSummary {
 
 	var summaries []SessionSummary
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
 			continue
 		}
-		id := strings.TrimSuffix(e.Name(), ".json")
-		rec, err := d.loadSession(id)
-		if err != nil || rec.ID != id || rec.ID == "" {
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
+		meta, err := d.readMetaTail(id)
+		if err != nil || meta.ID != id || meta.ID == "" {
 			continue
 		}
 		summaries = append(summaries, SessionSummary{
-			ID:           rec.ID,
-			CWD:          rec.CWD,
-			Title:        rec.Title,
-			Model:        rec.Model,
-			Status:       rec.Status,
-			Pinned:       rec.Pinned,
-			CreatedAt:    rec.CreatedAt,
-			UpdatedAt:    rec.UpdatedAt,
-			TodosOpen:    rec.TodosOpen,
-			Options:      &rec.Options,
+			ID:        meta.ID,
+			CWD:       resolvePath(meta.CWD),
+			Title:     meta.Title,
+			Model:     meta.Model,
+			Status:    meta.Status,
+			Pinned:    meta.Pinned,
+			CreatedAt: meta.CreatedAt,
+			UpdatedAt: meta.UpdatedAt,
+			TodosOpen: meta.TodosOpen,
+			Options:   &meta.Options,
 		})
 	}
 
@@ -920,6 +846,7 @@ func (d *DaemonServer) purgeSession(id string) {
 		delete(d.sessions, id)
 	}
 	d.sessionsMu.Unlock()
+	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".jsonl"))
 	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".json"))
 	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".wal.jsonl"))
 	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id))
@@ -960,35 +887,28 @@ func (d *DaemonServer) listSessionSummaries() []SessionSummary {
 	}
 	var summaries []SessionSummary
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var r sessionRaw
-		if err := json.Unmarshal(data, &r); err != nil {
-			continue
-		}
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
 		// Ghost guard: corrupt leftovers (empty id or content id ≠
-		// filename; every save writes rec.ID+".json"). Listing any of
-		// them shows a blank row in the sidebar whose click always fails
-		// with "Session not found", since loadSession reads id+".json".
-		if r.ID == "" || strings.TrimSuffix(e.Name(), ".json") != r.ID {
+		// filename). Listing any of them shows a blank row in the
+		// sidebar whose click always fails with "Session not found".
+		meta, err := d.readMetaTail(id)
+		if err != nil || meta.ID == "" || meta.ID != id {
 			continue
 		}
 		summaries = append(summaries, SessionSummary{
-			ID:           r.ID,
-			CWD:          r.CWD,
-			Title:        r.Title,
-			Model:        r.Model,
-			Status:       r.Status,
-			Pinned:       r.Pinned,
-			CreatedAt:    r.CreatedAt,
-			UpdatedAt:    r.UpdatedAt,
-			TodosOpen:    r.TodosOpen,
-			Options:      r.Options,
+			ID:        meta.ID,
+			CWD:       resolvePath(meta.CWD),
+			Title:     meta.Title,
+			Model:     meta.Model,
+			Status:    meta.Status,
+			Pinned:    meta.Pinned,
+			CreatedAt: meta.CreatedAt,
+			UpdatedAt: meta.UpdatedAt,
+			TodosOpen: meta.TodosOpen,
+			Options:   &meta.Options,
 		})
 	}
 	sort.Slice(summaries, func(i, j int) bool {
@@ -1010,31 +930,23 @@ func (d *DaemonServer) resetRunningSessions() {
 		return
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
 			continue
 		}
-		sid := strings.TrimSuffix(e.Name(), ".json")
+		sid := strings.TrimSuffix(e.Name(), ".jsonl")
 		// A WAL means resume owns this session.
 		if _, err := os.Stat(filepath.Join(dir, sid+".wal.jsonl")); err == nil {
 			continue
 		}
-		p := filepath.Join(dir, e.Name())
-		data, err := os.ReadFile(p)
-		if err != nil {
+		meta, err := d.readMetaTail(sid)
+		if err != nil || meta.Status != "running" {
 			continue
 		}
-		var doc map[string]any
-		if err := json.Unmarshal(data, &doc); err != nil {
+		meta.Status = "idle"
+		if err := d.rewriteMetaOnly(sid, meta); err != nil {
 			continue
 		}
-		if doc["status"] != "running" {
-			continue
-		}
-		doc["status"] = "idle"
-		if out, err := json.MarshalIndent(doc, "", "  "); err == nil {
-			_ = os.WriteFile(p, out, 0o600)
-			fmt.Printf("[INFO] Reset stale running session: %s\n", e.Name())
-		}
+		fmt.Printf("[INFO] Reset stale running session: %s\n", e.Name())
 	}
 }
 
@@ -1614,7 +1526,41 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			removed = 0
 		}
 		broadcastTruncated(d, req.SessionID, req.Index, removed, rec.Messages, rec.Compaction, rec.Attachments)
-		_ = d.saveSession(rec)
+		// Turn-granular persist: clean prefix turns byte-copied, dirty
+		// suffix re-split from memory (the edited message changed content
+		// disk lines can't provide).
+		firstDirty := 0
+		for _, m := range rec.Messages[req.Index:] {
+			if m.TurnIndex > 0 {
+				firstDirty = m.TurnIndex
+				break
+			}
+		}
+		if firstDirty <= 0 {
+			// All-zero tail (legacy): full re-split of the kept prefix.
+			lines, _ := splitRecord(rec)
+			_ = d.writeSessionFile(rec.ID, lines, recordMeta(rec))
+		} else {
+			// Suffix from the first message of the dirty turn (plus
+			// attached leading zeros just before it).
+			start := len(rec.Messages)
+			for i, m := range rec.Messages {
+				if m.TurnIndex >= firstDirty {
+					start = i
+					break
+				}
+			}
+			for start > 0 && rec.Messages[start-1].TurnIndex <= 0 {
+				start--
+			}
+			var sbal []filetrack.TurnChanges
+			for _, b := range rec.FileBalloons {
+				if b.TurnIndex >= firstDirty {
+					sbal = append(sbal, b)
+				}
+			}
+			_ = d.persistEdited(rec.ID, firstDirty, append([]provider.Message{}, rec.Messages[start:]...), sbal, recordMeta(rec))
+		}
 		_ = d.sendWS(map[string]any{
 			"type":       "session_content",
 			"hostId":     d.config.HostID,
@@ -1912,6 +1858,26 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 
 	case "update_config":
 		d.updateConfig(raw)
+	case "daemon_update_check":
+		go d.checkForUpdates("manual")
+		d.broadcastUpdateState()
+	case "daemon_update_apply":
+		if !d.applyStagedUpdate() {
+			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "No staged update to apply"})
+		}
+	case "daemon_update_toggle":
+		var treq struct {
+			Enabled bool `json:"enabled"`
+		}
+		_ = json.Unmarshal(raw, &treq)
+		// NOTE: handleMessage already holds configMu (non-reentrant) —
+		// mutate directly like updateConfig does.
+		d.config.AutoUpdate = &treq.Enabled
+		_ = d.saveConfig()
+		if treq.Enabled {
+			go d.checkForUpdates("toggle-on")
+		}
+		d.broadcastUpdateState()
 	case "test_mcp":
 		d.testMCP(raw)
 
@@ -2288,6 +2254,9 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	}
 	rec.Messages = append([]provider.Message(nil), rec.Messages[:keep]...)
 	rec.FileBalloons = dropBalloonsAbove(rec.FileBalloons, keep)
+	// Turn-granular persist: pure tail cut (no content change above the
+	// cut) — clean prefix lines byte-copied, nothing re-marshaled.
+	keepTurn := dropTurnForPrefix(rec.Messages)
 	// The new turn re-sends attachmentIDs right after: keep them while
 	// pruning files orphaned by the discarded tail.
 	pruneOrphanAttachments(rec, attachmentIDs)
@@ -2299,7 +2268,7 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	}
 	rec.Status = "idle"
 	rec.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(rec)
+	_ = d.truncateTail(rec.ID, keepTurn, recordMeta(rec))
 	act.record = rec
 	act.mu.Unlock()
 	d.sessionsMu.Unlock()
@@ -2560,6 +2529,8 @@ func (d *DaemonServer) connectWebSocket() error {
 	d.wsMu.Unlock()
 
 	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", d.config.GatewayURL)
+	// Fresh (re)connect: re-check for updates + push state to clients.
+	go d.checkForUpdates("reconnect")
 
 	// Heartbeat ticker
 	ticker := time.NewTicker(15 * time.Second)
@@ -2602,15 +2573,22 @@ func main() {
 	if dataDir == "" {
 		dataDir = defaultDataDir()
 	}
-
-	// Local fallback kill: works even with the gateway offline (no remote
-	// shutdown possible then). Used by the user directly, not the frontend.
+	// Local fallback kill: works even with broken storage or the gateway
+	// offline (only reads daemon.pid + signals — never touches storage).
+	// Used by the user directly, not the frontend.
 	if *stopFlag {
 		if err := stopDaemonFromPidFile(dataDir); err != nil {
 			fmt.Printf("Stop failed: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+
+	// Storage contract: the launcher owns migrations. The daemon assumes
+	// the current format and fails fast otherwise — zero legacy branches.
+	if err := checkStorageVersion(dataDir); err != nil {
+		fmt.Printf("[FATAL] %v\n", err)
+		os.Exit(3)
 	}
 
 	configPath := *configFlag
@@ -2699,6 +2677,11 @@ func main() {
 	// Idle sessions idle too long (or too many residents) are dropped
 	// from RAM and reloaded on next touch — disk stays the truth.
 	server.startEvictionSweeper()
+	// Self-update: check on start, every 10min, and on reconnect.
+	// Stops with the process (no explicit shutdown needed).
+	updateStop := make(chan struct{})
+	defer close(updateStop)
+	go server.startUpdateLoop(updateStop)
 
 	// Track the background process so install scripts and --stop can find it.
 	server.writePidFile()

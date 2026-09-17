@@ -8,16 +8,16 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// The WAL contract: while a turn runs the session JSON on disk stays
-// frozen; every mutation appends one JSONL line; the turn end commits
-// once and removes the WAL.
+// The WAL contract: while a turn runs the session file on disk stays
+// frozen; every mutation appends one WAL line; the turn end commits the
+// turn line + meta once and removes the WAL.
 func TestWALFreezesJSONUntilCommit(t *testing.T) {
 	d := testDaemon(t)
 	rec := &SessionRecord{ID: "walfreeze", CWD: t.TempDir(), Model: "m", Status: "idle", Options: SessionOptions{Mode: "build"}}
 	if err := d.saveSession(rec); err != nil {
 		t.Fatal(err)
 	}
-	frozen, err := os.ReadFile(filepath.Join(d.sessionsDir(), "walfreeze.json"))
+	frozen, err := os.ReadFile(filepath.Join(d.sessionsDir(), "walfreeze.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,13 +42,13 @@ func TestWALFreezesJSONUntilCommit(t *testing.T) {
 	rec.Title, rec.TitleSource = "T", "manual"
 	d.appendWALEvent(act, walEvent{Type: walTypeTitle, Title: "T", TitleSource: "manual"})
 
-	// The frozen JSON must carry zero turn deltas (only the running flip).
+	// The frozen file must carry zero turn deltas (only the running flip).
 	raw, err := d.loadSession(rec.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(raw.Messages) != 0 || raw.Title != "" {
-		t.Fatalf("frozen JSON mutated mid-turn: %+v", raw)
+		t.Fatalf("frozen file mutated mid-turn: %+v", raw)
 	}
 	_ = frozen
 

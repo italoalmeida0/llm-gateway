@@ -185,18 +185,18 @@ func TestListSessionSummariesSkipsGhosts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Healthy session: listed.
-	write("sess_ok.json", `{"id":"sess_ok","cwd":"/tmp","title":"Hi","createdAt":1,"updatedAt":2}`)
+	// Healthy session: listed (meta tail only — transcripts never read).
+	write("sess_ok.jsonl", `{"v":1,"kind":"meta","id":"sess_ok","cwd":"/tmp","title":"Hi","createdAt":1,"updatedAt":2}`+"\n")
 	// WAL sidecar: JSONL, no session fields — must never appear as a
 	// blank sidebar row.
 	write("sess_old.wal.jsonl", `{"v":1,"type":"header","header":{"turnIndex":3,"startedAt":1,"model":"m"}}`)
-	// Valid JSON but no id: ghost (blank row, unopenable).
-	write("empty.json", `{}`)
-	// Content id does not match the filename: loadSession(id+".json")
-	// would fail, so listing it only produces "Session not found".
-	write("stale.json", `{"id":"sess_other","title":"Ghost"}`)
-	// Corrupt JSON: skipped as before.
-	write("broken.json", `{"id":`)
+	// Valid JSONL but no meta: ghost (blank row, unopenable).
+	write("empty.jsonl", `{}\n`)
+	// Content id does not match the filename: loadSession fails, so
+	// listing it only produces "Session not found".
+	write("stale.jsonl", `{"v":1,"kind":"meta","id":"sess_other","title":"Ghost"}`+"\n")
+	// Corrupt JSONL: skipped as before.
+	write("broken.jsonl", `{"id":`)
 
 	got := d.listSessionSummaries()
 	if len(got) != 1 || got[0].ID != "sess_ok" {

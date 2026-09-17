@@ -155,6 +155,20 @@ func (d *DaemonServer) openWAL(sessionID string, h *walHeader) (*walWriter, erro
 	return ww, nil
 }
 
+// openWALAppend reopens an existing WAL for append (resume path): the
+// header and body stay intact, new events continue after them.
+func (d *DaemonServer) openWALAppend(sessionID string) (*walWriter, error) {
+	p := d.walPath(sessionID)
+	if p == "" {
+		return nil, fmt.Errorf("invalid session id")
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	return &walWriter{file: f, w: bufio.NewWriterSize(f, 64*1024), path: p}, nil
+}
+
 func (ww *walWriter) append(ev walEvent) error {
 	if ww == nil {
 		return fmt.Errorf("nil wal writer")
@@ -396,11 +410,12 @@ func (d *DaemonServer) loadSessionFused(id string) (*SessionRecord, *walHeader, 
 	return fused, header, nil
 }
 
-// commitWAL performs the single full JSON rewrite at turn end and deletes
-// the WAL. Callers must hold act.mu; the in-memory record is already the
-// complete post-turn state. The WAL is removed only after the JSON commit
-// is durable, so a crash in between replays idempotently (commit-window
-// detection in scanWALs/resume drops the already-committed log).
+// commitWAL appends the just-finished turn as ONE line + rewrites the meta
+// tail, then deletes the WAL. Callers must hold act.mu; the in-memory
+// record is the complete post-turn state. Old turn lines are never
+// touched (immutability). Idempotent: a re-commit after a crash in the
+// commit window skips turn lines already on disk (same turn number +
+// same message count) and only rewrites meta.
 func (d *DaemonServer) commitWAL(act *ActiveSession) error {
 	if act == nil || act.record == nil {
 		return fmt.Errorf("nil session")
@@ -410,14 +425,127 @@ func (d *DaemonServer) commitWAL(act *ActiveSession) error {
 		_ = act.wal.close()
 		act.wal = nil
 	}
-	act.record.UpdatedAt = time.Now().UnixMilli()
-	if err := d.saveSessionSync(act.record); err != nil {
-		return err
+	rec := act.record
+	rec.UpdatedAt = time.Now().UnixMilli()
+	// Fast path: does the disk already have this turn line?
+	lines, _, rerr := d.readSessionFile(id)
+	if rerr != nil && !os.IsNotExist(rerr) {
+		return rerr
+	}
+	turnIdx := rec.TurnSeq
+	// Messages of the finished turn (in-memory, includes WAL replay).
+	// Mirrors splitRecord: leading TurnIndex-0 notices attach to turn 1.
+	var turnMsgs []provider.Message
+	for _, m := range rec.Messages {
+		if m.TurnIndex == turnIdx || (turnIdx == 1 && m.TurnIndex <= 0) {
+			// Leading zeros only: stop attaching zeros once turn 1's
+			// own messages started... simpler: attach ALL zero-index
+			// messages that appear BEFORE the first turn-1 message.
+			// (Trailing zeros after the last turn attach to the last
+			// line via splitRecord; in-memory commit of the final turn
+			// includes them below.)
+			turnMsgs = append(turnMsgs, m)
+		}
+	}
+	// Refine: only leading zeros (before first turnIdx message) + the
+	// turn's own messages + trailing zeros after the LAST message when
+	// this is the newest turn on disk.
+	turnMsgs = sliceTurnMessages(rec.Messages, turnIdx)
+	// Zero-index notices at the very head belong to turn 1's line.
+	already := false
+	for _, tl := range lines {
+		if tl.Turn == turnIdx && len(tl.Messages) == len(turnMsgs) {
+			already = true
+			break
+		}
+	}
+	if !already && (len(turnMsgs) > 0 || turnIdx > 0) {
+		raw := make([]json.RawMessage, 0, len(turnMsgs))
+		for _, m := range turnMsgs {
+			data, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			raw = append(raw, data)
+		}
+		var balloon *filetrack.TurnChanges
+		for i := range rec.FileBalloons {
+			if rec.FileBalloons[i].TurnIndex == turnIdx {
+				cp := rec.FileBalloons[i]
+				balloon = &cp
+				break
+			}
+		}
+		tl := turnLine{V: storeVersion, Kind: "turn", Turn: turnIdx, Messages: raw, Balloon: balloon, Usage: rec.Usage, Context: rec.Context}
+		if err := d.appendTurnLine(id, tl, recordMeta(rec)); err != nil {
+			return err
+		}
+	} else {
+		// Turn line present (commit-window retry) or nothing to append:
+		// just rewrite meta.
+		if err := d.rewriteMetaOnly(id, recordMeta(rec)); err != nil {
+			// Fresh session with no lines yet (turn produced no messages):
+			// full write.
+			if os.IsNotExist(err) {
+				if werr := d.saveSessionSync(rec); werr != nil {
+					return werr
+				}
+			} else {
+				return err
+			}
+		}
 	}
 	if p := d.walPath(id); p != "" {
 		_ = os.Remove(p)
 	}
 	return nil
+}
+
+// sliceTurnMessages extracts one turn's messages with splitRecord's
+// zero-index attachment rules: leading zeros attach to the first
+// non-zero turn at/after them; trailing zeros attach to the last turn.
+func sliceTurnMessages(msgs []provider.Message, turnIdx int) []provider.Message {
+	// Find first index with TurnIndex == turnIdx.
+	first := -1
+	for i, m := range msgs {
+		if m.TurnIndex == turnIdx {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return nil
+	}
+	// Leading zeros: zeros immediately before `first` back to the previous
+	// non-zero turn (exclusive).
+	start := first
+	for start > 0 && msgs[start-1].TurnIndex <= 0 {
+		start--
+	}
+	// End: next non-zero turn that is NOT turnIdx (exclusive).
+	end := len(msgs)
+	for i := first; i < len(msgs); i++ {
+		if msgs[i].TurnIndex > 0 && msgs[i].TurnIndex != turnIdx {
+			end = i
+			break
+		}
+	}
+	return msgs[start:end]
+}
+
+// recordMeta projects a record onto its meta line.
+func recordMeta(rec *SessionRecord) metaLine {
+	return metaLine{
+		V: storeVersion, Kind: "meta",
+		Turn: rec.Turn, Todos: rec.Todos, TodosOpen: rec.TodosOpen,
+		Options: rec.Options, ID: rec.ID, CWD: rec.CWD,
+		Title: rec.Title, TitleSource: rec.TitleSource,
+		Usage: rec.Usage, Context: rec.Context, Model: rec.Model,
+		Status: rec.Status, Pinned: rec.Pinned,
+		CreatedAt: rec.CreatedAt, UpdatedAt: rec.UpdatedAt,
+		Attachments: rec.Attachments, LastDate: rec.LastDate, LastMode: rec.LastMode,
+		Compaction: rec.Compaction, TurnSeq: rec.TurnSeq, Queue: rec.Queue,
+	}
 }
 
 // discardWAL closes and removes the WAL without committing (purge path).
@@ -432,41 +560,8 @@ func (d *DaemonServer) discardWAL(act *ActiveSession) {
 // without emitting a change ping. The WAL commit path batches its own
 // single ping after the write.
 func (d *DaemonServer) saveSessionSync(rec *SessionRecord) error {
-	dir := d.sessionsDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	filePath := filepath.Join(dir, rec.ID+".json")
-	data, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".session-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err = tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err = tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(tmpName, filePath); err != nil {
-		return err
-	}
-	// Fsync the directory entry so the rename survives a power loss.
-	if df, err := os.Open(dir); err == nil {
-		_ = df.Sync()
-		df.Close()
-	}
-	return nil
+	lines, meta := splitRecord(rec)
+	return d.writeSessionFile(rec.ID, lines, meta)
 }
 
 // scanWALs lists session IDs with a WAL file on disk.
@@ -517,7 +612,6 @@ func (d *DaemonServer) appendWALEvent(act *ActiveSession, ev walEvent) {
 	_ = act.wal.append(ev)
 	_ = act.wal.flush()
 }
-
 
 // cloneWALHeader deep-copies a header so resume can overlay the latest
 // body snapshots without mutating the caller's copy.

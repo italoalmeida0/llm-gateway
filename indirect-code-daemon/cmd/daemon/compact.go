@@ -83,9 +83,13 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 		act.record.Status = "idle"
 		act.cancel = nil
 		if act.wal != nil {
-			// Compaction aborted (error above): commit partial state so
-			// the WAL never lingers; the frozen JSON is untouched.
-			_ = d.commitWAL(act)
+			// Compaction aborted (error above): no turn happened, so no
+			// turn line is appended — rewrite meta (status flip) + drop
+			// the WAL. The frozen lines are untouched.
+			d.discardWAL(act)
+			_ = os.Remove(d.walPath(sid))
+			act.wal = nil
+			_ = d.rewriteMetaOnly(sid, recordMeta(act.record))
 		} else {
 			_ = d.saveSession(act.record)
 		}
@@ -124,9 +128,10 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 	act.record.Usage = agent.Cost()
 	act.record.Context = estimateContext(agent, info)
 	act.record.UpdatedAt = time.Now().UnixMilli()
-	// Compaction replaces history wholesale: persist the WAL events that
-	// describe the new state, then commit once. (Replay applies the same
-	// snapshot, so crash recovery sees the compacted view.)
+	// Compaction replaces history wholesale (reorders/regroups turns):
+	// turn-granular append can't express it — full rewrite via split
+	// (rare manual op; correctness over IO savings). Crash between WAL
+	// events and rewrite replays the same snapshot idempotently.
 	for _, m := range act.record.Messages {
 		mc := m
 		d.appendWALEvent(act, walMsgEvent(mc))
@@ -135,7 +140,10 @@ func (d *DaemonServer) compactSession(act *ActiveSession) {
 	ctxCopy := act.record.Context
 	stateCopy := *act.record.Compaction
 	d.appendWALEvent(act, walEvent{Type: walTypeCompaction, Compaction: &stateCopy, Usage: &usageCopy, Context: ctxCopy})
-	_ = d.commitWAL(act)
+	d.discardWAL(act)
+	_ = os.Remove(d.walPath(sid))
+	act.wal = nil
+	_ = d.saveSessionSync(act.record)
 	d.notifyChange("sessions")
 	_ = d.sendWS(map[string]any{
 		"type":       "session_compacted",

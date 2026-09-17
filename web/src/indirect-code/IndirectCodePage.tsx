@@ -34,6 +34,7 @@ import { createPushSubscription } from "./hooks/usePushSubscription";
 import { createConvert } from "./hooks/useConvert";
 import { createQueue } from "./hooks/useQueue";
 import { createBackground } from "./hooks/useBackground";
+import { createDaemonUpdate } from "./hooks/useDaemonUpdate";
 import { createModals } from "./hooks/useModals";
 import { createRelay } from "./hooks/useRelay";
 import { createMirror } from "./hooks/useMirror";
@@ -166,6 +167,11 @@ export default function IndirectCodePage() {
     onForkKind: (kind: "resend" | "regenerate" | "fork") => {
       forkKind = kind;
     },
+  });
+
+  const daemonUpdate = createDaemonUpdate({
+    send: (payload) => relay.send(payload),
+    toast: notice.toast,
   });
 
   const background = createBackground({
@@ -726,6 +732,16 @@ export default function IndirectCodePage() {
         break;
       }
 
+      case "daemon_update": {
+        const prev = daemonUpdate.info()?.available ?? "";
+        daemonUpdate.noteUpdate(msg);
+        const now = daemonUpdate.info()?.available ?? "";
+        if (now && now !== prev) {
+          notice.toast(`Daemon update available: ${now}`, "ok");
+        }
+        break;
+      }
+
       case "bg_update":
       case "bg_list": {
         background.noteJobs(msg.jobs);
@@ -1185,6 +1201,7 @@ export default function IndirectCodePage() {
   };
   const uiValue: UICtxValue = {
     ...notice,
+    daemonUpdate,
     turnNotify,
     pushSub,
     sidebarOpen,

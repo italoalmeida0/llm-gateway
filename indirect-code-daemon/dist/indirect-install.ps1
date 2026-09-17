@@ -69,7 +69,7 @@ switch ($rawArch.ToUpperInvariant()) {
   default { Write-Error "unsupported arch: $rawArch (supported: AMD64, ARM64)"; exit 1 }
 }
 
-$Asset = "indirect-code-windows-$arch.exe"
+$Asset = "indirect-launcher-windows-$arch.exe"
 $Url = "$RepoRaw/$Asset"
 $Bin = Join-Path $BinDir "indirect-code.exe"
 

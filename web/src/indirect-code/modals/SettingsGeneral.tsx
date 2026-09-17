@@ -27,6 +27,7 @@ function Toggle(props: {
 export function SettingsGeneralSection() {
   const m = useModal();
   const ui = useUI();
+  const du = ui.daemonUpdate;
   return (
 <>
 <div class="border-b border-line pb-4 last:border-0 last:pb-0 space-y-3">
@@ -213,6 +214,55 @@ export function SettingsGeneralSection() {
         </span>
       </label>
     </div>
+  </div>
+</div>
+
+<div class="border-b border-line pb-4 last:border-0 last:pb-0 space-y-3">
+  <h3 class="text-sm font-semibold text-ink-100 flex items-center gap-2">
+    <Iconify icon="lucide:arrow-down-to-line" size={15} class="text-ink-500" />
+    <span>Updates</span>
+  </h3>
+  <div class="space-y-3 text-xs">
+    <label class="flex items-start gap-2 cursor-pointer select-none">
+      <input
+        type="checkbox"
+        checked={du.info()?.autoUpdate ?? true}
+        onChange={(e) => du.toggle(e.currentTarget.checked)}
+        class="rounded accent-brand-500 mt-0.5"
+      />
+      <span>
+        <span class="text-ink-200 font-medium">Auto-update daemon</span>
+        <span class="block text-[11px] text-ink-500 font-normal mt-0.5">
+          Check on start, reconnect and every 10 minutes. New versions are staged and applied on restart.
+        </span>
+      </span>
+    </label>
+    <div class="flex items-center gap-2 text-ink-500">
+      <span>
+        {(() => {
+          const i = du.info();
+          if (!i?.current) return "Version unknown (daemon never reported).";
+          let s = `Running ${i.current}`;
+          if (i.available && i.available !== i.current) s += ` — ${i.available} available`;
+          else if (i.checkedAt) s += " — up to date";
+          if (i.staged && i.staged !== i.current) s += ` (staged ${i.staged})`;
+          return s + ".";
+        })()}
+      </span>
+    </div>
+    <div class="flex items-center gap-2">
+      <button class="btn btn-xs" onClick={() => du.checkNow()}>
+        Check now
+      </button>
+      <Show when={(() => { const i = du.info(); return !!i && !!i.staged && i.staged !== i.current; })()}>
+        <button class="btn btn-xs btn-primary" disabled={du.applying()} onClick={() => du.apply()}>
+          {du.applying() ? "Restarting…" : "Restart to update"}
+        </button>
+      </Show>
+    </div>
+    <Show when={du.info()?.error}>
+      <p class="text-[11px] text-red-400">{du.info()?.error}</p>
+    </Show>
   </div>
 </div>
 

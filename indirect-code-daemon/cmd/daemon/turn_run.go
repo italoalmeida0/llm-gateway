@@ -595,27 +595,37 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *walHeader) {
 	act.record.UpdatedAt = now
 	sessionID, sessionCWD := act.record.ID, act.record.CWD
 	modelToUse := act.record.Model
-	// WAL checkpoint: the fused record (frozen JSON + replayed WAL) is
-	// now durable via the freeze below, so the old log lines are
-	// truncated to a fresh header. Without this a second crash would
-	// replay the pre-crash lines twice. The header keeps the recovery
-	// prompt and the latest tracker snapshot.
+	// Resume keeps the existing WAL file and appends to it: the fused
+	// record lives in memory, the frozen JSONL on disk is untouched (no
+	// partial turn line), and the commit appends the complete turn line
+	// once. A second crash replays header + body exactly once.
+	// Update the header's tracker snapshot to the latest body state so a
+	// crash before the next incoming event still restores tracking.
 	if act.wal != nil {
 		d.discardWAL(act)
 	}
-	ww, werr := d.openWAL(sessionID, &walHeader{TurnIndex: j.TurnIndex, StartedAt: act.record.Turn.StartedAt, Model: modelToUse, Prompt: j.Prompt, AttachmentIDs: j.AttachmentIDs, Incoming: j.Incoming})
+	ww, werr := d.openWALAppend(sessionID)
 	if werr != nil {
-		act.mu.Unlock()
-		return
+		// No WAL file (e.g. header-only legacy path): create fresh.
+		ww, werr = d.openWAL(sessionID, &walHeader{TurnIndex: j.TurnIndex, StartedAt: act.record.Turn.StartedAt, Model: modelToUse, Prompt: j.Prompt, AttachmentIDs: j.AttachmentIDs, Incoming: j.Incoming})
+		if werr != nil {
+			act.mu.Unlock()
+			return
+		}
 	}
 	act.wal = ww
-	// Freeze the resumed running state (single rewrite); deltas append.
-	if err := d.saveSessionSync(act.record); err != nil {
-		d.discardWAL(act)
-		_ = os.Remove(d.walPath(sessionID))
-		act.wal = nil
-		act.mu.Unlock()
-		return
+	// Freeze the resumed running state (meta rewrite only); deltas append.
+	meta := recordMeta(act.record)
+	if err := d.rewriteMetaOnly(sessionID, meta); err != nil {
+		// No JSONL yet (fresh session crashed before first commit):
+		// full write of the fused record.
+		if err := d.saveSessionSync(act.record); err != nil {
+			d.discardWAL(act)
+			_ = os.Remove(d.walPath(sessionID))
+			act.wal = nil
+			act.mu.Unlock()
+			return
+		}
 	}
 	touchSession(act)
 	d.notifyChange("sessions")

@@ -54,7 +54,7 @@ case "$arch" in
   *) echo "[indirect] unsupported arch: $arch (supported: amd64, arm64)" >&2; exit 1 ;;
 esac
 
-ASSET="indirect-code-${os}-${arch}"
+ASSET="indirect-launcher-${os}-${arch}"
 URL="${REPO_RAW}/${ASSET}"
 
 mkdir -p "$BIN_DIR" "$DATA_DIR"

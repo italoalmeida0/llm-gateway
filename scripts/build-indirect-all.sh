@@ -25,10 +25,38 @@ for target in "${TARGETS[@]}"; do
   goos="$1"; goarch="$2"
   name="indirect-code-${goos}-${goarch}"
   [[ "$goos" == "windows" ]] && name="${name}.exe"
-  echo "==> $name"
+  echo "==> $name (daemon)"
   (cd "$DAEMON_DIR" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
     go build -trimpath -ldflags "$LDFLAGS" -o "dist/$name" ./cmd/daemon)
+  lname="indirect-launcher-${goos}-${goarch}"
+  [[ "$goos" == "windows" ]] && lname="${lname}.exe"
+  echo "==> $lname (launcher)"
+  (cd "$DAEMON_DIR" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+    go build -trimpath -ldflags "$LDFLAGS" -o "dist/$lname" ./cmd/launcher)
 done
 
-(cd "$OUT" && sha256sum indirect-code-* > SHA256SUMS.txt)
+(cd "$OUT" && sha256sum indirect-code-* indirect-launcher-* > SHA256SUMS.txt)
+
+# versions.json: self-update manifest (daemon + launcher check this).
+VERSION="${INDIRECT_VERSION:-$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || date -u +%Y%m%d-%H%M)}"
+python3 - "$OUT" "$VERSION" <<'PYEOF'
+import json, os, sys
+out, version = sys.argv[1], sys.argv[2]
+sums = {}
+with open(os.path.join(out, "SHA256SUMS.txt")) as f:
+    for line in f:
+        parts = line.split()
+        if len(parts) == 2:
+            sums[parts[1]] = parts[0]
+def assets(prefix):
+    return {fn[len(prefix)+1:].removesuffix(".exe"): fn
+            for fn in sorted(sums) if fn.startswith(prefix + "-")}
+manifest = {
+    "daemon": {"version": version, "assets": assets("indirect-code"), "sums": sums},
+    "launcher": {"version": version, "assets": assets("indirect-launcher"), "sums": sums},
+}
+with open(os.path.join(out, "versions.json"), "w") as f:
+    json.dump(manifest, f, indent=2)
+print("==> versions.json:", version)
+PYEOF
 echo "==> sizes:"; ls -lh "$OUT"

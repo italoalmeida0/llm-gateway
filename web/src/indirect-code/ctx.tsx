@@ -81,6 +81,7 @@ export interface ComposerCtxValue extends Composer {
 export interface ModalCtxValue extends Modals, ReviewDomain, Settings {}
 
 export interface UICtxValue extends Notice {
+  daemonUpdate: import("./hooks/useDaemonUpdate").DaemonUpdate;
   turnNotify: TurnNotify;
   pushSub: PushSubscription;
   sidebarOpen: () => boolean;

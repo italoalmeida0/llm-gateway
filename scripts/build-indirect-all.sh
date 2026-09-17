@@ -8,12 +8,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON_DIR="$ROOT/indirect-code-daemon"
 OUT="$DAEMON_DIR/dist"
 mkdir -p "$OUT"
-# Static version from dist/versions.json (overridable via INDIRECT_VERSION env var)
+# Version: MANUAL — bump indirect-code-daemon/dist/versions.json (daemon.version)
+# before building a release, or pass INDIRECT_VERSION=x. The build stamps
+# this version into the daemon (-X main.daemonVersion) and regenerates the
+# manifest with it, so binary + manifest always agree. Do NOT auto-bump
+# (timestamps etc.): every build must be reproducible for a given version.
+# NOTE: cmd/launcher is its own main package (no daemonVersion var), so
+# launcher builds use plain LDFLAGS; only the daemon gets the stamp.
 VERSION="${INDIRECT_VERSION:-$(python3 -c 'import json, os; print(json.load(open(os.path.join("'"$OUT"'", "versions.json")))["daemon"]["version"])' 2>/dev/null || echo "1.0.0")}"
 echo "==> Building Indirect Code v${VERSION}"
 
 # Keep binaries small: ~100MB total for 6 targets matters in git history.
-LDFLAGS="-s -w -X main.daemonVersion=${VERSION}"
+LDFLAGS="-s -w"
+DAEMON_LDFLAGS="-s -w -X main.daemonVersion=${VERSION}"
 TARGETS=(
   "linux amd64"
   "linux arm64"
@@ -30,7 +37,7 @@ for target in "${TARGETS[@]}"; do
   [[ "$goos" == "windows" ]] && name="${name}.exe"
   echo "==> $name (daemon)"
   (cd "$DAEMON_DIR" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-    go build -trimpath -ldflags "$LDFLAGS" -o "dist/$name" ./cmd/daemon)
+    go build -trimpath -ldflags "$DAEMON_LDFLAGS" -o "dist/$name" ./cmd/daemon)
   lname="indirect-launcher-${goos}-${goarch}"
   [[ "$goos" == "windows" ]] && lname="${lname}.exe"
   echo "==> $lname (launcher)"

@@ -10,18 +10,18 @@
       "windows-arm64": "indirect-code-windows-arm64.exe"
     },
     "sums": {
-      "indirect-code-darwin-amd64": "bc5ad4c34dcba9b17d1b5f838531e7fa4d0058ca66deda24959d85ff808e470c",
-      "indirect-code-darwin-arm64": "90b9a0e304e52df01269208aaf37b68245036d9094ac1bde1b961761c5febc06",
-      "indirect-code-linux-amd64": "d9c4d3fea6cd4b00e4e858514aeab5c81683e0c8160bb64abebaccf6d3528292",
-      "indirect-code-linux-arm64": "2d490952a878360e286dc877dcd561bbb71d3b6dea411e2b04e5faaf8b2ee526",
-      "indirect-code-windows-amd64.exe": "232c82d9ff9a2f18eccfb2dfa597407c27b783705d11dbedfd4b0ad247814911",
-      "indirect-code-windows-arm64.exe": "dae2d5a16f1c8f6a620dfae5a2975497f75295dc68220226ad08f46e0ccfa528",
-      "indirect-launcher-darwin-amd64": "8c052a0ca777481b6b2dc0674072f37948feb33d0ce94d87c720b70fa6f5eac0",
-      "indirect-launcher-darwin-arm64": "ff396cc4ce22ab176aa20d829fa35a18bcc8347bf2d672186d52a45f1f6f1f9d",
-      "indirect-launcher-linux-amd64": "2678181338c15daedbe7542d4c5fa06cd9a2f9cb53e8c27f8fa2a239361261be",
-      "indirect-launcher-linux-arm64": "e4c782977d25962ffd05c3d467830a5291fc8ed67d2e43db529cca7ed1a0fc29",
-      "indirect-launcher-windows-amd64.exe": "f6cd61373baaee577d760631ed2de1c2cee3509bfd5f98b6974c0ef5dccddff8",
-      "indirect-launcher-windows-arm64.exe": "b71bdfcaa514c37d5bbd2d70d4f6bdd579a939a67ae6da9fbfa6d0001b552530"
+      "indirect-code-darwin-amd64": "1816a70f308d6d602a08b8a22587e4eeae529a54d9520f66af652a4ff90a664f",
+      "indirect-code-darwin-arm64": "70a3491aadfbf434838353c7ad07bd35735d95a3a1aed21ecdc3d94f5981ae80",
+      "indirect-code-linux-amd64": "c503311da707ee34003a9cd78db32a7521b53f4dd7786944a4a198b094ef428d",
+      "indirect-code-linux-arm64": "f0db30ee388e726af7b6ac121910b78d4350e3efbd7a060dbcea4247c10ce7b7",
+      "indirect-code-windows-amd64.exe": "e5361d8427b8ab38a514c8aff945ebd121b35916deac7c89a07741610b6b840b",
+      "indirect-code-windows-arm64.exe": "20859ade4f0624f31b2dde634e9f6c1d8ca6e48d65a6707cdf04362a31418171",
+      "indirect-launcher-darwin-amd64": "2636f7622f436842cf875601e308d7d0e9226aeb35c42914b178affada3a9c67",
+      "indirect-launcher-darwin-arm64": "5216207e95f23f9575ccf7dac55304803a5f453c5533bcdfc9a43c8ea2aba9fc",
+      "indirect-launcher-linux-amd64": "68fc78a4b9e745c924bf842ad5c4db121c73f445a9392a4eb965a0120d36bd93",
+      "indirect-launcher-linux-arm64": "68ee3514cb2459fc3d9ff415a0e421581c7cdc86fb7ed1a5f5411f69093b0089",
+      "indirect-launcher-windows-amd64.exe": "b00305100016d8d14c9f214b304278f2631c431bbd87973fd5ebee20e28c4372",
+      "indirect-launcher-windows-arm64.exe": "0dae298978bcd01d89c4315bd9cd76eccc8b2e2b38e342493344c599543ccf88"
     }
   },
   "launcher": {
@@ -35,18 +35,18 @@
       "windows-arm64": "indirect-launcher-windows-arm64.exe"
     },
     "sums": {
-      "indirect-code-darwin-amd64": "bc5ad4c34dcba9b17d1b5f838531e7fa4d0058ca66deda24959d85ff808e470c",
-      "indirect-code-darwin-arm64": "90b9a0e304e52df01269208aaf37b68245036d9094ac1bde1b961761c5febc06",
-      "indirect-code-linux-amd64": "d9c4d3fea6cd4b00e4e858514aeab5c81683e0c8160bb64abebaccf6d3528292",
-      "indirect-code-linux-arm64": "2d490952a878360e286dc877dcd561bbb71d3b6dea411e2b04e5faaf8b2ee526",
-      "indirect-code-windows-amd64.exe": "232c82d9ff9a2f18eccfb2dfa597407c27b783705d11dbedfd4b0ad247814911",
-      "indirect-code-windows-arm64.exe": "dae2d5a16f1c8f6a620dfae5a2975497f75295dc68220226ad08f46e0ccfa528",
-      "indirect-launcher-darwin-amd64": "8c052a0ca777481b6b2dc0674072f37948feb33d0ce94d87c720b70fa6f5eac0",
-      "indirect-launcher-darwin-arm64": "ff396cc4ce22ab176aa20d829fa35a18bcc8347bf2d672186d52a45f1f6f1f9d",
-      "indirect-launcher-linux-amd64": "2678181338c15daedbe7542d4c5fa06cd9a2f9cb53e8c27f8fa2a239361261be",
-      "indirect-launcher-linux-arm64": "e4c782977d25962ffd05c3d467830a5291fc8ed67d2e43db529cca7ed1a0fc29",
-      "indirect-launcher-windows-amd64.exe": "f6cd61373baaee577d760631ed2de1c2cee3509bfd5f98b6974c0ef5dccddff8",
-      "indirect-launcher-windows-arm64.exe": "b71bdfcaa514c37d5bbd2d70d4f6bdd579a939a67ae6da9fbfa6d0001b552530"
+      "indirect-code-darwin-amd64": "1816a70f308d6d602a08b8a22587e4eeae529a54d9520f66af652a4ff90a664f",
+      "indirect-code-darwin-arm64": "70a3491aadfbf434838353c7ad07bd35735d95a3a1aed21ecdc3d94f5981ae80",
+      "indirect-code-linux-amd64": "c503311da707ee34003a9cd78db32a7521b53f4dd7786944a4a198b094ef428d",
+      "indirect-code-linux-arm64": "f0db30ee388e726af7b6ac121910b78d4350e3efbd7a060dbcea4247c10ce7b7",
+      "indirect-code-windows-amd64.exe": "e5361d8427b8ab38a514c8aff945ebd121b35916deac7c89a07741610b6b840b",
+      "indirect-code-windows-arm64.exe": "20859ade4f0624f31b2dde634e9f6c1d8ca6e48d65a6707cdf04362a31418171",
+      "indirect-launcher-darwin-amd64": "2636f7622f436842cf875601e308d7d0e9226aeb35c42914b178affada3a9c67",
+      "indirect-launcher-darwin-arm64": "5216207e95f23f9575ccf7dac55304803a5f453c5533bcdfc9a43c8ea2aba9fc",
+      "indirect-launcher-linux-amd64": "68fc78a4b9e745c924bf842ad5c4db121c73f445a9392a4eb965a0120d36bd93",
+      "indirect-launcher-linux-arm64": "68ee3514cb2459fc3d9ff415a0e421581c7cdc86fb7ed1a5f5411f69093b0089",
+      "indirect-launcher-windows-amd64.exe": "b00305100016d8d14c9f214b304278f2631c431bbd87973fd5ebee20e28c4372",
+      "indirect-launcher-windows-arm64.exe": "0dae298978bcd01d89c4315bd9cd76eccc8b2e2b38e342493344c599543ccf88"
     }
   }
 }

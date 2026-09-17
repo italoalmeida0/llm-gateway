@@ -116,7 +116,10 @@ func fetchManifest() (*versionManifest, error) {
 // fails the caller: errors are recorded and broadcast as lastError.
 func (d *DaemonServer) checkForUpdates(reason string) {
 	if daemonVersion == "dev" || daemonVersion == "" {
-		return // dev builds never self-update
+		// Dev builds never self-update, but still broadcast so the
+		// frontend shows "dev build" instead of "unknown".
+		d.broadcastUpdateState()
+		return
 	}
 	m, err := fetchManifest()
 	st := d.updateChecker()

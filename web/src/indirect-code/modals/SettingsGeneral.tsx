@@ -242,6 +242,7 @@ export function SettingsGeneralSection() {
         {(() => {
           const i = du.info();
           if (!i?.current) return "Version unknown (daemon never reported).";
+          if (i.current === "dev") return "Running dev build (self-update disabled).";
           let s = `Running ${i.current}`;
           if (i.available && i.available !== i.current) s += ` — ${i.available} available`;
           else if (i.checkedAt) s += " — up to date";

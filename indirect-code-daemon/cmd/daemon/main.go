@@ -2567,7 +2567,12 @@ func main() {
 	configFlag := flag.String("config", "", "Path to config.json")
 	dataDirFlag := flag.String("data-dir", "", "Path to daemon data directory")
 	stopFlag := flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
+	versionFlag := flag.Bool("version", false, "Print daemon version and exit")
 	flag.Parse()
+	if *versionFlag {
+		fmt.Printf("indirect-code daemon %s\n", daemonVersion)
+		os.Exit(0)
+	}
 
 	dataDir := *dataDirFlag
 	if dataDir == "" {

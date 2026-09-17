@@ -9,12 +9,24 @@ import (
 	"strings"
 )
 
+// activeSessionsDir mirrors the daemon's sessionsDir (main.go): once
+// slots/active exists, sessions live in the active slot; otherwise in
+// the legacy top-level sessions/ dir. Keep the two in sync.
+func activeSessionsDir(dataDir string) string {
+	if raw, err := os.ReadFile(filepath.Join(dataDir, "slots", "active")); err == nil {
+		if s := strings.TrimSpace(string(raw)); s == "a" || s == "b" {
+			return filepath.Join(dataDir, "slots", "slot-"+s, "sessions")
+		}
+	}
+	return filepath.Join(dataDir, "sessions")
+}
+
 // verifySessions scans every session file for structural sanity:
 // JSONL sessions must end with a meta line; legacy JSON sessions must
 // parse. Torn tail lines are reported (the daemon tolerates them) but
 // do not fail verification.
 func verifySessions(dataDir string) error {
-	dir := filepath.Join(dataDir, "sessions")
+	dir := activeSessionsDir(dataDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {

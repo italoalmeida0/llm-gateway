@@ -230,10 +230,22 @@ func selfVerifyBinary(path, wantVersion, kind string) error {
 
 // copyToSlot copies sessions (+ small configs) active -> inactive.
 // Uses hardlinks when possible (instant, CoW-safe: all our writes are
-// tmp+rename), plain copy fallback otherwise.
+// tmp+rename), plain copy fallback otherwise. The sessions source is the
+// daemon's live sessionsDir (active slot once slots/ exist, legacy dir
+// otherwise) — never slotDir(active) blindly, which resolves to the
+// legacy dir in pre-slot installs and would copy nothing.
 func (d *DaemonServer) copyToSlot(sl slotLayout, inactiveDir string) error {
 	src := d.slotDir(sl.active)
-	for _, name := range []string{"sessions", "projects.json", "config.json"} {
+	srcSessions := d.sessionsDir()
+	// Sessions first: sourced from the live sessionsDir (slot-aware).
+	if s, err := os.Stat(srcSessions); err == nil && s.IsDir() {
+		if err := copyDirLink(filepath.Dir(srcSessions), filepath.Join(inactiveDir, "sessions"), "sessions"); err != nil {
+			return fmt.Errorf("copy sessions: %w", err)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, name := range []string{"projects.json", "config.json"} {
 		s, err := os.Stat(filepath.Join(src, name))
 		if err != nil {
 			if os.IsNotExist(err) {

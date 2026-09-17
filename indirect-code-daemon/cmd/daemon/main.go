@@ -602,6 +602,17 @@ func isRevokedDialError(resp *http.Response, err error) bool {
 }
 
 func (d *DaemonServer) sessionsDir() string {
+	// Sessions live in the ACTIVE slot once slots/ exists (the launcher
+	// adopts the legacy top-level sessions/ into slots/slot-a on first
+	// slot boot). Reading the legacy dir instead would silently hide
+	// every session after the first slot update (see handoff.go/copyToSlot
+	// and launcher installSlotA). The active slot is the source of truth;
+	// the legacy dir is only a fallback for pre-slot installs.
+	if raw, err := os.ReadFile(filepath.Join(d.dataDir, "slots", "active")); err == nil {
+		if s := strings.TrimSpace(string(raw)); s == "a" || s == "b" {
+			return filepath.Join(d.dataDir, "slots", "slot-"+s, "sessions")
+		}
+	}
 	return filepath.Join(d.dataDir, "sessions")
 }
 

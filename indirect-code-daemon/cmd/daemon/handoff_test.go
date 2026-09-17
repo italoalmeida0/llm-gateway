@@ -64,6 +64,49 @@ func TestCopyToSlotHardlink(t *testing.T) {
 	}
 }
 
+// Regression: after the first slot boot adopts sessions/ into
+// slots/slot-a, sessionsDir must resolve to the ACTIVE slot — the
+// daemon must keep serving (and copying) the adopted sessions, not
+// the stale legacy dir. (Real incident 2026-09-17: two compacted
+// sessions vanished from the frontend because the daemon kept reading
+// the legacy dir after installSlotA moved it.)
+func TestSessionsDirFollowsActiveSlot(t *testing.T) {
+	d := testDaemon(t)
+	dir := t.TempDir()
+	d.dataDir = dir
+	// Pre-slot layout: legacy dir is live.
+	if got := d.sessionsDir(); got != filepath.Join(dir, "sessions") {
+		t.Fatalf("legacy sessionsDir = %q", got)
+	}
+	// Post-adoption layout: active=a, sessions only in slot-a.
+	os.MkdirAll(filepath.Join(dir, "slots", "slot-a", "sessions"), 0o700)
+	os.WriteFile(filepath.Join(dir, "slots", "slot-a", "sessions", "s.jsonl"),
+		[]byte("{\"v\":1,\"kind\":\"meta\",\"id\":\"s\",\"title\":\"T\",\"updatedAt\":1}\n"), 0o600)
+	os.MkdirAll(filepath.Join(dir, "sessions"), 0o700) // stale legacy dir
+	os.WriteFile(filepath.Join(dir, "slots", "active"), []byte("a\n"), 0o600)
+	if got, want := d.sessionsDir(), filepath.Join(dir, "slots", "slot-a", "sessions"); got != want {
+		t.Fatalf("sessionsDir = %q, want %q", got, want)
+	}
+	// listSessions must see the adopted session.
+	found := false
+	for _, s := range d.listSessions() {
+		if s.ID == "s" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("adopted session invisible to listSessions")
+	}
+	// copyToSlot must copy FROM the active slot.
+	sl := d.slots()
+	if err := d.copyToSlot(sl, d.slotDir("b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "slots", "slot-b", "sessions", "s.jsonl")); err != nil {
+		t.Fatalf("copy missed adopted session: %v", err)
+	}
+}
+
 func TestLegacySlotDir(t *testing.T) {
 	d := testDaemon(t)
 	d.dataDir = t.TempDir()

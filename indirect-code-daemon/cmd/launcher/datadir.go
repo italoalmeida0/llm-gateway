@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 // defaultDataDir mirrors the daemon's defaultDataDir (kept in sync by
@@ -14,11 +13,6 @@ func defaultDataDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return filepath.Join(".", ".indirect-code")
-	}
-	if runtime.GOOS == "windows" {
-		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "indirect-code")
-		}
 	}
 	return filepath.Join(home, ".indirect-code")
 }

@@ -36,28 +36,31 @@ $ErrFile = Join-Path $DataDir "daemon.err.log"
 $PidFile = Join-Path $DataDir "daemon.pid"
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
-# --- Stop previous daemon (if any) before replacing binary ---
+# --- Stop previous daemon / launcher (if any) before replacing binary ---
 # On Windows, running .exe files are locked against deletion and replacement.
-if (Test-Path $PidFile) {
-  $oldPidRaw = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
-  $oldPid = ""
-  if ($null -ne $oldPidRaw) { $oldPid = "$oldPidRaw".Trim() }
-  if ($oldPid -match '^\d+$') {
-    $proc = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
-    if ($proc) {
-      Write-Host "[indirect] stopping previous daemon (pid $oldPid) ..."
-      try {
-        if (Test-Path (Join-Path $BinDir "indirect-code.exe")) {
-          & (Join-Path $BinDir "indirect-code.exe") --stop
-        } else {
-          Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
-        }
-      } catch {
-        Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
-      }
-      Start-Sleep -Seconds 1
+$possiblePidFiles = @(
+  $PidFile,
+  (Join-Path (Join-Path $env:APPDATA "indirect-code") "daemon.pid")
+)
+foreach ($pf in $possiblePidFiles) {
+  if (Test-Path $pf) {
+    $oldPidRaw = (Get-Content $pf -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($null -ne $oldPidRaw -and "$oldPidRaw".Trim() -match '^\d+$') {
+      Stop-Process -Id ([int]"$oldPidRaw".Trim()) -Force -ErrorAction SilentlyContinue
     }
   }
+}
+
+Get-Process -Name "indirect-code*", "indirect-launcher*" -ErrorAction SilentlyContinue | ForEach-Object {
+  Write-Host "[indirect] stopping running process $($_.ProcessName) (pid $($_.Id)) ..."
+  Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 600
+
+# Clean up stray AppData directory if it was created by an older launcher version
+$strayAppData = Join-Path $env:APPDATA "indirect-code"
+if (Test-Path $strayAppData) {
+  Remove-Item -Recurse -Force $strayAppData -ErrorAction SilentlyContinue
 }
 
 # --- Detect arch ---
@@ -79,8 +82,17 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 Invoke-WebRequest -Uri $Url -OutFile "$Bin.tmp" -UseBasicParsing
 if (Test-Path $Bin) {
   Remove-Item -Force $Bin -ErrorAction SilentlyContinue
+  if (Test-Path $Bin) {
+    # If the file is still locked or cannot be deleted directly, NTFS allows renaming it
+    $oldBin = "$Bin.old." + [System.Guid]::NewGuid().ToString("N")
+    Rename-Item -Path $Bin -NewName (Split-Path $oldBin -Leaf) -Force -ErrorAction SilentlyContinue
+    Remove-Item -Force $oldBin -ErrorAction SilentlyContinue
+  }
 }
-Move-Item -Force "$Bin.tmp" $Bin
+# Copy-Item then Remove-Item avoids the PowerShell 5.1 bug where Move-Item -Force
+# throws 'Cannot create a file when that file already exists'
+Copy-Item -Path "$Bin.tmp" -Destination $Bin -Force
+Remove-Item -Force "$Bin.tmp" -ErrorAction SilentlyContinue
 # Strip Mark-of-the-Web (Zone.Identifier) so Windows Defender / SmartScreen doesn't block unsigned execution
 Unblock-File -Path $Bin -ErrorAction SilentlyContinue
 

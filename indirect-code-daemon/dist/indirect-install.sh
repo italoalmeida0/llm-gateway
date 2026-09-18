@@ -77,20 +77,6 @@ fi
 mv "$BIN_DIR/indirect-code.tmp" "$BIN_DIR/indirect-code"
 chmod +x "$BIN_DIR/indirect-code"
 
-# Optional checksum verify (best-effort: raw cache may lag a fresh push).
-if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
-  if curl -fsSL --max-time 15 "${REPO_RAW}/SHA256SUMS.txt" -o "$DATA_DIR/SHA256SUMS.txt" 2>/dev/null; then
-    (cd "$BIN_DIR" && cp "$DATA_DIR/SHA256SUMS.txt" . 2>/dev/null || true
-     expected="$(grep " ${ASSET}\$" SHA256SUMS.txt 2>/dev/null | awk '{print $1}')"
-     actual="$(sha256sum indirect-code 2>/dev/null | awk '{print $1}' || shasum -a 256 indirect-code 2>/dev/null | awk '{print $1}')"
-     if [[ -n "$expected" && "$expected" == "$actual" ]]; then
-       echo "[indirect] checksum OK"
-     else
-       echo "[indirect] warning: checksum mismatch (continuing)"
-     fi)
-  fi
-fi
-
 # --- Stop previous daemon (if any) ---
 if [[ -f "$PID_FILE" ]]; then
   old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -99,7 +85,14 @@ if [[ -f "$PID_FILE" ]]; then
     "$BIN_DIR/indirect-code" --stop 2>/dev/null || kill "$old_pid" 2>/dev/null || true
     sleep 1
   fi
+  rm -f "$PID_FILE"
 fi
+pkill -f "$BIN_DIR/indirect-code" 2>/dev/null || true
+rm -f "$PID_FILE"
+
+# Export gateway & repo env vars so the launcher and daemon know their mirror
+export INDIRECT_GATEWAY="$GATEWAY_BASE"
+export INDIRECT_REPO_RAW="$REPO_RAW"
 
 # --- Pair + detach (nohup: terminal stays free) ---
 ARGS=(-connect "$CONNECT_URL")
@@ -109,9 +102,21 @@ echo "[indirect] pairing and starting in background (log: $LOG_FILE) ..."
 nohup "$BIN_DIR/indirect-code" "${ARGS[@]}" >>"$LOG_FILE" 2>&1 < /dev/null &
 disown 2>/dev/null || true
 
-sleep 2
-if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "[indirect] daemon running in background (pid $(cat "$PID_FILE"))."
+# First start downloads the daemon binary and runtimes, so poll for the pid file.
+daemon_pid=""
+for ((i = 0; i < 45; i++)); do
+  sleep 1
+  if [[ -f "$PID_FILE" ]]; then
+    candidate="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$candidate" ]] && kill -0 "$candidate" 2>/dev/null; then
+      daemon_pid="$candidate"
+      break
+    fi
+  fi
+done
+
+if [[ -n "$daemon_pid" ]]; then
+  echo "[indirect] daemon running in background (pid $daemon_pid)."
   echo "[indirect] Dashboard should show the host online in a few seconds."
   echo "[indirect] Stop locally anytime: ~/.indirect-code/bin/indirect-code --stop"
 else

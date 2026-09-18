@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,10 +37,7 @@ const (
 
 // releaseBase resolves the download mirror.
 func releaseBase() string {
-	if v := os.Getenv("INDIRECT_REPO_RAW"); v != "" {
-		return strings.TrimRight(v, "/")
-	}
-	return defaultReleaseBase
+	return mirrorBase()
 }
 
 // daemonAssetName is the platform asset, e.g. indirect-code-linux-amd64.
@@ -184,14 +182,57 @@ func installSlotA(dataDir string) error {
 
 // mirrorBase resolves the release mirror: explicit env override first,
 // then the gateway that spawned us (INDIRECT_GATEWAY, set by the daemon
-// on takeover — the gateway serves dist/ itself, no CDN cache), GitHub
-// raw only as last resort.
+// on takeover — the gateway serves dist/ itself, no CDN cache), or derived
+// from -connect flag or config.json.
 func mirrorBase() string {
 	if v := os.Getenv("INDIRECT_REPO_RAW"); v != "" {
 		return strings.TrimRight(v, "/")
 	}
 	if v := os.Getenv("INDIRECT_GATEWAY"); v != "" {
 		return strings.TrimRight(v, "/") + "/r"
+	}
+	// Check -connect flag in os.Args
+	for i, a := range os.Args {
+		if (a == "-connect" || a == "--connect") && i+1 < len(os.Args) {
+			if u, err := url.Parse(os.Args[i+1]); err == nil && u.Scheme != "" && u.Host != "" {
+				return fmt.Sprintf("%s://%s/r", u.Scheme, u.Host)
+			}
+		}
+		if strings.HasPrefix(a, "-connect=") || strings.HasPrefix(a, "--connect=") {
+			parts := strings.SplitN(a, "=", 2)
+			if u, err := url.Parse(parts[1]); err == nil && u.Scheme != "" && u.Host != "" {
+				return fmt.Sprintf("%s://%s/r", u.Scheme, u.Host)
+			}
+		}
+	}
+	// Check saved config.json in dataDir
+	home, _ := os.UserHomeDir()
+	cfgPaths := []string{
+		filepath.Join(defaultDataDir(), "config.json"),
+	}
+	for i, a := range os.Args {
+		if (a == "-data-dir" || a == "--data-dir") && i+1 < len(os.Args) {
+			cfgPaths = append([]string{filepath.Join(os.Args[i+1], "config.json")}, cfgPaths...)
+		}
+		if strings.HasPrefix(a, "-data-dir=") || strings.HasPrefix(a, "--data-dir=") {
+			parts := strings.SplitN(a, "=", 2)
+			cfgPaths = append([]string{filepath.Join(parts[1], "config.json")}, cfgPaths...)
+		}
+	}
+	if home != "" {
+		cfgPaths = append(cfgPaths, filepath.Join(home, ".indirect-code", "config.json"))
+	}
+	for _, cp := range cfgPaths {
+		if data, err := os.ReadFile(cp); err == nil {
+			var cfg struct {
+				GatewayURL string `json:"gateway_url"`
+			}
+			if json.Unmarshal(data, &cfg) == nil && cfg.GatewayURL != "" {
+				if u, err := url.Parse(cfg.GatewayURL); err == nil && u.Scheme != "" && u.Host != "" {
+					return fmt.Sprintf("%s://%s/r", u.Scheme, u.Host)
+				}
+			}
+		}
 	}
 	return defaultReleaseBase
 }
@@ -297,7 +338,11 @@ type releaseAsset struct {
 // fetchVersionsManifest downloads + parses versions.json.
 func fetchVersionsManifest() (*versionManifest, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(mirrorBase() + "/versions.json")
+	base := mirrorBase()
+	if base == "" {
+		return nil, fmt.Errorf("no release mirror available (pair a gateway or set INDIRECT_REPO_RAW)")
+	}
+	resp, err := client.Get(base + "/versions.json")
 	if err != nil {
 		return nil, err
 	}

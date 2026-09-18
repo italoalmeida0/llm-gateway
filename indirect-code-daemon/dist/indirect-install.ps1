@@ -52,6 +52,7 @@ foreach ($pf in $possiblePidFiles) {
     if ($null -ne $oldPidRaw -and "$oldPidRaw".Trim() -match '^\d+$') {
       Stop-Process -Id ([int]"$oldPidRaw".Trim()) -Force -ErrorAction SilentlyContinue
     }
+    Remove-Item -Force $pf -ErrorAction SilentlyContinue
   }
 }
 
@@ -104,6 +105,12 @@ Unblock-File -Path $Bin -ErrorAction SilentlyContinue
 # NOTE: $args is a PowerShell automatic variable, so the daemon argv lives
 # in $daemonArgs instead. Start-Process requires distinct stdout/stderr
 # files, so stderr goes to daemon.err.log (kept tiny/empty in practice).
+if ($ConnectUrl -match '^(https?://[^/]+)') {
+  $env:INDIRECT_GATEWAY = $Matches[1]
+}
+$env:INDIRECT_REPO_RAW = $RepoRaw
+Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
+
 $daemonArgs = @('-connect', $ConnectUrl)
 if (-not [string]::IsNullOrWhiteSpace($Name)) { $daemonArgs += @('--name', $Name) }
 Write-Host "[indirect] pairing and starting in background (log: $LogFile) ..."
@@ -113,21 +120,24 @@ Start-Process -FilePath $Bin -ArgumentList $daemonArgs -WindowStyle Hidden `
 # First start downloads unish/python runtimes (~30s+), so poll for the pid.
 $pid2 = ""
 for ($i = 0; $i -lt 45; $i++) {
-  Start-Sleep -Seconds 2
+  Start-Sleep -Seconds 1
   if (Test-Path $PidFile) {
     $pidRaw = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
-    if ($null -ne $pidRaw) { $pid2 = "$pidRaw".Trim() }
-    if ($pid2) { break }
+    if ($null -ne $pidRaw -and "$pidRaw".Trim() -match '^\d+$') {
+      $testPid = [int]"$pidRaw".Trim()
+      $proc2 = Get-Process -Id $testPid -ErrorAction SilentlyContinue
+      if ($proc2) {
+        $pid2 = "$testPid"
+        break
+      }
+    }
   }
 }
 if ($pid2) {
-  $proc2 = Get-Process -Id $pid2 -ErrorAction SilentlyContinue
-  if ($proc2) {
-    Write-Host "[indirect] daemon running in background (pid $pid2)."
-    Write-Host "[indirect] Dashboard should show the host online in a few seconds."
-    Write-Host "[indirect] Stop locally anytime: ~\.indirect-code\bin\indirect-code.exe --stop"
-    exit 0
-  }
+  Write-Host "[indirect] daemon running in background (pid $pid2)."
+  Write-Host "[indirect] Dashboard should show the host online in a few seconds."
+  Write-Host "[indirect] Stop locally anytime: ~\.indirect-code\bin\indirect-code.exe --stop"
+  exit 0
 }
 Write-Error "[indirect] started, but pid check failed - see $LogFile"
 Get-Content $LogFile -Tail 20 -ErrorAction SilentlyContinue

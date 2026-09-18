@@ -32,11 +32,10 @@ func fetchDaemonTo(slotDir, version string) (string, error) {
 		local = filepath.Join(binDir, "indirect-code.exe")
 	}
 	// Manifest URL: same mirror the daemon uses (env override supported).
-	mirror := os.Getenv("INDIRECT_REPO_RAW")
+	mirror := mirrorBase()
 	if mirror == "" {
-		mirror = defaultReleaseBase
+		return "", fmt.Errorf("no release mirror available (pair a gateway or set INDIRECT_REPO_RAW)")
 	}
-	mirror = strings.TrimRight(mirror, "/")
 	// Dual publish: versioned URL first (immutable — a CDN can never serve
 	// stale bytes for a URL that never existed), floating fallback (may be
 	// stale; --version self-verify decides). Cache-buster query on top.

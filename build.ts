@@ -1,6 +1,6 @@
 process.env.NODE_ENV = "production";
 
-import { cpSync, existsSync, mkdirSync, readdirSync } from "fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 

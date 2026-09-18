@@ -32,26 +32,38 @@ import (
 func runTakeover(
 	dataDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid string,
 ) int {
+	toDir := filepath.Join(dataDir, "slots", "slot-"+toSlot)
+	// Dedicated log: daemon stdout may be unreachable (service, nohup
+	// rotation); the reason for a takeover failure must survive here.
+	takeoverLog := filepath.Join(toDir, "takeover.log")
+	_ = os.Remove(takeoverLog) // fresh signals only (stale log must not confuse)
+	logf := func(format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		fmt.Println(msg)
+		if f, err := os.OpenFile(takeoverLog, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
+			fmt.Fprintln(f, msg)
+			f.Close()
+		}
+	}
 	fail := func(reason string) int {
 		_ = os.WriteFile(handoffFile, []byte("failed: "+reason), 0o600)
-		fmt.Printf("[TAKEOVER] failed: %s\n", reason)
+		logf("[TAKEOVER] failed: %s", reason)
 		return 1
 	}
-	toDir := filepath.Join(dataDir, "slots", "slot-"+toSlot)
 	// 0. Fresh signals only: clear stale handoff/serving leftovers in the
 	// target slot (a crashed previous takeover must not fake success).
 	_ = os.Remove(filepath.Join(toDir, "handoff.json"))
 	_ = os.Remove(filepath.Join(toDir, "serving.json"))
 	_ = os.Remove(filepath.Join(toDir, "standby-ready.json"))
 	// 1. Migrate inactive slot.
-	fmt.Printf("[TAKEOVER] migrating slot %s...\n", toSlot)
+	logf("[TAKEOVER] migrating slot %s...", toSlot)
 	if applied, err := migrations.MigrateDir(filepath.Join(toDir)); err != nil {
 		return fail(fmt.Sprintf("migrate: %v", err))
 	} else if len(applied) > 0 {
-		fmt.Printf("[TAKEOVER] applied: %v\n", applied)
+		logf("[TAKEOVER] applied: %v", applied)
 	}
 	// 2. Fetch new daemon into inactive slot + self-verify.
-	fmt.Printf("[TAKEOVER] fetching daemon %s...\n", expectVersion)
+	logf("[TAKEOVER] fetching daemon %s...", expectVersion)
 	daemonPath, err := fetchDaemonTo(toDir, expectVersion)
 	if err != nil {
 		return fail(fmt.Sprintf("fetch daemon: %v", err))
@@ -63,7 +75,7 @@ func runTakeover(
 	// never routed) and writes serving.json AFTER its WS is up. Serving
 	// proof = health + version + end-to-end WS in one file. No separate
 	// health step (the old standby-ready probe couldn't prove WS).
-	fmt.Printf("[TAKEOVER] starting standby daemon (shadow WS)...\n")
+	logf("[TAKEOVER] starting standby daemon (shadow WS)...")
 	standby, err := startStandby(daemonPath, toDir, expectVersion)
 	if err != nil {
 		return fail(fmt.Sprintf("standby: %v", err))
@@ -74,13 +86,13 @@ func runTakeover(
 	// dies before the replacement proves, in writing, that it serves.
 	// This kills the version-skew class: stale cache can no longer swap
 	// a healthy daemon for itself.
-	fmt.Printf("[TAKEOVER] waiting for new daemon proof of serving...\n")
+	logf("[TAKEOVER] waiting for new daemon proof of serving...")
 	if err := waitServingProof(toDir, expectVersion, 90*time.Second); err != nil {
 		_ = standby.cmd.Process.Kill()
 		return fail(fmt.Sprintf("serving proof: %v", err))
 	}
 	// 6. Only now: tell the old daemon to die (SIGTERM, escalate).
-	fmt.Printf("[TAKEOVER] proof OK; asking old daemon (pid %s) to exit...\n", parentPid)
+	logf("[TAKEOVER] proof OK; asking old daemon (pid %s) to exit...", parentPid)
 	if err := terminateParentWait(parentPid, 15*time.Second); err != nil {
 		_ = standby.cmd.Process.Kill()
 		return fail(fmt.Sprintf("terminate parent: %v", err))
@@ -100,7 +112,7 @@ func runTakeover(
 	if err := confirmServing(dataDir, standby, toDir, expectVersion, flippedAt); err != nil {
 		// Rollback: flip back, relaunch OLD daemon from the intact slot,
 		// report failure. The old slot was never touched.
-		fmt.Printf("[TAKEOVER] new daemon failed to serve: %v — rolling back\n", err)
+		logf("[TAKEOVER] new daemon failed to serve: %v — rolling back", err)
 		_ = standby.cmd.Process.Kill()
 		_ = os.WriteFile(filepath.Join(dataDir, "slots", "active"), []byte(fromSlot+"\n"), 0o600)
 		_ = os.WriteFile(handoffFile, []byte("failed: new daemon did not serve"), 0o600)
@@ -109,9 +121,9 @@ func runTakeover(
 		}
 		return fail("new daemon did not serve; rolled back to previous version")
 	}
-	fmt.Printf("[TAKEOVER] promoted slot %s, cleaning old slot %s...\n", toSlot, fromSlot)
+	logf("[TAKEOVER] promoted slot %s, cleaning old slot %s...", toSlot, fromSlot)
 	_ = os.RemoveAll(filepath.Join(dataDir, "slots", "slot-"+fromSlot))
-	fmt.Printf("[TAKEOVER] done (daemon %s live)\n", expectVersion)
+	logf("[TAKEOVER] done (daemon %s live)", expectVersion)
 	return 0
 }
 

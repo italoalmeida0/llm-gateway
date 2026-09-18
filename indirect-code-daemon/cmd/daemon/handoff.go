@@ -345,6 +345,13 @@ func fetchURL(url string, w io.Writer) error {
 func (d *DaemonServer) execTakeover(launcherPath string, sl slotLayout, version string) error {
 	handoffFile := filepath.Join(d.slotDir(sl.inactive), "handoff.json")
 	_ = os.Remove(handoffFile)
+	// Pre-flight: the downloaded launcher must identify as the expected
+	// version (stale cache serving an OLD launcher without --takeover
+	// support dies with a bare exit code and no handoff file — exactly
+	// the mystery "exit status 1". Catch it here with a clear message.
+	if err := selfVerifyBinary(launcherPath, version, "launcher"); err != nil {
+		return fmt.Errorf("launcher pre-flight: %w", err)
+	}
 	cmd := exec.Command(launcherPath,
 		"--takeover",
 		"--data-dir", d.dataDir,

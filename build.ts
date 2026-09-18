@@ -1,6 +1,6 @@
 process.env.NODE_ENV = "production";
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -55,6 +55,25 @@ async function build() {
   if (existsSync(path.join(ROOT, "web", "public"))) {
     cpSync(path.join(ROOT, "web", "public"), distDir, { recursive: true });
   }
+  // Daemon releases staged by build-indirect-all.sh in web/public/r/ are
+  // MOVED (not copied) to dist/r/: no 319MB duplication, no committed
+  // staging dir. Absent in normal dev builds (skipped silently).
+  {
+    const staged = path.join(ROOT, "web", "public", "r");
+    const dest = path.join(distDir, "r");
+    if (existsSync(staged)) {
+      mkdirSync(distDir, { recursive: true });
+      rmSync(dest, { recursive: true, force: true });
+      // renameSync = instant move on same device; fallback to copy.
+      try {
+        renameSync(staged, dest);
+      } catch {
+        cpSync(staged, dest, { recursive: true });
+        rmSync(staged, { recursive: true, force: true });
+      }
+      console.log("[build] daemon releases moved web/public/r -> dist/r/");
+    }
+  }
 
   // Web Push Service Worker (vanilla, outside the bundle): must be served
   // from the site root so its scope covers the whole dashboard.
@@ -74,20 +93,6 @@ async function build() {
     console.log("[build] pandoc.wasm not found, office conversion disabled");
   }
 
-  // Daemon releases into dist/r/ (public static: <gateway>/r/...).
-  // Gateway-first updates/installs with zero new endpoints — static.ts
-  // already hardens traversal/MIME/cache. No GitHub dependency.
-  const daemonDist = path.join(ROOT, "indirect-code-daemon", "dist");
-  const rDir = path.join(distDir, "r");
-  mkdirSync(rDir, { recursive: true });
-  let rCount = 0;
-  for (const f of readdirSync(daemonDist)) {
-    if (/^(indirect-(code|launcher)-|versions\.json|SHA256SUMS\.txt|indirect-install\.)/.test(f)) {
-      cpSync(path.join(daemonDist, f), path.join(rDir, f));
-      rCount++;
-    }
-  }
-  console.log(`[build] daemon releases -> dist/r/ (${rCount} files)`);
 
   console.log(`[build] OK -> dist/ (${result.outputs.length} outputs)`);
   process.exit(0);

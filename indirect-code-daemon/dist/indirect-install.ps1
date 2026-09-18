@@ -26,9 +26,11 @@ if ([string]::IsNullOrWhiteSpace($ConnectUrl)) {
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($RepoRaw)) {
-  # Derive from ConnectUrl (gateway serves everything) — no GitHub dependency.
+  # Derive from ConnectUrl (gateway serves everything via /r/).
+  # No GitHub fallback by design: without a gateway URL there is nothing
+  # to pair with (ConnectUrl is mandatory above).
   if ($ConnectUrl -match '^(https?://[^/]+)') { $RepoRaw = $Matches[1] + "/r" }
-  else { $RepoRaw = "https://raw.githubusercontent.com/italoalmeida0/llm-gateway/main/indirect-code-daemon/dist" }
+  else { Write-Error "[indirect] cannot derive download URL"; exit 1 }
 }
 
 $DataDir = Join-Path $HOME ".indirect-code"

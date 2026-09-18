@@ -6,15 +6,23 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON_DIR="$ROOT/indirect-code-daemon"
-OUT="$DAEMON_DIR/dist"
+# Staging straight into the frontend public dir: build.ts moves it to
+# dist/r/ (gateway serves statically). web/public/r is gitignored scratch.
+OUT="$ROOT/web/public/r"
 mkdir -p "$OUT"
-# Version: MANUAL — bump indirect-code-daemon/dist/versions.json (daemon.version)
-# before building a release, or pass INDIRECT_VERSION=x. The build stamps
-# this version into the daemon (-X main.daemonVersion) and regenerates the
-# manifest with it, so binary + manifest always agree. Do NOT auto-bump
-# (timestamps etc.): every build must be reproducible for a given version.
+# Version: MANUAL — bump web/public/r/versions.json (daemon.version) before
+# building a release, or pass INDIRECT_VERSION=x. First use seeds it from
+# indirect-code-daemon/dist/versions.json automatically. The build stamps
+# this version
+# into the daemon (-X main.daemonVersion) and regenerates the manifest with
+# it, so binary + manifest always agree. Do NOT auto-bump (timestamps etc.):
+# every build must be reproducible for a given version.
 # NOTE: cmd/launcher is its own main package (no daemonVersion var), so
 # launcher builds use plain LDFLAGS; only the daemon gets the stamp.
+if [ -z "${INDIRECT_VERSION:-}" ] && [ ! -f "$OUT/versions.json" ] && [ -f "$DAEMON_DIR/dist/versions.json" ]; then
+  cp "$DAEMON_DIR/dist/versions.json" "$OUT/versions.json"
+  echo "==> seeded versions.json from daemon dist"
+fi
 VERSION="${INDIRECT_VERSION:-$(python3 -c 'import json, os; print(json.load(open(os.path.join("'"$OUT"'", "versions.json")))["daemon"]["version"])' 2>/dev/null || echo "1.0.0")}"
 echo "==> Building Indirect Code v${VERSION}"
 
@@ -38,12 +46,12 @@ for target in "${TARGETS[@]}"; do
   [[ "$goos" == "windows" ]] && name="${name}.exe"
   echo "==> $name (daemon)"
   (cd "$DAEMON_DIR" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-    go build -trimpath -ldflags "$DAEMON_LDFLAGS" -o "dist/$name" ./cmd/daemon)
+    go build -trimpath -ldflags "$DAEMON_LDFLAGS" -o "$OUT/$name" ./cmd/daemon)
   lname="indirect-launcher-${goos}-${goarch}"
   [[ "$goos" == "windows" ]] && lname="${lname}.exe"
   echo "==> $lname (launcher)"
   (cd "$DAEMON_DIR" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-    go build -trimpath -ldflags "$LAUNCHER_LDFLAGS" -o "dist/$lname" ./cmd/launcher)
+    go build -trimpath -ldflags "$LAUNCHER_LDFLAGS" -o "$OUT/$lname" ./cmd/launcher)
   # Versioned copies (immutable URLs): update downloads these first, so CDN
   # cache can never serve stale bytes for a version. Floating names stay
   # for install.sh (first install = latest, no version known).

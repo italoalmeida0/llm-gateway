@@ -78,17 +78,18 @@ func (d *DaemonServer) updateChecker() *updateState {
 	return d.update
 }
 
-// defaultMirror is the public release mirror (override via
-// INDIRECT_REPO_RAW env, same as the launcher/installer).
-const defaultMirror = "https://raw.githubusercontent.com/italoalmeida0/llm-gateway/main/indirect-code-daemon/dist"
+// No GitHub fallback: releases come from the paired gateway
+// (/r/versions.json, authenticated) or INDIRECT_REPO_RAW override.
+// A daemon without gateway has no update source by design.
 
-// manifestURL resolves the versions.json URL from the release mirror.
+// manifestURL resolves the versions.json URL from the explicit override
+// only (no GitHub fallback by design). Daemon update checks go through
+// fetchManifestWithConfig (gateway-first); this is the last-resort path.
 func manifestURL() string {
-	base := defaultMirror
 	if v := os.Getenv("INDIRECT_REPO_RAW"); v != "" {
-		base = v
+		return strings.TrimRight(v, "/") + "/" + updateManifestFile
 	}
-	return strings.TrimRight(base, "/") + "/" + updateManifestFile
+	return ""
 }
 
 func fetchManifest() (*versionManifest, error) {
@@ -156,8 +157,12 @@ func fetchManifestGateway(d *DaemonServer) (*versionManifest, error) {
 }
 
 func fetchManifestMirror() (*versionManifest, error) {
+	u := manifestURL()
+	if u == "" {
+		return nil, fmt.Errorf("no update source (pair a gateway or set INDIRECT_REPO_RAW)")
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(manifestURL())
+	resp, err := client.Get(u)
 	if err != nil {
 		return nil, err
 	}

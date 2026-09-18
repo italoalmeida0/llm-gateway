@@ -24,11 +24,10 @@ import (
 //   daemon-current         -> symlink (unix) or version file (windows) to active version
 
 const (
-	// daemonReleaseBase is the LAST-RESORT mirror (first install without
-	// gateway — install scripts always derive the gateway from CONNECT_URL,
-	// so this ~never fires). Order everywhere: INDIRECT_REPO_RAW env >
-	// gateway-derived > GitHub raw.
-	defaultReleaseBase = "https://raw.githubusercontent.com/italoalmeida0/llm-gateway/main/indirect-code-daemon/dist"
+	// No GitHub fallback by design (gateway-first updates/installs).
+	// Order: INDIRECT_REPO_RAW env > INDIRECT_GATEWAY (gateway dist/) >
+	// error. Install scripts always derive the gateway from CONNECT_URL.
+	defaultReleaseBase = ""
 	// daemonPinnedVersion is overridden at build time (-ldflags
 	// -X main.daemonPinnedVersion=vX.Y.Z). Empty = latest asset name
 	// (no pin; checksum still verified against SHA256SUMS.txt).

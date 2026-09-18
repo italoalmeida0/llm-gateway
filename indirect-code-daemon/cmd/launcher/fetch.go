@@ -111,7 +111,6 @@ func resolveSlotDaemon(dataDir string) (string, string, []string, error) {
 		needDownload = true
 	} else if launcherVersion != "dev" && launcherVersion != "" {
 		if err := selfVerifyDaemon(local, launcherVersion); err != nil {
-			fmt.Printf("Updating daemon to match launcher %s ... ", launcherVersion)
 			needDownload = true
 		}
 	}
@@ -121,8 +120,10 @@ func resolveSlotDaemon(dataDir string) (string, string, []string, error) {
 		if ver, _, err := latestDaemonAsset(); err == nil && ver != "" {
 			targetVer = ver
 		}
+		fmt.Printf("Downloading daemon %s ... ", targetVer)
 		dlPath, err := fetchDaemonTo(slotDir, targetVer)
 		if err != nil {
+			fmt.Println("FAILED")
 			if st, serr := os.Stat(local); serr == nil && !st.IsDir() && st.Size() > 0 {
 				fmt.Printf("Warning: cannot download latest daemon (%v), using existing binary\n", err)
 				return local, slot, repairNotes, nil

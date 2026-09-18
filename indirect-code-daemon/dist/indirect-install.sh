@@ -16,8 +16,9 @@
 # and where the log is.
 set -euo pipefail
 
-GW="${1:?usage: indirect-install.sh <gateway-url> <token>}"
-TOK="${2:?usage: indirect-install.sh <gateway-url> <token>}"
+GW="${1:?usage: indirect-install.sh <gateway-url> <token> [host-name]}"
+TOK="${2:?usage: indirect-install.sh <gateway-url> <token> [host-name]}"
+HOST_NAME="${3:-$(hostname 2>/dev/null || echo "")}"
 GW="${GW%/}"
 
 ROOT="$HOME/.indirect-code"
@@ -109,5 +110,11 @@ ok
 # 4. Hand over: the launcher repairs the rest, fetches the daemon,
 #    migrates storage, verifies, and boots.
 echo "Starting ..."
-CONNECT_URL="$GW/api/indirect-code/connect/$TOK"
-exec "$SLOTDIR/bin/$ASSET" -connect "$CONNECT_URL"
+CONNECT_ARGS=(-connect "$GW/api/indirect-code/connect/$TOK")
+[ -n "$HOST_NAME" ] && CONNECT_ARGS+=(--name "$HOST_NAME")
+# Detached: the daemon must survive this shell (nohup + disown), so the
+# terminal is free as soon as the launcher hands over.
+nohup "$SLOTDIR/bin/$ASSET" "${CONNECT_ARGS[@]}" >>"$LOGS/daemon.log" 2>&1 < /dev/null &
+disown 2>/dev/null || true
+echo "done"
+echo "Running in the background - the dashboard shows this host online in a few seconds."

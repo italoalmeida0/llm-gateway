@@ -15,8 +15,12 @@
 # and where the log is.
 param(
   [Parameter(Mandatory = $true)][string]$GatewayUrl,
-  [Parameter(Mandatory = $true)][string]$Token
+  [Parameter(Mandatory = $true)][string]$Token,
+  [string]$HostName = ""
 )
+if ([string]::IsNullOrWhiteSpace($HostName)) {
+  try { $HostName = $env:COMPUTERNAME } catch {}
+}
 $ErrorActionPreference = "Stop"
 $GW = $GatewayUrl.TrimEnd("/")
 
@@ -105,9 +109,17 @@ try {
 
   # 4. Hand over: the launcher repairs the rest, fetches the daemon,
   #    migrates storage, verifies, and boots.
+  #    Detached (Start-Process Hidden): the terminal is free immediately;
+  #    the daemon keeps running in the background (log: logs/daemon.log).
   Write-Host "Starting ..."
   $CONNECT_URL = "${GW}/api/indirect-code/connect/${Token}"
-  & $dest -connect $CONNECT_URL
+  $daemonArgs = @("-connect", $CONNECT_URL)
+  if (-not [string]::IsNullOrWhiteSpace($HostName)) { $daemonArgs += @("--name", $HostName) }
+  $DLOG = Join-Path $LOGS "daemon.log"
+  Start-Process -FilePath $dest -ArgumentList $daemonArgs -WindowStyle Hidden `
+    -RedirectStandardOutput $DLOG -RedirectStandardError "$DLOG.err" | Out-Null
+  Write-Host "done"
+  Write-Host "Running in the background - the dashboard shows this host online in a few seconds."
 } finally {
   Stop-Transcript | Out-Null
 }

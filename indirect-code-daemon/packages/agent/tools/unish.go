@@ -302,28 +302,32 @@ func EnsureUnish(dataDir string) (string, error) {
 	}
 	latest, tagErr := unishLatestTagFunc(ctx)
 	if tagErr != nil {
-		fmt.Printf("[SHELL] unish: could not check latest release (%v); using local copy when valid\n", tagErr)
+		fmt.Printf("Warning: could not check latest shell release (%v); using local copy.\n", tagErr)
 	}
 	if !isExecutableFile(dest) {
 		if tagErr != nil {
 			return "", fmt.Errorf("unish: no local binary and release check failed: %v", tagErr)
 		}
-		fmt.Printf("[SHELL] unish: no local binary, downloading %s ...\n", latest)
+		fmt.Printf("Downloading shell %s ... ", latest)
 		if err := unishDownloadFunc(ctx, latest, asset, dest); err != nil {
+			fmt.Println("FAILED")
 			return "", err
 		}
+		fmt.Println("done")
 		local = localUnishVersion(dest)
 	} else if tagErr == nil && local != latest {
-		fmt.Printf("[SHELL] unish: local %s != release %s, updating ...\n", displayVer(local), latest)
+		fmt.Printf("Updating shell %s -> %s ... ", displayVer(local), latest)
 		if err := unishDownloadFunc(ctx, latest, asset, dest); err != nil {
+			fmt.Println("FAILED")
 			return "", err
 		}
+		fmt.Println("done")
 		local = localUnishVersion(dest)
 	}
 	if probeShellPath(dest, "-c") {
 		return dest, nil
 	}
-	fmt.Printf("[SHELL] unish: binary at %s failed its probe, re-downloading ...\n", dest)
+	fmt.Printf("Warning: shell binary failed its probe, re-downloading ...\n")
 	if tagErr != nil {
 		return "", fmt.Errorf("unish: binary invalid and release check unavailable")
 	}
@@ -352,39 +356,39 @@ func EnsureShell(dataDir string) error {
 			return fmt.Errorf("no usable terminal on Windows (unish unavailable: %v)", err)
 		}
 		SetShellOverride(path, "-c", true)
-		fmt.Printf("[SHELL] using %s -c\n", path)
+		// shell pinned (silent; visible in the dashboard).
 		return nil
 	}
 	if probeShellPath("/bin/bash", "-c") {
 		SetShellOverride("/bin/bash", "-c", true)
-		fmt.Printf("[SHELL] using /bin/bash -c\n")
+		// shell pinned (silent; visible in the dashboard).
 		return nil
 	}
 	if p, err := exec.LookPath("bash"); err == nil && probeShellPath(p, "-c") {
 		SetShellOverride(p, "-c", true)
-		fmt.Printf("[SHELL] using %s -c\n", p)
+		// shell pinned (silent; visible in the dashboard).
 		return nil
 	}
 	if upath, err := EnsureUnish(dataDir); err == nil {
 		SetShellOverride(upath, "-c", true)
-		fmt.Printf("[SHELL] using %s -c (unish)\n", upath)
+		// shell pinned (silent; visible in the dashboard).
 		return nil
 	} else {
-		fmt.Printf("[SHELL] unish unavailable (%v), trying zsh/sh\n", err)
+		fmt.Printf("Warning: managed shell unavailable (%v), trying zsh/sh.\n", err)
 	}
 	if p, err := exec.LookPath("zsh"); err == nil && probeShellPath(p, "-c") {
 		SetShellOverride(p, "-c", false)
-		fmt.Printf("[SHELL] using %s -c\n", p)
+		// shell pinned (silent; visible in the dashboard).
 		return nil
 	}
 	if probeShellPath("/bin/sh", "-c") {
 		SetShellOverride("/bin/sh", "-c", false)
-		fmt.Printf("[SHELL] using /bin/sh -c\n")
+		// shell pinned (silent; visible in the dashboard).
 		return nil
 	}
 	if p, err := exec.LookPath("sh"); err == nil && probeShellPath(p, "-c") {
 		SetShellOverride(p, "-c", false)
-		fmt.Printf("[SHELL] using %s -c\n", p)
+		// shell pinned (silent; visible in the dashboard).
 		return nil
 	}
 	return fmt.Errorf("no usable terminal (probed bash, unish, zsh and sh — none executed)")

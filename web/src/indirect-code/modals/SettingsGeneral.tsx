@@ -248,7 +248,7 @@ export function SettingsGeneralSection() {
           else if (i.checkedAt) s += " — up to date";
           if (i.frozen) s += ` (updating: ${i.freezeStage || "…"})`;
           else if ((i as any).mismatchWant) {
-            const left = Math.max(0, 30 - Math.floor((Date.now() - ((i as any).mismatchAt || 0)) / 60000));
+            const left = Math.max(0, 1 - Math.floor((Date.now() - ((i as any).mismatchAt || 0)) / 60000));
             s += ` (mirror stale: wanted ${(i as any).mismatchWant}, got ${(i as any).mismatchGot || "?"}${left > 0 ? ` — retry in ~${left}min` : ""})`;
           }
           return s + ".";

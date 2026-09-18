@@ -96,8 +96,8 @@ func (d *DaemonServer) beginHandoff() {
 		d.broadcastUpdateState()
 		return
 	}
-	if st.mismatchWant == version && time.Now().UnixMilli()-st.mismatchAt < 30*60*1000 {
-		// Same target failed verify <30min ago (mirror serving stale
+	if st.mismatchWant == version && time.Now().UnixMilli()-st.mismatchAt < 60*1000 {
+		// Same target failed verify <1min ago (mirror serving stale
 		// bytes): retrying now is pointless. Refuse fast with the stored
 		// reason; the next periodic check re-arms automatically.
 		st.lastError = "mirror stale for " + version + " (got " + st.mismatchGot + "), retry later"

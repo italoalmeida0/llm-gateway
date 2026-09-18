@@ -56,7 +56,7 @@ type updateState struct {
 	handoffBusy bool
 	// verifyMismatch remembers the last self-verify failure (want vs got
 	// version + timestamp): the frontend shows "mirror stale, retry later"
-	// instead of a generic failure, and beginHandoff backs off 30min for
+	// instead of a generic failure, and beginHandoff backs off 1min for
 	// the same target version (retrying stale bytes is pointless).
 	mismatchWant string
 	mismatchGot  string

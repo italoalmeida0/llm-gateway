@@ -6,7 +6,6 @@ param(
   [string]$HostName = ""
 )
 
-
 if ([string]::IsNullOrWhiteSpace($HostName)) {
   try {
     $HostName = [System.Net.Dns]::GetHostName()
@@ -62,8 +61,8 @@ try {
     foreach ($s in @("a", "b")) {
       $pidFile = Join-Path $ROOT "slots/slot-${s}/daemon.pid"
       if (Test-Path $pidFile) {
-        $pid = (Get-Content $pidFile -Raw).Trim()
-        if ($pid -match "^\d+$" -and (Get-Process -Id $pid -ErrorAction SilentlyContinue)) { $ACTIVE = $s; break }
+        $daemonPid = (Get-Content $pidFile -Raw).Trim()
+        if ($daemonPid -match "^\d+$" -and (Get-Process -Id $daemonPid -ErrorAction SilentlyContinue)) { $ACTIVE = $s; break }
       }
     }
   }
@@ -84,16 +83,15 @@ try {
   foreach ($s in @($ACTIVE, "a", "b")) {
     $pidFile = Join-Path $ROOT "slots/slot-${s}/daemon.pid"
     if (Test-Path $pidFile) {
-      $pid = (Get-Content $pidFile -Raw).Trim()
+      $daemonPid = (Get-Content $pidFile -Raw).Trim()
       $proc = $null
-      if ($pid -match "^\d+$") { $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue }
+      if ($daemonPid -match "^\d+$") { $proc = Get-Process -Id $daemonPid -ErrorAction SilentlyContinue }
       if ($proc) {
-        Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $daemonPid -Force -ErrorAction SilentlyContinue
         $proc.WaitForExit(5000)
       }
     }
   }
-
 
   Step "Downloading launcher"
   $SLOTDIR = Join-Path $ROOT "slots/slot-${ACTIVE}"

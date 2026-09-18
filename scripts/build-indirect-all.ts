@@ -85,7 +85,7 @@ const sortedVers = Array.from(vers).sort((a, b) => {
   return 0;
 });
 
-const keep = new Set([...sortedVers.slice(-2), version]);
+const keep = new Set([version]);
 for (const fn of readdirSync(OUT)) {
   const m = fn.match(/-v(\d+\.\d+\.\d+)(\.exe)?$/);
   if (m && !keep.has(m[1])) {

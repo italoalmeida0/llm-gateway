@@ -1,35 +1,31 @@
 # Indirect Code installer (Windows PowerShell).
 # Usage: powershell -ExecutionPolicy Bypass -NoProfile -Command "& ([scriptblock]::Create((irm '<gateway>/r/indirect-install.ps1'))) <gateway-url> <token>"
-#
-# The script does the MINIMUM to boot the launcher; the launcher owns the
-# house (repairs broken installs, adopts stray state, picks the active
-# slot). Worst case — even a broken update — a manual reinstall recovers
-# to bootable.
-#
-# Layout (canonical):
-#   ~/.indirect-code/
-#     brain/  slots/{active,slot-a,slot-b}/  logs/  external/
-#
-# Output contract: quiet on success (one line per step, "done" at the end).
-# Full detail always lands in logs/install.log; errors print what failed
-# and where the log is.
 param(
   [Parameter(Mandatory = $true)][string]$GatewayUrl,
   [Parameter(Mandatory = $true)][string]$Token,
   [string]$HostName = ""
 )
-# NOTE: $env:COMPUTERNAME is UPPERCASE by convention (NETBIOS); the real
-# mixed-case name lives in the registry (Active Directory / setup name).
-# Prefer it so the dashboard shows e.g. ItaloSurface, not ITALOSURFACE.
+
+
 if ([string]::IsNullOrWhiteSpace($HostName)) {
   try {
-    $reg = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName" -ErrorAction Stop
-    if (-not [string]::IsNullOrWhiteSpace($reg.ComputerName)) { $HostName = $reg.ComputerName }
+    $HostName = [System.Net.Dns]::GetHostName()
   } catch {}
+  if ([string]::IsNullOrWhiteSpace($HostName)) {
+    try {
+      $tcpip = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -ErrorAction Stop
+      if (-not [string]::IsNullOrWhiteSpace($tcpip.Hostname)) {
+        $HostName = $tcpip.Hostname
+      } elseif (-not [string]::IsNullOrWhiteSpace($tcpip.'NV Hostname')) {
+        $HostName = $tcpip.'NV Hostname'
+      }
+    } catch {}
+  }
   if ([string]::IsNullOrWhiteSpace($HostName)) {
     try { $HostName = $env:COMPUTERNAME } catch {}
   }
 }
+
 $ErrorActionPreference = "Stop"
 $GW = $GatewayUrl.TrimEnd("/")
 
@@ -46,6 +42,7 @@ function Fail($msg) {
   Write-Host "See $ILOG for details."
   exit 1
 }
+
 try {
   Step "Preparing"
   $ARCH = (Get-CimInstance Win32_Processor).AddressWidth
@@ -55,8 +52,6 @@ try {
   $ASSET = "indirect-launcher-windows-$archName.exe"
   Ok
 
-  # 1. Discover the active slot: slots/active wins; else live daemon.pid;
-  #    else freshest slot; else slot-a (fresh install).
   $ACTIVE = ""
   $activeFile = Join-Path $ROOT "slots/active"
   if (Test-Path $activeFile) {
@@ -86,7 +81,6 @@ try {
     $ACTIVE = if ($best) { $best } else { "a" }
   }
 
-  # 2. Stop the running daemon (if any) so binaries can be replaced.
   foreach ($s in @($ACTIVE, "a", "b")) {
     $pidFile = Join-Path $ROOT "slots/slot-${s}/daemon.pid"
     if (Test-Path $pidFile) {
@@ -100,30 +94,27 @@ try {
     }
   }
 
-  # 3. Download the launcher into the ACTIVE slot (fixed name, no -v copies).
+
   Step "Downloading launcher"
   $SLOTDIR = Join-Path $ROOT "slots/slot-${ACTIVE}"
   New-Item -ItemType Directory -Force -Path (Join-Path $SLOTDIR "bin") | Out-Null
   New-Item -ItemType Directory -Force -Path (Join-Path $ROOT "brain") | Out-Null
   New-Item -ItemType Directory -Force -Path (Join-Path $ROOT "external") | Out-Null
   $dest = Join-Path $SLOTDIR "bin/${ASSET}"
-  # NOTE: the temp file keeps a .tmp suffix (NOT .download): on failure the
-  # leftover must never look like something Windows tries to open (the
-  # "choose an app" popup for .download leftovers). It is renamed to the
-  # final name only after --version self-verify passes.
-  $tmp = "${dest}.tmp"
+  
+  $tmp = "${dest}.tmp.exe"
   try {
     Invoke-WebRequest -Uri "${GW}/r/${ASSET}?u=install-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" -OutFile $tmp -UseBasicParsing
   } catch { Fail "could not download ${ASSET} from ${GW} ($($_.Exception.Message))" }
+
   $ver = & $tmp --version 2>&1
-  if ($ver -notmatch "launcher") { Fail "downloaded file is not a launcher (bad gateway response?)" }
+  if ($ver -notmatch "launcher") {
+    Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+    Fail "downloaded file is not a launcher (bad gateway response?)"
+  }
   Move-Item -Force $tmp $dest
   Ok
 
-  # 4. Hand over: the launcher repairs the rest, fetches the daemon,
-  #    migrates storage, verifies, and boots.
-  #    Detached (Start-Process Hidden): the terminal is free immediately;
-  #    the daemon keeps running in the background (log: logs/daemon.log).
   Write-Host "Starting ..."
   $CONNECT_URL = "${GW}/api/indirect-code/connect/${Token}"
   $daemonArgs = @("-connect", $CONNECT_URL)

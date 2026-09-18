@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
 # Indirect Code installer (Linux/macOS).
 # Usage: curl -fsSL <gateway>/r/indirect-install.sh | bash -s -- <gateway-url> <token>
-#
-# The script does the MINIMUM to boot the launcher; the launcher owns the
-# house (repairs broken installs, adopts stray state, picks the active
-# slot). Worst case — even a broken update — a manual reinstall recovers
-# to bootable.
-#
-# Layout (canonical):
-#   ~/.indirect-code/
-#     brain/  slots/{active,slot-a,slot-b}/  logs/  external/
-#
-# Output contract: quiet on success (one line per step, "done" at the end).
-# Full detail always lands in logs/install.log; errors print what failed
-# and where the log is.
+
 set -euo pipefail
 
 GW="${1:?usage: indirect-install.sh <gateway-url> <token> [host-name]}"
@@ -25,7 +13,7 @@ ROOT="$HOME/.indirect-code"
 LOGS="$ROOT/logs"
 mkdir -p "$LOGS"
 ILOG="$LOGS/install.log"
-# Console stays quiet; everything is tee'd to the log.
+
 exec > >(tee -a "$ILOG") 2>&1
 
 step() { printf '%s ... ' "$1"; }
@@ -49,14 +37,12 @@ ASSET="indirect-launcher-$GOOS-$GOARCH"
 ok
 
 have() { command -v "$1" >/dev/null 2>&1; }
-fetch() { # fetch <url> <dest>
+fetch() { 
   if have curl; then curl -fsSL --retry 3 "$1" -o "$2"
   elif have wget; then wget -qO "$2" "$1"
   else fail "need curl or wget to download the launcher"; fi
 }
 
-# 1. Discover the active slot: slots/active wins; else the slot with a
-#    live daemon.pid; else the freshest slot; else slot-a (fresh install).
 ACTIVE=""
 if [ -f "$ROOT/slots/active" ]; then
   ACTIVE="$(tr -d ' \n\r' < "$ROOT/slots/active" | grep -o '[ab]' | head -n1 || true)"
@@ -82,7 +68,7 @@ if [ -z "$ACTIVE" ]; then
   ACTIVE="${NEWEST:-a}"
 fi
 
-# 2. Stop the running daemon (if any) so binaries can be replaced.
+
 for s in "$ACTIVE" a b; do
   PIDF="$ROOT/slots/slot-$s/daemon.pid"
   [ -f "$PIDF" ] || continue
@@ -94,7 +80,6 @@ for s in "$ACTIVE" a b; do
   fi
 done
 
-# 3. Download the launcher into the ACTIVE slot (fixed name, no -v copies).
 step "Downloading launcher"
 SLOTDIR="$ROOT/slots/slot-$ACTIVE"
 mkdir -p "$SLOTDIR/bin" "$LOGS" "$ROOT/brain" "$ROOT/external"
@@ -107,13 +92,11 @@ mv -f "$TMP" "$SLOTDIR/bin/$ASSET"
 trap - EXIT
 ok
 
-# 4. Hand over: the launcher repairs the rest, fetches the daemon,
-#    migrates storage, verifies, and boots.
+
 echo "Starting ..."
 CONNECT_ARGS=(-connect "$GW/api/indirect-code/connect/$TOK")
 [ -n "$HOST_NAME" ] && CONNECT_ARGS+=(--name "$HOST_NAME")
-# Detached: the daemon must survive this shell (nohup + disown), so the
-# terminal is free as soon as the launcher hands over.
+
 nohup "$SLOTDIR/bin/$ASSET" "${CONNECT_ARGS[@]}" >>"$LOGS/daemon.log" 2>&1 < /dev/null &
 disown 2>/dev/null || true
 echo "done"

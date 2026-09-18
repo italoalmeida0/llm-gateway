@@ -29,8 +29,10 @@ async function main() {
   const oldBin = join(work, "daemon-old");
   const newBin = join(work, "daemon-new");
   const launcherBin = join(work, "launcher-new");
+  const launcherOldBin = join(work, "launcher-old");
   build("./cmd/daemon", "vH1", oldBin, "daemonVersion");
   build("./cmd/daemon", "vH2", newBin, "daemonVersion");
+  build("./cmd/launcher", "vH1", launcherOldBin, "launcherVersion");
   build("./cmd/launcher", "vH2", launcherBin, "launcherVersion");
 
   // Mirror serves new binaries + manifest vH2.
@@ -45,7 +47,7 @@ async function main() {
 
   // Seed slot-a: old binaries + session + version + config (bad gateway: no WS needed for freeze/copy phases).
   copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", "indirect-code-linux-amd64"));
-  copyFileSync(launcherBin, join(root, "slots", "slot-a", "bin", "indirect-launcher-linux-amd64"));
+  copyFileSync(launcherOldBin, join(root, "slots", "slot-a", "bin", "indirect-launcher-linux-amd64"));
   wfs(join(root, "slots", "active"), "a\n");
   wfs(join(root, "slots", "slot-a", "storage_version.json"), JSON.stringify({ version: 1 }));
   wfs(join(root, "slots", "slot-a", "sessions", "s1.jsonl"),

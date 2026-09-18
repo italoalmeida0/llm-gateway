@@ -852,6 +852,12 @@ html[data-theme="dark"] .ag-theme-quartz-dark {
   30% { opacity: 1; transform: translateY(-2px); }
 }
 
+/* Remote Code: OS-style update progress slide (indeterminate bar) */
+@keyframes rc-update-slide {
+  from { margin-left: 0; }
+  to { margin-left: calc(100% - 33%); }
+}
+
 /* Live "Thinking Ns" shimmer (chatbot thinking-indicator) */
 .thinking-indicator { display: inline-flex; align-items: center; gap: 2px; }
 .thinking-indicator span {

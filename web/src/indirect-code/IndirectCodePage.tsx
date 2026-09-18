@@ -10,6 +10,9 @@ import {
   For,
 } from "solid-js";
 import { useUI, useHost, useModal } from "./ctx";
+import { Icon as Iconify } from "../components/icon";
+import { IndirectBrand } from "./components/IndirectBrand";
+import { FloatMenu } from "./components/FloatMenu";
 import { RemoteHints } from "./presentation";
 import { projectForDirectory } from "./paths";
 import { contextDisplay, type GatewayModel } from "./context";
@@ -50,11 +53,15 @@ import { createWorkspace } from "./hooks/useWorkspace";
 import { createHosts } from "./hooks/useHosts";
 import { createSettings } from "./hooks/useSettings";
 
-/** Full-screen update freeze: while the daemon handoff is frozen, block
- * everything on this host except switching hosts / connecting another /
- * cancelling the update. Stages stream from daemon_update.freezeStage.
- * Frozen is per-host: only the host that is really updating shows the
- * overlay (switching hosts swaps the world, same rule as sessions). */
+/** Full-screen OS-style update screen (same look as Onboarding): while the
+ * daemon handoff is frozen on a host, take over the whole page with the big
+ * Indirect brand, a progress line and the stage. Frozen is per-host: the
+ * overlay follows the host that is really updating, and host switching
+ * keeps working through the same host card + menu as the sidebar
+ * (WorkspaceSidebar, bottom card): select / refresh / connect / remove.
+ * PairModal/ConfirmModal/SettingsModal keep rendering above (z-50 modal
+ * layer > overlay z-40), so pairing + remove-confirm never hide behind.
+ * Stages stream from daemon_update.freezeStage. */
 function UpdateFreezeOverlay() {
   const ui = useUI();
   const hosts = useHost();
@@ -72,60 +79,96 @@ function UpdateFreezeOverlay() {
     return (hid ? ui.daemonUpdate.stateFor(hid)?.freezeStage : "") || "preparing update";
   };
   const frozenHost = () => hosts.hosts().find((h) => h.id === frozenHostId());
+  const upd = () => {
+    const hid = frozenHostId();
+    return hid ? ui.daemonUpdate.stateFor(hid) : null;
+  };
   return (
     <Show when={frozen()}>
-      <div class="fixed inset-0 z-[80] flex items-center justify-center bg-ink-950/90 backdrop-blur-sm">
-        <div class="w-[min(420px,90vw)] rounded-2xl border border-line bg-elev p-6 text-center shadow-2xl">
-          <div class="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-2 border-line border-t-brand-500" />
-          <h2 class="text-base font-semibold text-ink-100">Updating {frozenHost()?.name || "daemon"}…</h2>
-          <p class="mt-1 text-xs text-ink-400">{stage()}</p>
-          <p class="mt-3 text-[11px] text-ink-500">
-            Sessions are paused safely — nothing is lost. You can switch hosts meanwhile.
-          </p>
-          <div class="mt-4 flex items-center justify-center gap-2">
-            <button class="btn btn-xs" onClick={() => ui.daemonUpdate.cancel(frozenHostId())}>
-              Cancel update
-            </button>
+      <div class="fixed inset-0 z-40 flex flex-col items-center overflow-y-auto bg-ink-950 p-4 text-center sm:p-6">
+        <div class="mx-auto my-auto w-full max-w-xl space-y-6 py-8">
+          <div>
+            <IndirectBrand />
+            <h2 class="mt-5 text-lg font-semibold text-ink-100">
+              Updating {frozenHost()?.name || frozenHost()?.hostname || "daemon"}…
+            </h2>
+            <p class="mx-auto mt-2 max-w-sm text-[13px] leading-relaxed text-ink-400">
+              {upd()?.target ? `Installing ${upd()?.target} — ` : ""}{stage()}. Sessions are paused safely, nothing is lost.
+            </p>
           </div>
-          <div class="mt-4 border-t border-line pt-3 text-left">
-            <div class="mb-2 flex items-center justify-between">
-              <p class="text-[11px] font-medium text-ink-400">Hosts</p>
+          <div class="ui-card mx-auto max-w-sm space-y-3 p-4 text-left">
+            <div class="flex items-center gap-3">
+              <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-500/10 text-brand-400">
+                <Iconify icon="lucide:refresh-cw" size={16} class="animate-spin" />
+              </div>
+              <div class="min-w-0 flex-1 text-xs">
+                <p class="font-medium text-ink-200">{stage()}</p>
+                <p class="mt-0.5 text-[11px] text-ink-400">
+                  {frozenHost()?.name || frozenHost()?.hostname || frozenHostId()} · {upd()?.current ? `from ${upd()?.current}` : "working"}…
+                </p>
+              </div>
+            </div>
+            <div class="h-1.5 overflow-hidden rounded-full bg-ink-800">
+              <div class="h-full w-1/3 animate-[rc-update-slide_1.2s_ease-in-out_infinite_alternate] rounded-full bg-brand-500" />
+            </div>
+            <div class="flex items-center justify-end gap-2.5 pt-1 text-xs">
               <button
-                class="text-[11px] text-ink-400 hover:text-ink-200 cursor-pointer"
-                onClick={() => { void m.generatePairingToken(); }}
+                onClick={() => ui.daemonUpdate.cancel(frozenHostId())}
+                class="px-3.5 py-1.5 rounded-lg border border-line text-ink-300 hover:text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer"
               >
-                + Connect
+                Cancel update
               </button>
             </div>
-            <For each={hosts.hosts()}>
-              {(h) => {
-                const upd = () => ui.daemonUpdate.stateFor(h.id);
-                const isFrozen = () => !!upd()?.frozen;
-                const isActive = () => h.id === hosts.activeHostId();
-                return (
-                  <div class="mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-ink-800">
-                    <button
-                      class="flex flex-1 min-w-0 items-center justify-between gap-2 cursor-pointer"
-                      onClick={() => hosts.setActiveHostId(h.id)}
-                    >
-                      <span class="truncate text-ink-200">{h.name || h.id}{isActive() ? " · current" : ""}</span>
-                      <span class="shrink-0 text-[11px] text-ink-500">
-                        {isFrozen() ? `updating: ${upd()?.freezeStage || "…"}` : upd()?.lifecycle === "pending" ? `starting ${upd()?.target || "…"}` : upd()?.lifecycle === "failed" ? `failed: ${upd()?.failedReason || "?"}` : upd()?.lifecycle === "done" ? `updated to ${upd()?.current || ""}` : h.status}
-                      </span>
-                    </button>
-                    <Show when={!isActive() && !isFrozen()}>
-                      <button
-                        aria-label={`Remove ${h.name || h.id}`}
-                        class="shrink-0 rounded p-1 text-ink-500 hover:text-brand-500 cursor-pointer"
-                        onClick={() => { hosts.setActiveHostId(h.id); void hosts.removeHost(); }}
-                      >
-                        ✕
-                      </button>
-                    </Show>
-                  </div>
-                );
-              }}
-            </For>
+          </div>
+          {/* Same host card as the sidebar bottom (WorkspaceSidebar): the
+              button + FloatMenu pair, so switching/connecting/removing
+              behaves identically — including the remove confirm modal. */}
+          <div class="mx-auto w-full max-w-sm rounded-xl border border-line/70 bg-card p-2 text-left">
+            <button
+              ref={hosts.hostBtn}
+              data-menubtn
+              aria-label="Select host"
+              aria-haspopup="menu"
+              aria-expanded={hosts.hostMenuOpen()}
+              onClick={() => { const next = !hosts.hostMenuOpen(); ui.closeMenus(); hosts.setHostMenuOpen(next); }}
+              class="w-full flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-left hover:bg-elev transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 cursor-pointer"
+            >
+              <span class="flex h-8 w-8 items-center justify-center rounded-lg border border-line bg-card text-ink-400 shrink-0">
+                <Iconify icon="lucide:monitor" size={16} />
+              </span>
+              <span class="flex-1 min-w-0">
+                <span class="block truncate text-xs font-medium text-ink-200">{hosts.activeHost()?.name || hosts.activeHost()?.hostname || "Select host"}</span>
+                <span class="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-500">
+                  <span class={`h-1.5 w-1.5 rounded-full ${hosts.connectionState() === "connected" && hosts.activeHost()?.status === "online" ? "bg-accent-500" : "bg-ink-600"}`} />
+                  {hosts.connectionState() !== "connected" ? "Reconnecting…" : hosts.activeHost()?.status === "online" ? "Connected" : "Offline"}
+                </span>
+              </span>
+              <Iconify icon="lucide:chevrons-up-down" size={13} class="text-ink-500 shrink-0" />
+            </button>
+            <FloatMenu anchor={() => hosts.hostBtn} open={hosts.hostMenuOpen()} placement="top-start" width="18rem">
+              <div class="px-2.5 py-2 text-[10px] uppercase tracking-wider font-semibold text-ink-500">Your hosts</div>
+              <div role="menu" aria-label="Hosts" class="space-y-0.5">
+                <For each={hosts.hosts()}>{(host) => (
+                  <button role="menuitemradio" aria-checked={host.id === hosts.activeHostId()}
+                    class="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-elev focus-visible:bg-elev cursor-pointer"
+                    onClick={() => { hosts.setHostMenuOpen(false); hosts.setActiveHostId(host.id); }}>
+                    <Iconify icon="lucide:monitor" size={15} class="text-ink-500 shrink-0" />
+                    <span class="flex-1 min-w-0"><span class="block truncate text-xs text-ink-200">{host.name || host.hostname || host.id}</span>
+                      <span class="block text-[11px] text-ink-500">{host.status === "online" ? "Online" : "Offline"}{host.os ? ` · ${host.os}` : ""}</span></span>
+                    <Show when={host.id === hosts.activeHostId()}><Iconify icon="lucide:check" size={14} /></Show>
+                  </button>
+                )}</For>
+              </div>
+              <div class="mt-1 border-t border-line pt-1 space-y-0.5">
+                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-ink-400 hover:bg-elev cursor-pointer"
+                  onClick={() => { hosts.setHostMenuOpen(false); void hosts.loadHosts(); }}><Iconify icon="lucide:refresh-cw" size={13} />Refresh hosts</button>
+                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-ink-200 hover:bg-elev cursor-pointer"
+                  onClick={() => { hosts.setHostMenuOpen(false); void m.generatePairingToken(); }}><Iconify icon="lucide:plus" size={13} />Connect another host</button>
+                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-brand-500 hover:bg-elev cursor-pointer" onClick={() => void hosts.removeHost()}>
+                  <Iconify icon="lucide:trash-2" size={13} />Remove current host
+                </button>
+              </div>
+            </FloatMenu>
           </div>
         </div>
       </div>

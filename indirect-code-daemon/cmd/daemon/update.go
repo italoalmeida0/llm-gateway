@@ -53,6 +53,13 @@ type updateState struct {
 	lastError string
 	// handoffBusy guards concurrent beginHandoff calls.
 	handoffBusy bool
+	// verifyMismatch remembers the last self-verify failure (want vs got
+	// version + timestamp): the frontend shows "mirror stale, retry later"
+	// instead of a generic failure, and beginHandoff backs off 30min for
+	// the same target version (retrying stale bytes is pointless).
+	mismatchWant string
+	mismatchGot  string
+	mismatchAt   int64
 	// Handoff freeze (late pause): when frozen, the daemon rejects new
 	// turns and mutations but KEEPS the WS connected. Set only after the
 	// new launcher is downloaded + self-verified (never pause for a
@@ -195,7 +202,9 @@ func (d *DaemonServer) broadcastUpdateState() {
 	msg := map[string]any{
 		"type": "daemon_update", "hostId": d.config.HostID,
 		"current": daemonVersion, "available": st.available,
-		"checkedAt":  st.checkedAt,
+		"checkedAt":    st.checkedAt,
+		"mismatchWant": st.mismatchWant, "mismatchGot": st.mismatchGot,
+		"mismatchAt": st.mismatchAt,
 		"autoUpdate": d.autoUpdateEnabled(),
 		"frozen":     st.frozen, "freezeStage": st.freezeStage,
 	}

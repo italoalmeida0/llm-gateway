@@ -32,22 +32,44 @@ func fetchDaemonTo(slotDir, version string) (string, error) {
 		local = filepath.Join(binDir, "indirect-code.exe")
 	}
 	// Manifest URL: same mirror the daemon uses (env override supported).
-	base := releaseBase()
-	_ = base
 	mirror := os.Getenv("INDIRECT_REPO_RAW")
 	if mirror == "" {
 		mirror = defaultReleaseBase
 	}
 	mirror = strings.TrimRight(mirror, "/")
+	// Dual publish: versioned URL first (immutable — a CDN can never serve
+	// stale bytes for a URL that never existed), floating fallback (may be
+	// stale; --version self-verify decides). Cache-buster query on top.
+	verAsset := asset
+	if runtime.GOOS == "windows" {
+		verAsset = "indirect-code-" + runtime.GOOS + "-" + runtime.GOARCH + "-v" + version + ".exe"
+	} else {
+		verAsset = asset + "-v" + version
+	}
+	candidates := []string{
+		fmt.Sprintf("%s/%s?u=%s-%d", mirror, verAsset, version, time.Now().Unix()),
+		fmt.Sprintf("%s/%s?u=%s-%d", mirror, asset, version, time.Now().Unix()),
+	}
+	var dlErr error
 	tmp, err := os.CreateTemp(binDir, ".daemon-*")
 	if err != nil {
 		return "", err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := fetchURL(mirror+"/"+asset, tmp); err != nil {
+	for _, u := range candidates {
+		tmp.Seek(0, 0)
+		tmp.Truncate(0)
+		if err := fetchURL(u, tmp); err != nil {
+			dlErr = fmt.Errorf("download %s: %w", asset, err)
+			continue
+		}
+		dlErr = nil
+		break
+	}
+	if dlErr != nil {
 		tmp.Close()
-		return "", fmt.Errorf("download %s: %w", asset, err)
+		return "", dlErr
 	}
 	tmp.Close()
 	if runtime.GOOS != "windows" {

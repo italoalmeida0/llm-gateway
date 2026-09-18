@@ -51,6 +51,23 @@ func daemonAssetName() string {
 	return name
 }
 
+// isInsideSlotDir reports whether dir is (or is inside) a slots/slot-x
+// dir. Running with such a dataDir would nest slots/ inside slots/ —
+// refuse instead (see main.go guard).
+func isInsideSlotDir(dir string) bool {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(filepath.Clean(abs), string(os.PathSeparator))
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "slots" && (parts[i+1] == "slot-a" || parts[i+1] == "slot-b") {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveSlotDaemon resolves the daemon binary for normal boot.
 // Slotted root (slots/active exists): <root>/slots/slot-<a|b>/bin.
 // First-ever boot (no slots/): self-install slot-a (copy launcher binary,

@@ -92,6 +92,15 @@ func (d *DaemonServer) beginHandoff() {
 		d.broadcastUpdateState()
 		return
 	}
+	if st.mismatchWant == version && time.Now().UnixMilli()-st.mismatchAt < 30*60*1000 {
+		// Same target failed verify <30min ago (mirror serving stale
+		// bytes): retrying now is pointless. Refuse fast with the stored
+		// reason; the next periodic check re-arms automatically.
+		st.lastError = "mirror stale for " + version + " (got " + st.mismatchGot + "), retry later"
+		st.mu.Unlock()
+		d.broadcastUpdateState()
+		return
+	}
 	st.handoffBusy = true
 	st.mu.Unlock()
 	go d.runHandoff(version)
@@ -119,6 +128,7 @@ func (d *DaemonServer) runHandoff(version string) {
 		return
 	}
 	if err := selfVerifyBinary(launcherPath, version, "launcher"); err != nil {
+		d.recordMismatch(version, extractGotVersion(err))
 		fail(fmt.Sprintf("launcher verify: %v", err))
 		return
 	}
@@ -188,15 +198,36 @@ func (d *DaemonServer) fetchLauncherTo(version string, sl slotLayout) (string, e
 	}
 	base := manifestURL()
 	base = base[:len(base)-len(updateManifestFile)]
+	// Dual publish (see takeover_help.go): versioned URL first (immutable),
+	// floating fallback (may be stale; self-verify decides).
+	verAsset := asset + "-v" + version
+	if runtime.GOOS == "windows" {
+		verAsset = "indirect-launcher-" + runtime.GOOS + "-" + runtime.GOARCH + "-v" + version + ".exe"
+	}
+	candidates := []string{
+		fmt.Sprintf("%s%s?u=%s-%d", base, verAsset, version, time.Now().Unix()),
+		fmt.Sprintf("%s%s?u=%s-%d", base, asset, version, time.Now().Unix()),
+	}
 	tmp, err := os.CreateTemp(binDir, ".launcher-*")
 	if err != nil {
 		return "", err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := fetchURL(base+asset, tmp); err != nil {
+	var dlErr error
+	for _, u := range candidates {
+		tmp.Seek(0, 0)
+		tmp.Truncate(0)
+		if err := fetchURL(u, tmp); err != nil {
+			dlErr = fmt.Errorf("download %s: %w", asset, err)
+			continue
+		}
+		dlErr = nil
+		break
+	}
+	if dlErr != nil {
 		tmp.Close()
-		return "", err
+		return "", dlErr
 	}
 	tmp.Close()
 	if runtime.GOOS != "windows" {
@@ -237,6 +268,34 @@ func selfVerifyBinary(path, wantVersion, kind string) error {
 		return fmt.Errorf("%s binary suspiciously small (%v)", kind, err)
 	}
 	return nil
+}
+
+// recordMismatch remembers a self-verify failure for backoff + UI.
+func (d *DaemonServer) recordMismatch(want, got string) {
+	st := d.updateChecker()
+	st.mu.Lock()
+	st.mismatchWant = want
+	st.mismatchGot = got
+	st.mismatchAt = time.Now().UnixMilli()
+	st.mu.Unlock()
+}
+
+// extractGotVersion pulls the quoted got-version from a mismatch error
+// (`want "X", got "Y"`); "" when the error has no version pair.
+func extractGotVersion(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	i := strings.Index(s, `got "`)
+	if i < 0 {
+		return ""
+	}
+	s = s[i+5:]
+	if j := strings.Index(s, `"`); j >= 0 {
+		return s[:j]
+	}
+	return ""
 }
 
 // copyToSlot copies sessions (+ small configs) active -> inactive.

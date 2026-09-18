@@ -12,6 +12,7 @@
     "build:daemon": "go build -C indirect-code-daemon -o bin/indirect-code ./cmd/daemon",
     "build:daemon:all": "bun ./scripts/build-indirect-all.ts",
     "release": "bun ./scripts/release.ts",
+    "update": "bun ./scripts/release.ts",
     "update:release": "bun ./scripts/release.ts",
     "test": "DATA_DIR=./data/test bun test",
     "lint": "eslint .",

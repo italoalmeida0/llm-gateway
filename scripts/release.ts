@@ -64,7 +64,7 @@ try {
 
 // 6. Stage, commit and push
 console.log(`\n📤 [4/4] Committing and pushing to GitHub...`);
-await $`git add indirect-code-daemon/dist package.json build.ts server/ scripts/ web/`.cwd(ROOT);
+await $`git add -A`.cwd(ROOT);
 
 // Check if anything is staged
 const stagedDiff = (await $`git diff --cached --name-only`.text()).trim();

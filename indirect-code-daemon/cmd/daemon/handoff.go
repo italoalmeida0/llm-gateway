@@ -198,12 +198,14 @@ func (d *DaemonServer) fetchLauncherTo(version string, sl slotLayout) (string, e
 		return local, nil
 	}
 	// Gateway first (serves dist/ itself — instant, no CDN), mirror fallback.
-	base := ""
+	var bases []string
 	if gb := gatewayBaseURL(d); gb != "" {
-		base = gb + "/r/"
-	} else {
-		base = manifestURL()
-		base = base[:len(base)-len(updateManifestFile)]
+		bases = append(bases, strings.TrimRight(gb, "/")+"/r/")
+	}
+	if raw := os.Getenv("INDIRECT_REPO_RAW"); raw != "" {
+		bases = append(bases, strings.TrimRight(raw, "/")+"/")
+	} else if mu := manifestURL(); mu != "" {
+		bases = append(bases, mu[:len(mu)-len(updateManifestFile)])
 	}
 	// Dual publish (see takeover_help.go): versioned URL first (immutable),
 	// floating fallback (may be stale; self-verify decides).
@@ -211,9 +213,12 @@ func (d *DaemonServer) fetchLauncherTo(version string, sl slotLayout) (string, e
 	if runtime.GOOS == "windows" {
 		verAsset = "indirect-launcher-" + runtime.GOOS + "-" + runtime.GOARCH + "-v" + version + ".exe"
 	}
-	candidates := []string{
-		fmt.Sprintf("%s%s?u=%s-%d", base, verAsset, version, time.Now().Unix()),
-		fmt.Sprintf("%s%s?u=%s-%d", base, asset, version, time.Now().Unix()),
+	var candidates []string
+	for _, b := range bases {
+		candidates = append(candidates,
+			fmt.Sprintf("%s%s?u=%s-%d", b, verAsset, version, time.Now().Unix()),
+			fmt.Sprintf("%s%s?u=%s-%d", b, asset, version, time.Now().Unix()),
+		)
 	}
 	tmp, err := os.CreateTemp(binDir, ".launcher-*")
 	if err != nil {
@@ -406,8 +411,8 @@ func gatewayBaseURL(d *DaemonServer) string {
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	scheme := u.Scheme
-	if scheme != "http" && scheme != "https" {
+	scheme := "http"
+	if u.Scheme == "wss" || u.Scheme == "https" {
 		scheme = "https"
 	}
 	return scheme + "://" + u.Host

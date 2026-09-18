@@ -287,7 +287,7 @@ func projectPayload(p ProjectEntry) map[string]any {
 }
 
 func (d *DaemonServer) projectsFile() string {
-	return filepath.Join(d.sharedRoot(), "projects.json")
+	return filepath.Join(d.dataDir, "projects.json")
 }
 
 func (d *DaemonServer) loadProjects() []ProjectEntry {
@@ -445,9 +445,8 @@ type DaemonServer struct {
 	filesMu     sync.Mutex
 	configPath  string
 	dataDir     string
-	// sharedDir roots shared (unslotted) state: brain, python, unish,
-	// projects, config, pidfile. Equals dataDir in legacy single-root
-	// mode; the slots root when dataDir is a slot dir (takeover path).
+	// sharedDir roots <root>/external (python, unish). Set once at boot
+	// from the slot dataDir; the daemon never guesses it elsewhere.
 	sharedDir string
 	config    *DaemonConfig
 	configMu  sync.RWMutex
@@ -523,11 +522,11 @@ func defaultDataDir() string {
 var errDaemonRevoked = errors.New("daemon credentials revoked by gateway")
 
 func (d *DaemonServer) pidFile() string {
-	return filepath.Join(d.sharedRoot(), "daemon.pid")
+	return filepath.Join(d.dataDir, "daemon.pid")
 }
 
 func (d *DaemonServer) writePidFile() {
-	if err := os.MkdirAll(d.sharedRoot(), 0o700); err != nil {
+	if err := os.MkdirAll(d.dataDir, 0o700); err != nil {
 		return
 	}
 	_ = os.WriteFile(d.pidFile(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
@@ -559,11 +558,26 @@ func (d *DaemonServer) gracefulShutdown(reason string) {
 // (gateway offline => no remote shutdown possible). Returns nil when a
 // process was signalled, error otherwise.
 func stopDaemonFromPidFile(dataDir string) error {
+	// pid is slot-local (canonical: dataDir IS the slot). Fall back to
+	// the sibling slot and a stray root pidfile for broken layouts.
 	pidPath := filepath.Join(dataDir, "daemon.pid")
 	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
-		parent := filepath.Dir(dataDir)
-		if filepath.Base(parent) == "slots" {
-			pidPath = filepath.Join(filepath.Dir(parent), "daemon.pid")
+		if filepath.Base(filepath.Dir(dataDir)) == "slots" {
+			root := filepath.Dir(filepath.Dir(dataDir))
+		base := filepath.Base(dataDir)
+			other := "slot-a"
+			if base == "slot-a" {
+				other = "slot-b"
+			}
+			for _, c := range []string{
+				filepath.Join(root, "slots", other, "daemon.pid"),
+			filepath.Join(root, "daemon.pid"),
+			} {
+				if _, err := os.Stat(c); err == nil {
+					pidPath = c
+					break
+				}
+			}
 		}
 	}
 	raw, err := os.ReadFile(pidPath)
@@ -610,37 +624,30 @@ func isRevokedDialError(resp *http.Response, err error) bool {
 }
 
 func (d *DaemonServer) sessionsDir() string {
-	// Sessions live in the ACTIVE slot once slots/ exists (the launcher
-	// adopts the legacy top-level sessions/ into slots/slot-a on first
-	// slot boot). Reading the legacy dir instead would silently hide
-	// every session after the first slot update (see handoff.go/copyToSlot
-	// and launcher installSlotA). The active slot is the source of truth;
-	// the legacy dir is only a fallback for pre-slot installs.
-	if raw, err := os.ReadFile(filepath.Join(d.dataDir, "slots", "active")); err == nil {
-		if s := strings.TrimSpace(string(raw)); s == "a" || s == "b" {
-			return filepath.Join(d.dataDir, "slots", "slot-"+s, "sessions")
-		}
-	}
+	// Canonical layout: the daemon ALWAYS runs with dataDir = the slot
+	// dir (<root>/slots/slot-a|b), so sessions live at <slot>/sessions.
+	// No fallback branches: the launcher guarantees the layout before exec.
 	return filepath.Join(d.dataDir, "sessions")
 }
 
-// sharedRoot returns the shared state root, initializing it once.
-func (d *DaemonServer) sharedRoot() string {
-	if d.sharedDir != "" {
-		return d.sharedDir
+// rootDir resolves <root> from the slot dataDir (<root>/slots/slot-x).
+// Root holds only: brain/, slots/, logs/, external/. Everything the
+// daemon serves (sessions, config, projects, pid) lives in the slot.
+func (d *DaemonServer) rootDir() string {
+	if filepath.Base(filepath.Dir(d.dataDir)) == "slots" {
+		return filepath.Dir(filepath.Dir(d.dataDir))
 	}
 	return d.dataDir
 }
 
-// initSharedDir resolves sharedDir from dataDir: when dataDir is a slot
-// dir (<root>/slots/slot-x), shared is <root>; otherwise dataDir itself.
-func (d *DaemonServer) initSharedDir() {
-	parent := filepath.Dir(d.dataDir)
-	if filepath.Base(parent) == "slots" {
-		d.sharedDir = filepath.Dir(parent)
-		return
+// brainDir resolves the per-session private scratch space
+// (<root>/brain/<sessionID>), refusing traversal. Created lazily;
+// allowed through the jail so the model always has temp space.
+func (d *DaemonServer) brainDir(sessionID string) string {
+	if sessionID == "" || filepath.Base(sessionID) != sessionID {
+		return ""
 	}
-	d.sharedDir = d.dataDir
+	return filepath.Join(d.rootDir(), "brain", sessionID)
 }
 
 func resolvePath(p string) string {
@@ -1591,7 +1598,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			}
 		}
 		if firstDirty <= 0 {
-			// All-zero tail (legacy): full re-split of the kept prefix.
+			// All-zero tail: full re-split of the kept prefix.
 			lines, _ := splitRecord(rec)
 			_ = d.writeSessionFile(rec.ID, lines, recordMeta(rec))
 		} else {
@@ -2660,12 +2667,7 @@ func main() {
 	if *standbyFlag {
 		cfgPath := *configFlag
 		if cfgPath == "" {
-			// Shared config (slot mode) or slot-local (legacy): mirror
-			// the initSharedDir rule without a server yet.
 			cfgPath = filepath.Join(dataDir, "config.json")
-			if pp := filepath.Dir(dataDir); filepath.Base(pp) == "slots" {
-				cfgPath = filepath.Join(filepath.Dir(pp), "config.json")
-			}
 		}
 		os.Exit(runStandby(dataDir, cfgPath))
 	}
@@ -2684,15 +2686,14 @@ func main() {
 	if configPath == "" {
 		configPath = filepath.Join(dataDir, "config.json")
 	}
-	// NOTE: configPath stays dataDir-relative for legacy mode; slot mode
-	// passes an explicit --config pointing at the shared root (launcher).
 
 	server := &DaemonServer{
 		configPath: configPath,
 		dataDir:    dataDir,
 		sessions:   make(map[string]*ActiveSession),
 	}
-	server.initSharedDir()
+	// external/ (python, unish) lives at the root, next to slots/.
+	server.sharedDir = filepath.Join(server.rootDir(), "external")
 
 	// If -connect was explicitly passed, ALWAYS perform pairing to the new link (disconnects from old gateway)
 	if *connectFlag != "" {
@@ -2732,10 +2733,10 @@ func main() {
 		fmt.Println("[INFO] Tip: To switch to another gateway link or user account, run: ./indirect-code -connect <new-url>")
 	}
 
-	// Python check: managed copy in the Indirect Code folder -> PATH ->
+	// Python check: managed copy in <root>/external -> PATH ->
 	// standalone download (astral-sh/python-build-standalone). Failure only
 	// DISABLES the python tool — startup continues.
-	if bin, err := tools.EnsurePython(dataDir); err != nil {
+	if bin, err := tools.EnsurePython(server.sharedDir); err != nil {
 		fmt.Printf("[PYTHON] unavailable (%v); python tool disabled\n", err)
 		tools.SetPythonOverride("", err)
 	} else {
@@ -2747,7 +2748,7 @@ func main() {
 	// unish (auto-downloaded from the unish releases) -> zsh -> sh,
 	// Windows requires unish. No usable shell = refuse to start, since
 	// every turn depends on terminal commands.
-	if err := tools.EnsureShell(dataDir); err != nil {
+	if err := tools.EnsureShell(server.sharedDir); err != nil {
 		// No shell, but a valid python exists: the daemon still starts —
 		// the bash tool stays advertised but refuses with "unavailable"
 		// when used, while the python tool works normally. Only when
@@ -2765,6 +2766,7 @@ func main() {
 		fmt.Printf("[INFO] swept %d tmp orphans\n", n)
 	}
 	sweepTmpOrphans(dataDir, time.Hour)
+	sweepTmpOrphans(filepath.Join(server.rootDir(), "logs"), time.Hour)
 	// A previous run dying mid-turn must not brick sessions forever.
 	server.resetRunningSessions()
 	// Turns interrupted by the death resume where they died: same index,

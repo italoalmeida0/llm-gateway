@@ -21,12 +21,12 @@ import (
 // tool: before the daemon starts it guarantees a usable Python 3
 // interpreter, trying in order:
 //
-//  1. the managed copy in <dataDir>/python (the Indirect Code folder),
+//  1. the managed copy in <externalDir>/python (the Indirect Code folder),
 //     auto-installed from python-build-standalone when missing;
 //  2. python3/python on PATH (must answer "Python 3." to --version and
 //     execute a trivial snippet);
 //  3. download the small install_only_stripped standalone build matching
-//     this OS/arch into <dataDir>/python and use it.
+//     this OS/arch into <externalDir>/python and use it.
 //
 // When nothing works the python tool is DISABLED (not advertised, and
 // Execute refuses with "not available") — it never blocks startup. The
@@ -49,8 +49,8 @@ var (
 	pythonDownloadFunc = downloadPythonStandalone
 )
 
-// PythonBinPath is the managed interpreter location inside the daemon data
-// dir: <dataDir>/python/bin/python3 (python.exe on Windows).
+// PythonBinPath is the managed interpreter location inside <externalDir>
+// (the shared <root>/external dir): <externalDir>/python/bin/python3 (python.exe on Windows).
 func PythonBinPath(dataDir string) string {
 	if runtime.GOOS == "windows" {
 		return filepath.Join(dataDir, "python", "python.exe")
@@ -192,7 +192,7 @@ func resolvePythonStandaloneAsset(ctx context.Context, goos, goarch string) (str
 }
 
 // downloadPythonStandalone fetches the pinned standalone tarball and
-// extracts it under <dataDir>/python (the archive's top-level "python/"
+// extracts it under <externalDir>/python (the archive's top-level "python/"
 // dir), then probes the resulting interpreter.
 func downloadPythonStandalone(ctx context.Context, dataDir string) (string, error) {
 	asset, err := resolvePythonStandaloneAsset(ctx, runtime.GOOS, runtime.GOARCH)

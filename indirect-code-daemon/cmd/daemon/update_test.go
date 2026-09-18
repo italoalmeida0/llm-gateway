@@ -80,8 +80,9 @@ func TestBeginHandoffGuards(t *testing.T) {
 func TestBroadcastShape(t *testing.T) {
 	d := testDaemon(t)
 	dir := t.TempDir()
-	d.dataDir = dir
-	os.MkdirAll(filepath.Join(dir, "sessions"), 0o700)
+	slot := filepath.Join(dir, "slots", "slot-a")
+	d.dataDir = slot
+	os.MkdirAll(filepath.Join(slot, "sessions"), 0o700)
 	// broadcastUpdateState with nil conn must not panic (sendWS guards).
 	d.broadcastUpdateState()
 }

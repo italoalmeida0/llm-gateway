@@ -6,34 +6,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/internal/migrations"
 )
 
-// Takeover mode: invoked by the OLD daemon as
-//   launcher-new --takeover --data-dir D --from-slot a --to-slot b
+// Takeover mode: invoked by the ACTIVE daemon as
+//   launcher-new --takeover --root-dir R --from-slot a --to-slot b
 //     --expect-version V --handoff-file F --parent-pid PID
-//
 // Steps (all inside the INACTIVE slot; the active slot is never touched
 // until promote):
 //  1. migrate sessions in the inactive slot (chain)
 //  2. fetch the new daemon into the inactive slot + self-verify (--version)
 //  3. start the new daemon in STANDBY (no WS): --standby --data-dir <slot>
 //  4. health-check it (version + storage + sessions readable)
-//  5. signal the old daemon to die (it disconnects WS + exits), then
+//  5. signal the active daemon to die (it disconnects WS + exits), then
 //     promote: flip `active`, tell the new daemon to assume (handoff file
-//     "promoted"), delete the old slot.
+//     "promoted"), delete the previous slot.
 // Any failure: write "failed: reason" to the handoff file, delete nothing
-// active, exit non-zero. The old daemon (still alive, WS connected)
+// active, exit non-zero. The active daemon (still alive, WS connected)
 // unfreezes on failure.
 
 func runTakeover(
-	dataDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid string,
+	rootDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid string,
 ) int {
-	toDir := filepath.Join(dataDir, "slots", "slot-"+toSlot)
-	stableLog := filepath.Join(dataDir, "takeover-last.log")
+	toDir := filepath.Join(rootDir, "slots", "slot-"+toSlot)
+	logsDir := filepath.Join(rootDir, "logs")
+	_ = os.MkdirAll(logsDir, 0o700)
+	stableLog := filepath.Join(logsDir, "takeover-last.log")
 	// Dedicated log: daemon stdout may be unreachable (service, nohup
 	// rotation); the reason for a takeover failure must survive here.
 	takeoverLog := filepath.Join(toDir, "takeover.log")
@@ -86,7 +86,7 @@ func runTakeover(
 	}
 	// 5. PROOF FIRST: wait for the new daemon's serving.json (written
 	// AFTER its WS connects) and verify the version matches what we
-	// downloaded. The old daemon is still alive and serving — nothing
+	// downloaded. The active daemon is still alive and serving — nothing
 	// dies before the replacement proves, in writing, that it serves.
 	// This kills the version-skew class: stale cache can no longer swap
 	// a healthy daemon for itself.
@@ -95,14 +95,14 @@ func runTakeover(
 		_ = standby.cmd.Process.Kill()
 		return fail(fmt.Sprintf("serving proof: %v", err))
 	}
-	// 6. Only now: tell the old daemon to die (SIGTERM, escalate).
-	logf("[TAKEOVER] proof OK; asking old daemon (pid %s) to exit...", parentPid)
+	// 6. Only now: tell the active daemon to die (SIGTERM, escalate).
+	logf("[TAKEOVER] proof OK; asking active daemon (pid %s) to exit...", parentPid)
 	if err := terminateParentWait(parentPid, 15*time.Second); err != nil {
 		_ = standby.cmd.Process.Kill()
 		return fail(fmt.Sprintf("terminate parent: %v", err))
 	}
-	// 7. Promote: flip active, tell standby to assume, delete old slot.
-	if err := os.WriteFile(filepath.Join(dataDir, "slots", "active"), []byte(toSlot+"\n"), 0o600); err != nil {
+	// 7. Promote: flip active, tell standby to assume, delete the previous slot.
+	if err := os.WriteFile(filepath.Join(rootDir, "slots", "active"), []byte(toSlot+"\n"), 0o600); err != nil {
 		_ = standby.cmd.Process.Kill()
 		return fail(fmt.Sprintf("flip active: %v", err))
 	}
@@ -113,20 +113,20 @@ func runTakeover(
 	// normal boot: WS, pidfile, fresh serving.json). CONFIRM a fresh
 	// post-boot proof before deleting anything.
 	flippedAt := time.Now()
-	if err := confirmServing(dataDir, standby, toDir, expectVersion, flippedAt); err != nil {
-		// Rollback: flip back, relaunch OLD daemon from the intact slot,
-		// report failure. The old slot was never touched.
+	if err := confirmServing(rootDir, standby, toDir, expectVersion, flippedAt); err != nil {
+		// Rollback: flip back, relaunch the previous daemon from the intact slot,
+		// report failure. The previous slot was never touched.
 		logf("[TAKEOVER] new daemon failed to serve: %v — rolling back", err)
 		_ = standby.cmd.Process.Kill()
-		_ = os.WriteFile(filepath.Join(dataDir, "slots", "active"), []byte(fromSlot+"\n"), 0o600)
+		_ = os.WriteFile(filepath.Join(rootDir, "slots", "active"), []byte(fromSlot+"\n"), 0o600)
 		_ = os.WriteFile(handoffFile, []byte("failed: new daemon did not serve"), 0o600)
-		if rbErr := relaunchOldSlot(dataDir, fromSlot); rbErr != nil {
+		if rbErr := relaunchOldSlot(rootDir, fromSlot); rbErr != nil {
 			return fail(fmt.Sprintf("rollback relaunch: %v", rbErr))
 		}
 		return fail("new daemon did not serve; rolled back to previous version")
 	}
-	logf("[TAKEOVER] promoted slot %s, cleaning old slot %s...", toSlot, fromSlot)
-	_ = os.RemoveAll(filepath.Join(dataDir, "slots", "slot-"+fromSlot))
+	logf("[TAKEOVER] promoted slot %s, cleaning previous slot %s...", toSlot, fromSlot)
+	_ = os.RemoveAll(filepath.Join(rootDir, "slots", "slot-"+fromSlot))
 	logf("[TAKEOVER] done (daemon %s live)", expectVersion)
 	return 0
 }
@@ -136,7 +136,7 @@ func runTakeover(
 // The standby's pre-exec proof is not enough: exec changes the pid, so we
 // require a FRESH post-boot proof (the booted daemon rewrites serving.json
 // right after its WS connects). Stale proofs fail the timestamp check.
-func confirmServing(dataDir string, standby *standbyProc, slotDir, expectVersion string, flippedAt time.Time) error {
+func confirmServing(rootDir string, standby *standbyProc, slotDir, expectVersion string, flippedAt time.Time) error {
 	_ = standby
 	path := filepath.Join(slotDir, "serving.json")
 	deadline := time.Now().Add(60 * time.Second)
@@ -157,18 +157,14 @@ func confirmServing(dataDir string, standby *standbyProc, slotDir, expectVersion
 
 // relaunchOldSlot starts the previous slot's daemon (rollback). It boots
 // normally (resume from WALs, reconnect) — the slot was never modified.
-func relaunchOldSlot(dataDir, fromSlot string) error {
-	binDir := filepath.Join(dataDir, "slots", "slot-"+fromSlot, "bin")
-	asset := daemonAssetName()
-	local := filepath.Join(binDir, asset)
-	if runtime.GOOS == "windows" {
-		local = filepath.Join(binDir, "indirect-code.exe")
-	}
+func relaunchOldSlot(rootDir, fromSlot string) error {
+	binDir := filepath.Join(rootDir, "slots", "slot-"+fromSlot, "bin")
+	local := filepath.Join(binDir, slotBinName())
 	if st, err := os.Stat(local); err != nil || st.IsDir() {
-		return fmt.Errorf("old slot has no daemon")
+		return fmt.Errorf("previous slot has no daemon")
 	}
-	slotDir := filepath.Join(dataDir, "slots", "slot-"+fromSlot)
-	cmd := exec.Command(local, "--data-dir", slotDir, "--config", dataDir+"/config.json")
+	slotDir := filepath.Join(rootDir, "slots", "slot-"+fromSlot)
+	cmd := exec.Command(local, "--data-dir", slotDir, "--config", filepath.Join(slotDir, "config.json"))
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		return err
@@ -178,15 +174,15 @@ func relaunchOldSlot(dataDir, fromSlot string) error {
 }
 
 // runTakeoverFlags parses --takeover CLI flags (called from main).
-func parseTakeoverFlags(args []string) (dataDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid string) {
+func parseTakeoverFlags(args []string) (rootDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid string) {
 	for i := 0; i < len(args); i++ {
 		next := ""
 		if i+1 < len(args) {
 			next = args[i+1]
 		}
 		switch args[i] {
-		case "--data-dir":
-			dataDir, i = next, i+1
+		case "--root-dir":
+			rootDir, i = next, i+1
 		case "--from-slot":
 			fromSlot, i = next, i+1
 		case "--to-slot":
@@ -199,5 +195,5 @@ func parseTakeoverFlags(args []string) (dataDir, fromSlot, toSlot, expectVersion
 			parentPid, i = next, i+1
 		}
 	}
-	return dataDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid
+	return rootDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid
 }

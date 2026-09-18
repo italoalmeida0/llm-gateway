@@ -9,9 +9,8 @@ import (
 )
 
 // Full handoff phases 0-2 against the fake mirror (no WS needed):
-// fetch launcher -> freeze -> copy -> (takeover exec mocked by checking
-// launcher --takeover arg parsing would need a daemon; here we verify the
-// daemon-side primitives the E2E shell drives).
+// fetch launcher -> freeze -> copy -> abort. Canonical layout: dataDir IS
+// the active slot (<root>/slots/slot-a), root holds brain/slots/logs.
 func TestHandoffPrimitivesE2E(t *testing.T) {
 	// Hermetic mirror: serves a fake launcher script for self-verify.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,15 +28,16 @@ func TestHandoffPrimitivesE2E(t *testing.T) {
 	t.Setenv("INDIRECT_REPO_RAW", srv.URL)
 	d := testDaemon(t)
 	root := t.TempDir()
-	// Seed slot-a with one session (mirrors the shell E2E layout).
-	os.MkdirAll(filepath.Join(root, "slots", "slot-a", "sessions"), 0o700)
-	os.WriteFile(filepath.Join(root, "slots", "slot-a", "sessions", "s1.jsonl"),
+	// Seed slot-a with one session (canonical layout: dataDir = slot-a).
+	slotA := filepath.Join(root, "slots", "slot-a")
+	os.MkdirAll(filepath.Join(slotA, "sessions"), 0o700)
+	os.WriteFile(filepath.Join(slotA, "sessions", "s1.jsonl"),
 		[]byte("{\"v\":1,\"kind\":\"meta\",\"id\":\"s1\",\"title\":\"T\"}\n"), 0o600)
 	os.WriteFile(filepath.Join(root, "slots", "active"), []byte("a\n"), 0o600)
-	d.dataDir = root
-	d.initSharedDir()
-	if got := d.sharedRoot(); got != root {
-		t.Fatalf("shared = %q", got)
+	d.dataDir = slotA
+	d.sharedDir = filepath.Join(root, "external")
+	if got := d.rootDir(); got != root {
+		t.Fatalf("root = %q, want %q", got, root)
 	}
 	// Slot layout reads active=a.
 	sl := d.slots()
@@ -77,7 +77,7 @@ func TestHandoffPrimitivesE2E(t *testing.T) {
 		t.Fatal("slot-b survived abort")
 	}
 	// Slot-a untouched.
-	if _, err := os.Stat(filepath.Join(root, "slots", "slot-a", "sessions", "s1.jsonl")); err != nil {
+	if _, err := os.Stat(filepath.Join(slotA, "sessions", "s1.jsonl")); err != nil {
 		t.Fatal("slot-a damaged")
 	}
 }

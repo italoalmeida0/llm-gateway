@@ -70,8 +70,8 @@ func UnishAssetName(goos, goarch string) (string, error) {
 	return fmt.Sprintf("unish-%s-%s%s", osPart, archPart, ext), nil
 }
 
-// UnishBinPath is the managed binary location inside the daemon data dir
-// ("the indirect code folder"): <dataDir>/bin/unish[.exe].
+// UnishBinPath is the managed binary location inside <externalDir>
+// (the shared <root>/external dir): <externalDir>/bin/unish[.exe].
 func UnishBinPath(dataDir string) string {
 	name := "unish"
 	if runtime.GOOS == "windows" {
@@ -276,7 +276,7 @@ func displayVer(v string) string {
 }
 
 // EnsureUnish guarantees a usable managed unish binary at
-// <dataDir>/bin/unish[.exe], downloading or re-downloading it from the
+// <externalDir>/bin/unish[.exe], downloading or re-downloading it from the
 // unish releases when needed:
 //
 //  1. no local binary -> download the latest release;

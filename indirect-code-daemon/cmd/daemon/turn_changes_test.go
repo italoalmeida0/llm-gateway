@@ -220,7 +220,7 @@ func TestEditMessageTrimsDiscardedBalloons(t *testing.T) {
 func TestBrainFilesNeverBecomeBalloons(t *testing.T) {
 	d := testDaemon(t)
 	dir := t.TempDir()
-	brain := filepath.Join(d.dataDir, "brain", "s-brain")
+	brain := filepath.Join(d.rootDir(), "brain", "s-brain")
 	if err := os.MkdirAll(brain, 0o700); err != nil {
 		t.Fatal(err)
 	}

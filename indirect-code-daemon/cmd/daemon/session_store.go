@@ -79,7 +79,7 @@ func (d *DaemonServer) sessionFile(id string) string {
 	return filepath.Join(d.sessionsDir(), id+".jsonl")
 }
 
-// validSessionID refuses traversal (shared with the legacy .json guard).
+// validSessionID refuses traversal.
 func validSessionID(id string) bool {
 	return id != "" && !strings.ContainsAny(id, "/\\") && id != "." && id != ".."
 }
@@ -349,7 +349,7 @@ func (d *DaemonServer) readSessionFile(id string) ([]turnLine, metaLine, error) 
 }
 
 // assembleRecord fuses turn lines + meta into a SessionRecord (hydrate
-// messages via the same path as the legacy JSON load).
+// messages via the same record-hydration path).
 func assembleRecord(lines []turnLine, meta metaLine) *SessionRecord {
 	rec := &SessionRecord{
 		Turn: meta.Turn, Todos: meta.Todos, TodosOpen: meta.TodosOpen,
@@ -376,7 +376,7 @@ func assembleRecord(lines []turnLine, meta metaLine) *SessionRecord {
 	// Commit-window reconcile: torn meta rewrite after a turn append
 	// leaves TurnSeq one behind the lines on disk — trust the lines.
 	// Guard: only when real (non-zero) turn indexing exists. All-zero
-	// legacy/test transcripts group as a fabricated turn-1 line that
+	// all-zero test transcripts group as a fabricated turn-1 line that
 	// must NOT advance TurnSeq (it isn't turn 1).
 	hasIndexed := false
 	for _, m := range rec.Messages {
@@ -908,7 +908,7 @@ func (d *DaemonServer) persistEdited(id string, firstDirtyTurn int, suffixMsgs [
 	// starts at a turn boundary. Callers guarantee: suffixMsgs begins at
 	// the first message with TurnIndex >= firstDirtyTurn (plus attached
 	// leading zeros), so the first group IS firstDirtyTurn — unless the
-	// suffix is all zeros (legacy), in which case it forms turn 1 and
+	// suffix is all zeros, in which case it forms turn 1 and
 	// firstDirtyTurn must be 1 (callers: full rewrite, keepEnd=0).
 	if firstDirtyTurn > 1 {
 		for i := range suffixLines {
@@ -1127,18 +1127,9 @@ func (d *DaemonServer) sweepTmpLoop() {
 	}
 }
 
-// sweepTmpDirs walks all tmp-capable dirs (legacy + slotted).
+// sweepTmpDirs walks the slot's tmp-capable dirs (sessions + bin).
 func (d *DaemonServer) sweepTmpDirs() {
 	dirs := []string{d.sessionsDir(), filepath.Join(d.dataDir, "bin")}
-	if entries, err := os.ReadDir(filepath.Join(d.dataDir, "slots")); err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				dirs = append(dirs,
-					filepath.Join(d.dataDir, "slots", e.Name(), "sessions"),
-					filepath.Join(d.dataDir, "slots", e.Name(), "bin"))
-			}
-		}
-	}
 	for _, dir := range dirs {
 		sweepTmpOrphans(dir, time.Hour)
 	}

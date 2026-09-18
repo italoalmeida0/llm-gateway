@@ -246,10 +246,9 @@ func (d *DaemonServer) isFrozen() bool {
 // every (re)connect so the frontend learns even if WS was down at boot.
 func (d *DaemonServer) announceUpdateDone() {
 	marker := ""
-	// Marker lives next to the slot's handoff file (dataDir-adjacent).
+	// Marker lives in the slot next to the handoff file.
 	for _, cand := range []string{
 		filepath.Join(d.dataDir, "handoff.json"),
-		filepath.Join(filepath.Dir(d.dataDir), "handoff.json"),
 	} {
 		if raw, err := os.ReadFile(cand); err == nil && strings.TrimSpace(string(raw)) == "promoted" {
 			marker = cand

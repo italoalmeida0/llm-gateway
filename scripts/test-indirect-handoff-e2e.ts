@@ -46,6 +46,7 @@ async function main() {
   wfs(join(mirror, "versions.json"), JSON.stringify(manifest));
 
   // Seed slot-a: old binaries + session + version + config (bad gateway: no WS needed for freeze/copy phases).
+  // Canonical layout: config.json is slot-local.
   copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", "indirect-code-linux-amd64"));
   copyFileSync(launcherOldBin, join(root, "slots", "slot-a", "bin", "indirect-launcher-linux-amd64"));
   wfs(join(root, "slots", "active"), "a\n");
@@ -53,7 +54,7 @@ async function main() {
   wfs(join(root, "slots", "slot-a", "sessions", "s1.jsonl"),
     `{"v":1,"kind":"turn","turn":1,"messages":[{"role":"user","turnIndex":1,"content":[{"type":"text","text":"hi"}]}]}\n` +
     `{"v":1,"kind":"meta","id":"s1","cwd":"/tmp","title":"T","model":"m","status":"idle","createdAt":1,"updatedAt":2,"turnSeq":1}\n`);
-  wfs(join(root, "config.json"), JSON.stringify({
+  wfs(join(root, "slots", "slot-a", "config.json"), JSON.stringify({
     gateway_url: "ws://127.0.0.1:1", daemon_token: "x", api_key: "y",
     host_id: "handoff-e2e", name: "e2e", settings: {},
   }));
@@ -110,9 +111,9 @@ async function main() {
   });
   const gwURL = `ws://127.0.0.1:${gw.port}`;
   // Point config at fake gateway.
-  const cfg = JSON.parse(readFileSync(join(root, "config.json"), "utf8"));
+  const cfg = JSON.parse(readFileSync(join(root, "slots", "slot-a", "config.json"), "utf8"));
   cfg.gateway_url = gwURL;
-  wfs(join(root, "config.json"), JSON.stringify(cfg));
+  wfs(join(root, "slots", "slot-a", "config.json"), JSON.stringify(cfg));
 
   // Start OLD daemon via launcher (slot-aware boot).
   const launcherOld = join(root, "slots", "slot-a", "bin", "indirect-launcher-linux-amd64");

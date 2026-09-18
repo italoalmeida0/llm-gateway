@@ -9,22 +9,19 @@ import (
 	"strings"
 )
 
-// activeSessionsDir mirrors the daemon's sessionsDir (main.go): once
-// slots/active exists, sessions live in the active slot; otherwise in
-// the legacy top-level sessions/ dir. Keep the two in sync.
-func activeSessionsDir(dataDir string) string {
-	if raw, err := os.ReadFile(filepath.Join(dataDir, "slots", "active")); err == nil {
-		if s := strings.TrimSpace(string(raw)); s == "a" || s == "b" {
-			return filepath.Join(dataDir, "slots", "slot-"+s, "sessions")
-		}
+// activeSessionsDir resolves the live sessions dir: the active slot's
+// sessions (canonical layout). No fallback branches: ensureLayout runs
+// before verify, so slots/active always parses here.
+func activeSessionsDir(rootDir string) string {
+	if s := readActiveSlot(filepath.Join(rootDir, "slots")); s == "a" || s == "b" {
+		return filepath.Join(rootDir, "slots", "slot-"+s, "sessions")
 	}
-	return filepath.Join(dataDir, "sessions")
+	return filepath.Join(rootDir, "slots", "slot-a", "sessions")
 }
 
 // verifySessions scans every session file for structural sanity:
-// JSONL sessions must end with a meta line; legacy JSON sessions must
-// parse. Torn tail lines are reported (the daemon tolerates them) but
-// do not fail verification.
+// JSONL sessions must end with a meta line. Torn tail lines are reported
+// (the daemon tolerates them) but do not fail verification.
 func verifySessions(dataDir string) error {
 	dir := activeSessionsDir(dataDir)
 	entries, err := os.ReadDir(dir)
@@ -44,7 +41,7 @@ func verifySessions(dataDir string) error {
 			continue
 		}
 		if strings.HasSuffix(name, ".wal.jsonl") || strings.HasSuffix(name, ".turn.json") {
-			continue // ephemeral / legacy-crash sidecars, daemon-owned
+			continue // ephemeral sidecars, daemon-owned
 		}
 		p := filepath.Join(dir, name)
 		if strings.HasSuffix(name, ".jsonl") {
@@ -60,15 +57,8 @@ func verifySessions(dataDir string) error {
 			}
 			continue
 		}
-		// Legacy single-JSON session (pre-migration): must at least parse.
-		raw, err := os.ReadFile(p)
-		checked++
-		if err != nil || !json.Valid(raw) {
-			failed++
-			if firstErr == nil {
-				firstErr = fmt.Errorf("%s: unreadable legacy session", name)
-			}
-		}
+		// Non-JSONL files inside sessions/: ignore (sidecars, future).
+		continue
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d/%d sessions failed verification: %v", failed, checked, firstErr)

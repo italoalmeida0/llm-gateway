@@ -67,11 +67,18 @@ func isInsideSlotDir(dir string) bool {
 	return false
 }
 
-// resolveSlotDaemon resolves the daemon binary for normal boot.
-// Slotted root (slots/active exists): <root>/slots/slot-<a|b>/bin.
-// First-ever boot (no slots/): self-install slot-a (copy launcher binary,
-// download daemon latest, write active) then resolve.
+// resolveSlotDaemon resolves the daemon binary for normal boot:
+// ensureLayout first (repairs broken installs), then the active slot's
+// bin. First-ever boot (no slots/): self-install slot-a (copy launcher
+// binary, download daemon latest, write active) then resolve.
 func resolveSlotDaemon(dataDir string) (string, string, error) {
+	if notes, err := ensureLayout(dataDir); err != nil {
+		return "", "", err
+	} else {
+		for _, n := range notes {
+			fmt.Printf("[REPAIR] %s\n", n)
+		}
+	}
 	raw, err := os.ReadFile(filepath.Join(dataDir, "slots", "active"))
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -97,11 +104,7 @@ func resolveSlotDaemon(dataDir string) (string, string, error) {
 	}
 	slotDir := filepath.Join(dataDir, "slots", "slot-"+slot)
 	binDir := filepath.Join(slotDir, "bin")
-	asset := daemonAssetName()
-	local := filepath.Join(binDir, asset)
-	if runtime.GOOS == "windows" {
-		local = filepath.Join(binDir, "indirect-code.exe")
-	}
+	local := filepath.Join(binDir, slotBinName())
 
 	needDownload := false
 	if st, err := os.Stat(local); err != nil || st.IsDir() || st.Size() == 0 {
@@ -137,12 +140,7 @@ func resolveSlotDaemon(dataDir string) (string, string, error) {
 	}
 
 	if exe, err := os.Executable(); err == nil {
-		launcherName := daemonAssetName()
-		launcherName = "indirect-launcher-" + launcherName[len("indirect-code-"):]
-		if runtime.GOOS == "windows" {
-			launcherName = "indirect-launcher.exe"
-		}
-		slotLauncher := filepath.Join(binDir, launcherName)
+		slotLauncher := filepath.Join(binDir, slotLauncherName())
 		if st, serr := os.Stat(slotLauncher); serr != nil || st.Size() == 0 {
 			_ = copyFileLink(exe, slotLauncher)
 		}
@@ -168,8 +166,9 @@ func fetchURL(url string, w io.Writer) error {
 // installSlotA bootstraps slots/ on first-ever boot: copies THIS launcher
 // binary into slot-a/bin, downloads the latest daemon into slot-a/bin,
 // self-verifies both via --version, writes slots/active=a.
-// Legacy dataDir (sessions/ at top level, pre-slot installs): sessions are
-// MOVED (rename, instant) into slot-a/sessions so history is preserved.
+// Stray top-level sessions/ was already adopted by ensureLayout (which
+// runs before this); the move below is a second net for the exact
+// first-boot interleaving.
 func installSlotA(dataDir string) error {
 	slotsDir := filepath.Join(dataDir, "slots")
 	slotA := filepath.Join(slotsDir, "slot-a")
@@ -182,11 +181,7 @@ func installSlotA(dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("own binary: %w", err)
 	}
-	launcherName := daemonAssetName()
-	launcherName = "indirect-launcher-" + launcherName[len("indirect-code-"):]
-	if runtime.GOOS == "windows" {
-		launcherName = "indirect-launcher.exe"
-	}
+	launcherName := slotLauncherName()
 	if err := copyFileLink(exe, filepath.Join(binDir, launcherName)); err != nil {
 		return fmt.Errorf("install launcher: %w", err)
 	}
@@ -210,7 +205,7 @@ func installSlotA(dataDir string) error {
 	if err := selfVerifyDaemon(local, verifyVer); err != nil {
 		return fmt.Errorf("self verify daemon: %w", err)
 	}
-	// 4. Adopt legacy sessions/ (rename, instant) when present.
+	// 4. Adopt stray sessions/ (rename, instant) when present.
 	if _, err := os.Stat(filepath.Join(dataDir, "sessions")); err == nil {
 		if _, err := os.Stat(filepath.Join(slotA, "sessions")); os.IsNotExist(err) {
 			if err := os.Rename(filepath.Join(dataDir, "sessions"), filepath.Join(slotA, "sessions")); err != nil {
@@ -250,9 +245,12 @@ func mirrorBase() string {
 			}
 		}
 	}
-	// Check saved config.json in dataDir
+	// Check saved config.json: slot-local first (canonical), then the
+	// default root (this machine's real install — tests override HOME).
 	home, _ := os.UserHomeDir()
 	cfgPaths := []string{
+		filepath.Join(defaultDataDir(), "slots", "slot-a", "config.json"),
+		filepath.Join(defaultDataDir(), "slots", "slot-b", "config.json"),
 		filepath.Join(defaultDataDir(), "config.json"),
 	}
 	for i, a := range os.Args {
@@ -265,7 +263,10 @@ func mirrorBase() string {
 		}
 	}
 	if home != "" {
-		cfgPaths = append(cfgPaths, filepath.Join(home, ".indirect-code", "config.json"))
+		cfgPaths = append(cfgPaths,
+			filepath.Join(home, ".indirect-code", "slots", "slot-a", "config.json"),
+			filepath.Join(home, ".indirect-code", "slots", "slot-b", "config.json"),
+			filepath.Join(home, ".indirect-code", "config.json"))
 	}
 	for _, cp := range cfgPaths {
 		if data, err := os.ReadFile(cp); err == nil {

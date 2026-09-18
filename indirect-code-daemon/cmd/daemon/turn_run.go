@@ -606,7 +606,7 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *walHeader) {
 	}
 	ww, werr := d.openWALAppend(sessionID)
 	if werr != nil {
-		// No WAL file (e.g. header-only legacy path): create fresh.
+		// No WAL file (header-only session): create fresh.
 		ww, werr = d.openWAL(sessionID, &walHeader{TurnIndex: j.TurnIndex, StartedAt: act.record.Turn.StartedAt, Model: modelToUse, Prompt: j.Prompt, AttachmentIDs: j.AttachmentIDs, Incoming: j.Incoming})
 		if werr != nil {
 			act.mu.Unlock()

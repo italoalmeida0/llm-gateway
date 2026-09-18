@@ -8,14 +8,19 @@ import (
 	"sort"
 )
 
-// Storage migration chain for the daemon data directory.
+// Storage migration chain for one SLOT dir (sessions + storage_version.json
+// live inside the slot; nothing versioned lives at the root).
 //
 // Versioning mirrors the gateway's server/db.ts pattern (MIGRATIONS +
 // PRAGMA user_version), adapted to a file tree: the current version lives
-// in <dataDir>/storage_version.json. The launcher applies every pending
+// in <slotDir>/storage_version.json. The launcher applies every pending
 // migration in order; the daemon assumes CurrentVersion and fails fast
 // otherwise. Every migration must be idempotent (re-running a fully or
 // partially applied migration is always safe).
+//
+// Fresh installs start AT CurrentVersion (baseline stamp, no conversions):
+// there is nothing to convert — sessions are JSONL with the meta line
+// last since day one.
 
 // CurrentVersion is the storage schema version the daemon understands.
 const CurrentVersion = 1
@@ -24,8 +29,8 @@ const CurrentVersion = 1
 type Migration struct {
 	Version int
 	Name    string
-	Apply   func(dataDir string) error
-	Verify  func(dataDir string) error
+	Apply   func(slotDir string) error
+	Verify  func(slotDir string) error
 }
 
 // registry holds all migrations sorted by version.
@@ -48,13 +53,13 @@ func ordered() []Migration {
 	return out
 }
 
-func versionFile(dataDir string) string {
-	return filepath.Join(dataDir, "storage_version.json")
+func versionFile(slotDir string) string {
+	return filepath.Join(slotDir, "storage_version.json")
 }
 
-// StoredVersion reads the applied version (0 = pre-versioning install).
-func StoredVersion(dataDir string) (int, error) {
-	raw, err := os.ReadFile(versionFile(dataDir))
+// StoredVersion reads the applied version (0 = unstamped slot dir).
+func StoredVersion(slotDir string) (int, error) {
+	raw, err := os.ReadFile(versionFile(slotDir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
@@ -73,12 +78,12 @@ func StoredVersion(dataDir string) (int, error) {
 	return doc.Version, nil
 }
 
-func writeVersion(dataDir string, v int) error {
+func writeVersion(slotDir string, v int) error {
 	data, err := json.MarshalIndent(map[string]any{"version": v}, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dataDir, ".storage-version-*")
+	tmp, err := os.CreateTemp(slotDir, ".storage-version-*")
 	if err != nil {
 		return err
 	}
@@ -95,10 +100,10 @@ func writeVersion(dataDir string, v int) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, versionFile(dataDir))
+	return os.Rename(tmpName, versionFile(slotDir))
 }
 
-// MigrateDir runs the chain with dir as the data root (used for slot
+// MigrateDir runs the chain with dir as the slot root (used for slot
 // takeover: the inactive slot dir is a full data root).
 func MigrateDir(dir string) ([]int, error) {
 	return Migrate(dir)
@@ -108,28 +113,38 @@ func MigrateDir(dir string) ([]int, error) {
 // of applied versions (empty when already current). Each migration is
 // verified after apply; a failed migration aborts the chain WITHOUT
 // bumping the stored version, so re-running resumes correctly.
-func Migrate(dataDir string) ([]int, error) {
-	stored, err := StoredVersion(dataDir)
+//
+// A fresh slot dir (no version file, no sessions) is stamped at
+// CurrentVersion with no conversions: baseline, not a migration.
+func Migrate(slotDir string) ([]int, error) {
+	stored, err := StoredVersion(slotDir)
 	if err != nil {
 		return nil, err
 	}
 	if stored > CurrentVersion {
 		return nil, fmt.Errorf("storage v%d is newer than this launcher (v%d): update the launcher", stored, CurrentVersion)
 	}
+	if stored == 0 {
+		// Fresh slot: stamp the baseline, run nothing.
+		if err := writeVersion(slotDir, CurrentVersion); err != nil {
+			return nil, fmt.Errorf("baseline stamp: %w", err)
+		}
+		return []int{CurrentVersion}, nil
+	}
 	var applied []int
 	for _, m := range ordered() {
 		if m.Version <= stored || m.Version > CurrentVersion {
 			continue
 		}
-		if err := m.Apply(dataDir); err != nil {
+		if err := m.Apply(slotDir); err != nil {
 			return applied, fmt.Errorf("migration %d (%s): %w", m.Version, m.Name, err)
 		}
 		if m.Verify != nil {
-			if err := m.Verify(dataDir); err != nil {
+			if err := m.Verify(slotDir); err != nil {
 				return applied, fmt.Errorf("migration %d (%s) verify: %w", m.Version, m.Name, err)
 			}
 		}
-		if err := writeVersion(dataDir, m.Version); err != nil {
+		if err := writeVersion(slotDir, m.Version); err != nil {
 			return applied, fmt.Errorf("migration %d: persist version: %w", m.Version, err)
 		}
 		applied = append(applied, m.Version)

@@ -1,95 +1,107 @@
 #!/usr/bin/env bash
-# Indirect Code installer (Linux + macOS).
-# Usage:
-#   curl -fsSL <gatewayUrl>/r/indirect-install.sh | bash -s -- <gatewayUrl> <token>
+# Indirect Code installer (Linux/macOS).
+# Usage: curl -fsSL <gateway>/r/indirect-install.sh | bash -s -- <gateway-url> <token>
+#
+# The script does the MINIMUM to boot the launcher; the launcher owns the
+# house (ensureLayout: repairs broken installs, adopts stray state, picks
+# the active slot). Worst case — even a broken update — a manual reinstall
+# recovers to bootable.
+#
+# Layout (canonical):
+#   ~/.indirect-code/
+#     brain/  slots/{active,slot-a,slot-b}/  logs/  external/
 set -euo pipefail
 
-if [[ $# -lt 2 || -z "${1:-}" || -z "${2:-}" ]]; then
-  echo "[indirect] usage: indirect-install.sh <gatewayUrl> <token>" >&2
-  exit 1
-fi
+GW="${1:?usage: indirect-install.sh <gateway-url> <token>}"
+TOK="${2:?usage: indirect-install.sh <gateway-url> <token>}"
+GW="${GW%/}"
 
-GATEWAY="${1%/}"
-TOKEN="$2"
-CONNECT_URL="${GATEWAY}/api/indirect-code/connect/${TOKEN}"
-REPO_RAW="${GATEWAY}/r"
+ROOT="$HOME/.indirect-code"
+LOGS="$ROOT/logs"
+mkdir -p "$LOGS"
+ILOG="$LOGS/install.log"
+exec > >(tee -a "$ILOG") 2>&1
+echo "[install] $(date -u +%FT%TZ) gateway=$GW"
 
-DATA_DIR="$HOME/.indirect-code"
-BIN_DIR="$DATA_DIR/bin"
-LOG_FILE="$DATA_DIR/daemon.log"
-PID_FILE="$DATA_DIR/daemon.pid"
-
-# --- Detect OS/arch ---
-os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-case "$os" in
-  linux|darwin) ;;
-  *) echo "[indirect] unsupported OS: $(uname -s) (use the Windows PowerShell command instead)" >&2; exit 1 ;;
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+case "$OS" in
+  linux) GOOS=linux ;;
+  darwin) GOOS=darwin ;;
+  *) echo "[install] unsupported OS: $OS" >&2; exit 1 ;;
 esac
-
-arch="$(uname -m)"
-case "$arch" in
-  x86_64|amd64) arch="amd64" ;;
-  arm64|aarch64) arch="arm64" ;;
-  *) echo "[indirect] unsupported arch: $arch (supported: amd64, arm64)" >&2; exit 1 ;;
+case "$ARCH" in
+  x86_64|amd64) GOARCH=amd64 ;;
+  arm64|aarch64) GOARCH=arm64 ;;
+  *) echo "[install] unsupported arch: $ARCH" >&2; exit 1 ;;
 esac
+ASSET="indirect-launcher-$GOOS-$GOARCH"
 
-ASSET="indirect-launcher-${os}-${arch}"
-URL="${REPO_RAW}/${ASSET}"
+have() { command -v "$1" >/dev/null 2>&1; }
+fetch() { # fetch <url> <dest>
+  if have curl; then curl -fsSL --retry 3 "$1" -o "$2"
+  elif have wget; then wget -qO "$2" "$1"
+  else echo "[install] need curl or wget" >&2; exit 1; fi
+}
 
-mkdir -p "$BIN_DIR" "$DATA_DIR"
-chmod 700 "$DATA_DIR" 2>/dev/null || true
-
-echo "[indirect] downloading $ASSET ..."
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL --retry 3 "$URL" -o "$BIN_DIR/indirect-code.tmp"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$BIN_DIR/indirect-code.tmp" "$URL"
-else
-  echo "[indirect] need curl or wget" >&2; exit 1
+# 1. Discover the active slot: slots/active wins; else the slot with a
+#    live daemon.pid; else the freshest slot; else slot-a (fresh install).
+ACTIVE=""
+if [ -f "$ROOT/slots/active" ]; then
+  ACTIVE="$(tr -d ' \n\r' < "$ROOT/slots/active" | grep -o '[ab]' | head -n1 || true)"
 fi
-mv "$BIN_DIR/indirect-code.tmp" "$BIN_DIR/indirect-code"
-chmod +x "$BIN_DIR/indirect-code"
-
-# --- Stop previous daemon (if any) ---
-if [[ -f "$PID_FILE" ]]; then
-  old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-  if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-    echo "[indirect] stopping previous daemon (pid $old_pid) ..."
-    "$BIN_DIR/indirect-code" --stop 2>/dev/null || kill "$old_pid" 2>/dev/null || true
-    sleep 1
-  fi
-  rm -f "$PID_FILE"
-fi
-pkill -f "$BIN_DIR/indirect-code" 2>/dev/null || true
-rm -f "$PID_FILE"
-rm -f "$DATA_DIR/slots/active" "$DATA_DIR/slots/slot-a/bin/"* "$DATA_DIR/slots/slot-b/bin/"* 2>/dev/null || true
-
-export INDIRECT_GATEWAY="$GATEWAY"
-export INDIRECT_REPO_RAW="$REPO_RAW"
-
-echo "[indirect] pairing and starting in background (log: $LOG_FILE) ..."
-nohup "$BIN_DIR/indirect-code" -connect "$CONNECT_URL" >>"$LOG_FILE" 2>&1 < /dev/null &
-disown 2>/dev/null || true
-
-# Poll for daemon pid (first start downloads daemon binary + runtimes)
-daemon_pid=""
-for ((i = 0; i < 45; i++)); do
-  sleep 1
-  if [[ -f "$PID_FILE" ]]; then
-    candidate="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [[ -n "$candidate" ]] && kill -0 "$candidate" 2>/dev/null; then
-      daemon_pid="$candidate"
-      break
+if [ -z "$ACTIVE" ]; then
+  for s in a b; do
+    PIDF="$ROOT/slots/slot-$s/daemon.pid"
+    if [ -f "$PIDF" ]; then
+      PID="$(tr -d ' \n\r' < "$PIDF" || true)"
+      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then ACTIVE="$s"; break; fi
     fi
+  done
+fi
+if [ -z "$ACTIVE" ]; then
+  NEWEST=""; NEWTIME=0
+  for s in a b; do
+    D="$ROOT/slots/slot-$s"
+    if [ -d "$D" ]; then
+      T="$(stat -c %Y "$D/sessions" 2>/dev/null || stat -f %m "$D/sessions" 2>/dev/null || stat -c %Y "$D" 2>/dev/null || stat -f %m "$D" 2>/dev/null || echo 0)"
+      if [ "$T" -gt "$NEWTIME" ]; then NEWTIME="$T"; NEWEST="$s"; fi
+    fi
+  done
+  ACTIVE="${NEWEST:-a}"
+fi
+echo "[install] active slot: $ACTIVE"
+
+# 2. Stop the running daemon (if any) so binaries can be replaced.
+for s in "$ACTIVE" a b; do
+  PIDF="$ROOT/slots/slot-$s/daemon.pid"
+  [ -f "$PIDF" ] || continue
+  PID="$(tr -d ' \n\r' < "$PIDF" || true)"
+  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    echo "[install] stopping daemon (pid $PID, slot $s) ..."
+    kill "$PID" 2>/dev/null || true
+    for _ in $(seq 1 25); do kill -0 "$PID" 2>/dev/null || break; sleep 0.2; done
+    kill -9 "$PID" 2>/dev/null || true
   fi
 done
 
-if [[ -n "$daemon_pid" ]]; then
-  echo "[indirect] daemon running in background (pid $daemon_pid)."
-  echo "[indirect] Dashboard should show the host online in a few seconds."
-  echo "[indirect] Stop locally anytime: ~/.indirect-code/bin/indirect-code --stop"
-else
-  echo "[indirect] started, but pid check failed — see $LOG_FILE" >&2
-  tail -n 20 "$LOG_FILE" >&2 || true
-  exit 1
+# 3. Download the launcher into the ACTIVE slot (fixed name, no -v copies).
+SLOTDIR="$ROOT/slots/slot-$ACTIVE"
+mkdir -p "$SLOTDIR/bin" "$LOGS" "$ROOT/brain" "$ROOT/external"
+TMP="$(mktemp "$SLOTDIR/bin/.launcher-XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+echo "[install] downloading $ASSET ..."
+fetch "$GW/r/$ASSET?u=install-$(date +%s)" "$TMP"
+chmod +x "$TMP"
+if ! "$TMP" --version 2>&1 | grep -q "launcher"; then
+  echo "[install] downloaded file is not a launcher (bad gateway?)" >&2; exit 1
 fi
+mv -f "$TMP" "$SLOTDIR/bin/$ASSET"
+trap - EXIT
+echo "[install] launcher: $SLOTDIR/bin/$ASSET"
+
+# 4. Hand over: the launcher repairs the rest (ensureLayout), fetches the
+#    daemon, migrates storage, verifies, and boots.
+CONNECT_URL="$GW/#/connect?token=$TOK"
+echo "[install] handing over to the launcher (it repairs + boots) ..."
+exec "$SLOTDIR/bin/$ASSET" -connect "$CONNECT_URL"

@@ -96,17 +96,6 @@ type walWriter struct {
 	path string
 }
 
-// brainDir resolves the per-session private scratch space
-// (<dataDir>/brain/<sessionID>), refusing traversal. It is created lazily
-// and allowed through the jail so the model always has somewhere to put
-// temporary files, test scripts and experiment output.
-func (d *DaemonServer) brainDir(sessionID string) string {
-	if sessionID == "" || filepath.Base(sessionID) != sessionID {
-		return ""
-	}
-	return filepath.Join(d.sharedRoot(), "brain", sessionID)
-}
-
 // ensureBrainDir creates the scratch space (0700, like the data dir).
 // Returns "" when the session id is unusable.
 func (d *DaemonServer) ensureBrainDir(sessionID string) string {

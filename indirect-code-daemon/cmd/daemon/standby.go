@@ -14,12 +14,12 @@ import (
 
 // Standby mode (update takeover), v2: the new daemon loads the migrated
 // slot storage, SHADOW-connects to the gateway (?shadow=1: tracked, never
-// routed, never flips status — the old daemon still owns the host), writes
+// routed, never flips status — the active daemon still owns the host), writes
 // serving.json (proof, WITH post-WS timestamp), and waits. On handoff
 // "promoted" it execs itself WITHOUT --standby (same binary, same slot
 // dir) so normal boot (resume, sweeper, pidfile, WS) runs exactly once.
 //
-// Why shadow-connect instead of no-WS: the takeover gates the old daemon's
+// Why shadow-connect instead of no-WS: the takeover gates the active daemon's
 // death on proof that the replacement serves END-TO-END (storage + WS +
 // version). A no-WS standby can only prove storage — the version-skew bug
 // proved that insufficient.
@@ -31,7 +31,7 @@ func runStandby(dataDir, cfgPath string) int {
 		dataDir:    dataDir,
 		sessions:   make(map[string]*ActiveSession),
 	}
-	server.initSharedDir()
+	server.sharedDir = filepath.Join(server.rootDir(), "external")
 	if v, err := migrations.StoredVersion(dataDir); err != nil || v != migrations.CurrentVersion {
 		fmt.Printf("[STANDBY] storage v%d (want %d): %v\n", v, migrations.CurrentVersion, err)
 		return 1

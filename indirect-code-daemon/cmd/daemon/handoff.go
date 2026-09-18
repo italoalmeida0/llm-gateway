@@ -25,9 +25,9 @@ import (
 //     pid + active/inactive slot ids). The new launcher: migrates,
 //     downloads the new daemon into the inactive slot, verifies
 //     (--version), starts it in standby (no WS).
-//  4. Old daemon: disconnect WS + die. New daemon: connect, assume,
+//  4. Active daemon: disconnect WS + die. New daemon: connect, assume,
 //     unfreeze (broadcast update_done). Launcher flips `active`, deletes
-//     the old slot.
+//     the previous slot.
 //  5. Any failure before step 4: delete inactive slot, UNFREEZE (no WS
 //     reconnect needed — it never dropped), broadcast update_failed.
 //
@@ -42,9 +42,12 @@ type slotLayout struct {
 }
 
 func (d *DaemonServer) slots() slotLayout {
-	// Single-slot legacy (no slots dir yet): active = dataDir itself.
+	// Canonical layout: dataDir IS the active slot (<root>/slots/slot-x),
+	// so the root is two levels up. The launcher guarantees the layout
+	// before exec — no fallback branches here.
+	root := d.rootDir()
 	active := "a"
-	if raw, err := os.ReadFile(filepath.Join(d.dataDir, "slots", "active")); err == nil {
+	if raw, err := os.ReadFile(filepath.Join(root, "slots", "active")); err == nil {
 		if s := strings.TrimSpace(string(raw)); s == "a" || s == "b" {
 			active = s
 		}
@@ -53,18 +56,18 @@ func (d *DaemonServer) slots() slotLayout {
 	if active == "b" {
 		inactive = "a"
 	}
-	return slotLayout{base: filepath.Join(d.dataDir, "slots"), active: active, inactive: inactive}
+	return slotLayout{base: filepath.Join(root, "slots"), active: active, inactive: inactive}
 }
 
 func (s slotLayout) dir(which string) string {
 	return filepath.Join(s.base, "slot-"+which)
 }
 
-// legacySlotDir is used when slots/ doesn't exist yet: the dataDir IS
-// slot "a" (bin/, sessions/, ... at top level).
+// slotDir resolves the slot dir: dataDir IS the active slot, so the
+// active slot is dataDir itself; the inactive one is its sibling.
 func (d *DaemonServer) slotDir(which string) string {
 	sl := d.slots()
-	if _, err := os.Stat(sl.base); os.IsNotExist(err) && which == sl.active {
+	if which == sl.active {
 		return d.dataDir
 	}
 	return sl.dir(which)
@@ -306,14 +309,12 @@ func extractGotVersion(err error) string {
 	return ""
 }
 
-// copyToSlot copies sessions (+ small configs) active -> inactive.
-// Uses hardlinks when possible (instant, CoW-safe: all our writes are
-// tmp+rename), plain copy fallback otherwise. The sessions source is the
-// daemon's live sessionsDir (active slot once slots/ exist, legacy dir
-// otherwise) — never slotDir(active) blindly, which resolves to the
-// legacy dir in pre-slot installs and would copy nothing.
+// copyToSlot copies the slot's sessions (+ small configs) active ->
+// inactive. Uses hardlinks when possible (instant, CoW-safe: all our
+// writes are tmp+rename), plain copy fallback otherwise. dataDir IS the
+// active slot, so the source is dataDir itself.
 func (d *DaemonServer) copyToSlot(sl slotLayout, inactiveDir string) error {
-	src := d.slotDir(sl.active)
+	src := d.dataDir
 	srcSessions := d.sessionsDir()
 	// Sessions first: sourced from the live sessionsDir (slot-aware).
 	if s, err := os.Stat(srcSessions); err == nil && s.IsDir() {
@@ -323,7 +324,7 @@ func (d *DaemonServer) copyToSlot(sl slotLayout, inactiveDir string) error {
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	for _, name := range []string{"projects.json", "config.json"} {
+	for _, name := range []string{"projects.json", "config.json", "storage_version.json"} {
 		s, err := os.Stat(filepath.Join(src, name))
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -443,7 +444,7 @@ func (d *DaemonServer) execTakeover(launcherPath string, sl slotLayout, version 
 	}
 	cmd := exec.Command(launcherPath,
 		"--takeover",
-		"--data-dir", d.dataDir,
+		"--root-dir", d.rootDir(),
 		"--from-slot", sl.active,
 		"--to-slot", sl.inactive,
 		"--expect-version", version,

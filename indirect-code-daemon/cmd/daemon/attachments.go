@@ -139,7 +139,7 @@ func messageAttachmentIDs(msg provider.Message, attachments []AttachmentRef) []s
 			return ids
 		}
 	}
-	// Compatibility for sessions recorded before explicit message references.
+	// Fallback for attachments without explicit message references.
 	ids := []string{}
 	for _, a := range attachments {
 		matched := false

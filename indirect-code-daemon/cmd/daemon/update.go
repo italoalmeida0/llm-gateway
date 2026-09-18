@@ -200,6 +200,7 @@ func (d *DaemonServer) checkForUpdates(reason string) {
 	if err != nil {
 		st.lastError = err.Error()
 		st.mu.Unlock()
+		d.broadcastUpdateState()
 		return
 	}
 	st.lastError = ""

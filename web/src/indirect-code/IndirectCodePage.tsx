@@ -9,7 +9,7 @@ import {
   Show,
   For,
 } from "solid-js";
-import { useUI, useHost } from "./ctx";
+import { useUI, useHost, useModal } from "./ctx";
 import { RemoteHints } from "./presentation";
 import { projectForDirectory } from "./paths";
 import { contextDisplay, type GatewayModel } from "./context";
@@ -52,39 +52,79 @@ import { createSettings } from "./hooks/useSettings";
 
 /** Full-screen update freeze: while the daemon handoff is frozen, block
  * everything on this host except switching hosts / connecting another /
- * cancelling the update. Stages stream from daemon_update.freezeStage. */
+ * cancelling the update. Stages stream from daemon_update.freezeStage.
+ * Frozen is per-host: only the host that is really updating shows the
+ * overlay (switching hosts swaps the world, same rule as sessions). */
 function UpdateFreezeOverlay() {
   const ui = useUI();
   const hosts = useHost();
-  const frozen = () => ui.daemonUpdate.info()?.frozen ?? false;
-  const stage = () => ui.daemonUpdate.info()?.freezeStage || "preparing update";
+  const m = useModal();
+  const frozenHostId = () => {
+    const list = hosts.hosts();
+    for (const h of list) {
+      if (ui.daemonUpdate.stateFor(h.id)?.frozen) return h.id;
+    }
+    return "";
+  };
+  const frozen = () => frozenHostId() !== "";
+  const stage = () => {
+    const hid = frozenHostId();
+    return (hid ? ui.daemonUpdate.stateFor(hid)?.freezeStage : "") || "preparing update";
+  };
+  const frozenHost = () => hosts.hosts().find((h) => h.id === frozenHostId());
   return (
     <Show when={frozen()}>
       <div class="fixed inset-0 z-[80] flex items-center justify-center bg-ink-950/90 backdrop-blur-sm">
         <div class="w-[min(420px,90vw)] rounded-2xl border border-line bg-elev p-6 text-center shadow-2xl">
           <div class="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-2 border-line border-t-brand-500" />
-          <h2 class="text-base font-semibold text-ink-100">Updating daemon…</h2>
+          <h2 class="text-base font-semibold text-ink-100">Updating {frozenHost()?.name || "daemon"}…</h2>
           <p class="mt-1 text-xs text-ink-400">{stage()}</p>
           <p class="mt-3 text-[11px] text-ink-500">
             Sessions are paused safely — nothing is lost. You can switch hosts meanwhile.
           </p>
           <div class="mt-4 flex items-center justify-center gap-2">
-            <button class="btn btn-xs" onClick={() => ui.daemonUpdate.cancel()}>
+            <button class="btn btn-xs" onClick={() => ui.daemonUpdate.cancel(frozenHostId())}>
               Cancel update
             </button>
           </div>
           <div class="mt-4 border-t border-line pt-3 text-left">
-            <p class="mb-2 text-[11px] font-medium text-ink-400">Other hosts</p>
+            <div class="mb-2 flex items-center justify-between">
+              <p class="text-[11px] font-medium text-ink-400">Hosts</p>
+              <button
+                class="text-[11px] text-ink-400 hover:text-ink-200 cursor-pointer"
+                onClick={() => { void m.generatePairingToken(); }}
+              >
+                + Connect
+              </button>
+            </div>
             <For each={hosts.hosts()}>
-              {(h) => (
-                <button
-                  class="mb-1 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-xs hover:bg-ink-800 cursor-pointer"
-                  onClick={() => hosts.setActiveHostId(h.id)}
-                >
-                  <span class="text-ink-200">{h.name || h.id}</span>
-                  <span class="text-[11px] text-ink-500">{h.status}</span>
-                </button>
-              )}
+              {(h) => {
+                const upd = () => ui.daemonUpdate.stateFor(h.id);
+                const isFrozen = () => !!upd()?.frozen;
+                const isActive = () => h.id === hosts.activeHostId();
+                return (
+                  <div class="mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-ink-800">
+                    <button
+                      class="flex flex-1 min-w-0 items-center justify-between gap-2 cursor-pointer"
+                      onClick={() => hosts.setActiveHostId(h.id)}
+                    >
+                      <span class="truncate text-ink-200">{h.name || h.id}{isActive() ? " · current" : ""}</span>
+                      <span class="shrink-0 text-[11px] text-ink-500">
+                        {isFrozen() ? `updating: ${upd()?.freezeStage || "…"}` : upd()?.lifecycle === "pending" ? `starting ${upd()?.target || "…"}` : upd()?.lifecycle === "failed" ? `failed: ${upd()?.failedReason || "?"}` : upd()?.lifecycle === "done" ? `updated to ${upd()?.current || ""}` : h.status}
+                      </span>
+                    </button>
+                    <Show when={!isActive() && !isFrozen()}>
+                      <button
+                        aria-label={`Remove ${h.name || h.id}`}
+                        class="shrink-0 rounded p-1 text-ink-500 hover:text-brand-500 cursor-pointer"
+                        onClick={() => { hosts.setActiveHostId(h.id); void hosts.removeHost(); }}
+                      >
+                        ✕
+                      </button>
+                    </Show>
+                  </div>
+                );
+              }}
             </For>
           </div>
         </div>
@@ -111,7 +151,7 @@ export default function IndirectCodePage() {
   const hosts = createHosts({
     toast: notice.toast,
     showConfirm: modals.showConfirm,
-    onHostRemoved: (id) => { void mirror.dataLayer.disposeHost(id); },
+    onHostRemoved: (id) => { void mirror.dataLayer.disposeHost(id); daemonUpdate.forgetHost(id); },
   });
 
   const relay = createRelay({
@@ -126,6 +166,11 @@ export default function IndirectCodePage() {
     },
     onOpen: (hostId) => {
       void loadGatewayModels();
+      // Fresh state for THIS host on every (re)connect: the daemon
+      // re-checks + broadcasts on reconnect, and announceUpdateDone()
+      // reports a just-promoted version even if WS was down at boot.
+      // Without this, F5 during an update shows a stale idle card.
+      daemonUpdate.checkNow(hostId);
       mirror.dataLayer.storeFor(hostId).syncAll().then(() => {
         const hid = hosts.activeHostId();
         if (hid === hostId && restoredHostId !== hid) {
@@ -217,6 +262,7 @@ export default function IndirectCodePage() {
   const daemonUpdate = createDaemonUpdate({
     send: (payload) => relay.send(payload),
     toast: notice.toast,
+    getHostId: () => hosts.activeHostId(),
   });
 
   const background = createBackground({
@@ -778,9 +824,15 @@ export default function IndirectCodePage() {
       }
 
       case "daemon_update": {
-        const prev = daemonUpdate.info()?.available ?? "";
-        daemonUpdate.noteUpdate(msg);
-        const now = daemonUpdate.info()?.available ?? "";
+        // Per-host: the relay fans out every host, but the foreground
+        // filter above already dropped other hosts — msg.hostId is ours.
+        // Persisted lifecycle (pending/updating/done/failed) survives
+        // F5 + reconnect + host switch; the daemon stays the source of
+        // truth for versions, the hook owns the per-host lifecycle.
+        const hid = (msg as any).hostId || hosts.activeHostId();
+        const prev = hid ? daemonUpdate.stateFor(hid)?.available ?? "" : "";
+        daemonUpdate.noteUpdate(hid, msg);
+        const now = hid ? daemonUpdate.stateFor(hid)?.available ?? "" : "";
         if (now && now !== prev) {
           notice.toast(`Daemon update available: ${now}`, "ok");
         }
@@ -788,11 +840,11 @@ export default function IndirectCodePage() {
       }
 
       case "update_failed": {
-        daemonUpdate.noteFailed(String((msg as any).reason ?? "unknown error"));
+        daemonUpdate.noteFailed((msg as any).hostId || hosts.activeHostId(), String((msg as any).reason ?? "unknown error"));
         break;
       }
       case "update_done": {
-        daemonUpdate.noteDone(String((msg as any).version ?? ""));
+        daemonUpdate.noteDone((msg as any).hostId || hosts.activeHostId(), String((msg as any).version ?? ""));
         break;
       }
 

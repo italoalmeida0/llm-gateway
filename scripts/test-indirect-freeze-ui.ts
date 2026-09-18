@@ -24,15 +24,15 @@ import assert from "node:assert/strict";
  assert.equal(await frozen(), "false", "starts unfrozen");
  assert.equal(await overlay(), false, "no overlay initially");
 
- // 2. Freeze with stage -> overlay + stage text.
- await page.evaluate(() => (window as any).freezeUI.noteUpdate({ current: "1.0.0", available: "1.1.0", checkedAt: 1, autoUpdate: true, frozen: true, freezeStage: "copying sessions" }));
+ // 2. Freeze with stage -> overlay + stage text (per-host: frozen host drives the overlay).
+ await page.evaluate(() => (window as any).freezeUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 1, autoUpdate: true, frozen: true, freezeStage: "copying sessions" }));
  await settle();
  assert.equal(await frozen(), "true", "frozen flag");
  assert.equal(await overlay(), true, "overlay visible");
  assert.equal(await page.evaluate(()=>((document.querySelector("#freeze-stage") as HTMLElement).innerText)), "copying sessions", "stage text");
 
  // 3. Stage updates live.
- await page.evaluate(() => (window as any).freezeUI.noteUpdate({ current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: true, frozen: true, freezeStage: "preparing update" }));
+ await page.evaluate(() => (window as any).freezeUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: true, frozen: true, freezeStage: "preparing update" }));
  await settle();
  assert.equal(await page.evaluate(()=>((document.querySelector("#freeze-stage") as HTMLElement).innerText)), "preparing update", "stage live");
 
@@ -47,7 +47,7 @@ import assert from "node:assert/strict";
  assert(cmds2.some((c:any)=>c.type==="daemon_update_cancel"), "cancel sends command");
 
  // 6. Unfreeze hides overlay.
- await page.evaluate(() => (window as any).freezeUI.noteUpdate({ current: "1.1.0", available: "", checkedAt: 3, autoUpdate: true, frozen: false }));
+ await page.evaluate(() => (window as any).freezeUI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 3, autoUpdate: true, frozen: false }));
  await settle();
  assert.equal(await overlay(), false, "overlay hidden after unfreeze");
 

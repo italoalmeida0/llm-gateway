@@ -10,8 +10,10 @@ render(() => {
   const du = createDaemonUpdate({
     send: (c) => api.commands.push(c),
     toast: (message, kind) => setNotices((p) => [...p, { message, kind }]),
+    getHostId: () => api.hostId || "h1",
   });
   api.info = du.info;
+  api.stateFor = du.stateFor;
   api.applying = du.applying;
   api.noteUpdate = du.noteUpdate;
   api.checkNow = du.checkNow;

@@ -2613,6 +2613,10 @@ func (d *DaemonServer) connectWebSocket() error {
 	// daemon — never trust a pidfile alone (version skew proved it lies).
 	d.writeServingProof()
 	// Fresh (re)connect: re-check for updates + push state to clients.
+	// If this boot just promoted a handoff, report update_done FIRST so a
+	// client that F5'd mid-update (or reconnected late) learns the new
+	// version even though the old WS (and its update_failed race) is gone.
+	d.announceUpdateDone()
 	go d.checkForUpdates("reconnect")
 
 	// Heartbeat ticker
@@ -2783,9 +2787,14 @@ func main() {
 	// Track the background process so install scripts and --stop can find it.
 	server.writePidFile()
 	// Stale handoff markers from a crashed takeover must never gate a
-	// fresh boot: a new process never serves a leftover proof.
+	// fresh boot: a new process never serves a leftover proof. BUT a
+	// just-promoted handoff must survive until the first WS connect so
+	// announceUpdateDone() can report update_done to clients that F5'd
+	// mid-update: only clear a FAILED marker here, keep "promoted".
 	_ = os.Remove(servingProofPath(dataDir))
-	_ = os.Remove(filepath.Join(dataDir, "handoff.json"))
+	if raw, err := os.ReadFile(filepath.Join(dataDir, "handoff.json")); err != nil || strings.TrimSpace(string(raw)) != "promoted" {
+		_ = os.Remove(filepath.Join(dataDir, "handoff.json"))
+	}
 	_ = os.Remove(filepath.Join(dataDir, "standby-ready.json"))
 
 	// Graceful shutdown handling

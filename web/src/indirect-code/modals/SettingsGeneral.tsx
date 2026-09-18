@@ -260,11 +260,24 @@ export function SettingsGeneralSection() {
         Check now
       </button>
       <Show when={(() => { const i = du.info(); return !!i && !!i.available && i.available !== i.current && !i.frozen; })()}>
-        <button class="btn btn-xs btn-primary" disabled={du.applying()} onClick={() => du.apply()}>
+        <button
+          class="btn btn-xs btn-primary"
+          disabled={du.applying()}
+          onClick={() => { du.apply(); m.cancelSettings(); }}
+        >
           {du.applying() ? "Updating…" : "Update now"}
         </button>
       </Show>
     </div>
+    <Show when={(() => { const i = du.info(); return !!i && (i.lifecycle === "failed" || i.lifecycle === "done"); })()}>
+      <p class="text-[11px] text-ink-500">
+        {(() => {
+          const i = du.info();
+          if (i?.lifecycle === "failed") return `Last update ${i.target || ""} failed: ${i.failedReason || i.error || "unknown error"}.`;
+          return `Last update finished: now running ${i?.current || ""}.`;
+        })()}
+      </p>
+    </Show>
     <Show when={du.info()?.error}>
       <p class="text-[11px] text-red-400">{du.info()?.error}</p>
     </Show>

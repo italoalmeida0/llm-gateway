@@ -31,4 +31,3 @@ __pycache__/
 .mypy_cache/
 # Test coverage
 coverage/
-web/public/r/

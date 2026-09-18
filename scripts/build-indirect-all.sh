@@ -6,24 +6,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON_DIR="$ROOT/indirect-code-daemon"
-# Staging straight into the frontend public dir: build.ts moves it to
-# dist/r/ (gateway serves statically). web/public/r is gitignored scratch.
-OUT="$ROOT/web/public/r"
+OUT="$DAEMON_DIR/dist"
 mkdir -p "$OUT"
-# Version: MANUAL — bump web/public/r/versions.json (daemon.version) before
-# building a release, or pass INDIRECT_VERSION=x. First use seeds it from
-# indirect-code-daemon/dist/versions.json automatically. The build stamps
-# this version
+# Version: MANUAL — bump indirect-code-daemon/dist/versions.json (daemon.version) before
+# building a release, or pass INDIRECT_VERSION=x. The build stamps this version
 # into the daemon (-X main.daemonVersion) and regenerates the manifest with
 # it, so binary + manifest always agree. Do NOT auto-bump (timestamps etc.):
 # every build must be reproducible for a given version.
 # NOTE: cmd/launcher is its own main package (no daemonVersion var), so
 # launcher builds use plain LDFLAGS; only the daemon gets the stamp.
-if [ -z "${INDIRECT_VERSION:-}" ] && [ ! -f "$OUT/versions.json" ] && [ -f "$DAEMON_DIR/dist/versions.json" ]; then
-  cp "$DAEMON_DIR/dist/versions.json" "$OUT/versions.json"
-  echo "==> seeded versions.json from daemon dist"
-fi
-cp "$DAEMON_DIR/dist/indirect-install."* "$OUT/" 2>/dev/null || true
 VERSION="${INDIRECT_VERSION:-$(python3 -c 'import json, os; print(json.load(open(os.path.join("'"$OUT"'", "versions.json")))["daemon"]["version"])' 2>/dev/null || echo "1.0.0")}"
 echo "==> Building Indirect Code v${VERSION}"
 
@@ -110,6 +101,4 @@ with open(os.path.join(out, "versions.json"), "w") as f:
     json.dump(manifest, f, indent=2)
 print("==> versions.json:", version)
 PYEOF
-cp -r "$OUT/"* "$DAEMON_DIR/dist/"
-echo "==> synced to $DAEMON_DIR/dist"
 echo "==> sizes:"; ls -lh "$OUT"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, rmSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { $ } from "bun";
 
@@ -56,39 +56,11 @@ for (const { goos, goarch } of TARGETS) {
   await $`go build -trimpath -ldflags ${launcherLdflags} -o ${path.join(OUT, lname)} ./cmd/launcher`
     .cwd(DAEMON_DIR)
     .env({ ...process.env, CGO_ENABLED: "0", GOOS: goos, GOARCH: goarch });
-
-  const vname = `indirect-code-${goos}-${goarch}-v${version}${ext}`;
-  const vlname = `indirect-launcher-${goos}-${goarch}-v${version}${ext}`;
-
-  copyFileSync(path.join(OUT, name), path.join(OUT, vname));
-  copyFileSync(path.join(OUT, lname), path.join(OUT, vlname));
 }
 
-// 2. Prune older versioned copies (keep current + previous)
-const vers = new Set<string>();
-const files = readdirSync(OUT);
-for (const fn of files) {
-  const m = fn.match(/-v(\d+\.\d+\.\d+)(\.exe)?$/);
-  if (m) vers.add(m[1]);
-}
-
-function parseSemver(v: string): number[] {
-  return v.split(".").map(Number);
-}
-
-const sortedVers = Array.from(vers).sort((a, b) => {
-  const pa = parseSemver(a);
-  const pb = parseSemver(b);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
-  }
-  return 0;
-});
-
-const keep = new Set([version]);
+// 2. Prune any deprecated versioned copies
 for (const fn of readdirSync(OUT)) {
-  const m = fn.match(/-v(\d+\.\d+\.\d+)(\.exe)?$/);
-  if (m && !keep.has(m[1])) {
+  if (/-v\d+\.\d+\.\d+/.test(fn)) {
     rmSync(path.join(OUT, fn), { force: true });
     console.log(`pruned ${fn}`);
   }
@@ -122,28 +94,15 @@ function getAssets(prefix: string) {
   return res;
 }
 
-function getAssetsVersioned(prefix: string, ver: string) {
-  const res: Record<string, string> = {};
-  for (const fn of Object.keys(sums).sort()) {
-    if (fn.startsWith(prefix + "-") && (fn.endsWith(`-v${ver}`) || fn.endsWith(`-v${ver}.exe`))) {
-      const key = fn.slice(prefix.length + 1).replace(/\.exe$/, "");
-      res[key] = fn;
-    }
-  }
-  return res;
-}
-
 const manifest = {
   daemon: {
     version,
     assets: getAssets("indirect-code"),
-    assetsVersioned: getAssetsVersioned("indirect-code", version),
     sums,
   },
   launcher: {
     version,
     assets: getAssets("indirect-launcher"),
-    assetsVersioned: getAssetsVersioned("indirect-launcher", version),
     sums,
   },
 };

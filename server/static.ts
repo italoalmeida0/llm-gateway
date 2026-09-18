@@ -90,18 +90,15 @@ export function serveStatic(req: Request, urlPath: string): Response | null {
   // rendering old notification shapes after deploys.
   const basename = path.basename(resolved.filePath);
   const isPushSw = basename === "push-sw.js";
-  const isVersionedRelease = /-v\d+\.\d+\.\d+(\.exe)?$/.test(basename);
   const isReleaseAsset = resolved.filePath.includes(path.sep + "r" + path.sep);
 
   headers.set(
     "Cache-Control",
     resolved.isHtml || isPushSw
       ? "no-cache"
-      : isVersionedRelease
-        ? "public, max-age=31536000, immutable"
-        : isReleaseAsset
-          ? "public, max-age=60, must-revalidate"
-          : IMMUTABLE_EXT.has(path.extname(resolved.filePath))
+      : isReleaseAsset
+        ? "public, max-age=60, must-revalidate"
+        : IMMUTABLE_EXT.has(path.extname(resolved.filePath))
             ? "public, max-age=31536000, immutable"
             : "public, max-age=300",
   );

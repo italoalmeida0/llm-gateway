@@ -207,16 +207,12 @@ func (d *DaemonServer) fetchLauncherTo(version string, sl slotLayout) (string, e
 	} else if mu := manifestURL(); mu != "" {
 		bases = append(bases, mu[:len(mu)-len(updateManifestFile)])
 	}
-	// Dual publish (see takeover_help.go): versioned URL first (immutable),
-	// floating fallback (may be stale; self-verify decides).
-	verAsset := asset + "-v" + version
-	if runtime.GOOS == "windows" {
-		verAsset = "indirect-launcher-" + runtime.GOOS + "-" + runtime.GOARCH + "-v" + version + ".exe"
-	}
+	// Floating asset only: a single URL per base (no -v copies).
+	// Freshness is enforced by --version self-verify after download
+	// (plus a cache-buster query), not by immutable versioned URLs.
 	var candidates []string
 	for _, b := range bases {
 		candidates = append(candidates,
-			fmt.Sprintf("%s%s?u=%s-%d", b, verAsset, version, time.Now().Unix()),
 			fmt.Sprintf("%s%s?u=%s-%d", b, asset, version, time.Now().Unix()),
 		)
 	}

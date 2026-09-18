@@ -17,7 +17,9 @@ type standbyProc struct {
 	dataDir string
 }
 
-// fetchDaemonTo downloads the daemon asset for version into slotDir/bin.
+// fetchDaemonTo downloads the floating daemon asset into slotDir/bin.
+// Freshness is enforced by --version self-verify after download
+// (plus a cache-buster query), not by immutable versioned URLs.
 func fetchDaemonTo(slotDir, version string) (string, error) {
 	asset := "indirect-code-" + runtime.GOOS + "-" + runtime.GOARCH
 	if runtime.GOOS == "windows" {
@@ -36,50 +38,17 @@ func fetchDaemonTo(slotDir, version string) (string, error) {
 	if mirror == "" {
 		return "", fmt.Errorf("no release mirror available (pair a gateway or set INDIRECT_REPO_RAW)")
 	}
-	// Dual publish: versioned URL first (immutable — a CDN can never serve
-	// stale bytes for a URL that never existed), floating fallback (may be
-	// stale; --version self-verify decides). Cache-buster query on top.
-	verAsset := asset
-	if runtime.GOOS == "windows" {
-		verAsset = "indirect-code-" + runtime.GOOS + "-" + runtime.GOARCH + "-v" + version + ".exe"
-	} else {
-		verAsset = asset + "-v" + version
-	}
-	candidates := []string{
-		fmt.Sprintf("%s/%s?u=%s-%d", mirror, verAsset, version, time.Now().Unix()),
-		fmt.Sprintf("%s/%s?u=%s-%d", mirror, asset, version, time.Now().Unix()),
-	}
-	var dlErr error
-	var saw404Versioned bool
+	// Single floating URL (no -v copies): cache-buster query on top.
+	url := fmt.Sprintf("%s/%s?u=%s-%d", mirror, asset, version, time.Now().Unix())
 	tmp, err := os.CreateTemp(binDir, ".daemon-*")
 	if err != nil {
 		return "", err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	for i, u := range candidates {
-		tmp.Seek(0, 0)
-		tmp.Truncate(0)
-		if err := fetchURL(u, tmp); err != nil {
-			// First candidate (versioned URL) 404 = release still
-			// propagating on the mirror (manifest text propagates before
-			// big blobs). Signal distinctly so the daemon backs off with
-			// "retry later" instead of a generic failure.
-			if i == 0 && isNotFound(err) {
-				saw404Versioned = true
-			}
-			dlErr = fmt.Errorf("download %s: %w", asset, err)
-			continue
-		}
-		dlErr = nil
-		break
-	}
-	if dlErr != nil {
+	if err := fetchURL(url, tmp); err != nil {
 		tmp.Close()
-		if saw404Versioned {
-			return "", errReleasePropagating
-		}
-		return "", dlErr
+		return "", fmt.Errorf("download %s: %w", asset, err)
 	}
 	tmp.Close()
 	if runtime.GOOS != "windows" {
@@ -191,13 +160,4 @@ func waitServingProof(slotDir, expectVersion string, timeout time.Duration) erro
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("no serving proof for %s in time", expectVersion)
-}
-
-// errReleasePropagating signals versioned-asset 404: the release manifest
-// is live but blobs haven't propagated. Retry later, don't mismatch-backoff.
-var errReleasePropagating = fmt.Errorf("release propagating on mirror (versioned asset 404), retry in a few minutes")
-
-// isNotFound detects HTTP 404 in fetch errors.
-func isNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "HTTP 404")
 }

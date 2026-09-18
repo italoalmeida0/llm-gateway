@@ -1,68 +1,21 @@
-# Indirect Code one-line installer (Windows PowerShell).
-#
-# Copiado do dashboard como:
-#   powershell -ExecutionPolicy Bypass -NoProfile -Command "& ([scriptblock]::Create((irm '<seu-gateway>/r/indirect-install.ps1'))) -ConnectUrl '<connectUrl>'"
-#
-# Faz: detecta arch -> para daemon anterior -> baixa o .exe compatível mais recente ->
-# instala em ~/.indirect-code/bin -> unblock-file -> pareia (-connect) -> deixa rodando
-# em segundo plano (Start-Process Hidden, sem prender o terminal).
+# Indirect Code installer (Windows PowerShell).
+# Usage:
+#   powershell -ExecutionPolicy Bypass -NoProfile -Command "& ([scriptblock]::Create((irm '<gatewayUrl>/r/indirect-install.ps1'))) <gatewayUrl> <token>"
 param(
-  [Parameter(Position = 0)][string]$Arg1 = "",
-  [Parameter(Position = 1)][string]$Arg2 = "",
-  [string]$ConnectUrl = $env:INDIRECT_CONNECT_URL,
-  [string]$Token = "",
-  [string]$Gateway = "",
-  [string]$Name = "",
-  [string]$RepoRaw = $env:INDIRECT_REPO_RAW
+  [Parameter(Position = 0, Mandatory = $true)][string]$Gateway,
+  [Parameter(Position = 1, Mandatory = $true)][string]$Token
 )
-
-if ([string]::IsNullOrWhiteSpace($ConnectUrl)) {
-  if (-not [string]::IsNullOrWhiteSpace($env:CONNECT_URL)) {
-    $ConnectUrl = $env:CONNECT_URL
-  }
-}
-
-# Resolve ConnectUrl from arguments
-if ([string]::IsNullOrWhiteSpace($ConnectUrl)) {
-  if (-not [string]::IsNullOrWhiteSpace($Arg1) -and -not [string]::IsNullOrWhiteSpace($Arg2)) {
-    if ($Arg1 -match '^https?://') {
-      $gw = $Arg1.TrimEnd('/')
-      $tok = $Arg2
-    } elseif ($Arg2 -match '^https?://') {
-      $gw = $Arg2.TrimEnd('/')
-      $tok = $Arg1
-    } else {
-      Write-Error "[indirect] One parameter must be the gateway URL (http:// or https://)"
-      exit 1
-    }
-    if ($gw -match '/api/indirect-code/connect/') {
-      $ConnectUrl = $gw
-    } else {
-      $ConnectUrl = "$gw/api/indirect-code/connect/$tok"
-    }
-  } elseif (-not [string]::IsNullOrWhiteSpace($Gateway) -and -not [string]::IsNullOrWhiteSpace($Token)) {
-    $ConnectUrl = "$($Gateway.TrimEnd('/'))/api/indirect-code/connect/$Token"
-  } elseif (-not [string]::IsNullOrWhiteSpace($Arg1)) {
-    if ($Arg1 -match '^https?://') {
-      $ConnectUrl = $Arg1
-    }
-  }
-}
-
-if ([string]::IsNullOrWhiteSpace($ConnectUrl)) {
-  Write-Error "[indirect] Gateway URL and Token are required.`nUsage: indirect-install.ps1 <gatewayUrl> <token>`n   or: indirect-install.ps1 -ConnectUrl '<url>'"
-  exit 1
-}
 
 $ErrorActionPreference = "Stop"
 
-if ([string]::IsNullOrWhiteSpace($RepoRaw)) {
-  # Derive from ConnectUrl (gateway serves everything via /r/).
-  # No GitHub fallback by design: without a gateway URL there is nothing
-  # to pair with (ConnectUrl is mandatory above).
-  if ($ConnectUrl -match '^(https?://[^/]+)') { $RepoRaw = $Matches[1] + "/r" }
-  else { Write-Error "[indirect] cannot derive download URL"; exit 1 }
+if ([string]::IsNullOrWhiteSpace($Gateway) -or [string]::IsNullOrWhiteSpace($Token)) {
+  Write-Error "[indirect] usage: indirect-install.ps1 <gatewayUrl> <token>"
+  exit 1
 }
+
+$Gateway = $Gateway.TrimEnd('/')
+$ConnectUrl = "$Gateway/api/indirect-code/connect/$Token"
+$RepoRaw = "$Gateway/r"
 
 $DataDir = Join-Path $HOME ".indirect-code"
 $BinDir = Join-Path $DataDir "bin"
@@ -72,7 +25,6 @@ $PidFile = Join-Path $DataDir "daemon.pid"
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
 # --- Stop previous daemon / launcher (if any) before replacing binary ---
-# On Windows, running .exe files are locked against deletion and replacement.
 $possiblePidFiles = @(
   $PidFile,
   (Join-Path (Join-Path $env:APPDATA "indirect-code") "daemon.pid")
@@ -93,7 +45,6 @@ Get-Process -Name "indirect-code*", "indirect-launcher*" -ErrorAction SilentlyCo
 }
 Start-Sleep -Milliseconds 600
 
-# Clean up stray AppData directory if it was created by an older launcher version
 $strayAppData = Join-Path $env:APPDATA "indirect-code"
 if (Test-Path $strayAppData) {
   Remove-Item -Recurse -Force $strayAppData -ErrorAction SilentlyContinue
@@ -113,42 +64,29 @@ $Url = "$RepoRaw/$Asset"
 $Bin = Join-Path $BinDir "indirect-code.exe"
 
 Write-Host "[indirect] downloading $Asset ..."
-# TLS 1.2 for Windows PowerShell 5.1
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 Invoke-WebRequest -Uri $Url -OutFile "$Bin.tmp" -UseBasicParsing
 if (Test-Path $Bin) {
   Remove-Item -Force $Bin -ErrorAction SilentlyContinue
   if (Test-Path $Bin) {
-    # If the file is still locked or cannot be deleted directly, NTFS allows renaming it
     $oldBin = "$Bin.old." + [System.Guid]::NewGuid().ToString("N")
     Rename-Item -Path $Bin -NewName (Split-Path $oldBin -Leaf) -Force -ErrorAction SilentlyContinue
     Remove-Item -Force $oldBin -ErrorAction SilentlyContinue
   }
 }
-# Copy-Item then Remove-Item avoids the PowerShell 5.1 bug where Move-Item -Force
-# throws 'Cannot create a file when that file already exists'
 Copy-Item -Path "$Bin.tmp" -Destination $Bin -Force
 Remove-Item -Force "$Bin.tmp" -ErrorAction SilentlyContinue
-# Strip Mark-of-the-Web (Zone.Identifier) so Windows Defender / SmartScreen doesn't block unsigned execution
 Unblock-File -Path $Bin -ErrorAction SilentlyContinue
 
-# --- Pair + detach (Hidden window: prompt stays free) ---
-# NOTE: $args is a PowerShell automatic variable, so the daemon argv lives
-# in $daemonArgs instead. Start-Process requires distinct stdout/stderr
-# files, so stderr goes to daemon.err.log (kept tiny/empty in practice).
-if ($ConnectUrl -match '^(https?://[^/]+)') {
-  $env:INDIRECT_GATEWAY = $Matches[1]
-}
+$env:INDIRECT_GATEWAY = $Gateway
 $env:INDIRECT_REPO_RAW = $RepoRaw
 Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
 
-$daemonArgs = @('-connect', $ConnectUrl)
-if (-not [string]::IsNullOrWhiteSpace($Name)) { $daemonArgs += @('--name', $Name) }
 Write-Host "[indirect] pairing and starting in background (log: $LogFile) ..."
-Start-Process -FilePath $Bin -ArgumentList $daemonArgs -WindowStyle Hidden `
+Start-Process -FilePath $Bin -ArgumentList @('-connect', $ConnectUrl) -WindowStyle Hidden `
   -RedirectStandardOutput $LogFile -RedirectStandardError $ErrFile
 
-# First start downloads unish/python runtimes (~30s+), so poll for the pid.
+# Poll for daemon pid (first start downloads daemon binary + runtimes)
 $pid2 = ""
 for ($i = 0; $i -lt 45; $i++) {
   Start-Sleep -Seconds 1

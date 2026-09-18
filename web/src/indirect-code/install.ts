@@ -20,10 +20,11 @@ export function indirectInstallCommands(connectUrl: string): {
   const { gateway, token } = parseConnectParams(connectUrl);
   const gw = gateway || "<gateway>";
   const tok = token || "<token>";
-  // Third arg is optional: the host display name. Empty = the daemon
-  // falls back to os.Hostname() (e.g. DESKTOP-ABC123, never host_...).
+  // Third arg is optional: the host display name (empty = the script
+  // resolves it: hostname(1) on unix; the registry ComputerName on
+  // Windows, which keeps the real mixed case, unlike $env:COMPUTERNAME).
   return {
-    unix: `curl -fsSL ${gw}/r/indirect-install.sh | bash -s -- ${gw} ${tok} "$(hostname)"`,
-    windows: `powershell -ExecutionPolicy Bypass -NoProfile -Command "& ([scriptblock]::Create((irm '${gw}/r/indirect-install.ps1'))) ${gw} ${tok} $env:COMPUTERNAME"`,
+    unix: `curl -fsSL ${gw}/r/indirect-install.sh | bash -s -- ${gw} ${tok}`,
+    windows: `powershell -ExecutionPolicy Bypass -NoProfile -Command "& ([scriptblock]::Create((irm '${gw}/r/indirect-install.ps1'))) ${gw} ${tok}"`,
   };
 }

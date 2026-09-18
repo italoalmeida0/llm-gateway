@@ -18,8 +18,17 @@ param(
   [Parameter(Mandatory = $true)][string]$Token,
   [string]$HostName = ""
 )
+# NOTE: $env:COMPUTERNAME is UPPERCASE by convention (NETBIOS); the real
+# mixed-case name lives in the registry (Active Directory / setup name).
+# Prefer it so the dashboard shows e.g. ItaloSurface, not ITALOSURFACE.
 if ([string]::IsNullOrWhiteSpace($HostName)) {
-  try { $HostName = $env:COMPUTERNAME } catch {}
+  try {
+    $reg = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName" -ErrorAction Stop
+    if (-not [string]::IsNullOrWhiteSpace($reg.ComputerName)) { $HostName = $reg.ComputerName }
+  } catch {}
+  if ([string]::IsNullOrWhiteSpace($HostName)) {
+    try { $HostName = $env:COMPUTERNAME } catch {}
+  }
 }
 $ErrorActionPreference = "Stop"
 $GW = $GatewayUrl.TrimEnd("/")
@@ -98,7 +107,11 @@ try {
   New-Item -ItemType Directory -Force -Path (Join-Path $ROOT "brain") | Out-Null
   New-Item -ItemType Directory -Force -Path (Join-Path $ROOT "external") | Out-Null
   $dest = Join-Path $SLOTDIR "bin/${ASSET}"
-  $tmp = "${dest}.download"
+  # NOTE: the temp file keeps a .tmp suffix (NOT .download): on failure the
+  # leftover must never look like something Windows tries to open (the
+  # "choose an app" popup for .download leftovers). It is renamed to the
+  # final name only after --version self-verify passes.
+  $tmp = "${dest}.tmp"
   try {
     Invoke-WebRequest -Uri "${GW}/r/${ASSET}?u=install-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" -OutFile $tmp -UseBasicParsing
   } catch { Fail "could not download ${ASSET} from ${GW} ($($_.Exception.Message))" }

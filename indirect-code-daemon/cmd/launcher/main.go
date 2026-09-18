@@ -21,6 +21,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/internal/migrations"
@@ -58,6 +60,15 @@ func main() {
 	if dataDir == "" {
 		dataDir = defaultDataDir()
 	}
+
+	if *stopFlag {
+		if err := stopDaemon(dataDir); err != nil {
+			fmt.Printf("Stop failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	daemonPath := *daemonFlag
 	activeSlot := ""
 	if daemonPath == "" {
@@ -75,14 +86,6 @@ func main() {
 	}
 	if *nameFlag != "" {
 		daemonArgs = append([]string{"--name", *nameFlag}, daemonArgs...)
-	}
-	if *stopFlag {
-		// --stop needs no checkup/migrations: forward directly.
-		if code, err := execDaemon(daemonPath, dataDir, append([]string{"--stop"}, daemonArgs...)); err != nil {
-			fmt.Printf("[LAUNCH] failed: %v\n", err)
-			os.Exit(code)
-		}
-		return
 	}
 
 	// 1. Checkup: dependencies and environment ready?
@@ -131,6 +134,11 @@ func main() {
 		if err == nil {
 			os.Exit(code)
 		}
+		stopReq := filepath.Join(dataDir, "stop.req")
+		if _, serr := os.Stat(stopReq); serr == nil {
+			_ = os.Remove(stopReq)
+			os.Exit(code)
+		}
 		fmt.Printf("[LAUNCH] daemon exited %d: %v\n", code, err)
 		crashes++
 		if crashes > 3 {
@@ -141,4 +149,43 @@ func main() {
 		fmt.Printf("[LAUNCH] restarting in %v (crash #%d)...\n", wait, crashes)
 		time.Sleep(wait)
 	}
+}
+
+func stopDaemon(dataDir string) error {
+	pidPath := filepath.Join(dataDir, "daemon.pid")
+	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
+		parent := filepath.Dir(dataDir)
+		if filepath.Base(parent) == "slots" {
+			pidPath = filepath.Join(filepath.Dir(parent), "daemon.pid")
+		}
+	}
+
+	raw, err := os.ReadFile(pidPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("[STOP] no daemon.pid found in %s (daemon is not running)\n", dataDir)
+			return nil
+		}
+		return err
+	}
+
+	pid := strings.TrimSpace(string(raw))
+	if pid == "" || !pidAlive(pid) {
+		_ = os.Remove(pidPath)
+		fmt.Printf("[STOP] daemon (pid %s) was not running\n", pid)
+		return nil
+	}
+
+	// Signal stop to prevent launcher loop from restarting daemon
+	stopReq := filepath.Join(dataDir, "stop.req")
+	_ = os.WriteFile(stopReq, []byte("stop\n"), 0o600)
+	defer os.Remove(stopReq)
+
+	fmt.Printf("[STOP] stopping daemon (pid %s)...\n", pid)
+	if err := terminateParentWait(pid, 5*time.Second); err != nil {
+		return err
+	}
+	_ = os.Remove(pidPath)
+	fmt.Printf("[STOP] daemon stopped successfully\n")
+	return nil
 }

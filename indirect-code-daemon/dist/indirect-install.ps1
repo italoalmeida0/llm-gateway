@@ -81,6 +81,7 @@ Unblock-File -Path $Bin -ErrorAction SilentlyContinue
 $env:INDIRECT_GATEWAY = $Gateway
 $env:INDIRECT_REPO_RAW = $RepoRaw
 Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
+Remove-Item -Force "$DataDir\slots\active", "$DataDir\slots\slot-a\bin\*", "$DataDir\slots\slot-b\bin\*" -ErrorAction SilentlyContinue
 
 Write-Host "[indirect] pairing and starting in background (log: $LogFile) ..."
 Start-Process -FilePath $Bin -ArgumentList @('-connect', $ConnectUrl) -WindowStyle Hidden `
@@ -105,7 +106,7 @@ for ($i = 0; $i -lt 45; $i++) {
 if ($pid2) {
   Write-Host "[indirect] daemon running in background (pid $pid2)."
   Write-Host "[indirect] Dashboard should show the host online in a few seconds."
-  Write-Host "[indirect] Stop locally anytime: ~\.indirect-code\bin\indirect-code.exe --stop"
+  Write-Host "[indirect] Stop locally anytime: & `"$HOME\.indirect-code\bin\indirect-code.exe`" --stop"
   exit 0
 }
 Write-Error "[indirect] started, but pid check failed - see $LogFile"

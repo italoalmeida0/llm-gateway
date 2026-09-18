@@ -559,7 +559,14 @@ func (d *DaemonServer) gracefulShutdown(reason string) {
 // (gateway offline => no remote shutdown possible). Returns nil when a
 // process was signalled, error otherwise.
 func stopDaemonFromPidFile(dataDir string) error {
-	raw, err := os.ReadFile(filepath.Join(dataDir, "daemon.pid"))
+	pidPath := filepath.Join(dataDir, "daemon.pid")
+	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
+		parent := filepath.Dir(dataDir)
+		if filepath.Base(parent) == "slots" {
+			pidPath = filepath.Join(filepath.Dir(parent), "daemon.pid")
+		}
+	}
+	raw, err := os.ReadFile(pidPath)
 	if err != nil {
 		return fmt.Errorf("no daemon.pid in %s (is the daemon running?)", dataDir)
 	}
@@ -582,7 +589,7 @@ func stopDaemonFromPidFile(dataDir string) error {
 		}
 	}
 	// Best-effort pidfile cleanup; the dying daemon removes it too.
-	_ = os.Remove(filepath.Join(dataDir, "daemon.pid"))
+	_ = os.Remove(pidPath)
 	fmt.Printf("[STOP] signalled daemon pid %d\n", pid)
 	return nil
 }

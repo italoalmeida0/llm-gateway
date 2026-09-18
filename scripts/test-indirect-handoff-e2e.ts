@@ -6,7 +6,7 @@
 //
 // Run: bun scripts/test-indirect-handoff-e2e.ts (needs built binaries).
 import { spawn, execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";

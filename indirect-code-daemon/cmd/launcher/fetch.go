@@ -95,15 +95,59 @@ func resolveSlotDaemon(dataDir string) (string, string, error) {
 	if slot == "" {
 		return "", "", fmt.Errorf("slots/active corrupt")
 	}
-	binDir := filepath.Join(dataDir, "slots", "slot-"+slot, "bin")
+	slotDir := filepath.Join(dataDir, "slots", "slot-"+slot)
+	binDir := filepath.Join(slotDir, "bin")
 	asset := daemonAssetName()
 	local := filepath.Join(binDir, asset)
 	if runtime.GOOS == "windows" {
 		local = filepath.Join(binDir, "indirect-code.exe")
 	}
+
+	needDownload := false
 	if st, err := os.Stat(local); err != nil || st.IsDir() || st.Size() == 0 {
-		return "", "", fmt.Errorf("slot %s has no daemon binary", slot)
+		needDownload = true
+	} else if launcherVersion != "dev" && launcherVersion != "" {
+		if err := selfVerifyDaemon(local, launcherVersion); err != nil {
+			fmt.Printf("[FETCH] slot %s daemon is outdated (%v) — updating to match launcher %s...\n", slot, err, launcherVersion)
+			needDownload = true
+		}
 	}
+
+	if needDownload {
+		targetVer := launcherVersion
+		if ver, _, err := latestDaemonAsset(); err == nil && ver != "" {
+			targetVer = ver
+		}
+		dlPath, err := fetchDaemonTo(slotDir, targetVer)
+		if err != nil {
+			if st, serr := os.Stat(local); serr == nil && !st.IsDir() && st.Size() > 0 {
+				fmt.Printf("[FETCH] warning: cannot download latest daemon (%v), using existing binary\n", err)
+				return local, slot, nil
+			}
+			return "", "", fmt.Errorf("slot %s daemon unavailable: %w", slot, err)
+		}
+		local = dlPath
+		verifyVer := targetVer
+		if verifyVer == "dev" {
+			verifyVer = ""
+		}
+		if err := selfVerifyDaemon(local, verifyVer); err != nil {
+			fmt.Printf("[FETCH] warning: downloaded daemon self-verify: %v\n", err)
+		}
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		launcherName := daemonAssetName()
+		launcherName = "indirect-launcher-" + launcherName[len("indirect-code-"):]
+		if runtime.GOOS == "windows" {
+			launcherName = "indirect-launcher.exe"
+		}
+		slotLauncher := filepath.Join(binDir, launcherName)
+		if st, serr := os.Stat(slotLauncher); serr != nil || st.Size() == 0 {
+			_ = copyFileLink(exe, slotLauncher)
+		}
+	}
+
 	return local, slot, nil
 }
 
@@ -146,23 +190,24 @@ func installSlotA(dataDir string) error {
 	if err := copyFileLink(exe, filepath.Join(binDir, launcherName)); err != nil {
 		return fmt.Errorf("install launcher: %w", err)
 	}
-	// 2. Download latest daemon (version resolved from manifest).
-	ver, asset, err := latestDaemonAsset()
+	// 2. Download latest daemon (version resolved from manifest or launcherVersion).
+	targetVer := launcherVersion
+	if ver, _, err := latestDaemonAsset(); err == nil && ver != "" {
+		targetVer = ver
+	}
+	local, err := fetchDaemonTo(slotA, targetVer)
 	if err != nil {
-		return err
-	}
-	local := filepath.Join(binDir, asset)
-	if runtime.GOOS == "windows" {
-		local = filepath.Join(binDir, "indirect-code.exe")
-	}
-	if err := downloadToMirror(mirrorBase()+"/"+asset, local); err != nil {
-		return err
+		return fmt.Errorf("download daemon: %w", err)
 	}
 	// 3. Self-verify both.
 	if err := selfVerifyLauncher(filepath.Join(binDir, launcherName), ""); err != nil {
 		return fmt.Errorf("self verify launcher: %w", err)
 	}
-	if err := selfVerifyDaemon(local, ver); err != nil {
+	verifyVer := targetVer
+	if verifyVer == "dev" {
+		verifyVer = ""
+	}
+	if err := selfVerifyDaemon(local, verifyVer); err != nil {
 		return fmt.Errorf("self verify daemon: %w", err)
 	}
 	// 4. Adopt legacy sessions/ (rename, instant) when present.

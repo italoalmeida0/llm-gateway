@@ -62,6 +62,7 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 pkill -f "$BIN_DIR/indirect-code" 2>/dev/null || true
 rm -f "$PID_FILE"
+rm -f "$DATA_DIR/slots/active" "$DATA_DIR/slots/slot-a/bin/"* "$DATA_DIR/slots/slot-b/bin/"* 2>/dev/null || true
 
 export INDIRECT_GATEWAY="$GATEWAY"
 export INDIRECT_REPO_RAW="$REPO_RAW"

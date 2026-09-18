@@ -25,10 +25,30 @@ export function installBase(connectUrl: string): string {
   return INDIRECT_REPO_RAW;
 }
 
+export function parseConnectParams(connectUrl: string): { gateway: string; token: string } {
+  try {
+    const u = new URL(connectUrl);
+    const m = u.pathname.match(/\/connect\/([a-zA-Z0-9_-]+)/);
+    if (m) {
+      return { gateway: u.origin, token: m[1] };
+    }
+    return { gateway: u.origin, token: "" };
+  } catch {
+    return { gateway: "", token: "" };
+  }
+}
+
 export function indirectInstallCommands(connectUrl: string): {
   unix: string;
   windows: string;
 } {
+  const { gateway, token } = parseConnectParams(connectUrl);
+  if (gateway && token) {
+    return {
+      unix: `curl -fsSL ${gateway}/r/indirect-install.sh | bash -s -- ${gateway} ${token}`,
+      windows: `powershell -ExecutionPolicy Bypass -NoProfile -Command "& ([scriptblock]::Create((irm '${gateway}/r/indirect-install.ps1'))) ${gateway} ${token}"`,
+    };
+  }
   const url = connectUrl || "<connectUrl>";
   const base = connectUrl ? installBase(connectUrl) : "<gateway>/r";
   return {

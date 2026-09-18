@@ -46,7 +46,7 @@ if (existsSync(pkgPath)) {
 
 // 3. Build daemon binaries for all platforms
 console.log(`\n📦 [1/4] Building Indirect Code daemon binaries for all platforms...`);
-await $`INDIRECT_VERSION=${version} bash scripts/build-indirect-all.sh`.cwd(ROOT);
+await $`bun ./scripts/build-indirect-all.ts ${version}`.cwd(ROOT);
 
 // 4. Build web dashboard and populate dist/r/
 console.log(`\n🌐 [2/4] Building web dashboard and staging releases to dist/r/...`);
@@ -80,7 +80,7 @@ if (!stagedDiff) {
 console.log(`
 🎉 Release v${version} published!
 The VPS auto-deploy listener will detect the push, rebuild images, and serve the new binaries at:
-  https://llm.hezz.it/r/versions.json
-  https://llm.hezz.it/r/indirect-install.sh
-  https://llm.hezz.it/r/indirect-install.ps1
+  <gateway-url>/r/versions.json
+  <gateway-url>/r/indirect-install.sh
+  <gateway-url>/r/indirect-install.ps1
 `);

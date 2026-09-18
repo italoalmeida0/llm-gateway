@@ -23,26 +23,56 @@ CONNECT_URL=""
 HOST_NAME=""
 
 usage() {
-  echo "usage: indirect-install.sh \"<connectUrl>\" [--name <host-name>]" >&2
-  echo "  connectUrl: single-use pairing URL from the LLM Gateway dashboard (valid ~15m)" >&2
+  echo "usage: indirect-install.sh \"<gatewayUrl>\" \"<token>\" [--name <host-name>]" >&2
+  echo "   or: indirect-install.sh \"<connectUrl>\" [--name <host-name>]" >&2
 }
 
+POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name) HOST_NAME="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; usage; exit 1 ;;
-    *) if [[ -z "$CONNECT_URL" ]]; then CONNECT_URL="$1"; else echo "unexpected arg: $1" >&2; usage; exit 1; fi; shift ;;
+    *) POSITIONAL+=("$1"); shift ;;
   esac
 done
 
-if [[ -z "$CONNECT_URL" ]]; then
-  echo "[indirect] missing <connectUrl>." >&2
-  echo "[indirect] Dashboard -> Indirect Code -> Connect Host -> copy the Linux/macOS command." >&2
+if [[ ${#POSITIONAL[@]} -eq 2 ]]; then
+  arg1="${POSITIONAL[0]}"
+  arg2="${POSITIONAL[1]}"
+  if [[ "$arg1" =~ ^https?:// ]]; then
+    gateway="${arg1%/}"
+    token="$arg2"
+  elif [[ "$arg2" =~ ^https?:// ]]; then
+    gateway="${arg2%/}"
+    token="$arg1"
+  else
+    echo "[indirect] invalid arguments: one argument must be the gateway URL (http:// or https://)" >&2
+    exit 1
+  fi
+  if [[ "$gateway" == *"/api/indirect-code/connect/"* ]]; then
+    CONNECT_URL="$gateway"
+  else
+    CONNECT_URL="${gateway}/api/indirect-code/connect/${token}"
+  fi
+elif [[ ${#POSITIONAL[@]} -eq 1 ]]; then
+  arg="${POSITIONAL[0]}"
+  if [[ "$arg" =~ ^https?:// ]]; then
+    CONNECT_URL="$arg"
+  else
+    if [[ -n "${INDIRECT_GATEWAY:-}" ]]; then
+      CONNECT_URL="${INDIRECT_GATEWAY%/}/api/indirect-code/connect/${arg}"
+    else
+      echo "[indirect] missing gateway URL. Usage: indirect-install.sh <gatewayUrl> <token>" >&2
+      exit 1
+    fi
+  fi
+else
+  echo "[indirect] missing connection parameters." >&2
   usage; exit 1
 fi
 
-GATEWAY_BASE="$(printf '%s' "$CONNECT_URL" | sed -E 's#(https?://[^/]+)/.*#\1#')"
+GATEWAY_BASE="$(printf '%s' "$CONNECT_URL" | sed -E 's#(https?://[^/]+).*#\1#')"
 REPO_RAW="${INDIRECT_REPO_RAW:-${GATEWAY_BASE}/r}"
 
 # --- Detect OS/arch ---

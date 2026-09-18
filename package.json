@@ -10,7 +10,7 @@
     "build": "bun run build:daemon:all && bun run build:web",
     "build:web": "NODE_ENV=production bun ./build.ts",
     "build:daemon": "go build -C indirect-code-daemon -o bin/indirect-code ./cmd/daemon",
-    "build:daemon:all": "bash scripts/build-indirect-all.sh",
+    "build:daemon:all": "bun ./scripts/build-indirect-all.ts",
     "release": "bun ./scripts/release.ts",
     "update:release": "bun ./scripts/release.ts",
     "test": "DATA_DIR=./data/test bun test",
@@ -22,8 +22,8 @@
     "perf:sim": "bun ./scripts/perf-sim.ts",
     "perf:tuning": "bun ./scripts/perf-tuning.ts",
     "perf:router-bench": "bun ./scripts/perf-router-bench.ts",
-    "clean": "rm -rf dist data",
-    "fclean": "rm -rf dist data node_modules"
+    "clean": "bun -e \"import { rmSync } from 'fs'; rmSync('dist', {recursive: true, force: true}); rmSync('data', {recursive: true, force: true});\"",
+    "fclean": "bun run clean && bun -e \"import { rmSync } from 'fs'; rmSync('node_modules', {recursive: true, force: true});\""
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",

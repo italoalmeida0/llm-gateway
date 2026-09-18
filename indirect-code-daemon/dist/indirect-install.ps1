@@ -7,7 +7,11 @@
 # instala em ~/.indirect-code/bin -> unblock-file -> pareia (-connect) -> deixa rodando
 # em segundo plano (Start-Process Hidden, sem prender o terminal).
 param(
-  [Parameter(Position = 0)][string]$ConnectUrl = $env:INDIRECT_CONNECT_URL,
+  [Parameter(Position = 0)][string]$Arg1 = "",
+  [Parameter(Position = 1)][string]$Arg2 = "",
+  [string]$ConnectUrl = $env:INDIRECT_CONNECT_URL,
+  [string]$Token = "",
+  [string]$Gateway = "",
   [string]$Name = "",
   [string]$RepoRaw = $env:INDIRECT_REPO_RAW
 )
@@ -18,8 +22,35 @@ if ([string]::IsNullOrWhiteSpace($ConnectUrl)) {
   }
 }
 
+# Resolve ConnectUrl from arguments
 if ([string]::IsNullOrWhiteSpace($ConnectUrl)) {
-  Write-Error "[indirect] ConnectUrl is required. Usage: indirect-install.ps1 -ConnectUrl '<url>'"
+  if (-not [string]::IsNullOrWhiteSpace($Arg1) -and -not [string]::IsNullOrWhiteSpace($Arg2)) {
+    if ($Arg1 -match '^https?://') {
+      $gw = $Arg1.TrimEnd('/')
+      $tok = $Arg2
+    } elseif ($Arg2 -match '^https?://') {
+      $gw = $Arg2.TrimEnd('/')
+      $tok = $Arg1
+    } else {
+      Write-Error "[indirect] One parameter must be the gateway URL (http:// or https://)"
+      exit 1
+    }
+    if ($gw -match '/api/indirect-code/connect/') {
+      $ConnectUrl = $gw
+    } else {
+      $ConnectUrl = "$gw/api/indirect-code/connect/$tok"
+    }
+  } elseif (-not [string]::IsNullOrWhiteSpace($Gateway) -and -not [string]::IsNullOrWhiteSpace($Token)) {
+    $ConnectUrl = "$($Gateway.TrimEnd('/'))/api/indirect-code/connect/$Token"
+  } elseif (-not [string]::IsNullOrWhiteSpace($Arg1)) {
+    if ($Arg1 -match '^https?://') {
+      $ConnectUrl = $Arg1
+    }
+  }
+}
+
+if ([string]::IsNullOrWhiteSpace($ConnectUrl)) {
+  Write-Error "[indirect] Gateway URL and Token are required.`nUsage: indirect-install.ps1 <gatewayUrl> <token>`n   or: indirect-install.ps1 -ConnectUrl '<url>'"
   exit 1
 }
 

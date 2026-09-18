@@ -16,7 +16,7 @@ func TestResolveSlotDaemonMissing(t *testing.T) {
 	t.Setenv("INDIRECT_REPO_RAW", "")
 	t.Setenv("INDIRECT_GATEWAY", "")
 	t.Setenv("HOME", dir)
-	if _, _, err := resolveSlotDaemon(dir); err == nil {
+	if _, _, _, err := resolveSlotDaemon(dir); err == nil {
 		t.Fatal("empty dir with no mirror must fail install")
 	}
 }

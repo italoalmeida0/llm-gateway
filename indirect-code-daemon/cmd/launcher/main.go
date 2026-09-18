@@ -76,14 +76,30 @@ func main() {
 	daemonPath := *daemonFlag
 	activeSlot := ""
 	slotDir := ""
+	quietStep := func(msg string) func() {
+		fmt.Printf("%s ... ", msg)
+		return func() { fmt.Println("done") }
+	}
+	fail := func(format string, args ...any) {
+		fmt.Println("FAILED")
+		fmt.Printf("Error: "+format+"\n", args...)
+		fmt.Printf("See %s for details.\n", filepath.Join(rootDir, "logs", "daemon.log"))
+		os.Exit(1)
+	}
 	if daemonPath == "" {
+		done := quietStep("Preparing")
 		var err error
-		daemonPath, activeSlot, err = resolveSlotDaemon(rootDir)
+		var notes []string
+		daemonPath, activeSlot, notes, err = resolveSlotDaemon(rootDir)
 		if err != nil {
-			fmt.Printf("[FETCH] failed: %v\n", err)
-			os.Exit(1)
+			done()
+			fail("setup failed: %v", err)
 		}
 		slotDir = filepath.Join(rootDir, "slots", "slot-"+activeSlot)
+		done()
+		if len(notes) > 0 {
+			fmt.Printf("Repaired %d issue(s) — see %s.\n", len(notes), filepath.Join(rootDir, "logs", "install.log"))
+		}
 	}
 	// Daemon CLI surface passthrough (connect/stop live in the daemon).
 	daemonArgs := flag.Args()
@@ -94,42 +110,38 @@ func main() {
 		daemonArgs = append([]string{"--name", *nameFlag}, daemonArgs...)
 	}
 
-	// 1. Checkup: dependencies and environment ready?
+	// 1. Checkup: dependencies and environment ready? Silent on success;
+	// on failure print the one-line error + full report.
 	report := runCheckup(rootDir, daemonPath)
-	report.print()
 	if !report.ok() {
-		os.Exit(1)
+		report.print()
+		report.printVerbose()
+		fail("environment check failed")
 	}
 
-	// 2. Migrations: storage chain up to date (slot-local stamp)?
+	// 2. Migrations: storage chain up to date (slot-local stamp). Silent
+	// when already current.
 	migrateDir := slotDir
 	if migrateDir == "" {
 		migrateDir = rootDir
 	}
 	applied, err := migrations.Migrate(migrateDir)
 	if err != nil {
-		fmt.Printf("[MIGRATE] failed: %v\n", err)
-		os.Exit(1)
+		fail("migration failed: %v", err)
 	}
-	if len(applied) > 0 {
-		fmt.Printf("[MIGRATE] applied: %v\n", applied)
-	} else {
-		fmt.Printf("[MIGRATE] storage v%d up to date\n", migrations.CurrentVersion)
-	}
+	_ = applied // silent when current; repairs are reported via [REPAIR] above
 	if *migrateOnly {
 		return
 	}
 
-	// 3. Integrity: daemon binary + storage sane?
+	// 3. Integrity: daemon binary + storage sane? Silent on success.
 	verifyDir := slotDir
 	if verifyDir == "" {
 		verifyDir = rootDir
 	}
 	if err := verifyAll(verifyDir, daemonPath); err != nil {
-		fmt.Printf("[VERIFY] failed: %v\n", err)
-		os.Exit(1)
+		fail("verification failed: %v", err)
 	}
-	fmt.Printf("[VERIFY] ok\n")
 	if *checkOnly || *verifyOnly {
 		return
 	}
@@ -147,8 +159,8 @@ func main() {
 		daemonArgs = append([]string{"--slot", activeSlot}, daemonArgs...)
 	}
 	crashes := 0
+	fmt.Println("Ready — listening for turns.")
 	for {
-		fmt.Printf("[LAUNCH] starting daemon %s (data: %s)\n", daemonPath, daemonDataDir)
 		code, err := execDaemon(daemonPath, daemonDataDir, daemonArgs)
 		if err == nil {
 			os.Exit(code)
@@ -158,14 +170,12 @@ func main() {
 			_ = os.Remove(stopReq)
 			os.Exit(code)
 		}
-		fmt.Printf("[LAUNCH] daemon exited %d: %v\n", code, err)
 		crashes++
 		if crashes > 3 {
-			fmt.Printf("[LAUNCH] daemon keeps exiting — giving up. Check %s.\n", filepath.Join(rootDir, "logs", "daemon.log"))
-			os.Exit(code)
+			fail("daemon keeps exiting (last exit %d: %v)", code, err)
 		}
 		wait := time.Duration(crashes) * 5 * time.Second
-		fmt.Printf("[LAUNCH] restarting in %v (crash #%d)...\n", wait, crashes)
+		fmt.Printf("Warning: daemon exited %d (%v) — restarting in %v (attempt %d/3) ...\n", code, err, wait, crashes)
 		time.Sleep(wait)
 	}
 }

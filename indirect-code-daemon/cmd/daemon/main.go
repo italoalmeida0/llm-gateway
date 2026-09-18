@@ -795,9 +795,9 @@ func (d *DaemonServer) performPairing(connectURL string, hostName string) error 
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Printf("\n[SUCCESS] Host paired successfully! Host ID: %s (Gateway: %s)\n", result.HostID, result.GatewayURL)
+	fmt.Printf("Paired - host %s ready.\n", result.HostID)
 	if result.Reused {
-		fmt.Printf("[INFO] Reused existing host registration (token rotated, no duplicate created).\n")
+		fmt.Println("Reused existing host registration.")
 	}
 	return nil
 }
@@ -2698,19 +2698,15 @@ func main() {
 	// If -connect was explicitly passed, ALWAYS perform pairing to the new link (disconnects from old gateway)
 	if *connectFlag != "" {
 		_ = server.loadConfig()
-		fmt.Printf("[PAIRING] Connecting daemon to new gateway link: %s\n", *connectFlag)
+		fmt.Println("Pairing ...")
 		if err := server.performPairing(*connectFlag, *nameFlag); err != nil {
-			fmt.Printf("Pairing failed: %v\n", err)
+			fmt.Printf("Error: pairing failed (%v).\nSee logs/daemon.log for details.\n", err)
 			os.Exit(1)
 		}
 	} else if err := server.loadConfig(); err != nil || server.config == nil {
 		// No existing config and no -connect flag -> prompt interactively
-		fmt.Println("=========================================================")
-		fmt.Println("                  Indirect Code Daemon                   ")
-		fmt.Println("=========================================================")
-		fmt.Println("No existing pairing configuration found.")
-		fmt.Println("In your LLM Gateway dashboard (/#/code), click 'Connect Host'")
-		fmt.Println("and paste the generated connection URL below:")
+		fmt.Println("No pairing found. In the gateway dashboard (#/code), click 'Connect Host'")
+		fmt.Println("and paste the connection URL below:")
 		fmt.Print("\nConnection URL: ")
 
 		var pairURL string
@@ -2720,27 +2716,26 @@ func main() {
 		}
 
 		if pairURL == "" {
-			fmt.Println("Error: connection URL required to pair host.")
+			fmt.Println("Error: connection URL is required.")
 			os.Exit(1)
 		}
 
 		if err := server.performPairing(pairURL, *nameFlag); err != nil {
-			fmt.Printf("Pairing failed: %v\n", err)
+			fmt.Printf("Error: pairing failed (%v).\nSee logs/daemon.log for details.\n", err)
 			os.Exit(1)
 		}
 	} else {
-		fmt.Printf("[INFO] Loaded configuration for host '%s' (Gateway: %s)\n", server.config.Name, server.config.GatewayURL)
-		fmt.Println("[INFO] Tip: To switch to another gateway link or user account, run: ./indirect-code -connect <new-url>")
+		fmt.Printf("Ready - host '%s' connected.\n", server.config.Name)
 	}
 
 	// Python check: managed copy in <root>/external -> PATH ->
 	// standalone download (astral-sh/python-build-standalone). Failure only
 	// DISABLES the python tool — startup continues.
 	if bin, err := tools.EnsurePython(server.sharedDir); err != nil {
-		fmt.Printf("[PYTHON] unavailable (%v); python tool disabled\n", err)
+		// python unavailable: tool disabled (silent; visible in the dashboard).
 		tools.SetPythonOverride("", err)
 	} else {
-		fmt.Printf("[PYTHON] using %s\n", bin)
+		// python ready (silent; visible in the dashboard).
 		tools.SetPythonOverride(bin, nil)
 	}
 
@@ -2754,16 +2749,16 @@ func main() {
 		// when used, while the python tool works normally. Only when
 		// NEITHER shell NOR python works does the daemon refuse to start.
 		if bin, perr := tools.PythonAvailable(); perr == nil && bin != "" {
-			fmt.Printf("[SHELL] no shell available (%v); bash tool disabled, python tool active\n", err)
+			fmt.Printf("Warning: no shell available (%v); bash tool disabled, python tool active.\n", err)
 		} else {
-			fmt.Printf("Terminal unavailable: %v (and no usable python either)\n", err)
+			fmt.Printf("Error: no usable shell or python (%v).\n", err)
 			os.Exit(1)
 		}
 	}
 
 	// Crashed runs leave tmp files (tmp+rename writers): sweep stale ones.
 	if n := sweepTmpOrphans(server.sessionsDir(), time.Hour); n > 0 {
-		fmt.Printf("[INFO] swept %d tmp orphans\n", n)
+		fmt.Printf("Cleaned %d leftover temp file(s).\n", n)
 	}
 	sweepTmpOrphans(dataDir, time.Hour)
 	sweepTmpOrphans(filepath.Join(server.rootDir(), "logs"), time.Hour)

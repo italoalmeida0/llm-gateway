@@ -71,25 +71,25 @@ func isInsideSlotDir(dir string) bool {
 // ensureLayout first (repairs broken installs), then the active slot's
 // bin. First-ever boot (no slots/): self-install slot-a (copy launcher
 // binary, download daemon latest, write active) then resolve.
-func resolveSlotDaemon(dataDir string) (string, string, error) {
-	if notes, err := ensureLayout(dataDir); err != nil {
-		return "", "", err
-	} else {
-		for _, n := range notes {
-			fmt.Printf("[REPAIR] %s\n", n)
-		}
+// Repair notes from ensureLayout are returned so the caller prints one
+// summary line (fetch.go itself stays quiet: it runs inside the
+// "Preparing ... done" step).
+func resolveSlotDaemon(dataDir string) (string, string, []string, error) {
+	repairNotes, err := ensureLayout(dataDir)
+	if err != nil {
+		return "", "", nil, err
 	}
 	raw, err := os.ReadFile(filepath.Join(dataDir, "slots", "active"))
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return "", "", err
+			return "", "", repairNotes, err
 		}
 		if err := installSlotA(dataDir); err != nil {
-			return "", "", err
+			return "", "", repairNotes, err
 		}
 		raw, err = os.ReadFile(filepath.Join(dataDir, "slots", "active"))
 		if err != nil {
-			return "", "", err
+			return "", "", repairNotes, err
 		}
 	}
 	slot := ""
@@ -100,7 +100,7 @@ func resolveSlotDaemon(dataDir string) (string, string, error) {
 		}
 	}
 	if slot == "" {
-		return "", "", fmt.Errorf("slots/active corrupt")
+		return "", "", repairNotes, fmt.Errorf("slots/active corrupt")
 	}
 	slotDir := filepath.Join(dataDir, "slots", "slot-"+slot)
 	binDir := filepath.Join(slotDir, "bin")
@@ -111,7 +111,7 @@ func resolveSlotDaemon(dataDir string) (string, string, error) {
 		needDownload = true
 	} else if launcherVersion != "dev" && launcherVersion != "" {
 		if err := selfVerifyDaemon(local, launcherVersion); err != nil {
-			fmt.Printf("[FETCH] slot %s daemon is outdated (%v) — updating to match launcher %s...\n", slot, err, launcherVersion)
+			fmt.Printf("Updating daemon to match launcher %s ... ", launcherVersion)
 			needDownload = true
 		}
 	}
@@ -124,18 +124,19 @@ func resolveSlotDaemon(dataDir string) (string, string, error) {
 		dlPath, err := fetchDaemonTo(slotDir, targetVer)
 		if err != nil {
 			if st, serr := os.Stat(local); serr == nil && !st.IsDir() && st.Size() > 0 {
-				fmt.Printf("[FETCH] warning: cannot download latest daemon (%v), using existing binary\n", err)
-				return local, slot, nil
+				fmt.Printf("Warning: cannot download latest daemon (%v), using existing binary\n", err)
+				return local, slot, repairNotes, nil
 			}
-			return "", "", fmt.Errorf("slot %s daemon unavailable: %w", slot, err)
+			return "", "", repairNotes, fmt.Errorf("slot %s daemon unavailable: %w", slot, err)
 		}
 		local = dlPath
+		fmt.Println("done")
 		verifyVer := targetVer
 		if verifyVer == "dev" {
 			verifyVer = ""
 		}
 		if err := selfVerifyDaemon(local, verifyVer); err != nil {
-			fmt.Printf("[FETCH] warning: downloaded daemon self-verify: %v\n", err)
+			fmt.Printf("Warning: downloaded daemon self-verify: %v\n", err)
 		}
 	}
 
@@ -146,7 +147,7 @@ func resolveSlotDaemon(dataDir string) (string, string, error) {
 		}
 	}
 
-	return local, slot, nil
+	return local, slot, repairNotes, nil
 }
 
 func fetchURL(url string, w io.Writer) error {

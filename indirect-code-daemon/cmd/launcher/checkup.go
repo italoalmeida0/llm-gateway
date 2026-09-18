@@ -50,6 +50,22 @@ func (r *checkReport) ok() bool {
 }
 
 func (r *checkReport) print() {
+	// Quiet contract: one line when everything passes, full detail only
+	// on failure (the failing item + hint). Warnings (non-fatal) print
+	// only when verbose.
+	if r.ok() {
+		return
+	}
+	for _, it := range r.items {
+		if it.fatal && !it.ok {
+			fmt.Printf("Error: %s: %s\n", it.name, it.detail)
+		}
+	}
+}
+
+// printVerbose prints every item (warnings included). Used on failure to
+// show the full picture after the one-line error above.
+func (r *checkReport) printVerbose() {
 	for _, it := range r.items {
 		status := "ok"
 		if !it.ok {

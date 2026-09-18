@@ -10,11 +10,10 @@
 # em segundo plano (nohup, sem prender o terminal).
 set -euo pipefail
 
-# Mirror resolution: the gateway you're pairing with serves everything
-# (derived from CONNECT_URL) — no GitHub dependency. INDIRECT_REPO_RAW
-# overrides (air-gapped mirrors, dev).
-GATEWAY_BASE="$(printf '%s' "$CONNECT_URL" | sed -E 's#(https?://[^/]+)/.*#\1#')"
-REPO_RAW="${INDIRECT_REPO_RAW:-${GATEWAY_BASE}/api/indirect-code/dist}"
+# Mirror resolution (set AFTER arg parsing below — CONNECT_URL arrives
+# via argv): the gateway you're pairing with serves everything (derived
+# from CONNECT_URL) — no GitHub dependency. INDIRECT_REPO_RAW overrides
+# (air-gapped mirrors, dev).
 DATA_DIR="${INDIRECT_DATA_DIR:-$HOME/.indirect-code}"
 BIN_DIR="$DATA_DIR/bin"
 LOG_FILE="$DATA_DIR/daemon.log"
@@ -42,6 +41,9 @@ if [[ -z "$CONNECT_URL" ]]; then
   echo "[indirect] Dashboard -> Indirect Code -> Connect Host -> copy the Linux/macOS command." >&2
   usage; exit 1
 fi
+
+GATEWAY_BASE="$(printf '%s' "$CONNECT_URL" | sed -E 's#(https?://[^/]+)/.*#\1#')"
+REPO_RAW="${INDIRECT_REPO_RAW:-${GATEWAY_BASE}/api/indirect-code/dist}"
 
 # --- Detect OS/arch ---
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"

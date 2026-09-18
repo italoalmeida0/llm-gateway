@@ -1,5 +1,5 @@
 node_modules
-dist
+/dist
 data
 test
 *.log
@@ -10,3 +10,4 @@ Dockerfile
 .dockerignore
 README.md
 AGENTS.md
+!indirect-code-daemon/dist/

@@ -23,9 +23,8 @@ COPY patches ./patches
 RUN bun install --frozen-lockfile --production
 COPY server ./server
 COPY --from=webbuild /app/dist ./dist
-# Daemon release binaries + install scripts + versions manifest, served at
-# /api/indirect-code/dist/* (gateway-first updates/installs, no GitHub).
-COPY indirect-code-daemon/dist ./indirect-code-daemon/dist
+# NOTE: daemon releases ride inside ./dist/r/ (copied by build.ts from
+# indirect-code-daemon/dist/) — no separate COPY (would duplicate ~319MB).
 
 # Run as a dedicated non-root user (least privilege). /data holds the DB and
 # the dev secret, so it is owned by that user and mounted as a volume.

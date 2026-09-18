@@ -2,7 +2,7 @@
 # Indirect Code one-line installer (Linux + macOS).
 #
 # Copiado do dashboard como:
-#   curl -fsSL <seu-gateway>/api/indirect-code/dist/indirect-install.sh \
+#   curl -fsSL <seu-gateway>/r/indirect-install.sh \
 #     | bash -s -- "<connectUrl>" [--name "my-host"]
 #
 # Faz: detecta OS/arch -> baixa o binário compatível mais recente ->
@@ -43,7 +43,7 @@ if [[ -z "$CONNECT_URL" ]]; then
 fi
 
 GATEWAY_BASE="$(printf '%s' "$CONNECT_URL" | sed -E 's#(https?://[^/]+)/.*#\1#')"
-REPO_RAW="${INDIRECT_REPO_RAW:-${GATEWAY_BASE}/api/indirect-code/dist}"
+REPO_RAW="${INDIRECT_REPO_RAW:-${GATEWAY_BASE}/r}"
 
 # --- Detect OS/arch ---
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"

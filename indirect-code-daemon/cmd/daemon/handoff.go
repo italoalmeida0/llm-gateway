@@ -200,7 +200,7 @@ func (d *DaemonServer) fetchLauncherTo(version string, sl slotLayout) (string, e
 	// Gateway first (serves dist/ itself — instant, no CDN), mirror fallback.
 	base := ""
 	if gb := gatewayBaseURL(d); gb != "" {
-		base = gb + "/api/indirect-code/dist/"
+		base = gb + "/r/"
 	} else {
 		base = manifestURL()
 		base = base[:len(base)-len(updateManifestFile)]

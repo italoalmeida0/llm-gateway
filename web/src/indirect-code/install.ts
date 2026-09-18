@@ -1,6 +1,6 @@
 /** One-line install commands for the Indirect Code daemon.
  *
- * The gateway serves dist/ itself (/api/indirect-code/dist/), so install
+ * The gateway serves releases statically (/r/), so install
  * commands point at it (derived from the connectUrl's origin — same host
  * the daemon will pair with, no CDN cache in the path). GitHub raw stays
  * as documented fallback when the gateway isn't publicly reachable.
@@ -17,7 +17,7 @@ export function installBase(connectUrl: string): string {
   try {
     const u = new URL(connectUrl);
     if (u.protocol === "http:" || u.protocol === "https:") {
-      return `${u.origin}/api/indirect-code/dist`;
+      return `${u.origin}/r`;
     }
   } catch {}
   return INDIRECT_REPO_RAW;

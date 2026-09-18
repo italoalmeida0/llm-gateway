@@ -1,6 +1,6 @@
 process.env.NODE_ENV = "production";
 
-import { cpSync, existsSync, mkdirSync, rmSync } from "fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -73,6 +73,21 @@ async function build() {
   } else {
     console.log("[build] pandoc.wasm not found, office conversion disabled");
   }
+
+  // Daemon releases into dist/r/ (public static: <gateway>/r/...).
+  // Gateway-first updates/installs with zero new endpoints — static.ts
+  // already hardens traversal/MIME/cache. No GitHub dependency.
+  const daemonDist = path.join(ROOT, "indirect-code-daemon", "dist");
+  const rDir = path.join(distDir, "r");
+  mkdirSync(rDir, { recursive: true });
+  let rCount = 0;
+  for (const f of readdirSync(daemonDist)) {
+    if (/^(indirect-(code|launcher)-|versions\.json|SHA256SUMS\.txt|indirect-install\.)/.test(f)) {
+      cpSync(path.join(daemonDist, f), path.join(rDir, f));
+      rCount++;
+    }
+  }
+  console.log(`[build] daemon releases -> dist/r/ (${rCount} files)`);
 
   console.log(`[build] OK -> dist/ (${result.outputs.length} outputs)`);
   process.exit(0);

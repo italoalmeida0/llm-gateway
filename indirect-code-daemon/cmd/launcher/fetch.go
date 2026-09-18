@@ -192,7 +192,7 @@ func mirrorBase() string {
 		return strings.TrimRight(v, "/")
 	}
 	if v := os.Getenv("INDIRECT_GATEWAY"); v != "" {
-		return strings.TrimRight(v, "/") + "/api/indirect-code/dist"
+		return strings.TrimRight(v, "/") + "/r"
 	}
 	return defaultReleaseBase
 }

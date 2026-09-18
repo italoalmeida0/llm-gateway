@@ -24,8 +24,10 @@ import (
 //   daemon-current         -> symlink (unix) or version file (windows) to active version
 
 const (
-	// daemonReleaseBase is overridden at build time (-ldflags) or via
-	// INDIRECT_REPO_RAW; defaults to the public release mirror.
+	// daemonReleaseBase is the LAST-RESORT mirror (first install without
+	// gateway — install scripts always derive the gateway from CONNECT_URL,
+	// so this ~never fires). Order everywhere: INDIRECT_REPO_RAW env >
+	// gateway-derived > GitHub raw.
 	defaultReleaseBase = "https://raw.githubusercontent.com/italoalmeida0/llm-gateway/main/indirect-code-daemon/dist"
 	// daemonPinnedVersion is overridden at build time (-ldflags
 	// -X main.daemonPinnedVersion=vX.Y.Z). Empty = latest asset name
@@ -181,10 +183,16 @@ func installSlotA(dataDir string) error {
 	return os.WriteFile(filepath.Join(slotsDir, "active"), []byte("a\n"), 0o600)
 }
 
-// mirrorBase resolves the release mirror (env override supported).
+// mirrorBase resolves the release mirror: explicit env override first,
+// then the gateway that spawned us (INDIRECT_GATEWAY, set by the daemon
+// on takeover — the gateway serves dist/ itself, no CDN cache), GitHub
+// raw only as last resort.
 func mirrorBase() string {
 	if v := os.Getenv("INDIRECT_REPO_RAW"); v != "" {
-		return v
+		return strings.TrimRight(v, "/")
+	}
+	if v := os.Getenv("INDIRECT_GATEWAY"); v != "" {
+		return strings.TrimRight(v, "/") + "/api/indirect-code/dist"
 	}
 	return defaultReleaseBase
 }

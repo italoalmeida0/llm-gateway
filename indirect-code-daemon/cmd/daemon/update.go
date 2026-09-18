@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,6 +92,70 @@ func manifestURL() string {
 }
 
 func fetchManifest() (*versionManifest, error) {
+	return fetchManifestWithConfig(nil)
+}
+
+// fetchManifestWithConfig tries the gateway first (instant, no CDN cache),
+// then the public mirror. d may be nil (launcher-side callers pass explicit
+// gateway URL + token via fetchManifestGateway).
+func fetchManifestWithConfig(d *DaemonServer) (*versionManifest, error) {
+	if d != nil {
+		if m, err := fetchManifestGateway(d); err == nil {
+			return m, nil
+		} else {
+			fmt.Printf("[UPDATE] gateway manifest failed (%v), trying mirror\n", err)
+		}
+	}
+	return fetchManifestMirror()
+}
+
+// fetchManifestGateway pulls versions.json from the connected gateway
+// (same host/token the daemon already uses for WS).
+func fetchManifestGateway(d *DaemonServer) (*versionManifest, error) {
+	d.configMu.RLock()
+	gw, token := d.config.GatewayURL, d.config.DaemonToken
+	d.configMu.RUnlock()
+	if gw == "" || token == "" {
+		return nil, fmt.Errorf("no gateway configured")
+	}
+	u, err := url.Parse(gw)
+	if err != nil {
+		return nil, err
+	}
+	scheme := "http"
+	if u.Scheme == "https" {
+		scheme = "https"
+	}
+	endpoint := fmt.Sprintf("%s://%s/api/indirect-code/versions", scheme, u.Host)
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("gateway versions HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	var m versionManifest
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	if m.Daemon.Version == "" {
+		return nil, fmt.Errorf("gateway manifest missing daemon version")
+	}
+	return &m, nil
+}
+
+func fetchManifestMirror() (*versionManifest, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(manifestURL())
 	if err != nil {
@@ -123,7 +188,7 @@ func (d *DaemonServer) checkForUpdates(reason string) {
 		d.broadcastUpdateState()
 		return
 	}
-	m, err := fetchManifest()
+	m, err := fetchManifestWithConfig(d)
 	st := d.updateChecker()
 	st.mu.Lock()
 	st.checkedAt = time.Now().UnixMilli()

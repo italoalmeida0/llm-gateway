@@ -39,6 +39,56 @@ export async function handleIndirectCodeRestRoute(
     return json({ success: true, models }, { req });
   }
 
+  // GET /api/indirect-code/versions -> local versions.json (instant,
+  // no CDN cache). Daemons prefer this over the GitHub mirror; the mirror
+  // stays as fallback for bootstrap/first-install.
+  if (path === "/api/indirect-code/versions" && req.method === "GET") {
+    const token = req.headers.get("authorization")?.replace(/^Bearer /, "") || "";
+    const host = db.prepare<{ id: string }, [string]>(
+      `SELECT h.id FROM remote_hosts h JOIN users u ON u.id = h.user_id
+       WHERE h.daemon_token_hash = ? AND u.status = 'active'`,
+    ).get(sha256Hex(token));
+    if (!host) return err(401, "unauthorized daemon token", req);
+    try {
+      const text = await Bun.file("indirect-code-daemon/dist/versions.json").text();
+      return new Response(text, { headers: { "Content-Type": "application/json" } });
+    } catch {
+      return err(404, "versions manifest unavailable", req);
+    }
+  }
+
+  // GET /api/indirect-code/dist/<asset> -> release binaries/manifest.
+  // Public (same as GitHub raw): lets install.sh and daemons download
+  // without depending on githubusercontent. Locked to a strict allowlist
+  // (a stray file in dist/ must never leak) + traversal-safe basename.
+  // Global per-IP rate limit (index.ts) + immutable-URL caching apply.
+  if (path.startsWith("/api/indirect-code/dist/") && req.method === "GET") {
+    const name = path.slice("/api/indirect-code/dist/".length);
+    const allowed =
+      /^(indirect-code-[a-z0-9]+-[a-z0-9]+(-v\d+\.\d+\.\d+)?(\.exe)?|indirect-launcher-[a-z0-9]+-[a-z0-9]+(-v\d+\.\d+\.\d+)?(\.exe)?|versions\.json|SHA256SUMS\.txt|indirect-install\.(sh|ps1))$/.test(name);
+    if (!allowed) {
+      return err(404, "asset not found", req);
+    }
+    try {
+      const f = Bun.file(`indirect-code-daemon/dist/${name}`);
+      if (!(await f.exists())) return err(404, "asset not found", req);
+      const isText = name.endsWith(".json") || name.endsWith(".txt") || name.endsWith(".sh") || name.endsWith(".ps1");
+      // Versioned binaries are immutable -> long cache; floating names +
+      // manifest revalidate (update propagation depends on freshness).
+      const cache = /-v\d+\.\d+\.\d+(\.exe)?$/.test(name)
+        ? "public, max-age=31536000, immutable"
+        : "public, max-age=60, must-revalidate";
+      return new Response(f, {
+        headers: {
+          "Content-Type": isText ? "text/plain; charset=utf-8" : "application/octet-stream",
+          "Cache-Control": cache,
+        },
+      });
+    } catch {
+      return err(404, "asset not found", req);
+    }
+  }
+
   // POST /api/indirect-code/pair
   if (path === "/api/indirect-code/pair" && req.method === "POST") {
     const { user } = await requireAuth(req);

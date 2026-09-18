@@ -1,7 +1,7 @@
 # Indirect Code one-line installer (Windows PowerShell).
 #
 # Copiado do dashboard como:
-#   powershell -ExecutionPolicy Bypass -NoProfile -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/italoalmeida0/llm-gateway/main/indirect-code-daemon/dist/indirect-install.ps1'))) -ConnectUrl '<connectUrl>'"
+#   powershell -ExecutionPolicy Bypass -NoProfile -Command "& ([scriptblock]::Create((irm '<seu-gateway>/api/indirect-code/dist/indirect-install.ps1'))) -ConnectUrl '<connectUrl>'"
 #
 # Faz: detecta arch -> para daemon anterior -> baixa o .exe compatível mais recente ->
 # instala em ~/.indirect-code/bin -> unblock-file -> pareia (-connect) -> deixa rodando
@@ -26,7 +26,9 @@ if ([string]::IsNullOrWhiteSpace($ConnectUrl)) {
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($RepoRaw)) {
-  $RepoRaw = "https://raw.githubusercontent.com/italoalmeida0/llm-gateway/main/indirect-code-daemon/dist"
+  # Derive from ConnectUrl (gateway serves everything) — no GitHub dependency.
+  if ($ConnectUrl -match '^(https?://[^/]+)') { $RepoRaw = $Matches[1] + "/api/indirect-code/dist" }
+  else { $RepoRaw = "https://raw.githubusercontent.com/italoalmeida0/llm-gateway/main/indirect-code-daemon/dist" }
 }
 
 $DataDir = Join-Path $HOME ".indirect-code"

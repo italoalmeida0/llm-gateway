@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -196,8 +197,14 @@ func (d *DaemonServer) fetchLauncherTo(version string, sl slotLayout) (string, e
 	if st, err := os.Stat(local); err == nil && !st.IsDir() && st.Size() > 0 {
 		return local, nil
 	}
-	base := manifestURL()
-	base = base[:len(base)-len(updateManifestFile)]
+	// Gateway first (serves dist/ itself — instant, no CDN), mirror fallback.
+	base := ""
+	if gb := gatewayBaseURL(d); gb != "" {
+		base = gb + "/api/indirect-code/dist/"
+	} else {
+		base = manifestURL()
+		base = base[:len(base)-len(updateManifestFile)]
+	}
 	// Dual publish (see takeover_help.go): versioned URL first (immutable),
 	// floating fallback (may be stale; self-verify decides).
 	verAsset := asset + "-v" + version
@@ -384,6 +391,28 @@ func copyFileLink(src, dst string) error {
 	return out.Sync()
 }
 
+// gatewayBaseURL returns scheme://host of the connected gateway ("" when
+// unconfigured). The gateway serves dist/ itself: instant, no CDN cache.
+func gatewayBaseURL(d *DaemonServer) string {
+	if d == nil {
+		return ""
+	}
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	if d.config == nil || d.config.GatewayURL == "" {
+		return ""
+	}
+	u, err := url.Parse(d.config.GatewayURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := u.Scheme
+	if scheme != "http" && scheme != "https" {
+		scheme = "https"
+	}
+	return scheme + "://" + u.Host
+}
+
 // fetchURL downloads url into w (5min timeout for binaries).
 func fetchURL(url string, w io.Writer) error {
 	client := &http.Client{Timeout: 5 * time.Minute}
@@ -421,6 +450,10 @@ func (d *DaemonServer) execTakeover(launcherPath string, sl slotLayout, version 
 		"--parent-pid", fmt.Sprint(os.Getpid()),
 	)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	// Takeover downloads from OUR gateway (instant, no CDN): pass it down
+	// so the new launcher never touches GitHub. Falls back to GitHub raw
+	// only when the gateway is unreachable (same rule as manifest fetch).
+	cmd.Env = append(os.Environ(), "INDIRECT_GATEWAY="+gatewayBaseURL(d))
 	done := make(chan error, 1)
 	go func() { done <- cmd.Run() }()
 	timeout := time.After(10 * time.Minute)

@@ -33,6 +33,7 @@ func runTakeover(
 	dataDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid string,
 ) int {
 	toDir := filepath.Join(dataDir, "slots", "slot-"+toSlot)
+	stableLog := filepath.Join(dataDir, "takeover-last.log")
 	// Dedicated log: daemon stdout may be unreachable (service, nohup
 	// rotation); the reason for a takeover failure must survive here.
 	takeoverLog := filepath.Join(toDir, "takeover.log")
@@ -40,9 +41,11 @@ func runTakeover(
 	logf := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
 		fmt.Println(msg)
-		if f, err := os.OpenFile(takeoverLog, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
-			fmt.Fprintln(f, msg)
-			f.Close()
+		for _, p := range []string{takeoverLog, stableLog} {
+			if f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
+				fmt.Fprintln(f, msg)
+				f.Close()
+			}
 		}
 	}
 	fail := func(reason string) int {
@@ -52,6 +55,7 @@ func runTakeover(
 	}
 	// 0. Fresh signals only: clear stale handoff/serving leftovers in the
 	// target slot (a crashed previous takeover must not fake success).
+	_ = os.Remove(stableLog)
 	_ = os.Remove(filepath.Join(toDir, "handoff.json"))
 	_ = os.Remove(filepath.Join(toDir, "serving.json"))
 	_ = os.Remove(filepath.Join(toDir, "standby-ready.json"))

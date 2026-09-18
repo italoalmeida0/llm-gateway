@@ -2,7 +2,7 @@
 # Indirect Code one-line installer (Linux + macOS).
 #
 # Copiado do dashboard como:
-#   curl -fsSL https://raw.githubusercontent.com/italoalmeida0/llm-gateway/main/indirect-code-daemon/dist/indirect-install.sh \
+#   curl -fsSL <seu-gateway>/api/indirect-code/dist/indirect-install.sh \
 #     | bash -s -- "<connectUrl>" [--name "my-host"]
 #
 # Faz: detecta OS/arch -> baixa o binário compatível mais recente ->
@@ -10,7 +10,11 @@
 # em segundo plano (nohup, sem prender o terminal).
 set -euo pipefail
 
-REPO_RAW="${INDIRECT_REPO_RAW:-https://raw.githubusercontent.com/italoalmeida0/llm-gateway/main/indirect-code-daemon/dist}"
+# Mirror resolution: the gateway you're pairing with serves everything
+# (derived from CONNECT_URL) — no GitHub dependency. INDIRECT_REPO_RAW
+# overrides (air-gapped mirrors, dev).
+GATEWAY_BASE="$(printf '%s' "$CONNECT_URL" | sed -E 's#(https?://[^/]+)/.*#\1#')"
+REPO_RAW="${INDIRECT_REPO_RAW:-${GATEWAY_BASE}/api/indirect-code/dist}"
 DATA_DIR="${INDIRECT_DATA_DIR:-$HOME/.indirect-code}"
 BIN_DIR="$DATA_DIR/bin"
 LOG_FILE="$DATA_DIR/daemon.log"

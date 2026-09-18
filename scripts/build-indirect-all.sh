@@ -23,6 +23,7 @@ if [ -z "${INDIRECT_VERSION:-}" ] && [ ! -f "$OUT/versions.json" ] && [ -f "$DAE
   cp "$DAEMON_DIR/dist/versions.json" "$OUT/versions.json"
   echo "==> seeded versions.json from daemon dist"
 fi
+cp "$DAEMON_DIR/dist/indirect-install."* "$OUT/" 2>/dev/null || true
 VERSION="${INDIRECT_VERSION:-$(python3 -c 'import json, os; print(json.load(open(os.path.join("'"$OUT"'", "versions.json")))["daemon"]["version"])' 2>/dev/null || echo "1.0.0")}"
 echo "==> Building Indirect Code v${VERSION}"
 
@@ -100,7 +101,7 @@ def assets(prefix):
             for fn in sorted(sums) if fn.startswith(prefix + "-") and "-v" not in fn}
 def assets_versioned(prefix, version):
     return {fn[len(prefix)+1:].removesuffix(".exe"): fn
-            for fn in sorted(sums) if fn.startswith(prefix + "-") and fn.endswith(f"-v{version}") or fn.endswith(f"-v{version}.exe")}
+            for fn in sorted(sums) if fn.startswith(prefix + "-") and (fn.endswith(f"-v{version}") or fn.endswith(f"-v{version}.exe"))}
 manifest = {
     "daemon": {"version": version, "assets": assets("indirect-code"), "assetsVersioned": assets_versioned("indirect-code", version), "sums": sums},
     "launcher": {"version": version, "assets": assets("indirect-launcher"), "assetsVersioned": assets_versioned("indirect-launcher", version), "sums": sums},
@@ -109,4 +110,6 @@ with open(os.path.join(out, "versions.json"), "w") as f:
     json.dump(manifest, f, indent=2)
 print("==> versions.json:", version)
 PYEOF
+cp -r "$OUT/"* "$DAEMON_DIR/dist/"
+echo "==> synced to $DAEMON_DIR/dist"
 echo "==> sizes:"; ls -lh "$OUT"

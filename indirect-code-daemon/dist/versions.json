@@ -15,9 +15,7 @@
       "linux-amd64-v1.0.9": "indirect-code-linux-amd64-v1.0.9",
       "linux-arm64-v1.0.9": "indirect-code-linux-arm64-v1.0.9",
       "windows-amd64-v1.0.9": "indirect-code-windows-amd64-v1.0.9.exe",
-      "windows-arm64-v1.0.9": "indirect-code-windows-arm64-v1.0.9.exe",
-      "her-windows-amd64-v1.0.9": "indirect-launcher-windows-amd64-v1.0.9.exe",
-      "her-windows-arm64-v1.0.9": "indirect-launcher-windows-arm64-v1.0.9.exe"
+      "windows-arm64-v1.0.9": "indirect-code-windows-arm64-v1.0.9.exe"
     },
     "sums": {
       "indirect-code-darwin-amd64": "b980f9a396bcabefb0d9ff768f69e8a7586a256578d68aacc5745190879f4627",

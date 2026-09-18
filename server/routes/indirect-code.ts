@@ -50,7 +50,11 @@ export async function handleIndirectCodeRestRoute(
     ).get(sha256Hex(token));
     if (!host) return err(401, "unauthorized daemon token", req);
     try {
-      const text = await Bun.file("indirect-code-daemon/dist/versions.json").text();
+      let file = Bun.file("dist/r/versions.json");
+      if (!(await file.exists())) {
+        file = Bun.file("indirect-code-daemon/dist/versions.json");
+      }
+      const text = await file.text();
       return new Response(text, { headers: { "Content-Type": "application/json" } });
     } catch {
       return err(404, "versions manifest unavailable", req);

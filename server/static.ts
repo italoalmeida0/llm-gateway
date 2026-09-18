@@ -28,6 +28,8 @@ const MIME: Record<string, string> = {
   ".ttf": "font/ttf",
   ".map": "application/json",
   ".txt": "text/plain; charset=utf-8",
+  ".sh": "text/plain; charset=utf-8",
+  ".ps1": "text/plain; charset=utf-8",
   ".webmanifest": "application/manifest+json",
 };
 
@@ -60,8 +62,8 @@ export function resolveStaticFile(urlPath: string): { filePath: string; isHtml: 
 
   let finalPath = fullPath;
   if (!existsSync(finalPath) || statSync(finalPath).isDirectory()) {
-    // SPA fallback: extension-less GET paths render the dashboard shell.
-    if (path.extname(normalized) === "") {
+    // SPA fallback: extension-less GET paths render the dashboard shell (never for missing /r/ release binaries).
+    if (path.extname(normalized) === "" && !normalized.startsWith("r" + path.sep) && normalized !== "r") {
       const indexPath = path.join(STATIC_ROOT, "index.html");
       if (!existsSync(indexPath)) return null;
       finalPath = indexPath;
@@ -86,10 +88,22 @@ export function serveStatic(req: Request, urlPath: string): Response | null {
   // Hashed build artifacts can be cached forever; HTML always revalidates.
   // The push Service Worker must never stick in cache: a stale SW keeps
   // rendering old notification shapes after deploys.
-  const isPushSw = path.basename(resolved.filePath) === "push-sw.js";
+  const basename = path.basename(resolved.filePath);
+  const isPushSw = basename === "push-sw.js";
+  const isVersionedRelease = /-v\d+\.\d+\.\d+(\.exe)?$/.test(basename);
+  const isReleaseAsset = resolved.filePath.includes(path.sep + "r" + path.sep);
+
   headers.set(
     "Cache-Control",
-    resolved.isHtml || isPushSw ? "no-cache" : IMMUTABLE_EXT.has(path.extname(resolved.filePath)) ? "public, max-age=31536000, immutable" : "public, max-age=300",
+    resolved.isHtml || isPushSw
+      ? "no-cache"
+      : isVersionedRelease
+        ? "public, max-age=31536000, immutable"
+        : isReleaseAsset
+          ? "public, max-age=60, must-revalidate"
+          : IMMUTABLE_EXT.has(path.extname(resolved.filePath))
+            ? "public, max-age=31536000, immutable"
+            : "public, max-age=300",
   );
 
   return new Response(file, { status: 200, headers });

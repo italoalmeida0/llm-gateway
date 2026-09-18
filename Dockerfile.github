@@ -30,6 +30,7 @@ RUN bun install --frozen-lockfile
 COPY --from=src /src/repo/plugins ./plugins
 COPY --from=src /src/repo/build.ts /src/repo/tsconfig.json ./
 COPY --from=src /src/repo/web ./web
+COPY --from=src /src/repo/indirect-code-daemon/dist ./indirect-code-daemon/dist
 RUN bun ./build.ts
 
 # ===== Runtime stage: server + built assets =====

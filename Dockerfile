@@ -7,6 +7,7 @@ RUN bun install --frozen-lockfile
 COPY plugins ./plugins
 COPY build.ts tsconfig.json ./
 COPY web ./web
+COPY indirect-code-daemon/dist ./indirect-code-daemon/dist
 RUN bun ./build.ts
 
 # ===== Runtime stage: server + built assets =====

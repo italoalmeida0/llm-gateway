@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,8 +37,12 @@ func TestSettingsAtomicValidationConflictAndSecrets(t *testing.T) {
 	if json.Unmarshal(data, &saved) != nil || saved.Skills["review"].Body != "Review instructions" || saved.MCPServers["local"].Env["TOKEN"] != "fixture-secret" {
 		t.Fatal("config not persisted")
 	}
-	if info, _ := os.Stat(d.configPath); info.Mode().Perm() != 0600 {
-		t.Fatal("config permissions")
+	// Windows ACLs ignore Unix permission bits (Go reports 0666): the
+	// real guarantee there is the user-profile dir ACL, not the mode.
+	if runtime.GOOS != "windows" {
+		if info, _ := os.Stat(d.configPath); info.Mode().Perm() != 0600 {
+			t.Fatal("config permissions")
+		}
 	}
 	mirrored, _ := json.Marshal(d.mirroredMCP())
 	if strings.Contains(string(mirrored), "fixture-secret") || !strings.Contains(string(mirrored), "TOKEN") {

@@ -63,3 +63,57 @@ func IsContextOverflow(err error) bool {
 	}
 	return false
 }
+
+// Non-retryable upstream error patterns: client-caused rejections where
+// retrying the identical request can never succeed (400-class, auth).
+// Rate limits (429) and 5xx are deliberately absent: those are transient
+// and keep the turn alive on the backoff schedule. Context-overflow is
+// handled separately (IsContextOverflow triggers compaction, not retry).
+var nonRetryablePatterns = []*regexp.Regexp{
+	// HTTP status markers as surfaced by the provider clients
+	// ("gateway-anthropic: http 400: ...", "http 401", "http 403").
+	regexp.MustCompile(`\bhttp 400\b`),
+	regexp.MustCompile(`\bhttp 401\b`),
+	regexp.MustCompile(`\bhttp 403\b`),
+	regexp.MustCompile(`\bstatus code 400\b`),
+	regexp.MustCompile(`\bstatus code 401\b`),
+	regexp.MustCompile(`\bstatus code 403\b`),
+	// Error type markers (both envelopes).
+	regexp.MustCompile(`(?i)invalid_request_error`),
+	regexp.MustCompile(`(?i)authentication_error`),
+	regexp.MustCompile(`(?i)invalid_api_key`),
+	regexp.MustCompile(`(?i)incorrect api key`),
+	// Parameter rejections (the request itself is malformed for this
+	// model: retrying verbatim burns quota forever).
+	regexp.MustCompile(`(?i)unsupported (parameter|value)`),
+	regexp.MustCompile(`(?i)not supported for .* in /v1/`),
+	regexp.MustCompile(`(?i)unrecognized request argument`),
+	regexp.MustCompile(`(?i)unknown (parameter|field)`),
+	regexp.MustCompile(`(?i)invalid (parameter|value|request)`),
+	// Broken client construction (no gateway configured, relative URL,
+	// unsupported scheme): the request can never leave the machine.
+	// Retrying forever hangs the turn until the user notices (caught on
+	// Windows: fork/regenerate/queue turns spun 10-30s on
+	// 'unsupported protocol scheme ""' instead of failing fast).
+	regexp.MustCompile(`(?i)unsupported protocol scheme`),
+	regexp.MustCompile(`(?i)unsupported scheme`),
+}
+
+// isRetryableUpstream reports whether an upstream error is worth retrying
+// on the backoff schedule. False = fail the turn fast with the error
+// visible (EvTurnEnd carries it) instead of looping hourly forever.
+func isRetryableUpstream(err error) bool {
+	if err == nil {
+		return false
+	}
+	if IsContextOverflow(err) {
+		return true // compaction path, not the retry loop
+	}
+	msg := err.Error()
+	for _, p := range nonRetryablePatterns {
+		if p.MatchString(msg) {
+			return false
+		}
+	}
+	return true
+}

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,12 @@ import (
 )
 
 func TestLiveChoicesApplyToNextRequestAndToolWithinSameTask(t *testing.T) {
+	// Needs a real shell for the bash tool (posix script in the fake
+	// upstream). Windows is unish-only by business rule and the test
+	// Surface has no unish on PATH — skip there, covered on unix.
+	if runtime.GOOS == "windows" {
+		t.Skip("needs posix shell")
+	}
 	d := testDaemon(t)
 	d.configPath = filepath.Join(d.dataDir, "config.json")
 	cwd := t.TempDir()

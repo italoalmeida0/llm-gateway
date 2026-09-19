@@ -51,3 +51,31 @@ func TestIsContextOverflow(t *testing.T) {
 		}
 	}
 }
+
+func TestIsRetryableUpstream(t *testing.T) {
+	retryable := []string{
+		"gateway-anthropic: http 429: rate limited",
+		"gateway-anthropic: http 500: internal error",
+		"gateway-anthropic: http 503: overloaded",
+		"connection reset by peer",
+		"prompt is too long for requested model", // compaction path
+	}
+	for _, msg := range retryable {
+		if !isRetryableUpstream(errors.New(msg)) {
+			t.Fatalf("must retry: %q", msg)
+		}
+	}
+	fatal := []string{
+		"gateway-anthropic: http 400: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Function tools with reasoning_effort are not supported\"}}",
+		"gateway-anthropic: http 401: unauthorized",
+		"gateway-anthropic: http 403: forbidden",
+		"Unsupported value: 'temperature' does not support 0.7 with this model",
+		"Unsupported parameter: 'max_tokens' is not supported with this model",
+		`anthropic: Post "/anthropic/v1/messages": unsupported protocol scheme ""`,
+	}
+	for _, msg := range fatal {
+		if isRetryableUpstream(errors.New(msg)) {
+			t.Fatalf("must NOT retry: %q", msg)
+		}
+	}
+}

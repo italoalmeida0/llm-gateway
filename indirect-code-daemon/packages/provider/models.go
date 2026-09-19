@@ -10,6 +10,11 @@ type Model struct {
 	MaxOutput         int               `json:"max_output,omitempty"`
 	Reasoning         bool              `json:"reasoning,omitempty"`
 	ReasoningLevelMap map[string]string `json:"reasoning_level_map,omitempty"`
+	// OmitTemperature, when true, drops the temperature param from every
+	// request: reasoning-only models (e.g. gpt-5.6-luna) reject it
+	// outright (only the default 1 is accepted). Set from the gateway
+	// catalog when the model stops advertising temperature.
+	OmitTemperature bool `json:"omit_temperature,omitempty"`
 
 	// Prices are USD per 1M tokens (optional, gateway tracks billing).
 	PriceInput           float64 `json:"price_input,omitempty"`

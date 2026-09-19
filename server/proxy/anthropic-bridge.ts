@@ -215,7 +215,10 @@ export function anthropicToOpenAI(body: Record<string, unknown>): Record<string,
   }
 
   if (typeof body.max_tokens === "number") out.max_tokens = body.max_tokens;
-  if (typeof body.temperature === "number") out.temperature = body.temperature;
+  // Reasoning-only models (e.g. gpt-5.6-luna) reject non-default
+  // temperature outright: forward only the default 1 (accepted) or omit,
+  // so a stale client param can't 400 the request upstream.
+  if (body.temperature === 1) out.temperature = 1;
   if (typeof body.top_p === "number") out.top_p = body.top_p;
   if (typeof body.reasoning_effort === "string") {
     out.reasoning_effort = body.reasoning_effort;

@@ -210,8 +210,11 @@ func TestProviderErrorRetriesUntilRecovery(t *testing.T) {
 		}
 		if failMode.Load() {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"nope"}}`))
+			// Transient 429 (rate limit): the turn must stay alive and
+			// retry until the upstream recovers. A 400 here would fail
+			// fast by design (non-retryable client error).
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`))
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -12,10 +13,12 @@ import (
 func TestResolveSlotDaemonMissing(t *testing.T) {
 	// Hermetic: no mirror (env cleared), HOME pointed at the empty dir so
 	// no real config.json leaks in. Install must fail, not succeed.
+	// Windows: Go reads %USERPROFILE%, not %HOME% — clear both.
 	dir := t.TempDir()
 	t.Setenv("INDIRECT_REPO_RAW", "")
 	t.Setenv("INDIRECT_GATEWAY", "")
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	if _, _, _, err := resolveSlotDaemon(dir); err == nil {
 		t.Fatal("empty dir with no mirror must fail install")
 	}
@@ -118,19 +121,38 @@ func TestActiveSessionsDir(t *testing.T) {
 // Floating asset only (no -vX.Y.Z copies): a single URL per mirror.
 // Freshness is enforced by --version self-verify after download
 // (plus a cache-buster query), not by immutable versioned URLs.
+//
+// The fake mirror serves a REAL binary for the current platform (built
+// from a tiny Go program): shell scripts can't exec on Windows and a
+// fixture .exe can't run on unix (real bug caught on windows/arm64 —
+// the old test served #!/bin/sh and fork/exec failed there).
 func TestFetchDaemonFloatingURL(t *testing.T) {
 	var hits []string
-	fakeBin := "#!/bin/sh\necho 'indirect-code daemon v9.9.9'\n"
-	pad := make([]byte, 2<<20)
-	for i := range pad {
-		pad[i] = '#'
+	fakeSrc := "package main\nimport \"fmt\"\nfunc main(){fmt.Println(\"indirect-code daemon v9.9.9\")}\n"
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "fake.go")
+	if err := os.WriteFile(src, []byte(fakeSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeBinPath := filepath.Join(srcDir, "fakebin")
+	if runtime.GOOS == "windows" {
+		fakeBinPath += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", fakeBinPath, src).CombinedOutput(); err != nil {
+		t.Fatalf("build fake: %v %s", err, out)
+	}
+	fakeBin, err := os.ReadFile(fakeBinPath)
+	if err != nil {
+		t.Fatal(err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits = append(hits, r.URL.Path)
-		w.Write([]byte(fakeBin))
-		w.Write(pad)
+		w.Write(fakeBin)
 	}))
 	defer srv.Close()
+	// Gateway-first: the daemon's gateway wins when set; the raw mirror
+	// is the fallback. Clear any ambient gateway so the test mirror wins.
+	t.Setenv("INDIRECT_GATEWAY", "")
 	t.Setenv("INDIRECT_REPO_RAW", srv.URL)
 	dir := t.TempDir()
 	lp, err := fetchDaemonTo(dir, "9.9.9")
@@ -156,6 +178,7 @@ func TestFetchDaemonStaleFailsVerify(t *testing.T) {
 		w.Write([]byte("#!/bin/sh\necho 'indirect-code daemon vOLD'\n"))
 	}))
 	defer srv.Close()
+	t.Setenv("INDIRECT_GATEWAY", "")
 	t.Setenv("INDIRECT_REPO_RAW", srv.URL)
 	dir := t.TempDir()
 	lp, err := fetchDaemonTo(dir, "9.9.9")
@@ -164,5 +187,68 @@ func TestFetchDaemonStaleFailsVerify(t *testing.T) {
 	}
 	if err := selfVerifyDaemon(lp, "9.9.9"); err == nil {
 		t.Fatal("stale binary must fail self-verify")
+	}
+}
+
+// Gateway-first: INDIRECT_GATEWAY wins over a stale INDIRECT_REPO_RAW.
+// (E2E caught it: ambient raw mirror served old bytes while the gateway
+// had the fresh release — the new side fetched stale and failed verify
+// after the old daemon was already gone.)
+func TestMirrorBaseGatewayFirst(t *testing.T) {
+	t.Setenv("INDIRECT_GATEWAY", "http://gw:1234")
+	t.Setenv("INDIRECT_REPO_RAW", "http://stale:9999/r")
+	if got := mirrorBase(); got != "http://gw:1234/r" {
+		t.Fatalf("gateway must win, got %q", got)
+	}
+	t.Setenv("INDIRECT_GATEWAY", "")
+	t.Setenv("INDIRECT_REPO_RAW", "http://stale:9999/r")
+	if got := mirrorBase(); got != "http://stale:9999/r" {
+		t.Fatalf("raw fallback must work, got %q", got)
+	}
+}
+
+// ws:// connect/config URLs map to the http(s) mirror (K5 chaos: the old
+// code built a ws:// mirror URL and the download failed with
+// "unsupported protocol scheme").
+func TestHttpMirrorBaseSchemes(t *testing.T) {
+	cases := map[string]string{
+		"ws://h:1/api/x":    "http://h:1/r",
+		"wss://h/x":         "https://h/r",
+		"http://h:2/":       "http://h:2/r",
+		"https://h/y":       "https://h/r",
+		"ftp://h/z":         "",
+		"not-a-url-\x7f":    "",
+	}
+	for in, want := range cases {
+		if got := httpMirrorBase(in); got != want {
+			t.Fatalf("httpMirrorBase(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Boot path accepts a NEWER daemon than the launcher (post-flip power
+// loss: active=b holds vK2 while the launcher is vK1). Strict pinning
+// would refuse to boot the good slot (K3 chaos caught it).
+func TestSelfVerifyRunsAcceptsAnyVersion(t *testing.T) {
+	dir := t.TempDir()
+	// Real binary (shell scripts can't exec on Windows — same rule as
+	// the floating-URL test above).
+	src := filepath.Join(dir, "v.go")
+	if err := os.WriteFile(src, []byte("package main\nimport \"fmt\"\nfunc main(){fmt.Println(\"indirect-code daemon vNEWER\")}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "indirect-code")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", bin, src).CombinedOutput(); err != nil {
+		t.Fatalf("build fake: %v %s", err, out)
+	}
+	if err := selfVerifyRuns(bin); err != nil {
+		t.Fatalf("newer daemon must boot: %v", err)
+	}
+	os.WriteFile(bin, []byte("garbage-not-a-binary"), 0o755)
+	if err := selfVerifyRuns(bin); err == nil {
+		t.Fatal("garbage must not boot")
 	}
 }

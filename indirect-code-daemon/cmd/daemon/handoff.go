@@ -136,11 +136,14 @@ func (d *DaemonServer) runHandoff(version string) {
 		fail(fmt.Sprintf("launcher verify: %v", err))
 		return
 	}
-	// Phase 1: quiesce (commit WALs, close handles, cancel turns) THEN
+	// Phase 1: quiesce-for-handoff (pause turns, KEEP WALs for resume) THEN
 	// LATE freeze. Copying a live session dir races appends; quiesced
-	// state is stable. Running turns are cancelled with full WAL commit
-	// (same as graceful shutdown) — resumable history, no loss.
-	d.quiesceSessions()
+	// state is stable. Running turns are NOT cancelled: the WAL stays on
+	// disk and the new daemon's resumeInterruptedTurns continues them
+	// (same index, no repeated user message). Background bash/python
+	// processes keep running detached (root brain scratch is slot-shared)
+	// and report as restart orphans on the resumed turn.
+	d.quiesceForHandoff()
 	// Phase 1b: LATE freeze (only now — download could have failed).
 	d.setFrozen(true, "copying sessions")
 	// Phase 2: copy sessions (+ configs) to inactive slot.
@@ -166,7 +169,10 @@ func (d *DaemonServer) runHandoff(version string) {
 }
 
 // abortHandoff: delete inactive slot, unfreeze (WS never dropped — no
-// reconnect needed), notify frontend.
+// reconnect needed), notify frontend. The paused turns were NEVER
+// cancelled: their WALs sit untouched in the ACTIVE slot, so the SAME
+// process resumes them immediately (no reboot, no new daemon) — the
+// frontend sees session_status running again and streaming continues.
 func (d *DaemonServer) abortHandoff(reason string) {
 	sl := d.slots()
 	_ = os.RemoveAll(d.slotDir(sl.inactive))
@@ -179,6 +185,7 @@ func (d *DaemonServer) abortHandoff(reason string) {
 	_ = d.sendWS(map[string]any{
 		"type": "update_failed", "hostId": d.config.HostID, "reason": reason,
 	})
+	d.resumePausedTurns()
 }
 
 // fetchLauncherTo downloads the launcher asset for version into the
@@ -196,10 +203,13 @@ func (d *DaemonServer) fetchLauncherTo(version string, sl slotLayout) (string, e
 	if runtime.GOOS == "windows" {
 		local = filepath.Join(binDir, "indirect-launcher.exe")
 	}
-	// Already there + verified? Reuse (idempotent retry).
-	if st, err := os.Stat(local); err == nil && !st.IsDir() && st.Size() > 0 {
-		return local, nil
-	}
+	// NOTE: no reuse of a leftover binary here. A previous attempt may
+	// have left bytes for a DIFFERENT version (or a stale-cache copy);
+	// the caller (runHandoff phase 0) always downloads fresh and
+	// self-verifies. Reusing by size alone once promoted a stale daemon
+	// past the point of rollback (E2E caught it: launcher vE2E.2 reused
+	// 1.0.21 bytes, new side fetched the same stale daemon, verify
+	// failed after the old daemon was already gone).
 	// Gateway first (serves dist/ itself — instant, no CDN), mirror fallback.
 	var bases []string
 	if gb := gatewayBaseURL(d); gb != "" {
@@ -309,13 +319,35 @@ func extractGotVersion(err error) string {
 	return ""
 }
 
-// copyToSlot copies the slot's sessions (+ small configs) active ->
+// copyToSlot copies the slot's sessions (+ WALs, + small configs) active ->
 // inactive. Uses hardlinks when possible (instant, CoW-safe: all our
 // writes are tmp+rename), plain copy fallback otherwise. dataDir IS the
 // active slot, so the source is dataDir itself.
+//
+// WAL sidecars (*.wal.jsonl) MUST travel with their session JSON: the
+// new daemon resumes running turns from them (quiesceForHandoff keeps
+// Status=running + WAL on purpose). The per-session brain scratch
+// (<root>/brain/<sid>) is root-level, shared by both slots — nothing to
+// copy, and bg .log files survive the handoff there.
 func (d *DaemonServer) copyToSlot(sl slotLayout, inactiveDir string) error {
 	src := d.dataDir
 	srcSessions := d.sessionsDir()
+	// Sessions first: sourced from the live sessionsDir (slot-aware).
+	// Quiesce audit (fail = abort, nothing half-copied): every in-memory
+	// running session must be paused with its WAL closed and flushed.
+	// A live writer here means quiesceForHandoff raced a new turn —
+	// copying would snapshot a torn state, so refuse instead.
+	d.sessionsMu.RLock()
+	for _, act := range d.sessions {
+		act.mu.Lock()
+		live := act.record.Status == "running" && (act.wal != nil || act.cancel != nil)
+		act.mu.Unlock()
+		if live {
+			d.sessionsMu.RUnlock()
+			return fmt.Errorf("session %s still writing during copy", act.record.ID)
+		}
+	}
+	d.sessionsMu.RUnlock()
 	// Sessions first: sourced from the live sessionsDir (slot-aware).
 	if s, err := os.Stat(srcSessions); err == nil && s.IsDir() {
 		if err := copyDirLink(filepath.Dir(srcSessions), filepath.Join(inactiveDir, "sessions"), "sessions"); err != nil {
@@ -368,13 +400,19 @@ func copyDirLink(srcDir, dst, name string) error {
 }
 
 // copyFileLink hardlinks (same device) or copies bytes (cross-device /
-// Windows without privilege).
+// Windows without privilege). Binaries are NEVER hardlinked: the daemon
+// overwrites dist/r assets in place during tests/releases, and a
+// hardlinked slot binary would silently change under a running process
+// (same inode = new bytes). Sessions/configs stay hardlinked (they are
+// always tmp+rename, CoW-safe).
 func copyFileLink(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
-	if err := os.Link(src, dst); err == nil {
-		return nil
+	if !isBinaryAsset(src) {
+		if err := os.Link(src, dst); err == nil {
+			return nil
+		}
 	}
 	in, err := os.Open(src)
 	if err != nil {
@@ -391,6 +429,14 @@ func copyFileLink(src, dst string) error {
 		return err
 	}
 	return out.Sync()
+}
+
+// isBinaryAsset reports whether a slot file is a release binary (never
+// hardlinked — see copyFileLink). Matches the build's dist/r asset
+// pattern: indirect-code-*, indirect-launcher-*.
+func isBinaryAsset(path string) bool {
+	base := filepath.Base(path)
+	return strings.HasPrefix(base, "indirect-code-") || strings.HasPrefix(base, "indirect-launcher")
 }
 
 // gatewayBaseURL returns scheme://host of the connected gateway ("" when

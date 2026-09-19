@@ -565,6 +565,24 @@ func (r *turnRun) persistIncoming() {
 // fused record via Continue (no duplicated user message). The resumed
 // turn checkpoints to a fresh header-only WAL and appends from there.
 func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *walHeader) {
+	// Tests override turn execution: background wake-ups AND resumes call
+	// the hook instead of hitting a provider, so tests never need one.
+	// Narrowly scoped: only when the session is a valid resume candidate
+	// (registered, no live worker, not abandoned) — otherwise fall
+	// through to the real path (which fails fast on misconfiguration
+	// instead of hanging the test).
+	if d.runTurnHook != nil {
+		d.sessionsMu.RLock()
+		act.mu.Lock()
+		valid := d.sessions[act.record.ID] == act && act.cancel == nil && !turnResumeAbandoned(act.record, j)
+		d.sessionsMu.RUnlock()
+		prompt := j.Prompt
+		act.mu.Unlock()
+		if valid {
+			d.runTurnHook(act, prompt)
+			return
+		}
+	}
 	d.configMu.RLock()
 	cfg := *d.config
 	d.configMu.RUnlock()

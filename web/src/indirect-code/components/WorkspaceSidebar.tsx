@@ -301,7 +301,7 @@ export function WorkspaceSidebar() {
           onClick={() => { h.setHostMenuOpen(false); void h.loadHosts(); }}><Iconify icon="lucide:refresh-cw" size={13} />Refresh hosts</button>
         <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-ink-200 hover:bg-elev cursor-pointer"
           onClick={() => { h.setHostMenuOpen(false); void m.generatePairingToken(); }}><Iconify icon="lucide:plus" size={13} />Connect another host</button>
-        <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-brand-500 hover:bg-elev cursor-pointer" onClick={() => void h.removeHost()}>
+        <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-brand-500 hover:bg-elev cursor-pointer" onClick={() => { h.setHostMenuOpen(false); void h.removeHost(); }}>
           <Iconify icon="lucide:trash-2" size={13} />Remove current host
         </button>
       </div>

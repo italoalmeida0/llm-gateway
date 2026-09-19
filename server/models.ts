@@ -355,6 +355,7 @@ export function publicModelSummary(m: ModelRow) {
 export function publicModelEntry(m: ModelRow, providerName: string): Record<string, unknown> {
   const efforts = jsonArr(m.reasoning_efforts);
   const pricing = modelPricing(m);
+  const sampling = jsonArr(m.sampling_params);
   const entry: Record<string, unknown> = {
     ...publicModelSummary(m),
     provider: providerName,
@@ -366,7 +367,12 @@ export function publicModelEntry(m: ModelRow, providerName: string): Record<stri
   if (m.context_length != null) entry.context_length = m.context_length;
   if (m.max_output_length != null) entry.max_output_length = m.max_output_length;
   if (pricing) entry.pricing = pricing;
-  entry.supported_sampling_parameters = jsonArr(m.sampling_params);
+  // Reasoning-only models (e.g. gpt-5.6-luna) reject `temperature`
+  // outright: never advertise it, so daemon clients omit the param
+  // instead of sending a value the upstream refuses.
+  entry.supported_sampling_parameters = efforts.length
+    ? sampling.filter((p) => p !== "temperature")
+    : sampling;
   entry.supported_features = jsonArr(m.features);
   return entry;
 }

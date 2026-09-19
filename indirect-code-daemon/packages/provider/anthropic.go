@@ -161,10 +161,15 @@ func (c *anthropicClient) buildRequest(req Request) (*anthRequest, error) {
 	}
 
 	out := &anthRequest{
-		Model:       req.Model,
-		MaxTokens:   maxTok,
-		Temperature: req.Temperature,
-		Stream:      true,
+		Model:     req.Model,
+		MaxTokens: maxTok,
+		Stream:    true,
+	}
+	// Reasoning-only models (e.g. gpt-5.6-luna via gateway translation)
+	// reject `temperature` outright (only the default 1 is accepted): omit
+	// it instead of sending a value the upstream refuses.
+	if !m.Reasoning || !m.OmitTemperature {
+		out.Temperature = req.Temperature
 	}
 	if req.System != "" {
 		out.System = []anthSystemBlock{
@@ -371,7 +376,13 @@ func (c *anthropicClient) Stream(ctx context.Context, req Request) (<-chan Event
 
 	resp, err := doStreamWithRetry(ctx, c.http, newReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", c.Name(), err)
+		// Failed before any response: return a CLOSED channel so callers
+		// ranging over it terminate. A nil channel would block forever
+		// (caught on Windows: fork/regenerate/queue turns spun 10-30s
+		// on 'unsupported protocol scheme' instead of failing fast).
+		out := make(chan Event)
+		close(out)
+		return out, fmt.Errorf("%s: %w", c.Name(), err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)

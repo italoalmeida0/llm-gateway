@@ -660,7 +660,8 @@ func ShellDescription() string {
 // pinned via SetShellOverride at startup) -> zsh -> sh. Every candidate is
 // probed with a trivial command so an unexecutable binary is skipped.
 // Windows uses unish only (same PATH lookup here; startup pins the managed
-// copy and refuses to start when it is unusable).
+// copy and refuses to start when it is unusable). Business rule: no
+// fallback on Windows — the model always writes unish-compatible commands.
 func resolveShell(goos string, executable func(string) bool, lookPath func(string) (string, error), probe func(path, flag string) bool) shellCommand {
 	if goos == "windows" {
 		if path, err := lookPath("unish"); err == nil && probe(path, "-c") {

@@ -61,19 +61,28 @@ func SanitizeUserText(s string) string {
 
 // StripLeadingSystemPrompt removes any synthetic leading <system-reminder>...</system-reminder>
 // or legacy <system_prompt>...</system_prompt> block from a message (e.g. date/mode directives)
-// returning the underlying user text.
+// returning the underlying user text. A message may carry MULTIPLE stacked
+// blocks (date + mode + custom directives) — strip all of them, not just
+// the first (caught on Windows: fork/resend matching saw the second block
+// and the stamp poll never matched).
 func StripLeadingSystemPrompt(text string) string {
-	for _, tag := range []string{"<system-reminder>", "<system_prompt>"} {
-		closeTag := "</" + tag[1:]
-		trimmed := strings.TrimSpace(text)
-		if strings.HasPrefix(trimmed, tag) {
-			endIdx := strings.Index(trimmed, closeTag)
-			if endIdx != -1 {
-				text = strings.TrimSpace(trimmed[endIdx+len(closeTag):])
+	for {
+		stripped := false
+		for _, tag := range []string{"<system-reminder>", "<system_prompt>"} {
+			closeTag := "</" + tag[1:]
+			trimmed := strings.TrimSpace(text)
+			if strings.HasPrefix(trimmed, tag) {
+				endIdx := strings.Index(trimmed, closeTag)
+				if endIdx != -1 {
+					text = strings.TrimSpace(trimmed[endIdx+len(closeTag):])
+					stripped = true
+				}
 			}
 		}
+		if !stripped {
+			return text
+		}
 	}
-	return text
 }
 
 // Agent is a stateful conversation bound to a provider client, a model,
@@ -169,8 +178,13 @@ type Agent struct {
 	// session only. Hosts set it before each turn; zero leaves
 	// messages unstamped (readers derive boundaries).
 	TurnIndex int
-	// PersistentTurns keeps daemon tasks alive across provider/compaction errors
-	// and requires a successful completion signal in modes that expose one.
+	// PersistentTurns keeps daemon tasks alive across TRANSIENT
+	// provider/compaction errors (429/5xx/network) and requires a
+	// successful completion signal in modes that expose one.
+	// Non-retryable errors (400/auth/misconfiguration — see
+	// isRetryableUpstream) still fail fast: retrying them forever hangs
+	// the turn until the user notices (caught on Windows: fork turns
+	// spun on 'unsupported protocol scheme' instead of failing).
 	PersistentTurns bool
 
 	// OnUsage, if set, fires after every turn's usage row arrives,
@@ -501,7 +515,10 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		// Preparation is cached across steps and user messages. Only an
 		// explicit prompt/model/session change invokes BeforeStart again.
 		if err := a.prepareStart(ctx); err != nil {
-			if a.PersistentTurns && ctx.Err() == nil {
+			// PersistentTurns retries TRANSIENT errors only: a broken
+			// setup (bad key, bad params, no gateway) fails fast instead
+			// of spinning the backoff schedule forever.
+			if a.PersistentTurns && ctx.Err() == nil && isRetryableUpstream(err) {
 				delay := a.retryDelay(preparationAttempt)
 				preparationAttempt++
 				sink(EvRetry{Attempt: preparationAttempt, Delay: delay, Err: err})
@@ -523,7 +540,8 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		a.mu.Unlock()
 		if autoCompact != nil {
 			if err := autoCompact(ctx, sink); err != nil {
-				if a.PersistentTurns && ctx.Err() == nil {
+				// Same transient-only rule as preparation above.
+				if a.PersistentTurns && ctx.Err() == nil && isRetryableUpstream(err) {
 					delay := a.retryDelay(preparationAttempt)
 					preparationAttempt++
 					sink(EvRetry{Attempt: preparationAttempt, Delay: delay, Err: err})
@@ -569,9 +587,9 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 					continue
 				}
 			}
-			if ctx.Err() != nil || (!a.PersistentTurns && !a.canRetryError(err, attempt)) {
+			if ctx.Err() != nil || !a.canRetryError(err, attempt) {
 				break
-			}
+		}
 			if !a.PersistentTurns {
 				a.dropLastAssistantMessage()
 			}
@@ -711,6 +729,14 @@ func (a *Agent) canRetryError(err error, _ int) bool {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// Non-retryable upstream rejections: retrying forever burns quota and
+	// hangs the turn until the user notices. This includes bad-request
+	// errors (400 invalid_request_error — e.g. a model rejecting tools +
+	// reasoning, bad params) and auth errors. Rate limits (429) and 5xx
+	// still retry forever (transient by nature).
+	if !isRetryableUpstream(err) {
 		return false
 	}
 	return true

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -40,6 +41,12 @@ func writeConfigFile(path string, data []byte) error {
 		return err
 	}
 	defer os.Remove(file.Name())
+	// Temp files inherit umask-open permissions: clamp to owner-only
+	// BEFORE writing secrets (Windows ACLs ignore Unix bits, so the
+	// test skips the mode check there — real bug caught on win/arm64).
+	if runtime.GOOS != "windows" {
+		_ = file.Chmod(0o600)
+	}
 	if _, err = file.Write(data); err == nil {
 		err = file.Sync()
 	}

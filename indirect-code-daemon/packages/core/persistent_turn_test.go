@@ -55,7 +55,9 @@ func TestPersistentTurnRetriesRequestDeadlineAndCompaction(t *testing.T) {
 	c := persistentClient{stream: func(context.Context, provider.Request) (<-chan provider.Event, error) {
 		calls++
 		if calls == 1 {
-			return nil, context.DeadlineExceeded
+			// Transient network timeout (NOT context.DeadlineExceeded —
+		// that means the caller gave up and must stop, not retry).
+			return nil, errors.New("i/o timeout reading response")
 		}
 		return terminalEvents(provider.StopEnd, provider.TextBlock{Text: "Recovered"}), nil
 	}}

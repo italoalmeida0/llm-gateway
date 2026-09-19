@@ -149,16 +149,35 @@ func queueTestUpstream(t *testing.T, d *DaemonServer) {
 
 func waitUserTurns(t *testing.T, d *DaemonServer, sessionID string, n int) *SessionRecord {
 	t.Helper()
+	// Poll MEMORY (authoritative while resident: WAL mode keeps the
+	// transcript in RAM until commit), gated on the turn COMPLETING —
+	// a bare count can observe a transient state and return before the
+	// promoted turn even starts.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		rec, err := d.loadSession(sessionID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if queueUserTurnCount(rec) >= n {
-			return rec
+		d.sessionsMu.RLock()
+		a := d.sessions[sessionID]
+		d.sessionsMu.RUnlock()
+		if a != nil {
+			a.mu.Lock()
+			msgs := a.record.Messages
+			status := a.record.Status
+			turn := a.record.Turn
+			a.mu.Unlock()
+			turnDone := turn != nil && turn.Status == "completed"
+			if status == "idle" && turnDone && queueUserTurnCount(&SessionRecord{Messages: msgs}) >= n {
+				rec, err := d.loadSession(sessionID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return rec
+			}
 		}
 		if time.Now().After(deadline) {
+			rec, err := d.loadSession(sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			t.Fatalf("want %d user turns, got %d", n, queueUserTurnCount(rec))
 		}
 		time.Sleep(20 * time.Millisecond)

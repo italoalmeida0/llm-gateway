@@ -3,7 +3,13 @@ import { Portal } from "solid-js/web";
 import type { Placement } from "@floating-ui/dom";
 import { anchorFloat } from "../../floating";
 
-/** Local popover menu on the shared floating-ui layer (Portal + flip/shift). */
+/** Local popover menu on the shared floating-ui layer (Portal + flip/shift).
+ *
+ * Every action inside MUST close the menu first (like the host card's
+ * remove does): an open floating menu lives in a Portal above everything
+ * and would otherwise cover the modal/button that follows (E2E caught
+ * it: Remove left the menu open over Cancel update). When in doubt,
+ * close-then-act in the handler itself — don't rely on the caller. */
 export function FloatMenu(props: {
   anchor: () => HTMLElement | null | undefined;
   open: boolean;

@@ -44,6 +44,7 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 				Efforts []string `json:"efforts"`
 			} `json:"reasoning_parameters"`
 			Features []string `json:"supported_features"`
+			Sampling []string `json:"supported_sampling_parameters"`
 		} `json:"models"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&catalog) != nil {
@@ -74,6 +75,22 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 		model.ContextWindow = max(0, entry.Limit.Context, entry.ContextLength)
 		model.MaxOutput = max(0, entry.Limit.Output, entry.MaxOutputLength)
 		model.Reasoning = len(entry.Reasoning.Efforts) > 0
+		// Reasoning-only models (e.g. gpt-5.6-luna) reject `temperature`
+		// outright: when the gateway omits it from the advertised
+		// sampling params, drop the configured temperature so neither
+		// client sends a value the upstream refuses.
+		if model.Reasoning && len(entry.Sampling) > 0 {
+			advertisesTemp := false
+			for _, p := range entry.Sampling {
+				if p == "temperature" {
+					advertisesTemp = true
+					break
+				}
+			}
+			if !advertisesTemp {
+				model.OmitTemperature = true
+			}
+		}
 		if model.Reasoning {
 			model.ReasoningLevelMap = map[string]string{}
 			for _, effort := range entry.Reasoning.Efforts {

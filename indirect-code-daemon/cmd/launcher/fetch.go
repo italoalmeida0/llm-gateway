@@ -26,7 +26,7 @@ import (
 
 const (
 	// No GitHub fallback by design (gateway-first updates/installs).
-	// Order: INDIRECT_REPO_RAW env > INDIRECT_GATEWAY (gateway dist/) >
+	// Order: INDIRECT_GATEWAY (gateway dist/) > INDIRECT_REPO_RAW env >
 	// error. Install scripts always derive the gateway from CONNECT_URL.
 	defaultReleaseBase = ""
 	// daemonPinnedVersion is overridden at build time (-ldflags
@@ -110,7 +110,14 @@ func resolveSlotDaemon(dataDir string) (string, string, []string, error) {
 	if st, err := os.Stat(local); err != nil || st.IsDir() || st.Size() == 0 {
 		needDownload = true
 	} else if launcherVersion != "dev" && launcherVersion != "" {
-		if err := selfVerifyDaemon(local, launcherVersion); err != nil {
+		// The daemon in a freshly-promoted slot is NEWER than this
+		// launcher (post-flip power loss: active=b, launcher vK1,
+		// daemon vK2). Accept any RUNNING binary here — strict version
+		// pinning would refuse to boot the good slot (K3 chaos caught
+		// it). Freshness for UPDATES is enforced by the takeover path
+		// (fetchDaemonTo + selfVerifyDaemon against the target), not
+		// by the boot path.
+		if err := selfVerifyRuns(local); err != nil {
 			needDownload = true
 		}
 	}
@@ -124,9 +131,18 @@ func resolveSlotDaemon(dataDir string) (string, string, []string, error) {
 		dlPath, err := fetchDaemonTo(slotDir, targetVer)
 		if err != nil {
 			fmt.Println("FAILED")
+			// A corrupt local binary must NEVER be trusted as fallback:
+			// self-verify it against the pinned version first. A tampered
+			// binary (disk tamper, torn write) fails here and the boot
+			// refuses instead of executing garbage (K5 chaos caught it:
+			// the old code ran whatever was on disk when offline).
 			if st, serr := os.Stat(local); serr == nil && !st.IsDir() && st.Size() > 0 {
-				fmt.Printf("Warning: cannot download latest daemon (%v), using existing binary\n", err)
-				return local, slot, repairNotes, nil
+				verr := selfVerifyDaemon(local, targetVer)
+				if verr == nil {
+					fmt.Printf("Warning: cannot download latest daemon (%v), using existing binary\n", err)
+					return local, slot, repairNotes, nil
+				}
+				fmt.Printf("Warning: existing binary failed self-verify (%v), refusing to run it\n", verr)
 			}
 			return "", "", repairNotes, fmt.Errorf("slot %s daemon unavailable: %w", slot, err)
 		}
@@ -222,46 +238,59 @@ func installSlotA(dataDir string) error {
 	return os.WriteFile(filepath.Join(slotsDir, "active"), []byte("a\n"), 0o600)
 }
 
-// mirrorBase resolves the release mirror: explicit env override first,
-// then the gateway that spawned us (INDIRECT_GATEWAY, set by the daemon
-// on takeover — the gateway serves dist/ itself, no CDN cache), or derived
-// from -connect flag or config.json.
+// mirrorBase resolves the release mirror: the gateway that spawned us
+// (INDIRECT_GATEWAY, set by the daemon on takeover — the gateway serves
+// dist/ itself, no CDN cache), explicit env override, or derived from
+// -connect flag or config.json. Gateway-first is deliberate: INDIRECT_*_RAW
+// is a stale-prone global (production install + E2E tmp gateway in one
+// shell = the wrong mirror wins and the new side fetches old bytes).
 func mirrorBase() string {
-	if v := os.Getenv("INDIRECT_REPO_RAW"); v != "" {
-		return strings.TrimRight(v, "/")
-	}
 	if v := os.Getenv("INDIRECT_GATEWAY"); v != "" {
 		return strings.TrimRight(v, "/") + "/r"
 	}
-	// Check -connect flag in os.Args
+	if v := os.Getenv("INDIRECT_REPO_RAW"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	// Check -connect flag in os.Args (connect URLs are WS; the mirror is
+	// plain HTTP/S: ws -> http, wss -> https).
 	for i, a := range os.Args {
 		if (a == "-connect" || a == "--connect") && i+1 < len(os.Args) {
-			if u, err := url.Parse(os.Args[i+1]); err == nil && u.Scheme != "" && u.Host != "" {
-				return fmt.Sprintf("%s://%s/r", u.Scheme, u.Host)
+			if m := httpMirrorBase(os.Args[i+1]); m != "" {
+				return m
 			}
 		}
 		if strings.HasPrefix(a, "-connect=") || strings.HasPrefix(a, "--connect=") {
 			parts := strings.SplitN(a, "=", 2)
-			if u, err := url.Parse(parts[1]); err == nil && u.Scheme != "" && u.Host != "" {
-				return fmt.Sprintf("%s://%s/r", u.Scheme, u.Host)
+			if m := httpMirrorBase(parts[1]); m != "" {
+				return m
 			}
 		}
 	}
 	// Check saved config.json: slot-local first (canonical), then the
 	// default root (this machine's real install — tests override HOME).
+	// NOTE: --data-dir here is the ROOT (launcher convention), so the
+	// slot configs live one level down (<root>/slots/slot-x). A bare
+	// <root>/config.json never exists in the canonical layout — do NOT
+	// read it (a stale/wrong gateway_url there would hijack the mirror).
 	home, _ := os.UserHomeDir()
 	cfgPaths := []string{
 		filepath.Join(defaultDataDir(), "slots", "slot-a", "config.json"),
 		filepath.Join(defaultDataDir(), "slots", "slot-b", "config.json"),
-		filepath.Join(defaultDataDir(), "config.json"),
 	}
 	for i, a := range os.Args {
 		if (a == "-data-dir" || a == "--data-dir") && i+1 < len(os.Args) {
-			cfgPaths = append([]string{filepath.Join(os.Args[i+1], "config.json")}, cfgPaths...)
+			root := os.Args[i+1]
+			cfgPaths = append([]string{
+				filepath.Join(root, "slots", "slot-a", "config.json"),
+				filepath.Join(root, "slots", "slot-b", "config.json"),
+			}, cfgPaths...)
 		}
 		if strings.HasPrefix(a, "-data-dir=") || strings.HasPrefix(a, "--data-dir=") {
 			parts := strings.SplitN(a, "=", 2)
-			cfgPaths = append([]string{filepath.Join(parts[1], "config.json")}, cfgPaths...)
+			cfgPaths = append([]string{
+				filepath.Join(parts[1], "slots", "slot-a", "config.json"),
+				filepath.Join(parts[1], "slots", "slot-b", "config.json"),
+			}, cfgPaths...)
 		}
 	}
 	if home != "" {
@@ -276,13 +305,34 @@ func mirrorBase() string {
 				GatewayURL string `json:"gateway_url"`
 			}
 			if json.Unmarshal(data, &cfg) == nil && cfg.GatewayURL != "" {
-				if u, err := url.Parse(cfg.GatewayURL); err == nil && u.Scheme != "" && u.Host != "" {
-					return fmt.Sprintf("%s://%s/r", u.Scheme, u.Host)
+				// The daemon stores a WS URL (ws://host/...); the
+				// mirror is plain HTTPS (wss -> https).
+				if m := httpMirrorBase(cfg.GatewayURL); m != "" {
+					return m
 				}
 			}
 		}
 	}
 	return defaultReleaseBase
+}
+
+// httpMirrorBase maps a gateway URL (http/https WS, or ws/wss connect
+// URL) to its release mirror (<scheme>://<host>/r). "" when unusable.
+func httpMirrorBase(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := u.Scheme
+	if scheme == "ws" {
+		scheme = "http"
+	} else if scheme == "wss" {
+		scheme = "https"
+	}
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	return fmt.Sprintf("%s://%s/r", scheme, u.Host)
 }
 
 // latestDaemonAsset resolves (version, asset) for this platform from the

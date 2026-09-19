@@ -358,7 +358,9 @@ describe("public /v1/models registry entry", () => {
     expect(e.context_length).toBe(100_000);
     expect(e.max_output_length).toBe(4096);
     expect(e.pricing).toEqual({ prompt: 0.1, completion: 0.2 });
-    expect(e.supported_sampling_parameters).toEqual(["temperature"]);
+    // Reasoning models never advertise temperature (reasoning-only
+    // upstreams like gpt-5.6-luna reject the param outright).
+    expect(e.supported_sampling_parameters).toEqual([]);
     expect(e.supported_features).toEqual(["tools"]);
     expect(e.limit).toEqual({ context: 100_000, output: 4096 });
   });

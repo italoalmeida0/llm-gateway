@@ -171,7 +171,12 @@ func (c *openaiClient) buildRequest(req Request) (*oaiRequest, error) {
 		Model:         req.Model,
 		Stream:        true,
 		StreamOptions: &oaiStreamOptions{IncludeUsage: true},
-		Temperature:   req.Temperature,
+	}
+	// Reasoning-only models (e.g. gpt-5.6-luna) reject `temperature`
+	// outright (only the default 1 is accepted): omit it, same rule as
+	// the Anthropic client.
+	if !m.Reasoning || !m.OmitTemperature {
+		out.Temperature = req.Temperature
 	}
 
 	maxTok := req.MaxTokens
@@ -442,7 +447,11 @@ func (c *openaiClient) Stream(ctx context.Context, req Request) (<-chan Event, e
 
 	resp, err := doStreamWithRetry(ctx, c.http, newReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", c.Name(), err)
+		// Failed before any response: return a CLOSED channel so callers
+		// ranging over it terminate (same rule as the Anthropic client).
+		out := make(chan Event)
+		close(out)
+		return out, fmt.Errorf("%s: %w", c.Name(), err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)

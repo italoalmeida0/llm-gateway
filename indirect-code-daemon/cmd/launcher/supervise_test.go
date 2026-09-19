@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -26,11 +27,23 @@ func main() {
 }
 `
 
+// fakeBinName is the platform executable name for the supervise fake:
+// on Windows the binary MUST end in .exe or fork/exec fails with
+// "not compatible with the version of Windows" (real bug caught on
+// windows/arm64 — the old test built a bare "fakedaemon" with no ext).
+func fakeBinName(dir string) string {
+	name := "fakedaemon"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(dir, name)
+}
+
 func TestSuperviseLoop(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "fake.go")
 	os.WriteFile(src, []byte(fakeDaemonSrc), 0o600)
-	bin := filepath.Join(dir, "fakedaemon")
+	bin := fakeBinName(dir)
 	cmd := exec.Command("go", "build", "-o", bin, src)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build fake: %v %s", err, out)

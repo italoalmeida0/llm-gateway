@@ -1646,7 +1646,9 @@ describe("model registry & routing mode", () => {
     expect(alias.max_output_length).toBe(4096);
     expect(alias.pricing).toEqual({ prompt: 0.000001, completion: 0.000002 });
     expect(alias.reasoning_parameters).toEqual({ efforts: ["low", "high"] });
-    expect(alias.supported_sampling_parameters).toEqual(["temperature", "top_p"]);
+    // Reasoning models never advertise temperature (reasoning-only
+    // upstreams like gpt-5.6-luna reject the param outright).
+    expect(alias.supported_sampling_parameters).toEqual(["top_p"]);
     expect(alias.input_modalities).toEqual(["text"]);
 
     // forced anthropic listing: every model serves both surfaces now

@@ -396,6 +396,19 @@ func TestResolveShell(t *testing.T) {
 			goos: "windows", binBash: true, pathBash: "/usr/local/bin/bash", probe: okProbe,
 			want: shellCommand{path: `C:\tools\unish.exe`, flag: "-c", isBash: true},
 		},
+		{
+			// Business rule: Windows is unish-only, no fallback — even
+			// with msys2 bash on disk and no unish, resolveShell stays
+			// empty (the daemon refuses to start without unish).
+			name: "no fallback to msys2 bash on Windows",
+			goos: "windows", binBash: false, pathBash: "", pathErr: notFound, probe: okProbe,
+			want: shellCommand{},
+		},
+		{
+			name: "no shell on bare Windows",
+			goos: "windows", binBash: false, pathBash: "", pathErr: notFound, probe: noProbe,
+			want: shellCommand{},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

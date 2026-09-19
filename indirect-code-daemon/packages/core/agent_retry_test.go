@@ -131,10 +131,12 @@ func TestAgentRetriesCodexProcessingError(t *testing.T) {
 	}
 }
 
-// TestCanRetryErrorOnlyRefusesCancel pins the turn-stop contract: every
-// provider error retries forever — capacity, quota, billing, malformed
-// requests alike. Only context cancellation (user stop / shutdown) and
-// nil refuse another attempt.
+// TestCanRetryErrorOnlyRefusesCancel pins the turn-stop contract: transient
+// provider errors (capacity, quota, billing, 5xx, 429, network) retry
+// forever on the backoff schedule. Client-caused rejections (400-class
+// malformed requests, auth) fail fast instead of burning quota hourly
+// forever — the error stays visible via EvTurnEnd. Only context
+// cancellation (user stop / shutdown) and nil refuse another attempt.
 func TestCanRetryErrorOnlyRefusesCancel(t *testing.T) {
 	a := NewAgent(nil, "gpt-5.6-sol", "system", Registry{})
 	cases := []struct {
@@ -146,9 +148,10 @@ func TestCanRetryErrorOnlyRefusesCancel(t *testing.T) {
 		{"codex error: Please try again later.", true},
 		{"codex error: You have hit your monthly usage limit. Try again later.", true},
 		{"codex error: quota exceeded, try again later", true},
-		{"codex error: unsupported parameter: reasoning", true},
-		{"anthropic: http 400: bad request", true},
-		{"anthropic: http 401: unauthorized", true},
+		// Client-caused 400/auth: fail fast, never retry verbatim.
+		{"codex error: unsupported parameter: reasoning", false},
+		{"anthropic: http 400: bad request", false},
+		{"anthropic: http 401: unauthorized", false},
 	}
 	for _, tc := range cases {
 		if got := a.canRetryError(errors.New(tc.msg), 0); got != tc.want {

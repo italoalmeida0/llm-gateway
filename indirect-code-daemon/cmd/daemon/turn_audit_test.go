@@ -32,6 +32,10 @@ func TestStaleFinalizerCannotCommitChangesOrDeleteRecovery(t *testing.T) {
 	act.wal = ww
 	r := &turnRun{d: d, act: act, sessionID: "stale", ctx: context.Background(), myGen: 1, tfc: tfc}
 	r.finishTurn()
+	// Windows locks open files: the stale handle must be closed before
+	// TempDir cleanup can remove it (the assertion above already proved
+	// the finalizer changed nothing).
+	_ = ww.close()
 	h, _ := d.readWALHeader("stale")
 	if h == nil || h.TurnIndex != 2 || len(act.record.FileBalloons) != 0 || tfc.tracker.Count() != 1 {
 		t.Fatal("stale finalizer modified the live turn")

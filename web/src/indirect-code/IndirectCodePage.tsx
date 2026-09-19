@@ -61,17 +61,23 @@ import { createSettings } from "./hooks/useSettings";
  * (WorkspaceSidebar, bottom card): select / refresh / connect / remove.
  * PairModal/ConfirmModal/SettingsModal keep rendering above (z-50 modal
  * layer > overlay z-40), so pairing + remove-confirm never hide behind.
- * Stages stream from daemon_update.freezeStage. */
-function UpdateFreezeOverlay() {
+ * Stages stream from daemon_update.freezeStage.
+ *
+ * Exported for the overlay fixture test (same component, real browser).
+ */
+export function UpdateFreezeOverlay() {
   const ui = useUI();
   const hosts = useHost();
   const m = useModal();
+  // Overlay is per-ACTIVE-host: visible only while the host you are ON
+  // is frozen. Switching to a non-frozen host hides the overlay so you
+  // can keep working there; switching back re-shows it. (Scanning all
+  // hosts here would pin the overlay on screen forever — the exact bug
+  // where switching hosts never dismissed it.)
   const frozenHostId = () => {
-    const list = hosts.hosts();
-    for (const h of list) {
-      if (ui.daemonUpdate.stateFor(h.id)?.frozen) return h.id;
-    }
-    return "";
+    const aid = hosts.activeHostId();
+    if (!aid) return "";
+    return ui.daemonUpdate.stateFor(aid)?.frozen ? aid : "";
   };
   const frozen = () => frozenHostId() !== "";
   const stage = () => {
@@ -164,7 +170,7 @@ function UpdateFreezeOverlay() {
                   onClick={() => { hosts.setHostMenuOpen(false); void hosts.loadHosts(); }}><Iconify icon="lucide:refresh-cw" size={13} />Refresh hosts</button>
                 <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-ink-200 hover:bg-elev cursor-pointer"
                   onClick={() => { hosts.setHostMenuOpen(false); void m.generatePairingToken(); }}><Iconify icon="lucide:plus" size={13} />Connect another host</button>
-                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-brand-500 hover:bg-elev cursor-pointer" onClick={() => void hosts.removeHost()}>
+                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-brand-500 hover:bg-elev cursor-pointer" onClick={() => { hosts.setHostMenuOpen(false); void hosts.removeHost(); }}>
                   <Iconify icon="lucide:trash-2" size={13} />Remove current host
                 </button>
               </div>

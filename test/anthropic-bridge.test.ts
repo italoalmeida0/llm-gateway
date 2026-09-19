@@ -17,7 +17,7 @@ describe("Anthropic → OpenAI request translation", () => {
     const out = anthropicToOpenAI({
       model: "m",
       max_tokens: 100,
-      temperature: 0.5,
+      temperature: 1,
       stream: true,
       system: "Be helpful",
       messages: [
@@ -356,5 +356,14 @@ describe("Anthropic SSE → OpenAI SSE translator (reverse)", () => {
     for (const piece of t.flush()) s += new TextDecoder().decode(piece);
     expect(s).toContain('"error"');
     expect(s.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+});
+
+describe("Anthropic → OpenAI temperature filter (reasoning-only models)", () => {
+  test("non-default temperature is dropped, default 1 is kept", () => {
+    const dropped = anthropicToOpenAI({ model: "m", messages: [{ role: "user", content: "hi" }], temperature: 0.5 }) as any;
+    expect("temperature" in dropped).toBe(false);
+    const kept = anthropicToOpenAI({ model: "m", messages: [{ role: "user", content: "hi" }], temperature: 1 }) as any;
+    expect(kept.temperature).toBe(1);
   });
 });

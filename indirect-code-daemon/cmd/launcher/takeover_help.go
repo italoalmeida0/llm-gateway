@@ -61,6 +61,34 @@ func fetchDaemonTo(slotDir, version string) (string, error) {
 	return local, nil
 }
 
+// selfVerifyRuns checks a daemon binary RUNS (--version exits 0 with a
+// sane version string), without pinning to any expected version. Boot
+// path only: a promoted slot legitimately holds a NEWER daemon than the
+// launcher (post-flip power loss). Update freshness is enforced by the
+// takeover path (selfVerifyDaemon against the target version).
+func selfVerifyRuns(path string) error {
+	done := make(chan struct{})
+	var out []byte
+	var runErr error
+	go func() {
+		defer close(done)
+		cmd := exec.Command(path, "--version")
+		out, runErr = cmd.CombinedOutput()
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("daemon --version timed out")
+	}
+	if runErr != nil {
+		return fmt.Errorf("daemon --version failed: %v (%s)", runErr, strings.TrimSpace(string(out)))
+	}
+	if !strings.Contains(string(out), "indirect-code daemon") {
+		return fmt.Errorf("not an indirect-code daemon: %q", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // selfVerifyDaemon runs `daemon --version` and checks the version string.
 func selfVerifyDaemon(path, want string) error {
 	done := make(chan struct{})

@@ -102,14 +102,18 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 	// provider for the append; the model call retries in background
 	// until cancelled below).
 	command, _ := json.Marshal(map[string]any{"type": "fork_session", "sessionId": "src-edit", "index": 0, "editText": "edited question"})
-	srcSeq := rec.TurnSeq
 	d.handleMessage(command)
+	// Memory first (same Windows disk-visibility rule as the stamp
+	// poll below: listSessions scans the directory and may not see a
+	// just-created file yet).
 	var forkID string
-	for _, summary := range d.listSessions() {
-		if summary.ID != "src-edit" {
-			forkID = summary.ID
+	d.sessionsMu.RLock()
+	for id := range d.sessions {
+		if id != "src-edit" {
+			forkID = id
 		}
 	}
+	d.sessionsMu.RUnlock()
 	if forkID == "" {
 		t.Fatal("no fork created")
 	}
@@ -135,22 +139,40 @@ func TestForkWithEditTextResendsFromEditedBoundary(t *testing.T) {
 	// Waiting for that exact stamp proves Prompt ran, so a later cancel
 	// cannot hide the append (and the pre-truncation save, stamped older,
 	// can never satisfy it).
-	targetSeq := srcSeq + 1
-	stamped := func() bool {
-		fork, _, _ := d.loadSessionFused(forkID)
-		if fork == nil {
-			return false
-		}
-		for _, m := range fork.Messages {
-			if m.Role == provider.RoleUser && m.TurnIndex == targetSeq {
-				for _, c := range m.Content {
-					if tb, ok := c.(provider.TextBlock); ok && core.StripLeadingSystemPrompt(tb.Text) == "edited question" {
-						return true
-					}
+	matchEdited := func(msgs []provider.Message) bool {
+		for _, m := range msgs {
+			if m.Role != provider.RoleUser {
+				continue
+			}
+			for _, c := range m.Content {
+				if tb, ok := c.(provider.TextBlock); ok && core.StripLeadingSystemPrompt(tb.Text) == "edited question" {
+					return true
 				}
 			}
 		}
 		return false
+	}
+	stamped := func() bool {
+		// Gate on the fork turn COMPLETING, then match the text in
+		// memory (authoritative while resident). The fork starts EMPTY
+		// (truncate drops the boundary msg) so any user text proves the
+		// resend appended — but only after completion, otherwise a
+		// slow start reads zero messages and spins.
+		d.sessionsMu.RLock()
+		a := d.sessions[forkID]
+		d.sessionsMu.RUnlock()
+		if a == nil {
+			return false
+		}
+		a.mu.Lock()
+		msgs := a.record.Messages
+		turn := a.record.Turn
+		status := a.record.Status
+		a.mu.Unlock()
+		if status != "idle" || turn == nil || turn.Status != "completed" {
+			return false
+		}
+		return matchEdited(msgs)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for !stamped() {
@@ -207,9 +229,6 @@ func TestRegeneratePicksLastUserMessageInMultiTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srcSeq := rec.TurnSeq
-	targetSeq := srcSeq + 1
-
 	// Regenerate pointing at the last user message (index 2)
 	command, _ := json.Marshal(map[string]any{
 		"type":      "regenerate",
@@ -220,19 +239,46 @@ func TestRegeneratePicksLastUserMessageInMultiTurn(t *testing.T) {
 	d.handleMessage(command)
 
 	// Check that the re-run message appended by Prompt is "second question", NOT "first question"
+	// (memory first, then fused disk; no TurnIndex filter — same
+	// commit re-index rule as the fork stamp above).
 	stamped := func() (bool, string) {
-		s, _, _ := d.loadSessionFused("multi-turn")
-		if s == nil {
-			return false, ""
+		// Gate on the TURN completing (status idle + turn completed),
+		// then read the LAST user message. Regenerate truncates the
+		// tail (4 msgs -> 2) and the re-run appends (2 -> 3): polling
+		// any user text would match the pre-existing "first question"
+		// before the turn even starts. Waiting for completion makes
+		// the read deterministic in both views (memory + fused disk).
+		ready := func() ([]provider.Message, bool) {
+			d.sessionsMu.RLock()
+			a := d.sessions["multi-turn"]
+			d.sessionsMu.RUnlock()
+			if a != nil {
+				a.mu.Lock()
+				msgs := a.record.Messages
+				turn := a.record.Turn
+				status := a.record.Status
+				a.mu.Unlock()
+				if status == "idle" && turn != nil && turn.Status == "completed" {
+					return msgs, true
+				}
+			}
+			return nil, false
 		}
-		for _, m := range s.Messages {
-			if m.Role == provider.RoleUser && m.TurnIndex == targetSeq {
-				for _, c := range m.Content {
-					if tb, ok := c.(provider.TextBlock); ok {
-						return true, tb.Text
+		check := func(msgs []provider.Message) (bool, string) {
+			for i := len(msgs) - 1; i >= 0; i-- {
+				m := msgs[i]
+				if m.Role == provider.RoleUser {
+					for _, c := range m.Content {
+						if tb, ok := c.(provider.TextBlock); ok {
+							return true, tb.Text
+						}
 					}
 				}
 			}
+			return false, ""
+		}
+		if msgs, ok := ready(); ok {
+			return check(msgs)
 		}
 		return false, ""
 	}

@@ -250,7 +250,9 @@ export function responsesToChat(body: Record<string, unknown>): Record<string, u
     out.reasoning_effort = reasoning.effort;
   }
   if (typeof body.max_output_tokens === "number") out.max_completion_tokens = body.max_output_tokens;
-  if (typeof body.temperature === "number") out.temperature = body.temperature;
+  // Reasoning-only models (e.g. gpt-5.6-luna) reject non-default
+  // temperature outright: forward only the default 1 (accepted) or omit.
+  if (body.temperature === 1) out.temperature = 1;
   if (typeof body.top_p === "number") out.top_p = body.top_p;
   // NOTE: `store` is deliberately NOT forwarded — strict chat backends
   // reject the unknown field, and server-side history is a Responses
@@ -406,7 +408,9 @@ export function chatToResponsesRequest(body: Record<string, unknown>): Record<st
         ? body.max_tokens
         : undefined;
   if (maxOut !== undefined) out.max_output_tokens = maxOut;
-  if (typeof body.temperature === "number") out.temperature = body.temperature;
+  // Reasoning-only models (e.g. gpt-5.6-luna) reject non-default
+  // temperature outright: forward only the default 1 (accepted) or omit.
+  if (body.temperature === 1) out.temperature = 1;
   if (typeof body.top_p === "number") out.top_p = body.top_p;
   if (body.store === false) out.store = false;
   const fmt = asRecord(body.response_format);

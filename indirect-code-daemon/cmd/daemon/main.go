@@ -543,7 +543,14 @@ func (d *DaemonServer) gracefulShutdown(reason string) {
 	d.removeServingProof()
 	fmt.Printf("\n[SHUTDOWN] %s\n", reason)
 	d.stopEvictionSweeper()
-	d.quiesceSessions()
+	// Post-promote exit (handoff success): turns were paused by
+	// quiesceForHandoff with WALs intact FOR the new daemon — committing
+	// here would seal them as cancelled and the resumed turn would be
+	// abandoned as stale. Only a real shutdown (SIGTERM, remote kill,
+	// Ctrl-C) commits.
+	if !strings.HasPrefix(reason, "[HANDOFF]") {
+		d.quiesceSessions()
+	}
 	d.wsMu.Lock()
 	if d.wsConn != nil {
 		_ = d.wsConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
@@ -999,6 +1006,99 @@ func (d *DaemonServer) resetRunningSessions() {
 	}
 }
 
+// quiesceForHandoff suspends execution for a slot handoff WITHOUT finishing
+// any turn: the WAL stays on disk (header + all flushed events) and the
+// session JSON keeps Status=running, so the NEW daemon's
+// resumeInterruptedTurns continues the turn (same index, Continue, no
+// repeated user message). Only an explicit user Stop marks the task
+// cancelled. Deferred finalizers see the generation bump and cannot
+// commit stale work. Background bash/python processes are NOT killed:
+// they keep running detached (their .log files live at the ROOT brain
+// scratch, shared by both slots) and the resumed turn gets the standard
+// restart notice for each orphaned job.
+func (d *DaemonServer) quiesceForHandoff() {
+	d.sessionsMu.Lock()
+	defer d.sessionsMu.Unlock()
+	for _, act := range d.sessions {
+		act.mu.Lock()
+		act.gen++
+		if act.cancel != nil {
+			act.cancel()
+	}
+		if act.record.Status == "running" && act.fileChanges != nil {
+			// Snapshot the tracker into the WAL before copying, so the
+			// resumed turn restores tracking from the latest state.
+			d.appendWALEvent(act, walEvent{Type: walTypeIncoming, Incoming: act.fileChanges.tracker.Snapshot()})
+		}
+		act.pendingApproval = nil
+		act.question = nil
+		act.convert = nil
+		act.sendNow = false
+		act.toolProgress = nil
+		act.toolStarts = nil
+		// Close the WAL handle (flush + fsync) WITHOUT committing or
+		// removing the file: the log is the turn's recovery record.
+		// The JSON stays frozen (running) — resume replays the WAL.
+		if act.wal != nil {
+			_ = act.wal.close()
+			act.wal = nil
+		}
+		// Publish the still-running state (meta rewrite only): the new
+		// slot must see running, never a half-committed idle.
+		if act.record.Status == "running" {
+			_ = d.rewriteMetaOnly(act.record.ID, recordMeta(act.record))
+		}
+		act.mu.Unlock()
+	}
+}
+
+// resumePausedTurns restarts the turns quiesceForHandoff paused, in the
+// SAME process: reopen each WAL in append mode and continue the turn
+// (same index, Continue, no repeated user message). Used when a handoff
+// fails AFTER pausing (abort path): the update is over, the old daemon
+// keeps serving, so turns go back to running instead of sitting frozen
+// as running-with-no-worker. On success the process exits and the NEW
+// daemon's resumeInterruptedTurns does the same job from disk.
+func (d *DaemonServer) resumePausedTurns() {
+	d.sessionsMu.RLock()
+	acts := make([]*ActiveSession, 0, len(d.sessions))
+	for _, act := range d.sessions {
+		acts = append(acts, act)
+	}
+	d.sessionsMu.RUnlock()
+	for _, act := range acts {
+		act.mu.Lock()
+		if act.record.Status != "running" || act.cancel != nil {
+			act.mu.Unlock()
+			continue
+		}
+		header, herr := d.readWALHeader(act.record.ID)
+		if herr != nil || header == nil || header.TurnIndex <= 0 {
+			act.mu.Unlock()
+			continue
+		}
+		// Fuse frozen JSON + WAL: the resumed turn continues from the
+		// full pre-pause transcript.
+		fused, _, ferr := d.loadSessionFused(act.record.ID)
+		if ferr != nil {
+			act.mu.Unlock()
+			continue
+		}
+		act.record = fused
+		j := cloneWALHeader(header)
+		if data, rerr := os.ReadFile(d.walPath(act.record.ID)); rerr == nil {
+			j.Incoming = walLatestIncoming(data, header.Incoming)
+		}
+		sid := act.record.ID
+		act.mu.Unlock()
+		if turnResumeAbandoned(fused, j) {
+			continue
+		}
+		fmt.Printf("[INFO] Resuming paused turn %d of session %s\n", j.TurnIndex, sid)
+		go d.resumeAgentTurn(act, j)
+	}
+}
+
 // quiesceSessions suspends execution on shutdown, committing the WAL so
 // the frozen JSON plus replayed log become one durable record. Only an
 // explicit user Stop marks the task cancelled. Deferred finalizers see
@@ -1117,10 +1217,22 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		}
 		d.handleQueueAdd(raw)
 	case "queue_update":
+		if d.isFrozen() {
+			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
+			break
+		}
 		d.handleQueueUpdate(raw)
 	case "queue_remove":
+		if d.isFrozen() {
+			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
+			break
+		}
 		d.handleQueueRemove(raw)
 	case "queue_send_now":
+		if d.isFrozen() {
+			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
+			break
+		}
 		d.handleQueueSendNow(raw)
 	case "check_workspace":
 		d.checkWorkspace(raw)

@@ -165,3 +165,21 @@ func TestBuildRequestClampsDynamicPromptTokens(t *testing.T) {
 		t.Fatalf("output budget (%d) + input estimate (%d) = %d exceeds window (%d)", got, inputEst, got+inputEst, window)
 	}
 }
+
+// Stream errors must return a CLOSED channel (never nil): callers range
+// over it (same rule as the Anthropic client).
+func TestOpenAIStreamErrorClosesChannel(t *testing.T) {
+	c := NewGatewayOpenAI("k", "/relative-no-scheme", Model{ID: "m"}).(*openaiClient)
+	ch, err := c.Stream(t.Context(), Request{Model: "m", MaxTokens: 10, Messages: []Message{{Role: RoleUser, Content: []Content{TextBlock{Text: "hi"}}}}})
+	if err == nil {
+		t.Fatal("expected error for relative URL")
+	}
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("closed channel must not yield events")
+		}
+	default:
+		t.Fatal("error channel must be closed (would block range forever)")
+	}
+}

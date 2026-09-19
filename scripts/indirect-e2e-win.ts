@@ -10,6 +10,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, copyFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const IS_WIN = process.platform === "win32";
 

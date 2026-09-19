@@ -9,10 +9,11 @@ import { spawn } from "node:child_process";
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { DAEMON_BIN, LAUNCHER_BIN, PLAT, buildBin, killAll, killProc } from "./indirect-e2e-win";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const DAEMON_DIR = join(ROOT, "indirect-code-daemon");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

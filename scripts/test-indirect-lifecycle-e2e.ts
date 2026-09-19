@@ -19,10 +19,11 @@
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, copyFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { IS_WIN, PLAT, buildBin, bunBin, homeEnv, cdpFrontend, copyDir } from "./indirect-e2e-win";
 
-const WS = new URL("..", import.meta.url).pathname;
+const WS = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const DAEMON_DIR = join(WS, "indirect-code-daemon");
 // Local build in DAEMON_DIR (shared helper takes daemonDir explicitly).
 // (imported as sharedBuildBin; call sites pass DAEMON_DIR explicitly)

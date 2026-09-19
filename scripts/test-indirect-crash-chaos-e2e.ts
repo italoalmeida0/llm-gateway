@@ -30,6 +30,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { mkdirSync, existsSync, rmSync, copyFileSync, writeFileSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 
 const IS_WIN = process.platform === "win32";
@@ -37,7 +38,7 @@ const IS_WIN = process.platform === "win32";
 // Windows (C:\Users\italo\llmgw-win-test\indirect-code-daemon). The daemon
 // sources live next to the script in the standalone layout, one level up
 // in the repo layout — detect both.
-const SCRIPT_DIR = decodeURIComponent(new URL(".", import.meta.url).pathname);
+const SCRIPT_DIR = fileURLToPath(new URL(".", import.meta.url));
 const IS_STANDALONE = IS_WIN && !SCRIPT_DIR.replace(/\\/g, "/").includes("/scripts/");
 const ROOT = IS_STANDALONE ? join(SCRIPT_DIR, "..") : new URL("..", import.meta.url).pathname;
 // Windows file URLs come back as /C:/... (leading slash): strip it so

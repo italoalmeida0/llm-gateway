@@ -330,6 +330,18 @@ try {
     await sleep(3000);
     const upd = conn.events.filter((e: any) => e.type === "daemon_update").pop();
     log("update", `daemon_update: ${JSON.stringify(upd).slice(0, 300)}`);
+    // Download forensics BEFORE apply: what does the daemon's own
+    // download path see? (mismatch "got 1.0.21" while the gateway
+    // serves vE2E.2 = stale read somewhere between Bun.file and fetch.)
+    try {
+      const dbg = await fetch(`${GW}/r/${lAsset}?u=dbg-${Date.now()}`);
+      const dbgBuf = Buffer.from(await dbg.arrayBuffer());
+      const dbgPath = exe(join(work, "dbg-launcher"));
+      await Bun.write(dbgPath, dbgBuf);
+      const { execFileSync: dbgExec } = await import("node:child_process");
+      const dbgOut = dbgExec(dbgPath, ["--version"], { encoding: "utf8" });
+      log("update", `pre-apply download: ${dbgBuf.length}b runs-as=${dbgOut.trim().slice(0, 60)}`);
+    } catch (e: any) { log("update", `pre-apply download failed: ${e.message?.slice(0, 120)}`); }
     await conn.send({ type: "daemon_update_apply" });
     // Watch for freeze -> promote -> reconnect with new version.
     const t0 = Date.now();

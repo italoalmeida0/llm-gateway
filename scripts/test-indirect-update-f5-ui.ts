@@ -95,7 +95,16 @@ import assert from "node:assert/strict";
  assert(!(await text()).includes("Updating"), "D: no overlay after done");
  assert((await page.evaluate(()=>document.getElementById("lifecycle")?.textContent)) === "done", "D: lifecycle done");
 
+ // ---- E: done for v1.1.0, then v1.2.0 appears -> back to idle, button live ----
+ // (The reported bug: after an update, the SAME host could never update
+ // again without wiping localStorage — the finished row stuck with
+ // lifecycle=done and the Update button never reappeared.)
+ await page.evaluate(() => (window as any).f5UI.noteUpdate("h1", { current: "1.1.0", available: "1.2.0", checkedAt: 6, autoUpdate: true, frozen: false }));
+ await settle();
+ assert((await page.evaluate(()=>document.getElementById("lifecycle")?.textContent)) === "idle", "E: lifecycle back to idle when a NEW version appears after done");
+ assert(!(await text()).includes("Updating"), "E: no overlay for new version");
+
  assert.equal(errors.length, 0, "zero page errors: " + errors.join("; "));
- console.log("PASS: update F5 matrix (return / switch-away / stale-pending / missed-done)");
+ console.log("PASS: update F5 matrix (return / switch-away / stale-pending / missed-done / next-version)");
  } finally { await browser.close(); server.stop(); }
 })();

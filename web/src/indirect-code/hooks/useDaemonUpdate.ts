@@ -122,6 +122,18 @@ export function createDaemonUpdate(opts: {
         lifecycle = "idle";
       }
     }
+    // A finished lifecycle is TERMINAL for that target: once the daemon
+    // reports current == target (done) the button must come back the
+    // next time a NEW version appears. If we kept lifecycle=done forever,
+    // the next available version would still show the stale "finished"
+    // row and apply() would stay disabled (the done target != new
+    // target, but applying() only checks pending/updating... the real
+    // killer: noteUpdate keeps available="" for finished, so the
+    // Update button never reappears). Reset: new available != finished
+    // target -> back to idle so the next update is applicable.
+    if (lifecycle === "done" && available && prev?.target && available !== prev.target) {
+      lifecycle = "idle";
+    }
     const finished = lifecycle === "done";
     patch(hostId, {
       current,
@@ -188,6 +200,12 @@ export function createDaemonUpdate(opts: {
       patch(hostId, {
         lifecycle: "done", current: version || states()[hostId]?.current || "",
         available: "", frozen: false, freezeStage: "", finishedAt: Date.now(),
+        // The finished target is terminal: record it so the NEXT version
+        // can reset to idle. Without target, noteUpdate can't tell
+        // "done for vX" from "done forever" and a newer available
+        // would keep showing the stale finished row (Update button gone
+        // until localStorage is wiped — the exact bug reported).
+        target: version || undefined,
       });
     }
     // Reload so the whole SPA reboots against the new daemon (fresh

@@ -330,6 +330,25 @@ try {
     await sleep(3000);
     const upd = conn.events.filter((e: any) => e.type === "daemon_update").pop();
     log("update", `daemon_update: ${JSON.stringify(upd).slice(0, 300)}`);
+    // The daemon reads the version to install from its OWN manifest poll
+    // (st.available <- fetchManifestGateway), NOT from what we published.
+    // If the daemon's poll raced our publish (cached 1.0.21 manifest), the
+    // handoff would install a stale version and fail verify. Force a fresh
+    // poll and WAIT until the daemon itself reports available=vE2E.2.
+    await conn.send({ type: "daemon_update_check" });
+    {
+      const t1 = Date.now();
+      let seen = "";
+      while (Date.now() - t1 < 60000) {
+        await sleep(2000);
+        for (const e of conn.events.splice(0)) {
+          if (e.type === "daemon_update" && e.available) seen = e.available;
+        }
+        if (seen === "vE2E.2") break;
+      }
+      assert(seen === "vE2E.2", `daemon never saw vE2E.2 (last available=${seen})`);
+      log("update", "daemon confirms available=vE2E.2");
+    }
     // Download forensics BEFORE apply: what does the daemon's own
     // download path see? (mismatch "got 1.0.21" while the gateway
     // serves vE2E.2 = stale read somewhere between Bun.file and fetch.)

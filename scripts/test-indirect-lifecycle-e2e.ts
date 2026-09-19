@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { IS_WIN, PLAT, buildBin, bunBin, homeEnv, cdpFrontend, copyDir } from "./indirect-e2e-win";
+import { IS_WIN, PLAT, buildBin, bunBin, exe, homeEnv, cdpFrontend, copyDir } from "./indirect-e2e-win";
 
 const WS = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const DAEMON_DIR = join(WS, "indirect-code-daemon");
@@ -292,6 +292,19 @@ try {
       const buf = Buffer.from(await probe.arrayBuffer());
       // Executables: check the version string is embedded (Go ldflags).
       assert(buf.includes(Buffer.from(want)), `/r/${asset} does not contain ${want} (stale copy?)`);
+      // Stronger: the downloaded bytes must RUN as the new version.
+      // (Catches truncation/corruption that still contains the string.)
+      const runPath = exe(join(work, `probe-${asset.replace(/[^a-z0-9]+/gi, "_")}`));
+      await Bun.write(runPath, buf);
+      // Bun.write does not set the exec bit: chmod before running
+      // (Bun.file served over HTTP has no mode either — same rule).
+      if (!IS_WIN) {
+        const { chmodSync } = await import("node:fs");
+        chmodSync(runPath, 0o755);
+      }
+      const { execFileSync: runExec } = await import("node:child_process");
+      const runOut = runExec(runPath, ["--version"], { encoding: "utf8" });
+      assert(runOut.includes(want), `/r/${asset} runs as wrong version: ${runOut.trim().slice(0, 80)}`);
     }
     log("update", "gateway serves fresh vE2E.2 bytes (verified)");
 

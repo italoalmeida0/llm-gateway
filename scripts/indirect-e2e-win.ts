@@ -15,8 +15,27 @@ export const IS_WIN = process.platform === "win32";
 
 // Platform key as used in dist/r/versions.json manifests:
 // "<os>-<arch>" with os in {darwin, linux, windows}.
-export const PLAT =
-  `${process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux"}-${process.arch === "arm64" ? "arm64" : "amd64"}`;
+// NOTE: this is the DAEMON's platform (GOOS-GOARCH), not the script
+// runner's: on Windows the test may run under x64 bun while `go build`
+// targets arm64 (GOARCH env), and the daemon self-reports runtime
+// GOOS-GOARCH when fetching. Resolve via `go env` when available so
+// the manifest key + asset names match what the daemon downloads
+// (caught on Surface: bun x64 said windows-amd64, daemon arm64 fetched
+// windows-arm64 — the manifest only had the bun-arch key).
+function daemonPlat(): string {
+  try {
+    const { execFileSync: goEnv } = require("node:child_process");
+    const goos = String(goEnv("go", ["env", "GOOS"], { encoding: "utf8" })).trim();
+    const goarch = String(goEnv("go", ["env", "GOARCH"], { encoding: "utf8" })).trim();
+    if (goos && goarch) {
+      const os = goos === "darwin" ? "darwin" : goos === "windows" ? "windows" : "linux";
+      const arch = goarch === "arm64" ? "arm64" : "amd64";
+      return `${os}-${arch}`;
+    }
+  } catch {}
+  return `${process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux"}-${process.arch === "arm64" ? "arm64" : "amd64"}`;
+}
+export const PLAT = daemonPlat();
 
 // Slot binary names (daemon layout.go: slotBinName/slotLauncherName).
 export const DAEMON_BIN = IS_WIN ? "indirect-code.exe" : `indirect-code-${PLAT}`;

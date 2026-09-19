@@ -26,8 +26,23 @@ const WS = new URL("..", import.meta.url).pathname;
 const DAEMON_DIR = join(WS, "indirect-code-daemon");
 // Local build in DAEMON_DIR (shared helper takes daemonDir explicitly).
 // (imported as sharedBuildBin; call sites pass DAEMON_DIR explicitly)
-const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
-assert(OPENAI_KEY.startsWith("sk-"), "OPENAI_API_KEY must be set (temp key)");
+// OPENAI_API_KEY from env, else a .e2e-key file next to the script (Windows
+// remote-exec cannot pass secrets through env — the key is uploaded once
+// via `rc win up` and read from disk; the file stays gitignored).
+import { readFileSync as readKeyFile } from "node:fs";
+function loadE2EKey(): string {
+  const env = (process.env.OPENAI_API_KEY || "").trim();
+  if (env.startsWith("sk-")) return env;
+  for (const cand of [join(WS, "..", ".e2e-key"), join(process.cwd(), ".e2e-key"), "C:\\Users\\italo\\llmgw-win-test\\.e2e-key"]) {
+    try {
+      const k = readKeyFile(cand, "utf8").trim();
+      if (k.startsWith("sk-")) return k;
+    } catch {}
+  }
+  return "";
+}
+const OPENAI_KEY = loadE2EKey();
+assert(OPENAI_KEY.startsWith("sk-"), "OPENAI_API_KEY must be set (temp key) or .e2e-key file present");
 const MODEL = "gpt-5.6-luna";
 const GW_PORT = 18731 + (Number(process.env.E2E_SLOT || 0) % 100);
 const GW = `http://127.0.0.1:${GW_PORT}`;

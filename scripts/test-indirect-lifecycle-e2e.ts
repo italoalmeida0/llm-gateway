@@ -65,7 +65,12 @@ async function bootGateway(work: string) {
   const dataDir = join(work, "gw-data");
   mkdirSync(dataDir, { recursive: true });
   const gwProc = Bun.spawn(
-    [bunBin(), "start", "--port", String(GW_PORT)],
+    // Source mode (NOT `bun start`): the E2E publishes fake vE2E.x
+    // binaries into dist/r mid-run; `bun run build` output would go
+    // stale, but more importantly `bun start` resolves the package
+    // script which on some setups points at a dist/ bundle. Direct
+    // server/index.ts always reads dist/r live from the source tree.
+    [bunBin(), "server/index.ts"],
     {
       cwd: WS,
       env: {

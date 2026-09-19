@@ -5,11 +5,12 @@
 // new daemon serving the same session, old slot cleaned.
 //
 // Run: bun scripts/test-indirect-handoff-e2e.ts (needs built binaries).
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
+import { DAEMON_BIN, LAUNCHER_BIN, PLAT, buildBin, killAll, killProc } from "./indirect-e2e-win";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const DAEMON_DIR = join(ROOT, "indirect-code-daemon");
@@ -25,7 +26,7 @@ async function main() {
 
   // Versioned builds: old=vH1, new=vH2.
   const build = (pkg: string, ver: string, out: string, vvar: string) =>
-    execFileSync("go", ["build", "-trimpath", "-ldflags", `-s -w -X main.${vvar}=${ver}`, "-o", out, pkg], { cwd: DAEMON_DIR });
+    buildBin(pkg, ver, out, vvar, DAEMON_DIR);
   const oldBin = join(work, "daemon-old");
   const newBin = join(work, "daemon-new");
   const launcherBin = join(work, "launcher-new");
@@ -36,19 +37,20 @@ async function main() {
   build("./cmd/launcher", "vH2", launcherBin, "launcherVersion");
 
   // Mirror serves new binaries + manifest vH2.
-  const { copyFileSync, writeFileSync: wfs, readFileSync } = await import("node:fs");
-  copyFileSync(newBin, join(mirror, "indirect-code-linux-amd64"));
-  copyFileSync(launcherBin, join(mirror, "indirect-launcher-linux-amd64"));
+  const { copyFileSync, writeFileSync: wfs, readFileSync, mkdirSync: mkMirror } = await import("node:fs");
+  mkMirror(mirror, { recursive: true });
+  copyFileSync(newBin, join(mirror, DAEMON_BIN));
+  copyFileSync(launcherBin, join(mirror, LAUNCHER_BIN));
   const manifest = {
-    daemon: { version: "vH2", assets: { "linux-amd64": "indirect-code-linux-amd64" }, sums: {} },
-    launcher: { version: "vH2", assets: { "linux-amd64": "indirect-launcher-linux-amd64" }, sums: {} },
+    daemon: { version: "vH2", assets: { [PLAT]: DAEMON_BIN }, sums: {} },
+    launcher: { version: "vH2", assets: { [PLAT]: LAUNCHER_BIN }, sums: {} },
   };
   wfs(join(mirror, "versions.json"), JSON.stringify(manifest));
 
   // Seed slot-a: old binaries + session + version + config (bad gateway: no WS needed for freeze/copy phases).
   // Canonical layout: config.json is slot-local.
-  copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", "indirect-code-linux-amd64"));
-  copyFileSync(launcherOldBin, join(root, "slots", "slot-a", "bin", "indirect-launcher-linux-amd64"));
+  copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", DAEMON_BIN));
+  copyFileSync(launcherOldBin, join(root, "slots", "slot-a", "bin", LAUNCHER_BIN));
   wfs(join(root, "slots", "active"), "a\n");
   wfs(join(root, "slots", "slot-a", "storage_version.json"), JSON.stringify({ version: 1 }));
   wfs(join(root, "slots", "slot-a", "sessions", "s1.jsonl"),
@@ -70,7 +72,13 @@ async function main() {
     },
   });
   const mirrorURL = `http://127.0.0.1:${mirrorSrv.port}`;
-  const env = { ...process.env, INDIRECT_REPO_RAW: mirrorURL };
+  // Gateway-first mirror resolution (daemon fetchLauncherTo + launcher
+  // fetchDaemonTo both try the GATEWAY before INDIRECT_REPO_RAW). The
+  // daemon's slot config gateway_url is rewritten to the fake gateway
+  // below; ALSO export INDIRECT_GATEWAY in the child env so the
+  // takeover child (spawned by the daemon, env inherited) resolves the
+  // same fake mirror instead of a stale ambient gateway from the shell.
+  const env = { ...process.env, INDIRECT_GATEWAY: mirrorURL, INDIRECT_REPO_RAW: mirrorURL };
 
   // Fake gateway WS: accepts daemon sockets, keeps them open, and can
   // SEND commands (the daemon handleMessages anything on the socket).
@@ -88,6 +96,15 @@ async function main() {
         (req as any).__shadow = u.searchParams.get("shadow") === "1";
         if (server.upgrade(req)) return undefined as any;
         return new Response("up", { status: 426 });
+      }
+      // Serve the update mirror under /r/ (same server): the daemon
+      // fetchLauncherTo + the takeover child both resolve the mirror
+      // gateway-first from the slot config gateway_url, which points
+      // here. Without this the download 404s against the WS stub.
+      if (u.pathname.startsWith("/r/")) {
+        const p = join(mirror, u.pathname.slice(3));
+        if (!existsSync(p)) return new Response("nf", { status: 404 });
+        return new Response(Bun.file(p));
       }
       return new Response("nf", { status: 404 });
     },
@@ -110,13 +127,17 @@ async function main() {
     },
   });
   const gwURL = `ws://127.0.0.1:${gw.port}`;
-  // Point config at fake gateway.
+  // Point config at the fake gateway WS (the daemon MUST connect here
+  // to be observed). The update MIRROR is resolved separately: the daemon
+  // fetchLauncherTo tries the config gateway first, so the fake gateway
+  // ALSO serves the mirror files under /r/ (same trick the gateway-death
+  // script uses: fake gateway + /r/ in one server).
   const cfg = JSON.parse(readFileSync(join(root, "slots", "slot-a", "config.json"), "utf8"));
   cfg.gateway_url = gwURL;
   wfs(join(root, "slots", "slot-a", "config.json"), JSON.stringify(cfg));
 
   // Start OLD daemon via launcher (slot-aware boot).
-  const launcherOld = join(root, "slots", "slot-a", "bin", "indirect-launcher-linux-amd64");
+  const launcherOld = join(root, "slots", "slot-a", "bin", LAUNCHER_BIN);
   // Launcher in slot-a is vH2 build (we copied launcherBin); for a faithful
   // old-version boot this is fine (launcher version doesn't gate).
   const proc = spawn(launcherOld, ["--data-dir", root], { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -171,21 +192,10 @@ async function main() {
   assert(!existsSync(join(root, "slots", "slot-a")), "old slot cleaned");
   assert(connects.length >= 3, "new daemon connected");
   console.log(`handoff OK: connects=${connects.length} disconnects=${disconnects}`);
-  const cleanupProcs = () => {
-    // Kill ONLY processes under this run's work dir (never broad pkill:
-    // a wide pattern once killed the real VPS daemon).
-    try {
-      const out = execFileSync("ps", ["-eo", "pid,args"], { encoding: "utf8" });
-      for (const line of out.split("\n")) {
-        if (line.includes(work) && !line.includes("ps -eo")) {
-          const pid = parseInt(line.trim().split(/\s+/)[0], 10);
-          if (pid > 0 && pid !== process.pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
-        }
-      }
-    } catch {}
-  };
-  cleanupProcs();
-  proc.kill("SIGKILL");
+  // Scoped kill (work dir only — never broad pkill: a wide pattern once
+  // killed the real VPS daemon).
+  killAll(work);
+  killProc(proc);
   await sleep(500);
   mirrorSrv.stop();
   gw.stop();

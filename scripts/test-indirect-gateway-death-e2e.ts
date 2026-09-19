@@ -20,11 +20,12 @@
 //
 // Run: bun scripts/test-indirect-gateway-death-e2e.ts (needs built binaries,
 // no model, no browser — fake WS gateway + controllable mirror).
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
+import { DAEMON_BIN, LAUNCHER_BIN, PLAT, buildBin, killAll, killProc } from "./indirect-e2e-win";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const DAEMON_DIR = join(ROOT, "indirect-code-daemon");
@@ -32,7 +33,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (tag: string, msg: string) => console.log(`[${new Date().toISOString().slice(11, 19)}][${tag}] ${msg}`);
 
 const build = (pkg: string, ver: string, out: string, vvar: string) =>
-  execFileSync("go", ["build", "-trimpath", "-ldflags", `-s -w -X main.${vvar}=${ver}`, "-o", out, pkg], { cwd: DAEMON_DIR, stdio: "pipe" });
+    buildBin(pkg, ver, out, vvar, DAEMON_DIR);
 
 interface World {
   work: string; root: string; mirror: string;
@@ -62,15 +63,15 @@ async function bootWorld(tag: string, opts: { mirrorDelayMs?: number; mirrorFail
   build("./cmd/launcher", "vG2", launcherBin, "launcherVersion");
 
   const { copyFileSync, writeFileSync: wfs, readFileSync } = await import("node:fs");
-  copyFileSync(newBin, join(mirror, "indirect-code-linux-amd64"));
-  copyFileSync(launcherBin, join(mirror, "indirect-launcher-linux-amd64"));
+  copyFileSync(newBin, join(mirror, DAEMON_BIN));
+  copyFileSync(launcherBin, join(mirror, LAUNCHER_BIN));
   wfs(join(mirror, "versions.json"), JSON.stringify({
-    daemon: { version: "vG2", assets: { "linux-amd64": "indirect-code-linux-amd64" }, sums: {} },
-    launcher: { version: "vG2", assets: { "linux-amd64": "indirect-launcher-linux-amd64" }, sums: {} },
+    daemon: { version: "vG2", assets: { [PLAT]: DAEMON_BIN }, sums: {} },
+    launcher: { version: "vG2", assets: { [PLAT]: LAUNCHER_BIN }, sums: {} },
   }));
 
-  copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", "indirect-code-linux-amd64"));
-  copyFileSync(launcherOldBin, join(root, "slots", "slot-a", "bin", "indirect-launcher-linux-amd64"));
+  copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", DAEMON_BIN));
+  copyFileSync(launcherOldBin, join(root, "slots", "slot-a", "bin", LAUNCHER_BIN));
   wfs(join(root, "slots", "active"), "a\n");
   wfs(join(root, "slots", "slot-a", "storage_version.json"), JSON.stringify({ version: 1 }));
   wfs(join(root, "slots", "slot-a", "sessions", "s1.jsonl"),
@@ -124,7 +125,7 @@ async function bootWorld(tag: string, opts: { mirrorDelayMs?: number; mirrorFail
   }));
 
   const env = { ...process.env, INDIRECT_REPO_RAW: `http://127.0.0.1:${mirrorSrv.port}`, INDIRECT_GATEWAY: "" };
-  const proc = spawn(join(root, "slots", "slot-a", "bin", "indirect-launcher-linux-amd64"),
+  const proc = spawn(join(root, "slots", "slot-a", "bin", LAUNCHER_BIN),
     ["--data-dir", root], { env, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   proc.stdout.on("data", (d) => (out += d.toString()));
@@ -138,16 +139,8 @@ async function bootWorld(tag: string, opts: { mirrorDelayMs?: number; mirrorFail
     work, root, mirror, gw, gwPort: gw.port, mirrorSrv, mirrorPort: mirrorSrv.port,
     daemonSock: daemonSockRef, events, proc, out,
     cleanup: async () => {
-      try {
-        const out2 = execFileSync("ps", ["-eo", "pid,args"], { encoding: "utf8" });
-        for (const line of out2.split("\n")) {
-          if (line.includes(work) && !line.includes("ps -eo")) {
-            const pid = parseInt(line.trim().split(/\s+/)[0], 10);
-            if (pid > 0 && pid !== process.pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
-          }
-        }
-      } catch {}
-      try { proc.kill("SIGKILL"); } catch {}
+      killAll(work);
+      killProc(proc);
       await sleep(300);
       try { mirrorSrv.stop(); } catch {}
       try { gw.stop(); } catch {}

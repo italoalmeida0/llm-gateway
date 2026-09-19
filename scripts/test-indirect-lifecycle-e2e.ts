@@ -16,14 +16,16 @@
 //   all (default): everything in sequence.
 //
 // The script never commits anything: all state lives in tmp dirs.
-import { execFileSync, execSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, copyFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, copyFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
+import { IS_WIN, PLAT, buildBin, homeEnv, cdpFrontend, copyDir } from "./indirect-e2e-win";
 
 const WS = new URL("..", import.meta.url).pathname;
 const DAEMON_DIR = join(WS, "indirect-code-daemon");
+// Local build in DAEMON_DIR (shared helper takes daemonDir explicitly).
+// (imported as sharedBuildBin; call sites pass DAEMON_DIR explicitly)
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 assert(OPENAI_KEY.startsWith("sk-"), "OPENAI_API_KEY must be set (temp key)");
 const MODEL = "gpt-5.6-luna";
@@ -36,14 +38,11 @@ const log = (tag: string, msg: string) => console.log(`[${new Date().toISOString
 
 const PW_MOD = process.env.PLAYWRIGHT_MODULE || "/home/user/workspace/vscode/node_modules/playwright/index.mjs";
 const CHROME = process.env.CHROMIUM_PATH || "/home/user/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome";
+const USE_CDP = !!process.env.BROWSER_API || IS_WIN; // Windows: Bun CDP server; Linux: Playwright
 
 async function resolveChrome(): Promise<string> {
   if (existsSync(CHROME)) return CHROME;
   throw new Error(`Chromium not found at ${CHROME} (set CHROMIUM_PATH)`);
-}
-
-function buildBin(pkg: string, ver: string, out: string, vvar: string) {
-  execFileSync("go", ["build", "-trimpath", "-ldflags", `-s -w -X main.${vvar}=${ver}`, "-o", out, pkg], { cwd: DAEMON_DIR, stdio: "pipe" });
 }
 
 async function bootGateway(work: string) {
@@ -196,11 +195,10 @@ try {
   mkdirSync(join(daemonHome, "workspace"), { recursive: true });
   const pair: any = await (await fetch(`${GW}/api/indirect-code/pair`, { method: "POST", headers: { Authorization: `Bearer ${login.accessToken}` } })).json();
   assert(pair.success && pair.connectUrl, "pairing failed");
-  const launcherBin = join(work, "launcher");
-  buildBin("./cmd/launcher", "vE2E.1", launcherBin, "launcherVersion");
+  const launcherBin = buildBin("./cmd/launcher", "vE2E.1", join(work, "launcher"), "launcherVersion", DAEMON_DIR);
   const daemonProc = Bun.spawn(
     [launcherBin, "--connect", pair.connectUrl, "--data-dir", daemonHome, "--name", "Lifecycle E2E"],
-    { cwd: WS, env: { ...process.env, HOME: daemonHome }, stdout: "ignore", stderr: "ignore" });
+    { cwd: WS, env: { ...process.env, ...homeEnv(daemonHome) }, stdout: "ignore", stderr: "ignore" });
   procs.push(daemonProc);
   const conn = wsConnect(login.accessToken);
   await conn.ready;
@@ -228,8 +226,8 @@ try {
   log("update", "building vE2E.2 binaries...");
   const relDir = join(work, "rel");
   mkdirSync(relDir, { recursive: true });
-  buildBin("./cmd/daemon", "vE2E.2", join(relDir, "daemon-new"), "daemonVersion");
-  buildBin("./cmd/launcher", "vE2E.2", join(relDir, "launcher-new"), "launcherVersion");
+  const daemonNew = buildBin("./cmd/daemon", "vE2E.2", join(relDir, "daemon-new"), "daemonVersion", DAEMON_DIR);
+  const launcherNew = buildBin("./cmd/launcher", "vE2E.2", join(relDir, "launcher-new"), "launcherVersion", DAEMON_DIR);
   // Serve the mirror over HTTP (INDIRECT_REPO_RAW fallback) — the gateway
   // manifest still says the old version, so force the check via mirror:
   // we emulate a release by serving versions.json + assets locally and
@@ -245,9 +243,9 @@ try {
   const distR = join(WS, "dist", "r");
   assert(existsSync(join(distR, "versions.json")), "dist/r missing — run bun run build first");
   const backupDir = join(work, "dist-r-backup");
-  execSync(`cp -r "${distR}" "${backupDir}"`);
+  copyDir(distR, backupDir);
   try {
-    const plat = `${process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux"}-${process.arch === "arm64" ? "arm64" : "amd64"}`;
+    const plat = PLAT;
     const { readFileSync: rf } = await import("node:fs");
     const manifest: any = JSON.parse(rf(join(distR, "versions.json"), "utf8"));
     // Publish the locally-built vE2E.2 under the CURRENT platform asset
@@ -255,8 +253,8 @@ try {
     const dAsset = manifest.daemon.assets[plat];
     const lAsset = manifest.launcher.assets[plat];
     assert(dAsset && lAsset, `platform ${plat} not in manifest`);
-    copyFileSync(join(relDir, "daemon-new"), join(distR, dAsset));
-    copyFileSync(join(relDir, "launcher-new"), join(distR, lAsset));
+    copyFileSync(daemonNew, join(distR, dAsset));
+    copyFileSync(launcherNew, join(distR, lAsset));
     // Re-hash + re-version ONLY in the served manifest copy.
     const { createHash } = await import("node:crypto");
     const sha = (p: string) => createHash("sha256").update(rf(p)).digest("hex");
@@ -384,10 +382,9 @@ try {
       mkdirSync(join(home, "workspace"), { recursive: true });
       const p2: any = await (await fetch(`${GW}/api/indirect-code/pair`, { headers: { Authorization: `Bearer ${login.accessToken}` }, method: "POST" })).json();
       assert(p2.success && p2.connectUrl, `pairing ${i} failed`);
-      const lb = join(work, `launcher-${i}`);
-      buildBin("./cmd/launcher", "vE2E.1", lb, "launcherVersion");
+      const lb = buildBin("./cmd/launcher", "vE2E.1", join(work, `launcher-${i}`), "launcherVersion", DAEMON_DIR);
       const dp = Bun.spawn([lb, "--connect", p2.connectUrl, "--data-dir", home, "--name", hostNames[i]],
-        { cwd: WS, env: { ...process.env, HOME: home }, stdout: "ignore", stderr: "ignore" });
+        { cwd: WS, env: { ...process.env, ...homeEnv(home) }, stdout: "ignore", stderr: "ignore" });
       procs.push(dp); extraProcs.push(dp);
     }
     const hostIds: string[] = [hostId];
@@ -421,7 +418,15 @@ try {
     }
     for (const c of extraConns) { try { c.ws.close(); } catch {} }
 
-    // ---- FRONTEND phase: real Chromium on #/code ----
+    // ---- FRONTEND phase: #/code in a real browser ----
+    // Windows (Surface): the persistent Bun CDP automation server drives
+    // real Chrome over native CDP (no Playwright there). Everywhere else:
+    // Playwright Chromium as before.
+    if (USE_CDP) {
+      log("frontend", "driving #/code via CDP browser server...");
+      const r = await cdpFrontend(GW, login.accessToken, log);
+      log("frontend", `sidebar buttons: ${r.buttons}, settings: ${r.settingsSeen}, update: ${r.updateSeen}`);
+    } else {
     log("frontend", "launching Chromium...");
     const chromePath = await resolveChrome();
     const { chromium } = await import(PW_MOD);
@@ -456,8 +461,10 @@ try {
     } finally {
       await browser.close();
     }
+    }
   } finally {
-    execSync(`rm -rf "${distR}" && cp -r "${backupDir}" "${distR}"`);
+    rmSync(distR, { recursive: true, force: true });
+    copyDir(backupDir, distR);
     log("update", "dist/r restored");
   }
 

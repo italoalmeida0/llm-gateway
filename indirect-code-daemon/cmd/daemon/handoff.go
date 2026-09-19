@@ -45,7 +45,28 @@ type slotLayout struct {
 func (d *DaemonServer) slots() slotLayout {
 	// Canonical layout: dataDir IS the active slot (<root>/slots/slot-x),
 	// so the root is two levels up. The launcher guarantees the layout
-	// before exec — no fallback branches here.
+	// before exec.
+	//
+	// TEST/LEGACY layout: dataDir IS the root (slots/ directly inside,
+	// as the E2E harness and old installs use). Detect it: when dataDir
+	// itself contains slots/active, the root is dataDir. Without this,
+	// rootDir() walks two levels up from dataDir (which is NOT inside
+	// slots/), reads a nonexistent slots/active, and every slot path
+	// (fetchLauncherTo, copyToSlot, abort cleanup) fans out to a WRONG
+	// directory — phase-0 verify then fails with the version of
+	// whatever stale binary was already there (caught on Windows: the
+	// E2E daemon-home root layout downloaded vE2E.2 into a phantom dir
+	// while slot-a kept the installed vE2E.1 launcher).
+	if raw, err := os.ReadFile(filepath.Join(d.dataDir, "slots", "active")); err == nil {
+		if s := strings.TrimSpace(string(raw)); s == "a" || s == "b" {
+			active := s
+			inactive := "b"
+			if active == "b" {
+				inactive = "a"
+			}
+			return slotLayout{base: filepath.Join(d.dataDir, "slots"), active: active, inactive: inactive}
+		}
+	}
 	root := d.rootDir()
 	active := "a"
 	if raw, err := os.ReadFile(filepath.Join(root, "slots", "active")); err == nil {
@@ -130,6 +151,19 @@ func (d *DaemonServer) runHandoff(version string) {
 	launcherPath, err := d.fetchLauncherTo(version, sl)
 	if err != nil {
 		fail(fmt.Sprintf("launcher download: %v", err))
+		return
+	}
+	// The launcher MUST have been (re)downloaded by the fetch above:
+	// a pre-existing binary (installed vE2E.1 launcher, stale cache)
+	// would verify against the OLD version and fail with a confusing
+	// "got 1.0.21" mismatch. Stat the mtime to prove freshness in
+	// failure reports (caught on Windows: phase-0 verify failed with
+	// the installed launcher's version).
+	if st, serr := os.Stat(launcherPath); serr != nil {
+		fail(fmt.Sprintf("launcher missing after download: %v", serr))
+		return
+	} else if time.Since(st.ModTime()) > 5*time.Minute {
+		fail(fmt.Sprintf("launcher not refreshed by download (mtime %v)", st.ModTime()))
 		return
 	}
 	if err := selfVerifyBinary(launcherPath, version, "launcher"); err != nil {

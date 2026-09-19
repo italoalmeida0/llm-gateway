@@ -2037,6 +2037,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		// holds configMu and broadcast reads it via autoUpdateEnabled
 		// (Go mutexes are not reentrant).
 		go d.checkForUpdates("manual")
+	case "debug_mirror":
+		// E2E forensics: report what the daemon's own download path
+		// resolves (gateway base from slot config, manifest version
+		// from the daemon's poll, launcher asset bytes head). Never
+		// fails the caller — best-effort diagnostics only.
+		go d.debugMirror(raw)
 	case "daemon_update_apply":
 		// Full-slot handoff (replaces the old exit-42 restart): download
 		// launcher -> late freeze -> copy -> takeover -> promote.

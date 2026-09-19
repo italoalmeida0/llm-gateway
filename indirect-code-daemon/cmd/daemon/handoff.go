@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -554,4 +555,59 @@ func readHandoffReady(path string) (bool, bool) {
 		return false, true
 	}
 	return false, false
+}
+
+// debugMirror reports what the daemon's own download path resolves:
+// the gateway base (from slot config), the manifest version the daemon
+// last polled, and the first bytes of the launcher asset as fetched
+// through fetchLauncherTo's candidate chain. E2E forensics only.
+func (d *DaemonServer) debugMirror(raw []byte) {
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	_ = json.Unmarshal(raw, &req)
+	info := map[string]any{"type": "debug_mirror", "requestId": req.RequestID}
+	info["gatewayBase"] = gatewayBaseURL(d)
+	d.configMu.RLock()
+	info["configGateway"] = d.config.GatewayURL
+	d.configMu.RUnlock()
+	st := d.updateChecker()
+	st.mu.Lock()
+	info["available"] = st.available
+	info["current"] = daemonVersion
+	st.mu.Unlock()
+	// What would fetchLauncherTo download? HEAD the first candidate.
+	sl := d.slots()
+	asset := "indirect-launcher-" + runtime.GOOS + "-" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		asset += ".exe"
+	}
+	var bases []string
+	if gb := gatewayBaseURL(d); gb != "" {
+		bases = append(bases, strings.TrimRight(gb, "/")+"/r/")
+	}
+	if raw := os.Getenv("INDIRECT_REPO_RAW"); raw != "" {
+		bases = append(bases, strings.TrimRight(raw, "/")+"/")
+	} else if mu := manifestURL(); mu != "" {
+		bases = append(bases, mu[:len(mu)-len(updateManifestFile)])
+	}
+	info["asset"] = asset
+	info["bases"] = bases
+	if len(bases) > 0 {
+		u := fmt.Sprintf("%s%s?u=dbg-%d", bases[0], asset, time.Now().Unix())
+		info["url"] = u
+		client := &http.Client{Timeout: 30 * time.Second}
+		if resp, err := client.Get(u); err != nil {
+			info["fetchErr"] = err.Error()
+		} else {
+			defer resp.Body.Close()
+			info["status"] = resp.StatusCode
+			head := make([]byte, 64)
+			n, _ := resp.Body.Read(head)
+			info["head"] = fmt.Sprintf("%x", head[:n])
+			info["headLen"] = n
+		}
+	}
+	_ = sl
+	_ = d.sendWS(info)
 }

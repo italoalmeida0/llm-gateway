@@ -361,6 +361,14 @@ try {
       const dbgOut = dbgExec(dbgPath, ["--version"], { encoding: "utf8" });
       log("update", `pre-apply download: ${dbgBuf.length}b runs-as=${dbgOut.trim().slice(0, 60)}`);
     } catch (e: any) { log("update", `pre-apply download failed: ${e.message?.slice(0, 120)}`); }
+    // Daemon-side mirror forensics: ask the daemon itself what IT sees.
+    // (fetchLauncherTo resolves gatewayBaseURL(config.gateway_url) first.
+    // If the daemon's gateway_url points elsewhere — e.g. a stale pairing
+    // URL — its download hits a DIFFERENT gateway than our probe above.)
+    try {
+      const info: any = await conn.send({ type: "debug_mirror" });
+      log("update", `daemon mirror info: ${JSON.stringify(info).slice(0, 400)}`);
+    } catch (e: any) { log("update", `debug_mirror unsupported: ${e.message?.slice(0, 80)}`); }
     await conn.send({ type: "daemon_update_apply" });
     // Watch for freeze -> promote -> reconnect with new version.
     const t0 = Date.now();

@@ -232,7 +232,7 @@ try {
   const launcherBin = buildBin("./cmd/launcher", "vE2E.1", join(work, "launcher"), "launcherVersion", DAEMON_DIR);
   const daemonProc = Bun.spawn(
     [launcherBin, "--connect", pair.connectUrl, "--data-dir", daemonHome, "--name", "Lifecycle E2E"],
-    { cwd: WS, env: { ...process.env, ...homeEnv(daemonHome) }, stdout: "ignore", stderr: "ignore" });
+    { cwd: WS, env: { ...process.env, INDIRECT_GATEWAY: GW, INDIRECT_REPO_RAW: `${GW}/r`, ...homeEnv(daemonHome) }, stdout: "ignore", stderr: "ignore" });
   procs.push(daemonProc);
   const conn = wsConnect(login.accessToken);
   await conn.ready;
@@ -462,7 +462,7 @@ try {
       assert(p2.success && p2.connectUrl, `pairing ${i} failed`);
       const lb = buildBin("./cmd/launcher", "vE2E.1", join(work, `launcher-${i}`), "launcherVersion", DAEMON_DIR);
       const dp = Bun.spawn([lb, "--connect", p2.connectUrl, "--data-dir", home, "--name", hostNames[i]],
-        { cwd: WS, env: { ...process.env, ...homeEnv(home) }, stdout: "ignore", stderr: "ignore" });
+        { cwd: WS, env: { ...process.env, INDIRECT_GATEWAY: GW, INDIRECT_REPO_RAW: `${GW}/r`, ...homeEnv(home) }, stdout: "ignore", stderr: "ignore" });
       procs.push(dp); extraProcs.push(dp);
     }
     const hostIds: string[] = [hostId];

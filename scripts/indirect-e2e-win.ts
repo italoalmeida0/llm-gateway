@@ -178,8 +178,25 @@ export async function cdpFrontend(gw: string, jwt: string, log: (tag: string, ms
   if (!tab?.id) throw new Error(`tab open failed: ${JSON.stringify(tab).slice(0, 200)}`);
   const id = tab.id;
   try {
+    // The gateway under test runs on the SAME Surface (127.0.0.1 shared):
+    // no tunnel/NAT issue — but wait for the SPA to actually render
+    // (poll snapshot until the chrome-error page is gone).
     await api("POST", `/api/tabs/${id}/navigate`, { url: `${gw}/#/code`, waitUntil: "load" });
-    await new Promise((r) => setTimeout(r, 4000));
+    {
+      const t1 = Date.now();
+      let ready = false;
+      while (Date.now() - t1 < 30000) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const snap: any = await api("GET", `/api/tabs/${id}/snapshot`);
+        const txt: string = snap?.snapshotText || "";
+        if (!txt.includes("chrome-error") && txt.length > 200) { ready = true; break; }
+      }
+      if (!ready) {
+        const snap: any = await api("GET", `/api/tabs/${id}/snapshot`);
+        throw new Error(`#/code never rendered: ${(snap?.snapshotText || "").slice(0, 200)}`);
+      }
+    }
+    await new Promise((r) => setTimeout(r, 2000));
     await api("POST", `/api/tabs/${id}/eval`, { script: `localStorage.setItem("llmgw-access", ${JSON.stringify(jwt)})` });
     await api("POST", `/api/tabs/${id}/navigate`, { url: `${gw}/#/code`, waitUntil: "load" });
     await new Promise((r) => setTimeout(r, 5000));

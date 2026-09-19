@@ -98,17 +98,44 @@ export function createDaemonUpdate(opts: {
     if (!hostId || !msg || typeof msg !== "object") return;
     const prev = states()[hostId];
     const frozen = !!msg.frozen;
+    const current = String(msg.current ?? prev?.current ?? "");
+    const available = String(msg.available ?? "");
+    // Reconcile the persisted lifecycle against authoritative daemon
+    // state. Without this, a pending/updating flag stuck in localStorage
+    // (apply clicked, then update_done/failed missed because the user
+    // switched hosts, F5'd, or the socket dropped) disables the Update
+    // button forever: banner + settings show "Updating…" with no
+    // overlay (frozen=false) and no way to retry.
+    // Rules: frozen=true -> really updating. Otherwise a stale
+    // pending/updating is resolved: target reached -> done (done event
+    // was missed); anything else -> idle so the button works again
+    // (the daemon's error/lastError, if any, stays visible).
+    let lifecycle = prev?.lifecycle ?? "idle";
+    if (frozen) {
+      // Freeze broadcast arrived after our apply click: the handoff is
+      // really running on this host now (F5-safe: frozen survives).
+      lifecycle = "updating";
+    } else if (prev && (prev.lifecycle === "pending" || prev.lifecycle === "updating")) {
+      if (prev.target && current && prev.target === current) {
+        lifecycle = "done";
+      } else {
+        lifecycle = "idle";
+      }
+    }
+    const finished = lifecycle === "done";
     patch(hostId, {
-      current: String(msg.current ?? prev?.current ?? ""),
-      available: String(msg.available ?? ""),
+      current,
+      available: finished ? "" : available,
       checkedAt: Number(msg.checkedAt ?? 0),
       autoUpdate: msg.autoUpdate !== false,
       frozen,
       freezeStage: String(msg.freezeStage ?? ""),
       error: typeof msg.error === "string" ? msg.error : undefined,
-      // Freeze broadcast arrived after our apply click: the handoff is
-      // really running on this host now (F5-safe: frozen survives).
-      lifecycle: frozen ? "updating" : prev?.lifecycle === "updating" && !frozen ? prev.lifecycle : prev?.lifecycle ?? "idle",
+      lifecycle,
+      // A missed done still counts as finished; a reset to idle drops
+      // the stale target so the next apply starts clean.
+      target: finished ? prev?.target : lifecycle === "idle" ? undefined : prev?.target,
+      finishedAt: finished ? Date.now() : prev?.finishedAt,
     });
   }
 

@@ -70,7 +70,10 @@ async function bootGateway(work: string) {
       env: {
         ...process.env, DATA_DIR: dataDir, PORT: String(GW_PORT),
         ADMIN_EMAIL: "admin@example.com", ADMIN_PASSWORD: ADMIN_PW,
-        GATEWAY_SECRET: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        // 96-hex secret: bootGateway previously passed 112 chars, which
+        // the server rejects (exit 5, migrations half-applied). Real bug
+        // caught on Windows where the gateway died 2s after boot.
+        GATEWAY_SECRET: "0123456789abcdef".repeat(6),
         PUBLIC_URL: GW,
       },
       stdout: "ignore", stderr: "ignore",

@@ -49,11 +49,12 @@ export function exe(p: string): string {
 // (a remote-exec channel runs with a minimal PATH where `bun` alone
 // fails with uv_spawn ENOENT — caught on the Surface).
 export function bunBin(): string {
-  // Bare `bun` resolves via PATH (Bun.which confirms) and works from
-  // Bun.spawn; a hardcoded .exe path broke under `rc win run`
-  // (uv_spawn ENOENT) even though the same path worked interactively.
+  // Full execPath: under `rc win run` the remote PATH is minimal and
+  // bare `bun` fails uv_spawn ENOENT; the hardcoded Jan path ALSO failed
+  // (double-backslash escaping through the rc channel). process.execPath
+  // is the one path guaranteed to exist — it IS the running bun.
   if (process.env.BUN_BIN) return process.env.BUN_BIN;
-  return "bun";
+  return process.execPath || "bun";
 }
 
 // `go build -trimpath -ldflags "-s -w -X main.<vvar>=<ver>" -o <out> <pkg>`

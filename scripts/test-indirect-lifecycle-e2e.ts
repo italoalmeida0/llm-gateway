@@ -20,7 +20,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, copyFileSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
-import { IS_WIN, PLAT, buildBin, homeEnv, cdpFrontend, copyDir } from "./indirect-e2e-win";
+import { IS_WIN, PLAT, buildBin, bunBin, homeEnv, cdpFrontend, copyDir } from "./indirect-e2e-win";
 
 const WS = new URL("..", import.meta.url).pathname;
 const DAEMON_DIR = join(WS, "indirect-code-daemon");
@@ -64,7 +64,7 @@ async function bootGateway(work: string) {
   const dataDir = join(work, "gw-data");
   mkdirSync(dataDir, { recursive: true });
   const gwProc = Bun.spawn(
-    ["bun", "start", "--port", String(GW_PORT)],
+    [bunBin(), "start", "--port", String(GW_PORT)],
     {
       cwd: WS,
       env: {

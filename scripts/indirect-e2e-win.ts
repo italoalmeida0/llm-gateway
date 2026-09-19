@@ -45,6 +45,15 @@ export function exe(p: string): string {
   return IS_WIN && !p.endsWith(".exe") ? p + ".exe" : p;
 }
 
+// Bun executable: bare `bun` on unix; on Windows resolve the full path
+// (a remote-exec channel runs with a minimal PATH where `bun` alone
+// fails with uv_spawn ENOENT — caught on the Surface).
+export function bunBin(): string {
+  if (!IS_WIN) return "bun";
+  if (process.env.BUN_BIN) return process.env.BUN_BIN;
+  return "C:\\Users\\italo\\AppData\\Local\\Programs\\Jan\\bun.exe";
+}
+
 // `go build -trimpath -ldflags "-s -w -X main.<vvar>=<ver>" -o <out> <pkg>`
 // in the daemon dir. Returns the actual output path (with .exe on win).
 export function buildBin(pkg: string, ver: string, out: string, vvar: string, daemonDir: string): string {

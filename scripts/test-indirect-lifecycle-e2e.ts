@@ -366,8 +366,21 @@ try {
     // If the daemon's gateway_url points elsewhere — e.g. a stale pairing
     // URL — its download hits a DIFFERENT gateway than our probe above.)
     try {
-      const info: any = await conn.send({ type: "debug_mirror" });
-      log("update", `daemon mirror info: ${JSON.stringify(info).slice(0, 400)}`);
+      // debug_mirror is a WS BROADCAST (no request/response): listen for
+      // it in the event stream, don't await conn.send (that waits 60s
+      // for a requestId reply that never comes).
+      const seenBefore = conn.events.length;
+      conn.ws.send(JSON.stringify({ type: "debug_mirror" }));
+      const t1 = Date.now();
+      let info: any = null;
+      while (Date.now() - t1 < 30000) {
+        await sleep(1000);
+        for (const e of conn.events.splice(seenBefore)) {
+          if (e.type === "debug_mirror") { info = e; break; }
+        }
+        if (info) break;
+      }
+      log("update", `daemon mirror info: ${info ? JSON.stringify(info).slice(0, 500) : "(no reply in 30s)"}`);
     } catch (e: any) { log("update", `debug_mirror unsupported: ${e.message?.slice(0, 80)}`); }
     await conn.send({ type: "daemon_update_apply" });
     // Watch for freeze -> promote -> reconnect with new version.

@@ -24,9 +24,8 @@ export const IS_WIN = process.platform === "win32";
 // windows-arm64 — the manifest only had the bun-arch key).
 function daemonPlat(): string {
   try {
-    const { execFileSync: goEnv } = require("node:child_process");
-    const goos = String(goEnv("go", ["env", "GOOS"], { encoding: "utf8" })).trim();
-    const goarch = String(goEnv("go", ["env", "GOARCH"], { encoding: "utf8" })).trim();
+    const goos = String(execFileSync("go", ["env", "GOOS"], { encoding: "utf8" })).trim();
+    const goarch = String(execFileSync("go", ["env", "GOARCH"], { encoding: "utf8" })).trim();
     if (goos && goarch) {
       const os = goos === "darwin" ? "darwin" : goos === "windows" ? "windows" : "linux";
       const arch = goarch === "arm64" ? "arm64" : "amd64";

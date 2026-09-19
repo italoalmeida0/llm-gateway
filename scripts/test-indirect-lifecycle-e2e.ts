@@ -70,11 +70,21 @@ async function bootGateway(work: string) {
     // stale, but more importantly `bun start` resolves the package
     // script which on some setups points at a dist/ bundle. Direct
     // server/index.ts always reads dist/r live from the source tree.
+    // Scrub INDIRECT_* mirror env: the test gateway must be the ONLY
+    // mirror. A stale ambient INDIRECT_GATEWAY (dev shell pointing at
+    // the real gateway) would otherwise win gateway-first resolution
+    // in fetchManifestMirror/fetchDaemonTo and serve the REAL 1.0.21
+    // manifest/bytes instead of our vE2E.2 (caught on Linux: daemon
+    // reported available=vE2E.2 via gateway manifest but downloaded
+    // 1.0.21 bytes via the ambient mirror).
     [bunBin(), "server/index.ts"],
     {
       cwd: WS,
       env: {
-        ...process.env, DATA_DIR: dataDir, PORT: String(GW_PORT),
+        ...process.env,
+        INDIRECT_GATEWAY: GW,
+        INDIRECT_REPO_RAW: `${GW}/r`,
+        DATA_DIR: dataDir, PORT: String(GW_PORT),
         ADMIN_EMAIL: "admin@example.com", ADMIN_PASSWORD: ADMIN_PW,
         // 96-hex secret: bootGateway previously passed 112 chars, which
         // the server rejects (exit 5, migrations half-applied). Real bug

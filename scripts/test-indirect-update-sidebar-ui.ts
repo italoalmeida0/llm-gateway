@@ -36,6 +36,7 @@ import assert from "node:assert/strict";
  assert(t.includes("Update to 1.1.0"), "sidebar update button with version: " + t.slice(0, 300));
  const cls = await page.evaluate(() => (document.querySelector("button.ui-button-primary") as HTMLElement | null)?.className || "");
  assert(cls.includes("ui-button-primary"), "button uses Save-changes (primary) style");
+ assert(cls.includes("rounded-full"), "button is rounded-full");
 
  // 3. Apply -> Updating… on the same button.
  await page.evaluate(() => { (window as any).sidebarUI.setHostId("h1"); });

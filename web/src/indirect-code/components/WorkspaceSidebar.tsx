@@ -101,22 +101,6 @@ export function WorkspaceSidebar() {
       <Iconify icon="lucide:clock" size={13} />
       <span>Conversation History</span>
     </button>
-    {/* Daemon update: white primary button (same style as the settings
-        modal's Save changes), not a pinned banner over the composer. */}
-    <Show when={(() => { const i = ui.daemonUpdate.info(); return !!i && !!i.available && i.available !== i.current; })()}>{(() => {
-      const i = ui.daemonUpdate.info()!;
-      const busy = ui.daemonUpdate.applying() || i.frozen;
-      return (
-        <button
-          onClick={() => ui.daemonUpdate.apply()}
-          disabled={busy}
-          class="ui-button ui-button-primary w-full justify-start mt-1"
-        >
-          <Iconify icon="lucide:arrow-down-to-line" size={14} />
-          <span>{busy ? (i.frozen ? (i.freezeStage || "Updating…") : "Updating…") : `Update to ${i.available}`}</span>
-        </button>
-      );
-    })()}</Show>
   </div>
 
 
@@ -285,6 +269,21 @@ export function WorkspaceSidebar() {
   </Show>
 
   <div class="p-2 border-t border-line/70 space-y-1">
+    {/* Daemon update: primary rounded-full button above host selector */}
+    <Show when={(() => { const i = ui.daemonUpdate.info(); return !!i && !!i.available && i.available !== i.current; })()}>{(() => {
+      const i = ui.daemonUpdate.info()!;
+      const busy = ui.daemonUpdate.applying() || i.frozen;
+      return (
+        <button
+          onClick={() => ui.daemonUpdate.apply()}
+          disabled={busy}
+          class="ui-button ui-button-primary w-full rounded-full h-[1.5rem] min-h-[1.5rem] py-0 text-xs gap-1.5"
+        >
+          <Iconify icon="lucide:arrow-down-to-line" size={13} />
+          <span>{busy ? (i.frozen ? (i.freezeStage || "Updating…") : "Updating…") : `Update to ${i.available}`}</span>
+        </button>
+      );
+    })()}</Show>
     <HostCard id="sidebar" />
     {/* () => … — openSettings takes an optional section id; passing it
         directly would feed the MouseEvent in as the section. */}

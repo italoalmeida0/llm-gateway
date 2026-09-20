@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { UpdateFreezeOverlay } from "../../web/src/indirect-code/IndirectCodePage";
+import { HostCard } from "../../web/src/indirect-code/components/HostCard";
 import { HostCtx, ModalCtx, UICtx } from "../../web/src/indirect-code/ctx";
 import { createDaemonUpdate } from "../../web/src/indirect-code/hooks/useDaemonUpdate";
 
@@ -12,6 +13,7 @@ const api: any = { commands: [] as any[] };
 render(() => {
   const [hostId, setHostId] = createSignal("h1");
   const [menuOpen, setMenuOpen] = createSignal(false);
+  const [menuAnchor, setMenuAnchor] = createSignal<string | null>(null);
   api.setHostId = setHostId;
   const du = createDaemonUpdate({
     send: (c) => api.commands.push(c),
@@ -31,7 +33,10 @@ render(() => {
     setActiveHostId: (id: string) => { setHostId(id); api.commands.push({ type: "switch-host", id }); },
     hostMenuOpen: () => menuOpen(),
     setHostMenuOpen: (v: boolean) => setMenuOpen(v),
-    hostBtn: undefined,
+    // Opener-gated anchor (mirrors the real useHosts): each HostCard
+    // instance owns its id; the menu shows only for the opener.
+    hostMenuAnchor: () => menuAnchor(),
+    setHostMenuAnchor: (v: string | null) => setMenuAnchor(v),
     connectionState: () => "connected",
     loadHosts: () => { api.commands.push({ type: "load-hosts" }); return Promise.resolve(); },
     // Mirrors the real removeHost: closes the menu synchronously, then
@@ -40,12 +45,18 @@ render(() => {
     removeHost: () => { setMenuOpen(false); api.commands.push({ type: "remove-host" }); return Promise.resolve(); },
   };
   const modal: any = { generatePairingToken: () => { api.commands.push({ type: "pair" }); return Promise.resolve(); } };
-  const ui: any = { daemonUpdate: du, closeMenus: () => setMenuOpen(false) };
+  const ui: any = { daemonUpdate: du, closeMenus: () => { setMenuOpen(false); setMenuAnchor(null); } };
   return (
     <HostCtx.Provider value={hosts}>
       <ModalCtx.Provider value={modal}>
         <UICtx.Provider value={ui}>
           <UpdateFreezeOverlay />
+          {/* Second HostCard instance, like the real sidebar bottom:
+              proves two cards share one menu state without stealing
+              each other's anchor (the "menu lá em cima" regression). */}
+          <div id="sidebar-card">
+            <HostCard id="sidebar" />
+          </div>
           <div id="active-host">{hostId()}</div>
         </UICtx.Provider>
       </ModalCtx.Provider>

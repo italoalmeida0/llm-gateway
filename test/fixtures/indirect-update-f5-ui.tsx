@@ -12,6 +12,7 @@ const api: any = { commands: [] as any[] };
 render(() => {
   const [hostId, setHostId] = createSignal("h1");
   const [menuOpen, setMenuOpen] = createSignal(false);
+  const [menuAnchor, setMenuAnchor] = createSignal<string | null>(null);
   api.setHostId = setHostId;
   const du = createDaemonUpdate({
     send: (c) => api.commands.push(c),
@@ -32,7 +33,8 @@ render(() => {
     setActiveHostId: (id: string) => { setHostId(id); api.commands.push({ type: "switch-host", id }); },
     hostMenuOpen: () => menuOpen(),
     setHostMenuOpen: (v: boolean) => setMenuOpen(v),
-    hostBtn: undefined,
+    hostMenuAnchor: () => menuAnchor(),
+    setHostMenuAnchor: (v: string | null) => setMenuAnchor(v),
     connectionState: () => "connected",
     loadHosts: () => { api.commands.push({ type: "load-hosts" }); return Promise.resolve(); },
     removeHost: () => { setMenuOpen(false); api.commands.push({ type: "remove-host" }); return Promise.resolve(); },

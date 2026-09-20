@@ -7,12 +7,11 @@ import {
   onMount,
   onCleanup,
   Show,
-  For,
 } from "solid-js";
-import { useUI, useHost, useModal } from "./ctx";
+import { useUI, useHost } from "./ctx";
 import { Icon as Iconify } from "../components/icon";
 import { IndirectBrand } from "./components/IndirectBrand";
-import { FloatMenu } from "./components/FloatMenu";
+import { HostCard } from "./components/HostCard";
 import { RemoteHints } from "./presentation";
 import { projectForDirectory } from "./paths";
 import { contextDisplay, type GatewayModel } from "./context";
@@ -68,7 +67,6 @@ import { createSettings } from "./hooks/useSettings";
 export function UpdateFreezeOverlay() {
   const ui = useUI();
   const hosts = useHost();
-  const m = useModal();
   // Overlay is per-ACTIVE-host: visible only while the host you are ON
   // is frozen. Switching to a non-frozen host hides the overlay so you
   // can keep working there; switching back re-shows it. (Scanning all
@@ -126,55 +124,11 @@ export function UpdateFreezeOverlay() {
               </button>
             </div>
           </div>
-          {/* Same host card as the sidebar bottom (WorkspaceSidebar): the
-              button + FloatMenu pair, so switching/connecting/removing
-              behaves identically — including the remove confirm modal. */}
+          {/* Shared HostCard (same component as the update overlay):
+              per-instance anchor ref + opener gating, so the menu can
+              never jump to the hidden card. */}
           <div class="mx-auto w-full max-w-sm rounded-xl border border-line/70 bg-card p-2 text-left">
-            <button
-              ref={hosts.hostBtn}
-              data-menubtn
-              aria-label="Select host"
-              aria-haspopup="menu"
-              aria-expanded={hosts.hostMenuOpen()}
-              onClick={() => { const next = !hosts.hostMenuOpen(); ui.closeMenus(); hosts.setHostMenuOpen(next); }}
-              class="w-full flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-left hover:bg-elev transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 cursor-pointer"
-            >
-              <span class="flex h-8 w-8 items-center justify-center rounded-lg border border-line bg-card text-ink-400 shrink-0">
-                <Iconify icon="lucide:monitor" size={16} />
-              </span>
-              <span class="flex-1 min-w-0">
-                <span class="block truncate text-xs font-medium text-ink-200">{hosts.activeHost()?.name || hosts.activeHost()?.hostname || "Select host"}</span>
-                <span class="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-500">
-                  <span class={`h-1.5 w-1.5 rounded-full ${hosts.connectionState() === "connected" && hosts.activeHost()?.status === "online" ? "bg-accent-500" : "bg-ink-600"}`} />
-                  {hosts.connectionState() !== "connected" ? "Reconnecting…" : hosts.activeHost()?.status === "online" ? "Connected" : "Offline"}
-                </span>
-              </span>
-              <Iconify icon="lucide:chevrons-up-down" size={13} class="text-ink-500 shrink-0" />
-            </button>
-            <FloatMenu anchor={() => hosts.hostBtn} open={hosts.hostMenuOpen()} placement="top-start" width="18rem">
-              <div class="px-2.5 py-2 text-[10px] uppercase tracking-wider font-semibold text-ink-500">Your hosts</div>
-              <div role="menu" aria-label="Hosts" class="space-y-0.5">
-                <For each={hosts.hosts()}>{(host) => (
-                  <button role="menuitemradio" aria-checked={host.id === hosts.activeHostId()}
-                    class="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-elev focus-visible:bg-elev cursor-pointer"
-                    onClick={() => { hosts.setHostMenuOpen(false); hosts.setActiveHostId(host.id); }}>
-                    <Iconify icon="lucide:monitor" size={15} class="text-ink-500 shrink-0" />
-                    <span class="flex-1 min-w-0"><span class="block truncate text-xs text-ink-200">{host.name || host.hostname || host.id}</span>
-                      <span class="block text-[11px] text-ink-500">{host.status === "online" ? "Online" : "Offline"}{host.os ? ` · ${host.os}` : ""}</span></span>
-                    <Show when={host.id === hosts.activeHostId()}><Iconify icon="lucide:check" size={14} /></Show>
-                  </button>
-                )}</For>
-              </div>
-              <div class="mt-1 border-t border-line pt-1 space-y-0.5">
-                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-ink-400 hover:bg-elev cursor-pointer"
-                  onClick={() => { hosts.setHostMenuOpen(false); void hosts.loadHosts(); }}><Iconify icon="lucide:refresh-cw" size={13} />Refresh hosts</button>
-                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-ink-200 hover:bg-elev cursor-pointer"
-                  onClick={() => { hosts.setHostMenuOpen(false); void m.generatePairingToken(); }}><Iconify icon="lucide:plus" size={13} />Connect another host</button>
-                <button class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-brand-500 hover:bg-elev cursor-pointer" onClick={() => { hosts.setHostMenuOpen(false); void hosts.removeHost(); }}>
-                  <Iconify icon="lucide:trash-2" size={13} />Remove current host
-                </button>
-              </div>
-            </FloatMenu>
+            <HostCard id="overlay" />
           </div>
         </div>
       </div>

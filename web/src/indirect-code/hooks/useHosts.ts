@@ -17,7 +17,13 @@ export function createHosts(opts: {
     }
   })());
   const [hostMenuOpen, setHostMenuOpen] = createSignal(false);
-  let hostBtn: HTMLButtonElement | undefined;
+  // Which host-card instance opened the menu (each HostCard owns a local
+  // id). The card renders twice at once — sidebar bottom + full-screen
+  // update overlay — sharing one `let hostBtn` meant the last-rendered
+  // card stole the anchor and the open menu jumped to the hidden card
+  // ("lá em cima" after update/host switch). Each card now anchors its
+  // own menu and only shows it when IT is the opener.
+  const [hostMenuAnchor, setHostMenuAnchor] = createSignal<string | null>(null);
 
   createEffect(() => {
     const hid = activeHostId();
@@ -92,7 +98,7 @@ export function createHosts(opts: {
 
   return {
     hosts, activeHostId, setActiveHostId, activeHost,
-    hostMenuOpen, setHostMenuOpen, hostBtn,
+    hostMenuOpen, setHostMenuOpen, hostMenuAnchor, setHostMenuAnchor,
     loadHosts, removeHost, noteHostStatus, markActiveHostOffline,
   };
 }

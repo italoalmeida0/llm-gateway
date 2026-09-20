@@ -40,8 +40,10 @@ import assert from "node:assert/strict";
  await settle();
  assert((await text()).includes("waiting for promote"), "stage live");
 
- // 4. Host card: open menu, switch to h2.
- await page.getByRole("button", { name: "Select host" }).click(); await settle();
+ // 4. Host card: open menu, switch to h2. (Two cards now: overlay
+ // card first, #sidebar-card second — the menu must anchor to the
+ // CLICKED one; step 9 pins the geometry.)
+ await page.locator("#sidebar-card").getByRole("button", { name: "Select host" }).click(); await settle();
  t = await text();
  assert(t.includes("Your hosts") && t.includes("two"), "host menu opens with hosts");
  await page.getByRole("menuitemradio", { name: /two/ }).click(); await settle();
@@ -63,13 +65,16 @@ import assert from "node:assert/strict";
  // 6. Menu actions: connect + refresh + remove send commands.
  // NOTE: Playwright clicks each menu item directly after opening (no
  // keyboard nav): the floating menu closes on select, so reopen first.
- await page.getByRole("button", { name: "Select host" }).click(); await settle();
+ // Always drive the SIDEBAR card here: the overlay card unmounts on
+ // switch-away (step 4 hid the overlay), so only #sidebar-card stays
+ // mounted through the whole flow.
+ await page.locator("#sidebar-card").getByRole("button", { name: "Select host" }).click(); await settle();
  await page.getByRole("button", { name: /Connect another host/ }).click(); await settle();
  assert((await cmds()).some((c:any)=>c.type==="pair"), "connect sends pair");
- await page.getByRole("button", { name: "Select host" }).click(); await settle();
+ await page.locator("#sidebar-card").getByRole("button", { name: "Select host" }).click(); await settle();
  await page.getByRole("button", { name: /Refresh hosts/ }).click(); await settle();
  assert((await cmds()).some((c:any)=>c.type==="load-hosts"), "refresh sends load-hosts");
- await page.getByRole("button", { name: "Select host" }).click(); await settle();
+ await page.locator("#sidebar-card").getByRole("button", { name: "Select host" }).click(); await settle();
  // Remove opens the confirm modal in the real page; the fixture stubs
  // removeHost as a command. Click via mouse at the resolved box: the
  // floating menu repositions under autoUpdate on reopen, and
@@ -89,6 +94,37 @@ import assert from "node:assert/strict";
  await page.evaluate(() => (window as any).overlayUI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 3, autoUpdate: true, frozen: false }));
  await settle();
  assert(!(await text()).includes("Updating"), "overlay hidden after unfreeze");
+
+ // 9. Two HostCards, one shared menu (sidebar + overlay regression):
+ // both cards visible at once, the menu must follow the CLICKED card.
+ // Freeze again so the overlay card is back alongside #sidebar-card.
+ // NOTE: step 4's switch-to-h2 may have left the menu OPEN (switching
+ // hosts hides the overlay but the sidebar card's menu state survives
+ // — the very class of bug this step guards). Close it first so the
+ // geometry below measures a fresh open from each card.
+ await page.keyboard.press("Escape"); await settle();
+ await page.evaluate(() => (window as any).overlayUI.noteUpdate("h1", { current: "1.1.0", available: "1.2.0", checkedAt: 4, autoUpdate: true, frozen: true, freezeStage: "copying sessions" }));
+ await settle();
+ const cards = page.getByRole("button", { name: "Select host" });
+ assert.equal(await cards.count(), 2, "two host cards (overlay + sidebar)");
+ // Open via the OVERLAY card (nth 0), then via the SIDEBAR card
+ // (nth 1): the menu must jump between the two anchors. Under the old
+ // shared-ref bug the second open kept the first card's anchor (or a
+ // stale one) and the menu rendered up top instead of by its card.
+ await cards.nth(0).click(); await settle();
+ const menuBoxA = await page.getByRole("menu", { name: "Hosts" }).boundingBox();
+ assert(menuBoxA, "menu opens from overlay card");
+ await cards.nth(1).click(); await settle();
+ const menuBoxB = await page.getByRole("menu", { name: "Hosts" }).boundingBox();
+ assert(menuBoxB, "menu opens from sidebar card");
+ assert(
+   Math.abs(menuBoxB!.y - menuBoxA!.y) > 10,
+   `menu follows clicked card (overlayY=${Math.round(menuBoxA!.y)} sidebarY=${Math.round(menuBoxB!.y)})`,
+ );
+ assert((await text()).includes("Your hosts"), "menu content visible");
+ // Click the same sidebar card again toggles its own menu closed.
+ await cards.nth(1).click(); await settle();
+ assert(!(await text()).includes("Your hosts"), "menu toggles closed on same card");
 
  assert.equal(errors.length, 0, "zero page errors: " + errors.join("; "));
  console.log("PASS: update overlay brand/stage/host-card/cancel/switch-away");

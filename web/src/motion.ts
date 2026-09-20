@@ -68,3 +68,27 @@ export function usalCount(formatted: string): { "data-usal": string } {
 }
 
 export { USAL };
+
+// USAL 2.0 observes all DOM mutations and searches the entire document for
+// shadow roots/animation targets. The streaming workspace has no USAL
+// entrances; leave its hot DOM outside that global observer's lifetime.
+let motionEnabled = true;
+let changingMotion = false;
+export function setMotionEnabled(enabled: boolean) {
+  if (motionEnabled === enabled) return;
+  motionEnabled = enabled;
+  if (changingMotion) return;
+  changingMotion = true;
+  void (async () => {
+    // Let USAL's automatic initial rAF run before attempting to destroy it.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      for (;;) {
+        const wanted = motionEnabled;
+        if (wanted) await USAL.restart();
+        else await USAL.destroy();
+        if (wanted === motionEnabled) break;
+      }
+    } finally { changingMotion = false; }
+  })();
+}

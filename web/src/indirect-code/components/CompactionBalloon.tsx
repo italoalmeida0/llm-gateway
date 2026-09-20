@@ -1,6 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
-import { Streamdown } from "streamdown-solid";
+import { StreamingMarkdown } from "./StreamingMarkdown";
 import { FileIcon } from "../presentation";
 import { baseNameOf } from "../transcript";
 import { copyWithToast } from "../../ui";
@@ -210,7 +210,7 @@ export function CompactionBalloon(props: CompactionBalloonProps) {
               }
             >
               <div class="rc-markdown text-xs max-h-96 overflow-y-auto px-1 py-0.5">
-                <Streamdown class="text-xs">{cleanedSummary()}</Streamdown>
+                <StreamingMarkdown class="text-xs">{cleanedSummary()}</StreamingMarkdown>
               </div>
             </Show>
           </div>

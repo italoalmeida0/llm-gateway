@@ -36,6 +36,7 @@
     "@signaldb/sync": "^1.3.1",
     "ag-grid-community": "31.1.1",
     "highlight.js": "^11.12.0",
+    "katex": "0.16.47",
     "magic-bytes.js": "^1.13.1",
     "marked": "^18.0.11",
     "nodemailer": "^9.0.5",
@@ -43,7 +44,7 @@
     "solid-ag-grid": "^0.0.230",
     "solid-charts": "0.0.2",
     "sortablejs": "^1.15.7",
-    "streamdown-solid": "^0.0.3",
+    "streaming-markdown": "0.2.15",
     "tokenx": "^2.1.0",
     "usal": "^2.0.0",
     "web-push": "^3.6.7"
@@ -70,8 +71,5 @@
     "solid-js": "^1.9.14",
     "tailwindcss": "^4.3.3",
     "typescript-eslint": "^8.69.0"
-  },
-  "patchedDependencies": {
-    "streamdown-solid@0.0.3": "patches/streamdown-solid@0.0.3.patch"
   }
 }

@@ -1,4 +1,5 @@
 import "@fontsource-variable/inter";
+import "katex/dist/katex.min.css";
 import "@fontsource-variable/jetbrains-mono";
 
 import { render } from "solid-js/web";
@@ -30,6 +31,7 @@ import {
   toast,
   watchSystemTheme,
 } from "./ui";
+import { setMotionEnabled } from "./motion";
 import LoginPage from "./pages/Login";
 import SetPasswordPage from "./pages/SetPassword";
 import DashboardPage from "./pages/Dashboard";
@@ -159,6 +161,8 @@ function RailItem(props: { item: NavItem; current: string; badge?: number }) {
 }
 
 function AppShell(props: { children: JSX.Element }) {
+  createEffect(() => setMotionEnabled(route().path !== "/code"));
+  onCleanup(() => setMotionEnabled(true));
   const user = () => currentSession()!.user;
   const [mobileNav, setMobileNav] = createSignal(false);
 

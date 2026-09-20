@@ -254,16 +254,24 @@ function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
     : `${entry.msg.id}:${entry.kind}:${"nth" in entry ? entry.nth : index}` }));
 }
 
-/** One aggregate per assistant turn: every message of a turn with tool
- * activity, thinking or multiple messages becomes ordered rows of a single
- * card. Only a turn consisting of one plain message stays a single bubble.
- * Keep the raw transcript and source indices intact, including while a new
- * step streams. */
+type RenderCache = Map<string, { messages: ChatMessage[]; block: RenderBlock }>;
+
+/** Per-view cache: immutable message identities invalidate only changed turns.
+ * Keeping only the latest turn set bounds retention across session switches. */
+export function createRenderBlockBuilder() {
+  const cache: RenderCache = new Map();
+  return (messages: ChatMessage[]) => buildRenderBlocks(messages, cache);
+}
+
+/** One aggregate per assistant turn: thinking/tools become ordered rows;
+ * a single plain assistant message stays a bubble. Source indices remain
+ * attached to the original daemon messages. */
 export function buildRenderBlocks(
-  messages: ChatMessage[],
+  messages: ChatMessage[], cache?: RenderCache,
 ): RenderBlock[] {
   const list = withoutContinueNudges(withoutTodoActivity(messages));
   const result: RenderBlock[] = [];
+  const nextCache: RenderCache = new Map();
 
   for (let i = 0; i < list.length; i++) {
     const head = list[i];
@@ -273,6 +281,10 @@ export function buildRenderBlocks(
     while (turnEnd + 1 < list.length && list[turnEnd + 1].role !== "user" &&
       !(head.turnIndex && list[turnEnd + 1].turnIndex && head.turnIndex !== list[turnEnd + 1].turnIndex)) turnEnd++;
     const turnMsgs = list.slice(i, turnEnd + 1);
+    const cached = cache?.get(head.id);
+    if (cached && cached.messages.length === turnMsgs.length && cached.messages.every((m, index) => m === turnMsgs[index])) {
+      result.push(cached.block); nextCache.set(head.id, cached); i = turnEnd; continue;
+    }
     const tools = turnMsgs.some(hasToolActivity);
     const thoughts = turnMsgs.some((m) =>
       m.blocks.some((b) => b.type === "reasoning" && !!b.reasoning?.trim()));
@@ -288,8 +300,10 @@ export function buildRenderBlocks(
         finalMsgId: finalTurnMessage(turnMsgs)?.id ?? null,
       });
     }
+    nextCache.set(head.id, { messages: turnMsgs, block: result[result.length - 1] });
     i = turnEnd;
   }
+  if (cache) { cache.clear(); for (const [key, value] of nextCache) cache.set(key, value); }
   return result;
 }
 

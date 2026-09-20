@@ -250,10 +250,19 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   `ag-theme-quartz(-dark)` class; the `--ag-*` CSS variables are remapped to
   the semantic tokens in `style.tailwindcss.css` (never hardcode hex).
   `@fontsource-variable/inter` is a bundled dev asset (no runtime CDN).
-   `streamdown-solid@0.0.3` ships raw `.tsx` sources and its
-   `Record<BundledLanguage, …>` broke against the installed shiki — patched
-   via `bun patch` (`patches/streamdown-solid@0.0.3.patch`, widened to
-   `Partial<Record>`); revisit the patch if the package is ever upgraded.
+   Indirect Code Markdown uses `streaming-markdown@0.2.15` (the user-tested
+   thetarnav parser) via `components/StreamingMarkdown.tsx`, wrapping the
+   parity.html port in `components/TarnavMarkdown.tsx`: incremental DOM,
+   bounded snapshot slices, live block highlighting, gutters/copy, file and
+   command icons, KaTeX (local CSS/fonts), and table exports. Pause rendering
+   while hidden/collapsed; keep raw code separate from highlighted DOM.
+   Preserve the `data-streamdown` attributes for existing theme rules; they
+   are CSS hooks, not a dependency on the removed renderer. Browser gates use
+   only the current renderer.
+   Relay events share one ordered, lossless batch (`relayInbox.ts`); never
+   let status/snapshot events overtake buffered deltas. USAL's global DOM
+   observer is suspended on `/code` because that workspace has no USAL
+   entrances. See `docs/performance/indirect-streaming.md`.
    Bun-native or hand-rolled beats a new dep.
 
 ## Commands

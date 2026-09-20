@@ -1,4 +1,5 @@
 import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
+import { useDisclosureActive } from "./Disclosure";
 import { escapeHtml, highlightCode } from "../utils/lang";
 import { followTail, recordToolScroll, restoreToolScroll } from "../utils/scrollMemory";
 
@@ -37,6 +38,7 @@ export function CodeBlock(props: {
   /** Pin to the tail while growing (streaming). Omit for static views. */
   follow?: () => boolean;
 }) {
+  const disclosureActive = useDisclosureActive();
   let containerRef: HTMLDivElement | null = null;
   const [rows, setRows] = createSignal<CodeRow[] | null>(null);
   const [rawHtml, setRawHtml] = createSignal<string | null>(null);
@@ -48,6 +50,7 @@ export function CodeBlock(props: {
   const hasGutter = () => !props.bare && rawLines().some((l) => /^\d+:/.test(l));
 
   createEffect(() => {
+    if (!disclosureActive()) return;
     const text = clean();
     const lang = props.language;
     let cancelled = false;

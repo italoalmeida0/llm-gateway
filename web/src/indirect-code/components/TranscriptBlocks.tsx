@@ -1,7 +1,7 @@
 import { createEffect, createMemo, For, Show, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { createDisclosure, DisclosureBody } from "./Disclosure";
-import { Streamdown } from "streamdown-solid";
+import { StreamingMarkdown } from "./StreamingMarkdown";
 import { followTail } from "../utils/scrollMemory";
 import { Icon as Iconify } from "../../components/icon";
 import type { ChatMessage, ContentBlock, RenderBlock, RenderBlockSeries, ToolUnit, TurnEntry } from "../types";
@@ -11,7 +11,6 @@ import type { ToolSeg } from "../utils/toolSegs";
 import { groupTitle, specialTitle } from "../utils/titles";
 import { formatDurationSecs } from "../utils/format";
 import { useToolUnitModel } from "./tool/toolUnitModel";
-import { transcriptMarkdownComponents } from "./MarkdownCode";
 import { ToolUnitHeader } from "./tool/ToolUnitHeader";
 import { ToolEditBodies } from "./tool/ToolEditBodies";
 import { ToolSearchBodies } from "./tool/ToolSearchBodies";
@@ -45,8 +44,8 @@ export interface TranscriptRenderCtx {
   bgClock: () => number;
 }
 
-/** Thinking as a tool-style row: header (bot icon + timer) with a
- * Streamdown body. Open by default while the turn runs, closed after —
+/** Thinking as a tool-style row: header (bot icon + timer) with an
+ * incremental Markdown body. Open by default while the turn runs, closed after —
  * unless the user toggled it explicitly. */
 function renderThinkingRow(
   ctx: TranscriptRenderCtx,
@@ -94,9 +93,9 @@ function renderThinkingRow(
           ref={(el) => onCleanup(followTail(el, () => open() && streaming()))}
           class="rc-markdown w-full text-xs leading-relaxed break-words overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-64 pl-1 pb-1 text-ink-400"
         >
-          <Streamdown components={transcriptMarkdownComponents}>
+          <StreamingMarkdown streaming={streaming()} active={open() && !hidden()}>
             {entry.block.reasoning || "(thinking…)"}
-          </Streamdown>
+          </StreamingMarkdown>
         </div>
       </DisclosureBody>
     </div>
@@ -104,7 +103,7 @@ function renderThinkingRow(
 }
 
 /** Assistant text as a tool-style row: header with a one-line preview and
- * a Streamdown body. Hidden (display:none, kept in the DOM) while the
+ * an incremental Markdown body. Hidden (display:none, kept in the DOM) while the
  * hide-tool-messages rule, verbose filter, fuzzy dedup or the featured
  * final message takes it out of the card. */
 function renderTextRow(
@@ -138,7 +137,7 @@ function renderTextRow(
           ref={(el) => onCleanup(followTail(el, () => open() && streaming()))}
           class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-96 pl-1 pb-1"
         >
-          <Streamdown components={transcriptMarkdownComponents}>{entry.block.text}</Streamdown>
+          <StreamingMarkdown streaming={streaming()} active={open() && !hidden()}>{entry.block.text}</StreamingMarkdown>
         </div>
       </DisclosureBody>
     </div>
@@ -181,10 +180,10 @@ function renderTurnAggregate(
         u.call.toolId === tailCall()?.call?.toolId));
   const isPending = (u: ToolUnit) => running() && !u.result && !!u.call?.toolId &&
     (series.extras.at(-1) ?? series.msg).blocks.some((b) => b.type === "tool_call" && b.toolId === u.call?.toolId);
-  const lastEntryIdx = () => series.entries.length - 1;
+  const lastEntryIdx = () => (series.entries?.length ?? 0) - 1;
   /** A stale thinking timer (snapshot restart mid-tools) must not spin:
    * live only while the turn's tail is still thinking. */
-  const tailIsThinking = () => series.entries[lastEntryIdx()]?.kind === "thinking";
+  const tailIsThinking = () => series.entries?.[lastEntryIdx()]?.kind === "thinking";
   const lastTextIdx = () => {
     let idx = -1;
     series.entries.forEach((e, i) => { if (e.kind === "text") idx = i; });
@@ -301,7 +300,7 @@ function renderFinalMsg(ctx: TranscriptRenderCtx, series: RenderBlockSeries) {
           <For each={m().blocks.filter((b) => b.type === "image" || (b.type === "text" && !!b.text?.trim()))}>
             {(block) => block.type === "image" ? renderImageBlock(ctx, block) : (
               <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
-                <Streamdown components={transcriptMarkdownComponents}>{block.text}</Streamdown>
+                <StreamingMarkdown>{block.text}</StreamingMarkdown>
               </div>
             )}
           </For>
@@ -318,7 +317,7 @@ function renderSingleAssistant(ctx: TranscriptRenderCtx, msg: ChatMessage) {
       <For each={msg.blocks.filter((b) => b.type === "image" || (b.type === "text" && !!b.text?.trim()))}>
         {(block) => block.type === "image" ? renderImageBlock(ctx, block) : (
           <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
-            <Streamdown components={transcriptMarkdownComponents}>{block.text}</Streamdown>
+            <StreamingMarkdown streaming={msg.streaming}>{block.text}</StreamingMarkdown>
           </div>
         )}
       </For>

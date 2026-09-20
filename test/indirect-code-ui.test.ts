@@ -11,7 +11,7 @@ import {
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity, sameRemotePath } from "../web/src/indirect-code/paths";
 import {
-  blockTurnDuration, buildRenderBlocks, cacheHitPct, finalTurnMessage, fmtUsd, fuzzySame, isHeaderOnlySleep, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
+  blockTurnDuration, buildRenderBlocks, createRenderBlockBuilder, cacheHitPct, finalTurnMessage, fmtUsd, fuzzySame, isHeaderOnlySleep, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
 } from "../web/src/indirect-code/transcript";
 import { specialTitle } from "../web/src/indirect-code/utils/titles";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
@@ -1778,4 +1778,21 @@ describe("Tool row model", () => {
     expect(rb?.toolResult).toBe("");
     expect((rb?.toolDetails as any)?.detached).toBe(true);
   });
+});
+
+
+test("streaming reuses unchanged historical turn derivations and invalidates edits", () => {
+  const build = createRenderBlockBuilder();
+  const old: ChatMessage = { id: "old", role: "assistant", turnIndex: 1, blocks: [{ type: "reasoning", reasoning: "old thought" }, { type: "text", text: "old answer" }] };
+  const live: ChatMessage = { id: "live", role: "assistant", turnIndex: 2, streaming: true, blocks: [{ type: "reasoning", reasoning: "new thought" }] };
+  const first = build([old, live]);
+  const updated = appendReasoningDelta([old, live], " delta");
+  const second = build(updated);
+  expect(second).toEqual(buildRenderBlocks(updated));
+  expect(second[0]).toBe(first[0]);
+  expect(second[1]).not.toBe(first[1]);
+  const edited = [{ ...old, blocks: [{ type: "text" as const, text: "edited" }] }, updated[1]];
+  expect(build(edited)).toEqual(buildRenderBlocks(edited));
+  build([]);
+  expect(build([old, live])[0]).not.toBe(first[0]);
 });

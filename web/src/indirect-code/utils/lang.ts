@@ -166,6 +166,28 @@ function mapHljsClasses(html: string): string {
   });
 }
 
+let hljsSyncCache: any | null = null;
+export async function preloadCodeHighlight(): Promise<void> { hljsSyncCache = await getHljs(); }
+
+/**
+ * Synchronous live block highlighting with preloaded hljs. Returns null
+ * until loading finishes; callers retain source text and retry on readiness.
+ */
+export function highlightCodeSync(text: string, language?: string): string | null {
+  const hljs = hljsSyncCache;
+  if (!hljs) return null;
+  const src = text || "";
+  let html: string;
+  if (language && typeof hljs.getLanguage === "function" && hljs.getLanguage(language)) {
+    html = hljs.highlight(src, { language, ignoreIllegals: true }).value;
+  } else if (typeof hljs.highlightAuto === "function") {
+    html = hljs.highlightAuto(src).value;
+  } else {
+    return null;
+  }
+  return mapHljsClasses(html);
+}
+
 export async function highlightCode(text: string, language?: string): Promise<string> {
   const src = text || "";
   const hljs = await getHljs();

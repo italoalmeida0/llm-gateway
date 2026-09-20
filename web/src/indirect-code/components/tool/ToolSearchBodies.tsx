@@ -1,6 +1,6 @@
 import { For, Show, createMemo, onCleanup } from "solid-js";
 import { followTail } from "../../utils/scrollMemory";
-import { Streamdown } from "streamdown-solid";
+import { StreamingMarkdown } from "../StreamingMarkdown";
 import { Icon as Iconify } from "../../../components/icon";
 import { CodeBlock } from "../CodeBlock";
 import { FileIcon } from "../../presentation";
@@ -206,7 +206,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
                 onScroll={(e) => recordToolScroll(props.m.key(), e.currentTarget)}
                 class="px-3 py-2 max-h-96 overflow-y-auto [scrollbar-gutter:stable] text-[12.5px] leading-relaxed text-ink-200 article-body"
               >
-                <Streamdown>{String(props.m.fetchDetails()?.content || "")}</Streamdown>
+                <StreamingMarkdown>{String(props.m.fetchDetails()?.content || "")}</StreamingMarkdown>
               </div>
               <Show when={props.m.fetchDetails()?.truncated}>
                 <p class="px-3 pb-1 text-[10px] text-ink-600">Truncated</p>

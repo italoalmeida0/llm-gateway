@@ -4,7 +4,7 @@ import { createStore, reconcile } from "solid-js/store";
 import { copyWithToast } from "../../ui";
 import { clearToolScrolls } from "../utils/scrollMemory";
 import { createTranscriptScroll } from "../scroll";
-import { buildRenderBlocks, latestShortTurnMessage } from "../transcript";
+import { createRenderBlockBuilder, latestShortTurnMessage } from "../transcript";
 import { elapsedLabel, messageText } from "../utils/format";
 import { prettyArgs } from "../utils/wire";import {
   appendReasoningDelta as reduceReasoningDelta,
@@ -220,9 +220,18 @@ export function createTranscript(opts: {
   /** Explicit "Pin at bottom": jump to the tail and follow streaming again. */
   function pinAtBottom() { transcriptScroll.pin(); }
 
+  // Keep ingesting ordered state while hidden, but derive the view only once
+  // on return. There is no backlog of per-token DOM work to replay.
+  const [pageVisible, setPageVisible] = createSignal(!document.hidden);
+  const onVisibility = () => setPageVisible(!document.hidden);
+  document.addEventListener("visibilitychange", onVisibility);
+  onCleanup(() => document.removeEventListener("visibilitychange", onVisibility));
+
   // Render blocks (reconciled store to preserve DOM identity across deltas)
+  const buildRenderBlocks = createRenderBlockBuilder();
   const [renderState, setRenderState] = createStore<{ blocks: (RenderBlock & { id: string })[] }>({ blocks: [] });
   createEffect(() => {
+    if (!pageVisible()) return;
     const blocks = buildRenderBlocks(messages()).map((block) => ({ ...block, id: block.msg.id }));
     setRenderState("blocks", reconcile(blocks, { merge: true }));
   });
@@ -454,7 +463,7 @@ export function createTranscript(opts: {
   const WORKER_MIN_MESSAGES = 50;
   let historyWorker: Worker | null = null;
   let historyWorkerSeq = 0;
-  const historyWorkerWaiters = new Map<number, (page: ChatMessage[]) => void>();
+  const historyWorkerWaiters = new Map<number, { resolve: (page: ChatMessage[]) => void; fallback: () => ChatMessage[] }>();
   function getHistoryWorker(): Worker | null {
     if (historyWorker) return historyWorker;
     try {
@@ -465,8 +474,13 @@ export function createTranscript(opts: {
         const w = historyWorkerWaiters.get(ev.data?.seq);
         if (w) {
           historyWorkerWaiters.delete(ev.data.seq);
-          w(Array.isArray(ev.data.page) ? ev.data.page : []);
+          w.resolve(Array.isArray(ev.data.page) ? ev.data.page : []);
         }
+      };
+      historyWorker.onerror = () => {
+        historyWorker?.terminate(); historyWorker = null;
+        const waiters = [...historyWorkerWaiters.values()]; historyWorkerWaiters.clear();
+        for (const waiter of waiters) waiter.resolve(waiter.fallback());
       };
     } catch {
       historyWorker = null;
@@ -479,8 +493,10 @@ export function createTranscript(opts: {
     if (!w) return normalizeSessionMessages(rawMsgs, [], indexBase);
     return new Promise((resolve) => {
       const seq = ++historyWorkerSeq;
-      historyWorkerWaiters.set(seq, resolve);
-      w.postMessage({ seq, rawMsgs, indexBase });
+      const fallback = () => normalizeSessionMessages(rawMsgs, [], indexBase);
+      historyWorkerWaiters.set(seq, { resolve, fallback });
+      try { w.postMessage({ seq, rawMsgs, indexBase }); }
+      catch { historyWorkerWaiters.delete(seq); resolve(fallback()); }
     });
   }
 
@@ -495,38 +511,53 @@ export function createTranscript(opts: {
   function beginLoad(sessionId: string) {
     initialScrollSession = sessionId;
   }
+  let snapshotVersion = 0;
+  let pendingSnapshot: { replay: (() => void)[] } | null = null;
   async function applySessionContent(sessionId: string, rawMsgs: any[], compaction?: any, history?: any) {
-    if (history && typeof history.oldestTurn === "number") {
-      // Paged snapshot: merge the tail over previously loaded older pages,
-      // then seal it (newest seal; budget reveals it immediately).
-      const base = typeof history.firstIndex === "number" ? history.firstIndex : 0;
-      const tail = await normalizeAsync(rawMsgs, base);
-      if (sessionId !== opts.getSessionId()) return; // stale while worker ran
-      setMessages((prev) => {
-        const ids = new Set(tail.map((m) => m.id));
-        return [...prev.filter((m) => !ids.has(m.id)), ...tail];
-      });
-      sealBlock(rawMsgs, history);
-      // Fresh tail snapshot: reveal it (newest seal visible).
-      setSealedBudget((n) => Math.max(n, sealedBlocks().length));
-    } else if ((rawMsgs?.length ?? 0) >= WORKER_MIN_MESSAGES) {
-      const tail = await normalizeAsync(rawMsgs, 0);
-      if (sessionId !== opts.getSessionId()) return;
-      setMessages(() => tail as ChatMessage[]);
+    const version = ++snapshotVersion;
+    pendingSnapshot = null;
+    const paged = history && typeof history.oldestTurn === "number";
+    const base = paged && typeof history.firstIndex === "number" ? history.firstIndex : 0;
+    const normalized = !paged && (rawMsgs?.length ?? 0) < WORKER_MIN_MESSAGES
+      ? normalizeSessionMessages(rawMsgs, messages()) : normalizeAsync(rawMsgs, base);
+    let tail: ChatMessage[];
+    if (Array.isArray(normalized)) {
+      // Small snapshots commit synchronously, before the next wire event.
+      tail = normalized;
     } else {
-      setMessages((prev) => normalizeSessionMessages(rawMsgs, prev));
+      pendingSnapshot = { replay: [] };
+      tail = await normalized;
     }
-    restoreEditDraft();
-    if (compaction !== undefined) {
-      setSessionCompaction(compaction);
-    }
+    if (version !== snapshotVersion || sessionId !== opts.getSessionId()) return;
+    const replay = pendingSnapshot?.replay || [];
+    pendingSnapshot = null;
+    batch(() => {
+      if (paged) {
+        setMessages((prev) => {
+          const ids = new Set(tail.map((m) => m.id));
+          return [...prev.filter((m) => !ids.has(m.id)), ...tail];
+        });
+        sealBlock(rawMsgs, history);
+        setSealedBudget((n) => Math.max(n, sealedBlocks().length));
+      } else setMessages(tail);
+      restoreEditDraft();
+      if (compaction !== undefined) setSessionCompaction(compaction);
+      // A worker snapshot must not overwrite deltas/status received while it
+      // was normalizing. Replay only the events after this exact snapshot.
+      for (const apply of replay) apply();
+    });
     if (initialScrollSession === sessionId) {
       initialScrollSession = "";
       scrollToBottom(true);
-    } else {
-      scrollToBottom();
-    }
+    } else scrollToBottom();
   }
+  onCleanup(() => {
+    snapshotVersion++;
+    pendingSnapshot = null;
+    historyWorker?.terminate();
+    for (const waiter of historyWorkerWaiters.values()) waiter.resolve([]);
+    historyWorkerWaiters.clear();
+  });
   function applyUsage(sessionId: string, u: any, cum: any) {
     setSessionUsage((prev) => mergeUsage(prev, sessionId, u, cum));
   }
@@ -862,6 +893,9 @@ export function createTranscript(opts: {
     return false;
   }
   function handleTruncated(sessionId: string | undefined, keep: number) {
+    if (pendingSnapshot && sessionId === opts.getSessionId()) {
+      pendingSnapshot.replay.push(() => handleTruncated(sessionId, keep)); return;
+    }
     // Authoritative tail cut after edit/regenerate (daemon broadcast).
     // keepIndex is the last RAW message to keep; drop rendered messages
     // whose srcIdx exceeds it, then let the following session_content
@@ -879,6 +913,9 @@ export function createTranscript(opts: {
     }
   }
   function handleStatusEvent(msg: SessionStatusEvent) {
+    if (pendingSnapshot && msg.sessionId === opts.getSessionId()) {
+      pendingSnapshot.replay.push(() => handleStatusEvent(msg)); return;
+    }
     // Composer responsiveness only (stop button state) — the collections
     // get the same truth via the sessions change ping.
     if (msg.sessionId === opts.getSessionId()) {
@@ -896,6 +933,7 @@ export function createTranscript(opts: {
   }
   function handleAgentEvent(sessionId: string, ev: AgentEvent | undefined) {
     if (!ev || sessionId !== opts.getSessionId()) return;
+    if (pendingSnapshot) { pendingSnapshot.replay.push(() => handleAgentEvent(sessionId, ev)); return; }
     if (ev.type === "turn_start") {
       setSessionStatus("running");
       setTurnActivity((turn) => !turn || turn.endedAt ? { startedAt: Date.now(), status: "running" } : turn);
@@ -1012,6 +1050,7 @@ export function createTranscript(opts: {
    * cleaned up by their own domains; the page orchestrates).
    */
   function resetForSession() {
+    snapshotVersion++; pendingSnapshot = null;
     editSource = null;
     editAttachments.clearAttachments();
     setEditingAttachments([]);

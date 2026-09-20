@@ -488,41 +488,6 @@ export default function IndirectCodePage() {
 
   let forkKind: "resend" | "regenerate" | "fork" | null = null;
   let pendingDiscardReloadSid: string | null = null;
-  // Hidden-tab coalescing: while the tab is in background, agent_event
-  // deltas accumulate here instead of rendering one by one (each would
-  // schedule Solid renders + markdown/highlight + rAF frames that never
-  // run hidden, then all flush at once on return = the 1-2s freeze).
-  // Cheap status-ish events still apply live; text/tool streams wait.
-  // On visible, text deltas for the same carrier are summed before a
-  // single apply, then the queue drains in order.
-  let hiddenEventQueue: { sessionId: string; event: any }[] = [];
-  const HIDDEN_LIVE_TYPES = new Set([
-    "turn_start", "turn_end", "usage", "todo_update", "compact_progress",
-    "retry", "user_message",
-  ]);
-  function flushHiddenQueue() {
-    if (hiddenEventQueue.length === 0) return;
-    const q = hiddenEventQueue;
-    hiddenEventQueue = [];
-    // Coalesce consecutive text/reasoning deltas and tool-args deltas.
-    const out: { sessionId: string; event: any }[] = [];
-    for (const item of q) {
-      const prev = out[out.length - 1];
-      const t = item.event?.type;
-      if (
-        prev && prev.sessionId === item.sessionId &&
-        (t === "text_delta" || t === "reasoning_delta" || t === "tool_use_args") &&
-        prev.event?.type === t &&
-        (t !== "tool_use_args" || prev.event?.id === item.event?.id)
-      ) {
-        prev.event = { ...prev.event, delta: (prev.event.delta || "") + (item.event.delta || ""), text: ((prev.event as any).text || "") + ((item.event as any).text || "") };
-        continue;
-      }
-      out.push(item);
-    }
-    for (const item of out) transcript.handleAgentEvent(item.sessionId, item.event);
-  }
-
   function reloadSessionFromDaemon(sid: string) {
     if (!sid || sid !== activeSessionId()) return;
     const s = mirror.sessions().find((x) => x.id === sid);
@@ -929,16 +894,6 @@ export default function IndirectCodePage() {
 
       case "agent_event": {
         if (msg.sessionId !== activeSessionId()) break;
-        const evType: string | undefined = msg.event?.type;
-        if (typeof document !== "undefined" && document.hidden && !(evType && HIDDEN_LIVE_TYPES.has(evType)) && msg.sessionId) {
-          hiddenEventQueue.push({ sessionId: msg.sessionId as string, event: msg.event });
-          // Bound the queue: a very long background turn could enqueue
-          // thousands of deltas; coalescing at flush keeps it small, but
-          // cap anyway (drop oldest text of the same carrier is complex —
-          // drop oldest non-structural events instead).
-          if (hiddenEventQueue.length > 2000) hiddenEventQueue.splice(0, hiddenEventQueue.length - 2000);
-          break;
-        }
         if (pendingDiscardReloadSid && pendingDiscardReloadSid === msg.sessionId && msg.event?.type === "turn_start") {
           const sid = pendingDiscardReloadSid;
           pendingDiscardReloadSid = null;
@@ -1020,16 +975,6 @@ export default function IndirectCodePage() {
     };
     window.addEventListener("resize", onResize);
     onCleanup(() => window.removeEventListener("resize", onResize));
-    // Hidden-tab coalescing flush: apply the queued stream as one batch
-    // when the reader returns (single render instead of N catch-ups).
-    const onVisibility = () => {
-      if (!document.hidden) flushHiddenQueue();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    onCleanup(() => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      hiddenEventQueue = [];
-    });
     // Shortcuts: Ctrl/Cmd+K search, Ctrl/Cmd+N new conversation (chatbot).
     // Esc cascades: menus -> history -> editor -> preview -> confirm.
     const onKey = (e: KeyboardEvent) => {

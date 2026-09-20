@@ -1,10 +1,5 @@
 @import "tailwindcss";
 
-/* Streamdown-Solid ships Tailwind classes inside node_modules: make sure the
- * v4 compiler sees them (node_modules is excluded from auto-detection). */
-@source "../node_modules/streamdown-solid/src";
-@source "../node_modules/streamdown-solid/dist";
-
 @custom-variant hover (&:hover);
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
@@ -893,7 +888,7 @@ html[data-theme="dark"] .ag-theme-quartz-dark {
   animation: rc-delayed-banner 0.3s ease-out 3s forwards;
 }
 
-/* Remote Code markdown (Streamdown output) — semantic tokens so both
+/* Indirect Code markdown (Tarnav output) — semantic tokens so both
  * white/dark themes flip for free. Never hardcode hex here. */
 .rc-markdown { color: var(--ink-200); font-size: 0.875rem; line-height: 1.6; }
 .rc-markdown > *:first-child { margin-top: 0; }
@@ -949,7 +944,7 @@ html[data-theme="light"] [data-streamdown="inline-code"] {
 .rc-markdown img { max-width: 100%; border-radius: 0.6rem; }
 .rc-markdown hr { border: none; border-top: 1px solid var(--line); margin: 0.9rem 0; }
 
-/* text-xs modifier for .rc-markdown and Streamdown components */
+/* text-xs modifier for .rc-markdown and renderer elements */
 .rc-markdown.text-xs,
 .rc-markdown .text-xs,
 .text-xs.rc-markdown,

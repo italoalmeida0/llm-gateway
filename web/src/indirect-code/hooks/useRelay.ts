@@ -1,4 +1,5 @@
-import { createSignal, onCleanup } from "solid-js";
+import { batch, createSignal, onCleanup } from "solid-js";
+import { createRelayInbox } from "../relayInbox";
 import { currentSession } from "../../api";
 import type { DaemonCommand } from "../daemon-protocol";
 
@@ -29,6 +30,20 @@ export function createRelay(opts: {
   let reconnectAttempt = 0;
   let disposed = false;
 
+  const inbox = createRelayInbox({
+    apply: (messages) => batch(() => {
+      for (const message of messages) {
+        try { opts.onMessage(message); }
+        catch (err) { console.error("Indirect Code message error:", err); }
+      }
+    }),
+    schedule: (flush) => setTimeout(flush, document.hidden ? 250 : 32),
+    cancel: (timer) => clearTimeout(timer),
+  });
+  const onVisibility = () => { if (!document.hidden) inbox.flush(); };
+  document.addEventListener("visibilitychange", onVisibility);
+  onCleanup(() => { inbox.clear(); document.removeEventListener("visibilitychange", onVisibility); });
+
   function wsOpen() {
     connectionState();
     try {
@@ -52,6 +67,7 @@ export function createRelay(opts: {
   }
 
   function connect(hostId: string) {
+    inbox.clear();
     clearTimeout(reconnectTimer);
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
     if (disposed || !hostId) { setConnectionState("disconnected"); return; }
@@ -70,13 +86,14 @@ export function createRelay(opts: {
     socket.onmessage = (ev) => {
       if (socket !== ws || disposed) return;
       try {
-        opts.onMessage(JSON.parse(ev.data));
+        inbox.push(JSON.parse(ev.data));
       } catch (err) {
         console.error("Indirect Code message error:", err);
       }
     };
     socket.onclose = () => {
       if (socket !== ws || disposed) return;
+      inbox.flush();
       setConnectionState("disconnected");
       opts.onClose();
       const delay = Math.min(1000 * 2 ** reconnectAttempt++, 15000);
@@ -94,7 +111,9 @@ export function createRelay(opts: {
   }
 
   /** Disconnects without reconnecting (host switch): next connect() starts fresh. */
-  function shutdown() {    clearTimeout(reconnectTimer);
+  function shutdown() {
+    inbox.clear();
+    clearTimeout(reconnectTimer);
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
   }
 

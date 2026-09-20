@@ -32,7 +32,7 @@ export function followTail(el: HTMLElement | null, isActive: () => boolean): () 
   let pinned = true;
   let frame = 0;
   const schedule = () => {
-    if (frame) return;
+    if (frame || !isActive() || document.hidden) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
       if (pinned && isActive() && el.clientHeight > 0) el.scrollTop = el.scrollHeight;

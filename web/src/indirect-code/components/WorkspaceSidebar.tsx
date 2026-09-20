@@ -73,6 +73,14 @@ export function WorkspaceSidebar() {
 
   {/* New Conversation */}
   <div class="p-2">
+    <a
+      href="#/"
+      class="w-full flex items-center gap-2 px-3 py-1.5 mb-1 rounded-lg text-xs text-ink-500 hover:text-ink-300 hover:bg-ink-900/60 transition-colors"
+      data-rc-tip="Back to LLM Gateway"
+    >
+      <Iconify icon="lucide:arrow-left" size={13} />
+      <span>Back to Gateway</span>
+    </a>
     <button
       onClick={() => {
         s.startNewConversation();
@@ -93,6 +101,22 @@ export function WorkspaceSidebar() {
       <Iconify icon="lucide:clock" size={13} />
       <span>Conversation History</span>
     </button>
+    {/* Daemon update: white primary button (same style as the settings
+        modal's Save changes), not a pinned banner over the composer. */}
+    <Show when={(() => { const i = ui.daemonUpdate.info(); return !!i && !!i.available && i.available !== i.current; })()}>{(() => {
+      const i = ui.daemonUpdate.info()!;
+      const busy = ui.daemonUpdate.applying() || i.frozen;
+      return (
+        <button
+          onClick={() => ui.daemonUpdate.apply()}
+          disabled={busy}
+          class="ui-button ui-button-primary w-full justify-start mt-1"
+        >
+          <Iconify icon="lucide:arrow-down-to-line" size={14} />
+          <span>{busy ? (i.frozen ? (i.freezeStage || "Updating…") : "Updating…") : `Update to ${i.available}`}</span>
+        </button>
+      );
+    })()}</Show>
   </div>
 
 

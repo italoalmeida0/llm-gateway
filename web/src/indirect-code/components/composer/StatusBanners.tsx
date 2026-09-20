@@ -40,23 +40,6 @@ export function StatusBanners() {
     </ol></Show>
   </section>
 </Show>
-<Show when={(() => { const i = ui.daemonUpdate.info(); return !!i && !!i.available && i.available !== i.current; })()}>{(() => {
-  const i = ui.daemonUpdate.info()!;
-  const busy = ui.daemonUpdate.applying() || i.frozen;
-  return (
-    <div role="status" class="mb-3 flex items-start gap-2 rounded-xl border border-line bg-elev px-3 py-2.5 text-xs text-ink-300">
-      <Iconify icon="lucide:arrow-down-to-line" size={15} class="text-ink-400" />
-      <span class="min-w-0 flex-1 break-words">
-        Daemon update available: {i.available}{i.frozen ? ` (${i.freezeStage || "updating…"})` : ""}.
-      </span>
-      <Show when={!i.frozen}>
-        <button onClick={() => ui.daemonUpdate.apply()} disabled={busy} class="text-ink-200 hover:underline cursor-pointer disabled:opacity-60">
-          {busy ? "Updating…" : "Update now"}
-        </button>
-      </Show>
-    </div>
-  );
-})()}</Show>
 <Show when={ui.appNotice()}>{(notice) =>
   <div role={notice().kind === "err" ? "alert" : "status"} class={`mb-3 flex items-start gap-2 rounded-xl border px-3 py-2.5 text-xs ${notice().kind === "err" ? "border-brand-500/30 bg-brand-500/5 text-ink-200" : "border-line bg-elev text-ink-300"}`}>
     <Iconify icon={notice().kind === "err" ? "lucide:circle-alert" : "lucide:check"} size={15} class={notice().kind === "err" ? "text-brand-500" : "text-ink-400"} />

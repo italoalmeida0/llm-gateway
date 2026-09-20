@@ -69,15 +69,9 @@ export function TranscriptView() {
 <>
 
 
-{/* Floating top-left: back + sidebar toggle (no topbar) */}
+{/* Floating top-left: sidebar toggle only (Back to Gateway lives above
+    New Conversation in the sidebar) */}
 <div class="absolute top-2 left-2 z-20 flex items-center gap-1.5">
-  <a
-    href="#/"
-    class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line/70 text-ink-400 hover:text-ink-200 transition-colors shadow-sm"
-    data-rc-tip="Back to LLM Gateway"
-  >
-    <Iconify icon="lucide:arrow-left" size={14} />
-  </a>
   <button
     onClick={() => ui.setSidebarOpen(!ui.sidebarOpen())}
     class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line/70 text-ink-400 hover:text-ink-200 transition-colors shadow-sm cursor-pointer"

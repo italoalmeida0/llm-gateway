@@ -218,7 +218,9 @@ function AppShell(props: { children: JSX.Element }) {
   );
 
   return (
-    <div class="min-h-screen">
+    <div class="gw-shell min-h-screen">
+      {/* Reserve the native controls row across the whole installed window. */}
+      <div class="gw-wco-bar" data-tauri-drag-region aria-hidden="true" />
       {/* ===== desktop icon rail ===== */}
       <aside class="gateway-rail hidden md:flex fixed inset-y-0 left-0 w-16 lg:w-64 flex-col items-center py-4 border-r border-line z-30">
         <a href="#/" class="flex items-center gap-2.5 lg:w-60 lg:px-2" aria-label="LLM Gateway home">
@@ -261,7 +263,7 @@ function AppShell(props: { children: JSX.Element }) {
       </aside>
 
       {/* ===== mobile top bar ===== */}
-      <div class="md:hidden sticky top-0 z-40 border-b border-line bg-ink-950/90 backdrop-blur">
+      <div class="gw-header md:hidden sticky top-0 z-40 border-b border-line bg-ink-950/90 backdrop-blur">
         <div class="flex items-center justify-between h-14 px-4">
           <a href="#/" class="flex items-center gap-2.5">
             <LogoMark class="w-8 h-8 rounded-lg" />
@@ -301,13 +303,9 @@ function AppShell(props: { children: JSX.Element }) {
       </div>
 
       <main class="md:pl-16 lg:pl-64">
-        {/* Installed-app drag strip (window-controls-overlay): an invisible
-          bar over the header row so the window can be dragged from the
-          user-area side. Hidden in the browser. */}
-        <div class="gw-wco-bar" data-tauri-drag-region aria-hidden="true" />
         {/* ===== desktop header ===== */}
         <header
-          class="hidden md:flex sticky top-0 z-20 h-14 items-center justify-between gap-4 border-b border-line bg-ink-950/95 backdrop-blur px-6"
+          class="gw-header hidden md:flex sticky top-0 z-20 h-14 items-center justify-between gap-4 border-b border-line bg-ink-950/95 backdrop-blur px-6"
         >
           <div class="flex items-center gap-2.5 min-w-0 text-xs">
             <span class="text-ink-500">{route().path.startsWith("/admin") ? "Administration" : "Workspace"}</span>

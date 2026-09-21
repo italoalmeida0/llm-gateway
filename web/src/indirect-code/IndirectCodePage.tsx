@@ -7,6 +7,7 @@ import {
   onMount,
   onCleanup,
   Show,
+  type JSX,
 } from "solid-js";
 import { useUI, useHost } from "./ctx";
 import { Icon as Iconify } from "../components/icon";
@@ -62,6 +63,19 @@ import { createSettings } from "./hooks/useSettings";
 export function WcoTitlebar() {
   return (
     <div class="rc-wco-bar shrink-0" data-tauri-drag-region aria-hidden="true" />
+  );
+}
+
+/** Shared shell keeps the sidebar and conversation below the same titlebar. */
+export function WorkspaceLayout(props: { sidebar: JSX.Element; children: JSX.Element }) {
+  return (
+    <div class="rc-wco-layout flex-1 flex min-h-0 overflow-hidden relative">
+      <WcoTitlebar />
+      {props.sidebar}
+      <main class="rc-wco-main flex-1 flex flex-col min-w-0 min-h-0 bg-ink-950 relative">
+        {props.children}
+      </main>
+    </div>
   );
 }
 
@@ -1338,16 +1352,10 @@ export default function IndirectCodePage() {
         when={hosts.hosts().length > 0}
         fallback={<Onboarding />}
       >
-        {/* WCO overlay layout: sidebar spans both rows (full height, like
-          tweakgrid); the titlebar strip only covers the content column. */}
-        <div class="rc-wco-layout flex-1 flex min-h-0 overflow-hidden relative">
-          <WorkspaceSidebar />
-          <WcoTitlebar />
-          <main class="rc-wco-main flex flex-col min-w-0 min-h-0 bg-ink-950 relative">
-            <TranscriptView />
-            <Composer />
-          </main>
-        </div>
+        <WorkspaceLayout sidebar={<WorkspaceSidebar />}>
+          <TranscriptView />
+          <Composer />
+        </WorkspaceLayout>
       </Show>
 
       <NewProjectModal />

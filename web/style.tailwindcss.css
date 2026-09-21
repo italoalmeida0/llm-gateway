@@ -538,8 +538,7 @@ html.theme-xfade body * {
 
 /*
  * Installed-app chrome: window-controls-overlay (desktop PWA) +
- * safe-area (notch / gesture bar / mobile keyboard), same pattern as
- * tweakgrid's .top-bar. The WCO strip only exists when the app runs
+ * safe-area (notch / gesture bar / mobile keyboard). The WCO strip only exists when the app runs
  * installed with display_override window-controls-overlay; elsewhere the
  * rules below are inert (env() falls back, media never matches).
  */
@@ -550,66 +549,63 @@ html.theme-xfade body * {
   --sar: env(safe-area-inset-right, 0px);
 }
 
-/* Empty drag strip for the installed-app titlebar (nothing inside: no
- * icon, no title, no buttons — the sidebar toggle stays in its normal
- * floating spot in the transcript). Hidden in the browser; in WCO mode it
- * becomes a real in-flow row of the app shell (shrink-0), so the workspace
- * below is pushed down — nothing overlaps: the OS draws its window buttons
- * in the area beside env(titlebar-area-x/width). */
-.rc-wco-bar {
+/* Reserve a full-width opaque row; only its native safe rectangle is
+ * draggable. Content and interactive controls always start below it. */
+.rc-wco-bar, .gw-wco-bar {
   display: none;
 }
 
 @media (display-mode: window-controls-overlay) {
-  /* Overlay layout: the sidebar runs full-height (like tweakgrid — the
-   * titlebar only spans the content area). Off (default) the layout div
-   * is a plain flex row and the bar is display:none, so the browser render
-   * is byte-identical to no overlay. Specificity div.X beats the Tailwind
-   * .flex utility so grid really wins in the bundle. */
+  :root {
+    --wco-top: calc(env(titlebar-area-y, 0px) + env(titlebar-area-height, 33px));
+  }
+  /* Both columns start below the titlebar, including after a live toggle.
+   * Outside WCO the main flex item fills all remaining horizontal space. */
   div.rc-wco-layout {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
     grid-template-areas:
-      "side wco"
+      "wco wco"
       "side main";
   }
   .rc-wco-layout > .rc-wco-bar { grid-area: wco; min-width: 0; }
   .rc-wco-layout > .rc-wco-main { grid-area: main; min-width: 0; min-height: 0; }
   .rc-wco-layout > .rc-sidebar {
     grid-area: side;
-    grid-row: 1 / -1;
   }
-  /* In-flow drag row: only as wide as the draggable area the OS leaves
-   * us (titlebar-area-x/width), padded for the notch. Sticky so it stays
-   * grabbable after scrolling the content. */
-  .rc-wco-bar {
+  .rc-wco-bar, .gw-wco-bar {
     display: block;
-    position: sticky;
-    top: 0;
-    z-index: 60;
+    position: relative;
     flex-shrink: 0;
     width: 100%;
+    height: var(--wco-top);
+    background: var(--ink-950);
+  }
+  .rc-wco-bar::before, .gw-wco-bar::before {
+    content: "";
+    position: absolute;
+    left: env(titlebar-area-x, 0px);
+    top: env(titlebar-area-y, 0px);
+    width: env(titlebar-area-width, 100%);
     height: env(titlebar-area-height, 33px);
-    padding-top: var(--sat);
-    padding-right: var(--sar);
     -webkit-app-region: drag;
     app-region: drag;
   }
-  /* Gateway dashboard: invisible drag strip ABOVE the header row
-   * (user-area side) so the installed window can be dragged there.
-   * Sticky at the viewport top so it stays grabbable after scrolling.
-   * In-flow (not overlay): the header below is pushed down, nothing
-   * stacks over the avatar/name and clicks keep working. */
+  /* The document scrolls on dashboard pages. Keep an opaque titlebar
+   * fixed above the sticky header instead of letting both stick at zero. */
   .gw-wco-bar {
-    display: block;
-    position: sticky;
+    position: fixed;
     top: 0;
+    left: 0;
     z-index: 40;
-    height: env(titlebar-area-height, 33px);
-    -webkit-app-region: drag;
-    app-region: drag;
-    pointer-events: auto;
+  }
+  .gw-shell {
+    padding-top: var(--wco-top);
+  }
+  .gw-shell .gw-header, .gw-shell .gateway-rail,
+  .rc-wco-layout > .rc-sidebar.fixed {
+    top: var(--wco-top);
   }
   /* The composer must clear the gesture bar on installed mobile apps. */
   .rc-safe-bottom {

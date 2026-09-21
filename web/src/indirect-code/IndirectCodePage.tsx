@@ -76,6 +76,11 @@ export function WcoTitlebar(props: WcoTitlebarProps) {
   };
   return (
     <div class="rc-wco-bar" data-tauri-drag-region aria-hidden="false">
+      <div class="rc-wco-traffic" aria-hidden="true">
+        <span class="rc-wco-dot rc-wco-dot--close" />
+        <span class="rc-wco-dot rc-wco-dot--min" />
+        <span class="rc-wco-dot rc-wco-dot--max" />
+      </div>
       <img src="/indirect-icon.svg" alt="" class="rc-wco-icon" draggable={false} />
       <span class="rc-wco-title">{title()}</span>
       <div class="rc-wco-actions">
@@ -86,8 +91,9 @@ export function WcoTitlebar(props: WcoTitlebarProps) {
           aria-label={props.sbOpen() ? "Hide sidebar" : "Show sidebar"}
           title={props.sbOpen() ? "Hide sidebar" : "Show sidebar"}
         >
-          <Iconify icon={props.sbOpen() ? "lucide:panel-left-close" : "lucide:panel-left-open"} size={14} />
+          <Iconify icon={props.sbOpen() ? "lucide:panel-left-close" : "lucide:panel-left-open"} size={15} />
         </button>
+        <span class="rc-wco-sep" aria-hidden="true" />
         <button
           type="button"
           class="rc-wco-btn"
@@ -95,7 +101,7 @@ export function WcoTitlebar(props: WcoTitlebarProps) {
           aria-label="Open settings"
           title="Settings"
         >
-          <Iconify icon="lucide:settings" size={14} />
+          <Iconify icon="lucide:settings" size={15} />
         </button>
       </div>
     </div>

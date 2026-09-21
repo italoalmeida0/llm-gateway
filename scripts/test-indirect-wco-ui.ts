@@ -57,6 +57,7 @@ await page.waitForTimeout(400);
 
 // Icon + session title render through the real component.
 check("wco icon", (await page.locator(".rc-wco-icon").count()) === 1);
+check("wco traffic lights decor", (await page.locator(".rc-wco-traffic .rc-wco-dot").count()) === 3);
 check("wco session title", ((await page.locator(".rc-wco-title").innerText()).trim()) === "Fix login bug");
 
 // Sidebar toggle flips through the real callback.

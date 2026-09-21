@@ -1,13 +1,17 @@
-import { createSignal } from "solid-js";
+import { createSignal, Show } from "solid-js";
 import { render } from "solid-js/web";
 import { Composer } from "../../web/src/indirect-code/components/Composer";
 import { RemoteCodeProvider } from "../../web/src/indirect-code/ctx";
+import { WorkspaceLayout, WorkspaceShell } from "../../web/src/indirect-code/IndirectCodePage";
+import { Modal } from "../../web/src/ui";
 
 // Browser regression fixture: the composer minimize toggle, driven by flips
 // of draft/session/workspace state rather than by the real daemon.
 const api: any = {};
 (window as any).collapseUI = api;
 render(() => {
+  const layout = new URLSearchParams(location.search).has("layout");
+  const [modalOpen, setModalOpen] = createSignal(false);
   const [active, setActive] = createSignal("s1");
   const [draft, setDraft] = createSignal(false);
   const [collapsed, setCollapsed] = createSignal(false);
@@ -46,8 +50,8 @@ render(() => {
     pendingApproval: () => null,
     cancelCurrentTurn: () => {},
     activeUsage: () => null,
-    messages: () => [],
-    isAtBottom: () => true,
+    messages: () => layout ? [{ role: "assistant" }] : [],
+    isAtBottom: () => !layout,
     pinAtBottom: () => {},
   };
   const composer: any = {
@@ -88,7 +92,9 @@ render(() => {
     appNotice: () => null,
     setAppNotice: () => {},
     historyView: () => false,
-    isMobile: () => false,
+    isMobile: () => layout,
+    sidebarOpen: () => false,
+    setSidebarOpen: () => {},
     composerCollapsed: collapsed,
     setComposerCollapsed: setCollapsed,
     toggleComposerCollapsed: () => setCollapsed((v: boolean) => !v),
@@ -98,7 +104,7 @@ render(() => {
     setUsageOpen: () => {},
     closeMenus: () => {},
   };
-  Object.assign(api, { setActive, setDraft, setCollapsed, setBlocked, setTodos, setTurn, active, draft, collapsed });
+  Object.assign(api, { setActive, setDraft, setCollapsed, setBlocked, setTodos, setTurn, active, draft, collapsed, setModalOpen });
   return (
     <RemoteCodeProvider
       host={{ activeHost: () => ({ status: "online", name: "Host" }), connectionState: () => "connected", loadHosts: () => {} } as any}
@@ -111,7 +117,19 @@ render(() => {
       modal={{} as any}
       ui={ui}
     >
-      <Composer />
+      <Show when={layout} fallback={<Composer />}>
+        <WorkspaceShell>
+          <WorkspaceLayout sidebar={null}>
+            <div class="flex-1 min-h-0 overflow-y-auto" aria-label="Conversation">
+              <div class="py-6 px-4">Conversation content</div>
+            </div>
+            <Composer />
+          </WorkspaceLayout>
+          <Modal open={modalOpen()} onClose={() => setModalOpen(false)} title="Safe area dialog" fullOnMobile>
+            <div class="h-96">Scrollable dialog content</div>
+          </Modal>
+        </WorkspaceShell>
+      </Show>
     </RemoteCodeProvider>
   );
 }, document.getElementById("root")!);

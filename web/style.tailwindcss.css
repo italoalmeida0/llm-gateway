@@ -536,12 +536,8 @@ html.theme-xfade body * {
   color: white;
 }
 
-/*
- * Installed-app chrome: window-controls-overlay (desktop PWA) +
- * safe-area (notch / gesture bar / mobile keyboard). The WCO strip only exists when the app runs
- * installed with display_override window-controls-overlay; elsewhere the
- * rules below are inert (env() falls back, media never matches).
- */
+/* Installed apps fill the display. Mobile safe areas and desktop WCO have
+ * separate rules: a standalone phone never matches window-controls-overlay. */
 :root {
   --sat: env(safe-area-inset-top, 0px);
   --sab: env(safe-area-inset-bottom, 0px);
@@ -553,6 +549,52 @@ html.theme-xfade body * {
  * row and conversation header become the titlebar in an installed window. */
 .rc-workspace-header { height: 3rem; }
 .rc-window-header { padding-inline: 1rem; }
+
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  /* The shell keeps its edge-to-edge background while its contents fit
+   * inside the native safe rectangle. Fixed drawers need their own insets. */
+  .rc-app-shell, .rc-app-shell .rc-sidebar.fixed {
+    padding: var(--sat) var(--sar) var(--sab) var(--sal);
+  }
+  .rc-update-screen {
+    inset: var(--sat) var(--sar) var(--sab) var(--sal);
+  }
+  .rc-safe-bottom { padding-bottom: 0.5rem; }
+
+  .gw-shell { padding: var(--sat) var(--sar) var(--sab) var(--sal); }
+  .gw-shell .gw-header { top: var(--sat); }
+  .gw-shell .gateway-rail { top: var(--sat); bottom: var(--sab); left: var(--sal); }
+  .gw-shell::before {
+    content: "";
+    position: fixed;
+    inset: 0 0 auto;
+    height: var(--sat);
+    background: var(--ink-950);
+    z-index: 40;
+    pointer-events: none;
+  }
+
+  /* Portaled dialogs sit outside the workspace shell. Keep their close
+   * buttons and footers clear of the notch and home indicator as well. */
+  .ui-dialog-backdrop {
+    --dialog-gap: 0.75rem;
+    padding: calc(var(--sat) + var(--dialog-gap)) calc(var(--sar) + var(--dialog-gap))
+      calc(var(--sab) + var(--dialog-gap)) calc(var(--sal) + var(--dialog-gap));
+  }
+  .ui-dialog {
+    max-height: calc(100dvh - var(--sat) - var(--sab) - 2 * var(--dialog-gap));
+  }
+  @media (min-width: 640px) {
+    .ui-dialog-backdrop { --dialog-gap: 1.5rem; }
+  }
+  @media (max-width: 639px) {
+    .ui-dialog-backdrop:has(.ui-dialog-full) { padding: var(--sat) var(--sar) var(--sab) var(--sal); }
+    .ui-dialog-full {
+      height: calc(100dvh - var(--sat) - var(--sab));
+      max-height: calc(100dvh - var(--sat) - var(--sab));
+    }
+  }
+}
 
 @media (display-mode: window-controls-overlay) {
   :root {

@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
-import { WorkspaceLayout } from "../../web/src/indirect-code/IndirectCodePage";
+import { WorkspaceLayout, WorkspaceShell } from "../../web/src/indirect-code/IndirectCodePage";
 import { WorkspaceSidebar } from "../../web/src/indirect-code/components/WorkspaceSidebar";
 import { HostCtx, SessionCtx, TranscriptCtx, ModalCtx, UICtx } from "../../web/src/indirect-code/ctx";
 import { createDaemonUpdate } from "../../web/src/indirect-code/hooks/useDaemonUpdate";
@@ -71,7 +71,7 @@ render(() => {
         <SessionCtx.Provider value={session}>
           <TranscriptCtx.Provider value={transcript}>
             <UICtx.Provider value={ui}>
-              <div class="fixed inset-0 flex flex-col bg-ink-950 text-ink-100 overflow-hidden">
+              <WorkspaceShell>
                 <WorkspaceLayout sidebar={<WorkspaceSidebar />}>
                   <div id="conversation" class="flex-1 min-h-0 overflow-y-auto px-4 md:px-8">
                     <div id="messages" class="max-w-3xl mx-auto pt-6 pb-10">
@@ -84,7 +84,7 @@ render(() => {
                     </div>
                   </div>
                 </WorkspaceLayout>
-              </div>
+              </WorkspaceShell>
             </UICtx.Provider>
           </TranscriptCtx.Provider>
         </SessionCtx.Provider>

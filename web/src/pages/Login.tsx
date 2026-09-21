@@ -20,8 +20,9 @@ declare global {
 
 /** Persist the session and hard-reload into the app (guarantees a clean state). */
 function enterApp(tokens: { accessToken: string; refreshToken: string; user: any }): void {
+  const destination = location.hash.startsWith("#/code") ? location.hash : "#/";
   setSession({ accessToken: tokens.accessToken, refreshToken: tokens.refreshToken, user: tokens.user });
-  location.hash = "/";
+  location.hash = destination;
   location.reload();
 }
 

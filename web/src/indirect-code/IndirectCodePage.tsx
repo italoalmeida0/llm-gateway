@@ -70,6 +70,15 @@ function WorkspaceHeader() {
   );
 }
 
+/** Edge-to-edge background with native mobile safe-area padding. */
+export function WorkspaceShell(props: { children: JSX.Element }) {
+  return (
+    <div class="rc-app-shell fixed inset-0 w-full h-dvh flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50">
+      {props.children}
+    </div>
+  );
+}
+
 /** One layout in browser and installed modes; WCO only changes header insets. */
 export function WorkspaceLayout(props: { sidebar: JSX.Element; children: JSX.Element }) {
   const ui = useUI();
@@ -122,7 +131,7 @@ export function UpdateFreezeOverlay() {
   };
   return (
     <Show when={frozen()}>
-      <div class="fixed inset-0 z-40 flex flex-col items-center overflow-y-auto bg-ink-950 p-4 text-center sm:p-6">
+      <div class="rc-update-screen fixed inset-0 z-40 flex flex-col items-center overflow-y-auto bg-ink-950 p-4 text-center sm:p-6">
         <div class="mx-auto my-auto w-full max-w-xl space-y-6 py-8">
           <div>
             <IndirectBrand />
@@ -1351,7 +1360,7 @@ export default function IndirectCodePage() {
       modal={modalValue}
       ui={uiValue}
     >
-    <div class="fixed inset-0 w-full h-dvh flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50">
+    <WorkspaceShell>
       <RemoteHints />
       {/* Main Workspace Layout or Connect Host Onboarding */}
       <Show
@@ -1371,7 +1380,7 @@ export default function IndirectCodePage() {
       <PairModal />
       <SettingsModal />
       <UpdateFreezeOverlay />
-    </div>
+    </WorkspaceShell>
     </RemoteCodeProvider>
   );
 }

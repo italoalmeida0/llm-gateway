@@ -8,7 +8,7 @@ import {
   onCleanup,
   Show,
 } from "solid-js";
-import { useUI, useHost, useSession, useModal } from "./ctx";
+import { useUI, useHost, useModal } from "./ctx";
 import { Icon as Iconify } from "../components/icon";
 import { IndirectBrand } from "./components/IndirectBrand";
 import { HostCard } from "./components/HostCard";
@@ -57,30 +57,18 @@ interface WcoTitlebarProps {
   toggleSb: () => void;
 }
 
-/** Installed-app titlebar (window-controls-overlay): an OS-style top bar —
- *  app icon + session title in the draggable region, window controls
- *  (sidebar toggle, settings) pinned right in the no-drag zone.
- *  Rendered always; CSS shows it only under display-mode:
+/** Installed-app titlebar (window-controls-overlay): a slim drag strip with
+ *  the window controls (sidebar toggle, settings) pinned right in the
+ *  no-drag zone. No icon, no title — nothing may sit above the sidebar
+ *  buttons. Rendered always; CSS shows it only under display-mode:
  *  window-controls-overlay (inert in the browser).
  *
  *  Exported for the fixture test (same component, real browser). */
 export function WcoTitlebar(props: WcoTitlebarProps) {
-  const s = useSession();
   const m = useModal();
-  // No overlay there is no room for a fallback app name: when there is no
-  // active session and no draft, the bar is just icon + drag space + actions.
-  const title = () => {
-    const a = s.activeSession();
-    const t = a?.title?.trim();
-    if (t) return t;
-    if (s.draftMode()) return "New conversation";
-    return null;
-  };
   return (
     <div class="rc-wco-bar shrink-0" data-tauri-drag-region aria-hidden="false">
       <div class="rc-wco-bar-inner">
-      <img src="/indirect-icon.svg" alt="" class="rc-wco-icon" draggable={false} />
-      <Show when={title()}>{(t) => <span class="rc-wco-title">{t()}</span>}</Show>
       <div class="rc-wco-actions">
         <button
           type="button"

@@ -55,9 +55,11 @@ await page.goto(`http://127.0.0.1:${server.port}/`);
 await page.waitForSelector(".rc-wco-bar", { timeout: 15000 });
 await page.waitForTimeout(400);
 
-// Icon + session title render through the real component.
-check("wco icon", (await page.locator(".rc-wco-icon").count()) === 1);
-check("wco session title", ((await page.locator(".rc-wco-title").innerText()).trim()) === "Fix login bug");
+// Drag strip renders controls only — no icon, no title may stack above
+// the sidebar buttons.
+check("wco no icon", (await page.locator(".rc-wco-icon").count()) === 0);
+check("wco no title", (await page.locator(".rc-wco-title").count()) === 0);
+check("wco two controls", (await page.locator(".rc-wco-btn").count()) === 2);
 
 // Sidebar toggle flips through the real callback.
 const btn = page.locator(".rc-wco-btn").first();

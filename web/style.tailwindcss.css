@@ -550,21 +550,23 @@ html.theme-xfade body * {
   --sar: env(safe-area-inset-right, 0px);
 }
 
-/* OS-style titlebar: icon + session title in the draggable region, window
- * controls pinned right in the no-drag zone (tweakgrid .top-bar pattern:
- * drag everywhere except .rc-wco-actions). Hidden in the browser; in WCO
- * mode it becomes a real in-flow row of the app shell (shrink-0), so the
- * workspace below is pushed down — nothing overlaps: the OS draws its
- * window buttons in the area beside env(titlebar-area-x/width), and the
- * in-app overlay controls (sidebar toggle, sidebar headers, transcript
- * floating toggle) hide or re-dock while the bar is visible. */
+/* Slim drag strip for the installed-app titlebar: controls only, pinned
+ * right in the no-drag zone (tweakgrid .top-bar pattern: drag everywhere
+ * except .rc-wco-actions). No icon, no title — the strip shares the row
+ * with the OS window controls, so nothing may stack above the sidebar
+ * buttons. Hidden in the browser; in WCO mode it becomes a real in-flow
+ * row of the app shell (shrink-0), so the workspace below is pushed down —
+ * nothing overlaps: the OS draws its window buttons in the area beside
+ * env(titlebar-area-x/width), and the in-app overlay controls (sidebar
+ * toggle, sidebar headers, transcript floating toggle) hide or re-dock
+ * while the bar is visible. */
 .rc-wco-bar {
   display: none;
 }
 .rc-wco-bar-inner {
   display: flex;
   align-items: center;
-  gap: 0.625rem;
+  justify-content: flex-end;
   -webkit-app-region: drag;
   app-region: drag;
   background: var(--ink-950);
@@ -572,24 +574,6 @@ html.theme-xfade body * {
   user-select: none;
   overflow: hidden;
   white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 500;
-}
-.rc-wco-icon {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  border-radius: 5px;
-  object-fit: contain;
-  box-shadow: 0 0 0 1px var(--line);
-}
-.rc-wco-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  letter-spacing: -0.01em;
-  color: var(--ink-200);
 }
 .rc-wco-actions {
   display: flex;
@@ -648,7 +632,6 @@ html.theme-xfade body * {
   }
   .rc-wco-bar-inner {
     height: env(titlebar-area-height, 33px);
-    padding-left: 10px;
     padding-right: 2px;
   }
   /* Single sidebar toggle: the titlebar owns it now — the floating one in

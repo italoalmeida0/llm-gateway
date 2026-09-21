@@ -18,11 +18,16 @@ export function Composer() {
   // minimized, leaving only the turn-status row + chevron above. Never in a
   // new conversation — there is nothing to minimize into.
   const collapsed = () => ui.composerCollapsed() && !s.draftMode() && !!s.activeSessionId() && !s.workspaceBlocked();
+  // Minimized: the status row is the last thing on screen, so the wrapper
+  // needs its own bottom breathing room (nothing below it to add any).
+  const wrapperClass = () => s.draftMode()
+    ? "rc-draft flex-1 min-h-0 overflow-y-auto flex flex-col px-4 py-10"
+    : `px-4 pt-2 bg-ink-950 relative z-20${collapsed() ? " pb-2" : ""}`;
   return (
 <>
 
 <Show when={!ui.historyView()}>
-<div class={s.draftMode() ? "rc-draft flex-1 min-h-0 overflow-y-auto flex flex-col px-4 py-10" : "px-4 pt-2 bg-ink-950 relative z-20"}>
+<div class={wrapperClass()} data-composer-shell>
   <ScrollOverlays />
   <div class="w-full max-w-2xl mx-auto my-auto shrink-0">
   <StatusBanners />

@@ -50,9 +50,16 @@ try {
   assert(await page.locator("[data-turn-status]").isVisible(), "collapsed keeps the turn status row");
   assert.equal(await page.locator("[data-todo-status]").count(), 0, "collapsed hides the task list rows");
   assert.equal(await page.getByText("Task plan", { exact: true }).count(), 0, "collapsed hides the whole Task plan block");
+  // Collapsed leaves the status row as the last element: the shell must add a
+  // bottom gap so it does not sit flush against the viewport edge. Fixtures
+  // load no Tailwind, so assert the class contract, not pixel geometry.
+  const shellHasBottomGap = () => page.evaluate(() =>
+    !!document.querySelector("[data-composer-shell]")?.className.split(/\s+/).includes("pb-2"));
+  assert(await shellHasBottomGap(), "collapsed shell keeps a bottom gap for the status row");
   await toggle.click();
   await settle();
   assert(await page.locator("#rc-composer").isVisible(), "the chevron restores the composer");
+  assert(!(await shellHasBottomGap()), "the expanded shell carries no extra bottom gap");
   assert(await page.getByText("Task plan", { exact: true }).isVisible(), "the chevron restores the Task plan block");
 
   // Idle conversation (no turn row): the toggle still needs a reachable home.

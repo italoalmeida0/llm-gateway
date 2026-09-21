@@ -562,26 +562,32 @@ html.theme-xfade body * {
 
 @media (display-mode: window-controls-overlay) {
   /* Overlay layout: the sidebar runs full-height (like tweakgrid — the
-   * titlebar only spans the content area). Specificity div.X beats the
-   * Tailwind .flex utility so grid really wins in the bundle. */
+   * titlebar only spans the content area). Off (default) the layout div
+   * is a plain flex row and the bar is display:none, so the browser render
+   * is byte-identical to no overlay. Specificity div.X beats the Tailwind
+   * .flex utility so grid really wins in the bundle. */
   div.rc-wco-layout {
     display: grid;
-    grid-template-columns: auto 1fr;
+    grid-template-columns: auto minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
     grid-template-areas:
       "side wco"
       "side main";
   }
-  .rc-wco-layout > .rc-wco-bar { grid-area: wco; }
-  .rc-wco-layout > .rc-wco-main { grid-area: main; }
+  .rc-wco-layout > .rc-wco-bar { grid-area: wco; min-width: 0; }
+  .rc-wco-layout > .rc-wco-main { grid-area: main; min-width: 0; min-height: 0; }
   .rc-wco-layout > .rc-sidebar {
     grid-area: side;
     grid-row: 1 / -1;
   }
   /* In-flow drag row: only as wide as the draggable area the OS leaves
-   * us (titlebar-area-x/width), padded for the notch. */
+   * us (titlebar-area-x/width), padded for the notch. Sticky so it stays
+   * grabbable after scrolling the content. */
   .rc-wco-bar {
     display: block;
+    position: sticky;
+    top: 0;
+    z-index: 60;
     flex-shrink: 0;
     width: 100%;
     height: env(titlebar-area-height, 33px);
@@ -592,10 +598,14 @@ html.theme-xfade body * {
   }
   /* Gateway dashboard: invisible drag strip ABOVE the header row
    * (user-area side) so the installed window can be dragged there.
+   * Sticky at the viewport top so it stays grabbable after scrolling.
    * In-flow (not overlay): the header below is pushed down, nothing
    * stacks over the avatar/name and clicks keep working. */
   .gw-wco-bar {
     display: block;
+    position: sticky;
+    top: 0;
+    z-index: 40;
     height: env(titlebar-area-height, 33px);
     -webkit-app-region: drag;
     app-region: drag;

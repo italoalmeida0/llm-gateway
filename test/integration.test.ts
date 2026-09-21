@@ -86,6 +86,26 @@ beforeAll(async () => {
   mkdirSync(staticDir, { recursive: true });
   writeFileSync(path.join(staticDir, "index.html"), "<!doctype html><title>SPA</title><h1>dash</h1>");
   writeFileSync(path.join(staticDir, "terms.html"), "<!doctype html><title>terms</title>");
+  writeFileSync(
+    path.join(staticDir, "manifest.webmanifest"),
+    JSON.stringify({
+      name: "t",
+      display_override: ["window-controls-overlay"],
+      icons: [
+        { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+        { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+      ],
+    }),
+  );
+  // 1x1 transparent PNG fixture (valid PNG bytes so content-type checks pass).
+  const tinyPng = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  writeFileSync(path.join(staticDir, "icon-192.png"), tinyPng);
+  writeFileSync(path.join(staticDir, "icon-512.png"), tinyPng);
+  writeFileSync(path.join(staticDir, "apple-touch-icon.png"), tinyPng);
+  writeFileSync(path.join(staticDir, "push-sw.js"), "// test fixture");
   writeFileSync(path.join(staticDir, ".secret-file"), "should never be served");
 
   upProc = spawn("test/fake-upstream.ts", { FAKE_UPSTREAM_PORT: String(UP_PORT), FAKE_UPSTREAM_KEY: UPSTREAM_KEY });
@@ -1436,6 +1456,33 @@ describe("gateway end-to-end", () => {
     const dots = await fetch(`${GW}/../../etc/passwd`);
     expect(dots.status).toBe(200);
     expect(await dots.text()).toContain("dash"); // fell back to SPA, not the shadow file
+  });
+
+  test("PWA install surface: manifest, icons and push worker", async () => {
+    const man = await fetch(`${GW}/manifest.webmanifest`);
+    expect(man.status).toBe(200);
+    expect(man.headers.get("content-type")).toContain("application/manifest+json");
+    const manifest = (await man.json()) as {
+      name: string;
+      display_override: string[];
+      icons: Array<{ src: string; sizes: string }>;
+    };
+    expect(manifest.name).toBeTruthy();
+    expect(manifest.display_override).toContain("window-controls-overlay");
+    expect(manifest.icons.some((i) => i.sizes === "192x192")).toBe(true);
+    expect(manifest.icons.some((i) => i.sizes === "512x512")).toBe(true);
+    for (const icon of manifest.icons) {
+      const r = await fetch(`${GW}${icon.src}`);
+      expect(r.status).toBe(200);
+      expect(r.headers.get("content-type")).toContain("image/png");
+      await r.arrayBuffer();
+    }
+    // Apple touch icon + push worker (existing SW, must never cache).
+    const touch = await fetch(`${GW}/apple-touch-icon.png`);
+    expect(touch.status).toBe(200);
+    const sw = await fetch(`${GW}/push-sw.js`);
+    expect(sw.status).toBe(200);
+    expect(sw.headers.get("cache-control")).toContain("no-cache");
   });
 
   test("unauthenticated proxy endpoints look normal to scanners", async () => {

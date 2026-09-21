@@ -39,7 +39,7 @@ export function baseHeaders(req?: Request, isHtml = false): Headers {
       "Content-Security-Policy",
       [
         "default-src 'self'",
-        "script-src 'self' https://accounts.google.com/gsi/client 'sha256-NvF06vjzVBAMFUIiL2NbRIe4Gq5wnzaQg3OX+ClPI8c='",
+        "script-src 'self' https://accounts.google.com/gsi/client 'sha256-udweQu0/QO+buA7Ub3sQ33gElcVLpH0v6ZhZe9H8LB8='",
         "frame-src https://accounts.google.com/gsi/",
         "connect-src 'self' https://accounts.google.com/gsi/ https://api.iconify.design",
         "img-src 'self' data:",

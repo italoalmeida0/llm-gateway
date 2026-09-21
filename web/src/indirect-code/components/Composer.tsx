@@ -22,7 +22,7 @@ export function Composer() {
   // needs its own bottom breathing room (nothing below it to add any).
   const wrapperClass = () => s.draftMode()
     ? "rc-draft flex-1 min-h-0 overflow-y-auto flex flex-col px-4 py-10"
-    : `px-4 pt-2 bg-ink-950 relative z-20${collapsed() ? " pb-2" : ""}`;
+    : `rc-safe-bottom px-4 pt-2 bg-ink-950 relative z-20${collapsed() ? " pb-2" : ""}`;
   return (
 <>
 

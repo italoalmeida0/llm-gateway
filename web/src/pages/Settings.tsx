@@ -5,7 +5,7 @@ import { PageTitle, navigate } from "../index";
 import { usalItems } from "../motion";
 import { renderGoogleButton } from "../google";
 import {
-  Badge, Btn, Card, IconBtn, CardHeader, Icon, Icons, Input, Modal, ModalField, ModalNotice, Spinner, copyWithToast, fmtDate, toast,
+  Badge, Btn, Card, IconBtn, CardHeader, Icon, Icons, Input, Modal, ModalField, ModalNotice, Segmented, Spinner, copyWithToast, fmtDate, setThemeMode, themeMode, toast,
 } from "../ui";
 
 export default function SettingsPage() {
@@ -183,6 +183,21 @@ export default function SettingsPage() {
       <PageTitle title="Settings" subtitle="Profile, security and active sessions" />
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4" {...usalItems("fade-u", 90)}>
+        <Card>
+          <CardHeader title="Appearance" subtitle="White, dark, or follow the system automatically" />
+          <div class="px-5 pb-5">
+            <Segmented
+              value={themeMode()}
+              onChange={setThemeMode}
+              options={[
+                { value: "light", label: "Light" },
+                { value: "dark", label: "Dark" },
+                { value: "system", label: "System" },
+              ]}
+            />
+          </div>
+        </Card>
+
         <Card>
           <CardHeader title="Profile" />
           <div class="px-5 pb-5 space-y-4">

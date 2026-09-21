@@ -2,8 +2,18 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="robots" content="noindex, nofollow" />
+    <meta name="description" content="Self-hosted LLM API gateway with a personal dashboard and an Indirect Code agent workspace." />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#111315" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="LLM Gateway" />
+    <!-- PWA install surface (injected into dist/index.html post-build: Bun's
+      HTML bundler tries to resolve link hrefs as build inputs) -->
+    <!--PWA-HEAD-->
     <title>LLM Gateway</title>
     <script>
       // Theme init (before first paint): stored choice wins, otherwise follow
@@ -53,9 +63,35 @@
           link.href = iconFor(t);
         }
         syncFavicon();
+        // Theme-color for the browser chrome / installed-app switcher.
+        // Static media-based tags cover first paint; this keeps the value
+        // in sync with the effective theme at runtime (same pattern as
+        // tweakgrid's theme subscriber).
+        function syncThemeColor() {
+          var t = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+          var content = t === "dark" ? "#111315" : "#ffffff";
+          var metas = document.querySelectorAll('meta[name="theme-color"]');
+          // Collapse the static light/dark pair into a single live tag.
+          var meta = metas[0];
+          for (var i = 1; i < metas.length; i++) {
+            if (metas[i].parentNode) metas[i].parentNode.removeChild(metas[i]);
+          }
+          if (!meta) {
+            meta = document.createElement("meta");
+            meta.name = "theme-color";
+            document.head.appendChild(meta);
+          }
+          meta.removeAttribute("media");
+          if (meta.getAttribute("content") !== content) meta.setAttribute("content", content);
+        }
+        syncThemeColor();
         // Exposed for the SPA per-page override (window.__pageIcon).
         window.__syncFavicon = syncFavicon;
-        new MutationObserver(syncFavicon).observe(document.documentElement, {
+        window.__syncThemeColor = syncThemeColor;
+        new MutationObserver(function () {
+          syncFavicon();
+          syncThemeColor();
+        }).observe(document.documentElement, {
           attributes: true,
           attributeFilter: ["data-theme"],
         });

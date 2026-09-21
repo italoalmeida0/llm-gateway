@@ -1319,6 +1319,11 @@ export default function IndirectCodePage() {
       ui={uiValue}
     >
     <div class="fixed inset-0 w-full h-dvh flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50">
+      {/* Installed-app titlebar strip (window-controls-overlay): a draggable
+        region beside the OS window controls. Hidden in the browser. */}
+      <div class="rc-wco-bar shrink-0 text-[11px] font-medium" aria-hidden="true">
+        <span class="truncate">LLM Gateway · Indirect Code</span>
+      </div>
       <RemoteHints />
       {/* Main Workspace Layout or Connect Host Onboarding */}
       <Show

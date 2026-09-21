@@ -99,6 +99,26 @@ async function build() {
     console.log("[build] push-sw.js -> dist/ (turn-end push for closed tabs)");
   }
 
+  // PWA install surface: Bun's HTML bundler resolves <link href> as build
+  // inputs, so the manifest/apple-touch links live behind a <!--PWA-HEAD-->
+  // placeholder in web/index.html and are injected here (same absolute
+  // paths the dev server serves from web/public/).
+  {
+    const { readFileSync, writeFileSync } = await import("fs");
+    const distHtml = path.join(distDir, "index.html");
+    const pwaHead = [
+      '<link rel="manifest" href="/manifest.webmanifest" />',
+      '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />',
+    ].join("\n    ");
+    const html = readFileSync(distHtml, "utf-8");
+    if (!html.includes("<!--PWA-HEAD-->")) {
+      console.error("[build] PWA placeholder missing in dist/index.html");
+      process.exit(1);
+    }
+    writeFileSync(distHtml, html.replace("<!--PWA-HEAD-->", pwaHead));
+    console.log("[build] PWA head injected into dist/index.html");
+  }
+
   // pandoc.wasm (58MB office-to-markdown engine): copied from the reference
   // checkout when present; office conversion degrades gracefully without it.
   const pandocSrc = path.join(ROOT, "remote-code-ref", "chatbot", "pandoc.wasm");

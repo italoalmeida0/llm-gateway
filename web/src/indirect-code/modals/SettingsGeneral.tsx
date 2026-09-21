@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { ThemeToggle } from "../../ui";
+import { Segmented, setThemeMode, themeMode } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { useModal, useUI } from "../ctx";
 import { pushSupported } from "../hooks/usePushSubscription";
@@ -37,14 +37,21 @@ export function SettingsGeneralSection() {
 
   </h3>
   <div class="space-y-3 text-xs">
-    <div class="py-2 flex items-center justify-between gap-4">
-      <div>
-        <div class="font-medium text-ink-200">Theme</div>
-        <div class="text-[11px] text-ink-500 mt-0.5">
-          White or dark interface.
-        </div>
+    <div class="py-2">
+      <div class="font-medium text-ink-200">Theme</div>
+      <div class="text-[11px] text-ink-500 mt-0.5 mb-2">
+        White, dark, or follow the system automatically.
       </div>
-      <ThemeToggle />
+      <Segmented
+        value={themeMode()}
+        onChange={setThemeMode}
+        class="grid grid-cols-3"
+        options={[
+          { value: "light", label: "Light" },
+          { value: "dark", label: "Dark" },
+          { value: "system", label: "System" },
+        ]}
+      />
     </div>
     <div class="py-2 flex items-center justify-between gap-4">
       <div>

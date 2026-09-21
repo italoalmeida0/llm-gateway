@@ -53,6 +53,7 @@ export const Icons = {
   home: "lucide:home",
   sun: "lucide:sun",
   moon: "lucide:moon",
+  monitor: "lucide:monitor",
   chevronDown: "lucide:chevron-down",
   arrowUpRight: "lucide:arrow-up-right",
   menu: "lucide:menu",
@@ -102,51 +103,114 @@ export function Icon(props: {
 }
 
 // ==========================================
-// THEME (white / dark)
+// THEME (white / dark + system follow)
 // ==========================================
 
 export type Theme = "light" | "dark";
+/** User-facing choice: an explicit theme, or follow the OS (`system`).
+ *  Stored in localStorage under THEME_KEY; missing/unknown also means
+ *  `system` (fresh installs follow the OS by default). */
+export type ThemeMode = "light" | "dark" | "system";
 const THEME_KEY = "llmgw-theme";
 
+/** Theme-color meta values (page chrome / PWA task switcher), kept in sync
+ *  with the effective theme — tweakgrid does the same from its theme
+ *  subscriber. Values mirror the page bg of each theme (ink-950). */
+const THEME_COLORS: Record<Theme, string> = { light: "#ffffff", dark: "#111315" };
+
+export function getThemeMode(): ThemeMode {
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(THEME_KEY);
+  } catch {}
+  return stored === "light" || stored === "dark" ? stored : "system";
+}
+
 export function getTheme(): Theme {
-  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  if (document.documentElement.dataset.theme === "dark") return "dark";
+  if (document.documentElement.dataset.theme === "light") return "light";
+  // Unset (pre-init): resolve like the inline init script in index.html.
+  try {
+    if (localStorage.getItem(THEME_KEY) === "dark") return "dark";
+    if (localStorage.getItem(THEME_KEY) === "light") return "light";
+  } catch {}
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 const [theme, setThemeSignal] = createSignal<Theme>(getTheme());
 export { theme };
+const [themeMode, setThemeModeSignal] = createSignal<ThemeMode>(getThemeMode());
+export { themeMode };
 
-export function setTheme(t: Theme): void {
-  const html = document.documentElement;
+/** Keep `<meta name="theme-color">` on the effective theme (created when
+ *  missing — same pattern as tweakgrid's theme subscriber). */
+export function syncMetaThemeColor(): void {
   try {
-    localStorage.setItem(THEME_KEY, t);
+    const t = getTheme();
+    let meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) {
+      meta = document.createElement("meta");
+      meta.setAttribute("name", "theme-color");
+      document.head.appendChild(meta);
+    }
+    meta.setAttribute("content", THEME_COLORS[t]);
   } catch {}
+}
+
+function applyTheme(t: Theme): void {
+  const html = document.documentElement;
   html.classList.add("theme-xfade");
   html.dataset.theme = t;
   setThemeSignal(t);
+  syncMetaThemeColor();
   window.setTimeout(() => html.classList.remove("theme-xfade"), 380);
 }
 
-export function toggleTheme(): void {
-  setTheme(getTheme() === "dark" ? "light" : "dark");
+export function setThemeMode(m: ThemeMode): void {
+  try {
+    if (m === "system") localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, m);
+  } catch {}
+  setThemeModeSignal(m);
+  if (m === "system") {
+    const t: Theme = window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    applyTheme(t);
+  } else {
+    applyTheme(m);
+  }
 }
 
-/** If the user never picked a theme manually, keep following the OS. */
+export function setTheme(t: Theme): void {
+  setThemeMode(t);
+}
+
+export function toggleTheme(): void {
+  setThemeMode(getTheme() === "dark" ? "light" : "dark");
+}
+
+/** Follow the OS while the user has no explicit choice (mode `system`). */
 export function watchSystemTheme(): void {
   const mq = window.matchMedia("(prefers-color-scheme: dark)");
   const apply = () => {
-    let stored: string | null = null;
-    try {
-      stored = localStorage.getItem(THEME_KEY);
-    } catch {}
-    if (stored !== "light" && stored !== "dark") {
-      const t: Theme = mq.matches ? "dark" : "light";
-      document.documentElement.dataset.theme = t;
-      setThemeSignal(t);
-    }
+    if (getThemeMode() !== "system") return;
+    const t: Theme = mq.matches ? "dark" : "light";
+    document.documentElement.dataset.theme = t;
+    setThemeSignal(t);
+    syncMetaThemeColor();
   };
   // Apply once on setup (covers any stale pre-mount signal value), then keep
   // following the OS while no manual choice exists.
+  setThemeModeSignal(getThemeMode());
   apply();
+  try {
+    window.addEventListener?.("storage", (e) => {
+      // Cross-tab theme sync (e.g. mode changed in another tab/settings).
+      if (e.key === THEME_KEY) {
+        setThemeModeSignal(getThemeMode());
+        apply();
+      }
+    });
+  } catch {}
   mq.addEventListener?.("change", apply);
 }
 
@@ -154,13 +218,12 @@ export function ThemeToggle(props: {
   class?: string;
   tooltipPlacement?: Placement;
 }) {
+  const label = () => {
+    if (themeMode() === "system") return "Theme follows the system — switch to manual";
+    return theme() === "dark" ? "Switch to light theme" : "Switch to dark theme";
+  };
   return (
-    <Tooltip
-      content={
-        theme() === "dark" ? "Switch to light theme" : "Switch to dark theme"
-      }
-      placement={props.tooltipPlacement ?? "bottom"}
-    >
+    <Tooltip content={label()} placement={props.tooltipPlacement ?? "bottom"}>
       <button
         type="button"
         onClick={toggleTheme}
@@ -173,7 +236,10 @@ export function ThemeToggle(props: {
             transform: theme() === "dark" ? "rotate(0deg)" : "rotate(180deg)",
           }}
         >
-          <Icon name={theme() === "dark" ? Icons.sun : Icons.moon} size={18} />
+          <Icon
+            name={theme() === "dark" ? Icons.sun : themeMode() === "system" ? Icons.monitor : Icons.moon}
+            size={18}
+          />
         </span>
       </button>
     </Tooltip>

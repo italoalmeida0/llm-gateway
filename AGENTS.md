@@ -140,7 +140,12 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   event-driven (streaming is not mirroring); tool results are hoisted onto
   their assistant carrier for display (`srcIdx` maps rendered messages back to
   raw daemon indices for edit/delete/regenerate). Slash palette only lists
-  commands that are not already configurable in the UI.
+  commands that are not already configurable in the UI. The composer can be
+  minimized (chevron in the turn-status row, `ui.composerCollapsed` — one
+  global `llmgw-rc-composer-collapsed` preference): the input box, toolbar and
+  footer hide and the task-plan body folds, leaving only the `Working` status
+  row and the Task plan header. Never available in a new conversation
+  (`draftMode`) or behind a blocked workspace — the chevron is hidden there.
   - **Daemon project** (`indirect-code-daemon/`, Go 1.25: `cmd/daemon` +
     `packages/agent|core|provider|…`; external deps are gorilla/websocket,
     sergi/go-diff, x/image, x/net — keep both projects' dep lists minimal).
@@ -300,9 +305,10 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   writes a markdown report (see docs/performance/results)
 - `bun run fake-upstream` — fake provider for manual testing (:3399, key `sk-fake-secret`)
 - `PLAYWRIGHT_MODULE=… CHROMIUM_PATH=… bun scripts/test-indirect-turn-ui.ts`
-  (also `test-indirect-composer-ui.ts`, `test-indirect-settings-ui.ts`) —
-  component checks in real Chromium against fixture bundles (fast, no model).
-  Playwright is always an external install, never an app dependency.
+  (also `test-indirect-composer-ui.ts`, `test-indirect-settings-ui.ts`,
+  `test-indirect-collapse-ui.ts`) — component checks in real Chromium against
+  fixture bundles (fast, no model). Playwright is always an external install,
+  never an app dependency.
 - `PLAYWRIGHT_MODULE=… CHROMIUM_PATH=… bun scripts/test-indirect-bg-e2e.ts [finish|cancel]` —
   full-stack background check (real gateway + daemon + model + Chromium on
   `#/code`: finish-fold/duration, manual-cancel notice, zero page errors).

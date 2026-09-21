@@ -98,6 +98,10 @@ export interface UICtxValue extends Notice {
   convWidth: () => "narrow" | "default" | "wide";
   setConvWidth: (v: "narrow" | "default" | "wide") => void;
   convWidthClass: () => string;
+  /** Composer/TODO minimized (narrow vertical space). Global preference. */
+  composerCollapsed: () => boolean;
+  setComposerCollapsed: (v: boolean | ((p: boolean) => boolean)) => void;
+  toggleComposerCollapsed: () => void;
   modelMenuOpen: () => boolean;
   setModelMenuOpen: (v: boolean | ((p: boolean) => boolean)) => void;
   usageOpen: () => boolean;

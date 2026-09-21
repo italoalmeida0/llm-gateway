@@ -14,6 +14,10 @@ export function Composer() {
   const s = useSession();
   const t = useTranscriptCtx();
   const ui = useUI();
+  // Short viewports: the whole composer (input, toolbar, footer) can be
+  // minimized, leaving only the turn-status row + chevron above. Never in a
+  // new conversation — there is nothing to minimize into.
+  const collapsed = () => ui.composerCollapsed() && !s.draftMode() && !!s.activeSessionId() && !s.workspaceBlocked();
   return (
 <>
 
@@ -22,6 +26,7 @@ export function Composer() {
   <ScrollOverlays />
   <div class="w-full max-w-2xl mx-auto my-auto shrink-0">
   <StatusBanners />
+    <Show when={!collapsed()}>
     <Show when={!s.workspaceBlocked()} fallback={
       <div role="status" class="rounded-2xl border border-line bg-elev px-4 py-3 text-sm text-ink-300" data-workspace-unavailable>
         <div class="flex items-center gap-2 font-medium text-ink-100"><Iconify icon="lucide:folder-x" size={17} />{s.workspaceState() === "missing" ? "The project folder was deleted" : "The project folder is unavailable"}</div>
@@ -52,6 +57,7 @@ export function Composer() {
   </div>
     </Show>
     <ComposerFooter />
+    </Show>
   </div>
 </div>
 </Show>

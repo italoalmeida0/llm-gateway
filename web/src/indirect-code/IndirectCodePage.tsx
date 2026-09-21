@@ -451,6 +451,27 @@ export default function IndirectCodePage() {
     return "max-w-3xl";
   });
 
+  // Composer + task plan minimized for short viewports. A single global
+  // preference (not per conversation): whoever runs out of vertical room
+  // wants it quiet everywhere until they choose otherwise. New conversations
+  // are never collapsible (draftMode).
+  const [composerCollapsed, setComposerCollapsed] = createSignal(
+    (() => {
+      try {
+        return localStorage.getItem("llmgw-rc-composer-collapsed") === "1";
+      } catch {
+        return false;
+      }
+    })(),
+  );
+  const toggleComposerCollapsed = () => {
+    const next = !composerCollapsed();
+    setComposerCollapsed(next);
+    try {
+      localStorage.setItem("llmgw-rc-composer-collapsed", next ? "1" : "0");
+    } catch {}
+  };
+
   const [historyView, setHistoryView] = createSignal(false);
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [usageOpen, setUsageOpen] = createSignal(false);
@@ -1275,6 +1296,9 @@ export default function IndirectCodePage() {
     convWidth,
     setConvWidth,
     convWidthClass,
+    composerCollapsed,
+    setComposerCollapsed,
+    toggleComposerCollapsed,
     modelMenuOpen,
     setModelMenuOpen,
     usageOpen,

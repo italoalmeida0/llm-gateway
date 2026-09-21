@@ -567,8 +567,7 @@ html.theme-xfade body * {
   gap: 0.625rem;
   -webkit-app-region: drag;
   app-region: drag;
-  background: linear-gradient(to bottom, var(--ink-900), var(--ink-950));
-  border-bottom: 1px solid var(--line);
+  background: var(--ink-950);
   color: var(--ink-300);
   user-select: none;
   overflow: hidden;
@@ -649,6 +648,7 @@ html.theme-xfade body * {
   }
   .rc-wco-bar-inner {
     height: env(titlebar-area-height, 33px);
+    padding-left: 10px;
     padding-right: 2px;
   }
   /* Single sidebar toggle: the titlebar owns it now — the floating one in

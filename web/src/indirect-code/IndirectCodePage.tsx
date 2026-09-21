@@ -67,18 +67,20 @@ interface WcoTitlebarProps {
 export function WcoTitlebar(props: WcoTitlebarProps) {
   const s = useSession();
   const m = useModal();
+  // No overlay there is no room for a fallback app name: when there is no
+  // active session and no draft, the bar is just icon + drag space + actions.
   const title = () => {
     const a = s.activeSession();
     const t = a?.title?.trim();
     if (t) return t;
     if (s.draftMode()) return "New conversation";
-    return "Indirect Code";
+    return null;
   };
   return (
     <div class="rc-wco-bar shrink-0" data-tauri-drag-region aria-hidden="false">
       <div class="rc-wco-bar-inner">
       <img src="/indirect-icon.svg" alt="" class="rc-wco-icon" draggable={false} />
-      <span class="rc-wco-title">{title()}</span>
+      <Show when={title()}>{(t) => <span class="rc-wco-title">{t()}</span>}</Show>
       <div class="rc-wco-actions">
         <button
           type="button"

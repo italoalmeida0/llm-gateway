@@ -64,13 +64,7 @@ function WorkspaceHeader() {
     <header class="rc-workspace-header rc-window-header shrink-0 border-b border-line/60">
       <div class="rc-window-content flex h-full min-w-0 items-center gap-3">
         <Show when={!ui.sidebarOpen()}><SidebarToggle /></Show>
-        <div class="flex min-w-0 items-center gap-2 text-xs select-none">
-          <Show when={session.currentProject()?.name}>
-            <span class="rc-window-project shrink-0 text-ink-500">{session.currentProject()?.name}</span>
-            <span class="rc-window-project text-ink-600" aria-hidden="true">/</span>
-          </Show>
-          <span class="truncate text-ink-400">{title()}</span>
-        </div>
+        <span class="min-w-0 truncate text-xs text-ink-400 select-none">{title()}</span>
       </div>
     </header>
   );

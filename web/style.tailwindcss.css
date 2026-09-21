@@ -553,7 +553,6 @@ html.theme-xfade body * {
  * row and conversation header become the titlebar in an installed window. */
 .rc-workspace-header { height: 3rem; }
 .rc-window-header { padding-inline: 1rem; }
-.rc-window-project { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (display-mode: window-controls-overlay) {
   :root {
@@ -599,7 +598,7 @@ html.theme-xfade body * {
   .gw-user-email { display: none; }
   .gw-user-avatar { width: 1.75rem; height: 1.75rem; }
   .gw-shell .gateway-rail { padding-top: 0; }
-  .gw-rail-brand { min-height: var(--wco-header-height); min-width: 0; }
+  .gw-rail-brand { min-height: var(--wco-header-height); min-width: 0; margin-top: 0.25rem; }
   .gw-rail-logo { width: 1.75rem; height: 1.75rem; }
   .gw-mobile-header {
     height: var(--wco-header-height);
@@ -619,9 +618,6 @@ html.theme-xfade body * {
   @media (min-width: 768px) and (max-width: 1023px) {
     /* A compact rail cannot fit beside left-side native controls. */
     .gw-shell .gateway-rail { padding-top: min(var(--wco-left), var(--wco-top)); }
-  }
-  @media (max-width: 767px) {
-    .rc-window-project { display: none; }
   }
   .rc-safe-bottom { padding-bottom: max(var(--sab), 0.5rem); }
 }

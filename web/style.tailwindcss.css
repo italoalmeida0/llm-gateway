@@ -550,72 +550,14 @@ html.theme-xfade body * {
   --sar: env(safe-area-inset-right, 0px);
 }
 
-/* Slim drag strip for the installed-app titlebar: controls only, pinned
- * right in the no-drag zone (tweakgrid .top-bar pattern: drag everywhere
- * except .rc-wco-actions). No icon, no title — the strip shares the row
- * with the OS window controls, so nothing may stack above the sidebar
- * buttons. Hidden in the browser; in WCO mode it becomes a real in-flow
- * row of the app shell (shrink-0), so the workspace below is pushed down —
- * nothing overlaps: the OS draws its window buttons in the area beside
- * env(titlebar-area-x/width), and the in-app overlay controls (sidebar
- * toggle, sidebar headers, transcript floating toggle) hide or re-dock
- * while the bar is visible. */
+/* Empty drag strip for the installed-app titlebar (nothing inside: no
+ * icon, no title, no buttons — the sidebar toggle stays in its normal
+ * floating spot in the transcript). Hidden in the browser; in WCO mode it
+ * becomes a real in-flow row of the app shell (shrink-0), so the workspace
+ * below is pushed down — nothing overlaps: the OS draws its window buttons
+ * in the area beside env(titlebar-area-x/width). */
 .rc-wco-bar {
   display: none;
-}
-.rc-wco-bar-inner {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  -webkit-app-region: drag;
-  app-region: drag;
-  background: var(--ink-950);
-  color: var(--ink-300);
-  user-select: none;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.rc-wco-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex-shrink: 0;
-  margin-left: auto;
-  padding-right: 2px;
-  pointer-events: auto;
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-}
-.rc-wco-sep {
-  width: 1px;
-  height: 16px;
-  margin: 0 4px;
-  background: var(--line);
-  flex-shrink: 0;
-}
-.rc-wco-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 7px;
-  border: 1px solid transparent;
-  color: var(--ink-400);
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-.rc-wco-btn:hover {
-  background: var(--ink-800);
-  border-color: var(--line);
-  color: var(--ink-100);
-}
-.rc-wco-btn:active {
-  background: var(--ink-700);
-}
-.rc-wco-btn:focus-visible {
-  outline: 2px solid var(--brand-500);
-  outline-offset: 1px;
 }
 
 @media (display-mode: window-controls-overlay) {
@@ -636,33 +578,17 @@ html.theme-xfade body * {
     grid-area: side;
     grid-row: 1 / -1;
   }
-  /* In-flow titlebar row: only as wide as the draggable area the OS leaves
+  /* In-flow drag row: only as wide as the draggable area the OS leaves
    * us (titlebar-area-x/width), padded for the notch. */
   .rc-wco-bar {
     display: block;
     flex-shrink: 0;
     width: 100%;
+    height: env(titlebar-area-height, 33px);
     padding-top: var(--sat);
     padding-right: var(--sar);
-  }
-  /* Sidebar open: the bar starts after it — the OS titlebar-area-x already
-   * covers the left offset on most platforms; normalize it explicitly so
-   * nothing stacks above the sidebar buttons. Closed sidebar collapses to
-   * w-0: the bar then spans the freed row. */
-  .rc-wco-layout > .rc-sidebar {
-    min-height: 0;
-  }
-  .rc-wco-bar-inner--sbfull {
-    margin-left: 0;
-  }
-  .rc-wco-bar-inner {
-    height: env(titlebar-area-height, 33px);
-    padding-right: 2px;
-  }
-  /* Single sidebar toggle: the titlebar owns it now — the floating one in
-   * the transcript would sit on the same spot. */
-  .rc-transcript-toggle {
-    display: none;
+    -webkit-app-region: drag;
+    app-region: drag;
   }
   /* Gateway dashboard: invisible drag strip ABOVE the header row
    * (user-area side) so the installed window can be dragged there.

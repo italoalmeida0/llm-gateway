@@ -8,7 +8,7 @@ import {
   onCleanup,
   Show,
 } from "solid-js";
-import { useUI, useHost, useModal } from "./ctx";
+import { useUI, useHost } from "./ctx";
 import { Icon as Iconify } from "../components/icon";
 import { IndirectBrand } from "./components/IndirectBrand";
 import { HostCard } from "./components/HostCard";
@@ -52,49 +52,16 @@ import { createWorkspace } from "./hooks/useWorkspace";
 import { createHosts } from "./hooks/useHosts";
 import { createSettings } from "./hooks/useSettings";
 
-interface WcoTitlebarProps {
-  sbOpen: () => boolean;
-  toggleSb: () => void;
-  /** True while the inner sidebar panel is visible (desktop). The WCO bar
-   *  then leaves the left gutter free so the sidebar runs full-height. */
-  sbVisible: () => boolean;
-}
-
-/** Installed-app titlebar (window-controls-overlay): a slim drag strip with
- *  the window controls (sidebar toggle, settings) pinned right in the
- *  no-drag zone. No icon, no title — nothing may sit above the sidebar
- *  buttons. Rendered always; CSS shows it only under display-mode:
+/** Installed-app drag strip (window-controls-overlay): an empty draggable
+ *  row — no buttons, no icon, no title. The sidebar toggle lives only in
+ *  its normal floating spot in the transcript (like with no overlay).
+ *  Rendered always; CSS shows it only under display-mode:
  *  window-controls-overlay (inert in the browser).
  *
  *  Exported for the fixture test (same component, real browser). */
-export function WcoTitlebar(props: WcoTitlebarProps) {
-  const m = useModal();
+export function WcoTitlebar() {
   return (
-    <div class="rc-wco-bar shrink-0" data-tauri-drag-region aria-hidden="false">
-      <div class="rc-wco-bar-inner" classList={{ "rc-wco-bar-inner--sbfull": props.sbVisible() }}>
-      <div class="rc-wco-actions">
-        <button
-          type="button"
-          class="rc-wco-btn"
-          onClick={props.toggleSb}
-          aria-label={props.sbOpen() ? "Hide sidebar" : "Show sidebar"}
-          title={props.sbOpen() ? "Hide sidebar" : "Show sidebar"}
-        >
-          <Iconify icon={props.sbOpen() ? "lucide:panel-left-close" : "lucide:panel-left-open"} size={15} />
-        </button>
-        <span class="rc-wco-sep" aria-hidden="true" />
-        <button
-          type="button"
-          class="rc-wco-btn"
-          onClick={() => m.openSettings()}
-          aria-label="Open settings"
-          title="Settings"
-        >
-          <Iconify icon="lucide:settings" size={15} />
-        </button>
-      </div>
-      </div>
-    </div>
+    <div class="rc-wco-bar shrink-0" data-tauri-drag-region aria-hidden="true" />
   );
 }
 
@@ -1375,11 +1342,7 @@ export default function IndirectCodePage() {
           tweakgrid); the titlebar strip only covers the content column. */}
         <div class="rc-wco-layout flex-1 flex min-h-0 overflow-hidden relative">
           <WorkspaceSidebar />
-          <WcoTitlebar
-            sbOpen={sidebarOpen}
-            toggleSb={() => setSidebarOpen(!sidebarOpen())}
-            sbVisible={() => sidebarOpen() && !isMobile()}
-          />
+          <WcoTitlebar />
           <main class="rc-wco-main flex flex-col min-w-0 min-h-0 bg-ink-950 relative">
             <TranscriptView />
             <Composer />

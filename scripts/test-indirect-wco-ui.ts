@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 /**
- * WCO titlebar check: renders the REAL WcoTitlebar (same component as the
- * page) in real Chromium against a fixture bundle. Asserts the OS-style bar
- * structure (icon + session title + sidebar/settings controls), the toggle
- * callback, and zero page errors (TDZ guard — Solid memos evaluate eagerly).
+ * WCO drag-strip check: renders the REAL WcoTitlebar (same component as
+ * the page) in real Chromium against a fixture bundle. Asserts the strip
+ * is empty (no icon/title/buttons — the sidebar toggle stays in its
+ * normal floating spot) and zero page errors (TDZ guard — Solid memos
+ * evaluate eagerly).
  *
  * Usage:
  *   PLAYWRIGHT_MODULE=… CHROMIUM_PATH=… bun scripts/test-indirect-wco-ui.ts
@@ -52,34 +53,16 @@ const errors: string[] = [];
 page.on("pageerror", (e: Error) => errors.push(e.message));
 
 await page.goto(`http://127.0.0.1:${server.port}/`);
-await page.waitForSelector(".rc-wco-bar", { timeout: 15000 });
+// display:none outside WCO mode — attach, not visibility.
+await page.waitForSelector(".rc-wco-bar", { timeout: 15000, state: "attached" });
 await page.waitForTimeout(400);
 
-// Drag strip renders controls only — no icon, no title may stack above
-// the sidebar buttons.
+// Drag strip is empty by design — nothing may sit above the sidebar
+// buttons; the toggle keeps its normal floating spot in the transcript.
+check("wco strip renders", (await page.locator(".rc-wco-bar").count()) === 1);
 check("wco no icon", (await page.locator(".rc-wco-icon").count()) === 0);
 check("wco no title", (await page.locator(".rc-wco-title").count()) === 0);
-check("wco two controls", (await page.locator(".rc-wco-btn").count()) === 2);
-
-// Sidebar toggle flips through the real callback.
-const btn = page.locator(".rc-wco-btn").first();
-check("toggle label before", (await btn.getAttribute("aria-label")) === "Hide sidebar");
-await btn.click();
-await page.waitForTimeout(200);
-check(
-  "toggle flips sidebar state",
-  (await page.evaluate(() => (window as any).wcoUI.sbOpen())) === false,
-  "sbOpen false after click",
-);
-check("toggle label after", (await btn.getAttribute("aria-label")) === "Show sidebar");
-
-// Settings button fires openSettings.
-await page.locator(".rc-wco-btn").nth(1).click();
-await page.waitForTimeout(200);
-check(
-  "settings opens",
-  (await page.evaluate(() => (window as any).wcoUI.commands)).some((c: any) => c.type === "open-settings"),
-);
+check("wco no buttons", (await page.locator(".rc-wco-btn").count()) === 0);
 
 check("zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 

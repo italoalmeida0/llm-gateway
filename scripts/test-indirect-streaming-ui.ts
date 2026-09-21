@@ -62,7 +62,7 @@ try {
   assert(await page.locator("#markdown pre .tok-kw").count() > 0, "highlights before the fence closes");
   const scroller = page.locator("#markdown .tarnav-codeblock > .font-mono");
   const copy = page.locator("#markdown .tarnav-copy");
-  assert.equal(await copy.evaluate((el: HTMLElement) => el.parentElement?.style.position), "relative");
+  assert.equal(await copy.evaluate((el: HTMLElement) => el.closest<HTMLElement>(".tarnav-codeblock")?.style.position), "relative");
   assert.equal(await copy.evaluate((el: HTMLElement) => el.closest(".overflow-y-auto") !== null), false, "copy stays outside the scrolling code body");
   await set(liveCode + "2:console.log(value);\n3:const next = value + 1;\n", true);
   await copy.click();
@@ -98,17 +98,38 @@ try {
   }, table);
   await settle();
   assert.deepEqual(await page.locator("#markdown tbody tr").evaluateAll((rows: Element[]) => rows.map((r) => Array.from(r.children, (c) => c.textContent?.trim()))), [["one", ""], ["two", "three"]], "ragged-table repair does not consume cells that are still streaming");
-  await page.getByRole("button", { name: "Copy table", exact: true }).click();
-  assert.equal(await page.evaluate(() => (window as any).copiedMarkdown), "A\tB\none\t\ntwo\tthree");
-  await page.getByRole("button", { name: "Download table", exact: true }).click();
-  const csvDownload = page.waitForEvent("download");
-  await page.getByRole("button", { name: "CSV", exact: true }).click();
-  const downloaded = await csvDownload;
-  assert.equal(downloaded.suggestedFilename(), "table.csv");
-  assert.equal(await Bun.file(await downloaded.path()).text(), "A,B\none,\ntwo,three");
-  await page.getByRole("button", { name: "Download table", exact: true }).click();
-  await page.keyboard.press("Escape");
-  assert.equal(await page.getByRole("button", { name: "CSV", exact: true }).count(), 0, "floating controls dispose on close");
+  assert.equal(await page.locator('#markdown .rc-table-wrap button').count(), 0);
+  const literalTable = "| Language | Fence syntax | Highlight | Previous |\n|:---|:---:|---:|---|\n"
+    + ["python", "javascript", "markdown", "bash", "sql"].map((lang) => `| ${lang} | \` \`\`\`${lang} \` | keywords, strings | yes |`).join("\n")
+    + "\n\n| Item | Status |\n|---|---|\n| Code block | OK |\n| Table | OK |\n| Right alignment | OK |\n";
+  for (const streamed of [false, true]) {
+    await set("", true);
+    await page.evaluate(async ({ text, streamed }: { text: string; streamed: boolean }) => {
+      const a = (window as any).streamUI;
+      const chunk = streamed ? 13 : text.length;
+      for (let i = chunk; i < text.length + chunk; i += chunk) {
+        a.setText(text.slice(0, i)); await new Promise(requestAnimationFrame);
+      }
+      a.setStreaming(false);
+    }, { text: literalTable, streamed });
+    await settle();
+    assert.equal(await page.locator('#markdown table').count(), 2);
+    assert.deepEqual(await page.locator('#markdown table').first().locator('tbody tr').evaluateAll((rows: Element[]) => rows.map((r) => r.children.length)), [4, 4, 4, 4, 4]);
+    assert.deepEqual(await page.locator('#markdown code').allTextContents(), ["```python", "```javascript", "```markdown", "```bash", "```sql"]);
+    assert.deepEqual(await page.locator('#markdown table').first().locator('thead th').evaluateAll((cells: Element[]) => cells.map((c) => getComputedStyle(c).textAlign)), ["left", "center", "right", "left"]);
+    assert.deepEqual(await page.locator('#markdown table').first().locator('tbody tr').first().locator('td').evaluateAll((cells: Element[]) => cells.map((c) => getComputedStyle(c).textAlign)), ["left", "center", "right", "left"]);
+  }
+  const callouts = ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"].map((name) => `> [!${name}]\n> A **useful** message.\n\n`).join("");
+  await set("", true);
+  await page.evaluate(async (text: string) => {
+    const a = (window as any).streamUI;
+    for (let end = 3; end < text.length + 3; end += 3) { a.setText(text.slice(0, end)); await new Promise(requestAnimationFrame); }
+    a.setStreaming(false);
+  }, callouts);
+  await settle();
+  assert.equal(await page.locator('#markdown blockquote[data-callout]').count(), 5, await page.locator('#markdown').innerHTML());
+  assert.deepEqual(await page.locator('#markdown .rc-callout-label').allTextContents(), ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"]);
+  assert.equal(await page.locator('#markdown blockquote [data-streamdown="strong"]').count(), 5);
   await set("Loose fence inside text ``` not a fence, then `inline code`.\n\n");
   assert((await page.locator("#markdown").textContent())?.includes("not a fence, then inline code."));
   assert.equal(await page.locator('#markdown code[data-streamdown="inline-code"]').last().textContent(), "inline code");
@@ -119,7 +140,7 @@ try {
     await page.locator("#markdown").screenshot({ path: `/tmp/indirect-parity-${theme}.png` });
   }
   await page.setViewportSize({ width: 1280, height: 720 });
-  console.log("PASS: parity live highlighting, code copy/gutters, pinned copy control, icons, KaTeX, streamed ragged tables, downloads, loose spans and both themes");
+  console.log("PASS: parity live highlighting, code copy/gutters, pinned copy control, icons, KaTeX, streamed tables/backtick literals/alignment, callouts, loose spans and both themes");
 
   // Deterministic visibility transition: the browser still runs JS so we can
   // assert that the application (rather than Chromium throttling) pauses work.

@@ -33,10 +33,20 @@ render(() => {
     setPreviewFile: () => {}, activeSession: () => null, pendingApproval: t.pendingApproval, projects: () => [],
   };
   const inbox = createRelayInbox({
-    apply: (messages) => batch(() => messages.forEach((m: any) => t.handleAgentEvent(m.sessionId, m.event))),
-    schedule: (flush) => setTimeout(flush, 32), cancel: (timer) => clearTimeout(timer),
+    apply: (messages) => batch(() => messages.forEach((m: any) => {
+      if (m.type === "agent_event") t.handleAgentEvent(m.sessionId, m.event);
+      else if (m.type === "session_content") api.snapshot = t.applySessionContent(m.sessionId, m.messages);
+      else if (m.type === "session_status") t.handleStatusEvent(m);
+      else if (m.type === "checkpoint") api.checkpoint = m.id;
+    })),
+    schedule: (flush) => setTimeout(flush, document.hidden ? 250 : 32), cancel: (timer) => clearTimeout(timer),
   });
   onCleanup(inbox.clear);
+  if (new URLSearchParams(location.search).has("relay")) {
+    const socket = new WebSocket(`${location.origin.replace("http", "ws")}/events`);
+    socket.onmessage = (event) => inbox.push(JSON.parse(event.data));
+    onCleanup(() => socket.close());
+  }
   Object.assign(api, { setWidth, setText, setStreaming, setOpen, setSid, t, inbox, setMotionEnabled, motionReady: USAL.initialized });
   setMotionEnabled(false);
   const onCopy = () => { void navigator.clipboard.writeText(text()).then(() => setCopied(true)); };

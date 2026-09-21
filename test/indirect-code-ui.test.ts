@@ -1796,3 +1796,24 @@ test("streaming reuses unchanged historical turn derivations and invalidates edi
   build([]);
   expect(build([old, live])[0]).not.toBe(first[0]);
 });
+
+describe("Incremental note deduplication", () => {
+  test("matches a fresh derivation across appends, edits, snapshots and truncation", () => {
+    const build = createRenderBlockBuilder();
+    const make = (id: number, text: string): ChatMessage => ({ id: `note-${id}`, role: "assistant", turnIndex: 1,
+      time: 0, blocks: [{ type: "text", text }, { type: "tool_call", toolId: `read-${id}`, toolName: "read", toolArgs: "{}" }] });
+    const hidden = (blocks: ReturnType<typeof buildRenderBlocks>) => blocks.flatMap((block) => block.kind === "series"
+      ? block.entries.filter((entry) => entry.kind === "text").map((entry) => !!entry.hidden) : []);
+    let messages = Array.from({ length: 25 }, (_, i) => make(i, `Inspect module ${i} with unique symbol_${i} field_${i} method_${i}.`));
+    const check = () => expect(hidden(build(messages))).toEqual(hidden(buildRenderBlocks(messages)));
+    check();
+    messages = [...messages, make(25, messages[0].blocks[0].text!)]; check();
+    expect(hidden(build(messages))[0]).toBe(true);
+    messages = [...messages.slice(0, -1), make(25, "A completely different response.")]; check();
+    expect(hidden(build(messages))[0]).toBe(false);
+    messages = [...messages, make(26, messages[3].blocks[0].text!), make(27, messages[4].blocks[0].text!)]; check();
+    messages = structuredClone(messages); check();
+    messages = messages.slice(0, -2); check();
+    messages = [make(0, "Edited first note."), ...messages.slice(1)]; check();
+  });
+});

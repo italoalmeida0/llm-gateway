@@ -52,6 +52,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "streaming-markdown@0.2.15": "patches/streaming-markdown@0.2.15.patch",
+  },
   "packages": {
     "@alloc/quick-lru": ["@alloc/quick-lru@5.2.0", "", {}, "sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw=="],
 

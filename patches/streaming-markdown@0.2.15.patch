@@ -1,0 +1,49 @@
+diff --git a/smd.js b/smd.js
+index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..c260a1c3eec340388368d71f5a2f4a00b24eb576 100644
+--- a/smd.js
++++ b/smd.js
+@@ -909,19 +909,27 @@ export function parser_write(p, chunk) {
+             p.fence_end = 1
+             continue
+         case CODE_INLINE:
+-            switch (char) {
+-            case '`':
+-                if (pending_with_char.length ===
+-                    p.fence_start + Number(p.pending[0] === ' ') // 0 or 1 for space
+-                ) {
++            // A delimiter closes only when its COMPLETE run matches the opener.
++            // Deciding at the first tick incorrectly closes ` ```python ` and
++            // swallows subsequent table separators into a new code span.
++            if (char === '`') {
++                p.pending = pending_with_char
++                continue
++            }
++            if (p.pending.endsWith('`')) {
++                const run = p.pending.match(/`+$/)[0].length
++                if (run === p.fence_start) {
+                     add_text(p)
+                     end_token(p)
+                     p.pending = ""
+                     p.fence_start = 0
+-                } else {
+-                    p.pending = pending_with_char
++                    parser_write(p, char)
++                    continue
+                 }
+-                continue
++                p.text += p.pending
++                p.pending = ""
++            }
++            switch (char) {
+             case '\n':
+                 p.text += p.pending
+                 p.pending = ""
+@@ -935,7 +943,7 @@ export function parser_write(p, chunk) {
+                 p.pending = char
+                 continue
+             default:
+-                p.text += pending_with_char
++                p.text += p.pending + char
+                 p.pending = ""
+                 continue
+             }

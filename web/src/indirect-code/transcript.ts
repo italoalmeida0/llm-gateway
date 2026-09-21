@@ -115,21 +115,48 @@ export function latestShortTurnMessage(messages: ChatMessage[]): string {
 /** Fuzzy text similarity for turn dedup: normalized containment either way
  * or high word-overlap. Keeps only the last of near-duplicate progress
  * notes (the agent restating itself while tools run). Pure — covered by tests. */
-export function fuzzySame(a: string, b: string): boolean {
-  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
-  const na = norm(a);
-  const nb = norm(b);
+interface FuzzyText { source: string; normalized: string; words: Set<string> }
+function prepareFuzzyText(source: string): FuzzyText {
+  const normalized = source.toLowerCase().replace(/\s+/g, " ").trim();
+  return { source, normalized, words: new Set(normalized.split(" ").filter(Boolean)) };
+}
+function compareFuzzyText(a: FuzzyText, b: FuzzyText): boolean {
+  const na = a.normalized, nb = b.normalized;
   if (!na || !nb) return false;
   if (na === nb) return true;
   const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na];
   if (short.length >= 24 && long.includes(short)) return true;
-  const words = (s: string) => new Set(s.split(" ").filter(Boolean));
-  const wa = words(na);
-  const wb = words(nb);
-  let inter = 0;
-  for (const w of wa) if (wb.has(w)) inter++;
-  const union = wa.size + wb.size - inter;
-  return union > 0 && inter / union >= 0.8;
+  const [small, large] = a.words.size <= b.words.size ? [a.words, b.words] : [b.words, a.words];
+  // Even complete overlap cannot reach the threshold for very different sizes.
+  if (small.size < large.size * .8) return false;
+  const required = .8 * (small.size + large.size) / 1.8;
+  let intersection = 0, remaining = small.size;
+  for (const word of small) {
+    remaining--;
+    if (large.has(word)) intersection++;
+    if (intersection + remaining < required) return false;
+  }
+  return intersection / (small.size + large.size - intersection) >= .8;
+}
+export function fuzzySame(a: string, b: string): boolean {
+  return compareFuzzyText(prepareFuzzyText(a), prepareFuzzyText(b));
+}
+
+interface TextDedupState { texts: FuzzyText[]; matches: number[] }
+/** Append-only turns reuse previous decisions. Edits invalidate only comparisons
+ * involving the changed suffix, including matches whose later note disappeared. */
+function deduplicateTexts(sources: string[], previous?: TextDedupState): TextDedupState {
+  let prefix = 0;
+  while (prefix < sources.length && previous?.texts[prefix]?.source === sources[prefix]) prefix++;
+  const texts = sources.map((source, i) => i < prefix ? previous!.texts[i] : prepareFuzzyText(source));
+  const matches = texts.map((text, i) => {
+    const prior = i < prefix ? previous!.matches[i] : -1;
+    if (prior >= 0 && prior < prefix) return prior;
+    const floor = i < prefix && prior < 0 ? Math.max(prefix, i + 1) : i + 1;
+    for (let j = texts.length - 1; j >= floor; j--) if (compareFuzzyText(text, texts[j])) return j;
+    return -1;
+  });
+  return { texts, matches };
 }
 
 /** Featured final message of a turn, by priority: among the last two
@@ -195,7 +222,7 @@ function pairTurnUnits(turnMsgs: ChatMessage[]): ToolUnit[] {
  * Tool runs stay merged across messages until a thinking/text/image entry
  * breaks them, preserving the existing cross-message explore/command
  * sub-grouping for pure tool runs. */
-function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
+function buildTurnEntries(turnMsgs: ChatMessage[], previous?: TextDedupState): { entries: TurnEntry[]; dedup: TextDedupState } {
   const entries: TurnEntry[] = [];
   let run: ToolUnit[] = [];
   let runMsg: ChatMessage | null = null;
@@ -238,23 +265,17 @@ function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
     }
   }
   flushRun();
-  // Fuzzy dedup: hide near-duplicate texts, the last one wins.
+  // Normalize each note once, retaining decisions across live deltas/resumes.
   const texts = entries.filter((e) => e.kind === "text");
-  for (let i = 0; i < texts.length; i++) {
-    for (let j = texts.length - 1; j > i; j--) {
-      if (texts[j].kind === "text" && texts[i].kind === "text" &&
-        fuzzySame(texts[i].block.text || "", texts[j].block.text || "")) {
-        texts[i].hidden = true;
-        break;
-      }
-    }
-  }
-  return entries.map((entry, index) => ({ ...entry, id: entry.kind === "tools"
+  const dedup = deduplicateTexts(texts.map((entry) => entry.block.text || ""), previous);
+  texts.forEach((entry, i) => { entry.hidden = dedup.matches[i] >= 0; });
+  return { dedup, entries: entries.map((entry, index) => ({ ...entry, id: entry.kind === "tools"
     ? `${entry.msg.id}:tools:${entry.units[0]?.id || index}`
-    : `${entry.msg.id}:${entry.kind}:${"nth" in entry ? entry.nth : index}` }));
+    : `${entry.msg.id}:${entry.kind}:${"nth" in entry ? entry.nth : index}` })) };
+
 }
 
-type RenderCache = Map<string, { messages: ChatMessage[]; block: RenderBlock }>;
+type RenderCache = Map<string, { messages: ChatMessage[]; block: RenderBlock; dedup?: TextDedupState }>;
 
 /** Per-view cache: immutable message identities invalidate only changed turns.
  * Keeping only the latest turn set bounds retention across session switches. */
@@ -288,19 +309,22 @@ export function buildRenderBlocks(
     const tools = turnMsgs.some(hasToolActivity);
     const thoughts = turnMsgs.some((m) =>
       m.blocks.some((b) => b.type === "reasoning" && !!b.reasoning?.trim()));
+    let dedup: TextDedupState | undefined;
     if (!tools && !thoughts && turnMsgs.length === 1) {
       for (const m of turnMsgs) result.push({ kind: "single", msg: m });
     } else {
+      const built = buildTurnEntries(turnMsgs, cached?.dedup);
+      dedup = built.dedup;
       result.push({
         kind: "series",
         msg: turnMsgs[0],
         extras: turnMsgs.slice(1),
         units: pairTurnUnits(turnMsgs),
-        entries: buildTurnEntries(turnMsgs),
+        entries: built.entries,
         finalMsgId: finalTurnMessage(turnMsgs)?.id ?? null,
       });
     }
-    nextCache.set(head.id, { messages: turnMsgs, block: result[result.length - 1] });
+    nextCache.set(head.id, { messages: turnMsgs, block: result[result.length - 1], dedup });
     i = turnEnd;
   }
   if (cache) { cache.clear(); for (const [key, value] of nextCache) cache.set(key, value); }

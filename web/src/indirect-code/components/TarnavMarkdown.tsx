@@ -2,15 +2,13 @@
  * parity.html. Preserve its DOM/CSS, live block highlighting, icons, KaTeX,
  * gutters, copy controls, ragged-table and loose-code-span repairs.
  * Production additions: visibility/disclosure suspension, bounded feeding,
- * final flush, safe URLs and lifecycle cleanup for floating controls. */
+ * final flush, safe URLs and compact controls. */
 import { createEffect, on, onCleanup, onMount, untrack } from "solid-js";
-import { Portal, render } from "solid-js/web";
 import { Attr, Token, parser, parser_end, parser_write, type Any_Renderer, type Parser } from "streaming-markdown";
 import katex from "katex";
 import { registry } from "virtual:icons";
 import { commandIcon, fileIcon, hasFileIcon } from "../files";
 import { escapeHtml, highlightCodeSync, languageForPath, preloadCodeHighlight } from "../utils/lang";
-import { anchorFloat } from "../../floating";
 import { useDisclosureActive } from "./Disclosure";
 
 // Only trusted, build-time icon data is interpolated into SVG markup.
@@ -30,6 +28,8 @@ function safeUrl(value: string, image: boolean): string | null {
 // Rendered gutter/highlight markup must never become parser input or copy text.
 const codeSource = new WeakMap<Element, string>();
 const closedNodes = new WeakSet<Element>();
+const validCodeSpans = new WeakSet<Element>();
+const tableAlignments = new WeakMap<Element, string[]>();
 const highlightedAt = new WeakMap<Element, number>();
 const sourceCode = (code: Element) => codeSource.get(code) ?? code.textContent ?? "";
 const copyCode = (code: Element) => sourceCode(code).split("\n").map((line) => line.replace(/^\d+:/, "")).join("\n");
@@ -122,6 +122,7 @@ interface TarnavRendererOptions {
 }
 
 interface NodeStack {
+  parser?: Parser;
   nodes: Element[];
   index: number;
   dirty: Set<Element>;
@@ -190,19 +191,22 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
       if (token === Token.Document) return;
       // Code fences use the parity page's CodeBlock DOM:
       // div.font-mono.text-[11px] > pre.whitespace-pre-wrap > code.tok —
-      // Copy stays outside the scroller; there is no language header. The app's
+      // Copy and the language label stay in a compact header. The app's
       // wrapper owns the border/background so scroll clipping keeps rounded
       // corners; CodeBlock max-h-56 keeps big blocks inside the balloon.
       // The fence language arrives later via set_attr(LANG) into
       // data-language (used by the highlight pass).
       if (token === Token.Code_Fence || token === Token.Code_Block) {
         const parent = current();
-        // Outer wrapper: NOT scrollable, only anchors the absolute copy
-        // button (a positioned child of a scrolling box would scroll away
-        // and stretch the scroll area).
+        // Outer wrapper keeps the header outside the scrolling code body.
         const wrap = parent.appendChild(document.createElement("div"));
         wrap.className = "tarnav-codeblock";
         wrap.style.position = "relative";
+        const header = wrap.appendChild(document.createElement("div"));
+        header.className = "tarnav-code-header";
+        const language = header.appendChild(document.createElement("span"));
+        language.className = "tarnav-code-language";
+        language.textContent = "code";
         const container = wrap.appendChild(document.createElement("div"));
         container.className =
           "font-mono text-[11px] text-ink-300 overflow-x-auto overflow-y-auto select-text [scrollbar-gutter:stable] max-h-56";
@@ -214,7 +218,7 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
         codeSource.set(code, "");
         if (opts.highlight !== false) code.setAttribute("data-hl", "");
         // The copy control is anchored outside both scroll axes.
-        const copy = wrap.appendChild(makeCopyButton(() => copyCode(code), "Copy code", data.cleanup));
+        const copy = header.appendChild(makeCopyButton(() => copyCode(code), "Copy code", data.cleanup));
         copy.classList.add("tarnav-copy");
         data.nodes[++data.index] = code;
         return;
@@ -227,6 +231,9 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
         const cell = document.createElement(inHead ? "th" : "td");
         cell.setAttribute("data-streamdown", inHead ? "table-header-cell" : "table-cell");
         cell.className = inHead ? CLS["table-header-cell"] : CLS["table-cell"];
+        const table = current().closest("table");
+        const align = table && tableAlignments.get(table)?.[current().children.length];
+        if (align) cell.setAttribute("align", align);
         push(cell);
         return;
       }
@@ -254,134 +261,10 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
       // Tables get a wrapper and controls row for copying and downloading.
       if (token === Token.Table) {
         const wrap = document.createElement("div");
-        wrap.className = "my-4 flex flex-col space-y-2";
+        wrap.className = "rc-table-wrap";
         wrap.setAttribute("data-streamdown", "table-wrapper");
-        const controls = wrap.appendChild(document.createElement("div"));
-        controls.className = "flex items-center justify-end gap-1";
-        const copyBtn = controls.appendChild(
-          makeCopyButton(() => {
-            const tbl = wrap.querySelector("table");
-            if (!tbl) return "";
-            return [...tbl.querySelectorAll("tr")]
-              .map((tr) =>
-                [...tr.querySelectorAll("th,td")]
-                  .map((c) => (c as HTMLElement).innerText.trim())
-                  .join("\t")
-              )
-              .join("\n");
-          }, "Copy table", data.cleanup)
-        );
-        copyBtn.setAttribute("data-table-copy", "");
-        // Download dropdown (CSV/Markdown), like TableDownloadDropdown.
-        const dlWrap = controls.appendChild(document.createElement("div"));
-        dlWrap.style.position = "relative";
-        const dlBtn = dlWrap.appendChild(document.createElement("button"));
-        dlBtn.className = "rc-markdown-control";
-        dlBtn.setAttribute("aria-expanded", "false");
-        dlBtn.setAttribute("aria-haspopup", "true");
-        dlBtn.setAttribute("data-rc-tip", "Download table");
-        dlBtn.setAttribute("aria-label", "Download table");
-        dlBtn.setAttribute("type", "button");
-        dlBtn.innerHTML =
-          '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>';
-        const menu = document.createElement("div");
-        menu.className = "rc-markdown-download";
-        menu.setAttribute("role", "group");
-        menu.setAttribute("aria-label", "Table downloads");
-        menu.style.display = "none";
-        menu.style.position = "absolute";
-
-        menu.style.minWidth = "130px";
-        menu.style.border = "1px solid var(--line)";
-        menu.style.borderRadius = "8px";
-        menu.style.background = "var(--elev)";
-        menu.style.padding = "4px";
-        let closeMenu: (() => void) | undefined;
-        const hideMenu = () => { closeMenu?.(); closeMenu = undefined; menu.style.display = "none"; dlBtn.setAttribute("aria-expanded", "false"); };
-        data.cleanup.push(hideMenu);
-        const tableData = (): string[][] => {
-          const tbl = wrap.querySelector("table");
-          if (!tbl) return [];
-          return [...tbl.querySelectorAll("tr")].map((tr) =>
-            [...tr.querySelectorAll("th,td")].map((c) =>
-              (c as HTMLElement).innerText.trim()
-            )
-          );
-        };
-        const download = (format: "csv" | "md") => {
-          const rows = tableData();
-          if (!rows.length) return;
-          let content: string;
-          let mime: string;
-          let ext: string;
-          if (format === "md") {
-            content =
-              rows.map((r) => `| ${r.join(" | ")} |`).join("\n") +
-              (rows.length > 1
-                ? `\n| ${rows[0].map(() => "---").join(" | ")} |`
-                : "");
-            // header separator goes after the first row
-            if (rows.length > 1) {
-              const [h, ...rest] = rows;
-              content = `| ${h.join(" | ")} |\n| ${h.map(() => "---").join(" | ")} |\n${rest.map((r) => `| ${r.join(" | ")} |`).join("\n")}`;
-            }
-            mime = "text/markdown";
-            ext = "md";
-          } else {
-            content = rows
-              .map((r) =>
-                r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(",")
-              )
-              .join("\n");
-            mime = "text/csv";
-            ext = "csv";
-          }
-          const blob = new Blob([content], { type: mime });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = `table.${ext}`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        };
-        for (const [label, fmt] of [["CSV", "csv"], ["Markdown", "md"]] as const) {
-          const item = menu.appendChild(document.createElement("button"));
-          item.textContent = label;
-          item.setAttribute("type", "button");
-          item.style.display = "block";
-          item.style.width = "100%";
-          item.style.textAlign = "left";
-          item.style.padding = "6px 8px";
-          item.style.borderRadius = "6px";
-          item.style.fontSize = "12px";
-          item.addEventListener("click", () => {
-            download(fmt);
-            hideMenu();
-          });
-        }
-        dlBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          if (closeMenu) { hideMenu(); return; }
-          const portalHost = document.createElement("div");
-          const disposePortal = render(() => <Portal>{menu}</Portal>, portalHost);
-          menu.style.display = "block";
-          dlBtn.setAttribute("aria-expanded", "true");
-          if (e.detail === 0) menu.querySelector("button")?.focus();
-          const disposeFloat = anchorFloat(dlBtn, menu, { placement: "bottom-end", maxHeight: 300 });
-          const outside = (event: MouseEvent) => { if (!menu.contains(event.target as Node)) hideMenu(); };
-          const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { hideMenu(); dlBtn.focus(); } };
-          document.addEventListener("click", outside);
-          document.addEventListener("keydown", escape);
-          closeMenu = () => {
-            disposeFloat(); disposePortal();
-            document.removeEventListener("click", outside);
-            document.removeEventListener("keydown", escape);
-          };
-        });
         const scroller = wrap.appendChild(document.createElement("div"));
-        scroller.className = "overflow-x-auto";
+        scroller.className = "rc-table-scroll overflow-x-auto";
         const table = scroller.appendChild(document.createElement("table"));
         table.setAttribute("data-streamdown", "table");
         table.className = CLS.table;
@@ -410,6 +293,9 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
       // Pop one level, but never above the root (mirrors default renderer
       // semantics; guards against unbalanced streams mid-chunk).
       if (data.index > 0) {
+        const state = data.parser;
+        if (current().matches('code[data-streamdown="inline-code"]') && state &&
+            state.pending.trim().length === state.fence_start && /^ *`+$/.test(state.pending)) validCodeSpans.add(current());
         closedNodes.add(current()); data.dirty.add(current());
         data.index -= 1;
       }
@@ -443,7 +329,9 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
         if (code) {
           if (value) code.setAttribute("data-lang", value);
           const pre = code.parentElement;
-          if (pre && pre.tagName === "PRE") pre.setAttribute("data-language", value);
+          if (pre && pre.tagName === "PRE") pre.setAttribute("data-language", value.trim());
+          const label = code.closest(".tarnav-codeblock")?.querySelector(".tarnav-code-language");
+          if (label) label.textContent = value.trim() || "code";
         } else el.setAttribute("class", value);
       } else if (type === Attr.Checked && el.tagName === "INPUT") {
         (el as HTMLInputElement).checked = true;
@@ -572,12 +460,15 @@ function iconOne(code: HTMLElement) {
 /** Match the header width once a row closes; never rescan old table rows. */
 function normalizeTableRow(row: Element) {
   if (row.parentElement?.tagName === "THEAD") return;
-  const cols = row.closest("table")?.querySelector("thead tr")?.children.length ?? 0;
+  const table = row.closest("table");
+  const cols = table?.querySelector("thead tr")?.children.length ?? 0;
   if (!cols) return;
   while (row.children.length < cols) {
     const td = document.createElement("td");
     td.setAttribute("data-streamdown", "table-cell");
     td.className = CLS["table-cell"];
+    const align = table && tableAlignments.get(table)?.[row.children.length];
+    if (align) td.setAttribute("align", align);
     row.appendChild(td);
   }
   while (row.children.length > cols) row.removeChild(row.lastElementChild!);
@@ -586,9 +477,8 @@ function normalizeTableRow(row: Element) {
 /**
  * Fix leaked inline-code spans: thetarnav opens a code span on ANY backtick
  * run (``` mid-sentence included) and never backtracks when it doesn't
- * close, so the whole tail lands inside one giant chip. A well-formed
- * single-backtick span can never contain its own delimiter, so a chip
- * containing a backtick is a leak.
+ * close, so the whole tail lands inside one giant chip. Properly closed
+ * spans can contain shorter/longer backtick runs and must remain untouched.
  *
  * Instead of blindly unwrapping, RE-PARSE the leaked text: split on
  * backticks and rebuild — odd segments become real inline-code chips
@@ -604,7 +494,7 @@ function unwrapBogusInlineCode(root: ParentNode) {
       ? [root as HTMLElement]
       : [...(root as HTMLElement).querySelectorAll('code[data-streamdown="inline-code"]')];
   for (const code of codes) {
-    if (!closedNodes.has(code)) continue;
+    if (!closedNodes.has(code) || validCodeSpans.has(code)) continue;
     const text = code.textContent ?? "";
     if (!text.includes("`") && !text.includes("\n")) continue;
     const parent = code.parentElement;
@@ -633,6 +523,27 @@ function unwrapBogusInlineCode(root: ParentNode) {
   }
 }
 
+/** GitHub-style callouts: only rewrite the marker, retaining streamed body nodes. */
+function decorateCallout(paragraph: Element) {
+  const quote = paragraph.parentElement;
+  if (quote?.tagName !== "BLOCKQUOTE" || quote.dataset.callout || quote.firstElementChild !== paragraph) return;
+  const first = paragraph.firstChild;
+  // The parser represents unresolved [labels] as anchors without href.
+  // Wait for the following line so the marker cannot still become a link.
+  const anchor = first instanceof HTMLAnchorElement && !first.hasAttribute("href") && first.nextSibling?.nodeName === "BR";
+  const marker = anchor
+    ? first.textContent?.match(/^!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)$/)
+    : first?.nodeType === Node.TEXT_NODE ? first.textContent?.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:\s|$)/) : null;
+  if (!marker) return;
+  if (anchor) { first.nextSibling?.remove(); first.remove(); }
+  else (first as Text).deleteData(0, marker[0].length);
+  quote.dataset.callout = marker[1].toLowerCase();
+  const label = document.createElement("div");
+  label.className = "rc-callout-label";
+  label.textContent = marker[1];
+  quote.prepend(label);
+}
+
 /** Same live block strategy as parity.html, using the renderer's dirty set
  * instead of querying every previous code fence after each chunk. */
 function postPassSync(host: HTMLElement, opts: TarnavRendererOptions, data: NodeStack) {
@@ -641,7 +552,8 @@ function postPassSync(host: HTMLElement, opts: TarnavRendererOptions, data: Node
   data.dirty.clear();
   for (const el of dirties) {
     if (!host.contains(el)) continue;
-    if (el.tagName === "EQUATION-INLINE" || el.tagName === "EQUATION-BLOCK") katexOne(el as HTMLElement);
+    if (el.tagName === "P") decorateCallout(el);
+    else if (el.tagName === "EQUATION-INLINE" || el.tagName === "EQUATION-BLOCK") katexOne(el as HTMLElement);
     else if (el.matches("code[data-hl]") && opts.highlight !== false) {
       const code = el as HTMLElement;
       const text = sourceCode(code);
@@ -686,6 +598,7 @@ export function TarnavMarkdown(props: TarnavMarkdownProps) {
   let p: Parser | undefined;
   let fed = "";
   let previousCR = false;
+  let sourceLine = "";
   let ended = false;
   let frame = 0;
   let highlightTimer: ReturnType<typeof setTimeout> | undefined;
@@ -695,7 +608,7 @@ export function TarnavMarkdown(props: TarnavMarkdownProps) {
   function disposeView() { for (const dispose of view?.data.cleanup ?? []) dispose(); }
   function reset() {
     disposeView(); host.replaceChildren();
-    view = makeRenderer(host, opts); p = parser(view); fed = ""; previousCR = false; ended = false;
+    view = makeRenderer(host, opts); p = parser(view); view.data.parser = p; fed = ""; previousCR = false; sourceLine = ""; ended = false;
   }
   function update() {
     frame = 0;
@@ -709,7 +622,22 @@ export function TarnavMarkdown(props: TarnavMarkdownProps) {
       // Normalize only the new slice; a CRLF pair can cross chunk boundaries.
       const chunk = previousCR && appended.startsWith("\n") ? appended.slice(1) : appended;
       previousCR = appended.endsWith("\r");
-      parser_write(p!, chunk.replace(/\r\n?/g, "\n"));
+      const normalized = chunk.replace(/\r\n?/g, "\n");
+      let start = 0;
+      for (let newline = normalized.indexOf("\n"); newline >= 0; newline = normalized.indexOf("\n", start)) {
+        sourceLine += normalized.slice(start, newline);
+        parser_write(p!, normalized.slice(start, newline + 1));
+        const table = view!.data.nodes[view!.data.index]?.closest("table");
+        if (table && /^ {0,3}\|? *:?-{3,}:? *(?:\| *:?-{3,}:? *)+\|? *$/.test(sourceLine)) {
+          const cells = sourceLine.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+          const alignment = cells.map((cell) => cell.endsWith(":") ? cell.startsWith(":") ? "center" : "right" : "left");
+          tableAlignments.set(table, alignment);
+          table.querySelectorAll("thead th").forEach((cell, i) => cell.setAttribute("align", alignment[i] || "left"));
+        }
+        sourceLine = ""; start = newline + 1;
+      }
+      sourceLine += normalized.slice(start);
+      parser_write(p!, normalized.slice(start));
     }
     fed = full.slice(0, end);
     if (end === full.length && !props.streaming && !ended) {

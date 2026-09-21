@@ -254,7 +254,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
    thetarnav parser) via `components/StreamingMarkdown.tsx`, wrapping the
    parity.html port in `components/TarnavMarkdown.tsx`: incremental DOM,
    bounded snapshot slices, live block highlighting, gutters/copy, file and
-   command icons, KaTeX (local CSS/fonts), and table exports. Pause rendering
+   command icons, KaTeX (local CSS/fonts), and aligned tables without controls.
+   Code headers have compact copy buttons. The pinned parser patch preserves
+   literal backtick runs inside inline code/table cells. Pause rendering
    while hidden/collapsed; keep raw code separate from highlighted DOM.
    Preserve the `data-streamdown` attributes for existing theme rules; they
    are CSS hooks, not a dependency on the removed renderer. Browser gates use

@@ -71,5 +71,8 @@
     "solid-js": "^1.9.14",
     "tailwindcss": "^4.3.3",
     "typescript-eslint": "^8.69.0"
+  },
+  "patchedDependencies": {
+    "streaming-markdown@0.2.15": "patches/streaming-markdown@0.2.15.patch"
   }
 }

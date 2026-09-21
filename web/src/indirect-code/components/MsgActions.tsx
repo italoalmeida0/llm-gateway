@@ -1,8 +1,7 @@
 import { Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
 
-/** Transcript hover action button (byte-identical classes to the inline
- * ones that were duplicated in TranscriptView for user/assistant). */
+/** Shared transcript action button with mouse, keyboard and touch targets. */
 export function MsgIconBtn(props: {
   tip: string;
   icon: string;
@@ -15,12 +14,13 @@ export function MsgIconBtn(props: {
 }) {
   return (
     <button
+      type="button"
       onClick={props.onClick}
       disabled={props.disabled}
       class={
         props.compact
-          ? `p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer ${props.danger ? "hover:text-rose-400" : ""}`
-          : `p-1.5 rounded-md text-ink-500 hover:text-ink-200 ${props.danger ? "hover:text-rose-400 hover:bg-ink-900" : "hover:bg-elev"} transition-colors cursor-pointer disabled:opacity-40`
+          ? `rc-msg-action p-1 rounded-md text-ink-500 hover:text-ink-200 hover:bg-ink-900 transition-colors cursor-pointer ${props.danger ? "hover:text-rose-400" : ""}`
+          : `rc-msg-action p-1.5 rounded-md text-ink-500 hover:text-ink-200 ${props.danger ? "hover:text-rose-400 hover:bg-ink-900" : "hover:bg-elev"} transition-colors cursor-pointer disabled:opacity-40`
       }
       data-rc-tip={props.tip}
       aria-label={props.tip}
@@ -42,7 +42,7 @@ export interface MsgActionState {
 /** Hover actions for user bubbles (fork/copy/edit). */
 export function UserMsgActions(props: MsgActionState & { onEdit: () => void }) {
   return (
-    <div class="flex items-center gap-0.5 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+    <div class="rc-message-actions flex items-center gap-0.5 mt-1 transition-opacity">
       <MsgIconBtn tip="Fork conversation from here" icon="lucide:git-branch" disabled={props.forking || !props.canFork} onClick={props.onFork} />
       <Show when={props.showCopy}>
         <MsgIconBtn tip="Copy" icon="lucide:copy" compact copied={props.copied} onClick={props.onCopy} />
@@ -55,7 +55,7 @@ export function UserMsgActions(props: MsgActionState & { onEdit: () => void }) {
 /** Hover actions for assistant bubbles (fork/copy/regenerate). */
 export function AssistantMsgActions(props: MsgActionState & { onRegenerate: () => void; duration?: string }) {
   return (
-    <div class="flex items-center gap-0.5 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+    <div class="rc-message-actions flex items-center gap-0.5 mt-1.5 transition-opacity">
       <MsgIconBtn tip="Fork conversation from here" icon="lucide:git-branch" disabled={props.forking || !props.canFork} onClick={props.onFork} />
       <Show when={props.showCopy}>
         <MsgIconBtn tip="Copy" icon="lucide:copy" copied={props.copied} onClick={props.onCopy} />

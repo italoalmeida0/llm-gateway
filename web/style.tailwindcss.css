@@ -929,6 +929,50 @@ html[data-theme="light"] [data-streamdown="inline-code"] {
   overflow-x: auto; font-size: 0.78rem; line-height: 1.55;
 }
 .rc-markdown pre code { background: transparent; padding: 0; color: inherit; }
+/* Markdown controls stay outside scrolling content and remain usable on touch. */
+.tarnav-codeblock {
+  position: relative; min-width: 0; max-width: 100%; margin-bottom: 0.6rem;
+  border: 1px solid var(--line); border-radius: 0.75rem; background: var(--ink-900);
+}
+.tarnav-codeblock > .font-mono { border-radius: inherit; scrollbar-gutter: auto; }
+.rc-markdown .tarnav-codeblock pre[data-streamdown="code-block"] {
+  margin: 0; border: 0; border-radius: 0; background: transparent;
+  overflow: visible; padding-right: 3.25rem; min-height: 2.75rem;
+}
+.rc-markdown-control, .rc-msg-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0; min-width: 32px; min-height: 32px;
+}
+.rc-markdown-control {
+  padding: 6px; border: 1px solid var(--line); border-radius: 0.5rem;
+  color: var(--ink-400); background: var(--ink-900); cursor: pointer;
+  transition: opacity .15s, color .15s, background-color .15s;
+}
+.rc-markdown-control:hover, .rc-markdown-download button:hover {
+  color: var(--ink-100); background: var(--elev);
+}
+.rc-markdown-control:focus-visible, .rc-msg-action:focus-visible,
+.rc-markdown-download button:focus-visible {
+  outline: 2px solid var(--ink-400); outline-offset: -2px;
+}
+.tarnav-copy { position: absolute; top: 6px; right: 6px; z-index: 10; }
+.rc-markdown-control[data-copy-state="copied"] { color: var(--ink-100); }
+.rc-markdown-control[data-copy-state="error"] { color: var(--brand-400); }
+.rc-markdown-download button { min-height: 32px; color: var(--ink-200); cursor: pointer; }
+@media (hover: hover) and (pointer: fine) {
+  .tarnav-copy, .rc-message-actions { opacity: 0; }
+  .tarnav-codeblock:hover > .tarnav-copy,
+  .tarnav-codeblock:focus-within > .tarnav-copy,
+  .group\/msg:hover .rc-message-actions,
+  .group\/msg:focus-within .rc-message-actions { opacity: 1; }
+}
+@media (any-pointer: coarse) {
+  .tarnav-copy, .rc-message-actions { opacity: 1; }
+  .rc-markdown-control, .rc-msg-action, .rc-markdown-download button {
+    min-width: 44px; min-height: 44px;
+  }
+  .rc-markdown .tarnav-codeblock pre[data-streamdown="code-block"] { padding-right: 4rem; min-height: 3.5rem; }
+}
 .rc-markdown blockquote {
   margin: 0 0 0.6rem; padding: 0.15rem 0 0.15rem 0.8rem;
   border-left: 2px solid var(--line); color: var(--ink-400);

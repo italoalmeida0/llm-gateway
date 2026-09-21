@@ -120,3 +120,43 @@ bun test
 Playwright remains external. The visibility fixture deliberately overrides
 `document.hidden` and dispatches `visibilitychange`: it tests application
 suspension without depending on headless Chrome's tab-throttling policy.
+
+## Responsive controls audit (2026-09-21)
+
+The real Solid renderer and transcript components were checked with production
+CSS at 320, 360, 390, 768, 1024, 1440 and 1920 CSS pixels, in both themes.
+The first four sizes emulate touch; larger sizes exercise mouse and keyboard.
+The fixture uses the conversation's padding and narrow/normal/wide widths;
+it does not emulate the full sidebar/composer or a physical mobile browser.
+
+Fixes from the audit:
+
+- Copy controls were invisible on touch and only 22 pixels wide. Markdown and
+  message controls now have 44-pixel touch targets, remain visible on touch,
+  and reveal on hover or keyboard focus on desktop.
+- The code wrapper owns its border/background, preserving the bottom corners
+  of long scrolling blocks. Copy stays outside both scroll axes; code padding
+  reserves space for it, including compact thinking panels.
+- Code/table copying reports success or failure and cleans up feedback timers.
+  Table exports use consistent themed controls; the portaled dropdown stays
+  inside the viewport and exposes its expanded state.
+- CRLF and lone CR line endings are normalized incrementally, including pairs
+  split across updates. Without normalization, the parser could miss a closing
+  fence and absorb the following paragraph into code.
+
+The browser gate checks streamed code, tables and math without document-wide
+horizontal overflow; pinned controls while scrolling; clipboard contents;
+keyboard/touch visibility; download-menu boundaries; and the transition from
+live assistant text through the completion event and final session snapshot.
+The multiline Python example renders as one visible fenced block for LF and
+CRLF inputs, with its following paragraph outside the code and one final reply.
+The reported duplicate/inline presentation was not reproduced with the current
+renderer using the original saved message or a replay of its streaming flow.
+
+```sh
+PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs \
+CHROMIUM_PATH=/path/to/chrome \
+bun scripts/test-indirect-markdown-layout.ts
+```
+
+Screenshots are written to `/tmp/indirect-layout-<width>-<theme>.png`.

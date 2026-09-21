@@ -132,16 +132,39 @@ interface NodeStack {
 const COPY_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
 
-function makeCopyButton(copyText: () => string): HTMLButtonElement {
+const CHECK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
+
+function makeCopyButton(copyText: () => string, label: string, cleanup: (() => void)[]): HTMLButtonElement {
   const btn = document.createElement("button");
-  btn.className =
-    "flex size-7 items-center justify-center rounded-md border bg-background p-1 transition-colors hover:bg-muted";
-  btn.setAttribute("data-rc-tip", "Copy table");
-  btn.setAttribute("aria-label", "Copy table");
+  btn.className = "rc-markdown-control";
+  btn.setAttribute("data-rc-tip", label);
+  btn.setAttribute("aria-label", label);
   btn.setAttribute("type", "button");
-  btn.innerHTML = COPY_SVG;
-  btn.addEventListener("click", () => {
-    if (navigator.clipboard) navigator.clipboard.writeText(copyText()).catch(() => {});
+  const icon = btn.appendChild(document.createElement("span"));
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML = COPY_SVG;
+  const status = btn.appendChild(document.createElement("span"));
+  status.className = "sr-only";
+  status.setAttribute("role", "status");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
+  let attempt = 0;
+  cleanup.push(() => { disposed = true; clearTimeout(timer); });
+  btn.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    const current = ++attempt;
+    let success = false;
+    try { await navigator.clipboard.writeText(copyText()); success = true; } catch { /* Show feedback below. */ }
+    if (disposed || current !== attempt) return;
+    clearTimeout(timer);
+    btn.dataset.copyState = success ? "copied" : "error";
+    icon.innerHTML = success ? CHECK_SVG : COPY_SVG;
+    status.textContent = success ? "Copied to clipboard" : "Copy failed. Try again.";
+    btn.setAttribute("data-rc-tip", success ? "Copied" : "Copy failed. Try again.");
+    timer = setTimeout(() => {
+      delete btn.dataset.copyState; icon.innerHTML = COPY_SVG;
+      status.textContent = ""; btn.setAttribute("data-rc-tip", label);
+    }, 1800);
   });
   return btn;
 }
@@ -168,8 +191,8 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
       // Code fences use the parity page's CodeBlock DOM:
       // div.font-mono.text-[11px] > pre.whitespace-pre-wrap > code.tok —
       // Copy stays outside the scroller; there is no language header. The app's
-      // .rc-markdown pre CSS provides padding/background/border, and the
-      // CodeBlock max-h-56 keeps big blocks inside the balloon.
+      // wrapper owns the border/background so scroll clipping keeps rounded
+      // corners; CodeBlock max-h-56 keeps big blocks inside the balloon.
       // The fence language arrives later via set_attr(LANG) into
       // data-language (used by the highlight pass).
       if (token === Token.Code_Fence || token === Token.Code_Block) {
@@ -190,48 +213,9 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
         code.className = "tok";
         codeSource.set(code, "");
         if (opts.highlight !== false) code.setAttribute("data-hl", "");
-        // Copy button: absolute in the wrapper (top-right, hover-revealed),
-        // never inside the scroller and never inside the <pre> (copy text).
-        // Inline styles (not Tailwind classes): the parity page reuses the
-        // app's compiled CSS, which only contains classes the app itself
-        // uses — arbitrary utility classes may not exist there.
-        const copy = wrap.appendChild(document.createElement("button"));
-        copy.className = "tarnav-copy";
-        copy.style.position = "absolute";
-        copy.style.top = "6px";
-        copy.style.right = "6px";
-        copy.style.zIndex = "10";
-        copy.style.padding = "4px";
-        copy.style.borderRadius = "6px";
-        copy.style.color = "var(--ink-500)";
-        copy.style.opacity = "0";
-        copy.style.transition = "opacity .15s, color .15s, background-color .15s";
-        copy.style.cursor = "pointer";
-        copy.style.background = "transparent";
-        copy.style.border = "none";
-        copy.setAttribute("data-rc-tip", "Copy code");
-        copy.setAttribute("aria-label", "Copy code");
-        copy.setAttribute("type", "button");
-        copy.setAttribute("tabindex", "0");
-        copy.innerHTML = COPY_SVG;
-        copy.addEventListener("mouseenter", () => {
-          copy.style.color = "var(--ink-100)";
-          copy.style.background = "color-mix(in srgb, var(--ink-700) 60%, transparent)";
-        });
-        copy.addEventListener("mouseleave", () => {
-          copy.style.color = "var(--ink-500)";
-          copy.style.background = "transparent";
-        });
-        // Hover-reveal owned by JS (no CSS dependency on the app's build).
-        wrap.addEventListener("mouseenter", () => (copy.style.opacity = "1"));
-        wrap.addEventListener("mouseleave", () => (copy.style.opacity = "0"));
-        copy.addEventListener("focus", () => (copy.style.opacity = "1"));
-        copy.addEventListener("blur", () => (copy.style.opacity = "0"));
-        copy.addEventListener("click", (e) => {
-          e.stopPropagation();
-          if (navigator.clipboard)
-            navigator.clipboard.writeText(copyCode(code)).catch(() => {});
-        });
+        // The copy control is anchored outside both scroll axes.
+        const copy = wrap.appendChild(makeCopyButton(() => copyCode(code), "Copy code", data.cleanup));
+        copy.classList.add("tarnav-copy");
         data.nodes[++data.index] = code;
         return;
       }
@@ -285,21 +269,25 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
                   .join("\t")
               )
               .join("\n");
-          })
+          }, "Copy table", data.cleanup)
         );
         copyBtn.setAttribute("data-table-copy", "");
         // Download dropdown (CSV/Markdown), like TableDownloadDropdown.
         const dlWrap = controls.appendChild(document.createElement("div"));
         dlWrap.style.position = "relative";
         const dlBtn = dlWrap.appendChild(document.createElement("button"));
-        dlBtn.className =
-          "flex size-7 items-center justify-center rounded-md border bg-background p-1 transition-colors hover:bg-muted";
+        dlBtn.className = "rc-markdown-control";
+        dlBtn.setAttribute("aria-expanded", "false");
+        dlBtn.setAttribute("aria-haspopup", "true");
         dlBtn.setAttribute("data-rc-tip", "Download table");
         dlBtn.setAttribute("aria-label", "Download table");
         dlBtn.setAttribute("type", "button");
         dlBtn.innerHTML =
           '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>';
         const menu = document.createElement("div");
+        menu.className = "rc-markdown-download";
+        menu.setAttribute("role", "group");
+        menu.setAttribute("aria-label", "Table downloads");
         menu.style.display = "none";
         menu.style.position = "absolute";
 
@@ -309,7 +297,7 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
         menu.style.background = "var(--elev)";
         menu.style.padding = "4px";
         let closeMenu: (() => void) | undefined;
-        const hideMenu = () => { closeMenu?.(); closeMenu = undefined; menu.style.display = "none"; };
+        const hideMenu = () => { closeMenu?.(); closeMenu = undefined; menu.style.display = "none"; dlBtn.setAttribute("aria-expanded", "false"); };
         data.cleanup.push(hideMenu);
         const tableData = (): string[][] => {
           const tbl = wrap.querySelector("table");
@@ -379,6 +367,8 @@ function makeRenderer(root: HTMLElement, opts: TarnavRendererOptions) {
           const portalHost = document.createElement("div");
           const disposePortal = render(() => <Portal>{menu}</Portal>, portalHost);
           menu.style.display = "block";
+          dlBtn.setAttribute("aria-expanded", "true");
+          if (e.detail === 0) menu.querySelector("button")?.focus();
           const disposeFloat = anchorFloat(dlBtn, menu, { placement: "bottom-end", maxHeight: 300 });
           const outside = (event: MouseEvent) => { if (!menu.contains(event.target as Node)) hideMenu(); };
           const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { hideMenu(); dlBtn.focus(); } };
@@ -695,6 +685,7 @@ export function TarnavMarkdown(props: TarnavMarkdownProps) {
   let view: ReturnType<typeof makeRenderer> | undefined;
   let p: Parser | undefined;
   let fed = "";
+  let previousCR = false;
   let ended = false;
   let frame = 0;
   let highlightTimer: ReturnType<typeof setTimeout> | undefined;
@@ -704,7 +695,7 @@ export function TarnavMarkdown(props: TarnavMarkdownProps) {
   function disposeView() { for (const dispose of view?.data.cleanup ?? []) dispose(); }
   function reset() {
     disposeView(); host.replaceChildren();
-    view = makeRenderer(host, opts); p = parser(view); fed = ""; ended = false;
+    view = makeRenderer(host, opts); p = parser(view); fed = ""; previousCR = false; ended = false;
   }
   function update() {
     frame = 0;
@@ -713,7 +704,13 @@ export function TarnavMarkdown(props: TarnavMarkdownProps) {
     const full = props.children || "";
     if (!p || !full.startsWith(fed) || (ended && full !== fed)) reset();
     const end = Math.min(full.length, fed.length + 8192);
-    if (end > fed.length) parser_write(p!, full.slice(fed.length, end));
+    if (end > fed.length) {
+      const appended = full.slice(fed.length, end);
+      // Normalize only the new slice; a CRLF pair can cross chunk boundaries.
+      const chunk = previousCR && appended.startsWith("\n") ? appended.slice(1) : appended;
+      previousCR = appended.endsWith("\r");
+      parser_write(p!, chunk.replace(/\r\n?/g, "\n"));
+    }
     fed = full.slice(0, end);
     if (end === full.length && !props.streaming && !ended) {
       parser_end(p!);

@@ -143,8 +143,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   commands that are not already configurable in the UI. The composer can be
   minimized (chevron in the turn-status row, `ui.composerCollapsed` — one
   global `llmgw-rc-composer-collapsed` preference): the input box, toolbar and
-  footer hide and the task-plan body folds, leaving only the `Working` status
-  row and the Task plan header. Never available in a new conversation
+  footer hide and the WHOLE task-plan block folds away (no header, no partial
+  read — collapsed means gone), leaving only the `Working` status row plus the
+  chevron. Never available in a new conversation
   (`draftMode`) or behind a blocked workspace — the chevron is hidden there.
   - **Daemon project** (`indirect-code-daemon/`, Go 1.25: `cmd/daemon` +
     `packages/agent|core|provider|…`; external deps are gorilla/websocket,

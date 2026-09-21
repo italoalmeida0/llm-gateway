@@ -48,11 +48,12 @@ try {
   assert(!(await page.locator("#rc-composer").isVisible()), "collapsed hides the composer input");
   assert(!(await page.locator("[data-composer-footer]").isVisible()), "collapsed hides the footer");
   assert(await page.locator("[data-turn-status]").isVisible(), "collapsed keeps the turn status row");
-  assert.equal(await page.locator("[data-todo-status]").count(), 0, "collapsed hides the task list body");
-  assert(await page.getByText("Task plan", { exact: true }).isVisible(), "collapsed keeps the task header summary");
+  assert.equal(await page.locator("[data-todo-status]").count(), 0, "collapsed hides the task list rows");
+  assert.equal(await page.getByText("Task plan", { exact: true }).count(), 0, "collapsed hides the whole Task plan block");
   await toggle.click();
   await settle();
   assert(await page.locator("#rc-composer").isVisible(), "the chevron restores the composer");
+  assert(await page.getByText("Task plan", { exact: true }).isVisible(), "the chevron restores the Task plan block");
 
   // Idle conversation (no turn row): the toggle still needs a reachable home.
   await page.evaluate(() => {

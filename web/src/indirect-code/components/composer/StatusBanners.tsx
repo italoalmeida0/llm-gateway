@@ -3,9 +3,10 @@ import { Icon as Iconify } from "../../../components/icon";
 import { useHost, useSession, useTranscriptCtx, useUI } from "../../ctx";
 import { IndirectBrand } from "../IndirectBrand";
 
-/** Minimize/restore the composer + task plan body (short viewports).
- *  Lives in the turn-status row, so it is only reachable in an existing
- *  conversation — a new conversation (draftMode) never shows it. */
+/** Minimize/restore the composer (input, toolbar, footer) and the whole
+ *  task plan (short viewports). Lives in the turn-status row, so it is only
+ *  reachable in an existing conversation — a new conversation (draftMode)
+ *  never shows it. */
 function ComposerCollapseToggle(props: { withHint: boolean }) {
   const s = useSession();
   const ui = useUI();
@@ -60,7 +61,7 @@ export function StatusBanners() {
     <ComposerCollapseToggle withHint={false} />
   </div>
 </Show>
-<Show when={s.activeSessionId() && t.todos().length}>
+<Show when={s.activeSessionId() && t.todos().length && !collapsed()}>
   <section aria-label="Task checklist" class="mb-2 rounded-xl border border-line bg-elev/40 text-xs">
     <button onClick={() => t.toggleTodosOpen()} aria-expanded={t.todosOpen()} class="w-full px-3 py-2.5 flex items-center gap-2 text-ink-300 cursor-pointer">
       <Iconify icon="lucide:list-checks" size={15} /><span class="font-medium">Task plan</span>
@@ -68,7 +69,7 @@ export function StatusBanners() {
       <span class="flex-1 truncate text-left text-ink-500">{!t.todosOpen() ? t.todos().find((item) => item.status === "in_progress")?.text : ""}</span>
       <Iconify icon="lucide:chevron-down" size={13} class={t.todosOpen() ? "rotate-180" : ""} />
     </button>
-    <Show when={t.todosOpen() && !collapsed()}><ol class="px-3 pb-3 space-y-2 max-h-44 overflow-y-auto">
+    <Show when={t.todosOpen()}><ol class="px-3 pb-3 space-y-2 max-h-44 overflow-y-auto">
       <For each={t.todos()}>{(item) => <li class="flex items-start gap-2" data-todo-status={item.status}>
         <Iconify icon={item.status === "completed" ? "lucide:circle-check" : item.status === "in_progress" ? t.sessionStatus() === "running" ? "lucide:loader-circle" : "lucide:circle-dot" : "lucide:circle"} size={14} class={item.status === "in_progress" && t.sessionStatus() === "running" ? "animate-spin text-ink-200" : "text-ink-500"} />
         <span class={item.status === "completed" ? "text-ink-500 line-through" : "text-ink-200"}>{item.text}</span>

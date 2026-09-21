@@ -301,6 +301,10 @@ function AppShell(props: { children: JSX.Element }) {
       </div>
 
       <main class="md:pl-16 lg:pl-64">
+        {/* Installed-app drag strip (window-controls-overlay): an invisible
+          bar over the header row so the window can be dragged from the
+          user-area side. Hidden in the browser. */}
+        <div class="gw-wco-bar" data-tauri-drag-region aria-hidden="true" />
         {/* ===== desktop header ===== */}
         <header
           class="hidden md:flex sticky top-0 z-20 h-14 items-center justify-between gap-4 border-b border-line bg-ink-950/95 backdrop-blur px-6"

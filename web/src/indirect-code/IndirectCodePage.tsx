@@ -55,6 +55,9 @@ import { createSettings } from "./hooks/useSettings";
 interface WcoTitlebarProps {
   sbOpen: () => boolean;
   toggleSb: () => void;
+  /** True while the inner sidebar panel is visible (desktop). The WCO bar
+   *  then leaves the left gutter free so the sidebar runs full-height. */
+  sbVisible: () => boolean;
 }
 
 /** Installed-app titlebar (window-controls-overlay): a slim drag strip with
@@ -68,7 +71,7 @@ export function WcoTitlebar(props: WcoTitlebarProps) {
   const m = useModal();
   return (
     <div class="rc-wco-bar shrink-0" data-tauri-drag-region aria-hidden="false">
-      <div class="rc-wco-bar-inner">
+      <div class="rc-wco-bar-inner" classList={{ "rc-wco-bar-inner--sbfull": props.sbVisible() }}>
       <div class="rc-wco-actions">
         <button
           type="button"
@@ -1362,16 +1365,22 @@ export default function IndirectCodePage() {
       ui={uiValue}
     >
     <div class="fixed inset-0 w-full h-dvh flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50">
-      <WcoTitlebar sbOpen={sidebarOpen} toggleSb={() => setSidebarOpen(!sidebarOpen())} />
       <RemoteHints />
       {/* Main Workspace Layout or Connect Host Onboarding */}
       <Show
         when={hosts.hosts().length > 0}
         fallback={<Onboarding />}
       >
-        <div class="flex-1 flex min-h-0 overflow-hidden relative">
+        {/* WCO overlay layout: sidebar spans both rows (full height, like
+          tweakgrid); the titlebar strip only covers the content column. */}
+        <div class="rc-wco-layout flex-1 flex min-h-0 overflow-hidden relative">
           <WorkspaceSidebar />
-          <main class="flex-1 flex flex-col min-w-0 bg-ink-950 relative">
+          <WcoTitlebar
+            sbOpen={sidebarOpen}
+            toggleSb={() => setSidebarOpen(!sidebarOpen())}
+            sbVisible={() => sidebarOpen() && !isMobile()}
+          />
+          <main class="rc-wco-main flex flex-col min-w-0 min-h-0 bg-ink-950 relative">
             <TranscriptView />
             <Composer />
           </main>

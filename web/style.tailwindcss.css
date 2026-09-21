@@ -619,16 +619,41 @@ html.theme-xfade body * {
 }
 
 @media (display-mode: window-controls-overlay) {
+  /* Overlay layout: the sidebar runs full-height (like tweakgrid — the
+   * titlebar only spans the content area). Specificity div.X beats the
+   * Tailwind .flex utility so grid really wins in the bundle. */
+  div.rc-wco-layout {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas:
+      "side wco"
+      "side main";
+  }
+  .rc-wco-layout > .rc-wco-bar { grid-area: wco; }
+  .rc-wco-layout > .rc-wco-main { grid-area: main; }
+  .rc-wco-layout > .rc-sidebar {
+    grid-area: side;
+    grid-row: 1 / -1;
+  }
   /* In-flow titlebar row: only as wide as the draggable area the OS leaves
-   * us (titlebar-area-x/width), padded for the notch. The workspace flex
-   * column below is pushed down — zero overlap by construction. */
+   * us (titlebar-area-x/width), padded for the notch. */
   .rc-wco-bar {
     display: block;
     flex-shrink: 0;
-    width: env(titlebar-area-width, 100%);
-    margin-left: max(env(titlebar-area-x, 0px), var(--sal));
-    margin-right: var(--sar);
+    width: 100%;
     padding-top: var(--sat);
+    padding-right: var(--sar);
+  }
+  /* Sidebar open: the bar starts after it — the OS titlebar-area-x already
+   * covers the left offset on most platforms; normalize it explicitly so
+   * nothing stacks above the sidebar buttons. Closed sidebar collapses to
+   * w-0: the bar then spans the freed row. */
+  .rc-wco-layout > .rc-sidebar {
+    min-height: 0;
+  }
+  .rc-wco-bar-inner--sbfull {
+    margin-left: 0;
   }
   .rc-wco-bar-inner {
     height: env(titlebar-area-height, 33px);
@@ -638,6 +663,17 @@ html.theme-xfade body * {
    * the transcript would sit on the same spot. */
   .rc-transcript-toggle {
     display: none;
+  }
+  /* Gateway dashboard: invisible drag strip ABOVE the header row
+   * (user-area side) so the installed window can be dragged there.
+   * In-flow (not overlay): the header below is pushed down, nothing
+   * stacks over the avatar/name and clicks keep working. */
+  .gw-wco-bar {
+    display: block;
+    height: env(titlebar-area-height, 33px);
+    -webkit-app-region: drag;
+    app-region: drag;
+    pointer-events: auto;
   }
   /* The composer must clear the gesture bar on installed mobile apps. */
   .rc-safe-bottom {

@@ -19,7 +19,7 @@ render(() => {
   return (
     <ModalCtx.Provider value={modal}>
       <UICtx.Provider value={ui}>
-        <WcoTitlebar sbOpen={sbOpen} toggleSb={() => setSbOpen(!sbOpen())} />
+        <WcoTitlebar sbOpen={sbOpen} toggleSb={() => setSbOpen(!sbOpen())} sbVisible={sbOpen} />
       </UICtx.Provider>
     </ModalCtx.Provider>
   );

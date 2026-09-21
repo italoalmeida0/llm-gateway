@@ -1,8 +1,36 @@
+diff --git a/smd.d.ts b/smd.d.ts
+index cc589fed84ee0cf97ef0fafefbb4c3cd930e5e90..92c482422b03db2e0374e3a217f926e77ebcf3ab 100644
+--- a/smd.d.ts
++++ b/smd.d.ts
+@@ -268,5 +268,6 @@ export type Parser = {
+      */
+     hr_chars: number;
+     table_state: number;
++    equation_end: string;
+ };
+ //# sourceMappingURL=smd.d.ts.map
+\ No newline at end of file
 diff --git a/smd.js b/smd.js
-index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..c260a1c3eec340388368d71f5a2f4a00b24eb576 100644
+index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..bc8830163520452590081ecdb7a5a150e7857afa 100644
 --- a/smd.js
 +++ b/smd.js
-@@ -909,19 +909,27 @@ export function parser_write(p, chunk) {
+@@ -192,6 +192,7 @@ export const heading_to_level = (token) => {
+  * @property {number      } blockquote_idx  - For Blockquote parsing
+  * @property {string      } hr_char         - For horizontal rule parsing
+  * @property {number      } hr_chars        - For horizontal rule parsing
++ * @property {string      } equation_end    - Matching math delimiter
+  * @property {number      } table_state
+  */
+ 
+@@ -220,6 +221,7 @@ export function parser(renderer) {
+         indent     : "",
+         indent_len : 0,
+         table_state: 0,
++        equation_end: "",
+     }
+ }
+ 
+@@ -909,19 +911,27 @@ export function parser_write(p, chunk) {
              p.fence_end = 1
              continue
          case CODE_INLINE:
@@ -38,7 +66,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..c260a1c3eec340388368d71f5a2f4a00
              case '\n':
                  p.text += p.pending
                  p.pending = ""
-@@ -935,7 +943,7 @@ export function parser_write(p, chunk) {
+@@ -935,7 +945,7 @@ export function parser_write(p, chunk) {
                  p.pending = char
                  continue
              default:
@@ -47,3 +75,92 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..c260a1c3eec340388368d71f5a2f4a00
                  p.pending = ""
                  continue
              }
+@@ -1062,46 +1072,44 @@ export function parser_write(p, chunk) {
+             }
+             break
+         case MAYBE_EQ_BLOCK:
+-            /*
+-             \[?  or  $$?
+-               ^        ^
+-            */
+-            if (char === '\n') {
+-                add_text(p)
+-                add_token(p, EQUATION_BLOCK)
+-                p.pending = ""
+-            } else {
+-                p.token = p.tokens[p.len]
+-                if (p.pending[0] === '\\') {
+-                    p.text += '['
++            // Display math may start on the same line as its delimiter.
++            p.equation_end = p.pending[0] === '\\' ? '\\]' : '$$'
++            add_text(p)
++            add_token(p, EQUATION_BLOCK)
++            p.pending = ""
++            parser_write(p, char)
++            continue
++        case EQUATION_BLOCK:
++        case EQUATION_INLINE:
++            // Math is opaque to Markdown. Preserve escapes, matrix row breaks,
++            // underscores and pipes; only the matching unescaped delimiter ends it.
++            if (p.pending === '\\') {
++                if (p.equation_end === pending_with_char) {
++                    add_text(p)
++                    end_token(p)
+                 } else {
+-                    p.text += '$$'
++                    p.text += pending_with_char
+                 }
+                 p.pending = ""
+-                parser_write(p, char)
++                continue
+             }
+-            continue
+-        case EQUATION_BLOCK:
+-            if ("\\]" === pending_with_char || "$$" === pending_with_char) {
++            if (p.pending === '$' && p.equation_end === '$$' && char === '$') {
+                 add_text(p)
+                 end_token(p)
+                 p.pending = ""
+                 continue
+             }
+-            break
+-        case EQUATION_INLINE:
+-            if ("\\)" === pending_with_char || "$" === p.pending[0]) {
++            p.text += p.pending
++            p.pending = ""
++            if (char === '$' && p.equation_end === '$') {
+                 add_text(p)
+                 end_token(p)
+-
+-                if(char === ')'){
+-                    p.pending = ""
+-                } else {
+-                    p.pending = char
+-                }
+-                continue
++            } else if (char === '\\' || char === '$' && p.equation_end === '$$') {
++                p.pending = char
++            } else {
++                p.text += char
+             }
+-            break
++            continue
+         /* Raw URLs */
+         case MAYBE_URL:
+             if ("http://"  === pending_with_char ||
+@@ -1220,6 +1228,7 @@ export function parser_write(p, chunk) {
+ 
+             switch (char) {
+             case '(':
++                p.equation_end = "\\)"
+                 add_text(p)
+                 add_token(p, EQUATION_INLINE)
+                 p.pending = ""
+@@ -1402,6 +1411,7 @@ export function parser_write(p, chunk) {
+                 */
+                 else {
+                     add_text(p)
++                    p.equation_end = "$"
+                     add_token(p, EQUATION_INLINE)
+                     p.pending = char
+                     continue

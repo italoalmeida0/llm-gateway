@@ -1,6 +1,7 @@
 // Real Chromium correctness/performance gate. Playwright remains external.
 // PLAYWRIGHT_MODULE=... CHROMIUM_PATH=... bun scripts/test-indirect-streaming-ui.ts
 import assert from "node:assert/strict";
+import { copiedMathFormulas, copiedMathMarkdown, mathFormulas, mathMarkdown } from "../test/fixtures/markdown-math";
 import solidPlugin from "../plugins/solid-plugin";
 import iconifyPlugin from "../plugins/iconify-solid-plugin";
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
@@ -86,6 +87,53 @@ try {
   assert.equal(await page.locator('#markdown annotation[encoding="application/x-tex"]').textContent(), "E = mc^2");
   await page.evaluate(() => document.fonts.ready);
   assert(await page.evaluate(() => document.fonts.check('16px "KaTeX_Main"')), "KaTeX fonts are bundled locally");
+
+  // Consecutive display formulas must not swap places with their prose labels.
+  for (const width of [360, 1280]) for (const streamed of [false, true]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate((dark: boolean) => { document.documentElement.dataset.theme = dark ? "dark" : "light"; }, streamed);
+    await set("", true);
+    await page.evaluate(async ({ text, streamed }: { text: string; streamed: boolean }) => {
+      const a = (window as any).streamUI;
+      const input = streamed ? text.replaceAll("\n", "\r\n") : text;
+      const size = streamed ? 3 : input.length;
+      for (let end = size; end < input.length + size; end += size) {
+        a.setText(input.slice(0, end)); await new Promise(requestAnimationFrame);
+      }
+      a.setStreaming(false);
+    }, { text: mathMarkdown, streamed });
+    await settle();
+    assert.deepEqual((await page.locator('#markdown annotation[encoding="application/x-tex"]').allTextContents()).map((s: string) => s.trim()), mathFormulas);
+    assert.equal(await page.locator('#markdown equation-block .katex-display').count(), 4);
+    assert.equal(await page.locator('#markdown equation-inline .katex').count(), 3);
+    assert.equal(await page.locator('#markdown .katex-error').count(), 0);
+    assert.equal(await page.locator('#markdown equation-block .mtable').count(), 3, "all three matrices rendered");
+    for (const label of ["Gaussian integral:", "Famous sum:", "Matrix product:"]) {
+      assert.equal(await page.locator('#markdown p').filter({ hasText: label }).textContent(), label);
+    }
+    assert((await page.locator('#markdown p').last().textContent())?.endsWith(". Text after math."));
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "math scrolls inside the message");
+    await page.locator('#markdown').screenshot({ path: `/tmp/indirect-math-${width}-${streamed ? 'streamed' : 'static'}.png` });
+  }
+  await page.setViewportSize({ width: 360, height: 900 });
+  await set("", true);
+  await page.evaluate(async (text: string) => {
+    const a = (window as any).streamUI;
+    const input = text.replaceAll("\n", "\r\n");
+    for (let end = 7; end < input.length + 7; end += 7) {
+      a.setText(input.slice(0, end)); await new Promise(requestAnimationFrame);
+    }
+    a.setStreaming(false);
+  }, copiedMathMarkdown);
+  await settle();
+  assert.deepEqual((await page.locator('#markdown annotation[encoding="application/x-tex"]').allTextContents()).map((s: string) => s.trim()), copiedMathFormulas);
+  assert.equal(await page.locator('#markdown pre .tok-kw').count() > 0, true);
+  assert.equal(await page.locator('#markdown equation-block .mtable').count(), 3);
+  assert.equal(await page.locator('#markdown .katex-error').count(), 0);
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  assert.equal(await page.locator('#markdown p').last().textContent(), "Text after math.");
+  await page.locator('#markdown').screenshot({ path: '/tmp/indirect-math-copied.png' });
+  console.log("PASS: same-line/multiline display math, matrices, matching delimiters, streamed CRLF and mobile/desktop layout");
 
   const table = "| A | B |\n| --- | --- |\n| one |\n| two | three | extra |\n";
   await set("", true);

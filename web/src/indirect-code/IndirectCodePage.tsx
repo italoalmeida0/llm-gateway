@@ -8,7 +8,7 @@ import {
   onCleanup,
   Show,
 } from "solid-js";
-import { useUI, useHost } from "./ctx";
+import { useUI, useHost, useSession, useModal } from "./ctx";
 import { Icon as Iconify } from "../components/icon";
 import { IndirectBrand } from "./components/IndirectBrand";
 import { HostCard } from "./components/HostCard";
@@ -51,6 +51,56 @@ import { createProjects } from "./hooks/useProjects";
 import { createWorkspace } from "./hooks/useWorkspace";
 import { createHosts } from "./hooks/useHosts";
 import { createSettings } from "./hooks/useSettings";
+
+interface WcoTitlebarProps {
+  sbOpen: () => boolean;
+  toggleSb: () => void;
+}
+
+/** Installed-app titlebar (window-controls-overlay): an OS-style top bar —
+ *  app icon + session title in the draggable region, window controls
+ *  (sidebar toggle, settings) pinned right in the no-drag zone.
+ *  Rendered always; CSS shows it only under display-mode:
+ *  window-controls-overlay (inert in the browser).
+ *
+ *  Exported for the fixture test (same component, real browser). */
+export function WcoTitlebar(props: WcoTitlebarProps) {
+  const s = useSession();
+  const m = useModal();
+  const title = () => {
+    const a = s.activeSession();
+    const t = a?.title?.trim();
+    if (t) return t;
+    if (s.draftMode()) return "New conversation";
+    return "Indirect Code";
+  };
+  return (
+    <div class="rc-wco-bar" data-tauri-drag-region aria-hidden="false">
+      <img src="/indirect-icon.svg" alt="" class="rc-wco-icon" draggable={false} />
+      <span class="rc-wco-title">{title()}</span>
+      <div class="rc-wco-actions">
+        <button
+          type="button"
+          class="rc-wco-btn"
+          onClick={props.toggleSb}
+          aria-label={props.sbOpen() ? "Hide sidebar" : "Show sidebar"}
+          title={props.sbOpen() ? "Hide sidebar" : "Show sidebar"}
+        >
+          <Iconify icon={props.sbOpen() ? "lucide:panel-left-close" : "lucide:panel-left-open"} size={14} />
+        </button>
+        <button
+          type="button"
+          class="rc-wco-btn"
+          onClick={() => m.openSettings()}
+          aria-label="Open settings"
+          title="Settings"
+        >
+          <Iconify icon="lucide:settings" size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /** Full-screen OS-style update screen (same look as Onboarding): while the
  * daemon handoff is frozen on a host, take over the whole page with the big
@@ -1319,11 +1369,7 @@ export default function IndirectCodePage() {
       ui={uiValue}
     >
     <div class="fixed inset-0 w-full h-dvh flex flex-col bg-ink-950 text-ink-100 overflow-hidden font-sans select-none z-50">
-      {/* Installed-app titlebar strip (window-controls-overlay): a draggable
-        region beside the OS window controls. Hidden in the browser. */}
-      <div class="rc-wco-bar shrink-0 text-[11px] font-medium" aria-hidden="true">
-        <span class="truncate">LLM Gateway · Indirect Code</span>
-      </div>
+      <WcoTitlebar sbOpen={sidebarOpen} toggleSb={() => setSidebarOpen(!sidebarOpen())} />
       <RemoteHints />
       {/* Main Workspace Layout or Connect Host Onboarding */}
       <Show

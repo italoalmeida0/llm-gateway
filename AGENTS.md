@@ -307,7 +307,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - `bun run fake-upstream` — fake provider for manual testing (:3399, key `sk-fake-secret`)
 - `PLAYWRIGHT_MODULE=… CHROMIUM_PATH=… bun scripts/test-indirect-turn-ui.ts`
   (also `test-indirect-composer-ui.ts`, `test-indirect-settings-ui.ts`,
-  `test-indirect-collapse-ui.ts`) — component checks in real Chromium against
+  `test-indirect-wco-ui.ts`, `test-indirect-collapse-ui.ts`) — component checks in real Chromium against
   fixture bundles (fast, no model). Playwright is always an external install,
   never an app dependency.
 - `PLAYWRIGHT_MODULE=… CHROMIUM_PATH=… bun scripts/test-indirect-bg-e2e.ts [finish|cancel]` —

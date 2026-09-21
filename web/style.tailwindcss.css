@@ -550,6 +550,9 @@ html.theme-xfade body * {
   --sar: env(safe-area-inset-right, 0px);
 }
 
+/* OS-style titlebar: icon + session title in the draggable region, window
+ * controls pinned right in the no-drag zone (tweakgrid .top-bar pattern:
+ * drag everywhere except .rc-wco-actions). Hidden in the browser. */
 .rc-wco-bar {
   display: none;
   position: absolute;
@@ -562,32 +565,68 @@ html.theme-xfade body * {
   align-items: center;
   gap: 0.5rem;
   background: transparent;
-  color: var(--ink-500);
+  color: var(--ink-400);
   user-select: none;
   overflow: hidden;
   white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
 }
-.rc-wco-bar :is(button, a, input, select, [role="button"]) {
+.rc-wco-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  object-fit: contain;
+}
+.rc-wco-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: -0.01em;
+}
+.rc-wco-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: auto;
+  pointer-events: auto;
   -webkit-app-region: no-drag;
   app-region: no-drag;
+}
+.rc-wco-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--ink-400);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.rc-wco-btn:hover {
+  background: var(--ink-800);
+  color: var(--ink-100);
+}
+.rc-wco-btn:active {
+  background: var(--ink-700);
 }
 
 @media (display-mode: window-controls-overlay) {
   .rc-wco-bar {
     display: flex;
-    height: env(titlebar-area-height, 33px);
+    height: calc(env(titlebar-area-height, 33px) + var(--sat));
     width: env(titlebar-area-width, 100%);
     padding-left: max(env(titlebar-area-x, 0px), var(--sal));
     padding-right: var(--sar);
+    padding-top: var(--sat);
   }
   /* The composer must clear the gesture bar on installed mobile apps. */
   .rc-safe-bottom {
     padding-bottom: max(var(--sab), 0.5rem);
-  }
-  /* The drag strip floats over the workspace top so no layout shifts
-   * between browser and installed titlebar modes. */
-  .rc-wco-bar {
-    padding-top: var(--sat);
   }
 }
 

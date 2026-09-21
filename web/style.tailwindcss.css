@@ -552,18 +552,21 @@ html.theme-xfade body * {
 
 /* OS-style titlebar: icon + session title in the draggable region, window
  * controls pinned right in the no-drag zone (tweakgrid .top-bar pattern:
- * drag everywhere except .rc-wco-actions). Hidden in the browser. */
+ * drag everywhere except .rc-wco-actions). Hidden in the browser; in WCO
+ * mode it becomes a real in-flow row of the app shell (shrink-0), so the
+ * workspace below is pushed down — nothing overlaps: the OS draws its
+ * window buttons in the area beside env(titlebar-area-x/width), and the
+ * in-app overlay controls (sidebar toggle, sidebar headers, transcript
+ * floating toggle) hide or re-dock while the bar is visible. */
 .rc-wco-bar {
   display: none;
-  position: absolute;
-  top: 0;
-  left: 0;
-  z-index: 60;
-  pointer-events: none;
-  -webkit-app-region: drag;
-  app-region: drag;
+}
+.rc-wco-bar-inner {
+  display: flex;
   align-items: center;
   gap: 0.625rem;
+  -webkit-app-region: drag;
+  app-region: drag;
   background: linear-gradient(to bottom, var(--ink-900), var(--ink-950));
   border-bottom: 1px solid var(--line);
   color: var(--ink-300);
@@ -573,27 +576,6 @@ html.theme-xfade body * {
   font-size: 12.5px;
   font-weight: 500;
 }
-/* Fake traffic lights (macOS-style affordance, like tweakgrid's WCO bar):
- * purely visual — the real window controls are drawn by the OS beside
- * the titlebar area. Kept decorative so a screen reader never announces
- * fake window buttons. */
-.rc-wco-traffic {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-shrink: 0;
-  padding-left: 2px;
-}
-.rc-wco-dot {
-  width: 11px;
-  height: 11px;
-  border-radius: 9999px;
-  box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 0.35);
-}
-.rc-wco-dot--close { background: #ff5f57; }
-.rc-wco-dot--min { background: #febc2e; }
-.rc-wco-dot--max { background: #28c840; }
-html[data-theme="light"] .rc-wco-dot { box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 0.15); }
 .rc-wco-icon {
   width: 18px;
   height: 18px;
@@ -654,13 +636,25 @@ html[data-theme="light"] .rc-wco-dot { box-shadow: inset 0 0 0 0.5px rgb(0 0 0 /
 }
 
 @media (display-mode: window-controls-overlay) {
+  /* In-flow titlebar row: only as wide as the draggable area the OS leaves
+   * us (titlebar-area-x/width), padded for the notch. The workspace flex
+   * column below is pushed down — zero overlap by construction. */
   .rc-wco-bar {
-    display: flex;
-    height: calc(env(titlebar-area-height, 33px) + var(--sat));
+    display: block;
+    flex-shrink: 0;
     width: env(titlebar-area-width, 100%);
-    padding-left: max(env(titlebar-area-x, 0px), var(--sal));
-    padding-right: var(--sar);
+    margin-left: max(env(titlebar-area-x, 0px), var(--sal));
+    margin-right: var(--sar);
     padding-top: var(--sat);
+  }
+  .rc-wco-bar-inner {
+    height: env(titlebar-area-height, 33px);
+    padding-right: 2px;
+  }
+  /* Single sidebar toggle: the titlebar owns it now — the floating one in
+   * the transcript would sit on the same spot. */
+  .rc-transcript-toggle {
+    display: none;
   }
   /* The composer must clear the gesture bar on installed mobile apps. */
   .rc-safe-bottom {

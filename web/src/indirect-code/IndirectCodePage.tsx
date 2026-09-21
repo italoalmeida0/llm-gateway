@@ -75,12 +75,8 @@ export function WcoTitlebar(props: WcoTitlebarProps) {
     return "Indirect Code";
   };
   return (
-    <div class="rc-wco-bar" data-tauri-drag-region aria-hidden="false">
-      <div class="rc-wco-traffic" aria-hidden="true">
-        <span class="rc-wco-dot rc-wco-dot--close" />
-        <span class="rc-wco-dot rc-wco-dot--min" />
-        <span class="rc-wco-dot rc-wco-dot--max" />
-      </div>
+    <div class="rc-wco-bar shrink-0" data-tauri-drag-region aria-hidden="false">
+      <div class="rc-wco-bar-inner">
       <img src="/indirect-icon.svg" alt="" class="rc-wco-icon" draggable={false} />
       <span class="rc-wco-title">{title()}</span>
       <div class="rc-wco-actions">
@@ -103,6 +99,7 @@ export function WcoTitlebar(props: WcoTitlebarProps) {
         >
           <Iconify icon="lucide:settings" size={15} />
         </button>
+      </div>
       </div>
     </div>
   );

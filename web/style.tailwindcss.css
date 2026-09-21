@@ -549,68 +549,81 @@ html.theme-xfade body * {
   --sar: env(safe-area-inset-right, 0px);
 }
 
-/* Reserve a full-width opaque row; only its native safe rectangle is
- * draggable. Content and interactive controls always start below it. */
-.rc-wco-bar, .gw-wco-bar {
-  display: none;
-}
+/* The same two-column workspace is used in every display mode. Its brand
+ * row and conversation header become the titlebar in an installed window. */
+.rc-workspace-header { height: 3rem; }
+.rc-window-header { padding-inline: 1rem; }
+.rc-window-project { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (display-mode: window-controls-overlay) {
   :root {
     --wco-top: calc(env(titlebar-area-y, 0px) + env(titlebar-area-height, 33px));
+    --wco-left: env(titlebar-area-x, 0px);
+    --wco-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+    --wco-header-height: max(2.5rem, var(--wco-top));
   }
-  /* Both columns start below the titlebar, including after a live toggle.
-   * Outside WCO the main flex item fills all remaining horizontal space. */
-  div.rc-wco-layout {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-    grid-template-areas:
-      "wco wco"
-      "side main";
-  }
-  .rc-wco-layout > .rc-wco-bar { grid-area: wco; min-width: 0; }
-  .rc-wco-layout > .rc-wco-main { grid-area: main; min-width: 0; min-height: 0; }
-  .rc-wco-layout > .rc-sidebar {
-    grid-area: side;
-  }
-  .rc-wco-bar, .gw-wco-bar {
-    display: block;
-    position: relative;
-    flex-shrink: 0;
-    width: 100%;
-    height: var(--wco-top);
-    background: var(--ink-950);
-  }
-  .rc-wco-bar::before, .gw-wco-bar::before {
-    content: "";
-    position: absolute;
-    left: env(titlebar-area-x, 0px);
-    top: env(titlebar-area-y, 0px);
-    width: env(titlebar-area-width, 100%);
-    height: env(titlebar-area-height, 33px);
+  .rc-workspace-header { height: var(--wco-header-height); }
+  .rc-sidebar-header {
+    padding-left: max(0.875rem, calc(var(--wco-left) + 0.5rem));
+    padding-right: max(0.875rem, calc(100% - 100vw + var(--wco-right) + 0.5rem));
     -webkit-app-region: drag;
     app-region: drag;
   }
-  /* The document scrolls on dashboard pages. Keep an opaque titlebar
-   * fixed above the sticky header instead of letting both stick at zero. */
-  .gw-wco-bar {
-    position: fixed;
-    top: 0;
-    left: 0;
-    z-index: 40;
+  .rc-window-header {
+    padding-left: max(1rem, calc(var(--wco-left) - var(--rc-sidebar-width) + 0.5rem));
+    padding-right: calc(var(--wco-right) + 1rem);
   }
-  .gw-shell {
-    padding-top: var(--wco-top);
+  .rc-window-content {
+    -webkit-app-region: drag;
+    app-region: drag;
   }
-  .gw-shell .gw-header, .gw-shell .gateway-rail,
-  .rc-wco-layout > .rc-sidebar.fixed {
-    top: var(--wco-top);
+  .rc-sidebar-toggle, .gw-header button, .gw-header a {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
   }
-  /* The composer must clear the gesture bar on installed mobile apps. */
-  .rc-safe-bottom {
-    padding-bottom: max(var(--sab), 0.5rem);
+
+  /* The dashboard's existing header owns both the native controls and the
+   * page controls. One opaque sticky surface keeps scrolled content out. */
+  .gw-shell { --gw-rail-width: 0px; }
+  .gw-shell .gw-header {
+    background: var(--ink-950);
+    backdrop-filter: none;
+    -webkit-app-region: drag;
+    app-region: drag;
   }
+  .gw-shell header.gw-header {
+    height: var(--wco-header-height);
+    padding-left: max(1.5rem, calc(var(--wco-left) - var(--gw-rail-width) + 0.5rem));
+    padding-right: calc(var(--wco-right) + 1.5rem);
+  }
+  .gw-user-email { display: none; }
+  .gw-user-avatar { width: 1.75rem; height: 1.75rem; }
+  .gw-shell .gateway-rail { padding-top: 0; }
+  .gw-rail-brand { min-height: var(--wco-header-height); min-width: 0; }
+  .gw-rail-logo { width: 1.75rem; height: 1.75rem; }
+  .gw-mobile-header {
+    height: var(--wco-header-height);
+    padding-left: max(0.5rem, calc(var(--wco-left) + 0.5rem));
+    padding-right: calc(var(--wco-right) + 0.5rem);
+  }
+  .gw-mobile-brand > span { display: none; }
+  .gw-mobile-brand > div { width: 1.5rem; height: 1.5rem; }
+  .gw-mobile-actions button { width: 1.75rem; height: 1.75rem; }
+  @media (min-width: 768px) {
+    .gw-shell { --gw-rail-width: 4rem; }
+  }
+  @media (min-width: 1024px) {
+    .gw-shell { --gw-rail-width: 16rem; }
+    .gw-rail-brand { padding-left: max(0.5rem, var(--wco-left)); }
+  }
+  @media (min-width: 768px) and (max-width: 1023px) {
+    /* A compact rail cannot fit beside left-side native controls. */
+    .gw-shell .gateway-rail { padding-top: min(var(--wco-left), var(--wco-top)); }
+  }
+  @media (max-width: 767px) {
+    .rc-window-project { display: none; }
+  }
+  .rc-safe-bottom { padding-bottom: max(var(--sab), 0.5rem); }
 }
 
 ::-webkit-scrollbar {

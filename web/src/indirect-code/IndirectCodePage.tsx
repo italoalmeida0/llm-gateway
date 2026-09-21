@@ -9,7 +9,8 @@ import {
   Show,
   type JSX,
 } from "solid-js";
-import { useUI, useHost } from "./ctx";
+import { useUI, useHost, useSession } from "./ctx";
+import { SidebarToggle } from "./components/SidebarToggle";
 import { Icon as Iconify } from "../components/icon";
 import { IndirectBrand } from "./components/IndirectBrand";
 import { HostCard } from "./components/HostCard";
@@ -53,26 +54,37 @@ import { createWorkspace } from "./hooks/useWorkspace";
 import { createHosts } from "./hooks/useHosts";
 import { createSettings } from "./hooks/useSettings";
 
-/** Installed-app drag strip (window-controls-overlay): an empty draggable
- *  row — no buttons, no icon, no title. The sidebar toggle lives only in
- *  its normal floating spot in the transcript (like with no overlay).
- *  Rendered always; CSS shows it only under display-mode:
- *  window-controls-overlay (inert in the browser).
- *
- *  Exported for the fixture test (same component, real browser). */
-export function WcoTitlebar() {
+/** The workspace header becomes the native titlebar when WCO is enabled. */
+function WorkspaceHeader() {
+  const ui = useUI();
+  const session = useSession();
+  const title = () => ui.historyView() ? "Conversation history"
+    : session.draftMode() ? "New conversation" : session.activeSession()?.title || "Conversation";
   return (
-    <div class="rc-wco-bar shrink-0" data-tauri-drag-region aria-hidden="true" />
+    <header class="rc-workspace-header rc-window-header shrink-0 border-b border-line/60">
+      <div class="rc-window-content flex h-full min-w-0 items-center gap-3">
+        <Show when={!ui.sidebarOpen()}><SidebarToggle /></Show>
+        <div class="flex min-w-0 items-center gap-2 text-xs select-none">
+          <Show when={session.currentProject()?.name}>
+            <span class="rc-window-project shrink-0 text-ink-500">{session.currentProject()?.name}</span>
+            <span class="rc-window-project text-ink-600" aria-hidden="true">/</span>
+          </Show>
+          <span class="truncate text-ink-400">{title()}</span>
+        </div>
+      </div>
+    </header>
   );
 }
 
-/** Shared shell keeps the sidebar and conversation below the same titlebar. */
+/** One layout in browser and installed modes; WCO only changes header insets. */
 export function WorkspaceLayout(props: { sidebar: JSX.Element; children: JSX.Element }) {
+  const ui = useUI();
   return (
-    <div class="rc-wco-layout flex-1 flex min-h-0 overflow-hidden relative">
-      <WcoTitlebar />
+    <div class="rc-wco-layout flex-1 flex min-h-0 overflow-hidden relative"
+      style={{ "--rc-sidebar-width": ui.sidebarOpen() && !ui.isMobile() ? "16rem" : "0px" }}>
       {props.sidebar}
       <main class="rc-wco-main flex-1 flex flex-col min-w-0 min-h-0 bg-ink-950 relative">
+        <WorkspaceHeader />
         {props.children}
       </main>
     </div>

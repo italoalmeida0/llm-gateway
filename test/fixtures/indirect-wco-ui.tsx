@@ -37,7 +37,10 @@ render(() => {
     setHostMenuAnchor: () => {},
   };
   const session: any = {
-    activeSessionId: () => null,
+    activeSessionId: () => "session",
+    activeSession: () => ({ title: "Review workspace layout" }),
+    currentProject: () => ({ name: "llm-gateway" }),
+    draftMode: () => false,
     startNewConversation: () => {},
     projects: () => [],
     looseSessions: () => [],
@@ -70,9 +73,6 @@ render(() => {
             <UICtx.Provider value={ui}>
               <div class="fixed inset-0 flex flex-col bg-ink-950 text-ink-100 overflow-hidden">
                 <WorkspaceLayout sidebar={<WorkspaceSidebar />}>
-                  <div class="absolute top-2 left-2 z-20">
-                    <button aria-label="Toggle sidebar" class="p-1.5 border border-line" onClick={() => setSidebarOpen(!sidebarOpen())}>Toggle</button>
-                  </div>
                   <div id="conversation" class="flex-1 min-h-0 overflow-y-auto px-4 md:px-8">
                     <div id="messages" class="max-w-3xl mx-auto pt-6 pb-10">
                       {Array.from({ length: 80 }, (_, i) => <p class="py-4">Conversation message {i + 1}</p>)}

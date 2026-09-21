@@ -4,6 +4,7 @@ import { useModal, useSession, useTranscriptCtx, useUI } from "../ctx";
 import { SessionRow, type SessionRowCtx } from "./SessionSidebar";
 import { FloatMenu } from "./FloatMenu";
 import { HostCard } from "./HostCard";
+import { SidebarToggle } from "./SidebarToggle";
 import type { SessionSummary } from "../types";
 
 export function WorkspaceSidebar() {
@@ -49,7 +50,7 @@ export function WorkspaceSidebar() {
   }`}
 >
   {/* Brand Header */}
-  <div class="flex items-center justify-between px-3.5 h-14 shrink-0 border-b border-line select-none">
+  <div class="rc-workspace-header rc-sidebar-header flex items-center justify-between gap-2 px-3.5 shrink-0 border-b border-line select-none">
     <div class="flex items-center gap-2.5 min-w-0">
       <img
         src="/indirect-icon.svg"
@@ -60,15 +61,7 @@ export function WorkspaceSidebar() {
         Indirect Code
       </span>
     </div>
-    <Show when={ui.isMobile()}>
-      <button
-        onClick={() => ui.setSidebarOpen(false)}
-        class="p-1.5 rounded-lg text-ink-400 hover:text-ink-200 hover:bg-ink-900 cursor-pointer md:hidden"
-        aria-label="Close sidebar"
-      >
-        <Iconify icon="lucide:x" size={16} />
-      </button>
-    </Show>
+    <Show when={ui.sidebarOpen()}><SidebarToggle /></Show>
   </div>
 
   {/* New Conversation */}

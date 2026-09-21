@@ -87,17 +87,22 @@ try {
       await page.evaluate((theme: string) => { document.documentElement.dataset.theme = theme; }, theme);
       for (const enabled of [false, true, false]) {
         await overlay(enabled);
-        const top = enabled ? 33 : 0;
+        const headerHeight = enabled ? 40 : 48;
         for (const open of [true, false]) {
           await page.evaluate((open: boolean) => (window as any).wcoUI.setSidebarOpen(open), open);
           await page.waitForTimeout(250);
           const main = await box(".rc-wco-main");
           const sidebar = open ? await box(".rc-sidebar") : null;
-          closeTo(main.y, top, "conversation starts below chrome");
+          closeTo(main.y, 0, "workspace reaches the top without a spacer");
+          closeTo((await box(".rc-window-header")).height, headerHeight, "one compact workspace header");
+          closeTo((await box("#conversation")).y, headerHeight, "transcript clears the integrated header");
           closeTo(main.x + main.width, width, "conversation fills remaining width");
           closeTo(main.y + main.height, 800, "conversation reaches viewport bottom");
           if (sidebar) {
-            closeTo(sidebar.y, top, "sidebar and conversation start together");
+            closeTo(sidebar.y, 0, "sidebar extends to the very top");
+            closeTo((await box(".rc-sidebar-header")).height, headerHeight, "brand and conversation headers align");
+            const control = await box(".rc-sidebar-header .rc-sidebar-toggle");
+            closeTo(control.y + control.height / 2, headerHeight / 2, "collapse button aligns with the brand");
             closeTo(sidebar.y + sidebar.height, 800, "sidebar reaches bottom");
             if (width >= 768) closeTo(main.x, sidebar.x + sidebar.width, "no sidebar gap");
           }
@@ -107,11 +112,14 @@ try {
           closeTo(messages.x + messages.width / 2, composer.x + composer.width / 2, "transcript and composer align", 6);
           assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no horizontal overflow");
           await page.locator("#conversation").evaluate((el: HTMLElement) => { el.scrollTop = el.scrollHeight; });
-          closeTo((await box(".rc-wco-main")).y, top, "transcript scroll preserves top inset");
+          closeTo((await box(".rc-window-header")).y, 0, "header stays pinned during transcript scroll");
           if (!open) {
-            await page.getByRole("button", { name: "Toggle sidebar", exact: true }).click();
+            await page.getByRole("button", { name: "Expand sidebar", exact: true }).click();
             await page.waitForTimeout(250);
             assert((await box(".rc-sidebar")).width > 0, "sidebar toggle stays clickable");
+            await page.getByRole("button", { name: width < 768 ? "Close sidebar" : "Collapse sidebar", exact: true }).click();
+            await page.waitForTimeout(250);
+            assert(await page.getByRole("button", { name: "Expand sidebar", exact: true }).isVisible(), "collapse restores the same control in the header");
           }
         }
       }
@@ -120,18 +128,26 @@ try {
   }
   await page.setViewportSize({ width: 1440, height: 800 });
   await page.evaluate(() => { (window as any).wcoUI.setMobile(false); (window as any).wcoUI.setSidebarOpen(true); });
-  for (const [height, left] of [[33, 0], [40, 120]]) {
+  for (const [height, left] of [[33, 0], [40, 120], [48, 0]]) {
     await overlay(true, height, left);
-    closeTo((await box(".rc-sidebar")).y, height, "native titlebar height is respected");
-    const drag = await page.locator(".rc-wco-bar").evaluate((el: HTMLElement) => {
-      const style = getComputedStyle(el, "::before");
-      return { left: parseFloat(style.left), width: parseFloat(style.width), height: parseFloat(style.height) };
-    });
-    closeTo(drag.left, left, "drag rectangle avoids left controls");
-    closeTo(drag.width, 1440 - (left || 260), "drag rectangle avoids native controls");
-    closeTo(drag.height, height, "drag rectangle follows native height");
+    closeTo((await box(".rc-sidebar")).y, 0, "native geometry never adds a global spacer");
+    closeTo((await box(".rc-window-header")).height, Math.max(40, height), "header respects taller native controls");
+    for (const open of [true, false]) {
+      await page.evaluate((open: boolean) => (window as any).wcoUI.setSidebarOpen(open), open);
+      await page.waitForTimeout(250);
+      const content = await box(".rc-window-content");
+      assert(content.x >= left, "header content avoids left native controls");
+      assert(content.x + content.width <= 1440 - (left ? 0 : 260), "header content avoids right native controls");
+      const control = await box(".rc-sidebar-toggle");
+      assert(control.x >= left && control.x + control.width <= 1440 - (left ? 0 : 260), "sidebar control is in the native safe area");
+      assert.equal(await page.locator(".rc-sidebar-toggle").evaluate((el: HTMLElement) => getComputedStyle(el).getPropertyValue("app-region")), "no-drag", "sidebar control is clickable inside the drag region");
+    }
+    await page.evaluate(() => (window as any).wcoUI.setSidebarOpen(true));
   }
-  await page.screenshot({ path: "/tmp/wco-workspace-fixed.png" });
+  await overlay(true);
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.waitForTimeout(350);
+  await page.screenshot({ path: "/tmp/wco-workspace-integrated.png" });
 
   // Use the built dashboard shell with fixture-only API responses.
   await page.addInitScript(() => {
@@ -159,25 +175,29 @@ try {
           await page.evaluate((scroll: number) => window.scrollTo(0, scroll), scroll);
           await page.waitForTimeout(60);
           const header = await box(".gw-header:visible");
-          closeTo(header.y, enabled ? 33 : 0, "dashboard header clears controls while scrolling");
+          closeTo(header.y, 0, "dashboard uses the top edge while scrolling");
+          closeTo(header.height, enabled ? 40 : 56, "dashboard integrates chrome in a single header");
           if (width >= 768) closeTo((await box(".gateway-rail")).y, header.y, "rail clears controls");
           if (enabled) {
-            const bar = await box(".gw-wco-bar");
-            closeTo(bar.y, 0, "dashboard titlebar remains at viewport top");
-            closeTo(bar.width, width, "titlebar covers full viewport");
-            assert(await page.locator(".gw-wco-bar").evaluate((el: HTMLElement) => {
+            const content = await box(width >= 768 ? ".gw-user" : ".gw-mobile-actions");
+            assert(content.x + content.width <= width - 260, "dashboard actions fit beside native controls");
+            assert(await page.locator(".gw-header:visible").evaluate((el: HTMLElement) => {
               const style = getComputedStyle(el);
               return style.backgroundColor === getComputedStyle(document.body).backgroundColor
-                && document.elementFromPoint(innerWidth - 20, 12) === el;
-            }), "titlebar is opaque and covers scrolled content beneath native controls");
+                && el.contains(document.elementFromPoint(innerWidth - 20, 12));
+            }), "the integrated header covers scrolled content beneath native controls");
+            assert.equal(await page.locator(".gw-wco-bar").count(), 0, "no separate blank titlebar");
           }
         }
       }
     }
     console.log(`PASS dashboard: ${width}px, both themes, overlay on/off, top and scrolled header`);
   }
+  await page.setViewportSize({ width: 1440, height: 800 });
   await overlay(true);
-  await page.screenshot({ path: "/tmp/wco-dashboard-fixed.png" });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; window.scrollTo(0, 200); });
+  await page.waitForTimeout(350);
+  await page.screenshot({ path: "/tmp/wco-dashboard-integrated.png" });
   assert.deepEqual(errors, [], "zero browser errors");
   console.log("WCO layout: all green (native geometry simulated in headless Chromium)");
 } finally {

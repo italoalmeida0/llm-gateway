@@ -219,13 +219,11 @@ function AppShell(props: { children: JSX.Element }) {
 
   return (
     <div class="gw-shell min-h-screen">
-      {/* Reserve the native controls row across the whole installed window. */}
-      <div class="gw-wco-bar" data-tauri-drag-region aria-hidden="true" />
       {/* ===== desktop icon rail ===== */}
       <aside class="gateway-rail hidden md:flex fixed inset-y-0 left-0 w-16 lg:w-64 flex-col items-center py-4 border-r border-line z-30">
-        <a href="#/" class="flex items-center gap-2.5 lg:w-60 lg:px-2" aria-label="LLM Gateway home">
-          <LogoMark />
-          <span class="hidden lg:block text-[13px] font-semibold tracking-tight">LLM Gateway</span>
+        <a href="#/" class="gw-rail-brand flex items-center gap-2.5 lg:w-60 lg:px-2" aria-label="LLM Gateway home">
+          <LogoMark class="gw-rail-logo w-8 h-8 shrink-0" />
+          <span class="hidden lg:block truncate text-[13px] font-semibold tracking-tight">LLM Gateway</span>
         </a>
         <nav
           class="flex-1 min-h-0 overflow-y-auto flex flex-col items-center gap-1 mt-6"
@@ -264,14 +262,14 @@ function AppShell(props: { children: JSX.Element }) {
 
       {/* ===== mobile top bar ===== */}
       <div class="gw-header md:hidden sticky top-0 z-40 border-b border-line bg-ink-950/90 backdrop-blur">
-        <div class="flex items-center justify-between h-14 px-4">
-          <a href="#/" class="flex items-center gap-2.5">
+        <div class="gw-mobile-header flex items-center justify-between h-14 px-4">
+          <a href="#/" class="gw-mobile-brand flex items-center gap-2.5">
             <LogoMark class="w-8 h-8 rounded-lg" />
             <span class="text-sm font-semibold tracking-tight">
               LLM Gateway
             </span>
           </a>
-          <div class="flex items-center gap-1">
+          <div class="gw-mobile-actions flex items-center gap-1">
             <ThemeToggle />
             <button
               class="flex h-10 w-10 items-center justify-center rounded-xl text-ink-300 hover:bg-ink-800/60 transition-colors cursor-pointer"
@@ -312,16 +310,16 @@ function AppShell(props: { children: JSX.Element }) {
             <span class="text-ink-600" aria-hidden="true">/</span>
             <span class="text-ink-200 font-medium truncate">{info().label}</span>
           </div>
-          <div class="flex items-center gap-3 shrink-0">
+          <div class="gw-user flex items-center gap-3 shrink-0">
             <div class="hidden lg:block text-right mr-1">
               <div class="text-xs font-semibold truncate max-w-44">
                 {user().name || user().email}
               </div>
-              <div class="text-[11px] text-ink-500 truncate max-w-44">
+              <div class="gw-user-email text-[11px] text-ink-500 truncate max-w-44">
                 {user().email}
               </div>
             </div>
-            <div class="w-8 h-8 rounded-lg border border-line bg-card text-ink-300 flex items-center justify-center text-xs font-medium">
+            <div class="gw-user-avatar w-8 h-8 rounded-lg border border-line bg-card text-ink-300 flex items-center justify-center text-xs font-medium">
               {(user().name || user().email).slice(0, 1).toUpperCase()}
             </div>
           </div>

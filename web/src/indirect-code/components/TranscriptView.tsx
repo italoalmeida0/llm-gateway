@@ -69,25 +69,6 @@ export function TranscriptView() {
 <>
 
 
-{/* Floating top-left: sidebar toggle only (Back to Gateway lives above
-    New Conversation in the sidebar) */}
-<div class="absolute top-2 left-2 z-20 flex items-center gap-1.5">
-  <button
-    onClick={() => ui.setSidebarOpen(!ui.sidebarOpen())}
-    class="p-1.5 rounded-md bg-ink-900/80 hover:bg-ink-800 border border-line/70 text-ink-400 hover:text-ink-200 transition-colors shadow-sm cursor-pointer"
-    data-rc-tip={ui.sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"} aria-label={ui.sidebarOpen() ? "Collapse sidebar" : "Expand sidebar"}
-  >
-    <Iconify
-      icon={
-        ui.sidebarOpen()
-          ? "lucide:panel-left-close"
-          : "lucide:panel-left-open"
-      }
-      size={14}
-    />
-  </button>
-</div>
-
 {/* Chat Stream Viewport */}
 <Show
   when={!ui.historyView()}

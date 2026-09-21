@@ -184,7 +184,7 @@ export function TranscriptView() {
           >
           {/* ===== USER ===== */}
           <Show when={msg.role === "user"}>
-            <div class={isEditing() ? "w-full" : "flex flex-col items-end max-w-[90%] sm:max-w-[80%]"}>
+            <div class={isEditing() ? "w-full" : "flex min-w-0 flex-col items-end max-w-[90%] sm:max-w-[80%]"}>
               <Show when={!isEditing() && msg.attachments && msg.attachments.length > 0}>
                 <div class={`flex flex-wrap gap-1.5 mb-1.5 ${isEditing() ? "justify-start" : "justify-end"}`}>
                   <For each={msg.attachments || []}>
@@ -202,7 +202,7 @@ export function TranscriptView() {
                 when={isEditing()}
                 fallback={
                   <Show when={textOf().trim()}>
-                    <div class="bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md">
+                    <div class="rc-user-bubble bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md">
                       <p class="whitespace-pre-line text-sm leading-relaxed">{textOf()}</p>
                     </div>
                   </Show>

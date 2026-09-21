@@ -53,7 +53,9 @@ render(() => {
   return <main class={responsive ? "px-4 md:px-8 py-6 min-h-dvh" : ""}>
     <Show when={responsive}><RemoteHints /></Show>
     <section class={responsive ? `group/msg flex flex-col w-full ${width()} mx-auto items-end mb-6` : "hidden"}>
-      <div class="bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md max-w-[90%] sm:max-w-[80%] text-sm">Review the streaming layout and copy controls.</div>
+      <div class="flex min-w-0 flex-col items-end max-w-[90%] sm:max-w-[80%]">
+        <div class="rc-user-bubble bg-ink-900 border border-line/70 text-ink-100 px-3.5 py-2.5 rounded-2xl rounded-tr-md"><p class="whitespace-pre-line text-sm leading-relaxed">Review the streaming layout and copy controls.</p></div>
+      </div>
       <UserMsgActions canFork forking={false} showCopy copied={copied()} onCopy={onCopy} onFork={() => {}} onEdit={() => {}} />
     </section>
     <section class={responsive ? `group/msg flex flex-col w-full ${width()} mx-auto items-start` : ""}>

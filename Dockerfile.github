@@ -20,11 +20,13 @@ ARG REF
 RUN apk add --no-cache git
 WORKDIR /src
 RUN git clone --depth 1 --branch "${REF}" "${REPO}" repo
+RUN mkdir -p /src/repo/patches
 
 # ===== Build stage: bundle the dashboard SPA =====
 FROM oven/bun:1-alpine AS webbuild
 WORKDIR /app
 COPY --from=src /src/repo/package.json /src/repo/bun.lock ./
+COPY --from=src /src/repo/patches ./patches
 RUN bun install --frozen-lockfile
 COPY --from=src /src/repo/plugins ./plugins
 COPY --from=src /src/repo/build.ts /src/repo/tsconfig.json ./
@@ -42,6 +44,7 @@ ENV NODE_ENV=production \
     STATIC_DIR=/app/dist
 
 COPY --from=src /src/repo/package.json /src/repo/bun.lock ./
+COPY --from=src /src/repo/patches ./patches
 RUN bun install --frozen-lockfile --production
 COPY --from=src /src/repo/server ./server
 COPY --from=webbuild /app/dist ./dist

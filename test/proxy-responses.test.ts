@@ -291,7 +291,8 @@ describe("proxy Responses matrix (in-process)", () => {
     const res = await handleProxy(req, url, undefined);
     expect(res.status).toBe(200);
     const text = await readSse(res);
-    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    // Terminal gateway usage comment (if any) rides after [DONE].
+    expect(text.replace(/(?:^|\n): x-gateway-usage [^\n]*\n?/g, "\n").trimEnd().endsWith("data: [DONE]")).toBe(true);
     expect(text).toContain(STUB_REPLY);
   });
 });

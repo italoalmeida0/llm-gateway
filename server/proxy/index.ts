@@ -959,6 +959,19 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     }
     const wantsStream = (bodyJson as any)?.stream === true;
 
+    // Per-request usage ledger for the client: real upstream figures
+    // when present, gateway estimate when the upstream zeroed/omitted
+    // (same numbers the gateway records internally). Emitted as a
+    // response header on buffered replies and as a terminal SSE comment
+    // (`: x-gateway-usage ...`) on streams — comments are ignored by
+    // every SSE dialect, so no client parser breaks. Daemon clients
+    // prefer this over body usage (see indirect-code-daemon usage).
+    // NOTE: headers on a ReadableStream Response are frozen at first
+    // byte, so the stream value can only ride the body, not a header.
+    const setUsageHeader = (h: Headers, u: UsageResult) => {
+      h.set("x-gateway-usage", `in=${u.inTok},cache=${u.cacheTok},out=${u.outTok}`);
+    };
+
     const record = (u: UsageResult, status: number, latencyMs: number, stream: boolean, cand: RouteCandidate) => {
       let inTok = u.inTok;
       let cacheTok = u.cacheTok;
@@ -1091,6 +1104,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
           false,
           cand,
         );
+        h.set("x-gateway-usage", `in=${estimateBodyTokens(bodyJson, proto)},cache=0,out=0`);
         return new Response(
           JSON.stringify({ input_tokens: estimateBodyTokens(bodyJson, proto) }),
           { status: 200, headers: h },
@@ -1273,17 +1287,20 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // protocol it asked for.
         noteProviderKeyOk(cand.key);
         const ct = upstream.headers.get("content-type") || "";
+        const clientErrUsage = parseBufferedUsage(ct, errBody, cand.translated, cand.via);
         record(
-          parseBufferedUsage(ct, errBody, cand.translated, cand.via),
+          clientErrUsage,
           upstream.status,
           Math.round(performance.now() - started),
           false,
           cand,
         );
         const errOut = reEnvelopeError(proto, cand.via, upstream.status, errBody);
+        const errHeaders = buildClientHeaders(upstream.headers, requestId, req, { attemptsMade });
+        setUsageHeader(errHeaders, clientErrUsage);
         return new Response(errOut, {
           status: upstream.status,
-          headers: buildClientHeaders(upstream.headers, requestId, req, { attemptsMade }),
+          headers: errHeaders,
         });
       }
 
@@ -1320,12 +1337,23 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         const modelName = routedPublicModel ?? String((bodyJson as any)?.model ?? "");
         const translator = new IRStreamTranslator(cand.via as IRProto, proto as IRProto, modelName);
         let counted = false;
+        // The finalized usage, once known — queued into the stream tail as
+        // a terminal `: x-gateway-usage` comment (see pull() below).
+        let finalUsage: UsageResult | null = null;
+        let usageTailSent = false;
         const finalize = (status: number) => {
           if (counted) return;
           counted = true;
           const u = translator.result();
           if (u.estimated && bodyJson) u.inTok = estimateBodyTokens(bodyJson, proto);
+          finalUsage = u;
           record(u, status, Math.round(performance.now() - started), true, cand);
+        };
+        const usageComment = (): Uint8Array | null => {
+          if (!finalUsage || usageTailSent) return null;
+          usageTailSent = true;
+          const u = finalUsage;
+          return new TextEncoder().encode(`: x-gateway-usage in=${u.inTok},cache=${u.cacheTok},out=${u.outTok}\n\n`);
         };
 
         const idleLimit = LIMITS.proxyStreamIdleMs;
@@ -1373,6 +1401,8 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
                   /* terminal flush is best-effort */
                 }
                 finalize(req.signal.aborted ? 499 : upstream.status);
+                const tail = usageComment();
+                if (tail) sink.enqueue(tail);
                 cleanup();
                 closeSink(sink);
                 return;
@@ -1383,6 +1413,17 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
                 for (const piece of translator.feed(value)) {
                   sink.enqueue(piece);
                   emitted++;
+                }
+                if (translator.isDone) {
+                  // Terminal chunk arrived inside this batch: usage is
+                  // final — emit it right after (before any later
+                  // keepalive/close logic) so it can never be dropped.
+                  finalize(upstream.status);
+                  const tail = usageComment();
+                  if (tail) {
+                    sink.enqueue(tail);
+                    emitted++;
+                  }
                 }
                 if (emitted === 0 && !translator.isDone) {
                   // Bun.serve stops pulling a response stream whose pulls
@@ -1395,6 +1436,8 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
                 }
                 if (translator.isDone) {
                   finalize(upstream.status);
+                  const tail = usageComment();
+                  if (tail) sink.enqueue(tail);
                   cleanup();
                   closeSink(sink);
                   reader.cancel().catch(() => {});
@@ -1451,13 +1494,15 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       let offset = 0;
       for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
       const respText = decoder.decode(body);
+      const bufferedUsage = parseBufferedUsage(contentType, respText, cand.translated, cand.via);
       record(
-        parseBufferedUsage(contentType, respText, cand.translated, cand.via),
+        bufferedUsage,
         upstream.status,
         Math.round(performance.now() - started),
         false,
         cand,
       );
+      setUsageHeader(clientHeaders, bufferedUsage);
 
       if (cand.translated) {
         const modelName = routedPublicModel ?? String((bodyJson as any)?.model ?? "");
@@ -1467,9 +1512,14 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // No legacy fallback: a body the IR cannot parse is a gateway bug —
         // surface it loudly (502) instead of silently serving a wrong shape.
         let converted: string;
+        let translatedUsage: UsageResult;
         try {
           const irr = decodeResponseToIR(cand.via as IRProto, respText, modelName);
           converted = encodeResponseFromIR(proto as IRProto, irr, modelName);
+          translatedUsage = {
+            inTok: irr.inTok, cacheTok: irr.cacheTok, outTok: irr.outTok,
+            model: irr.model, estimated: irr.usageEstimated,
+          };
         } catch (e) {
           record(
             { inTok: 0, cacheTok: 0, outTok: 0, model: modelName, estimated: true },
@@ -1482,6 +1532,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         }
         const h = buildClientHeaders(upstream.headers, requestId, req, { attemptsMade });
         h.set("Content-Type", "application/json; charset=utf-8");
+        setUsageHeader(h, translatedUsage!);
         return new Response(converted, { status: upstream.status, headers: h });
       }
       return new Response(respText, { status: upstream.status, headers: clientHeaders });
@@ -1503,15 +1554,18 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // Translated failures are re-enveloped to the requested protocol.
       const f = lastFailure;
       const wasTranslated = lastAttempted?.translated ?? false;
+      const failUsage = parseBufferedUsage(f.headers.get("content-type") || "", f.body, wasTranslated, lastAttempted!.via);
       record(
-        parseBufferedUsage(f.headers.get("content-type") || "", f.body, wasTranslated, lastAttempted!.via),
+        failUsage,
         f.status,
         finalLatency,
         false,
         lastAttempted!,
       );
       const outBody = reEnvelopeError(proto, lastAttempted!.via, f.status, f.body);
-      return new Response(outBody, { status: f.status, headers: buildClientHeaders(f.headers, requestId, req, { attemptsMade }) });
+      const failHeaders = buildClientHeaders(f.headers, requestId, req, { attemptsMade });
+      setUsageHeader(failHeaders, failUsage);
+      return new Response(outBody, { status: f.status, headers: failHeaders });
     }
     if (lastFailure?.kind === "network") {
       recordUsage({

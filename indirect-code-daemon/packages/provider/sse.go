@@ -13,7 +13,13 @@ type sseEvent struct {
 }
 
 // readSSE reads events from r and sends them on out. It closes out when r
-// is exhausted or a read error occurs.
+// is exhausted or a read error occurs. The gateway's authoritative usage
+// signal rides a terminal SSE comment (`: x-gateway-usage ...`); it is
+// surfaced as an event with the gatewayUsageEvent name so provider loops
+// can apply it (see gateway_usage.go). Plain keep-alive comments stay
+// skipped.
+const gatewayUsageCommentPrefix = "x-gateway-usage"
+
 func readSSE(r io.Reader, out chan<- sseEvent) {
 	defer close(out)
 	sc := bufio.NewScanner(r)
@@ -35,7 +41,11 @@ func readSSE(r io.Reader, out chan<- sseEvent) {
 			continue
 		}
 		if strings.HasPrefix(line, ":") {
-			// comment / keep-alive
+			// comment / keep-alive — except the gateway usage signal.
+			payload := strings.TrimSpace(strings.TrimPrefix(line, ":"))
+			if rest, ok := cutPrefixFold(payload, gatewayUsageCommentPrefix); ok {
+				out <- sseEvent{Event: gatewayUsageCommentPrefix, Data: strings.TrimSpace(rest)}
+			}
 			continue
 		}
 		field, value, ok := strings.Cut(line, ":")

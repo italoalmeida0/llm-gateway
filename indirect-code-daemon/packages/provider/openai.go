@@ -501,6 +501,9 @@ func (c *openaiClient) runStream(ctx context.Context, resp *http.Response, req R
 		usage        Usage
 		stop         StopReason = StopEnd
 		finalErr     error
+		// gatewayUsageSeen marks the gateway's authoritative usage signal
+		// (terminal comment). Body usage arriving after it is stale.
+		gatewayUsageSeen bool
 	)
 
 	appendText := func(delta string) {
@@ -566,6 +569,16 @@ func (c *openaiClient) runStream(ctx context.Context, resp *http.Response, req R
 				sendDone()
 				return
 			}
+			// Gateway authoritative usage (terminal SSE comment): real
+			// upstream figures when present, gateway estimate otherwise.
+			// Preferred over body usage — apply verbatim, keep streaming.
+			if ev.Event == gatewayUsageCommentPrefix {
+				if inTok, cacheTok, outTok, ok := parseGatewayUsage(ev.Data); ok {
+					applyGatewayUsage(&usage, inTok, cacheTok, outTok)
+					gatewayUsageSeen = true
+				}
+				continue
+			}
 			if ev.Data == "[DONE]" {
 				sendDone()
 				return
@@ -615,7 +628,7 @@ func (c *openaiClient) runStream(ctx context.Context, resp *http.Response, req R
 				sendDone()
 				return
 			}
-			if chunk.Usage != nil {
+			if chunk.Usage != nil && !gatewayUsageSeen {
 				usage.InputTokens = chunk.Usage.PromptTokens - chunk.Usage.PromptTokensDetails.CachedTokens
 				if usage.InputTokens < 0 {
 					usage.InputTokens = chunk.Usage.PromptTokens

@@ -420,7 +420,8 @@ describe("gateway end-to-end", () => {
     expect(r2.headers.get("content-type")).toContain("text/event-stream");
     const body2 = await r2.text();
     expect(body2).toContain('"usage"');
-    expect(body2.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    // Terminal gateway usage comment (if any) rides after [DONE].
+    expect(body2.replace(/(?:^|\n): x-gateway-usage [^\n]*\n?/g, "\n").trimEnd().endsWith("data: [DONE]")).toBe(true);
 
     // anthropic prefix: non-stream + stream + count_tokens
     const r3 = await llm(
@@ -441,7 +442,8 @@ describe("gateway end-to-end", () => {
     expect(r4.status).toBe(200);
     const body4 = await r4.text();
     expect(body4).toContain("event: message_start");
-    expect(body4.trimEnd().endsWith('data: {"type":"message_stop"}')).toBe(true);
+    // Terminal gateway usage comment (if any) rides after message_stop.
+    expect(body4.replace(/(?:^|\n): x-gateway-usage [^\n]*\n?/g, "\n").trimEnd().endsWith('data: {"type":"message_stop"}')).toBe(true);
 
     const r5 = await llm(
       "/anthropic/v1/messages/count_tokens",
@@ -2429,6 +2431,9 @@ describe("zero-usage inference (isolated pair)", () => {
     expect(r1.status).toBe(200);
     const j1 = await r1.json();
     expect(String(j1.choices[0].message.content).length).toBeGreaterThan(0);
+    // Buffered replies carry the gateway's authoritative usage (real or
+    // estimated — same numbers the ledger records) as a response header.
+    expect(r1.headers.get("x-gateway-usage")).toMatch(/^in=\d+,cache=\d+,out=\d+$/);
     await Bun.sleep(1500); // usage flushes on a 1s buffer
 
     const ev1 = await api2(`/api/usage/events?key_id=${keyId}&limit=10`, { token: user2 });
@@ -2470,6 +2475,9 @@ describe("zero-usage inference (isolated pair)", () => {
     expect(r3.status).toBe(200);
     const sse3 = await r3.text();
     expect(sse3).toContain("text_delta");
+    // Streams carry the same signal as a terminal SSE comment (headers
+    // freeze at first byte, so it can only ride the body).
+    expect(sse3).toMatch(/^: x-gateway-usage in=\d+,cache=\d+,out=\d+$/m);
     await Bun.sleep(1500); // usage flushes on a 1s buffer
     const ev3 = await api2(`/api/usage/events?key_id=${keyId}&limit=10`, { token: user2 });
     const e3 = ev3.json.events.find((e: any) => e.proto === "anthropic" && e.stream === 1);

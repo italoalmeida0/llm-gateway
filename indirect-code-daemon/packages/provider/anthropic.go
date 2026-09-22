@@ -432,6 +432,9 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 		// the wreckage is incomplete and must error, never pass as a
 		// finished turn.
 		sawStop bool
+		// gatewayUsageSeen marks the gateway's authoritative usage signal
+		// (terminal comment). Body usage arriving after it is stale.
+		gatewayUsageSeen bool
 	)
 
 	ordered := func() []*blockEntry {
@@ -512,6 +515,16 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 			if ev.Event == "ping" {
 				continue
 			}
+			// Gateway authoritative usage (terminal SSE comment): real
+			// upstream figures when present, gateway estimate otherwise.
+			// Preferred over body usage — apply verbatim, keep streaming.
+			if ev.Event == gatewayUsageCommentPrefix {
+				if inTok, cacheTok, outTok, ok := parseGatewayUsage(ev.Data); ok {
+					applyGatewayUsage(&usage, inTok, cacheTok, outTok)
+					gatewayUsageSeen = true
+				}
+				continue
+			}
 			if ev.Data == "" {
 				continue
 			}
@@ -546,7 +559,7 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 						} `json:"usage"`
 					} `json:"message"`
 				}
-				if err := json.Unmarshal([]byte(ev.Data), &start); err == nil {
+				if err := json.Unmarshal([]byte(ev.Data), &start); err == nil && !gatewayUsageSeen {
 					usage.InputTokens = start.Message.Usage.InputTokens
 					usage.CacheWriteTokens = start.Message.Usage.CacheCreationTokens
 					usage.CacheReadTokens = start.Message.Usage.CacheReadTokens
@@ -641,17 +654,19 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 				if err := json.Unmarshal([]byte(ev.Data), &md); err != nil {
 					continue
 				}
-				if md.Usage.OutputTokens != 0 {
+				if md.Usage.OutputTokens != 0 && !gatewayUsageSeen {
 					usage.OutputTokens = md.Usage.OutputTokens
 				}
-				if md.Usage.InputTokens != nil {
-					usage.InputTokens = *md.Usage.InputTokens
-				}
-				if md.Usage.CacheReadTokens != nil {
-					usage.CacheReadTokens = *md.Usage.CacheReadTokens
-				}
-				if md.Usage.CacheWriteTokens != nil {
-					usage.CacheWriteTokens = *md.Usage.CacheWriteTokens
+				if !gatewayUsageSeen {
+					if md.Usage.InputTokens != nil {
+						usage.InputTokens = *md.Usage.InputTokens
+					}
+					if md.Usage.CacheReadTokens != nil {
+						usage.CacheReadTokens = *md.Usage.CacheReadTokens
+					}
+					if md.Usage.CacheWriteTokens != nil {
+						usage.CacheWriteTokens = *md.Usage.CacheWriteTokens
+					}
 				}
 				switch md.Delta.StopReason {
 				case "tool_use":

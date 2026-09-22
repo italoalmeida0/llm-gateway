@@ -20,7 +20,7 @@
 
 export type IRRole = "system" | "user" | "assistant" | "tool";
 
-import { countTextTokens } from "../tokens";
+import { countTextTokens, estimateThinkingTokens } from "../tokens";
 
 /** Canonical content block. `text` is shared; media/tool blocks are typed. */
 export type IRBlock =
@@ -131,6 +131,12 @@ function imageSourceToDataUrl(source: unknown): string | null {
 
 const REVERSE_IMAGE_TIMEOUT_MS = 15_000;
 const REVERSE_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/** Verbatim cap for the stream output-estimate samples (text + tool args).
+ *  500KB ≈ 125k tokens — beyond any realistic single-turn model output —
+ *  so counting is exact in practice; only the excess past the cap
+ *  extrapolates by per-char ratio. Bounds per-stream memory. */
+const OUT_SAMPLE_CAP = 500 * 1024;
 
 async function fetchImageToDataUrl(url: string): Promise<string> {
   const ctrl = new AbortController();
@@ -1159,7 +1165,7 @@ function decodeChatResponseToIR(text: string, fallbackModel: string): IRResponse
   let estimated = usageSaidNothing;
   let finalOut = outTok;
   if (!usageSaidNothing && outTok <= 0 && (visibleText.length > 0 || toolUses.length > 0)) {
-    finalOut = Math.max(1, countTextTokens(visibleText || toolUses.map((t) => JSON.stringify(t.input ?? {})).join("")));
+    finalOut = estimateBufferedOutTok(visibleText, toolUses, thinking);
     estimated = true;
   }
   const finish = String(first.finish_reason ?? "stop");
@@ -1223,7 +1229,7 @@ function decodeAnthropicResponseToIR(text: string, fallbackModel: string): IRRes
   let estimated = usageSaidNothing;
   let finalOut = outReported;
   if (!usageSaidNothing && outReported <= 0 && (outText.length > 0 || toolUses.length > 0)) {
-    finalOut = Math.max(1, countTextTokens(outText || toolUses.map((t) => JSON.stringify(t.input ?? {})).join("")));
+    finalOut = estimateBufferedOutTok(outText, toolUses, thinking);
     estimated = true;
   }
   return {
@@ -1292,7 +1298,7 @@ function decodeResponsesResponseToIR(text: string, fallbackModel: string): IRRes
   let estimated = usageSaidNothing;
   let finalOut = outTok;
   if (!usageSaidNothing && outTok <= 0 && (outText.length > 0 || toolUses.length > 0)) {
-    finalOut = Math.max(1, countTextTokens(outText || toolUses.map((t) => JSON.stringify(t.input ?? {})).join("")));
+    finalOut = estimateBufferedOutTok(outText, toolUses, thinking);
     estimated = true;
   }
   return {
@@ -1308,6 +1314,29 @@ function decodeResponsesResponseToIR(text: string, fallbackModel: string): IRRes
     reasonTok,
     usageEstimated: estimated,
   };
+}
+
+/** Full output estimate for the buffered path: text + tool-arg JSON
+ *  (both via the btdby4 text counter) + opaque thinking payloads. */
+function estimateBufferedOutTok(
+  text: string,
+  toolUses: Array<{ input: unknown }>,
+  thinking: Array<{ format: string; data: string }>,
+): number {
+  let total = 0;
+  if (text) total += countTextTokens(text);
+  for (const t of toolUses) {
+    try {
+      total += countTextTokens(JSON.stringify(t.input ?? {}));
+    } catch {
+      total += 1;
+    }
+  }
+  for (const th of thinking) {
+    if (th.format === "text") total += countTextTokens(th.data);
+    else total += estimateThinkingTokens(th.data);
+  }
+  return Math.max(1, total);
 }
 
 // ---------------------------------------------------------------------------
@@ -1984,8 +2013,21 @@ export class IRStreamTranslator {
   private sawUsage = false;
   private model = "";
   private outChars = 0;
-  private outSample = "";
+  /** Capped verbatim sample of streamed text/tool-arg JSON. 500KB covers
+   *  any realistic model output (~125k tokens) with exact counting; only
+   *  beyond that does the estimator fall back to per-char extrapolation.
+   *  Kept as chunk arrays (not += string concat) so accumulation is O(n):
+   *  blocks are pushed per delta and joined ONCE at estimate time; past
+   *  the cap only the char length is counted, never stored. */
+  private outChunks: string[] = [];
+  private outSampleLen = 0;
   private toolJsonChars = 0;
+  /** Bounded chunks of the streamed tool-arg JSON (extrapolation sample). */
+  private toolArgsChunks: string[] = [];
+  private toolArgsLen = 0;
+  /** Opaque thinking payloads (thought_signature / encrypted blobs): billed
+   *  output the upstream never itemizes — estimated via btdby4. */
+  private opaqueThinking: string[] = [];
 
   constructor(
     private upstream: Proto,
@@ -2087,16 +2129,33 @@ export class IRStreamTranslator {
           // something); visible text always wins for the sample.
           if (d.thinking) {
             this.thinkingChars += d.text.length;
-            if (this.outChars === 0 && this.outSample.length < 2048) {
-              this.outSample += d.text.slice(0, 2048 - this.outSample.length);
+            if (this.outChars === 0 && this.outSampleLen < OUT_SAMPLE_CAP) {
+              const room = OUT_SAMPLE_CAP - this.outSampleLen;
+              this.outChunks.push(d.text.slice(0, room));
+              this.outSampleLen += Math.min(d.text.length, room);
             }
           } else {
-            if (this.thinkingChars > 0 && this.outChars === 0) this.outSample = "";
+            if (this.thinkingChars > 0 && this.outChars === 0) {
+              this.outChunks = [];
+              this.outSampleLen = 0;
+            }
             this.outChars += d.text.length;
-            if (this.outSample.length < 2048) this.outSample += d.text.slice(0, 2048 - this.outSample.length);
+            if (this.outSampleLen < OUT_SAMPLE_CAP) {
+              const room = OUT_SAMPLE_CAP - this.outSampleLen;
+              this.outChunks.push(d.text.slice(0, room));
+              this.outSampleLen += Math.min(d.text.length, room);
+            }
           }
         }
-        if (d.toolUse?.inputDelta) this.toolJsonChars += d.toolUse.inputDelta.length;
+        if (d.toolUse?.inputDelta) {
+          this.toolJsonChars += d.toolUse.inputDelta.length;
+          if (this.toolArgsLen < OUT_SAMPLE_CAP) {
+            const room = OUT_SAMPLE_CAP - this.toolArgsLen;
+            this.toolArgsChunks.push(d.toolUse.inputDelta.slice(0, room));
+            this.toolArgsLen += Math.min(d.toolUse.inputDelta.length, room);
+          }
+        }
+        if (d.toolUse?.thoughtSignature) this.opaqueThinking.push(d.toolUse.thoughtSignature);
         // Text/tool bytes on the wire count as output activity even when the
         // upstream zeroed (or dropped) every usage figure — the zero-output
         // guard in result() needs to know content flowed. sawUsage marks
@@ -2179,24 +2238,48 @@ export class IRStreamTranslator {
     return {
       inTok: 0,
       cacheTok: 0,
-      outTok: this.outChars > 0 && this.outSample ? this.estimateOutTok() : 0,
+      outTok: this.outChars > 0 && this.outSampleLen > 0 ? this.estimateOutTok() : 0,
       model: this.model,
       estimated: true,
     };
   }
 
   private estimateOutTok(): number {
-    // btdby4 raw-text counter over the capped sample, extrapolated by
-    // per-char ratio to the full streamed length (same rule as before,
-    // better engine — the project's own estimator, shared with the daemon).
+    // Full output estimate (btdby4 engine throughout — the project's own
+    // estimator, shared with the daemon):
+    //   text / tool args: exact BPE count while the stream fits in the
+    //     500KB sample cap (~125k tokens — beyond any realistic model
+    //     output); only the excess past the cap extrapolates by per-char
+    //     ratio (rule of three over the remainder);
+    //   opaque thinking (thought_signature / encrypted blobs): the wasm's
+    //     payload estimator — billed output the upstream never itemizes.
     // Pure tool-call turns carry no text: their JSON args still cost output
-    // tokens, so fall back to counting the arg bytes directly.
-    if (this.outSample.length > 0) {
-      const sampleTokens = countTextTokens(this.outSample);
-      const scaled = Math.round((sampleTokens * this.outChars) / this.outSample.length);
-      return Math.max(1, scaled);
+    // tokens, so they estimate from the arg bytes instead of defaulting.
+    let total = 0;
+    if (this.outSampleLen > 0) {
+      // Single join of the capped blocks, counted once by the BPE engine;
+      // the tail past the cap (length-only) scales by the sample density.
+      const sample = this.outChunks.join("");
+      const sampleTokens = countTextTokens(sample);
+      total += sampleTokens;
+      if (this.outChars > sample.length) {
+        // Remainder past the cap: scale by the sample's own density.
+        total += Math.round(
+          (sampleTokens * (this.outChars - sample.length)) / sample.length,
+        );
+      }
     }
-    if (this.toolJsonChars > 0) return Math.max(1, Math.ceil(this.toolJsonChars / 4));
-    return 1;
+    if (this.toolJsonChars > 0) {
+      const slice = this.toolArgsLen > 0 ? this.toolArgsChunks.join("") : "{}";
+      const sliceTokens = countTextTokens(slice);
+      total += Math.max(1, sliceTokens);
+      if (this.toolJsonChars > slice.length) {
+        total += Math.round(
+          (sliceTokens * (this.toolJsonChars - slice.length)) / slice.length,
+        );
+      }
+    }
+    for (const blob of this.opaqueThinking) total += estimateThinkingTokens(blob);
+    return Math.max(1, total);
   }
 }

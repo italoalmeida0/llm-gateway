@@ -122,11 +122,12 @@ export const LIMITS = {
   breakerOpenMs: 30_000,
 
   /** upstream failover (multi-key / multi-target) */
-  /** Consecutive transient/rate-limit failures before a key enters cooldown. */
-  providerFailThreshold: Number(process.env.LIMIT_PROVIDER_FAIL_THRESHOLD || 3),
-  /** Cooldown backoff: base * 2^(fails-threshold), capped. */
-  providerCooldownBaseMs: Number(process.env.LIMIT_PROVIDER_COOLDOWN_BASE_MS || 30_000),
-  providerCooldownMaxMs: Number(process.env.LIMIT_PROVIDER_COOLDOWN_MAX_MS || 15 * 60_000),
+  /** Sticky-winner TTL: how long the last-good candidate stays first in
+   *  line for its routing lane (sliding on every success, in-memory).
+   *  No key is ever skipped automatically — the winner is only ordering.
+   *  (Legacy knobs LIMIT_PROVIDER_FAIL_THRESHOLD / LIMIT_PROVIDER_COOLDOWN_*
+   *  were removed with the auto-skip policy; if set in .env they are ignored.) */
+  keyStickyTtlMs: Number(process.env.KEY_STICKY_TTL_MS || 10 * 60_000),
   /** Bytes of an upstream error body read to classify it (billing/quota hints). */
   upstreamErrorPeekBytes: Number(process.env.UPSTREAM_ERROR_PEEK_BYTES || 16 * 1024),
   /** Hard cap on failover attempts (keys × targets) per client request. */

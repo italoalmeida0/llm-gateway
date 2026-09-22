@@ -528,6 +528,11 @@ describe("gateway end-to-end", () => {
     expect(viaGw).toEqual(upstream);
   });
 
+  // Zero-usage inference (MuseSpark case) runs as its own suite at the
+  // end of the file — it spawns a second gateway+upstream pair on
+  // dedicated ports (4470/4471) so its long sleeps never hold the shared
+  // server's event loop.
+
   test("cached input tokens get their own bucket, separate from uncached input", async () => {
     const made = await api("/api/keys", { token: userToken, body: { name: "cache-audit" } });
     const key = made.json.token;
@@ -733,6 +738,14 @@ describe("gateway end-to-end", () => {
     expect(reqsum(stProv.json.series)).toBeLessThanOrEqual(
       reqsum(stAll.json.series),
     );
+    // KV-cache snapshot rides the stats payload (60s server-side cache).
+    expect(stAll.json.kvCache).toBeTruthy();
+    expect(stAll.json.kvCache.max_bytes).toBeGreaterThan(0);
+    expect(stAll.json.kvCache.ttl_seconds).toBe(600);
+    expect(stAll.json.kvCache.captured_at).toBeGreaterThan(0);
+    const kvOnly = await api("/api/admin/kv-cache", { token: adminToken });
+    expect(kvOnly.status).toBe(200);
+    expect(kvOnly.json.kvCache.max_bytes).toBe(stAll.json.kvCache.max_bytes);
     const stNone = await api(
       "/api/admin/stats?days=7&provider_id=does-not-exist",
       { token: adminToken },
@@ -2036,7 +2049,7 @@ describe("upstream failover", () => {
     ).toBe(403);
   });
 
-  test("out-of-credits key falls through to the next key in the SAME request", async () => {
+  test("out-of-credits key falls through to the next key in the SAME request (and stays in rotation)", async () => {
     // primary key reports "insufficient credits" (billing)
     await behavior(SEC_A1, { status: 402, message: "Insufficient credits. Please top up your account." });
 
@@ -2051,26 +2064,27 @@ describe("upstream failover", () => {
     expect(h[SEC_A1]).toBe(1);
     expect(h[SEC_A2]).toBe(1);
 
-    // the failed key is marked exhausted(billing) with an auto-retry timestamp
+    // the failed key is NOT removed from rotation (no-skip policy) — its
+    // failure is only audit-logged as provider_key.failed with the cause
     const provs = await api("/api/admin/providers", { token: adminToken });
     const a1 = provs.json.providers.find((p: any) => p.id === provA).keys.find((k: any) => k.id === keyA1);
-    expect(a1.status).toBe("exhausted");
-    expect(a1.exhaustedReason).toBe("billing");
-    expect(a1.cooldownUntil).toBeGreaterThan(Date.now());
+    expect(a1.status).toBe("active");
 
-    // second request: the exhausted key is not retried
+    // second request: the sticky winner (A2 answered last) serves first —
+    // A1 is only re-tried after the sticky TTL or when A2 fails
     const r2 = await llm("/v1/chat/completions", gatewayKey, {
       model: "fake-llm-1", messages: [{ role: "user", content: "again" }],
     });
     expect(r2.status).toBe(200);
     await r2.text();
+    expect(r2.headers.get("x-gateway-attempts")).toBe("1");
     h = await hits();
     expect(h[SEC_A1]).toBe(1);
     expect(h[SEC_A2]).toBe(2);
 
-    // an exhausted key transition is audited
+    // a failed attempt is audited (observability, not gating)
     const log = await api(`/api/admin/audit?limit=20`, { token: adminToken });
-    expect(log.json.entries.some((e: any) => e.action === "provider_key.exhausted" && e.target === keyA1)).toBe(true);
+    expect(log.json.entries.some((e: any) => e.action === "provider_key.failed" && e.target === keyA1)).toBe(true);
   });
 
   test("client-caused 4xx does NOT fail over to other keys/providers", async () => {
@@ -2094,21 +2108,34 @@ describe("upstream failover", () => {
     await behavior(SEC_A2, null);
   });
 
-  test("manual re-enable returns an exhausted key to rotation", async () => {
+  test("disabled key is skipped; re-enable returns it to rotation", async () => {
+    const dis = await api(`/api/admin/providers/${provA}/keys/${keyA1}`, {
+      token: adminToken, method: "PATCH", body: { status: "disabled" },
+    });
+    expect(dis.status).toBe(200);
+    await behavior(SEC_A1, null);
+
+    const before = await hits();
+    const r = await llm("/v1/chat/completions", gatewayKey, {
+      model: "fake-llm-1", messages: [{ role: "user", content: "skip disabled" }],
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    // disabled A1 never attempted; A2 serves
+    const after = await hits();
+    expect(after[SEC_A1] ?? 0).toBe(before[SEC_A1] ?? 0);
+    expect((await lastAuth()).authorization).toBe(`Bearer ${SEC_A2}`);
+
+    // re-enable: priority order is back, A1 serves first again
     const re = await api(`/api/admin/providers/${provA}/keys/${keyA1}`, {
       token: adminToken, method: "PATCH", body: { status: "active" },
     });
     expect(re.status).toBe(200);
-    expect(re.json.key.status).toBe("active");
-    expect(re.json.key.cooldownUntil).toBeNull();
-    expect(re.json.key.exhaustedReason).toBeNull();
-    await behavior(SEC_A1, null);
-
-    const r = await llm("/v1/chat/completions", gatewayKey, {
+    const r2 = await llm("/v1/chat/completions", gatewayKey, {
       model: "fake-llm-1", messages: [{ role: "user", content: "primary again" }],
     });
-    expect(r.status).toBe(200);
-    await r.text();
+    expect(r2.status).toBe(200);
+    await r2.text();
     expect((await lastAuth()).authorization).toBe(`Bearer ${SEC_A1}`);
   });
 
@@ -2192,7 +2219,7 @@ describe("upstream failover", () => {
     const m = await fetch(`${GW}/v1/models`, { headers: { Authorization: `Bearer ${gatewayKey}` } });
     expect((await m.json()).data.some((x: any) => x.id === "fb-model")).toBe(true);
 
-    // cleanup: the created model + both A keys exhausted; back to passthrough
+    // cleanup: the created model is removed; back to passthrough
     expect((await api(`/api/admin/models/${encodeURIComponent("fb-model")}`, { token: adminToken, method: "DELETE" })).status).toBe(200);
     const sw2 = await api("/api/admin/settings", {
       token: adminToken, method: "PATCH", body: { routingMode: "passthrough" },
@@ -2227,7 +2254,8 @@ describe("upstream failover", () => {
     expect(put.json.model.providerId).toBe(provB); // mirror follows the new top-1
     expect(put.json.model.upstreamModel).toBe("m2-b");
 
-    // A's keys are still exhausted from the previous test → B serves anyway
+    // A healthy again (no-skip: nothing was ever removed from rotation) →
+    // B serves because it is top-1 now, not because A is blocked
     await behavior(SEC_A2, null); // A2 healthy again, but B is top-1 now
     const r = await llm("/v1/chat/completions", gatewayKey, {
       model: "fb-model2", messages: [{ role: "user", content: "chain order" }],
@@ -2284,4 +2312,182 @@ describe("upstream failover", () => {
     const provs = await api("/api/admin/providers", { token: adminToken });
     expect(provs.json.providers.find((p: any) => p.id === provA).keys.length).toBe(1);
   });
+});
+
+/**
+ * Zero-usage inference — its own suite on dedicated ports (4470/4471).
+ *
+ * The MuseSpark case: the provider reports all-zero usage while content
+ * flows (400k context billed as in:0/cache:0, dashboard correct). The
+ * gateway must infer from the wire (btdby4) + prefix stability instead of
+ * recording the lie — always flagged estimated.
+ * See server/tokens.ts (splitKvInput via the btdby4 KV provider).
+ *
+ * Runs standalone (not inside the main describe) so its flush-wait sleeps
+ * never hold the shared server's loop and its tracker state never leaks
+ * into other suites.
+ */
+describe("zero-usage inference (isolated pair)", () => {
+  const GW2_PORT = 4470;
+  const UP2_PORT = 4471;
+  const GW2 = `http://127.0.0.1:${GW2_PORT}`;
+  const UP2 = `http://127.0.0.1:${UP2_PORT}`;
+  let gw2: ReturnType<typeof Bun.spawn> | undefined;
+  let up2: ReturnType<typeof Bun.spawn> | undefined;
+  let dir2 = "";
+  let admin2 = "";
+  let user2 = "";
+
+  const api2 = async (p: string, opts: { method?: string; token?: string; body?: unknown } = {}) => {
+    const res = await fetch(`${GW2}${p}`, {
+      method: opts.method ?? (opts.body !== undefined ? "POST" : "GET"),
+      headers: {
+        ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
+      },
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    });
+    const text = await res.text();
+    let json: any = null;
+    try { json = JSON.parse(text); } catch { /* non-json */ }
+    return { status: res.status, json, text };
+  };
+  const llm2 = (pathname: string, key: string, body: unknown, anthropicStyle = false) =>
+    fetch(`${GW2}${pathname}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(anthropicStyle ? { "x-api-key": key, "anthropic-version": "2023-06-01" } : { Authorization: `Bearer ${key}` }),
+      },
+      body: JSON.stringify(body),
+    });
+
+  beforeAll(async () => {
+    dir2 = mkdtempSync(path.join(tmpdir(), "gw-zero-"));
+    up2 = spawn("test/fake-upstream.ts", { FAKE_UPSTREAM_PORT: String(UP2_PORT), FAKE_UPSTREAM_KEY: UPSTREAM_KEY });
+    gw2 = spawn("server/index.ts", {
+      PORT: String(GW2_PORT),
+      NODE_ENV: "development",
+      DATA_DIR: dir2,
+      ADMIN_EMAIL: "zero@example.com",
+      ADMIN_PASSWORD: ADMIN_PW,
+      LIMIT_IP_PER_MIN: "100000",
+      LIMIT_AUTH_PER_MIN: "100000",
+    });
+    await waitFor(`${GW2}/api/health`);
+    const login = await api2("/api/auth/login", { body: { email: "zero@example.com", password: ADMIN_PW } });
+    expect(login.status).toBe(200);
+    admin2 = login.json.accessToken;
+    const mk = await api2("/api/admin/users", {
+      token: admin2,
+      body: { email: "zu@example.com", name: "Zero User", role: "user", sendInvite: true },
+    });
+    expect(mk.status).toBe(200);
+    const inv = decodeURIComponent(String(mk.json.invite.link).split("token=")[1]);
+    const setup = await api2("/api/auth/password-reset/confirm", { body: { token: inv, password: "user-password-xyz" } });
+    expect(setup.status).toBe(200);
+    const login2 = await api2("/api/auth/login", { body: { email: "zu@example.com", password: "user-password-xyz" } });
+    expect(login2.status).toBe(200);
+    user2 = login2.json.accessToken;
+    const prov = await api2("/api/admin/providers", {
+      token: admin2,
+      body: {
+        name: "zero-provider",
+        openaiBaseUrl: `${UP2}/openai/v1`,
+        anthropicBaseUrl: `${UP2}/anthropic/v1`,
+        apiKey: UPSTREAM_KEY,
+      },
+    });
+    expect(prov.status).toBe(200);
+  }, 60_000);
+
+  afterAll(() => {
+    try { gw2?.kill(); } catch {}
+    try { up2?.kill(); } catch {}
+    try { rmSync(dir2, { recursive: true, force: true }); } catch {}
+  });
+
+  test("zero usage from the provider is inferred, never recorded as zero", async () => {
+    const big = (n: number, ch: string) => ch.repeat(n);
+    const made = await api2("/api/keys", { token: user2, body: { name: "zero-usage-audit" } });
+    expect(made.status).toBe(200);
+    const key = made.json.token;
+    const keyId = made.json.key.id;
+
+    // 1) non-stream, chat: zero usage + real content -> out estimated.
+    // The second probe EXTENDS the first with a new block (same prefix +
+    // one more message), so the KV provider sees a stable block prefix ~
+    // the whole first turn: almost everything counts as cache on the
+    // second request. (Block-level granularity: extending the SAME string
+    // in place does NOT hit — a new block must be appended.)
+    const probeBody = (extra: { role: string; content: string }[]) => ({
+      model: "fake-llm-1",
+      __zero_usage: true,
+      messages: [{ role: "user", content: `zero-usage probe base ${big(600, "a")}` }, ...extra],
+    });
+    const r1 = await llm2("/v1/chat/completions", key, probeBody([]));
+    expect(r1.status).toBe(200);
+    const j1 = await r1.json();
+    expect(String(j1.choices[0].message.content).length).toBeGreaterThan(0);
+    await Bun.sleep(1500); // usage flushes on a 1s buffer
+
+    const ev1 = await api2(`/api/usage/events?key_id=${keyId}&limit=10`, { token: user2 });
+    expect(ev1.status).toBe(200);
+    const e1 = ev1.json.events.find((e: any) => e.proto === "openai" && e.stream === 0);
+    expect(e1).toBeTruthy();
+    expect(e1.estimated).toBe(1);
+    expect(e1.out_tok).toBeGreaterThan(0); // content flowed: never zero
+    expect(e1.in_tok).toBeGreaterThan(0); // body was non-trivial: never zero
+    expect(e1.cache_tok).toBe(0); // first of run: 100% fresh
+
+    // 2) extended prefix -> stable-block cache via the KV provider:
+    // cache ~= whole first turn, fresh ~= the appended block.
+    const r2 = await llm2("/v1/chat/completions", key, probeBody([{ role: "user", content: `tail ${big(60, "b")}` }]));
+    expect(r2.status).toBe(200);
+    await Bun.sleep(1500); // usage flushes on a 1s buffer
+    const ev2 = await api2(`/api/usage/events?key_id=${keyId}&limit=10`, { token: user2 });
+    const e2 = ev2.json.events.find((e: any) => e.proto === "openai" && e.stream === 0 && e.id !== e1.id);
+    expect(e2).toBeTruthy();
+    expect(e2.estimated).toBe(1);
+    expect(e2.out_tok).toBeGreaterThan(0);
+    expect(e2.cache_tok).toBeGreaterThan(0); // common prefix ~= first turn
+    expect(e2.cache_tok).toBeGreaterThanOrEqual(Math.floor(e1.in_tok * 0.8));
+    expect(e2.in_tok).toBeLessThan(e1.in_tok); // only the tail is fresh
+
+    // 3) stream, anthropic: message_start usage zeroed but text flows.
+    const r3 = await llm2(
+      "/v1/messages",
+      key,
+      {
+        model: "fake-llm-1",
+        max_tokens: 200,
+        stream: true,
+        __zero_usage: true,
+        messages: [{ role: "user", content: `zero-usage stream probe ${big(600, "c")}` }],
+      },
+      true,
+    );
+    expect(r3.status).toBe(200);
+    const sse3 = await r3.text();
+    expect(sse3).toContain("text_delta");
+    await Bun.sleep(1500); // usage flushes on a 1s buffer
+    const ev3 = await api2(`/api/usage/events?key_id=${keyId}&limit=10`, { token: user2 });
+    const e3 = ev3.json.events.find((e: any) => e.proto === "anthropic" && e.stream === 1);
+    expect(e3).toBeTruthy();
+    expect(e3.estimated).toBe(1);
+    expect(e3.out_tok).toBeGreaterThan(0);
+    expect(e3.in_tok + e3.cache_tok).toBeGreaterThan(0);
+
+    // 4) nonzero upstream figures are never overridden by inference.
+    const r4 = await llm2("/v1/chat/completions", key, {
+      model: "fake-llm-1",
+      messages: [{ role: "user", content: "honest usage probe, reasonably long body here" }],
+    });
+    expect(r4.status).toBe(200);
+    await Bun.sleep(1500); // usage flushes on a 1s buffer
+    const ev4 = await api2(`/api/usage/events?key_id=${keyId}&limit=10`, { token: user2 });
+    const e4 = ev4.json.events.find((e: any) => e.proto === "openai" && e.stream === 0 && e.estimated === 0);
+    expect(e4).toBeTruthy();
+    expect(e4.out_tok).toBeGreaterThan(0);
+  }, 120_000);
 });

@@ -3,6 +3,8 @@
 # benchmark that matches bun's *_test* discovery pattern and must never run
 # as part of the suite.
 root = "test"
+# btdby4-wasm must be warm before any test counts tokens (async WASM init).
+preload = ["./test/preload.ts"]
 
 [serve.static]
 plugins = ["./plugins/iconify-solid-plugin.ts", "./plugins/tailwind-plugin.ts", "./plugins/solid-plugin.ts"]

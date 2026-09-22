@@ -27,16 +27,16 @@ import {
   type RouterSnapshot,
 } from "../server/models";
 import {
-  billingCooldownUntil,
   classifyHttpError,
-  keyBlockedNow,
   keyUsable,
-  liveKeyBlock,
-  liveKeyClear,
-  nextCooldown,
+  stickyClear,
+  stickyClearAll,
+  stickyGet,
+  stickySet,
 } from "../server/failover";
-import { StreamMeter, estimateBodyTokens } from "../server/proxy/index";
-import { estimateTokenCount } from "tokenx";
+import { estimateBodyTokens } from "../server/proxy/index";
+import { IRStreamTranslator } from "../server/proxy/gateway-ir";
+import { countTextTokens, kvClear, kvSnapshotCached, splitKvInput } from "../server/tokens";
 import type { ModelRow, ModelTargetRow, ProviderRow } from "../server/db";
 import { buildGridWhere } from "../server/gridql";
 import { normalizePricing, normalizePricingValue, pricingColumns } from "../server/pricing";
@@ -498,48 +498,38 @@ describe("failover: upstream error classification", () => {
   });
 });
 
-describe("failover: cooldowns and key usability", () => {
-  test("no cooldown below the threshold, exponential after", () => {
-    const t0 = Date.now();
-    expect(nextCooldown(1)).toBeNull();
-    expect(nextCooldown(2)).toBeNull();
-    const c3 = nextCooldown(3)!;
-    expect(c3).toBeGreaterThanOrEqual(t0 + 30_000);
-    expect(c3).toBeLessThan(t0 + 31_000);
-    const c5 = nextCooldown(5)!;
-    expect(c5).toBeGreaterThanOrEqual(t0 + 120_000); // 30s * 2^2
-    // capped at max
-    expect(nextCooldown(20)!).toBeLessThanOrEqual(Date.now() + 15 * 60_000);
+describe("failover: no-skip policy and sticky winner", () => {
+  test("nothing is auto-skipped: only an explicit disabled key is unusable", () => {
+    expect(keyUsable({ status: "active" })).toBe(true);
+    expect(keyUsable({ status: "exhausted" })).toBe(true);
+    // Legacy rows can still carry these columns — they no longer gate.
+    expect(keyUsable({ status: "active", cooldown_until: Date.now() + 10_000, exhausted_reason: null })).toBe(true);
+    expect(
+      keyUsable({ status: "exhausted", cooldown_until: Date.now() + 10_000, exhausted_reason: "billing" }),
+    ).toBe(true);
+    expect(keyUsable({ status: "disabled" })).toBe(false);
   });
 
-  test("billing cooldown lands on the next UTC midnight", () => {
-    // 2026-01-15 10:30 UTC -> midnight of the 16th
-    const at = Date.UTC(2026, 0, 15, 10, 30);
-    expect(billingCooldownUntil(at)).toBe(Date.UTC(2026, 0, 16));
-  });
-
-  test("keyUsable: billing auto-retries after midnight, auth stays out", () => {
-    const now = Date.now();
-    expect(keyUsable({ status: "active", cooldown_until: null, exhausted_reason: null }, now)).toBe(true);
-    expect(keyUsable({ status: "active", cooldown_until: now - 1, exhausted_reason: null }, now)).toBe(true);
-    expect(keyUsable({ status: "active", cooldown_until: now + 10_000, exhausted_reason: null }, now)).toBe(false);
-    expect(keyUsable({ status: "disabled", cooldown_until: null, exhausted_reason: null }, now)).toBe(false);
-    expect(keyUsable({ status: "exhausted", cooldown_until: null, exhausted_reason: "auth" }, now)).toBe(false);
-    expect(keyUsable({ status: "exhausted", cooldown_until: now + 10_000, exhausted_reason: "billing" }, now)).toBe(false);
-    expect(keyUsable({ status: "exhausted", cooldown_until: now - 1, exhausted_reason: "billing" }, now)).toBe(true);
-  });
-
-  test("live overlay blocks immediately and clears", () => {
-    const id = `test-${Math.random()}`;
-    expect(keyBlockedNow(id)).toBe(false);
-    liveKeyBlock(id, null);
-    expect(keyBlockedNow(id)).toBe(true);
-    liveKeyClear(id);
-    expect(keyBlockedNow(id)).toBe(false);
-    liveKeyBlock(id, Date.now() + 60_000);
-    expect(keyBlockedNow(id)).toBe(true);
-    liveKeyBlock(id, Date.now() - 1);
-    expect(keyBlockedNow(id)).toBe(false);
+  test("sticky winner: set/get TTL, overwrite, targeted + global clear", () => {
+    const lane = `test-lane-${Math.random()}`;
+    expect(stickyGet(lane)).toBeNull();
+    const w = { providerId: "p", keyId: "k", upstreamModel: "m", via: "openai" };
+    stickySet(lane, w);
+    expect(stickyGet(lane)).toEqual(w);
+    // Sliding TTL: a second success refreshes the same winner.
+    stickySet(lane, { ...w, keyId: "k2" });
+    expect(stickyGet(lane)?.keyId).toBe("k2");
+    stickyClear(lane);
+    expect(stickyGet(lane)).toBeNull();
+    // Expired entries read as missing.
+    stickySet(lane, w, Date.now() - 11 * 60_000);
+    expect(stickyGet(lane)).toBeNull();
+    // Global clear (admin mutations) drops every lane.
+    stickySet(lane, w);
+    stickySet(`${lane}-2`, w);
+    stickyClearAll();
+    expect(stickyGet(lane)).toBeNull();
+    expect(stickyGet(`${lane}-2`)).toBeNull();
   });
 });
 
@@ -585,22 +575,24 @@ describe("failover: candidate chains", () => {
     expect(r.candidates[2]!.upstreamModel).toBe("m-on-p2");
   });
 
-  test("exhausted/cooling keys and disabled targets are skipped; empty chain → 503", () => {
+  test("disabled keys are skipped; legacy exhausted/cooldown rows are still tried; empty chain → 503", () => {
     const snap: RouterSnapshot = {
       mode: "router",
       models: new Map([["m", model("m")]]),
       targets: new Map([["m", [target("m", "p1", "m", 0)]]]),
       providers: new Map([
-        ["p1", { row: provider, keys: [key("k1", 0, { status: "exhausted", exhaustedReason: "auth" }), key("k2", 10, { cooldownUntil: Date.now() + 60_000 })] }],
+        ["p1", { row: provider, keys: [key("k1", 0, { status: "disabled" }), key("k2", 10)] }],
       ]),
     };
-    expect(resolveModelRoute(snap, "openai", "m")).toMatchObject({ ok: false, status: 503 });
+    const onlyK2 = resolveModelRoute(snap, "openai", "m");
+    expect(onlyK2.ok).toBe(true);
+    if (onlyK2.ok) expect(onlyK2.candidates.map((c) => c.key.id)).toEqual(["k2"]);
 
-    // billing-exhausted key whose midnight passed is usable again
+    // legacy exhausted/cooldown columns no longer gate: the key is tried
     const snap2: RouterSnapshot = {
       ...snap,
       providers: new Map([
-        ["p1", { row: provider, keys: [key("k1", 0, { status: "exhausted", exhaustedReason: "billing", cooldownUntil: Date.now() - 1 })] }],
+        ["p1", { row: provider, keys: [key("k1", 0, { status: "exhausted", exhaustedReason: "billing", cooldownUntil: Date.now() + 60_000 })] }],
       ]),
     };
     const r = resolveModelRoute(snap2, "openai", "m");
@@ -608,7 +600,7 @@ describe("failover: candidate chains", () => {
     if (r.ok) expect(r.candidates.map((c) => c.key.id)).toEqual(["k1"]);
   });
 
-  test("passthroughCandidates walks providers by priority, skipping blocked keys", () => {
+  test("passthroughCandidates walks providers by priority, skipping disabled keys", () => {
     const p2 = { ...provider, id: "p2", name: "p2", priority: 200 } as ProviderRow;
     const snap: RouterSnapshot = {
       mode: "passthrough",
@@ -666,57 +658,73 @@ describe("failover: candidate chains", () => {
 });
 
 
-describe("StreamMeter fallback (upstream never reports usage)", () => {
+describe("IRStreamTranslator fallback (upstream never reports usage)", () => {
   const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const collect = (t: InstanceType<typeof IRStreamTranslator>, lines: string[]): string => {
+    let out = "";
+    for (const line of lines) for (const p of t.feed(enc.encode(line))) out += dec.decode(p);
+    for (const p of t.flush()) out += dec.decode(p);
+    return out;
+  };
 
-  test("openai stream: tokenx estimate of the output text — not the digit count", () => {
-    const m = new StreamMeter("openai");
+  test("openai stream: btdby4 estimate of the output text — not the digit count", () => {
+    const t = new IRStreamTranslator("openai", "openai", "m1");
     // 20 chunks x 100 chars of content, no usage chunk anywhere.
+    const lines = [];
     for (let i = 0; i < 20; i++) {
-      m.feed(enc.encode(`data: {"model":"m1","choices":[{"delta":{"content":"${"y".repeat(100)}"}}]}\n\n`));
+      lines.push(`data: {"model":"m1","choices":[{"delta":{"content":"${"y".repeat(100)}"}}]}\n\n`);
     }
-    const r = m.result();
+    const out = collect(t, lines);
+    expect(out).toContain("y".repeat(10));
+    const r = t.result();
     expect(r.estimated).toBe(true);
     expect(r.inTok).toBe(0); // input estimate happens at the call site
-    // Whole text (2000 chars) fits the estimation sample, so the meter must
-    // land exactly on tokenx's count. The pre-fix code returned 1-2 here.
-    expect(r.outTok).toBe(estimateTokenCount("y".repeat(2000)));
+    // Whole text (2000 chars) fits the estimation sample, so the translator
+    // must land exactly on btdby4's count.
+    expect(r.outTok).toBe(countTextTokens("y".repeat(2000)));
     expect(r.outTok).toBeGreaterThan(100); // a real order of magnitude
-    expect(r.model).toBe("m1");
   });
 
-  test("anthropic stream: text_delta is tokenx-estimated when usage events are missing", () => {
-    const m = new StreamMeter("anthropic");
-    m.feed(enc.encode(`event: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"${"z".repeat(400)}"}}\n\n`));
-    const r = m.result();
+  test("anthropic stream: text_delta is btdby4-estimated when usage events are missing", () => {
+    const t = new IRStreamTranslator("anthropic", "anthropic", "m");
+    const out = collect(t, [
+      `event: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"${"z".repeat(400)}"}}\n\n`,
+    ]);
+    expect(out).toContain("z".repeat(10));
+    const r = t.result();
     expect(r.estimated).toBe(true);
-    expect(r.outTok).toBe(estimateTokenCount("z".repeat(400)));
+    expect(r.outTok).toBe(countTextTokens("z".repeat(400)));
     expect(r.outTok).toBeGreaterThan(10);
   });
 
   test("long streams: the capped sample extrapolates to the full length", () => {
-    const m = new StreamMeter("openai");
+    const t = new IRStreamTranslator("openai", "openai", "m1");
     // 8000 chars of English prose — well beyond the 2048-char sample cap.
     let stream = "";
     while (stream.length < 8000) stream += "The quick brown fox jumps over the lazy dog. ";
     stream = stream.slice(0, 8000);
+    const lines = [];
     for (const chunk of stream.match(/.{1,100}/g)!) {
-      m.feed(enc.encode(`data: {"model":"m1","choices":[{"delta":{"content":${JSON.stringify(chunk)}}}]}\n\n`));
+      lines.push(`data: {"model":"m1","choices":[{"delta":{"content":${JSON.stringify(chunk)}}}]}\n\n`);
     }
-    const r = m.result();
+    collect(t, lines);
+    const r = t.result();
     expect(r.estimated).toBe(true);
     // The per-char ratio of the first sample extrapolates to (at least) the
-    // same order as counting the whole text — never the pre-fix ~1 token.
-    const full = estimateTokenCount(stream);
+    // same order as counting the whole text.
+    const full = countTextTokens(stream);
     expect(r.outTok).toBeGreaterThanOrEqual(Math.floor(full * 0.9));
     expect(r.outTok).toBeLessThanOrEqual(Math.ceil(full * 1.1));
   });
 
   test("real usage events still win over the estimate", () => {
-    const m = new StreamMeter("openai");
-    m.feed(enc.encode(`data: {"model":"m1","choices":[{"delta":{"content":"${"y".repeat(100)}"}}]}\n\n`));
-    m.feed(enc.encode(`data: {"usage":{"prompt_tokens":7,"completion_tokens":42}}\n\n`));
-    const r = m.result();
+    const t = new IRStreamTranslator("openai", "openai", "m1");
+    collect(t, [
+      `data: {"model":"m1","choices":[{"delta":{"content":"${"y".repeat(100)}"}}]}\n\n`,
+      `data: {"usage":{"prompt_tokens":7,"completion_tokens":42}}\n\n`,
+    ]);
+    const r = t.result();
     expect(r.estimated).toBe(false);
     expect(r.outTok).toBe(42);
     expect(r.inTok).toBe(7);
@@ -724,12 +732,84 @@ describe("StreamMeter fallback (upstream never reports usage)", () => {
 });
 
 describe("estimateBodyTokens (estimated input from the request body)", () => {
-  test("runs tokenx over string values only — JSON keys/structure add no tokens", () => {
+  test("runs the per-protocol btdby4 counter over the wire shape (framing included)", () => {
     const body = { model: "llm-1", messages: [{ role: "user", content: "a".repeat(400) }] };
-    expect(estimateBodyTokens(body)).toBe(estimateTokenCount(`llm-1 user ${"a".repeat(400)}`));
+    // btdby4 counts the real wire shape (role tags, framing) — ~62 for this
+    // body — not just the raw string values.
+    expect(estimateBodyTokens(body, "openai")).toBeGreaterThan(50);
+    expect(estimateBodyTokens(body, "openai")).toBeLessThan(120);
   });
 
   test("never returns zero for a non-empty body", () => {
     expect(estimateBodyTokens({ model: "x" })).toBeGreaterThanOrEqual(1);
   });
+});
+
+describe("btdby4 KV cache (egress-side prefix simulation)", () => {
+  const chatBody = (messages: unknown[]) => JSON.stringify({ model: "m", messages });
+  const msg = (text: string) => [{ role: "user", content: text }];
+
+  test("first turn is all fresh, extended prefix hits cache, new prompt misses", () => {
+    kvClear("kv-unit-a");
+    const t1 = `zero-usage probe base ${"a".repeat(600)}`;
+    const t2 = `${t1} tail ${"b".repeat(60)}`;
+    // Extended as a second block: common prefix ~= whole first turn.
+    const s1 = splitKvInput(chatBody(msg(t1)), "openai", "kv-unit-a");
+    expect(s1.cacheTok).toBe(0);
+    expect(s1.inTok).toBe(s1.total);
+    const s2 = splitKvInput(chatBody([msg(t1)[0], { role: "user", content: `tail ${"b".repeat(60)}` }]), "openai", "kv-unit-a");
+    expect(s2.cacheTok).toBeGreaterThan(0);
+    expect(s2.inTok).toBeLessThan(s1.inTok); // only the tail is fresh
+    expect(s2.inTok + s2.cacheTok).toBe(s2.total);
+    // Brand-new prompt: no cache.
+    const s3 = splitKvInput(chatBody(msg("totally different prompt here")), "openai", "kv-unit-a");
+    expect(s3.cacheTok).toBe(0);
+    expect(t2.length).toBeGreaterThan(t1.length);
+  });
+
+  test("cache is isolated per namespace (key/model/lane)", () => {
+    kvClear("kv-unit-b1");
+    kvClear("kv-unit-b2");
+    const body = chatBody(msg("same body everywhere"));
+    const first = splitKvInput(body, "openai", "kv-unit-b1");
+    expect(first.cacheTok).toBe(0);
+    // Same body, different namespace: separate run, no cache.
+    const other = splitKvInput(body, "openai", "kv-unit-b2");
+    expect(other.cacheTok).toBe(0);
+    // Same namespace: cache hit.
+    const same = splitKvInput(body, "openai", "kv-unit-b1");
+    expect(same.cacheTok).toBe(same.total);
+    expect(same.inTok).toBe(0);
+  });
+
+  test("per-protocol isolation is built into the provider", () => {
+    kvClear("kv-unit-c");
+    const body = chatBody(msg("same body everywhere"));
+    splitKvInput(body, "openai", "kv-unit-c");
+    // Same namespace, other protocol: separate run, no cache.
+    const other = splitKvInput(body, "anthropic", "kv-unit-c");
+    expect(other.cacheTok).toBe(0);
+  });
+
+  test("wasm failure falls back to the body total (never a zero lie)", () => {
+    // Unparseable JSON: the TotalQuick counters throw inside the wasm,
+    // so splitKvInput degrades to countRequestJson's 1-token floor.
+    const s = splitKvInput("{{{not json", "openai", "kv-unit-d");
+    expect(s).toEqual({ inTok: 1, cacheTok: 0, total: 1, hit: false });
+  });
+
+  test("snapshot memoizes kvStats for 60s (dashboard chip cache)", () => {
+    kvClear("kv-unit-snap");
+    splitKvInput(chatBody(msg("snapshot probe")), "openai", "kv-unit-snap");
+    const a = kvSnapshotCached();
+    expect(a.max_bytes).toBeGreaterThan(0);
+    expect(a.ttl_seconds).toBe(600);
+    expect(a.captured_at).toBeGreaterThan(0);
+    expect(a.stale).toBe(false);
+    // Second read within the window reuses the memoized object.
+    const b = kvSnapshotCached();
+    expect(b.captured_at).toBe(a.captured_at);
+    expect(b.bytes).toBe(a.bytes);
+  });
+
 });

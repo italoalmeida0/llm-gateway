@@ -225,6 +225,28 @@ describe("proxy Anthropic→OpenAI translation (in-process)", () => {
     expect(row).toMatchObject({ proto: "anthropic", out_tok: 10, stream: 1 });
   });
 
+  test("reasoning overflow in a translated stream is not billed as output", async () => {
+    // Reasoning-only truncation from an OpenAI upstream, served to an
+    // Anthropic client: completion_tokens spent on thinking (content null)
+    // must not consume the key's output budget.
+    seen = [];
+    const { req, url } = anthReq("/v1/messages", {
+      model: "fake-llm-1",
+      max_tokens: 8,
+      stream: true,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const { IRStreamTranslator } = await import("../server/proxy/gateway-ir");
+    const tr = new IRStreamTranslator("openai", "anthropic", "fake-llm-1");
+    const enc = new TextEncoder();
+    const usage = { prompt_tokens: 13, completion_tokens: 48, completion_tokens_details: { reasoning_tokens: 48 } };
+    for (const piece of tr.feed(enc.encode(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "length" }] })}\n\n`))) void piece;
+    for (const piece of tr.feed(enc.encode(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {} }], usage })}\n\n`))) void piece;
+    expect(tr.result().outTok).toBe(0);
+    void req;
+    void url;
+  });
+
   test("forced-prefix /anthropic/v1/messages translates too", async () => {
     const { req, url } = anthReq("/anthropic/v1/messages", {
       model: "fake-llm-1",
@@ -300,8 +322,8 @@ describe("proxy Anthropic→OpenAI translation (in-process)", () => {
   });
 
   test("translates Google-style tool call stream omitting [DONE] and preserves thought signature", async () => {
-    const { OpenAIToAnthropicStream, anthropicToOpenAI } = await import("../server/proxy/anthropic-bridge");
-    const stream = new OpenAIToAnthropicStream("test-model");
+    const { IRStreamTranslator, decodeToIR, encodeIR } = await import("../server/proxy/gateway-ir");
+    const stream = new IRStreamTranslator("openai", "anthropic", "test-model");
     const chunk1 = new TextEncoder().encode(
       'data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"extra_content":{"google":{"thought_signature":"sig123"}},"function":{"name":"run","arguments":"{\\"cmd\\":\\"ls\\"}"},"id":"call_1","type":"function"}]},"index":0}],"usage":{"prompt_tokens":50,"completion_tokens":20}}\n\n',
     );
@@ -336,7 +358,7 @@ describe("proxy Anthropic→OpenAI translation (in-process)", () => {
         },
       ],
     };
-    const translated = anthropicToOpenAI(req);
+    const translated = encodeIR("openai", await decodeToIR("anthropic", req as any), "test-model") as any;
     const assistantMsg = (translated.messages as any[])[1];
     expect(assistantMsg.extra_content?.google?.thought_signature).toBe("sig123");
     expect(assistantMsg.tool_calls?.[0]?.extra_content?.google?.thought_signature).toBe("sig123");

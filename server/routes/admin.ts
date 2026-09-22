@@ -5,7 +5,7 @@ import { requireAdmin, revokeAllUserSessions, auditAdmin } from "../auth";
 import { publicKey, revokeKey } from "../keys";
 import { GATEWAY_SECRET } from "../config";
 import { sendInviteEmail, sendResetEmail } from "../email";
-import { liveKeyClear } from "../failover";
+import { stickyClearAll } from "../failover";
 import {
   getRoutingMode,
   setRoutingMode,
@@ -21,6 +21,7 @@ import {
 } from "../models";
 import { ApiError, clientIp, err, ok, readJsonBody, v } from "../http";
 import { hourlySeries, utcDate } from "../usage";
+import { kvSnapshotCached } from "../tokens";
 import { gridPage, parseGridQuery, parseCursor, buildGridWhere, type ColSpec } from "../gridql";
 import { queryKeys } from "../keys";
 import { normalizePricing, pricingColumns } from "../pricing";
@@ -84,6 +85,8 @@ async function addProviderKey(providerId: string, apiKey: string, label: string,
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(id, providerId, label, enc, (maxP ?? -10) + 10, status, now, now);
   refreshProviderKeyMirror(providerId);
+  // New candidate in the chain: rebuild sticky lanes.
+  stickyClearAll();
   return db.prepare<ProviderKeyRow, [string]>("SELECT * FROM provider_keys WHERE id = ?").get(id)!;
 }
 
@@ -92,12 +95,11 @@ async function addProviderKey(providerId: string, apiKey: string, label: string,
 async function rotatePrimaryKey(providerId: string, apiKeyEnc: string): Promise<void> {
   const top = providerKeysFor(providerId)[0];
   if (top) {
-    // A new secret is a fresh credential: clear any failure state with it.
+    // A new secret is a fresh credential: clear its visible failure counter.
     db.prepare(
       `UPDATE provider_keys SET api_key_enc = ?, status = 'active', fail_count = 0,
          cooldown_until = NULL, exhausted_reason = NULL, updated_at = ? WHERE id = ?`,
     ).run(apiKeyEnc, Date.now(), top.id);
-    liveKeyClear(top.id);
   } else {
     const now = Date.now();
     db.prepare(
@@ -350,6 +352,8 @@ function replaceModelTargets(modelId: string, targets: TargetInput[]): void {
     targets.forEach((t, i) => ins.run(modelId, t.providerId, t.upstreamModel, i * 10, t.enabled ? 1 : 0, now));
     refreshModelMirror(modelId);
   })();
+  // The chain changed: this lane's winner may no longer be top priority.
+  stickyClearAll();
   invalidateModelCache();
 }
 
@@ -380,6 +384,8 @@ function upsertPrimaryTarget(modelId: string, providerId: string | null, upstrea
     ).run(modelId, providerId, upstreamModel, Date.now());
   }
   refreshModelMirror(modelId);
+  // Single-link edit changes the chain: rebuild sticky lanes.
+  stickyClearAll();
 }
 
 export async function handleAdminRoute(path: string, req: Request, url: URL): Promise<Response | null> {
@@ -494,6 +500,9 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       const upd = db.prepare("UPDATE providers SET priority = ? WHERE id = ?");
       (ids as string[]).forEach((pid, i) => upd.run(i * 10, pid));
     })();
+    // Provider order changed: sticky winners may now be wrong-ordered —
+    // lanes rebuild from the new order.
+    stickyClearAll();
     invalidateModelCache();
     auditAdmin(ctx.user, "providers.reordered", undefined, { count: ids.length }, ip);
     const rows = db
@@ -544,6 +553,8 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       })();
       // A new key became top-1: the mirror follows.
       refreshProviderKeyMirror(providerId);
+      // Key order changed: lanes rebuild from the new order.
+      stickyClearAll();
       invalidateModelCache();
       auditAdmin(ctx.user, "provider_keys.reordered", providerId, { count: ids.length }, ip);
       return ok({ keys: providerKeysFor(providerId).map(publicProviderKey) }, req);
@@ -591,7 +602,10 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
              cooldown_until = ?, exhausted_reason = ?, updated_at = ? WHERE id = ?`,
         ).run(label, api_key_enc, status, failCount, cooldownUntil, exhaustedReason, Date.now(), keyId);
         refreshProviderKeyMirror(providerId);
-        liveKeyClear(keyId);
+        // Key identity/order may have changed (rotation, re-enable,
+        // disable): drop every sticky winner so lanes rebuild from the
+        // current priority order instead of a stale candidate.
+        stickyClearAll();
         invalidateModelCache();
         auditAdmin(
           ctx.user,
@@ -613,7 +627,9 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         if (n <= 1) throw new ApiError(400, "a provider needs at least one upstream key");
         db.prepare("DELETE FROM provider_keys WHERE id = ?").run(keyId);
         refreshProviderKeyMirror(providerId);
-        liveKeyClear(keyId);
+        // Same as PATCH above: a deleted key must not stay pinned as a
+        // sticky winner.
+        stickyClearAll();
         invalidateModelCache();
         auditAdmin(ctx.user, "provider_key.deleted", keyId, { provider: providerId, label: keyRow.label }, ip);
         return ok({ deleted: true }, req);
@@ -644,6 +660,8 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
       // A submitted apiKey rotates the TOP-1 upstream key (legacy single-key
       // semantics) and refreshes its failure state.
       if (priKeyRotated) await rotatePrimaryKey(providerId, data.apiKeyEnc!);
+      // Identity/order/capabilities may have changed: rebuild sticky lanes.
+      stickyClearAll();
       invalidateModelCache();
       auditAdmin(ctx.user, "provider.updated", providerId, { name: data.name }, ip);
       const row = db.prepare<ProviderRow, [string]>("SELECT * FROM providers WHERE id = ?").get(providerId)!;
@@ -668,6 +686,8 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
         db.prepare("DELETE FROM providers WHERE id = ?").run(providerId);
         for (const mid of affected) refreshModelMirror(mid);
       })();
+      // Provider gone (keys cascade away): stale winners must not survive.
+      stickyClearAll();
       invalidateModelCache();
       auditAdmin(
         ctx.user,
@@ -1523,9 +1543,16 @@ if (path === "/api/admin/stats" && req.method === "GET") {
       providers: db.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM providers").get()!.n,
     };
     return ok(
-      { series: range, perUser, perModel, totals, today: todayRow, counts, granularity: hours !== null ? "hour" : "day" },
+      { series: range, perUser, perModel, totals, today: todayRow, counts, granularity: hours !== null ? "hour" : "day", kvCache: kvSnapshotCached() },
       req,
     );
+  }
+
+  // KV-cache snapshot for the Global overview chip (same 60s server-side
+  // cache as the bundled field above; a dedicated endpoint so other pages
+  // can read it without the full stats payload).
+  if (path === "/api/admin/kv-cache" && req.method === "GET") {
+    return ok({ kvCache: kvSnapshotCached() }, req);
   }
 
   // ================= usage breakdown (per user + per model × provider) =================

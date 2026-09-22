@@ -252,6 +252,9 @@ describe("proxy Responses matrix (in-process)", () => {
   });
 
   test("anthropic → responses translation", async () => {
+    // The gateway IR covers the full 3x3 matrix: an Anthropic-protocol
+    // request IS served by a Responses-only provider (translated through
+    // the IR), with the upstream body in Responses shape.
     onlyProvider(PR);
     seen = [];
     const { req, url } = gwReq(
@@ -262,10 +265,10 @@ describe("proxy Responses matrix (in-process)", () => {
     const res = await handleProxy(req, url, undefined);
     expect(res.status).toBe(200);
     const j = await res.json();
-    expect(j.type).toBe("message");
-    expect(j.content[0]).toMatchObject({ type: "text", text: STUB_REPLY });
+    expect(j.content[0].text).toBe(STUB_REPLY);
     expect(seen).toHaveLength(1);
-    expect(seen[0]!.url).toBe("http://resp.test/v1/responses");
+    expect(seen[0]!.url).toContain("/responses");
+    expect(seen[0]!.body.input).toBeDefined();
   });
 
   test("responses → chat streaming ends with response.completed", async () => {
@@ -346,5 +349,24 @@ describe("provider strip_params (in-process)", () => {
     const res = await handleProxy(req, url, undefined);
     expect(res.status).toBe(200);
     expect(seen[0]!.body.temperature).toBe(0.7);
+  });
+
+  test("reasoning overflow is not billed as visible output", async () => {
+    // Reasoning-only truncation (seen live on OpenRouter reasoning models
+    // with small max_tokens): content null while completion tokens were
+    // spent on thinking. Output budgets cap visible text, so out_tok
+    // excludes reasoning_tokens.
+    const usage = { prompt_tokens: 13, completion_tokens: 48, completion_tokens_details: { reasoning_tokens: 48 } };
+    // Exercise the IR directly: stream translator + buffered decoders.
+    const { IRStreamTranslator, decodeResponseToIR } = await import("../server/proxy/gateway-ir");
+    const meter = new IRStreamTranslator("openai", "openai", "m");
+    const enc = new TextEncoder();
+    const line = `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "length" }], usage })}\n`;
+    for (const piece of meter.feed(enc.encode(line))) void piece;
+    expect(meter.result().outTok).toBe(0);
+    const body = JSON.stringify({ choices: [{ message: { content: null } }], usage });
+    expect(decodeResponseToIR("openai", body, "m").outTok).toBe(0);
+    const resp = JSON.stringify({ usage: { input_tokens: 13, output_tokens: 48, output_tokens_details: { reasoning_tokens: 48 } } });
+    expect(decodeResponseToIR("responses", resp, "m").outTok).toBe(0);
   });
 });

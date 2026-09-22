@@ -14,6 +14,13 @@ import { handleIndirectCodeUpgrade, remoteRelayWsHandlers, type WsData } from ".
 import { handleProxy } from "./proxy/index";
 import { serveStatic } from "./static";
 import { flushUsage } from "./usage";
+import { initTokenEstimator } from "./tokens";
+
+// btdby4-wasm (token estimator) must be warm before serving: every counter
+// below is synchronous after init. Top-level await is fine — Bun.serve
+// starts after this resolves.
+await initTokenEstimator();
+console.log("[BOOT] token estimator ready (btdby4-wasm)");
 
 /**
  * Entry point. One Bun process serves:

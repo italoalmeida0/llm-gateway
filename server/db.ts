@@ -274,8 +274,9 @@ const MIGRATIONS: Migration[] = [
     // Upstream failover: N keys per provider (ordered by priority) and N
     // routing targets per model ((provider, upstream_model) pairs, ordered).
     // The proxy falls through to the next key/target when the preferred one
-    // is exhausted (billing/auth) or cooling down (>=3 consecutive transient
-    // failures) — see server/failover.ts.
+    // fails (billing/auth/rate_limit/transient) — see server/failover.ts.
+    // (Auto-skip of failing keys was removed by 020_no_auto_key_skip:
+    // failures only reorder future requests via the sticky winner.)
     //
     // Mirror rule: providers.api_key_enc and models.provider_id /
     // models.upstream_model stay as a denormalized mirror of the top-1
@@ -565,6 +566,22 @@ const MIGRATIONS: Migration[] = [
       );
       CREATE INDEX idx_push_subs_user ON push_subscriptions(user_id);
     `,
+  },
+  {
+    name: "020_no_auto_key_skip",
+    // No-skip policy: the gateway never removes a provider key from rotation
+    // automatically (see server/failover.ts). Pre-existing rows stuck in
+    // `exhausted`/cooldown state from the old policy are cured back to
+    // `active` — only an explicit admin `disabled` keeps a key out. New
+    // failures only bump the admin-visible `fail_count` counter.
+    up: () => {
+      db.prepare(
+        `UPDATE provider_keys
+         SET status = 'active', exhausted_reason = NULL, cooldown_until = NULL,
+           fail_count = 0, updated_at = ?
+         WHERE status = 'exhausted'`,
+      ).run(Date.now());
+    },
   },
 ];
 

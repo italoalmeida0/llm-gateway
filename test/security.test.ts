@@ -707,20 +707,19 @@ describe("security audit", () => {
     await victim.text();
   });
 
-  test("upstream 500 storm fast-fails the gateway (key cooldown → 503) (keep LAST)", async () => {
-    // Failover semantics: providerFailThreshold (3) consecutive transient
-    // failures put the provider's only key into cooldown — from then on
-    // requests skip the dead candidate and fast-fail with 503 (pre-failover
-    // this took breakerFailThreshold (5) fails to reach the same state).
+  test("upstream 500s never lock the key out: every request is still attempted (keep LAST)", async () => {
+    // No-skip policy: transient upstream failures never remove a key from
+    // rotation. Every request — failures included — reaches the upstream
+    // and returns its real status; the client (not the gateway) owns
+    // backoff. The gateway no longer invents a 503 fast-fail here.
     for (let i = 0; i < 3; i++) {
       const r = await llm(k1, { model: "mini-1", fail500: true, messages: [] }, freshIp());
       expect(r.status).toBe(500);
       await r.text();
     }
-    // …and the next request, even a healthy one, gets the fast 503 (no
-    // usable candidate: key cooling down).
-    const locked = await llm(k1, { model: "mini-1", messages: [] }, freshIp());
-    expect(locked.status).toBe(503);
-    await locked.text();
+    // …and the next request, even a healthy one, flows normally.
+    const next = await llm(k1, { model: "mini-1", messages: [] }, freshIp());
+    expect(next.status).toBe(200);
+    await next.text();
   });
 });

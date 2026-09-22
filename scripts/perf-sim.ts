@@ -155,7 +155,7 @@ try {
       console.log(`  [probes] failover regimes...`);
       failoverProbes = await runFailoverProbes(users, adminToken, topo);
       console.log(
-        `  [probes] skip-exhausted p50 ${failoverProbes.skipExhausted.p50.toFixed(1)}ms (dead-key hits: ${failoverProbes.skipExhausted.deadKeyHitsDuringMeasure}) | ` +
+        `  [probes] sticky-steady p50 ${failoverProbes.stickySteady.p50.toFixed(1)}ms (dead-key hits: ${failoverProbes.stickySteady.deadKeyHitsDuringMeasure}) | ` +
           `active failover ${failoverProbes.activeFailover.mean.toFixed(1)}ms avg | ` +
           `burst p95 ${failoverProbes.failoverBurst.p95.toFixed(1)}ms | ` +
           `provider-fallback p50 ${failoverProbes.providerFallback.p50.toFixed(1)}ms (${failoverProbes.providerFallback.fallbackUpstreamHits} hits on B)`,

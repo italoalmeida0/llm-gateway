@@ -499,7 +499,7 @@ export function userEvents(
     .prepare(
       // LEFT JOINs: hard-deleted keys/providers must not hide their history.
       `SELECT e.id, e.key_id, COALESCE(k.name, substr(e.key_id, 1, 8)) AS key_name, e.ts, e.proto, e.model,
-              e.in_tok, e.cache_tok, e.out_tok, e.latency_ms, e.status, e.stream,
+              e.in_tok, e.cache_tok, e.out_tok, e.latency_ms, e.status, e.stream, e.estimated,
               e.provider_id, p.name AS provider_name, e.provider_key_id, pk.label AS provider_key_label,
               e.upstream_model
        FROM usage_events e

@@ -206,7 +206,10 @@ export interface UsageEventDto {
 export type AuthStyle = "bearer" | "x-api-key";
 
 /** One upstream key of a provider (failover order). The key material itself
- *  never leaves the server. */
+ *  never leaves the server. `failCount` is an admin-visible health signal
+ *  only — keys are never removed from rotation automatically (only an
+ *  explicit `disabled` keeps one out). `cooldownUntil`/`exhaustedReason` are
+ *  legacy fields, always null on new writes. */
 export interface ProviderKeyDto {
   id: string;
   label: string;

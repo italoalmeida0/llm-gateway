@@ -22,23 +22,39 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   - `/*` → static SPA from `dist/` (`server/static.ts`, path-traversal safe).
 - **DB**: `bun:sqlite` (`server/db.ts`), migrations via `PRAGMA user_version`,
   in `MIGRATIONS` — append-only, never edit applied ones.
-- **Upstream failover** (migration `009_failover`): every request gets an
-  ordered candidate chain of `(provider, provider_key, upstream_model)` and
-  the proxy (`server/proxy/index.ts`) walks it — fallback happens only BEFORE
-  the first byte reaches the client (error bodies are consumed capped to 16KB
+- **Upstream failover** (migration `009_failover`; auto-skip removed by
+  `020_no_auto_key_skip`): every request gets an ordered candidate chain of
+  `(provider, provider_key, upstream_model)` and the proxy
+  (`server/proxy/index.ts`) walks it — fallback happens only BEFORE the
+  first byte reaches the client (error bodies are consumed capped to 16KB
   to be classified; 2xx streams relay untouched, no mid-stream failover).
   - `provider_keys`: N upstream keys per provider, ordered by `priority`.
-    Classification (`server/failover.ts` → `classifyHttpError`): HTTP 402 or
-    quota/billing phrases in any 4xx = **billing** → key `exhausted`,
-    auto-retries at next UTC midnight (daily free tiers); 401/403 without
-    those hints = **auth** → `exhausted` until manual re-enable; plain 429 /
-    5xx / network = **transient|rate_limit** → consecutive-failure counter,
-    exponential cooldown (30s→15min cap) from `LIMITS.providerFailThreshold`
-    (3); other 4xx = client error → delivered as-is, no failover. Key state
-    lives in the DB + an in-memory overlay (`liveKeyBlock`) so a dying key is
-    skipped instantly despite the 5s router snapshot TTL; admin mutations
-    `liveKeyClear`. **The last key of a provider is never deleted**
-    (`providers.api_key_enc` is NOT NULL).
+    **No-skip policy: nothing is ever removed from rotation automatically.**
+    Classification (`server/failover.ts` → `classifyHttpError`) only decides
+    whether THIS request moves to the next candidate: billing (HTTP 402 or
+    quota/billing phrases in any 4xx), auth (401/403 without those hints —
+    often transient moderation/geoblock, not a dead key), rate_limit (plain
+    429), transient (5xx/408/network) all fail over; `model_not_found`
+    (incl. provider-specific wrong-id rejections: synthetic "hf: prefix"/
+    "not a valid model ID", openrouter "No endpoints found") fails over
+    without touching key state (the key is healthy — it correctly rejected
+    a foreign id); other 4xx = client error → delivered as-is, no failover.
+    Failures only bump the admin-visible `fail_count` + audit
+    (`provider_key.failed`); the client always gets the REAL upstream error
+    (Retry-After forwarded when the provider sends one) plus
+    `x-gateway-attempts`, and owns backoff/retry. The ONLY skip is an
+    explicit admin `disabled` (`keyUsable`). **The last key of a provider
+    is never deleted** (`providers.api_key_enc` is NOT NULL).
+  - **Sticky winner** (`server/failover.ts` → `stickyGet/Set/Clear`, TTL
+    `KEY_STICKY_TTL_MS` default 10min, sliding, in-memory only): per routing
+    lane (`model:<proto>:<public-id>` in router mode,
+    `pass:<proto>:<requested-id>` in passthrough) the candidate that
+    answered last goes FIRST on the next request — steady state is 1
+    attempt instead of re-trying a known-bad key first. A failed winner is
+    dropped mid-request (the loop already continues); an all-failed sweep
+    clears the lane; expiry (inactivity) or any admin mutation
+    (`stickyClearAll` on key/provider/target changes) restarts from
+    priority order.
   - `model_targets`: N ordered `(provider_id, upstream_model)` rows per model
     — the per-model cross-provider fallback chain; `body.model` is rewritten
     per attempted target. Managed via `PUT /api/admin/models/:id/targets`
@@ -53,7 +69,24 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   - bun:sqlite `.changes` INCLUDES FK-cascaded rows — count deletions by
     existence, never by `.changes`, when cascade tables are involved.
   - Exhausted/failing everything → the client gets the LAST upstream error
-    (sanitized), or 503 "no upstream candidate" when all were skipped.
+    (sanitized + `x-gateway-attempts`), or 503 only when no attempt could
+    reach an upstream at all (every lane circuit-broken).
+- **Protocol translation is hub-and-spoke** (`server/proxy/gateway-ir.ts`):
+  every ingress protocol (chat/anthropic/responses) decodes ONCE into the
+  gateway IR; every attempt (incl. same-protocol — dialects still differ)
+  encodes IR→egress in order ingress-protocol → chat → anthropic →
+  responses. Streams go through `IRStreamTranslator` (one SSE parser +
+  writer per protocol); errors re-envelope via the IR. Protocol N+1 = one
+  decoder + one encoder + one SSE parser/writer, never N×N bridges (the old
+  `anthropic-bridge.ts`/`responses-bridge.ts` are deleted). Per-target quirks
+  (`max_tokens`↔`max_completion_tokens`, `reasoning_effort`/`reasoning`
+  forwarding, tool-id ≤64, Gemini `thought_signature`, strip_params) live in
+  the universal `target-profile.ts` pass. Passthrough affinity
+  (`scoreAffinities` in `server/models.ts`) routes known id-shapes to their
+  provider first (hf:*→synthetic, etc.); the per-lane sticky winner (above)
+  then keeps the hot path on the last-good candidate. Full ModelInfo
+  `/v1/models` compat (codex strict struct) is
+  patched in the proxy models path.
 - **Usage accounting** (`server/usage.ts`): buffered writes (flush 1s/100 events),
   `usage_daily` aggregates (plus `usage_model_daily` — per key/date/model rollup
   and `usage_model_provider_daily` (migration 011) — the SAME rollup one
@@ -71,7 +104,23 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   `cache_read/cache_creation_input_tokens` BOTH land in `cache_tok`.
   **Key budgets (`daily_limit`/`total_limit`) cap OUTPUT tokens only** — input
   and cache are visibility metrics, they never consume a key's budget; say
-  "output" in every budget label/message.
+  "output" in every budget label/message. **Zero-usage inference**
+  (`splitKvInput` in `server/tokens.ts`, via the btdby4 `kvCache`
+  provider): providers sometimes report all-zero usage while content
+  flows (observed live: MuseSpark 400k-context turn billed as
+  in:0/cache:0 while the provider dashboard showed every bucket). Zeros
+  are never trusted blindly — when the upstream says 0 but bytes crossed
+  the wire, the gateway infers from btdby4 (output from the streamed
+  sample or response text, input/cache split from the request body) and
+  always flags the event `estimated`. The input/cache split simulates a
+  REAL KV cache on the EGRESS side (the provider that answered): one
+  `kvCache` call counts the request JSON with the real BPE engine and
+  resolves the longest stable block prefix against a trie with fork
+  branches, LFU eviction and TTL — keyed by gateway key + provider +
+  provider key + upstream model + egress lane, per-protocol isolation
+  built in (10min TTL, 400MB cap). The wasm owns ALL cache state; the
+  gateway keeps no fingerprint, no Map, no LRU of its own.
+  Nonzero upstream figures are NEVER overridden.
   Scaling evidence: `docs/performance` (10y sim). `PRAGMA optimize` runs at the
   end of `migrate()` — without planner stats, hour-window aggregates on big
   `usage_events` degrade into full index scans.
@@ -200,8 +249,11 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - Don't buffer whole streams: keep the SSE tee incremental (memory bounded by
   longest event line, not response size).
 - Keep the dependency list minimal: runtime deps are `nodemailer` (SMTP),
-  `qrcode` (TOTP QR), `tokenx` (fallback token-count estimation when an
-  upstream reports no usage — used ONLY on that estimate path, user-sanctioned),
+  `qrcode` (TOTP QR), `btdby4-wasm` (universal WASM token-count estimation when an
+  upstream reports no usage — used ONLY on that estimate path, user-sanctioned;
+  same BPE engine as the indirect-code daemon, per-protocol counters + images +
+  encrypted-reasoning; one 8MB wasm ships inside the npm package, zero native deps —
+  linux/mac/windows, glibc/musl),
   `usal` (scroll/entrance animations, user-sanctioned), `sortablejs`
   (drag-and-drop ordering, user-sanctioned — only imported
   by `web/src/sortable.ts`; rows carry `data-id` + a `[data-handle]` grip,

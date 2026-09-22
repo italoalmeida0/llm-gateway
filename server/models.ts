@@ -472,7 +472,7 @@ export function refreshProviderKeyMirror(providerId: string): void {
 
 /** Top-priority usable key for admin-side operations (sync/test). Falls back
  *  to the top key regardless of state — a best-effort call never fails just
- *  because every key is cooling down. */
+ *  because a key was manually disabled. */
 export async function primaryAdminKey(providerId: string): Promise<string | null> {
   const rows = db
     .prepare<ProviderKeyRow, [string]>(
@@ -588,21 +588,27 @@ export function providerHasCapability(row: ProviderRow, proto: Proto): boolean {
 }
 
 /**
- * Ordered upstream preference per requesting surface: the native
- * capability first, then the others (served through the protocol
- * bridge). Every ordered pair has a translator, so any provider with
- * any capability can serve any surface.
+ * Ordered egress preference per ingress surface: the ingress protocol
+ * first (translated through the gateway IR even for same-protocol
+ * attempts — dialects still differ between providers), then chat (the
+ * most widely supported egress), then anthropic, then responses.
+ * The IR covers the full 3x3 matrix, so every ingress protocol can
+ * reach every egress capability. `upstreamPreference` stays as a
+ * compatibility alias.
  */
-export function upstreamPreference(proto: Proto): Proto[] {
+export function egressPreference(proto: Proto): Proto[] {
   if (proto === "responses") return ["responses", "openai", "anthropic"];
   if (proto === "openai") return ["openai", "anthropic", "responses"];
   return ["anthropic", "openai", "responses"];
+}
+export function upstreamPreference(proto: Proto): Proto[] {
+  return egressPreference(proto);
 }
 
 /** One attempt of the failover chain: a concrete provider key plus the
  *  upstream model id to send ("" in passthrough mode — body untouched).
  *  `via` is the upstream capability serving this attempt (the first of
- *  `upstreamPreference` the provider exposes); `translated` marks bridge
+ *  `egressPreference` the provider exposes); `translated` marks IR
  *  translation (via !== requesting protocol, either direction). */
 export interface RouteCandidate {
   provider: RoutedProvider;
@@ -612,12 +618,20 @@ export interface RouteCandidate {
   via: Proto;
 }
 
-/** Capability match for a candidate, including bridge translation: a
+/** Capability match for a candidate, including IR translation: a
  *  request may use a provider exposing any capability, served natively
- *  or through the protocol bridge. Returns the upstream capability to
- *  use (native first), or null when the provider exposes nothing. */
+ *  or translated through the gateway IR. Returns the upstream capability
+ *  to use, or null when the provider exposes nothing usable.
+ *
+ *  Egress order is [same-as-ingress, chat, anthropic, responses]: the
+ *  ingress protocol first (translated through the IR even for
+ *  same-protocol attempts — dialects still differ), then chat
+ *  (the most widely supported egress), then anthropic, then responses.
+ *  The IR covers the full 3x3 matrix, so the old directional guard
+ *  (anthropic-via-responses forbidden) is gone: every ingress protocol
+ *  can reach every egress capability. */
 export function candidateUsable(provider: RoutedProvider, proto: Proto): Proto | null {
-  for (const via of upstreamPreference(proto)) {
+  for (const via of egressPreference(proto)) {
     if (providerHasCapability(provider.row, via)) return via;
   }
   return null;
@@ -628,18 +642,11 @@ export type ModelResolution =
   | { ok: true; requested: string; candidates: RouteCandidate[] }
   | { ok: false; status: 404 | 503; code: string; message: string };
 
-/** Keys of a provider currently worth trying, priority order. */
-export function usableKeys(provider: RoutedProvider, now = Date.now()): RoutedKey[] {
-  return provider.keys.filter((k) =>
-    keyUsable(
-      {
-        status: k.status,
-        cooldown_until: k.cooldownUntil,
-        exhausted_reason: k.exhaustedReason,
-      },
-      now,
-    ),
-  );
+/** Keys of a provider currently worth trying, priority order. No-skip
+ *  policy: only an explicit admin `disabled` removes a key from rotation —
+ *  billing/auth/transient failures never do (the client owns backoff). */
+export function usableKeys(provider: RoutedProvider): RoutedKey[] {
+  return provider.keys.filter((k) => keyUsable({ status: k.status }));
 }
 
 export function resolveModelRoute(snap: RouterSnapshot, proto: Proto, model: string): ModelResolution {
@@ -680,7 +687,7 @@ export function resolveModelRoute(snap: RouterSnapshot, proto: Proto, model: str
       ok: false,
       status: 503,
       code: "model_unavailable",
-      message: `model '${model}': every upstream candidate is unavailable right now`,
+      message: `model '${model}': no enabled upstream key is configured right now`,
     };
   }
   return { ok: true, requested: model, candidates };
@@ -688,13 +695,90 @@ export function resolveModelRoute(snap: RouterSnapshot, proto: Proto, model: str
 
 /** Passthrough-mode candidates: every enabled provider exposing this
  *  capability (priority order), each contributing its usable keys. */
-export function passthroughCandidates(snap: RouterSnapshot, proto: Proto): RouteCandidate[] {
-  const out: RouteCandidate[] = [];
+/** Provider affinity for a passthrough model id (first-try order).
+ *  1. Registry target (admin-created model) -> its provider.
+ *  2. Id-shape heuristics (each provider family's native namespace):
+ *     hf:* -> synthetic; org/model without prefix -> openrouter;
+ *     muse-* -> meta; gpt-* -> openai-direct; grok-* -> xai;
+ *     gemini* / models/* -> gemini; claude-* -> anthropic-native.
+ *  Returns the provider id or null (stable order). Failover still tries
+ *  everyone, so a wrong guess only costs order, never correctness. */
+export function scoreAffinities(snap: RouterSnapshot, modelId: string, proto?: Proto): string[] {
+  const ranked = scoreAffinityRanked(snap, modelId, proto);
+  return ranked;
+}
+
+/** @deprecated Use scoreAffinities (ordered). Kept for tests. */
+export function scoreAffinity(snap: RouterSnapshot, modelId: string, proto?: Proto): string | null {
+  return scoreAffinities(snap, modelId, proto)[0] ?? null;
+}
+
+function scoreAffinityRanked(snap: RouterSnapshot, modelId: string, proto?: Proto): string[] {
+  const ts = snap.targets.get(modelId) ?? [];
+  const t = ts.find((x) => x.enabled && snap.providers.get(x.provider_id));
+  if (t) return [t.provider_id];
+  // NOTE: duplicate provider names exist (same family registered twice —
+  // e.g. syn/meta/or/xai created once per e2e script run). byName keeps the
+  // FIRST provider per name; a manually-disabled key never counts as usable.
+  // Failover still visits everyone.
+  const byName = new Map<string, RoutedProvider>();
+  for (const p of snap.providers.values()) {
+    const cur = byName.get(p.row.name);
+    if (!cur) {
+      byName.set(p.row.name, p);
+    } else {
+      const curOk = usableKeys(cur).length > 0;
+      const newOk = usableKeys(p).length > 0;
+      if (!curOk && newOk) byName.set(p.row.name, p);
+    }
+  }
+  const id = modelId.toLowerCase();
+  // Ordered guesses: exact-family matches first, generic openrouter
+  // (org/model) LAST — it 400s unknown ids instead of failing over.
+  // scoreAffinity returns the best usable guess; passthroughCandidates
+  // tries providers in this order but failover still visits everyone.
+  const guesses: string[] = [];
+  if (id.startsWith("hf:")) guesses.push("syn");
+  if (id.startsWith("muse-")) guesses.push("meta");
+  if (id.startsWith("gpt-")) guesses.push("oai");
+  if (id.startsWith("grok-")) guesses.push("xai");
+  if (id.startsWith("models/") || id.startsWith("gemini")) guesses.push("gem");
+  if (id.startsWith("claude-")) guesses.push("ant");
+  if (id.includes("/")) guesses.push("or");
+  const ranked: string[] = [];
+  for (const guess of guesses) {
+    const p = byName.get(guess);
+    if (p && candidateUsable(p, proto ?? "openai") !== null && !ranked.includes(p.row.id)) ranked.push(p.row.id);
+  }
+  return ranked;
+}
+
+export function passthroughCandidates(snap: RouterSnapshot, proto: Proto, modelId?: string): RouteCandidate[] {
+  // Passthrough affinity: when the requested model id is a KNOWN registry
+  // model (an admin-created target), its provider goes FIRST — before
+  // unrelated providers that would 400 invalid-model and burn latency on
+  // failover. Unknown ids keep stable provider order. Failover still tries
+  // everyone, so a wrong affinity never breaks a request, only orders it.
+  // Fast path: the exact affinity computed by scoreAffinity below.
+  const ranked = modelId ? scoreAffinities(snap, modelId, proto) : [];
+  if (process.env.MITM_AFFINITY_DEBUG && modelId) {
+    console.log(
+      `[AFFINITY] model=${modelId} proto=${proto} ranked=${JSON.stringify(ranked.map((id) => id.slice(0, 4)))} order=${[...snap.providers.values()].map((p) => `${p.row.name}:${p.row.id.slice(0, 4)}`).join(",")}`,
+    );
+  }
+  const rankOf = new Map(ranked.map((id, i) => [id, i]));
+  const scored: Array<{ rank: number; order: number; provider: RoutedProvider; via: Proto }> = [];
+  let order = 0;
   for (const provider of snap.providers.values()) {
     const via = candidateUsable(provider, proto);
     if (!via) continue;
-    for (const key of usableKeys(provider)) {
-      out.push({ provider, key, upstreamModel: "", translated: via !== proto, via });
+    scored.push({ rank: rankOf.has(provider.row.id) ? rankOf.get(provider.row.id)! : 999, order: order++, provider, via });
+  }
+  scored.sort((a, b) => a.rank - b.rank || a.order - b.order);
+  const out: RouteCandidate[] = [];
+  for (const sc of scored) {
+    for (const key of usableKeys(sc.provider)) {
+      out.push({ provider: sc.provider, key, upstreamModel: "", translated: sc.via !== proto, via: sc.via });
     }
   }
   return out;
@@ -702,7 +786,7 @@ export function passthroughCandidates(snap: RouterSnapshot, proto: Proto): Route
 
 /** Models visible in /v1/models for a protocol: enabled, with at least
  *  one enabled target whose provider is enabled and capable (directly
- *  or through bridge translation). */
+ *  or through IR translation). */
 export function listableModels(snap: RouterSnapshot, proto: Proto): ModelRow[] {
   const out: ModelRow[] = [];
   for (const m of snap.models.values()) {

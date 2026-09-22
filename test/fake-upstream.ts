@@ -81,6 +81,16 @@ function cachedTokens(body: any): number {
   return Math.max(0, Number(body?.__cached_tokens ?? 0) || 0);
 }
 
+/**
+ * Test hook: `__zero_usage: true` makes every surface report all-zero
+ * usage while still returning real content — the MuseSpark case (400k
+ * context billed as in:0/cache:0). The gateway must infer instead of
+ * recording the lie. See server/tokens.ts (splitKvInput).
+ */
+function zeroUsage(body: any): boolean {
+  return body?.__zero_usage === true;
+}
+
 function openAiUsage(inTok: number, outTok: number, cached: number) {
   return {
     prompt_tokens: inTok,
@@ -102,6 +112,9 @@ async function openAiChat(req: Request, raw: string): Promise<Response> {
   const { inTok, reply } = promptGuess(body);
   const outTok = Math.ceil(reply.length / 4);
   const cached = cachedTokens(body);
+  const chatZero = zeroUsage(body);
+  const chatUsageOf = (i: number, o: number, c: number) =>
+    chatZero ? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } : openAiUsage(i, o, c);
 
   if (body.stream) {
     const includeUsage = body.stream_options?.include_usage === true;
@@ -141,7 +154,7 @@ async function openAiChat(req: Request, raw: string): Promise<Response> {
               created: Math.floor(Date.now() / 1000),
               model: body.model,
               choices: [],
-              usage: openAiUsage(inTok, outTok, cached),
+              usage: chatUsageOf(inTok, outTok, cached),
             }),
           );
         }
@@ -162,7 +175,7 @@ async function openAiChat(req: Request, raw: string): Promise<Response> {
     choices: [
       { index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" },
     ],
-    usage: openAiUsage(inTok, outTok, cached),
+    usage: chatUsageOf(inTok, outTok, cached),
   });
 }
 
@@ -188,6 +201,11 @@ async function responsesCreate(req: Request, raw: string): Promise<Response> {
   const { inTok, reply } = promptGuess(body);
   const outTok = Math.ceil(reply.length / 4);
   const cached = cachedTokens(body);
+  const respZero = zeroUsage(body);
+  const respUsageOf = (i: number, o: number, c: number) =>
+    respZero
+      ? { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0 }
+      : responsesUsage(i, o, c);
   const response = (status: string) => ({
     id: "resp_fake",
     object: "response",
@@ -204,7 +222,7 @@ async function responsesCreate(req: Request, raw: string): Promise<Response> {
         content: [{ type: "output_text", text: reply, annotations: [] }],
       },
     ],
-    usage: responsesUsage(inTok, outTok, cached),
+    usage: respUsageOf(inTok, outTok, cached),
   });
 
   if (body.stream) {
@@ -283,13 +301,17 @@ async function anthropicMessages(req: Request, raw: string): Promise<Response> {
   const cached = cachedTokens(body);
   // Anthropic-style: input_tokens is the UNCACHED share; cache traffic is
   // reported in its own fields on the side.
-  const anthropicUsage = (output: number) => ({
-    input_tokens: inTok,
-    output_tokens: output,
-    ...(cached > 0
-      ? { cache_read_input_tokens: cached, cache_creation_input_tokens: Math.min(cached, 3) }
-      : {}),
-  });
+  const anthZero = zeroUsage(body);
+  const anthropicUsage = (output: number) =>
+    anthZero
+      ? { input_tokens: 0, output_tokens: 0 }
+      : {
+          input_tokens: inTok,
+          output_tokens: output,
+          ...(cached > 0
+            ? { cache_read_input_tokens: cached, cache_creation_input_tokens: Math.min(cached, 3) }
+            : {}),
+        };
 
   if (body.stream) {
     const words = reply.split(" ");
@@ -330,7 +352,7 @@ async function anthropicMessages(req: Request, raw: string): Promise<Response> {
           ev("message_delta", {
             type: "message_delta",
             delta: { stop_reason: "end_turn", stop_sequence: null },
-            usage: { output_tokens: Math.max(sent, outTok) },
+            usage: anthZero ? { output_tokens: 0 } : { output_tokens: Math.max(sent, outTok) },
           }),
         );
         c.enqueue(ev("message_stop", { type: "message_stop" }));

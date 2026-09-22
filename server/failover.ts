@@ -1,27 +1,42 @@
 import { LIMITS } from "./config";
 
 /**
- * Upstream failover classification.
+ * Upstream failover classification + sticky-winner ordering.
  *
- * When the proxy has more than one candidate to serve a request (the
- * provider's ordered upstream keys, and/or the model's ordered routing
- * targets), every upstream failure is classified before deciding whether the
- * request moves on to the next candidate:
+ * Policy: the gateway NEVER removes a key from rotation automatically.
+ * Every upstream failure is classified only to decide whether the request
+ * moves on to the next candidate WITHIN that same request:
  *
  *   billing     out of credits / quota exhausted (HTTP 402, or an
- *               "insufficient_quota"-style error in any 4xx) → the key is
- *               marked `exhausted` and auto-retried after midnight UTC
- *               (daily free tiers refill then); manual re-enable works too.
+ *               "insufficient_quota"-style error in any 4xx) → fail over
+ *               to the next candidate; the real error reaches the client
+ *               when every candidate fails.
  *   auth        the key itself was rejected (401/403 with no billing hint)
- *               → `exhausted` permanently, until an admin re-enables it.
- *   rate_limit  a 429 without quota hints → transient: consecutive-failure
- *   transient   counter + exponential cooldown (5xx, 408, network, timeout).
+ *               → fail over to the next candidate (401/403 is sometimes a
+ *               transient moderation/geoblock rejection, not a dead key).
+ *   rate_limit  a 429 without quota hints → fail over to the next
+ *   transient   candidate (5xx, 408, network, timeout).
  *   null        a plain client error (400 invalid request, 413, ...) → the
  *               response is delivered to the client as-is; every other
  *               candidate would reject it identically, so no failover.
  *
- * Everything here is a pure function of (status, error body peek) so it can
- * be unit-tested without HTTP.
+ * The only skip that still exists is `status = 'disabled'` — an explicit
+ * admin choice via PATCH /api/admin/... (`keyUsable`). Billing/auth/
+ * transient failures are only OBSERVABILITY (audit-logged by the proxy)
+ * plus a short-lived in-memory ordering hint (sticky winner, below) —
+ * the client owns backoff/retry and always receives the real upstream
+ * error (with Retry-After forwarded when the provider sends one).
+ *
+ * Sticky winner: serving N keys in strict priority order means every
+ * request re-tries a known-bad key first until it recovers. Instead the
+ * proxy remembers, per routing lane, which candidate answered last:
+ * subsequent requests try that winner FIRST (TTL 10min, sliding, global,
+ * in-memory only). A failed winner is dropped mid-request (the loop
+ * already continues to the next candidate) and a full sweep failure
+ * clears the lane so nothing stays pinned to a dead candidate. Expiry
+ * (inactivity) or admin-driven candidate changes also restart from
+ * priority order. classifyHttpError stays a pure function of
+ * (status, error body peek) so it can be unit-tested without HTTP.
  */
 
 export type FailClass = "billing" | "auth" | "rate_limit" | "transient" | "model_not_found";
@@ -33,7 +48,14 @@ const BILLING_RE =
 
 /** 404 is fail-able when it means "this provider doesn't have the model"
  *  (classic cross-provider fallback trigger), not a bad URL of ours. */
-const MODEL_NOT_FOUND_RE = /model[ '"]?.*\bnot found|no such model|unknown model|does not exist|model_not_found/i;
+// Wrong-provider affinity misses surface as provider-specific rejections:
+// synthetic "hf: prefix" / "not a valid model ID", openrouter "No endpoints
+// found". All mean "this provider can't serve that id" -> try the next
+// candidate (same as model_not_found), never deliver as client error —
+// and never touch key state: the key is healthy, it correctly rejected
+// an id it doesn't serve.
+export const MODEL_NOT_FOUND_RE =
+  /model[ '"]?.*\bnot found|no such model|unknown model|does not exist|model_not_found|not a valid model ID|hf: ?prefix|No endpoints found/i;
 
 /**
  * Map an upstream HTTP failure to a failover class, or null for client
@@ -59,59 +81,67 @@ export function classifyHttpError(status: number, bodyPeek: string): FailClass |
   return null;
 }
 
-/** Cooldown for consecutive transient/rate-limit failures: nothing until
- *  the threshold, then base * 2^extra capped at max. Success resets the
- *  counter, so intermittent blips never escalate. */
-export function nextCooldown(failCount: number): number | null {
-  if (failCount < LIMITS.providerFailThreshold) return null;
-  const extra = failCount - LIMITS.providerFailThreshold;
-  const ms = LIMITS.providerCooldownBaseMs * 2 ** Math.min(extra, 8);
-  return Date.now() + Math.min(ms, LIMITS.providerCooldownMaxMs);
+/** Legacy (no-skip policy): consecutive-failure cooldowns are gone —
+ *  kept as a no-op so older call sites/tests fail loudly at import time
+ *  instead of silently changing behavior. Do not use. */
+export function nextCooldown(_failCount: number): number | null {
+  return null;
 }
 
-/** Billing-exhausted keys auto-retry at the next UTC midnight (free-tier
- *  quotas typically refill daily); until then they stay out of rotation. */
-export function billingCooldownUntil(now = Date.now()): number {
-  const d = new Date(now);
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0);
+/** Legacy (no-skip policy): midnight auto-retry no longer exists — keys
+ *  never leave rotation, so there is nothing to retry. Kept for import
+ *  compatibility only. */
+export function billingCooldownUntil(_now = Date.now()): number {
+  return _now;
 }
 
-/** Is this provider key currently usable? Billing-exhausted keys re-enter
- *  rotation automatically once their cooldown (next UTC midnight) lapses;
- *  auth-exhausted keys stay out until an admin re-enables them. */
+/** Is this provider key currently usable? Only an explicit admin
+ *  `disabled` removes a key from rotation — billing/auth/transient
+ *  failures never do (the client owns backoff; see module header). */
 export function keyUsable(
-  k: { status: string; cooldown_until: number | null; exhausted_reason: string | null },
-  now = Date.now(),
+  k: { status: string; cooldown_until?: number | null; exhausted_reason?: string | null },
 ): boolean {
-  if (k.status === "disabled") return false;
-  if (k.status === "exhausted") {
-    if (k.exhausted_reason === "billing" && k.cooldown_until !== null) {
-      return k.cooldown_until <= now;
-    }
-    return false;
+  return k.status !== "disabled";
+}
+
+// ===== sticky winner (in-memory last-good ordering hint) =====
+// Key insight: with no automatic skip, strict priority order would re-try
+// a known-bad key FIRST on every request. The sticky winner remembers per
+// routing lane which candidate answered last, so the hot path is 1 attempt
+// in steady state. Memory-only (restart = priority order), TTL sliding on
+// every success, cleared on full-sweep failure (never pin a dead winner).
+
+export interface StickyWinner {
+  providerId: string;
+  keyId: string;
+  upstreamModel: string;
+  via: string;
+}
+
+const stickyLanes = new Map<string, { winner: StickyWinner; expiresAt: number }>();
+
+function stickyTtlMs(): number {
+  return LIMITS.keyStickyTtlMs;
+}
+
+export function stickyGet(lane: string, now = Date.now()): StickyWinner | null {
+  const e = stickyLanes.get(lane);
+  if (!e) return null;
+  if (e.expiresAt <= now) {
+    stickyLanes.delete(lane);
+    return null;
   }
-  return k.cooldown_until === null || k.cooldown_until <= now;
+  return e.winner;
 }
 
-// ===== freshest in-memory overlay =====
-// The router snapshot rides on a 5s cache; a key that just proved dead must
-// stop being tried IMMEDIATELY (next request, next attempt), not after the
-// TTL. This overlay is written together with the DB updates in the proxy and
-// cleared by admin key mutations (re-enable / rotate / delete / reorder).
-// `until` null = blocked indefinitely (auth exhaustion), else a timestamp.
-
-const liveKeys = new Map<string, { until: number | null }>();
-
-export function liveKeyBlock(keyId: string, until: number | null): void {
-  liveKeys.set(keyId, { until });
+export function stickySet(lane: string, winner: StickyWinner, now = Date.now()): void {
+  stickyLanes.set(lane, { winner, expiresAt: now + stickyTtlMs() });
 }
 
-export function liveKeyClear(keyId: string): void {
-  liveKeys.delete(keyId);
+export function stickyClear(lane: string): void {
+  stickyLanes.delete(lane);
 }
 
-export function keyBlockedNow(keyId: string): boolean {
-  const l = liveKeys.get(keyId);
-  if (!l) return false;
-  return l.until === null || l.until > Date.now();
+export function stickyClearAll(): void {
+  stickyLanes.clear();
 }

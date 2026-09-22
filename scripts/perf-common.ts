@@ -390,7 +390,8 @@ export async function upstreamHits(base: string): Promise<Record<string, number>
   return await (await fetch(`${base}/__hits`)).json();
 }
 
-/** Admin re-enable: wipes fail_count/cooldown/exhausted + clears the live overlay. */
+/** Reset a key's visible failure state (fail_count) + rebuild sticky lanes
+ *  (PATCH also calls stickyClearAll) so the next probe starts clean. */
 export async function resetKeyState(adminToken: string, providerId: string, keyId: string): Promise<void> {
   const res = await fetch(`${GW}/api/admin/providers/${providerId}/keys/${keyId}`, {
     method: "PATCH",
@@ -798,19 +799,22 @@ export async function measureDirect(count: number, concurrency: number): Promise
 //
 // The router+failover architecture adds candidate-chain walking on top of the
 // old single-provider hot path. These probes measure each failover regime the
-// gateway actually runs in, always restoring full health afterwards:
+// gateway actually runs in, always restoring full health afterwards. No-skip
+// policy: nothing is ever removed from rotation — a failing primary costs a
+// full chain walk on the first request of a lane, then the sticky winner
+// keeps the hot path on the survivor until the TTL lapses:
 //
-//   skipExhausted     primary key billing-exhausted → requests skip it
-//                     (chain resolution cost with a dead key in the list)
-//   activeFailover    primary key 500ing, state reset between requests →
+//   stickySteady      primary key billing-failing → first request fails over,
+//                     the rest ride the sticky winner (A2 first, 1 attempt)
+//   activeFailover    primary key 500ing, sticky cleared between requests →
 //                     EVERY request pays attempt#1 + classification + retry
-//   failoverBurst     primary key starts 500ing mid-flight → the first few
-//                     requests pay the failover, then the key cools down
-//   providerFallback  ALL provider-A keys exhausted → traffic rides the
+//   failoverBurst     primary key starts 500ing mid-flight → the first
+//                     request pays the failover, then the lane sticks to A2
+//   providerFallback  ALL provider-A keys failing → traffic rides the
 //                     model_targets chain on provider B (model rewritten)
 
 export interface FailoverProbes {
-  skipExhausted: LatStats & { deadKeyHitsDuringMeasure: number };
+  stickySteady: LatStats & { deadKeyHitsDuringMeasure: number };
   activeFailover: { n: number; mean: number; p50: number; p95: number };
   failoverBurst: LatStats;
   providerFallback: LatStats & { fallbackUpstreamHits: number };
@@ -836,24 +840,26 @@ export async function runFailoverProbes(
   };
 
   try {
-    // ---- 1. dead primary key is skipped (steady state on key #2) ----
+    // ---- 1. failing primary: first request walks the chain, rest ride sticky ----
     await setUpstreamFail(UP, UPSTREAM_KEY, { status: 402, message: "insufficient_quota" });
-    await measureProxy(users, 1, 1, false); // first request exhausts A1 (billing) and fails over
+    await measureProxy(users, 1, 1, false); // first request fails over to A2, lane sticks to it
     const hitsBefore = await upstreamHits(UP);
-    const skipExhaustedStats = await measureProxy(users, 30, 5, false);
+    const stickySteadyStats = await measureProxy(users, 30, 5, false);
     const hitsAfter = await upstreamHits(UP);
-    const skipExhausted = {
-      ...skipExhaustedStats,
+    const stickySteady = {
+      ...stickySteadyStats,
       deadKeyHitsDuringMeasure:
         (hitsAfter[UPSTREAM_KEY] ?? 0) - (hitsBefore[UPSTREAM_KEY] ?? 0),
     };
 
-    // ---- 2. every request pays a live failover (A1 500ing, state reset) ----
+    // ---- 2. every request pays a live failover (A1 500ing, sticky cleared) ----
     await setUpstreamFail(UP, UPSTREAM_KEY, null);
     await setUpstreamFail(UP, UPSTREAM_KEY, { status: 500, message: "upstream exploded" });
     const singles: number[] = [];
-    const ITER = 4; // below breakerFailThreshold (5); each success on A2 resets it anyway
+    const ITER = 4;
     for (let i = 0; i < ITER; i++) {
+      // fail_count is observability-only; the sticky lane is what must be
+      // cleared to force a full chain walk on the next request.
       await resetKeyState(adminToken, topo.providerA, topo.keyA1);
       const one = await measureProxy(users, 1, 1, false);
       if (one.errors === 0) singles.push(one.p50);
@@ -870,11 +876,11 @@ export async function runFailoverProbes(
     await resetKeyState(adminToken, topo.providerA, topo.keyA1);
     const failoverBurst = await measureProxy(users, 30, 5, false);
 
-    // ---- 4. whole provider dead → model_targets chain on provider B ----
+    // ---- 4. whole provider failing → model_targets chain on provider B ----
     await setUpstreamFail(UP, UPSTREAM_KEY, { status: 402, message: "insufficient_quota" });
     await setUpstreamFail(UP, KEY_A2, { status: 402, message: "insufficient_quota" });
     await setUpstreamFail(UP, KEY_A3, { status: 402, message: "insufficient_quota" });
-    await measureProxy(users, 1, 1, false); // cascade-exhausts all A keys, lands on B1
+    await measureProxy(users, 1, 1, false); // first request walks the whole A chain, lands on B1
     const bHitsBefore = await upstreamHits(UP2);
     const providerFallbackStats = await measureProxy(users, 30, 5, false);
     const bHitsAfter = await upstreamHits(UP2);
@@ -886,7 +892,7 @@ export async function runFailoverProbes(
     };
 
     await restoreAll();
-    return { skipExhausted, activeFailover, failoverBurst, providerFallback };
+    return { stickySteady, activeFailover, failoverBurst, providerFallback };
   } catch (e) {
     await restoreAll();
     throw e;

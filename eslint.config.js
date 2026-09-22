@@ -25,6 +25,13 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    // server/tokens.ts dynamically imports the btdby4-wasm VALUE side: a
+    // static import would pull the package's bundled sources into tsc.
+    // The structural type in tokens.ts stays local on purpose.
+    files: ["server/tokens.ts"],
+    rules: { "@typescript-eslint/no-require-imports": "off" },
+  },
+  {
     files: ["scripts/*.cjs"],
     languageOptions: {
       sourceType: "commonjs",

@@ -110,26 +110,28 @@ afterAll(() => {
 });
 
 describe("translated stream survives translator-silent head (serve pump)", () => {
-  test("anthropic <- responses completes past created/in_progress", async () => {
+  test("openai <- responses completes past created/in_progress", async () => {
+    // Responses->chat stream through a REAL Bun.serve (the parking only
+    // happens under serve pull-demand). The stub provider is responses-only
+    // and the request speaks the OpenAI protocol, which HAS a bridge.
     const server = Bun.serve({
       port: 0,
       idleTimeout: 5,
       fetch: (req) => handleProxy(req, new URL(req.url), undefined),
     });
     try {
-      const res = await fetch(`http://127.0.0.1:${server.port}/v1/messages`, {
+      const res = await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": GW_KEY,
-          "anthropic-version": "2023-06-01",
+          Authorization: `Bearer ${GW_KEY}`,
         },
-        body: JSON.stringify({ model: "m", max_tokens: 50, messages: [{ role: "user", content: "hi" }], stream: true }),
+        body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }], stream: true }),
         signal: AbortSignal.timeout(15000),
       });
       expect(res.status).toBe(200);
       const text = await res.text();
-      expect(text).toContain("event: message_stop");
+      expect(text).toContain("data: [DONE]");
       expect(text).toContain(STUB_REPLY);
       expect(text.match(/^: ping$/m) !== null).toBe(true);
     } finally {

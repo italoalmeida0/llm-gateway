@@ -4,20 +4,16 @@ import { api, type AuthStyle, type ProviderDto, type ProviderKeyDto, type SyncOu
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
-import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Modal, ModalField, ModalNotice, ModalSection, Segmented, Select, SwitchCard, toast, fmtDate, timeUntil } from "../../ui";
+import { Badge, Btn, Card, EmptyState, Icon, IconBtn, Icons, Modal, ModalField, ModalNotice, ModalSection, Segmented, Select, SwitchCard, toast, fmtDate } from "../../ui";
 import { syncSummary } from "./Models";
 
-/** Badge view of a provider key's failover state. */
+/** Badge view of a provider key's failover state. No-skip policy: keys are
+ *  never removed from rotation automatically — `fails` is only an
+ *  admin-visible health signal (reset by any success). Only an explicit
+ *  `disabled` keeps a key out. */
 function keyStatus(k: ProviderKeyDto): { tone: "green" | "zinc" | "amber" | "red"; label: string } {
   if (k.status === "disabled") return { tone: "zinc", label: "Disabled" };
-  if (k.status === "exhausted") {
-    return k.exhaustedReason === "billing"
-      ? { tone: "amber", label: `Out of credits · retry in ${timeUntil(k.cooldownUntil)}` }
-      : { tone: "red", label: "Rejected upstream (auth)" };
-  }
-  if (k.cooldownUntil && k.cooldownUntil > Date.now()) {
-    return { tone: "amber", label: `Cooldown · retry in ${timeUntil(k.cooldownUntil)}` };
-  }
+  if (k.failCount > 0) return { tone: "amber", label: `Active · ${k.failCount} recent fail${k.failCount === 1 ? "" : "s"}` };
   return { tone: "green", label: "Active" };
 }
 
@@ -470,14 +466,14 @@ export default function AdminProvidersPage() {
                               <Badge tone={st().tone}>{st().label}</Badge>
                               <span class="min-w-0 flex-1 basis-20 text-xs text-ink-200 font-medium truncate">{k.label || "key"}</span>
                               <span class="min-w-0 shrink-0 text-[10px] text-ink-600 truncate">
-                                {st().tone === "green" ? "configured ✓" : `fails ${k.failCount}`}
+                                {st().tone === "green" ? "configured ✓" : st().label}
                               </span>
                               <div class="ml-auto flex items-center gap-0.5 shrink-0">
-                                <Show when={k.status !== "active" || (k.cooldownUntil !== null && k.cooldownUntil > Date.now())}>
+                                <Show when={k.status === "disabled" || k.failCount > 0}>
                                   <IconBtn
                                     icon={Icons.refresh}
-                                    title="Re-enable: clear exhaustion/cooldown and return to rotation"
-                                    onClick={() => patchKey(p, k, { status: "active" }, "Key re-enabled")}
+                                    title="Clear failure counter"
+                                    onClick={() => patchKey(p, k, { status: "active" }, "Failure counter cleared")}
                                   />
                                 </Show>
                                 <Show when={k.status === "active"}>

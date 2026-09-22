@@ -2,7 +2,7 @@ import { LIMITS } from "../config";
 import { stmts, audit, parseStripParams, type AuthStyle, type Proto } from "../db";
 import { randomToken, sha256Hex } from "../crypto";
 import { clientIp, baseHeaders } from "../http";
-import { estimateTokenCount } from "tokenx";
+import { countRequestTokens, splitKvInput } from "../tokens";
 import {
   acquireUpstreamSlot,
   releaseUpstreamSlot,
@@ -25,42 +25,20 @@ import {
 } from "../models";
 import {
   classifyHttpError,
-  billingCooldownUntil,
-  nextCooldown,
-  keyBlockedNow,
-  liveKeyBlock,
-  liveKeyClear,
-  type FailClass,
+  stickyClear,
+  stickyGet,
+  stickySet,
 } from "../failover";
+import { normalizeAttemptBody } from "./target-profile";
 import {
-  anthropicToOpenAI,
-  openAIToAnthropicBody,
-  openAIErrorToAnthropic,
-  translatedUsageFromOpenAI,
-  OpenAIToAnthropicStream,
-  openAIChatToAnthropic,
-  anthropicToOpenAIBody,
-  anthropicErrorToOpenAI,
-  AnthropicToOpenAIStream,
-} from "./anthropic-bridge";
-import {
-  responsesToChat,
-  chatToResponsesRequest,
-  responsesToAnthropic,
-  anthropicToResponsesRequest,
-  chatToResponsesBody,
-  anthropicToResponsesBody,
-  responsesToChatBody,
-  responsesToAnthropicBody,
-  parseResponsesJson,
-  translatedUsageFromResponses,
-  anthropicErrorToResponses,
-  responsesErrorToAnthropic,
-  ChatToResponsesStream,
-  AnthropicToResponsesStream,
-  ResponsesToChatStream,
-  ResponsesToAnthropicStream,
-} from "./responses-bridge";
+  decodeToIR,
+  encodeIR,
+  decodeResponseToIR,
+  encodeResponseFromIR,
+  reEnvelopeErrorIR,
+  IRStreamTranslator,
+  type Proto as IRProto,
+} from "./gateway-ir";
 
 /**
  * The gateway itself: OpenAI-, Responses- and Anthropic-compatible
@@ -182,56 +160,37 @@ function envelopeError(proto: Proto, status: number, message: string, type?: str
   );
 }
 
-// ===== Failover bookkeeping (per-provider-key state) =====
+// ===== Failover observability (per-provider-key stats, write-light) =====
+// No-skip policy: NOTHING here removes a key from rotation. A failed
+// attempt only bumps `fail_count` as an admin-visible signal (reset by any
+// success); upstream failures are audit-logged so the dashboard shows
+// which key is unhealthy, and the client always receives the real upstream
+// error and owns backoff/retry.
 
-const qKeyFailCount = db.prepare<{ fail_count: number }, [string]>(
-  "SELECT fail_count FROM provider_keys WHERE id = ?",
+const qKeyFailBump = db.prepare(
+  "UPDATE provider_keys SET fail_count = fail_count + 1, updated_at = ? WHERE id = ?",
 );
-const qKeyExhaust = db.prepare(
-  "UPDATE provider_keys SET status = 'exhausted', exhausted_reason = ?, cooldown_until = ?, fail_count = 0, updated_at = ? WHERE id = ?",
-);
-const qKeyTrack = db.prepare(
-  "UPDATE provider_keys SET fail_count = ?, cooldown_until = ?, updated_at = ? WHERE id = ?",
-);
-const qKeyReset = db.prepare(
-  "UPDATE provider_keys SET fail_count = 0, cooldown_until = NULL, updated_at = ? WHERE id = ? AND (fail_count != 0 OR cooldown_until IS NOT NULL)",
+const qKeyFailReset = db.prepare(
+  "UPDATE provider_keys SET fail_count = 0, updated_at = ? WHERE id = ? AND fail_count != 0",
 );
 
-/** A key proved unusable: billing/auth → exhausted (billing auto-retries at
- *  the next UTC midnight, when daily free tiers refill; auth waits for a
- *  manual re-enable). Transient and rate-limit failures only bump a
- *  consecutive-failure counter that escalates to an exponential cooldown
- *  from LIMITS.providerFailThreshold — intermittent blips never escalate
- *  because any success resets the counter. */
-function markProviderKeyFailure(key: RoutedKey, cls: FailClass): void {
-  const now = Date.now();
-  if (cls === "billing" || cls === "auth") {
-    const until = cls === "billing" ? billingCooldownUntil(now) : null;
-    qKeyExhaust.run(cls, until, now, key.id);
-    liveKeyBlock(key.id, until);
-    audit("provider_key.exhausted", {
-      target: key.id,
-      meta: { reason: cls, label: key.label, retryAt: until },
-    });
-    console.warn(`[PROXY] upstream key exhausted (${cls}): ${key.label || key.id}`);
-    return;
-  }
-  const fails = (qKeyFailCount.get(key.id)?.fail_count ?? 0) + 1;
-  const until = nextCooldown(fails);
-  qKeyTrack.run(fails, until, now, key.id);
-  if (until !== null) {
-    liveKeyBlock(key.id, until);
-    console.warn(
-      `[PROXY] upstream key ${key.label || key.id} cooling down until ${new Date(until).toISOString()} (${fails} consecutive failures)`,
-    );
-  }
+/** A failed attempt: bump the visible failure counter + audit the cause.
+ *  Failover itself is decided by the classification at the call site
+ *  (`continue` to the next candidate) — this only records it. */
+function noteProviderKeyFailure(key: RoutedKey, cls: string): void {
+  qKeyFailBump.run(Date.now(), key.id);
+  audit("provider_key.failed", {
+    target: key.id,
+    meta: { reason: cls, label: key.label },
+  });
+  console.warn(`[PROXY] upstream key failed (${cls}): ${key.label || key.id}`);
 }
 
-/** Healthy response: reset the transient-failure counters (the conditional
- *  UPDATE keeps the common path write-free). */
-function markProviderKeyOk(key: RoutedKey): void {
-  liveKeyClear(key.id);
-  qKeyReset.run(Date.now(), key.id);
+/** Healthy response (or a client-caused rejection that proves the key
+ *  works): clear the visible failure counter. The conditional UPDATE
+ *  keeps the common path write-free. */
+function noteProviderKeyOk(key: RoutedKey): void {
+  qKeyFailReset.run(Date.now(), key.id);
 }
 
 /** Consume an upstream error body (capped) so it can be classified for
@@ -391,7 +350,7 @@ function safeResponseContentType(upstream: Headers): string {
   return SAFE_RES_CT.has(mime) ? raw : "application/json; charset=utf-8";
 }
 
-function buildClientHeaders(upstream: Headers, requestId: string, req: Request): Headers {
+function buildClientHeaders(upstream: Headers, requestId: string, req: Request, extra?: { attemptsMade?: number }): Headers {
   const h = baseHeaders(req);
   // Even if unsafe content slips through, it can never execute as a document.
   h.set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
@@ -409,14 +368,252 @@ function buildClientHeaders(upstream: Headers, requestId: string, req: Request):
   h.set("Pragma", "no-cache");
   h.set("Content-Type", safeResponseContentType(upstream));
   h.set("X-Request-Id", requestId);
+  // Failover/transparency signals for the client (which owns backoff):
+  // how many upstream candidates this request attempted. Upstream
+  // Retry-After / rate-limit hints pass through below via the copy loop
+  // (they are not in the strip lists), so a 429 tells the client when
+  // to retry instead of the gateway hiding it behind a 503.
+  if (extra?.attemptsMade !== undefined) h.set("x-gateway-attempts", String(extra.attemptsMade));
   return h;
 }
 
+/**
+ * Passthrough `GET /v1/models(:id)`: forward to the first usable upstream
+ * and patch the payload for strict managers (codex requires `display_name`
+ * per entry plus a top-level `models` array — upstreams like synthetic omit
+ * both). Patch-only, never stored. Non-JSON or error upstreams pass through
+ * untouched.
+ */
+async function passthroughModelsList(req: Request, proto: Proto, modelId?: string): Promise<Response> {
+  const snap = await routerSnapshot();
+  const cands = passthroughCandidates(snap, proto, modelId);
+  const cand = cands[0];
+  if (!cand) {
+    return envelopeError(proto, 503, "gateway is not configured for this API protocol", "api_error", req);
+  }
+  const via = cand.via;
+  const base = (
+    via === "openai"
+      ? cand.provider.row.openai_base_url
+      : via === "responses"
+        ? cand.provider.row.responses_base_url
+        : cand.provider.row.anthropic_base_url
+  )!.replace(/\/+$/, "");
+  const upstreamPath = cand.translated
+    ? via === "anthropic"
+      ? "/messages"
+      : via === "responses"
+        ? "/responses"
+        : "/chat/completions"
+    : "/models";
+  // Responses-capable listing lives under /responses/models upstream; the
+  // other two share /models.
+  const path = via === "responses" && cand.translated ? "/models" : upstreamPath;
+  const url = base + path + (modelId !== undefined ? `/${encodeURIComponent(modelId)}` : "");
+  const headers = buildUpstreamHeaders(
+    req,
+    via,
+    cand.key.key,
+    via === "openai"
+      ? cand.provider.row.openai_auth_style
+      : via === "responses"
+        ? cand.provider.row.responses_auth_style
+        : cand.provider.row.anthropic_auth_style,
+  );
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, { method: "GET", headers });
+  } catch {
+    return envelopeError(proto, 502, "upstream is unreachable", "api_error", req);
+  }
+  const ct = upstream.headers.get("content-type") || "";
+  const h = buildClientHeaders(upstream.headers, "models", req);
+  if (!ct.includes("application/json")) return new Response(upstream.body, { status: upstream.status, headers: h });
+  let text: string;
+  try {
+    text = await upstream.text();
+  } catch {
+    return new Response(null, { status: upstream.status, headers: h });
+  }
+  // Single-model fetch decodes into CodexModel too (strict struct — the
+  // same missing-field 500s as the list). Rebuild with the allowlisted
+  // shape when a modelId was requested.
+  if (modelId !== undefined) {
+    try {
+      const one = JSON.parse(text) as Record<string, unknown>;
+      const id = typeof one.id === "string" ? one.id : modelId;
+      h.set("Content-Type", "application/json; charset=utf-8");
+      return new Response(
+        JSON.stringify({
+          id,
+          object: "model",
+          created: typeof one.created === "number" ? one.created : 0,
+          owned_by: typeof one.owned_by === "string" ? one.owned_by : "gateway",
+          display_name: id, description: id,
+          visibility: "list",
+          priority: 0,
+          supported_reasoning_levels: [
+            { name: "low", description: "low reasoning effort", effort: "low" },
+            { name: "medium", description: "medium reasoning effort", effort: "medium" },
+            { name: "high", description: "high reasoning effort", effort: "high" },
+          ],
+          shell_type: "default",
+          supported_in_api: true,
+          support_verbosity: true,
+          truncation_policy: { type: "auto" },
+          mode: { id: "default" },
+          model_messages: { instructions_template: "" },
+          ...MODEL_INFO_DEFAULTS,
+        }),
+        { status: upstream.status, headers: h },
+      );
+    } catch {
+      h.set("Content-Type", "application/json; charset=utf-8");
+      return new Response(text, { status: upstream.status, headers: h });
+    }
+  }
+  try {
+    const j = JSON.parse(text) as Record<string, unknown>;
+    // Anthropic clients expect the NATIVE list shape ({type:"model", ...},
+    // has_more) — never rewrite it (the directional-alias contract + real
+    // Anthropic SDKs depend on it). Only OpenAI-family surfaces get the
+    // CodexModel allowlist below.
+    if (proto === "anthropic") {
+      h.set("Content-Type", "application/json; charset=utf-8");
+      return new Response(text, { status: upstream.status, headers: h });
+    }
+    const data = (j as any).data;
+    if (Array.isArray(data)) {
+      // Codex decodes this payload into a STRICT struct: any unknown field
+      // (synthetic sends ~20: reasoning_parameters, quantizations, lamar...) 
+      // 500s the models refresh. Rebuild entries with the allowlisted shape
+      // only: OpenAI list fields + the two compat fields codex requires.
+      // data[] keeps the OpenAI list shape (lenient decoder) + compat extras.
+      const clean = data
+        .filter((m: any) => m && typeof m === "object")
+        .map((m: any) => {
+          const id = typeof m.id === "string" ? m.id : "model";
+          const levelsFinal = ["low", "high", "max"].map((name: string) => ({ name, description: `${name} reasoning effort`, effort: name }));
+          return { id, object: "model", created: typeof m.created === "number" ? m.created : 0, owned_by: typeof m.owned_by === "string" ? m.owned_by : "gateway", display_name: id, description: id, visibility: "list", priority: 0, supported_reasoning_levels: levelsFinal, shell_type: "default", supported_in_api: true, support_verbosity: true, truncation_policy: { type: "auto" }, mode: { id: "default" } };
+        });
+      (j as any).data = clean;
+      // models[] decodes as Vec<ModelInfo> (STRICT 35-field struct — see
+      // model_info_from_slug). Emit the EXACT fallback shape per entry:
+      // slug (not id!), every Option-without-default as null, required
+      // enums with fallback values. Anything missing 500s the refresh.
+      const toModelInfo = (id: string) => ({
+        slug: id,
+        display_name: id,
+        description: id,
+        default_reasoning_level: null,
+        supported_reasoning_levels: ["low", "high", "max"].map((name: string) => ({ effort: name, description: `${name} reasoning effort` })),
+        shell_type: "unified_exec",
+        visibility: "list",
+        supported_in_api: true,
+        priority: 0,
+        additional_speed_tiers: [],
+        service_tiers: [],
+        default_service_tier: null,
+        available_access_programs: null,
+        availability_nux: null,
+        upgrade: null,
+        model_messages: { instructions_template: "" },
+        include_skills_usage_instructions: false,
+        include_plugin_usage_instructions: false,
+        include_apps_usage_instructions: true,
+        supports_reasoning_summary_parameter: true,
+        default_reasoning_summary: "auto",
+        support_verbosity: false,
+        default_verbosity: null,
+        apply_patch_tool_type: null,
+        web_search_tool_type: "text",
+        truncation_policy: { mode: "bytes", limit: 10000 },
+        supports_image_detail_original: false,
+        context_window: 272000,
+        max_context_window: 272000,
+        auto_compact_token_limit: null,
+        comp_hash: null,
+        effective_context_window_percent: 95,
+        experimental_supported_tools: [],
+        input_modalities: ["text", "image"],
+        supports_search_tool: false,
+        supports_experimental_context: false,
+        use_responses_lite: false,
+        supports_reasoning_effort_updates: false,
+        guardian: null,
+        node_repl_auto_review_required: false,
+        node_repl_disabled: false,
+        auto_review_model_override: null,
+        model_specialty: null,
+        tool_mode: null,
+        multi_agent_version: null,
+        multi_agent_reasoning_effort: null,
+      });
+      (j as any).models = clean.map((m: any) => toModelInfo(typeof m.id === "string" ? m.id : "model"));
+      // Drop any other top-level extras the upstream sent.
+      for (const k of Object.keys(j)) {
+        if (k !== "object" && k !== "data" && k !== "models") delete (j as any)[k];
+      }
+      (j as any).object = "list";
+    }
+    h.set("Content-Type", "application/json; charset=utf-8");
+    return new Response(JSON.stringify(j), { status: upstream.status, headers: h });
+  } catch {
+    h.set("Content-Type", "application/json; charset=utf-8");
+    return new Response(text, { status: upstream.status, headers: h });
+  }
+}
+
+/** Decoded model id for `GET .../v1/models/:id`. */
 /**
  * Router-mode `/v1/models`: answered from the local registry (rich format),
  * never forwarded upstream. Only servable models are listed (enabled, with an
  * enabled provider exposing this protocol's capability).
  */
+// Full ModelInfo shape, mirroring codex's model_info_from_slug fallback
+// (every field the fallback constructor sets — Option fields WITHOUT
+// #[serde(default)] are REQUIRED to be present, null allowed; omitting any
+// single one 500s the whole models refresh with `missing field X`).
+const MODEL_INFO_DEFAULTS = {
+  default_reasoning_level: null,
+  additional_speed_tiers: [],
+  service_tiers: [],
+  default_service_tier: null,
+  available_access_programs: null,
+  availability_nux: null,
+  upgrade: null,
+  base_instructions: "",
+  include_skills_usage_instructions: false,
+  include_plugin_usage_instructions: false,
+  include_apps_usage_instructions: true,
+  supports_reasoning_summary_parameter: true,
+  default_reasoning_summary: "auto",
+  default_verbosity: null,
+  apply_patch_tool_type: null,
+  web_search_tool_type: "text",
+  supports_image_detail_original: false,
+  context_window: 272000,
+  max_context_window: 272000,
+  auto_compact_token_limit: null,
+  comp_hash: null,
+  effective_context_window_percent: 95,
+  experimental_supported_tools: [],
+  input_modalities: ["text", "image"],
+  supports_search_tool: false,
+  supports_experimental_context: false,
+  use_responses_lite: false,
+  supports_reasoning_effort_updates: false,
+  guardian: null,
+  node_repl_auto_review_required: false,
+  node_repl_disabled: false,
+  auto_review_model_override: null,
+  model_specialty: null,
+  tool_mode: null,
+  multi_agent_version: null,
+  multi_agent_reasoning_effort: null,
+};
+const MODEL_LEVELS = [{ name: "low", description: "low reasoning effort", effort: "low" }, { name: "high", description: "high reasoning effort", effort: "high" }, { name: "max", description: "max reasoning effort", effort: "max" }];
+
 function registryModelsResponse(
   req: Request,
   snap: RouterSnapshot,
@@ -442,11 +639,15 @@ function registryModelsResponse(
         { headers: h },
       );
     }
+    // Codex hard-requires `display_name`, `supported_reasoning_levels` +
+    // top-level `models` on this surface (it 500s the models refresh
+    // otherwise); the data[] entries keep the OpenAI list shape.
+    // (Observed live: `missing field supported_reasoning_levels`.)
     return new Response(
       JSON.stringify({
         object: "list",
-        data: rows.map((m) => ({ id: m.id, object: "model", created: 0, owned_by: providerName(m) })),
-        models: rows.map((m) => ({ id: m.id, slug: m.id })),
+        data: rows.map((m) => ({ id: m.id, object: "model", created: 0, owned_by: providerName(m), display_name: m.id, visibility: "list", shell_type: "default", supported_in_api: true, support_verbosity: true, supported_reasoning_levels: MODEL_LEVELS, mode: { id: "default" }, ...MODEL_INFO_DEFAULTS })),
+        models: rows.map((m) => ({ id: m.id, slug: m.id, display_name: m.id, visibility: "list", shell_type: "default", supported_in_api: true, support_verbosity: true, supported_reasoning_levels: MODEL_LEVELS, mode: { id: "default" }, ...MODEL_INFO_DEFAULTS })),
       }),
       { headers: h },
     );
@@ -476,28 +677,23 @@ function registryModelsResponse(
 }
 
 // ===== Token estimation fallback =====
-// tokenx: calibrated against OpenAI's o200k_base, language-aware, 2kB,
-// zero-dep. Used ONLY on the fallback path — whenever the upstream reports
-// real usage figures, those always win.
+// btdby4 per-protocol request counters (same BPE engine as the
+// indirect-code daemon). Used ONLY on the fallback path — whenever the
+// upstream reports real usage figures, those always win.
 
-/** Chars of observed text fed to tokenx; the measured per-char ratio is
- *  extrapolated to the full length, so memory stays O(sample), never
- *  O(response). Accuracy depends on the kind of text, not its length. */
-const EST_SAMPLE_CHARS = 2048;
-
-/** Concatenate every string VALUE in a JSON tree (ignores keys, numbers and
- *  structure) — so an input estimate tracks the actual payload text, not the
- *  ~30% JSON overhead of the raw body. */
-function collectStrings(v: unknown, out: string[]): void {
-  if (typeof v === "string") out.push(v);
-  else if (Array.isArray(v)) for (const x of v) collectStrings(x, out);
-  else if (v && typeof v === "object") for (const x of Object.values(v)) collectStrings(x, out);
-}
-
-export function estimateBodyTokens(bodyJson: unknown): number {
-  const parts: string[] = [];
-  collectStrings(bodyJson, parts);
-  return Math.max(1, estimateTokenCount(parts.join(" ")));
+export function estimateBodyTokens(bodyJson: unknown, proto?: "openai" | "anthropic" | "responses"): number {
+  if (!bodyJson || typeof bodyJson !== "object" || Array.isArray(bodyJson)) return 1;
+  const body = bodyJson as Record<string, unknown>;
+  // The caller (handleProxy) knows the ingress surface — it tells us which
+  // per-protocol counter to use. Sniffing only covers direct callers/tests.
+  const p =
+    proto ??
+    (Array.isArray((body as any).input)
+      ? "responses"
+      : typeof (body as any).max_tokens === "number" && Array.isArray((body as any).messages)
+        ? "anthropic"
+        : "openai");
+  return countRequestTokens(p, body);
 }
 
 // ===== Usage parsing =====
@@ -508,225 +704,6 @@ interface UsageResult {
   outTok: number;
   model: string;
   estimated: boolean;
-}
-
-/**
- * Providers bill three token categories: uncached input, cached input (at a
- * steep discount) and output — so the gateway tracks all three separately.
- * OpenAI reports cached hits INSIDE prompt_tokens (split them apart here);
- * Anthropic's input_tokens is already cache-free and its cache_read/cache_
- * creation fields make up the cached bucket.
- */
-function splitPrompt(prompt: unknown, details: unknown): { inTok: number; cacheTok: number } {
-  const p = Number(prompt ?? 0) || 0;
-  const cacheTok = Math.max(0, Number((details as any)?.cached_tokens ?? 0) || 0);
-  return { inTok: Math.max(0, p - cacheTok), cacheTok };
-}
-
-/** Anthropic cached bucket: cache reads plus cache writes (creation). */
-function anthropicCacheTok(usage: any): number {
-  return (
-    (Number(usage?.cache_read_input_tokens ?? 0) || 0) +
-    (Number(usage?.cache_creation_input_tokens ?? 0) || 0)
-  );
-}
-
-function parseOpenAiJson(bodyText: string): UsageResult {
-  try {
-    const j = JSON.parse(bodyText);
-    const usage = j.usage;
-    return {
-      ...splitPrompt(usage?.prompt_tokens, usage?.prompt_tokens_details),
-      outTok: Number(usage?.completion_tokens ?? 0),
-      model: typeof j.model === "string" ? j.model : "",
-      estimated: !usage,
-    };
-  } catch {
-    return { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: true };
-  }
-}
-
-function parseAnthropicJson(bodyText: string): UsageResult {
-  try {
-    const j = JSON.parse(bodyText);
-    const usage = j.usage;
-    if (j.type === "error") return { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false };
-    // /messages/count_tokens returns { input_tokens } at the top level.
-    if (typeof j.input_tokens === "number") {
-      return { inTok: j.input_tokens, cacheTok: 0, outTok: 0, model: "", estimated: false };
-    }
-    // usage.input_tokens excludes cache hits per the Anthropic spec;
-    // cache_read + cache_creation make up the cached bucket.
-    return {
-      inTok: Number(usage?.input_tokens ?? 0),
-      cacheTok: anthropicCacheTok(usage),
-      outTok: Number(usage?.output_tokens ?? 0),
-      model: typeof j.model === "string" ? j.model : "",
-      estimated: !usage,
-    };
-  } catch {
-    return { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: true };
-  }
-}
-
-/**
- * Tee a passthrough SSE stream: every chunk is forwarded untouched while an
- * incremental line parser extracts usage figures and (fallback) output text
- * length. Memory stays O(longest event line), not O(response size).
- */
-export class StreamMeter {
-  private pending = "";
-  private decoder = new TextDecoder();
-  private currentEvent = "";
-  outChars = 0;
-  /** Capped text sample feeding tokenx — the per-char ratio measured on it
-   *  is extrapolated to the whole stream (memory stays O(sample)). */
-  private outSample = "";
-  inTok = 0;
-  cacheTok = 0;
-  outTok = 0;
-  model = "";
-  sawUsage = false;
-
-  constructor(private proto: Proto) {}
-
-  private addOutText(t: string): void {
-    this.outChars += t.length;
-    if (this.outSample.length < EST_SAMPLE_CHARS) {
-      this.outSample += t.slice(0, EST_SAMPLE_CHARS - this.outSample.length);
-    }
-  }
-
-  private estimateOutTok(): number {
-    const sampleTokens = estimateTokenCount(this.outSample);
-    const scaled = Math.round((sampleTokens * this.outChars) / this.outSample.length);
-    return Math.max(1, scaled);
-  }
-
-  feed(chunk: Uint8Array): void {
-    this.pending += this.decoder.decode(chunk, { stream: true });
-    for (;;) {
-      const idx = this.pending.indexOf("\n");
-      if (idx === -1) break;
-      const line = this.pending.slice(0, idx);
-      this.pending = this.pending.slice(idx + 1);
-      this.processLine(line);
-    }
-  }
-
-  private processLine(rawLine: string): void {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    if (line.startsWith("event:")) {
-      this.currentEvent = line.slice(6).trim();
-      return;
-    }
-    if (!line.startsWith("data:")) return;
-    const data = line.slice(5).trim();
-    if (!data || data === "[DONE]") return;
-
-    if (this.proto === "openai") {
-      // Only parse JSON when the line hints at usage or text (cheap pre-filter).
-      if (!data.includes('"usage"') && !data.includes('"content"') && !data.includes('"model"')) return;
-      try {
-        const j = JSON.parse(data);
-        if (j.usage) {
-          if (j.usage.prompt_tokens !== undefined) {
-            const s = splitPrompt(j.usage.prompt_tokens, j.usage.prompt_tokens_details);
-            this.inTok = s.inTok;
-            this.cacheTok = s.cacheTok;
-          }
-          this.outTok = Number(j.usage.completion_tokens ?? this.outTok) || this.outTok;
-          this.sawUsage = true;
-        }
-        if (typeof j.model === "string" && j.model && !this.model) this.model = j.model;
-        const choices = j.choices;
-        if (Array.isArray(choices)) {
-          for (const c of choices) {
-            const delta = c?.delta?.content;
-            if (typeof delta === "string") this.addOutText(delta);
-            const text = c?.text; // legacy completions
-            if (typeof text === "string") this.addOutText(text);
-          }
-        }
-      } catch {
-        /* partial JSON across lines is impossible per SSE spec; ignore bad lines */
-      }
-      return;
-    }
-
-    // responses: terminal usage arrives in response.completed; text deltas
-    // feed the tokenx fallback estimate.
-    if (this.proto === "responses") {
-      if (!data.includes('"type"')) return;
-      try {
-        const j = JSON.parse(data);
-        const t = j?.type;
-        if (t === "response.output_text.delta" && typeof j.delta === "string") {
-          this.addOutText(j.delta);
-        } else if ((t === "response.completed" || t === "response.incomplete") && j?.response) {
-          const u = j.response.usage ?? {};
-          const input = Number(u.input_tokens ?? 0) || 0;
-          const cached = Number(u.input_tokens_details?.cached_tokens ?? 0) || 0;
-          this.inTok = Math.max(0, input - cached);
-          this.cacheTok = Math.max(0, cached);
-          this.outTok = Number(u.output_tokens ?? 0) || this.outTok;
-          const rm = j.response.model;
-          if (typeof rm === "string" && rm && !this.model) this.model = rm;
-          this.sawUsage = true;
-        }
-      } catch {}
-      return;
-    }
-
-    // anthropic
-    if (this.currentEvent === "message_start") {
-      try {
-        const j = JSON.parse(data);
-        const usage = j?.message?.usage;
-        if (usage) {
-          this.inTok = Number(usage.input_tokens ?? 0);
-          this.cacheTok = anthropicCacheTok(usage);
-          this.sawUsage = true;
-        }
-        if (typeof j?.message?.model === "string" && !this.model) this.model = j.message.model;
-      } catch {}
-      return;
-    }
-    if (this.currentEvent === "message_delta") {
-      try {
-        const j = JSON.parse(data);
-        if (j?.usage?.output_tokens !== undefined) {
-          this.outTok = Number(j.usage.output_tokens) || this.outTok;
-          this.sawUsage = true;
-        }
-        // Some providers re-report cache counters here; keep the latest.
-        const ct = anthropicCacheTok(j?.usage);
-        if (ct > 0) this.cacheTok = ct;
-      } catch {}
-      return;
-    }
-    if (this.currentEvent === "content_block_delta" && data.includes('"text_delta"')) {
-      try {
-        const j = JSON.parse(data);
-        if (j?.delta?.type === "text_delta" && typeof j.delta.text === "string") {
-          this.addOutText(j.delta.text);
-        }
-      } catch {}
-    }
-  }
-
-  result(): UsageResult {
-    if (this.sawUsage && (this.inTok > 0 || this.outTok > 0 || this.cacheTok > 0)) {
-      return { inTok: this.inTok, cacheTok: this.cacheTok, outTok: this.outTok, model: this.model, estimated: false };
-    }
-    return {
-      inTok: 0, // input estimate comes from request-body size at call site
-      cacheTok: 0,
-      outTok: this.outChars > 0 ? this.estimateOutTok() : 0,
-      model: this.model,
-      estimated: true,
-    };
-  }
 }
 
 // ===== Main handler =====
@@ -761,13 +738,15 @@ function withChatStreamOptions(attemptBody: string): string {
  */
 function reEnvelopeError(proto: Proto, via: Proto, status: number, body: string): string {
   if (via === proto) return body;
-  if (proto === "anthropic") {
-    return via === "openai" ? openAIErrorToAnthropic(status, body) : responsesErrorToAnthropic(status, body);
+  // All error re-envelopes go through the gateway IR: extract the upstream
+  // message once, envelope in the client protocol. Protocol N+1 only needs
+  // its message extractor in errorMessageFromBody. No legacy fallback: if
+  // the IR cannot parse the error, the raw upstream body is delivered.
+  try {
+    return reEnvelopeErrorIR(proto as IRProto, via as IRProto, status, body);
+  } catch {
+    return body;
   }
-  if (via === "anthropic") {
-    return proto === "responses" ? anthropicErrorToResponses(status, body) : anthropicErrorToOpenAI(status, body);
-  }
-  return body;
 }
 
 export async function handleProxy(req: Request, url: URL, server: any): Promise<Response> {
@@ -903,13 +882,21 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     if (snap.mode === "router" && route.isModelsList) {
       return registryModelsResponse(req, snap, proto, route.modelId);
     }
+    // Passthrough GET /v1/models(:id): forward upstream (the managers that
+    // fetch it — codex — require fields upstreams omit: `display_name` per
+    // entry and a top-level `models` array). Patched here, never stored.
+    if (route.isModelsList && req.method === "GET") {
+      return await passthroughModelsList(req, proto, route.modelId);
+    }
 
     // ---- build the failover chain ----
     // Router mode: the model's enabled targets in priority order, each with
-    // its provider's usable keys. Passthrough: enabled providers in priority
-    // order, each contributing its usable keys. Every attempt is a concrete
-    // (provider, key, upstreamModel) triple.
+    // its provider's keys. Passthrough: enabled providers in priority
+    // order, each contributing its keys. Every attempt is a concrete
+    // (provider, key, upstreamModel) triple. Nothing is skipped
+    // automatically — the chain is only reordered below (sticky winner).
     let candidates: RouteCandidate[];
+    let stickyLane: string | null = null;
     if (snap.mode === "router" && req.method === "POST" && bodyJson) {
       const requested = String((bodyJson as any).model);
       const resolution = resolveModelRoute(snap, proto, requested);
@@ -918,9 +905,42 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       }
       candidates = resolution.candidates;
       routedPublicModel = requested;
+      // One sticky lane per public model id + ingress protocol: per-model
+      // fallback chains are independent of each other.
+      stickyLane = `model:${proto}:${requested}`;
     } else {
-      candidates = passthroughCandidates(snap, proto);
+      // Passthrough POST: affinity by requested model id (registry-known
+      // ids route to their provider first; unknown ids keep stable order).
+      const requestedModel = bodyJson && typeof (bodyJson as any).model === "string" ? String((bodyJson as any).model) : undefined;
+      candidates = passthroughCandidates(snap, proto, requestedModel);
+      // One sticky lane per requested id (or protocol when unmapped):
+      // unrelated model ids never share a winner.
+      stickyLane = `pass:${proto}:${requestedModel ?? ""}`;
     }
+    // Sticky winner FIRST: the candidate that answered this lane last goes
+    // to the front (TTL 10min sliding, memory-only). Order only — every
+    // candidate is still tried when the winner fails.
+    if (stickyLane) {
+      const w = stickyGet(stickyLane);
+      if (w) {
+        const wi = candidates.findIndex(
+          (c) => c.provider.row.id === w.providerId && c.key.id === w.keyId &&
+            c.upstreamModel === w.upstreamModel && c.via === w.via,
+        );
+        if (wi > 0) {
+          const [win] = candidates.splice(wi, 1);
+          candidates.unshift(win!);
+        } else if (wi < 0) {
+          // Winner no longer exists (key deleted/disabled, target removed,
+          // provider capability changed): drop the stale entry so the lane
+          // restarts from priority order.
+          stickyClear(stickyLane);
+        }
+      }
+    }
+    // How many candidates were actually attempted — reported back so the
+    // client can see failover happened (`x-gateway-attempts`).
+    let attemptsMade = 0;
     if (candidates.length === 0) {
       const hasMatchingProvider = Array.from(snap.providers.values()).some(
         (p) => candidateUsable(p, proto) !== null,
@@ -929,7 +949,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         return envelopeError(
           proto,
           503,
-          "no upstream candidate is currently available (keys cooling down or providers circuit-broken)",
+          "no enabled upstream key is configured for this API protocol",
           "api_error",
           req,
         );
@@ -941,8 +961,28 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
     const record = (u: UsageResult, status: number, latencyMs: number, stream: boolean, cand: RouteCandidate) => {
       let inTok = u.inTok;
-      if (u.estimated && bodyJson) {
-        inTok = estimateBodyTokens(bodyJson);
+      let cacheTok = u.cacheTok;
+      let estimated = u.estimated;
+      // Zero-input guard: upstream said in+cache == 0 on a 2xx with a
+      // non-trivial request body (the MuseSpark 400k-context case). The
+      // split comes from the btdby4 KV provider (`splitKvInput`): it
+      // counts the request with the real BPE engine and simulates a REAL
+      // KV cache on the EGRESS side (the provider that answered) — a
+      // block-level prefix trie with fork branches, LFU eviction and TTL,
+      // keyed by gateway key + provider + provider key + upstream model +
+      // egress lane (per-protocol isolation is built into the provider).
+      // Always flagged estimated. Nonzero upstream figures never reach
+      // this path — they are recorded untouched.
+      if (bodyJson && bodyText && status >= 200 && status < 300 && inTok <= 0 && cacheTok <= 0) {
+        const namespace =
+          `${keyRow.id}\0${cand.provider.row.id}\0${cand.key.id}\0` +
+          `${cand.upstreamModel || (routedPublicModel ?? String((bodyJson as any)?.model ?? ""))}`;
+        const split = splitKvInput(bodyText, cand.via, namespace);
+        if (split.total > 0) {
+          inTok = split.inTok;
+          cacheTok = split.cacheTok;
+          estimated = true;
+        }
       }
       recordUsage({
         keyId: keyRow.id,
@@ -953,12 +993,12 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // passthrough keeps the upstream-reported model as before.
         model: routedPublicModel ?? (u.model || String((bodyJson as any)?.model ?? "").slice(0, 128)),
         inTok,
-        cacheTok: u.cacheTok,
+        cacheTok,
         outTok: u.outTok,
         latencyMs,
         status,
         stream,
-        estimated: u.estimated,
+        estimated,
         // Upstream dimension: which failover candidate actually answered.
         providerId: cand.provider.row.id,
         providerKeyId: cand.key.id,
@@ -981,28 +1021,19 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       }
     };
 
-    // Usage is parsed from the UPSTREAM body shape: chat bodies (native
-    // or translated-to) via the OpenAI parser, Messages bodies via the
-    // Anthropic parser, Responses bodies via the Responses parser.
-    const parseBufferedUsage = (
-      contentType: string,
-      text: string,
-      translated: boolean,
-      via: Proto,
-    ): UsageResult =>
-      contentType.includes("application/json")
-        ? !translated
-          ? proto === "openai"
-            ? parseOpenAiJson(text)
-            : proto === "responses"
-              ? parseResponsesJson(text)
-              : parseAnthropicJson(text)
-          : via === "openai"
-            ? translatedUsageFromOpenAI(text)
-            : via === "responses"
-              ? translatedUsageFromResponses(text)
-              : parseAnthropicJson(text)
-        : { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false };
+    // Usage is parsed from the UPSTREAM body shape through the gateway IR:
+    // decode the upstream protocol once — the IR carries the canonical
+    // (in, cache, out) split with reasoning excluded. No legacy parsers:
+    // protocol N+1 only needs its decoder in decodeResponseToIR.
+    const parseBufferedUsage = (contentType: string, text: string, _translated: boolean, via: Proto): UsageResult => {
+      if (!contentType.includes("application/json")) return { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false };
+      try {
+        const irr = decodeResponseToIR(via as IRProto, text, "");
+        return { inTok: irr.inTok, cacheTok: irr.cacheTok, outTok: irr.outTok, model: irr.model, estimated: irr.usageEstimated };
+      } catch {
+        return { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: true };
+      }
+    };
 
     let lastFailure:
       | { kind: "upstream"; status: number; body: string; headers: Headers }
@@ -1013,11 +1044,15 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
     let lastAttempted: RouteCandidate | null = null;
 
     // ---- forward, with failover across the candidate chain ----
+    // No-skip policy: every candidate is attempted in order (sticky winner
+    // first). Failures only reorder FUTURE requests via the sticky lane —
+    // nothing here removes a key from rotation; the client owns backoff
+    // and always receives the real upstream error.
     for (const cand of candidates.slice(0, LIMITS.maxFailoverAttempts)) {
-      if (keyBlockedNow(cand.key.id)) continue;
+      attemptsMade++;
       lastAttempted = cand;
       // Translated candidates serve requests through the provider's
-      // other-protocol endpoint (the protocol bridge, every direction);
+      // other-protocol endpoint (the gateway IR, every direction);
       // everything else is byte-faithful pass-through on its own
       // capability URL.
       const via = cand.via;
@@ -1039,16 +1074,25 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       if (cand.translated && route.upstreamPath === "/messages/count_tokens" && bodyJson) {
         const h = baseHeaders(req);
         h.set("Content-Type", "application/json; charset=utf-8");
-        markProviderKeyOk(cand.key);
+        h.set("x-gateway-attempts", String(attemptsMade));
+        if (stickyLane) {
+          stickySet(stickyLane, {
+            providerId: cand.provider.row.id,
+            keyId: cand.key.id,
+            upstreamModel: cand.upstreamModel,
+            via: cand.via,
+          });
+        }
+        noteProviderKeyOk(cand.key);
         record(
-          { inTok: estimateBodyTokens(bodyJson), cacheTok: 0, outTok: 0, model: "", estimated: true },
+          { inTok: estimateBodyTokens(bodyJson, proto), cacheTok: 0, outTok: 0, model: "", estimated: true },
           200,
           Math.round(performance.now() - started),
           false,
           cand,
         );
         return new Response(
-          JSON.stringify({ input_tokens: estimateBodyTokens(bodyJson) }),
+          JSON.stringify({ input_tokens: estimateBodyTokens(bodyJson, proto) }),
           { status: 200, headers: h },
         );
       }
@@ -1056,7 +1100,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // Byte-fidelity rule: the original request bytes go upstream untouched;
       // the only per-attempt mutation is the router-mode model rewrite
       // (each failover target may name the model differently). Translated
-      // attempts instead carry the bridge-converted body.
+      // attempts instead carry the IR-converted body.
       const upstreamPath = cand.translated
         ? via === "anthropic"
           ? "/messages"
@@ -1067,32 +1111,24 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // Byte-fidelity rule: the original request bytes go upstream untouched;
       // the only per-attempt mutation is the router-mode model rewrite
       // (each failover target may name the model differently). Translated
-      // attempts instead carry the bridge-converted body.
+      // attempts instead carry the IR-converted body.
       let attemptBody = bodyText;
       if (cand.translated && bodyJson) {
         const withModel =
           cand.upstreamModel && (bodyJson as any).model !== cand.upstreamModel
             ? { ...bodyJson, model: cand.upstreamModel }
             : bodyJson;
+        // All translated requests go through the gateway IR: decode the
+        // ingress protocol once, encode to the attempt's egress protocol.
+        // Same-protocol attempts are translated too (dialects differ).
         try {
           const req43 = withModel as Record<string, unknown>;
-          const converted =
-            proto === "responses"
-              ? via === "openai"
-                ? responsesToChat(req43)
-                : await responsesToAnthropic(req43)
-              : proto === "openai"
-                ? via === "anthropic"
-                  ? await openAIChatToAnthropic(req43)
-                  : chatToResponsesRequest(req43)
-                : via === "openai"
-                  ? anthropicToOpenAI(req43)
-                  : anthropicToResponsesRequest(req43);
-          attemptBody = JSON.stringify(converted);
+          const ir = await decodeToIR(proto as IRProto, req43);
+          attemptBody = JSON.stringify(encodeIR(via as IRProto, ir, cand.upstreamModel));
         } catch (e) {
           // Client-caused conversion failure (bad image URL, missing
           // tool_call_id): fail fast as 400 with no failover.
-          markProviderKeyOk(cand.key);
+          noteProviderKeyOk(cand.key);
           record(
             { inTok: 0, cacheTok: 0, outTok: 0, model: "", estimated: false },
             400,
@@ -1113,6 +1149,31 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // reject `temperature`): drop top-level keys from the final upstream
       // body — native and translated attempts alike.
       attemptBody = stripBlockedParams(attemptBody, cand.provider.row);
+      // Universal normalization (the IR pass): EVERY attempt — including
+      // same-protocol ("passthrough") ones — is normalized for its TARGET:
+      // output-limit key rename, over-long tool-id compaction, narrow-block
+      // filtering. Compliant bodies pass through untouched (same bytes), so
+      // well-behaved providers see zero change; cross-dialect replays
+      // (failover/model-swap, accumulated prefixes) get fixed per target.
+      // See server/proxy/target-profile.ts.
+      if (bodyJson) {
+        try {
+          const parsed = JSON.parse(attemptBody) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const normalized = normalizeAttemptBody(parsed, {
+              openai_base_url: cand.provider.row.openai_base_url,
+              anthropic_base_url: cand.provider.row.anthropic_base_url,
+              responses_base_url: cand.provider.row.responses_base_url,
+              strip_params: cand.provider.row.strip_params,
+              via,
+              upstreamModel: cand.upstreamModel || (parsed as any).model,
+            });
+            if (normalized !== parsed) attemptBody = JSON.stringify(normalized);
+          }
+        } catch {
+          // Non-JSON bodies go upstream untouched.
+        }
+      }
 
       const upstreamUrl = `${base}${upstreamPath}`;
       const controller = new AbortController();
@@ -1153,7 +1214,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // provider trouble.
         if (!clientDisconnected) {
           breakerFail(breakerId);
-          markProviderKeyFailure(cand.key, "transient");
+          noteProviderKeyFailure(cand.key, "transient");
           console.error(`[PROXY] upstream fetch failed (${upstreamUrl}):`, (e as Error).name);
           lastFailure = { kind: "network", status: timedOut ? 504 : 502, timedOut };
           continue;
@@ -1171,8 +1232,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
       if (upstream.status >= 400) {
         // Failover happens BEFORE a single byte reaches the client: consume
-        // the (capped) error body, classify it, then either mark this key
-        // and move to the next candidate, or deliver the error untouched.
+        // the (capped) error body, classify it, then either move to the
+        // next candidate or deliver the error untouched. Failures are only
+        // recorded (audit + visible counter) — the key stays in rotation
+        // and the client owns backoff (it gets the real error + Retry-After).
         const peekTimeout = setTimeout(
           () => controller.abort(new Error("error peek timeout")),
           LIMITS.upstreamNonStreamTimeoutMs,
@@ -1195,16 +1258,20 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
           continue;
         }
         if (cls) {
-          markProviderKeyFailure(cand.key, cls);
+          // Fail-able (billing/auth/rate_limit/transient): record it and
+          // try the next candidate in THIS request. The key is NOT removed
+          // from rotation — the next request still tries everyone (sticky
+          // winner first).
+          noteProviderKeyFailure(cand.key, cls);
           lastFailure = { kind: "upstream", status: upstream.status, body: errBody, headers: upstream.headers };
           continue;
         }
         // Client-caused rejection (bad request, too large, ...): every other
         // candidate would answer the same — deliver as-is, no failover. The
-        // key itself clearly works, so its transient counters reset.
+        // key itself clearly works, so its visible failure counter resets.
         // Translated attempts are re-enveloped so the client still sees the
         // protocol it asked for.
-        markProviderKeyOk(cand.key);
+        noteProviderKeyOk(cand.key);
         const ct = upstream.headers.get("content-type") || "";
         record(
           parseBufferedUsage(ct, errBody, cand.translated, cand.via),
@@ -1216,15 +1283,27 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         const errOut = reEnvelopeError(proto, cand.via, upstream.status, errBody);
         return new Response(errOut, {
           status: upstream.status,
-          headers: buildClientHeaders(upstream.headers, requestId, req),
+          headers: buildClientHeaders(upstream.headers, requestId, req, { attemptsMade }),
         });
       }
 
       // ---- success: deliver this candidate's response ----
-      markProviderKeyOk(cand.key);
+      noteProviderKeyOk(cand.key);
+      if (stickyLane) {
+        // This candidate answered: future requests on this lane try it
+        // first (TTL sliding). Streams set it now, at first byte — the
+        // winner proved reachable; mid-stream failures can't fail over
+        // anyway (headers already sent).
+        stickySet(stickyLane, {
+          providerId: cand.provider.row.id,
+          keyId: cand.key.id,
+          upstreamModel: cand.upstreamModel,
+          via: cand.via,
+        });
+      }
       const contentType = upstream.headers.get("content-type") || "";
       const isSse = contentType.includes("text/event-stream");
-      const clientHeaders = buildClientHeaders(upstream.headers, requestId, req);
+      const clientHeaders = buildClientHeaders(upstream.headers, requestId, req, { attemptsMade });
 
       // ---- streaming relay ----
       if (isSse && upstream.body) {
@@ -1232,35 +1311,21 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // the outer finally must not free it when we hand back the Response.
         slotHeldByStream = true;
 
-        // Translated streams convert between SSE dialects on the fly;
-        // usage comes from the translator (terminal chunk), with the
+        // EVERY stream — native or translated — flows through the generic IR
+        // stream translator (any upstream SSE -> any client SSE). No legacy
+        // passthrough meter: same-protocol dialects still differ (usage
+        // shapes, reasoning fields), so the translator normalizes those too.
+        // Usage comes from the translator (terminal chunk), with the
         // request-body estimate as the input fallback.
         const modelName = routedPublicModel ?? String((bodyJson as any)?.model ?? "");
-        const translator = !cand.translated
-          ? null
-          : proto === "responses"
-            ? cand.via === "openai"
-              ? new ChatToResponsesStream(modelName)
-              : new AnthropicToResponsesStream(modelName)
-            : proto === "openai"
-              ? cand.via === "anthropic"
-                ? new AnthropicToOpenAIStream(modelName)
-                : new ResponsesToChatStream(modelName)
-              : cand.via === "openai"
-                ? new OpenAIToAnthropicStream(modelName)
-                : new ResponsesToAnthropicStream(modelName);
-        const meter = translator ? null : new StreamMeter(proto);
+        const translator = new IRStreamTranslator(cand.via as IRProto, proto as IRProto, modelName);
         let counted = false;
         const finalize = (status: number) => {
           if (counted) return;
           counted = true;
-          if (translator) {
-            const u = translator.result();
-            if (u.estimated && bodyJson) u.inTok = estimateBodyTokens(bodyJson);
-            record(u, status, Math.round(performance.now() - started), true, cand);
-          } else {
-            record(meter!.result(), status, Math.round(performance.now() - started), true, cand);
-          }
+          const u = translator.result();
+          if (u.estimated && bodyJson) u.inTok = estimateBodyTokens(bodyJson, proto);
+          record(u, status, Math.round(performance.now() - started), true, cand);
         };
 
         const idleLimit = LIMITS.proxyStreamIdleMs;
@@ -1302,12 +1367,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
             try {
               const { done, value } = await reader.read();
               if (done) {
-                if (translator) {
-                  try {
-                    for (const piece of translator.flush()) sink.enqueue(piece);
-                  } catch {
-                    /* terminal flush is best-effort */
-                  }
+                try {
+                  for (const piece of translator.flush()) sink.enqueue(piece);
+                } catch {
+                  /* terminal flush is best-effort */
                 }
                 finalize(req.signal.aborted ? 499 : upstream.status);
                 cleanup();
@@ -1316,31 +1379,26 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
               }
               if (value && value.length) {
                 resetIdle();
-                if (translator) {
-                  let emitted = 0;
-                  for (const piece of translator.feed(value)) {
-                    sink.enqueue(piece);
-                    emitted++;
-                  }
-                  if (emitted === 0 && !translator.isDone) {
-                    // Bun.serve stops pulling a response stream whose pulls
-                    // enqueue nothing, which would starve the upstream read
-                    // while the translator is still buffering (e.g. long
-                    // reasoning head with no client-visible events yet).
-                    // An SSE comment keeps the pump alive and is ignored by
-                    // every SSE client dialect.
-                    sink.enqueue(SSE_KEEPALIVE);
-                  }
-                  if (translator.isDone) {
-                    finalize(upstream.status);
-                    cleanup();
-                    closeSink(sink);
-                    reader.cancel().catch(() => {});
-                    return;
-                  }
-                } else {
-                  meter!.feed(value); // stats only — the chunk itself goes out as-is
-                  sink.enqueue(value);
+                let emitted = 0;
+                for (const piece of translator.feed(value)) {
+                  sink.enqueue(piece);
+                  emitted++;
+                }
+                if (emitted === 0 && !translator.isDone) {
+                  // Bun.serve stops pulling a response stream whose pulls
+                  // enqueue nothing, which would starve the upstream read
+                  // while the translator is still buffering (e.g. long
+                  // reasoning head with no client-visible events yet).
+                  // An SSE comment keeps the pump alive and is ignored by
+                  // every SSE client dialect.
+                  sink.enqueue(SSE_KEEPALIVE);
+                }
+                if (translator.isDone) {
+                  finalize(upstream.status);
+                  cleanup();
+                  closeSink(sink);
+                  reader.cancel().catch(() => {});
+                  return;
                 }
               }
             } catch {
@@ -1403,27 +1461,42 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
       if (cand.translated) {
         const modelName = routedPublicModel ?? String((bodyJson as any)?.model ?? "");
-        const converted =
-          proto === "responses"
-            ? cand.via === "openai"
-              ? chatToResponsesBody(respText, modelName)
-              : anthropicToResponsesBody(respText, modelName)
-            : proto === "openai"
-              ? cand.via === "anthropic"
-                ? anthropicToOpenAIBody(respText, modelName)
-                : responsesToChatBody(respText, modelName)
-              : cand.via === "openai"
-                ? openAIToAnthropicBody(respText, modelName)
-                : responsesToAnthropicBody(respText, modelName);
-        const h = buildClientHeaders(upstream.headers, requestId, req);
+        // All translated buffered responses go through the gateway IR:
+        // decode the upstream protocol once, encode to the client protocol.
+        // Adding protocol N+1 only needs one decoder + one encoder here.
+        // No legacy fallback: a body the IR cannot parse is a gateway bug —
+        // surface it loudly (502) instead of silently serving a wrong shape.
+        let converted: string;
+        try {
+          const irr = decodeResponseToIR(cand.via as IRProto, respText, modelName);
+          converted = encodeResponseFromIR(proto as IRProto, irr, modelName);
+        } catch (e) {
+          record(
+            { inTok: 0, cacheTok: 0, outTok: 0, model: modelName, estimated: true },
+            502,
+            Math.round(performance.now() - started),
+            false,
+            cand,
+          );
+          return envelopeError(proto, 502, `translation failure: ${(e as Error).message || "unparseable upstream body"}`, "api_error", req);
+        }
+        const h = buildClientHeaders(upstream.headers, requestId, req, { attemptsMade });
         h.set("Content-Type", "application/json; charset=utf-8");
         return new Response(converted, { status: upstream.status, headers: h });
       }
       return new Response(respText, { status: upstream.status, headers: clientHeaders });
     }
 
-    // ---- every candidate failed (or was skipped) ----
+    // ---- every candidate failed ----
+    // No-skip policy: with nothing skipped, the only way here with zero
+    // attempts is an open circuit breaker on every candidate's lane. The
+    // client still gets the last real upstream error when there is one.
     const finalLatency = Math.round(performance.now() - started);
+    if (stickyLane && attemptsMade > 0) {
+      // Nothing answered: never pin the lane to a dead winner — the next
+      // request restarts from priority order.
+      stickyClear(stickyLane);
+    }
     if (lastFailure?.kind === "upstream") {
       // Deliver the most recent UPSTREAM error (sanitized headers as always):
       // clients want the real cause (e.g. insufficient_quota), not a 503.
@@ -1438,7 +1511,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         lastAttempted!,
       );
       const outBody = reEnvelopeError(proto, lastAttempted!.via, f.status, f.body);
-      return new Response(outBody, { status: f.status, headers: buildClientHeaders(f.headers, requestId, req) });
+      return new Response(outBody, { status: f.status, headers: buildClientHeaders(f.headers, requestId, req, { attemptsMade }) });
     }
     if (lastFailure?.kind === "network") {
       recordUsage({
@@ -1456,11 +1529,13 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         "api_error",
       );
     }
-    // Every candidate was skipped (cooling-down keys / open breakers).
+    // No attempts reached an upstream at all (every candidate lane is
+    // circuit-broken right now). This is the ONLY path that still 503s:
+    // a provider-side storm guard, not key state.
     return envelopeError(
       proto,
       503,
-      "no upstream candidate is currently available (keys cooling down or providers circuit-broken)",
+      "no upstream candidate is currently reachable (providers circuit-broken)",
       "api_error",
       req,
     );

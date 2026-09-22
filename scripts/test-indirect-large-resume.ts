@@ -2,7 +2,7 @@
 // Visibility overrides test application suspension; CDP freeze additionally
 // exercises real queued network traffic while browser execution is suspended.
 import assert from "node:assert/strict";
-import { estimateTokenCount } from "tokenx";
+import { countTextTokens } from "../server/tokens";
 import solidPlugin from "../plugins/solid-plugin";
 import iconifyPlugin from "../plugins/iconify-solid-plugin";
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
@@ -36,7 +36,7 @@ function step(i: number) {
   ] };
 }
 const history = Array.from({ length: 750 }, (_, i) => step(i));
-const estimatedTokens = history.reduce((n, m) => n + m.content.reduce((sum, c) => sum + estimateTokenCount(c.summary || c.text || c.content || ""), 0), 0);
+const estimatedTokens = history.reduce((n, m) => n + m.content.reduce((sum, c) => sum + countTextTokens(c.summary || c.text || c.content || ""), 0), 0);
 assert(estimatedTokens >= 500_000, "stress fixture must exceed 500k estimated context tokens");
 const send = (message: unknown) => socket.send(JSON.stringify(message));
 const emit = (event: unknown) => send({ type: "agent_event", sessionId: "test", event });

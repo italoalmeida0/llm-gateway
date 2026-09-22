@@ -5,6 +5,7 @@ import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { DailyChart } from "../../charts";
 import {
+  Badge,
   Card,
   CardHeader,
   EmptyState,
@@ -12,6 +13,7 @@ import {
   Segmented,
   Select,
   StatCard,
+  Tooltip,
   fmtNum,
   windowLabel,
 } from "../../ui";
@@ -40,6 +42,21 @@ interface StatsDto {
     activeKeys: number;
     providers: number;
   };
+  kvCache?: KvCacheSnapshot;
+}
+
+/** btdby4 KV provider snapshot (server memoizes it for 60s). */
+interface KvCacheSnapshot {
+  namespaces: number;
+  nodes: number;
+  branches: number;
+  tokens: number;
+  bytes: number;
+  max_bytes: number;
+  available_bytes: number;
+  ttl_seconds: number;
+  captured_at: number;
+  stale: boolean;
 }
 
 interface UserRow extends Buckets {
@@ -84,6 +101,49 @@ const modelCols: ColDef<ModelRow>[] = [
   { field: "cache_tok", headerName: "Cache", width: 110, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
   { field: "out_tok", headerName: "Out", width: 110, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: tokenFormatter },
 ];
+
+/** Compact MB formatter for the KV chip (10.4/400 MB). */
+function fmtMB(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 100 ? String(Math.round(mb)) : mb.toFixed(1);
+}
+
+/** KV-cache chip for the Global overview header: used/cap % + TTL.
+ * The snapshot rides the stats payload (memoized server-side for 60s),
+ * so the chip never polls — it renders what arrived with the page. */
+function KvCacheChip(props: { snapshot?: KvCacheSnapshot }) {
+  const snap = () => props.snapshot;
+  const used = () => snap()?.bytes ?? 0;
+  const cap = () => Math.max(1, snap()?.max_bytes ?? 1);
+  const pct = () => Math.min(100, (used() / cap()) * 100);
+  const ttlMin = () => Math.round((snap()?.ttl_seconds ?? 600) / 60);
+  const tone = () => (pct() >= 90 ? "red" : pct() >= 70 ? "amber" : "zinc");
+  const tip = () => {
+    const s = snap();
+    if (!s) return "KV cache snapshot unavailable";
+    const age = Math.max(0, Math.round((Date.now() - s.captured_at) / 1000));
+    return (
+      <span>
+        Prefix-cache kept inside btdby4 for zero-usage inference
+        <br />
+        {s.namespaces} namespace(s) · {s.nodes} node(s) · {s.branches} branche(s) · {fmtNum(s.tokens)} token(s)
+        <br />
+        Snapshot {age}s old (refreshes every 60s)
+      </span>
+    );
+  };
+  return (
+    <Show when={snap()}>
+      <Tooltip content={tip()}>
+        <span class="inline-flex items-center">
+          <Badge tone={tone()}>
+            KV {fmtMB(used())}/{fmtMB(cap())} MB {pct() < 10 && pct() > 0 ? pct().toFixed(1) : Math.round(pct())}% · TTL {ttlMin()} MIN
+          </Badge>
+        </span>
+      </Tooltip>
+    </Show>
+  );
+}
 
 /** Card heading split in two tight spans so long windows never wrap. */
 function CardLabel(props: { title: string; window: string }) {
@@ -180,6 +240,9 @@ export default function AdminStatsPage() {
         subtitle="All users, all keys"
         right={
           <div class="flex flex-wrap items-end gap-3">
+            <div class="pb-0.5">
+              <KvCacheChip snapshot={stats()?.kvCache} />
+            </div>
             <div class="w-56">
               <Select
                 label="Provider"

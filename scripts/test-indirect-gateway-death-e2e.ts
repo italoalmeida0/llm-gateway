@@ -1,20 +1,22 @@
 // Gateway-death chaos E2E: kill the gateway (WS + mirror + manifest,
-// all served by one Bun server) at each handoff phase and assert the
-// daemon always lands in a safe state — never a torn slot, never a
-// stuck freeze, never a lost turn.
+// all served by one Bun server) at each brutal-update phase and assert the
+// daemon always lands in a safe state — never a torn slot, never a stuck
+// updater, never a lost turn.
 //
 // Phases (one daemon per phase, fresh work dir each):
 //   P0 download   - gateway dies mid launcher download -> update_failed,
-//                   unfrozen, turn keeps running, retry works after rebirth
-//   P1 frozen     - gateway dies while frozen/copying -> takeover fails
-//                   (child launcher can't fetch) -> abort -> unfreeze +
-//                   turn resumes in SAME process
-//   P2 takeover   - gateway dies after copy, during new-daemon fetch ->
-//                   same abort path, active slot untouched
-//   P4 promote    - gateway dies right at promote (new daemon can't
-//                   shadow-connect) -> old daemon must STAY ALIVE serving
-//                   the active slot (rollback by survival), frontend sees
-//                   update_failed, turn resumes
+//                   old daemon keeps serving, retry works after rebirth
+//   P1 launcher   - mirror dies MID launcher download (truncated bytes) ->
+//                   self-verify fails -> update_failed, slot cleaned
+//   P2 updater    - gateway dies while --update-start runs (copy/launcher
+//                   phase) -> launcher --update can't fetch -> writes the
+//                   fail file -> waiter cleans the slot, reports
+//                   update_failed, rebirths as a normal daemon on the
+//                   untouched active slot
+//   P4 promote    - gateway dies right at promote (--update-end's hello
+//                   fails) -> promote still runs LOCAL-FIRST: updater
+//                   killed, active flips, old slot cleaned; the WS just
+//                   reconnects later (same as booting offline)
 //   P5 rebirth    - gateway comes back -> daemon reconnects (backoff loop),
 //                   checkNow re-arms, update can be retried to success
 //
@@ -58,17 +60,17 @@ async function bootWorld(tag: string, opts: { mirrorDelayMs?: number; mirrorFail
   const newBin = join(work, "daemon-new");
   const launcherBin = join(work, "launcher-new");
   const launcherOldBin = join(work, "launcher-old");
-  build("./cmd/daemon", "vG1", oldBin, "daemonVersion");
-  build("./cmd/daemon", "vG2", newBin, "daemonVersion");
-  build("./cmd/launcher", "vG1", launcherOldBin, "launcherVersion");
-  build("./cmd/launcher", "vG2", launcherBin, "launcherVersion");
+  build("./cmd/daemon", "9.9.8", oldBin, "daemonVersion");
+  build("./cmd/daemon", "9.9.9", newBin, "daemonVersion");
+  build("./cmd/launcher", "9.9.8", launcherOldBin, "launcherVersion");
+  build("./cmd/launcher", "9.9.9", launcherBin, "launcherVersion");
 
   const { copyFileSync, writeFileSync: wfs, readFileSync } = await import("node:fs");
   copyFileSync(newBin, join(mirror, DAEMON_BIN));
   copyFileSync(launcherBin, join(mirror, LAUNCHER_BIN));
   wfs(join(mirror, "versions.json"), JSON.stringify({
-    daemon: { version: "vG2", assets: { [PLAT]: DAEMON_BIN }, sums: {} },
-    launcher: { version: "vG2", assets: { [PLAT]: LAUNCHER_BIN }, sums: {} },
+    daemon: { version: "9.9.9", assets: { [PLAT]: DAEMON_BIN }, sums: {} },
+    launcher: { version: "9.9.9", assets: { [PLAT]: LAUNCHER_BIN }, sums: {} },
   }));
 
   copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", DAEMON_BIN));
@@ -104,17 +106,25 @@ async function bootWorld(tag: string, opts: { mirrorDelayMs?: number; mirrorFail
   const events: any[] = [];
   const daemonSockRef: { ws: any } = { ws: null };
   const connects: number[] = [];
+  const gwBox: { pendingUpdating: boolean } = { pendingUpdating: false };
   const gw = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     fetch: (req, server) => {
       if (new URL(req.url).pathname === "/api/indirect-code/daemon/ws") {
+        // Bun drops custom props on upgrade: stash for the next open.
+        gwBox.pendingUpdating = new URL(req.url).searchParams.get("updating") === "1";
         if (server.upgrade(req)) return undefined as any;
-        return new Response("up", { status: 426 });
+        return new Response("up", { status: 404 });
       }
       return new Response("nf", { status: 404 });
     },
     websocket: {
-      open: (ws) => { connects.push(Date.now()); daemonSockRef.ws = ws; },
+      open: (ws) => {
+        connects.push(Date.now());
+        daemonSockRef.ws = ws;
+        if (gwBox.pendingUpdating) events.push({ type: "__updating_reconnect__" });
+        gwBox.pendingUpdating = false;
+      },
       message: (_ws, data) => { try { events.push(JSON.parse(String(data))); } catch {} },
       close: () => { daemonSockRef.ws = null; },
     },
@@ -126,8 +136,11 @@ async function bootWorld(tag: string, opts: { mirrorDelayMs?: number; mirrorFail
   }));
 
   const env = { ...process.env, INDIRECT_REPO_RAW: `http://127.0.0.1:${mirrorSrv.port}`, INDIRECT_GATEWAY: "" };
-  const proc = spawn(join(root, "slots", "slot-a", "bin", LAUNCHER_BIN),
-    ["--data-dir", root], { env, stdio: ["ignore", "pipe", "pipe"] });
+  // Canonical boot: dataDir = the slot dir (the launcher layout with
+  // dataDir=root only resolves via the legacy slots/ detection).
+  const proc = spawn(oldBin,
+    ["--data-dir", join(root, "slots", "slot-a"), "--config", join(root, "slots", "slot-a", "config.json"), "--slot", "a"],
+    { env, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   proc.stdout.on("data", (d) => (out += d.toString()));
   proc.stderr.on("data", (d) => (out += d.toString()));
@@ -148,11 +161,6 @@ async function bootWorld(tag: string, opts: { mirrorDelayMs?: number; mirrorFail
       rmSync(work, { recursive: true, force: true });
     },
   };
-}
-
-function lastEvent(w: World, type: string) {
-  const f = w.events.filter((e: any) => e.type === type);
-  return f.length ? f[f.length - 1] : null;
 }
 
 async function waitFor(w: World, type: string, pred: (e: any) => boolean, ms: number, label: string) {
@@ -179,17 +187,15 @@ async function main() {
       // Kill the mirror too: total blackout.
       w.mirrorSrv.stop();
       await sleep(2000);
-      // Nothing should be frozen; daemon must still be alive (process).
+      // Nothing updating; daemon must still be alive (process).
       assert(w.proc.exitCode === null, "[p0] daemon died on gateway loss");
-      const f = lastEvent(w, "daemon_update");
-      assert(!f || !f.frozen, "[p0] frozen with no gateway");
-      log("p0", "daemon alive + unfrozen under total blackout — PASS");
+      log("p0", "daemon alive, nothing updating under total blackout — PASS");
     } finally { await w.cleanup(); }
   }
 
   // ---- P1: mirror dies MID launcher download (truncated bytes) ----
   // Gateway alive (can send apply), mirror serves garbage: phase-0
-  // self-verify must fail -> update_failed + unfrozen + turn intact.
+  // self-verify must fail -> update_failed + turn intact.
   {
     const w = await bootWorld("p1-trunc", { mirrorFailAfterBytes: 1024 });
     try {
@@ -198,64 +204,68 @@ async function main() {
       const failed = await waitFor(w, "update_failed", () => true, 90000, "p1");
       log("p1", `update_failed: ${String((failed as any)?.reason || "").slice(0, 160)}`);
       assert(/verify|mismatch|small|suspicious|download/i.test(String((failed as any)?.reason || "")), "[p1] expected verify/download failure");
-      const st = await waitFor(w, "daemon_update", (e: any) => !e.frozen, 30000, "p1-unfreeze");
-      void st;
       assert(w.proc.exitCode === null, "[p1] daemon died on truncated mirror");
       assert(existsSync(join(w.root, "slots", "slot-a", "sessions", "s1.jsonl")), "[p1] active session intact");
       assert(!existsSync(join(w.root, "slots", "slot-b")), "[p1] no torn inactive slot left");
-      log("p1", "truncated download -> clean abort, unfrozen, session intact — PASS");
+      log("p1", "truncated download -> clean abort, session intact — PASS");
     } finally { await w.cleanup(); }
   }
 
-  // ---- P2: gateway dies WHILE FROZEN (during copy/takeover) ----
-  // Slow mirror keeps the handoff frozen a while; kill WS + mirror
-  // mid-freeze: takeover child can't fetch -> abort -> unfreeze +
-  // update_failed + turn resumes in the SAME process.
+  // ---- P2: gateway dies WHILE THE UPDATER RUNS (copy/launcher phase) ----
+  // Slow mirror keeps the updater busy a while; kill WS + mirror mid-run:
+  // launcher --update can't fetch -> fail file -> waiter cleans the slot,
+  // reports update_failed, rebirths as a normal daemon on slot-a.
   {
     const w = await bootWorld("p2", { mirrorDelayMs: 3000 });
     try {
       sendApply(w);
-      log("p2", "apply sent (slow mirror keeps it frozen a while)");
-      await waitFor(w, "daemon_update", (e: any) => !!e.frozen, 90000, "p2-freeze");
-      log("p2", "frozen observed — killing gateway + mirror mid-handoff");
+      log("p2", "apply sent (slow mirror keeps the updater busy a while)");
+      await waitFor(w, "__updating_reconnect__", () => true, 90000, "p2-updater");
+      log("p2", "updater running — killing gateway + mirror mid-update");
       w.gw.stop();
       w.mirrorSrv.stop();
+      const failed = await waitFor(w, "update_failed", () => true, 180000, "p2-failed");
+      log("p2", `update_failed: ${String((failed as any)?.reason || "").slice(0, 160)}`);
       await sleep(5000);
-      assert(w.proc.exitCode === null, "[p2] daemon died when gateway died mid-handoff");
       assert(existsSync(join(w.root, "slots", "slot-a", "sessions", "s1.jsonl")), "[p2] active session intact");
       const { readFileSync: rf } = await import("node:fs");
       const active = rf(join(w.root, "slots", "active"), "utf8").trim();
       assert.equal(active, "a", `[p2] active slot flipped under death (got ${active})`);
-      log("p2", "gateway death mid-handoff -> daemon alive, slot-a intact, active=a — PASS");
+      log("p2", "gateway death mid-update -> fail file, slot cleaned, rebirth on slot-a — PASS");
     } finally { await w.cleanup(); }
   }
 
-  // ---- P4: gateway dies AT PROMOTE (new daemon can't shadow-connect) ----
-  // The new launcher fetched everything BEFORE the death; the new daemon
-  // boots but its WS (shadow + promote) hits a dead gateway -> it can
-  // never prove serving -> old daemon must STAY ALIVE on slot-a
-  // (rollback by survival). Assert: old process alive, active=a,
-  // session intact, no torn slot-b serving traffic.
+  // ---- P4: gateway dies AT PROMOTE (--update-end's hello fails) ----
+  // The launcher fetched everything BEFORE the death; --update-end boots
+  // but its hello hits a dead gateway -> promote still runs LOCAL-FIRST
+  // (updater killed, active flips, old slot cleaned). Assert: active=b,
+  // new session intact, old slot gone — the WS reconnects when the
+  // gateway returns (same as booting offline).
   {
     const w = await bootWorld("p4");
     try {
       sendApply(w);
-      log("p4", "apply sent; waiting for copy to finish, then killing gateway at promote...");
-      await waitFor(w, "daemon_update", (e: any) => !!e.frozen, 90000, "p4-freeze");
-      // Copy is fast locally; takeover (fetch+standby+proof) takes ~10s.
-      // Kill the gateway 5s after freeze: fetches likely done, the new
-      // daemon's shadow WS + serving proof face a dead gateway.
+      log("p4", "apply sent; waiting for the updater to run, then killing gateway at promote...");
+      await waitFor(w, "__updating_reconnect__", () => true, 90000, "p4-updater");
+      // Copy is fast locally; launcher fetch takes ~10s. Kill the gateway
+      // 5s after the updater owns the host: fetches likely done,
+      // --update-end's hello faces a dead gateway.
       await sleep(5000);
       w.gw.stop();
       w.mirrorSrv.stop();
       log("p4", "gateway killed at promote window");
-      await sleep(15000);
-      assert(w.proc.exitCode === null, "[p4] old daemon died at promote with dead gateway");
       const { readFileSync: rf2 } = await import("node:fs");
-      const active = rf2(join(w.root, "slots", "active"), "utf8").trim();
-      assert.equal(active, "a", `[p4] active slot flipped with dead gateway (got ${active})`);
-      assert(existsSync(join(w.root, "slots", "slot-a", "sessions", "s1.jsonl")), "[p4] active session intact");
-      log("p4", "promote with dead gateway -> old daemon survives on slot-a — PASS");
+      const t0 = Date.now();
+      let active = "";
+      while (Date.now() - t0 < 120000) {
+        try { active = rf2(join(w.root, "slots", "active"), "utf8").trim(); } catch {}
+        if (active === "b") break;
+        await sleep(1000);
+      }
+      assert.equal(active, "b", `[p4] promote did not flip with dead gateway (got ${active})`);
+      assert(existsSync(join(w.root, "slots", "slot-b", "sessions", "s1.jsonl")), "[p4] new session intact");
+      assert(!existsSync(join(w.root, "slots", "slot-a")), "[p4] old slot survived promote");
+      log("p4", "promote with dead gateway -> local-first flip to slot-b — PASS");
     } finally { await w.cleanup(); }
   }
 

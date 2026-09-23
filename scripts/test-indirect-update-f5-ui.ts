@@ -3,9 +3,9 @@
 // WS state does not — exactly like closing/reopening the tab).
 //
 // Cases:
-//   A. h1 frozen -> F5 on h1 -> daemon re-broadcasts frozen -> overlay RETURNS
-//   B. h1 frozen -> switch h2 -> F5 on h2 -> overlay must NOT appear
-//      (daemon for h2 reports unfrozen; stale h1 state must not leak)
+//   A. h1 updating -> F5 on h1 -> relay replays updating -> overlay RETURNS
+//   B. h1 updating -> switch h2 -> F5 on h2 -> overlay must NOT appear
+//      (h2 reports online; stale h1 state must not leak)
 //   C. h1 pending (apply clicked, no freeze yet) -> F5 -> daemon reports
 //      idle unfrozen -> lifecycle reconciles to idle, NO overlay, button live
 //   D. h1 updating + target reached (done missed) -> F5 -> reconciles done
@@ -34,20 +34,20 @@ import assert from "node:assert/strict";
    await settle();
  };
 
- // ---- A: frozen h1 -> F5 on h1 -> overlay RETURNS ----
+ // ---- A: h1 updating -> F5 on h1 -> overlay RETURNS ----
  await boot();
- await page.evaluate(() => (window as any).f5UI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 1, autoUpdate: true, frozen: true, freezeStage: "copying sessions" }));
+ await page.evaluate(() => { (window as any).f5UI.statuses["h1"] = "updating"; (window as any).f5UI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 1, autoUpdate: true }); });
  await settle();
  assert((await text()).includes("Updating one…"), "A: overlay before F5");
  await page.reload();
  await page.waitForFunction(()=>(window as any).f5UI?.noteUpdate);
  await settle();
- // Fresh boot: persisted state says updating, but nothing re-broadcast yet.
- // The page sends daemon_update_check onOpen; emulate the daemon answer:
- await page.evaluate(() => (window as any).f5UI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: true, frozen: true, freezeStage: "copying sessions" }));
+ // Fresh boot: statuses reset to online, persisted lifecycle says
+ // updating. The relay replays host_status updating to every frontend
+ // that connects mid-update; emulate that replay:
+ await page.evaluate(() => { (window as any).f5UI.statuses["h1"] = "updating"; (window as any).f5UI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: true }); });
  await settle();
- assert((await text()).includes("Updating one…"), "A: overlay returns after F5 + rebroadcast");
- assert((await text()).includes("copying sessions"), "A: stage survives F5");
+ assert((await text()).includes("Updating one…"), "A: overlay returns after F5 + replay");
 
  // ---- B: switch h2 -> F5 on h2 -> NO overlay ----
  await page.evaluate(() => (window as any).f5UI.setHostId("h2")); await settle();
@@ -56,9 +56,9 @@ import assert from "node:assert/strict";
  await page.waitForFunction(()=>(window as any).f5UI?.noteUpdate);
  await settle();
  // Boot lands on h1 again in the fixture (default signal); switch to h2
- // then emulate h2's daemon answering unfrozen.
+ // then emulate h2's host answering online.
  await page.evaluate(() => (window as any).f5UI.setHostId("h2")); await settle();
- await page.evaluate(() => (window as any).f5UI.noteUpdate("h2", { current: "1.0.0", available: "", checkedAt: 3, autoUpdate: true, frozen: false }));
+ await page.evaluate(() => (window as any).f5UI.noteUpdate("h2", { current: "1.0.0", available: "", checkedAt: 3, autoUpdate: true }));
  await settle();
  assert(!(await text()).includes("Updating"), "B: no overlay after F5 on clean host (stale h1 state must not leak)");
 
@@ -74,8 +74,9 @@ import assert from "node:assert/strict";
  await page.waitForFunction(()=>(window as any).f5UI?.noteUpdate);
  await settle();
  assert((await page.evaluate(()=>document.getElementById("lifecycle")?.textContent)) === "pending", "C: pending survives F5 until daemon answers");
- // Daemon answers idle/unfrozen (update never started): reconcile -> idle.
- await page.evaluate(() => (window as any).f5UI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 4, autoUpdate: true, frozen: false }));
+ // Host answers online WITHOUT update_done (ghost update: updater died
+ // mid-flight, re-pair, crash): reconcile -> idle, button live again.
+ await page.evaluate(() => { (window as any).f5UI.setOnline("h1"); (window as any).f5UI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 4, autoUpdate: true }); });
  await settle();
  assert(!(await text()).includes("Updating"), "C: no overlay for stale pending");
  assert((await page.evaluate(()=>document.getElementById("lifecycle")?.textContent)) === "idle", "C: lifecycle back to idle, button live again");
@@ -89,8 +90,8 @@ import assert from "node:assert/strict";
  await page.reload();
  await page.waitForFunction(()=>(window as any).f5UI?.noteUpdate);
  await settle();
- // Daemon now reports the NEW version, unfrozen (done event was missed).
- await page.evaluate(() => (window as any).f5UI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 5, autoUpdate: true, frozen: false }));
+ // Daemon now reports the NEW version, host online (done event was missed).
+ await page.evaluate(() => { (window as any).f5UI.statuses["h1"] = "online"; (window as any).f5UI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 5, autoUpdate: true }); });
  await settle();
  assert(!(await text()).includes("Updating"), "D: no overlay after done");
  assert((await page.evaluate(()=>document.getElementById("lifecycle")?.textContent)) === "done", "D: lifecycle done");
@@ -99,7 +100,7 @@ import assert from "node:assert/strict";
  // (The reported bug: after an update, the SAME host could never update
  // again without wiping localStorage — the finished row stuck with
  // lifecycle=done and the Update button never reappeared.)
- await page.evaluate(() => (window as any).f5UI.noteUpdate("h1", { current: "1.1.0", available: "1.2.0", checkedAt: 6, autoUpdate: true, frozen: false }));
+ await page.evaluate(() => (window as any).f5UI.noteUpdate("h1", { current: "1.1.0", available: "1.2.0", checkedAt: 6, autoUpdate: true }));
  await settle();
  assert((await page.evaluate(()=>document.getElementById("lifecycle")?.textContent)) === "idle", "E: lifecycle back to idle when a NEW version appears after done");
  assert(!(await text()).includes("Updating"), "E: no overlay for new version");

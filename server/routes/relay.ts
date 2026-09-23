@@ -5,8 +5,7 @@ import { jwtVerify, sha256Hex } from "../crypto";
 import { sendTurnPush, type TurnPush } from "../push";
 
 export type WsData =
-  | { type: "daemon"; hostId: string; userId: string }
-  | { type: "daemon-shadow"; hostId: string; userId: string }
+  | { type: "daemon"; hostId: string; userId: string; updating?: boolean }
   | { type: "client"; userId: string };
 
 const daemons = new Map<string, ServerWebSocket<WsData>>();
@@ -31,6 +30,18 @@ export function isHostOnline(hostId: string): boolean {
   return daemons.has(hostId);
 }
 
+// Hosts owned by a --update-start naive updater (brutal update protocol):
+// the daemon socket is registered + online, but the host serves no turns.
+// Ephemeral (in-memory only): a relay restart clears it and the next
+// daemon_update (frozen) broadcast re-establishes the frontend overlay.
+// A frontend connecting mid-update must be told the host is updating —
+// see the client open handler below + isHostUpdating (hosts REST overlay).
+const updatingHosts = new Map<string, string>(); // hostId -> userId
+
+export function isHostUpdating(hostId: string): boolean {
+  return updatingHosts.has(hostId);
+}
+
 export async function handleIndirectCodeUpgrade(
   path: string,
   req: Request,
@@ -38,9 +49,11 @@ export async function handleIndirectCodeUpgrade(
   server: Server<WsData>,
 ): Promise<Response | undefined> {
   // Daemon WebSocket: /api/indirect-code/daemon/ws?token=<daemonToken>
-  // Shadow prover: ?shadow=1 connects WITHOUT registering (takeover proof:
-  // the new daemon proves it serves while the old one still owns the host).
-  const isShadow = url.searchParams.get("shadow") === "1";
+  // Brutal updater: ?updating=1 registers like a normal daemon (it OWNS the
+  // host: pidfile + frozen daemon_update broadcasts) but the relay reports
+  // host_status "updating" instead of "online" so frontends show the
+  // update overlay instead of a live host.
+  const isUpdating = url.searchParams.get("updating") === "1";
   if (path === "/api/indirect-code/daemon/ws") {
     let token = url.searchParams.get("token") || "";
     if (!token) {
@@ -63,9 +76,7 @@ export async function handleIndirectCodeUpgrade(
     }
 
     const upgraded = server.upgrade(req, {
-      data: isShadow
-        ? { type: "daemon-shadow", hostId: host.id, userId: host.user_id }
-        : { type: "daemon", hostId: host.id, userId: host.user_id },
+      data: { type: "daemon", hostId: host.id, userId: host.user_id, updating: isUpdating },
     });
     if (upgraded) return undefined;
     return new Response("upgrade failed", { status: 400 });
@@ -104,11 +115,7 @@ export async function handleIndirectCodeUpgrade(
 
 export const remoteRelayWsHandlers = {
   open(ws: ServerWebSocket<WsData>) {
-    if (ws.data.type === "daemon-shadow") {
-      // Takeover prover: visible in logs only. Never registered, never
-      // routed, never flips status — the old daemon still owns the host.
-      console.log(`[RELAY] Daemon shadow prover: ${ws.data.hostId} (user: ${ws.data.userId})`);
-    } else if (ws.data.type === "daemon") {
+    if (ws.data.type === "daemon") {
       const { hostId, userId } = ws.data;
       daemons.set(hostId, ws);
 
@@ -117,13 +124,22 @@ export const remoteRelayWsHandlers = {
         "UPDATE remote_hosts SET status = 'online', last_seen_at = ? WHERE id = ?",
       ).run(now, hostId);
 
+      // Brutal updater owns the host: report "updating" (overlay), not
+      // "online" — UNLESS a fresh non-updating daemon already reclaimed
+      // it (update_done path reconnects without the flag). The flag rides
+      // on the socket (upgrade path is async, query is gone by open).
+      const updating = ws.data.type === "daemon" && ws.data.updating === true;
+      if (updating) updatingHosts.set(hostId, userId);
+      else updatingHosts.delete(hostId);
+      const hostState = updating ? "updating" : "online";
+
       // Notify connected clients of this user
       broadcastToUser(userId, {
         type: "host_status",
         hostId,
-        status: "online",
+        status: hostState,
       });
-      console.log(`[RELAY] Daemon online: ${hostId} (user: ${userId})`);
+      console.log(`[RELAY] Daemon ${hostState}: ${hostId} (user: ${userId})`);
     } else if (ws.data.type === "client") {
       const { userId } = ws.data;
       let set = clientsByUserId.get(userId);
@@ -136,6 +152,14 @@ export const remoteRelayWsHandlers = {
       try {
         ws.send(JSON.stringify({ type: "relay_connected", userId }));
       } catch {}
+      // A frontend connecting mid-update missed the updating broadcast:
+      // replay per-host updating state so the overlay shows immediately.
+      for (const [hostId, owner] of updatingHosts) {
+        if (owner !== userId) continue;
+        try {
+          ws.send(JSON.stringify({ type: "host_status", hostId, status: "updating" }));
+        } catch {}
+      }
     }
   },
 
@@ -148,9 +172,7 @@ export const remoteRelayWsHandlers = {
       return;
     }
 
-    if (ws.data.type === "daemon-shadow") {
-      return; // prover traffic never touches clients
-    } else if (ws.data.type === "daemon") {
+    if (ws.data.type === "daemon") {
       // Message originating from Daemon -> forward to user's web client(s)
       const { userId } = ws.data;
       broadcastToUser(userId, rawStr);
@@ -162,6 +184,27 @@ export const remoteRelayWsHandlers = {
       const hostId = parsed.hostId;
       if (!hostId || typeof hostId !== "string") return;
 
+      // The naive updater owns the host (brutal update): it holds no
+      // sessions and answers nothing useful. Block here — the relay is
+      // the doorman — instead of letting commands die inside a hollow
+      // process. Same error shape as offline so the frontend recovers
+      // the same way; only the message differs.
+      if (updatingHosts.has(hostId)) {
+        try {
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              hostId,
+              message: "Remote host is updating",
+              replyTo: parsed.type,
+              id: typeof parsed.id === "number" ? parsed.id : undefined,
+              requestId: typeof parsed.requestId === "string" ? parsed.requestId : undefined,
+              sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : undefined,
+            }),
+          );
+        } catch {}
+        return;
+      }
       const daemonWs = daemons.get(hostId);
       if (daemonWs && daemonWs.data.type === "daemon" && daemonWs.data.userId === ws.data.userId) {
         try {
@@ -189,12 +232,14 @@ export const remoteRelayWsHandlers = {
   },
 
   close(ws: ServerWebSocket<WsData>, code: number, _reason: string) {
-    if (ws.data.type === "daemon-shadow") {
-      console.log(`[RELAY] Daemon shadow prover gone: ${ws.data.hostId} (code: ${code})`);
-    } else if (ws.data.type === "daemon") {
+    if (ws.data.type === "daemon") {
       const { hostId, userId } = ws.data;
       if (daemons.get(hostId) === ws) {
         daemons.delete(hostId);
+        // The updating flag dies with the socket: the waiter either
+        // promotes (update_done, fresh non-updating connect follows) or
+        // fails (it reports update_failed itself before rebirthing).
+        updatingHosts.delete(hostId);
         const now = Date.now();
         db.prepare(
           "UPDATE remote_hosts SET status = 'offline', last_seen_at = ? WHERE id = ?",

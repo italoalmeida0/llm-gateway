@@ -114,8 +114,7 @@ func runCheckup(dataDir, daemonPath string) *checkReport {
 		r.add("datadir", true, dataDir, true)
 	}
 
-	// Stale pidfile: informational (the daemon handles takeover itself,
-	// but a stale file hints at an unclean shutdown).
+	// Stale pidfile: informational (a stale file hints at an unclean shutdown).
 	if raw, err := os.ReadFile(filepath.Join(dataDir, "daemon.pid")); err == nil {
 		pid := strings.TrimSpace(string(raw))
 		if pid != "" && !pidAlive(pid) {

@@ -42,12 +42,11 @@ func main() {
 	stopFlag := flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
 	connectFlag := flag.String("connect", "", "Pairing connect URL (forwarded to the daemon)")
 	nameFlag := flag.String("name", "", "Host display name (forwarded to the daemon)")
-	// Takeover mode uses its own flags (--from-slot etc.): intercept BEFORE
-	// flag.Parse(), which would exit on unknown flags.
+	// Intercept BEFORE flag.Parse(), which would exit on unknown flags.
 	for _, a := range os.Args[1:] {
-		if a == "--takeover" {
-			dataDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid := parseTakeoverFlags(os.Args[1:])
-			os.Exit(runTakeover(dataDir, fromSlot, toSlot, expectVersion, handoffFile, parentPid))
+		if a == "--update" {
+			rootDir, fromSlot, toSlot, expectVersion, oldVersion, failFile, doneFile, parentPid := parseUpdateFlags(os.Args[1:])
+			os.Exit(runUpdate(rootDir, fromSlot, toSlot, expectVersion, oldVersion, failFile, doneFile, parentPid))
 		}
 	}
 	flag.Parse()
@@ -148,8 +147,8 @@ func main() {
 
 	// 4. Run the daemon with --data-dir pointing AT THE SLOT (canonical:
 	// dataDir = <root>/slots/slot-x; sessions/config/pid are slot-local).
-	// Handoff restarts are driven by takeover (the NEW launcher runs the
-	// new daemon) — no exit-code protocol. Unexpected exits restart with
+	// Update restarts are driven by the brutal protocol (launcher --update
+	// spawns --update-end detached) — no exit-code protocol. Unexpected exits restart with
 	// backoff a few times (crash resilience), then give up.
 	daemonDataDir := slotDir
 	if daemonDataDir == "" {

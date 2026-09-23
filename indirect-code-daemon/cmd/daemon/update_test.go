@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestFetchManifestParse(t *testing.T) {
@@ -58,13 +59,17 @@ func TestAutoUpdateDefaultTrue(t *testing.T) {
 
 func TestBeginHandoffGuards(t *testing.T) {
 	d := testDaemon(t)
-	// No available version: no-op, never freezes.
+	// No available version: no-op, never spawns.
 	d.beginHandoff()
-	if d.isFrozen() {
-		t.Fatal("handoff without available must not freeze")
+	time.Sleep(100 * time.Millisecond)
+	st := d.updateChecker()
+	st.mu.Lock()
+	busy := st.handoffBusy
+	st.mu.Unlock()
+	if busy {
+		t.Fatal("handoff without available must not spawn")
 	}
 	// Concurrent calls: second is a no-op.
-	st := d.updateChecker()
 	st.mu.Lock()
 	st.handoffBusy = true
 	st.mu.Unlock()
@@ -72,9 +77,17 @@ func TestBeginHandoffGuards(t *testing.T) {
 	st.available = "vX"
 	st.mu.Unlock()
 	d.beginHandoff()
-	if d.isFrozen() {
-		t.Fatal("busy handoff must not freeze")
+	time.Sleep(100 * time.Millisecond)
+	st.mu.Lock()
+	stillBusy := st.handoffBusy
+	st.mu.Unlock()
+	if !stillBusy {
+		t.Fatal("busy flag lost by concurrent beginHandoff")
 	}
+	st.mu.Lock()
+	st.handoffBusy = false
+	st.available = ""
+	st.mu.Unlock()
 }
 
 func TestBroadcastShape(t *testing.T) {

@@ -4,7 +4,7 @@ import { createKey, revokeKey } from "../keys";
 import { decryptSecret, randomToken, sha256Hex } from "../crypto";
 import { err, json, readJsonBody } from "../http";
 import { GATEWAY_SECRET, PUBLIC_URL } from "../config";
-import { closeDaemonSocket } from "./relay";
+import { closeDaemonSocket, isHostUpdating } from "./relay";
 import { publicModelEntry, routerSnapshot } from "../models";
 
 /**
@@ -241,6 +241,8 @@ export async function handleIndirectCodeRestRoute(
       )
       .all(user.id);
 
+    // A frontend listing hosts mid-update missed the updating broadcast:
+    // overlay the ephemeral updating state so the overlay shows immediately.
     const hosts = rows.map((r) => ({
       id: r.id,
       userId: r.user_id,
@@ -249,7 +251,7 @@ export async function handleIndirectCodeRestRoute(
       os: r.os,
       arch: r.arch,
       apiKeyId: r.api_key_id,
-      status: r.status,
+      status: r.status === "online" && isHostUpdating(r.id) ? "updating" : r.status,
       lastSeenAt: r.last_seen_at,
       createdAt: r.created_at,
     }));

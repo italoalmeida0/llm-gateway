@@ -49,16 +49,14 @@ import assert from "node:assert/strict";
  s = await state();
  assert.equal(s.lifecycle, "pending", "apply marks pending lifecycle");
 
- // 6. Freeze broadcast -> frozen state (loading screen driver) + updating lifecycle.
- await page.evaluate(() => (window as any).updateUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: false, frozen: true, freezeStage: "copying sessions" }));
+ // 6. Relay says updating -> updating lifecycle (overlay driver).
+ await page.evaluate(() => { (window as any).updateUI.hostStatus = () => "updating"; (window as any).updateUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: false }); });
  await settle();
  s = await state();
- assert.equal(s.frozen, true, "frozen recorded");
- assert.equal(s.freezeStage, "copying sessions", "stage recorded");
- assert.equal(s.lifecycle, "updating", "freeze marks updating lifecycle");
+ assert.equal(s.lifecycle, "updating", "updating status marks updating lifecycle");
 
  // 7. Other-host events must not bleed into the foreground host.
- await page.evaluate(() => (window as any).updateUI.noteUpdate("h2", { current: "9.9.9", available: "", checkedAt: 3, autoUpdate: true, frozen: false }));
+ await page.evaluate(() => (window as any).updateUI.noteUpdate("h2", { current: "9.9.9", available: "", checkedAt: 3, autoUpdate: true }));
  await settle();
  s = await state();
  assert.equal(s.current, "1.0.0", "other host state isolated");
@@ -77,11 +75,7 @@ import assert from "node:assert/strict";
  s = await state();
  assert.equal(s.lifecycle, "done", "done lifecycle recorded");
 
- // 10. Cancel sends command.
- await page.locator("#btn-cancel").click(); await settle();
- assert((await cmds()).some((c:any)=>c.type==="daemon_update_cancel"), "cancel sends command");
-
  assert.equal(errors.length, 0, "zero page errors: " + errors.join("; "));
- console.log("PASS: update hook state machine, commands, freeze, toasts");
+ console.log("PASS: update hook state machine, commands, updating, toasts");
  } finally { await browser.close(); server.stop(); }
 })();

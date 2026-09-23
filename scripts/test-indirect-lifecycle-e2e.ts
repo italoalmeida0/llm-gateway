@@ -271,8 +271,9 @@ try {
   // whole gateway from a patched dist? No — use the mirror env on a FRESH
   // daemon? That changes gateway-first behavior under test.
   //
-  // Pragmatic call: the handoff path (quiesce->copy->takeover->promote)
-  // is already covered binary-level by test-indirect-handoff-e2e.ts.
+  // Pragmatic call: the brutal update path (clean->fetch->SIGKILL->
+  // copy->launcher --update->--update-end promote) is already covered
+  // binary-level by test-indirect-handoff-e2e.ts.
   // Here we test the LIVE path end-to-end: bump dist/r for real.
   const distR = join(WS, "dist", "r");
   assert(existsSync(join(distR, "versions.json")), "dist/r missing — run bun run build first");
@@ -372,13 +373,15 @@ try {
       log("update", `pre-apply download: ${dbgBuf.length}b runs-as=${dbgOut.trim().slice(0, 60)}`);
     } catch (e: any) { log("update", `pre-apply download failed: ${e.message?.slice(0, 120)}`); }
     await conn.send({ type: "daemon_update_apply" });
-    // Watch for freeze -> promote -> reconnect with new version.
+    // Watch for promote -> reconnect with new version. The updater owns
+    // the host (relay reports host_status updating) while the old daemon
+    // is SIGKILLed and --update-end promotes.
     const t0 = Date.now();
-    let sawFrozen = false, sawDone = false, newVersion = "";
+    let sawUpdating = false, sawDone = false, newVersion = "";
     for (;;) {
       await sleep(2000);
       for (const e of conn.events.splice(0)) {
-        if (e.type === "daemon_update" && e.frozen) { sawFrozen = true; log("update", `frozen: ${e.freezeStage}`); }
+        if (e.type === "host_status" && (e as any).status === "updating") { sawUpdating = true; log("update", "host updating (updater owns host)"); }
         if (e.type === "update_failed") throw new Error(`update failed live: ${e.reason}`);
         if (e.type === "update_done") { sawDone = true; newVersion = e.version; log("update", `update_done ${e.version}`); }
       }
@@ -395,7 +398,7 @@ try {
         }
       } catch {}
     }
-    assert(sawFrozen, "never saw frozen stage");
+    assert(sawUpdating, "never saw host_status updating");
     assert(sawDone && newVersion === "vE2E.2", `expected update_done vE2E.2, got ${newVersion}`);
     log("update", "promote confirmed, waiting for turn resume...");
     const after = await waitIdle(conn.send, sid2, 420000);
@@ -407,14 +410,14 @@ try {
     // apply, assert abort + turn resumes in the SAME process ----
     log("fail", "poisoning mirror with stale bytes...");
     // Publish vE2E.3 in the manifest but serve 1.0.21 bytes: self-verify
-    // must fail and the handoff must abort (update_failed, unfrozen).
+    // must fail and the update must abort (update_failed).
     const { readFileSync: rf2 } = await import("node:fs");
     const manifest2: any = JSON.parse(rf2(join(distR, "versions.json"), "utf8"));
     manifest2.daemon.version = "vE2E.3";
     manifest2.launcher.version = "vE2E.3";
     // NOTE: sums stay for the real files; bytes are stale on purpose.
     // The launcher is fetched from dist/r too — serve the CURRENT (old)
-    // launcher bytes under the new version so phase-0 verify fails fast.
+    // launcher bytes under the new version so verify fails fast.
     writeFileSync(join(distR, "versions.json"), JSON.stringify(manifest2));
     const created3: any = await conn.send({ type: "create_session", cwd: join(daemonHome, "workspace"), title: "lifecycle fail", model: MODEL });
     const sid3: string = created3?.session?.id;
@@ -480,7 +483,7 @@ try {
       await c.send({ type: "daemon_update_check" });
       await sleep(2500);
       const u = c.events.filter((e: any) => e.type === "daemon_update").pop();
-      log("hosts", `${hid.slice(0, 12)}: current=${u?.current} available=${u?.available || "-"} frozen=${u?.frozen}`);
+      log("hosts", `${hid.slice(0, 12)}: current=${u?.current} available=${u?.available || "-"}`);
       assert(u?.hostId === hid || !u?.hostId, `daemon_update hostId mismatch for ${hid}`);
     }
     // Turn on host-2 while host-1 idles: states must stay independent.

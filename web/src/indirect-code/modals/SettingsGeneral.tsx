@@ -1,7 +1,7 @@
 import { For, Show } from "solid-js";
 import { Segmented, setThemeMode, themeMode } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
-import { useModal, useUI } from "../ctx";
+import { useHost, useModal, useUI } from "../ctx";
 import { pushSupported } from "../hooks/usePushSubscription";
 
 function Toggle(props: {
@@ -27,6 +27,8 @@ function Toggle(props: {
 export function SettingsGeneralSection() {
   const m = useModal();
   const ui = useUI();
+  const hosts = useHost();
+  const hostStatus = () => hosts.activeHost()?.status;
   const du = ui.daemonUpdate;
   return (
 <>
@@ -240,7 +242,7 @@ export function SettingsGeneralSection() {
       <span>
         <span class="text-ink-200 font-medium">Auto-update daemon</span>
         <span class="block text-[11px] text-ink-500 font-normal mt-0.5">
-          Check on start, reconnect and every 10 minutes. Applying runs the full-slot handoff (freeze, copy, takeover, promote).
+          Check on start, reconnect and every 10 minutes. Applying restarts the daemon into the new version (sessions resume from disk).
         </span>
       </span>
     </label>
@@ -253,7 +255,7 @@ export function SettingsGeneralSection() {
           let s = `Running ${i.current}`;
           if (i.available && i.available !== i.current) s += ` — ${i.available} available`;
           else if (i.checkedAt) s += " — up to date";
-          if (i.frozen) s += ` (updating: ${i.freezeStage || "…"})`;
+          if (hostStatus() === "updating") s += " (updating)";
           else if ((i as any).mismatchWant) {
             const left = Math.max(0, 1 - Math.floor((Date.now() - ((i as any).mismatchAt || 0)) / 60000));
             s += ` (mirror stale: wanted ${(i as any).mismatchWant}, got ${(i as any).mismatchGot || "?"}${left > 0 ? ` — retry in ~${left}min` : ""})`;
@@ -266,7 +268,7 @@ export function SettingsGeneralSection() {
       <button class="btn btn-xs" onClick={() => du.checkNow()}>
         Check now
       </button>
-      <Show when={(() => { const i = du.info(); return !!i && !!i.available && i.available !== i.current && !i.frozen; })()}>
+      <Show when={(() => { const i = du.info(); return !!i && !!i.available && i.available !== i.current && hostStatus() !== "updating"; })()}>
         <button
           class="btn btn-xs btn-primary"
           disabled={du.applying()}

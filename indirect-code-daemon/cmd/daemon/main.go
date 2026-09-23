@@ -540,17 +540,9 @@ func (d *DaemonServer) removePidFile() {
 // the pidfile and exits. Used by SIGINT/SIGTERM AND by the remote
 // shutdown message (frontend "Desconectar") so both paths behave alike.
 func (d *DaemonServer) gracefulShutdown(reason string) {
-	d.removeServingProof()
 	fmt.Printf("\n[SHUTDOWN] %s\n", reason)
 	d.stopEvictionSweeper()
-	// Post-promote exit (handoff success): turns were paused by
-	// quiesceForHandoff with WALs intact FOR the new daemon — committing
-	// here would seal them as cancelled and the resumed turn would be
-	// abandoned as stale. Only a real shutdown (SIGTERM, remote kill,
-	// Ctrl-C) commits.
-	if !strings.HasPrefix(reason, "[HANDOFF]") {
-		d.quiesceSessions()
-	}
+	d.quiesceSessions()
 	d.wsMu.Lock()
 	if d.wsConn != nil {
 		_ = d.wsConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
@@ -1014,103 +1006,6 @@ func (d *DaemonServer) resetRunningSessions() {
 	}
 }
 
-// quiesceForHandoff suspends execution for a slot handoff WITHOUT finishing
-// any turn: the WAL stays on disk (header + all flushed events) and the
-// session JSON keeps Status=running, so the NEW daemon's
-// resumeInterruptedTurns continues the turn (same index, Continue, no
-// repeated user message). Only an explicit user Stop marks the task
-// cancelled. Deferred finalizers see the generation bump and cannot
-// commit stale work. Background bash/python processes are NOT killed:
-// they keep running detached (their .log files live at the ROOT brain
-// scratch, shared by both slots) and the resumed turn gets the standard
-// restart notice for each orphaned job.
-func (d *DaemonServer) quiesceForHandoff() {
-	d.sessionsMu.Lock()
-	defer d.sessionsMu.Unlock()
-	for _, act := range d.sessions {
-		act.mu.Lock()
-		act.gen++
-		if act.cancel != nil {
-			act.cancel()
-	}
-		if act.record.Status == "running" && act.fileChanges != nil {
-			// Snapshot the tracker into the WAL before copying, so the
-			// resumed turn restores tracking from the latest state.
-			d.appendWALEvent(act, walEvent{Type: walTypeIncoming, Incoming: act.fileChanges.tracker.Snapshot()})
-		}
-		act.pendingApproval = nil
-		act.question = nil
-		act.convert = nil
-		act.sendNow = false
-		act.toolProgress = nil
-		act.toolStarts = nil
-		// Close the WAL handle (flush + fsync) WITHOUT committing or
-		// removing the file: the log is the turn's recovery record.
-		// The JSON stays frozen (running) — resume replays the WAL.
-		if act.wal != nil {
-			_ = act.wal.close()
-			act.wal = nil
-		}
-		// Publish the still-running state (meta rewrite only): the new
-		// slot must see running, never a half-committed idle.
-		if act.record.Status == "running" {
-			_ = d.rewriteMetaOnly(act.record.ID, recordMeta(act.record))
-		}
-		act.mu.Unlock()
-	}
-}
-
-// resumePausedTurns restarts the turns quiesceForHandoff paused, in the
-// SAME process: reopen each WAL in append mode and continue the turn
-// (same index, Continue, no repeated user message). Used when a handoff
-// fails AFTER pausing (abort path): the update is over, the old daemon
-// keeps serving, so turns go back to running instead of sitting frozen
-// as running-with-no-worker. On success the process exits and the NEW
-// daemon's resumeInterruptedTurns does the same job from disk.
-func (d *DaemonServer) resumePausedTurns() {
-	d.sessionsMu.RLock()
-	acts := make([]*ActiveSession, 0, len(d.sessions))
-	for _, act := range d.sessions {
-		acts = append(acts, act)
-	}
-	d.sessionsMu.RUnlock()
-	for _, act := range acts {
-		act.mu.Lock()
-		if act.record.Status != "running" || act.cancel != nil {
-			act.mu.Unlock()
-			continue
-		}
-		header, herr := d.readWALHeader(act.record.ID)
-		if herr != nil || header == nil || header.TurnIndex <= 0 {
-			act.mu.Unlock()
-			continue
-		}
-		// Fuse frozen JSON + WAL: the resumed turn continues from the
-		// full pre-pause transcript.
-		fused, _, ferr := d.loadSessionFused(act.record.ID)
-		if ferr != nil {
-			act.mu.Unlock()
-			continue
-		}
-		act.record = fused
-		j := cloneWALHeader(header)
-		if data, rerr := os.ReadFile(d.walPath(act.record.ID)); rerr == nil {
-			j.Incoming = walLatestIncoming(data, header.Incoming)
-		}
-		sid := act.record.ID
-		act.mu.Unlock()
-		if turnResumeAbandoned(fused, j) {
-			continue
-		}
-		fmt.Printf("[INFO] Resuming paused turn %d of session %s\n", j.TurnIndex, sid)
-		go d.resumeAgentTurn(act, j)
-	}
-}
-
-// quiesceSessions suspends execution on shutdown, committing the WAL so
-// the frozen JSON plus replayed log become one durable record. Only an
-// explicit user Stop marks the task cancelled. Deferred finalizers see
-// the generation bump and cannot commit stale work.
 func (d *DaemonServer) quiesceSessions() {
 	d.sessionsMu.Lock()
 	defer d.sessionsMu.Unlock()
@@ -1219,28 +1114,12 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 	case "convert_response":
 		d.answerFileConvert(raw)
 	case "queue_add":
-		if d.isFrozen() {
-			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
-			break
-		}
 		d.handleQueueAdd(raw)
 	case "queue_update":
-		if d.isFrozen() {
-			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
-			break
-		}
 		d.handleQueueUpdate(raw)
 	case "queue_remove":
-		if d.isFrozen() {
-			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
-			break
-		}
 		d.handleQueueRemove(raw)
 	case "queue_send_now":
-		if d.isFrozen() {
-			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
-			break
-		}
 		d.handleQueueSendNow(raw)
 	case "check_workspace":
 		d.checkWorkspace(raw)
@@ -1335,10 +1214,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		})
 
 	case "rename_session":
-		if d.isFrozen() {
-			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
-			break
-		}
 		var req struct {
 			SessionID string `json:"sessionId"`
 			Title     string `json:"title"`
@@ -1637,10 +1512,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		})
 
 	case "edit_message":
-		if d.isFrozen() {
-			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "message": "Daemon updating — try again in a moment"})
-			break
-		}
 		var req struct {
 			SessionID     string    `json:"sessionId"`
 			Index         int       `json:"index"`
@@ -2052,13 +1923,11 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		// fails the caller — best-effort diagnostics only.
 		go d.debugMirror(raw)
 	case "daemon_update_apply":
-		// Full-slot handoff (replaces the old exit-42 restart): download
-		// launcher -> late freeze -> copy -> takeover -> promote.
-		// Failure anywhere before promote unfreezes, WS never dropped.
+		// Brutal update: clean slot -> fetch launcher -> spawn
+		// --update-start (SIGKILLs us, copies slot, runs launcher
+		// --update, watches fail/done). Failure before the spawn
+		// aborts in place, WS never dropped.
 		go d.beginHandoff()
-	case "daemon_update_cancel":
-		// Frontend cancel button during freeze: abort + unfreeze.
-		go d.abortHandoff("cancelled by user")
 	case "daemon_update_toggle":
 		var treq struct {
 			Enabled bool `json:"enabled"`
@@ -2093,16 +1962,6 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 // single entry for user prompts: the "prompt" command, queue promotion
 // (auto-start and send-now) all flow through here.
 func (d *DaemonServer) startPrompt(sessionID, text string, attachmentIDs []string, model string, yolo bool, options *SessionOptions) {
-	// Handoff freeze: park nothing, reject with a clear message (the
-	// frontend blocks the UI, this is defense-in-depth). Running turns
-	// continue untouched.
-	if d.isFrozen() {
-		_ = d.sendWS(map[string]any{
-			"type": "error", "hostId": d.config.HostID, "sessionId": sessionID,
-			"message": "Daemon updating — try again in a moment",
-		})
-		return
-	}
 	cleanText := strings.TrimSpace(text)
 	if isSlashCommand(cleanText) {
 		if len(attachmentIDs) > 0 {
@@ -2705,6 +2564,46 @@ func instantTitle(text string) string {
 }
 
 func (d *DaemonServer) connectWebSocket() error {
+	return d.connectWebSocketWithQuery("")
+}
+
+// connectWebSocketOnce dials the relay, takes the socket (so a later
+// sendWS/update_done rides it), and returns. One shot: no read loop, no
+// retry, no reconnect — the caller decides what failure means. Used by
+// --update-end's best-effort hello (promote runs either way).
+func (d *DaemonServer) connectWebSocketOnce() error {
+	u, err := url.Parse(d.config.GatewayURL)
+	if err != nil {
+		return err
+	}
+	scheme := "ws"
+	if u.Scheme == "https" {
+		scheme = "wss"
+	}
+	wsURL := fmt.Sprintf("%s://%s/api/indirect-code/daemon/ws?token=%s", scheme, u.Host, url.QueryEscape(d.config.DaemonToken))
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, resp, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		if isRevokedDialError(resp, err) {
+			return errDaemonRevoked
+		}
+		return err
+	}
+	d.wsMu.Lock()
+	if d.wsConn != nil {
+		_ = d.wsConn.Close()
+	}
+	d.wsConn = conn
+	d.wsMu.Unlock()
+	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", d.config.GatewayURL)
+	return nil
+}
+
+// connectWebSocketWithQuery dials the relay with an extra query suffix
+// (e.g. "&updating=1" for the --update-start naive updater: the relay
+// keeps the host registered + online but broadcasts host_status updating
+// so the frontend shows the update overlay instead of offline).
+func (d *DaemonServer) connectWebSocketWithQuery(extra string) error {
 	u, err := url.Parse(d.config.GatewayURL)
 	if err != nil {
 		return err
@@ -2714,7 +2613,7 @@ func (d *DaemonServer) connectWebSocket() error {
 	if u.Scheme == "https" {
 		scheme = "wss"
 	}
-	wsURL := fmt.Sprintf("%s://%s/api/indirect-code/daemon/ws?token=%s", scheme, u.Host, url.QueryEscape(d.config.DaemonToken))
+	wsURL := fmt.Sprintf("%s://%s/api/indirect-code/daemon/ws?token=%s%s", scheme, u.Host, url.QueryEscape(d.config.DaemonToken), extra)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -2737,16 +2636,7 @@ func (d *DaemonServer) connectWebSocket() error {
 	d.wsMu.Unlock()
 
 	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", d.config.GatewayURL)
-	// Proof-of-serving (handoff protocol): after the WS is up, declare in
-	// writing that THIS binary serves THIS dataDir. The takeover launcher
-	// reads serving.json (version must match) BEFORE killing the old
-	// daemon — never trust a pidfile alone (version skew proved it lies).
-	d.writeServingProof()
 	// Fresh (re)connect: re-check for updates + push state to clients.
-	// If this boot just promoted a handoff, report update_done FIRST so a
-	// client that F5'd mid-update (or reconnected late) learns the new
-	// version even though the old WS (and its update_failed race) is gone.
-	d.announceUpdateDone()
 	go d.checkForUpdates("reconnect")
 
 	// Heartbeat ticker
@@ -2785,7 +2675,14 @@ func main() {
 	dataDirFlag := flag.String("data-dir", "", "Path to daemon data directory")
 	stopFlag := flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
 	versionFlag := flag.Bool("version", false, "Print daemon version and exit")
-	standbyFlag := flag.Bool("standby", false, "Standby mode: load storage, write readiness probe, wait for handoff promote (update takeover)")
+	updateStartFlag := flag.Bool("update-start", false, "Brutal update: kill the old daemon, own the host in update state, copy slot, run the new launcher")
+	updateEndFlag := flag.Bool("update-end", false, "Brutal update: boot the new daemon, promote local-first (hello relay, kill waiter, flip active, clean old slot)")
+	rootDirFlag := flag.String("root-dir", "", "Update slots root (<root> holding slots/)")
+	fromSlotFlag := flag.String("from-slot", "", "Update source slot (a|b)")
+	toSlotFlag := flag.String("to-slot", "", "Update target slot (a|b)")
+	expectVersionFlag := flag.String("expect-version", "", "Update target version")
+	parentPidFlag := flag.Int("parent-pid", 0, "PID of the daemon waiting to be killed")
+	launcherPathFlag := flag.String("launcher-path", "", "Verified new launcher binary (--update-start only)")
 	slotFlag := flag.String("slot", "", "Active slot id (a|b), informational: passed by the launcher; dataDir already points at the slot")
 	flag.Parse()
 	if *versionFlag {
@@ -2798,12 +2695,32 @@ func main() {
 		dataDir = defaultDataDir()
 	}
 	_ = *slotFlag
-	if *standbyFlag {
+	if *updateStartFlag {
 		cfgPath := *configFlag
 		if cfgPath == "" {
 			cfgPath = filepath.Join(dataDir, "config.json")
 		}
-		os.Exit(runStandby(dataDir, cfgPath))
+		os.Exit(runUpdateStart(dataDir, cfgPath, updateStartParams{
+			root:          *rootDirFlag,
+			fromSlot:      *fromSlotFlag,
+			toSlot:        *toSlotFlag,
+			expectVersion: *expectVersionFlag,
+			launcherPath:  *launcherPathFlag,
+			parentPid:     *parentPidFlag,
+		}))
+	}
+	if *updateEndFlag {
+		updateEndInfo = &updateEndParams{
+			root:          *rootDirFlag,
+			fromSlot:      *fromSlotFlag,
+			expectVersion: *expectVersionFlag,
+			parentPid:     *parentPidFlag,
+			slot:          *slotFlag,
+		}
+		// --update-end boots like a normal daemon on the new slot;
+		// promote (best-effort relay hello, kill the waiter, flip
+		// active, clean old slot) runs local-first right after boot,
+		// relay or not — see doUpdateEndPromote(server) below.
 	}
 	// Local fallback kill: works even with broken storage or the gateway
 	// offline (only reads daemon.pid + signals — never touches storage).
@@ -2916,16 +2833,16 @@ func main() {
 
 	// Track the background process so install scripts and --stop can find it.
 	server.writePidFile()
-	// Stale handoff markers from a crashed takeover must never gate a
-	// fresh boot: a new process never serves a leftover proof. BUT a
-	// just-promoted handoff must survive until the first WS connect so
-	// announceUpdateDone() can report update_done to clients that F5'd
-	// mid-update: only clear a FAILED marker here, keep "promoted".
-	_ = os.Remove(servingProofPath(dataDir))
-	if raw, err := os.ReadFile(filepath.Join(dataDir, "handoff.json")); err != nil || strings.TrimSpace(string(raw)) != "promoted" {
-		_ = os.Remove(filepath.Join(dataDir, "handoff.json"))
-	}
-	_ = os.Remove(filepath.Join(dataDir, "standby-ready.json"))
+	// --update-end promotes HERE (local-first, right after recovery, before
+	// the WS loop): one best-effort relay hello ("estou ok"), then kill
+	// the waiter + flip active + clean the old slot — relay or not, life
+	// goes on. The normal reconnect loop below keeps the WS alive after.
+	doUpdateEndPromote(server)
+	// Stale update signals from a crashed update must never gate a fresh
+	// boot: the waiter/launcher own the fail/done files, a normal boot
+	// never reads them.
+	_ = os.Remove(filepath.Join(server.rootDir(), "slots", "update.fail"))
+	_ = os.Remove(filepath.Join(server.rootDir(), "slots", "update.done"))
 
 	// Graceful shutdown handling
 	sigChan := make(chan os.Signal, 1)

@@ -18,15 +18,22 @@ render(() => {
     send: (c) => api.commands.push(c),
     toast: () => {},
     getHostId: () => hostId(),
+    getHostStatus: (hid) => api.hostStatus?.(hid),
   });
   api.noteUpdate = du.noteUpdate;
-  api.cancel = du.cancel;
   api.stateFor = du.stateFor;
   api.info = du.info;
+  const [st1, setSt1] = createSignal("online");
+  const [st2, setSt2] = createSignal("offline");
+  const getStatus = (hid: string) => (hid === "h1" ? st1() : st2());
+  const setStatus = (hid: string, v: string) => (hid === "h1" ? setSt1(v) : setSt2(v));
+  api.statuses = new Proxy({}, { get: (_t, k) => getStatus(String(k)), set: (_t, k, v) => { setStatus(String(k), String(v)); return true; } });
+  api.setOnline = (hid: string) => { setStatus(hid, "online"); };
+  api.hostStatus = (hid: string) => getStatus(hid);
   const hosts: any = {
     hosts: () => [
-      { id: "h1", name: "one", hostname: "one", status: "online" },
-      { id: "h2", name: "two", hostname: "two", status: "offline" },
+      { id: "h1", name: "one", hostname: "one", status: st1() },
+      { id: "h2", name: "two", hostname: "two", status: st2() },
     ],
     activeHostId: () => hostId(),
     activeHost: () => hosts.hosts().find((h: any) => h.id === hostId()) ?? null,

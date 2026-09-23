@@ -114,7 +114,7 @@ func resolveSlotDaemon(dataDir string) (string, string, []string, error) {
 		// launcher (post-flip power loss: active=b, launcher vK1,
 		// daemon vK2). Accept any RUNNING binary here — strict version
 		// pinning would refuse to boot the good slot (K3 chaos caught
-		// it). Freshness for UPDATES is enforced by the takeover path
+		// it). Freshness for UPDATES is enforced by the update path
 		// (fetchDaemonTo + selfVerifyDaemon against the target), not
 		// by the boot path.
 		if err := selfVerifyRuns(local); err != nil {
@@ -239,7 +239,7 @@ func installSlotA(dataDir string) error {
 }
 
 // mirrorBase resolves the release mirror: the gateway that spawned us
-// (INDIRECT_GATEWAY, set by the daemon on takeover — the gateway serves
+// (INDIRECT_GATEWAY, set by the daemon on update — the gateway serves
 // dist/ itself, no CDN cache), explicit env override, or derived from
 // -connect flag or config.json. Gateway-first is deliberate: INDIRECT_*_RAW
 // is a stale-prone global (production install + E2E tmp gateway in one

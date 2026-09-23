@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 // Same-version guard: a stale manifest (or double click) must never
@@ -14,14 +15,8 @@ func TestHandoffSameVersionNoop(t *testing.T) {
 	st.mu.Unlock()
 	d.beginHandoff()
 	// beginHandoff is async (go runHandoff); give it a beat, then assert
-	// nothing froze.
-	for i := 0; i < 100; i++ {
-		if d.isFrozen() {
-			t.Fatal("same-version handoff froze the daemon")
-		}
-		// runHandoff with equal versions returns before freeze; poll briefly.
-		break
-	}
+	// nothing spawned (busy cleared, reason recorded).
+	time.Sleep(200 * time.Millisecond)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.handoffBusy {

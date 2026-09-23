@@ -202,6 +202,38 @@ describe("Indirect Code Relay and Pairing", () => {
     expect(json.hosts[0].status).toBe("offline");
   });
 
+  test("updating relay errors block client traffic like offline, with its own message", async () => {
+    // A ?updating=1 daemon owns the host but holds no sessions: the relay
+    // (doorman) refuses client traffic instead of letting commands die
+    // inside the hollow updater. Same shape as offline, own message.
+    const daemonWs = new WebSocket(`${GW_WS}/api/indirect-code/daemon/ws?token=${encodeURIComponent(daemonToken)}&updating=1`);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("updating daemon never connected")), 3000);
+      daemonWs.onopen = () => { clearTimeout(timer); resolve(); };
+      daemonWs.onerror = () => { clearTimeout(timer); reject(new Error("updating daemon WS failed")); };
+    });
+    try {
+      const ws = new WebSocket(`${GW_WS}/api/indirect-code/ws?token=${encodeURIComponent(userToken)}`);
+      try {
+        const response = await new Promise<any>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("updating reply timed out")), 3000);
+          ws.onopen = () => ws.send(JSON.stringify({ type: "browse_folders", hostId, id: 789, requestId: "updating-request", sessionId: "session-reference", path: "~" }));
+          ws.onmessage = (event) => {
+            const message = JSON.parse(String(event.data));
+            if (message.type !== "error") return;
+            clearTimeout(timer);
+            resolve(message);
+          };
+        });
+        expect(response.message).toBe("Remote host is updating");
+        expect(response.replyTo).toBe("browse_folders");
+        expect(response.requestId).toBe("updating-request");
+        expect(response.sessionId).toBe("session-reference");
+        expect(response.id).toBe(789);
+      } finally { ws.close(); }
+    } finally { daemonWs.close(); }
+  });
+
   test("offline relay errors retain request correlation for inline recovery", async () => {
     const ws = new WebSocket(`${GW_WS}/api/indirect-code/ws?token=${encodeURIComponent(userToken)}`);
     try {

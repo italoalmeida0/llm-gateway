@@ -1,8 +1,10 @@
-// Handoff E2E with a fake gateway WS (no model, no real gateway):
-// old daemon connects -> beginHandoff (via direct call) -> freeze ->
-// takeover (real launcher binary) -> old disconnects/dies -> new daemon
-// connects from the new slot. Asserts: freeze broadcast, slot flip,
-// new daemon serving the same session, old slot cleaned.
+// Brutal update E2E with a fake gateway WS (no model, no real gateway):
+// old daemon connects -> runHandoff (clean slot, fetch launcher, spawn
+// --update-start, keep serving) -> updater SIGKILLs old -> updater copies
+// slot + runs launcher --update -> launcher spawns --update-end detached
+// -> new daemon connects, kills the waiter, flips active, deletes the old
+// slot. Asserts: updater reconnect (?updating=1), local-first promote, slot flip,
+// new daemon serving the same session, old slot cleaned, update_done.
 //
 // Run: bun scripts/test-indirect-handoff-e2e.ts (needs built binaries).
 import { spawn } from "node:child_process";
@@ -25,34 +27,36 @@ async function main() {
   mkdirSync(join(root, "slots", "slot-a", "sessions"), { recursive: true });
   mkdirSync(mirror, { recursive: true });
 
-  // Versioned builds: old=vH1, new=vH2.
+  // Versioned builds: old=9.9.8, new=9.9.9 (numeric: the brutal path requires strictly-newer).
   const build = (pkg: string, ver: string, out: string, vvar: string) =>
     buildBin(pkg, ver, out, vvar, DAEMON_DIR);
   const oldBin = join(work, "daemon-old");
   const newBin = join(work, "daemon-new");
   const launcherBin = join(work, "launcher-new");
   const launcherOldBin = join(work, "launcher-old");
-  build("./cmd/daemon", "vH1", oldBin, "daemonVersion");
-  build("./cmd/daemon", "vH2", newBin, "daemonVersion");
-  build("./cmd/launcher", "vH1", launcherOldBin, "launcherVersion");
-  build("./cmd/launcher", "vH2", launcherBin, "launcherVersion");
+  build("./cmd/daemon", "9.9.8", oldBin, "daemonVersion");
+  build("./cmd/daemon", "9.9.9", newBin, "daemonVersion");
+  build("./cmd/launcher", "9.9.8", launcherOldBin, "launcherVersion");
+  build("./cmd/launcher", "9.9.9", launcherBin, "launcherVersion");
 
-  // Mirror serves new binaries + manifest vH2.
+  // Mirror serves new binaries + manifest 9.9.9.
   const { copyFileSync, writeFileSync: wfs, readFileSync, mkdirSync: mkMirror } = await import("node:fs");
   mkMirror(mirror, { recursive: true });
   copyFileSync(newBin, join(mirror, DAEMON_BIN));
   copyFileSync(launcherBin, join(mirror, LAUNCHER_BIN));
   const manifest = {
-    daemon: { version: "vH2", assets: { [PLAT]: DAEMON_BIN }, sums: {} },
-    launcher: { version: "vH2", assets: { [PLAT]: LAUNCHER_BIN }, sums: {} },
+    daemon: { version: "9.9.9", assets: { [PLAT]: DAEMON_BIN }, sums: {} },
+    launcher: { version: "9.9.9", assets: { [PLAT]: LAUNCHER_BIN }, sums: {} },
   };
   wfs(join(mirror, "versions.json"), JSON.stringify(manifest));
 
-  // Seed slot-a: old binaries + session + version + config (bad gateway: no WS needed for freeze/copy phases).
-  // Canonical layout: config.json is slot-local.
+  // Seed slot-a: old binaries + session + version + config.
+  // Canonical layout: the daemon runs with dataDir = the SLOT dir
+  // (<root>/slots/slot-x), so slots/active lives two levels up.
   copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", DAEMON_BIN));
   copyFileSync(launcherOldBin, join(root, "slots", "slot-a", "bin", LAUNCHER_BIN));
   wfs(join(root, "slots", "active"), "a\n");
+  wfs(join(root, "slots", "slot-a", "daemon.pid"), "1\n"); // stale pid: proves the updater takes over the pidfile
   wfs(join(root, "slots", "slot-a", "storage_version.json"), JSON.stringify({ version: 1 }));
   wfs(join(root, "slots", "slot-a", "sessions", "s1.jsonl"),
     `{"v":1,"kind":"turn","turn":1,"messages":[{"role":"user","turnIndex":1,"content":[{"type":"text","text":"hi"}]}]}\n` +
@@ -62,11 +66,13 @@ async function main() {
     host_id: "handoff-e2e", name: "e2e", settings: {},
   }));
 
-  // Fake mirror server (serves files from mirror dir).
+  // Fake mirror server (serves files from mirror dir; strips the /r/
+  // prefix the launcher adds when resolving via INDIRECT_GATEWAY).
   const mirrorSrv = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     fetch: (req) => {
-      const name = new URL(req.url).pathname.slice(1);
+      let name = new URL(req.url).pathname.slice(1);
+      if (name.startsWith("r/")) name = name.slice(2);
       const p = join(mirror, name);
       if (!existsSync(p)) return new Response("nf", { status: 404 });
       return new Response(Bun.file(p));
@@ -77,7 +83,7 @@ async function main() {
   // fetchDaemonTo both try the GATEWAY before INDIRECT_REPO_RAW). The
   // daemon's slot config gateway_url is rewritten to the fake gateway
   // below; ALSO export INDIRECT_GATEWAY in the child env so the
-  // takeover child (spawned by the daemon, env inherited) resolves the
+  // launcher --update child (spawned by --update-start, env inherited) resolves the
   // same fake mirror instead of a stale ambient gateway from the shell.
   const env = { ...process.env, INDIRECT_GATEWAY: mirrorURL, INDIRECT_REPO_RAW: mirrorURL };
 
@@ -85,21 +91,24 @@ async function main() {
   // SEND commands (the daemon handleMessages anything on the socket).
   // Tracks connects/disconnects + forwards daemon_update_apply on demand.
   const connects: number[] = [];
-  const shadowConnects: number[] = [];
+  const updatingConnects: number[] = [];
   let disconnects = 0;
   let daemonSock: any = null;
-  let sawFreeze = false;
+  let sawDone: any = null;
+  let pendingUpdating = false;
   const gw = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     fetch: (req, server) => {
       const u = new URL(req.url);
       if (u.pathname === "/api/indirect-code/daemon/ws") {
-        (req as any).__shadow = u.searchParams.get("shadow") === "1";
+        // Bun drops custom props on upgrade: stash the flag for the
+        // next open (connections here are sequential, one at a time).
+        pendingUpdating = u.searchParams.get("updating") === "1";
         if (server.upgrade(req)) return undefined as any;
         return new Response("up", { status: 426 });
       }
       // Serve the update mirror under /r/ (same server): the daemon
-      // fetchLauncherTo + the takeover child both resolve the mirror
+      // fetchLauncherTo + the launcher --update child both resolve the mirror
       // gateway-first from the slot config gateway_url, which points
       // here. Without this the download 404s against the WS stub.
       if (u.pathname.startsWith("/r/")) {
@@ -111,17 +120,15 @@ async function main() {
     },
     websocket: {
       open: (ws) => {
-        // Bun upgrade drops custom props; detect shadow via query is not
-        // available here — count all, distinguish by timing (shadow comes
-        // while old still connected, before any disconnect).
-        if (disconnects === 0 && connects.length >= 1) shadowConnects.push(Date.now());
         connects.push(Date.now());
+        if (pendingUpdating) updatingConnects.push(Date.now());
+        pendingUpdating = false;
         if (disconnects === 0) daemonSock = ws;
       },
       message: (_ws, data) => {
         try {
           const m = JSON.parse(String(data));
-          if (m.type === "daemon_update" && m.frozen) sawFreeze = true;
+          if (m.type === "update_done") sawDone = m;
         } catch {}
       },
       close: () => { disconnects++; daemonSock = null; },
@@ -137,11 +144,8 @@ async function main() {
   cfg.gateway_url = gwURL;
   wfs(join(root, "slots", "slot-a", "config.json"), JSON.stringify(cfg));
 
-  // Start OLD daemon via launcher (slot-aware boot).
-  const launcherOld = join(root, "slots", "slot-a", "bin", LAUNCHER_BIN);
-  // Launcher in slot-a is vH2 build (we copied launcherBin); for a faithful
-  // old-version boot this is fine (launcher version doesn't gate).
-  const proc = spawn(launcherOld, ["--data-dir", root], { env, stdio: ["ignore", "pipe", "pipe"] });
+  // Start OLD daemon directly (canonical: dataDir = the slot dir).
+  const proc = spawn(oldBin, ["--data-dir", join(root, "slots", "slot-a"), "--config", join(root, "slots", "slot-a", "config.json"), "--slot", "a"], { env, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   proc.stdout.on("data", (d) => (out += d.toString()));
   proc.stderr.on("data", (d) => (out += d.toString()));
@@ -153,46 +157,31 @@ async function main() {
   await waitConnect(1, 20000);
   console.log("old daemon connected");
 
-  // Wait for boot check to see vH2, then trigger handoff like Update now.
+  // Wait for boot check to see 9.9.9, then trigger handoff like Update now.
   await sleep(3000);
   assert(daemonSock, "daemon socket open");
   daemonSock.send(JSON.stringify({ type: "daemon_update_apply" }));
-  console.log("apply sent; waiting for freeze...");
+  console.log("apply sent; waiting for updater (?updating=1 reconnect)...");
   const t0 = Date.now();
-  while (!sawFreeze && Date.now() - t0 < 60000) await sleep(500);
-  assert(sawFreeze, "daemon froze (late freeze after launcher verify)");
-  console.log("frozen; waiting for shadow proof (new daemon serves)...");
-  // Proof-before-death: serving.json with vH2 must appear while the old
-  // daemon is still connected (disconnects==0). This is THE regression
-  // test for the version-skew kill bug.
-  const proofPath = join(root, "slots", "slot-b", "serving.json");
-  const tProof = Date.now();
-  let proofOk = false;
-  while (Date.now() - tProof < 120000) {
-    try {
-      const p = JSON.parse(readFileSync(proofPath, "utf8"));
-      if (p.version === "vH2" && p.pid > 0) { proofOk = true; break; }
-    } catch {}
-    await sleep(500);
-  }
-  assert(proofOk, "serving.json proof with vH2");
-  assert(disconnects === 0, "old daemon still alive at proof time (proof-before-death)");
-  assert(shadowConnects.length >= 1, "shadow WS connected");
-  console.log("proof OK while old alive; waiting for promote (old dies, new connects)...");
-  // connects counts old + shadow + promoted-new; disconnects counts old +
-  // shadow-close. Wait for the old daemon's death AND the promoted connect.
+  while (updatingConnects.length < 1 && Date.now() - t0 < 60000) await sleep(500);
+  assert(updatingConnects.length >= 1, "updater reconnected with ?updating=1 (owns host)");
+  console.log("updater owns host; waiting for brutal promote (old SIGKILLed, new connects)...");
+  // Brutal order: the old daemon is SIGKILLed by --update-start (disconnect
+  // lands), THEN the new daemon (--update-end) connects, kills the waiter,
+  // flips active and reports update_done.
   const tProm = Date.now();
-  while ((disconnects < 1 || connects.length < 3) && Date.now() - tProm < 120000) await sleep(500);
-  assert(disconnects >= 1, "old daemon disconnected");
-  assert(connects.length >= 3, `promoted daemon connected (connects=${connects.length})`);
-  console.log("new daemon connected; settling...");
+  while ((disconnects < 1 || connects.length < 2 || !sawDone) && Date.now() - tProm < 120000) await sleep(500);
+  assert(disconnects >= 1, "old daemon disconnected (SIGKILLed by updater)");
+  assert(connects.length >= 2, `new daemon connected (connects=${connects.length})`);
+  assert(sawDone && sawDone.version === "9.9.9", `expected update_done 9.9.9, got ${JSON.stringify(sawDone)}`);
+  console.log("new daemon connected + update_done; settling...");
   await sleep(5000);
   const active = readFileSync(join(root, "slots", "active"), "utf8").trim();
   assert.equal(active, "b", `active slot = ${active}`);
   assert(existsSync(join(root, "slots", "slot-b", "sessions", "s1.jsonl")), "session in new slot");
   assert(!existsSync(join(root, "slots", "slot-a")), "old slot cleaned");
-  assert(connects.length >= 3, "new daemon connected");
-  console.log(`handoff OK: connects=${connects.length} disconnects=${disconnects}`);
+  assert(!existsSync(join(root, "slots", "update.fail")), "no fail signal");
+  console.log(`brutal update OK: connects=${connects.length} disconnects=${disconnects}`);
   // Scoped kill (work dir only — never broad pkill: a wide pattern once
   // killed the real VPS daemon).
   killAll(work);
@@ -201,7 +190,7 @@ async function main() {
   mirrorSrv.stop();
   gw.stop();
   rmSync(work, { recursive: true, force: true });
-  console.log("PASS: full handoff vH1 -> vH2 (freeze, takeover, promote, cleanup)");
+  console.log("PASS: brutal update 9.9.8 -> 9.9.9 (updating, SIGKILL, promote, cleanup)");
 }
 
 main().catch((e) => { console.error("FAIL:", e); process.exit(1); });

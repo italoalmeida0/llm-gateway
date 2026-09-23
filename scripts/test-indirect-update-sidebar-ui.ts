@@ -1,6 +1,6 @@
 // Sidebar update-button + header fixture test: the REAL WorkspaceSidebar
 // in a real browser — no composer banner; white Update button below
-// Conversation History; apply/frozen/per-host behavior; Back to Gateway
+// Conversation History; apply/updating/per-host behavior; Back to Gateway
 // above New Conversation; transcript keeps only the sidebar toggle.
 //   PLAYWRIGHT_MODULE=... CHROMIUM_PATH=... bun scripts/test-indirect-update-sidebar-ui.ts
 import solidPlugin from "../plugins/solid-plugin";
@@ -44,11 +44,11 @@ import assert from "node:assert/strict";
  assert((await cmds()).some((c:any)=>c.type==="daemon_update_apply" && c.hostId==="h1"), "apply stamped h1");
  assert((await text()).includes("Updating…"), "button flips to Updating… after apply");
 
- // 4. Frozen -> stage text on the button, still no composer banner.
- await page.evaluate(() => (window as any).sidebarUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: true, frozen: true, freezeStage: "copying sessions" }));
+ // 4. Relay says updating -> button shows Updating…, still no composer banner.
+ await page.evaluate(() => { (window as any).sidebarUI.statuses["h1"] = "updating"; (window as any).sidebarUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: true }); });
  await settle();
  t = await text();
- assert(t.includes("copying sessions"), "frozen stage on button: " + t.slice(0, 200));
+ assert(t.includes("Updating…"), "updating on button: " + t.slice(0, 200));
  assert(!t.includes("Daemon update available"), "no composer banner anymore");
 
  // 5. Switch host (h2, no update) -> button disappears.
@@ -56,14 +56,14 @@ import assert from "node:assert/strict";
  await settle();
  assert(!(await text()).includes("Update to"), "button hidden on host without update");
 
- // 6. Back to h1 (still frozen) -> button returns with stage.
+ // 6. Back to h1 (still updating) -> button returns with Updating….
  await page.evaluate(() => { (window as any).sidebarUI.setHostId("h1"); });
  await settle();
  t = await text();
- assert(t.includes("copying sessions"), "button returns on h1");
+ assert(t.includes("Updating…"), "button returns on h1");
 
  // 7. Done -> button hides.
- await page.evaluate(() => (window as any).sidebarUI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 3, autoUpdate: true, frozen: false }));
+ await page.evaluate(() => { (window as any).sidebarUI.statuses["h1"] = "online"; (window as any).sidebarUI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 3, autoUpdate: true }); });
  await settle();
  assert(!(await text()).includes("Update to"), "button hides after done");
 

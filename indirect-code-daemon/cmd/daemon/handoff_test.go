@@ -16,20 +16,6 @@ func testSlot(t *testing.T, root, which string) string {
 	return dir
 }
 
-func TestFreezeGuardsPrompt(t *testing.T) {
-	d := testDaemon(t)
-	d.setFrozen(true, "test")
-	if !d.isFrozen() {
-		t.Fatal("not frozen")
-	}
-	// startPrompt must reject while frozen (no turn starts).
-	d.startPrompt("nope", "hello", nil, "", false, nil)
-	d.setFrozen(false, "")
-	if d.isFrozen() {
-		t.Fatal("not unfrozen")
-	}
-}
-
 func TestAbortHandoffCleansInactive(t *testing.T) {
 	d := testDaemon(t)
 	root := t.TempDir()
@@ -37,11 +23,7 @@ func TestAbortHandoffCleansInactive(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, "slots", "slot-b", "sessions"), 0o700)
 	os.WriteFile(filepath.Join(root, "slots", "slot-b", "sessions", "x.jsonl"), []byte("x"), 0o600)
 	os.WriteFile(filepath.Join(root, "slots", "active"), []byte("a\n"), 0o600)
-	d.setFrozen(true, "test")
 	d.abortHandoff("boom")
-	if d.isFrozen() {
-		t.Fatal("still frozen after abort")
-	}
 	if _, err := os.Stat(filepath.Join(root, "slots", "slot-b")); !os.IsNotExist(err) {
 		t.Fatal("inactive slot survived abort")
 	}
@@ -116,18 +98,18 @@ func TestSlotDirActiveIsDataDir(t *testing.T) {
 	}
 }
 
-func TestHandoffResultParsing(t *testing.T) {
+func TestUpdateSignalParsing(t *testing.T) {
+	// The brutal fail/done signals are plain files under slots/:
+	// any non-empty body counts as the signal (the 100ms poller
+	// tolerates torn reads by retrying).
 	dir := t.TempDir()
-	p := filepath.Join(dir, "h.json")
-	os.WriteFile(p, []byte("promoted"), 0o600)
-	if ok, done := readHandoffReady(p); !ok || !done {
-		t.Fatal("promoted not parsed")
+	fail := filepath.Join(dir, "slots", "update.fail")
+	writeUpdateSignal(fail, "failed: x")
+	body, ok := readUpdateSignal(fail)
+	if !ok || body != "failed: x" {
+		t.Fatalf("fail signal = %q,%v", body, ok)
 	}
-	os.WriteFile(p, []byte("failed: x"), 0o600)
-	if ok, done := readHandoffReady(p); ok || !done {
-		t.Fatal("failed not parsed")
-	}
-	if err := readHandoffResult(p, nil); err == nil {
-		t.Fatal("failed result must error")
+	if _, ok := readUpdateSignal(filepath.Join(dir, "slots", "update.done")); ok {
+		t.Fatal("missing done must read absent")
 	}
 }

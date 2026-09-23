@@ -24,34 +24,29 @@ import assert from "node:assert/strict";
  assert.equal(await frozen(), "false", "starts unfrozen");
  assert.equal(await overlay(), false, "no overlay initially");
 
- // 2. Freeze with stage -> overlay + stage text (per-host: frozen host drives the overlay).
- await page.evaluate(() => (window as any).freezeUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 1, autoUpdate: true, frozen: true, freezeStage: "copying sessions" }));
+ // 2. Host goes updating -> overlay shows (per-host: updating host drives it).
+ await page.evaluate(() => { (window as any).freezeUI.statuses["h1"] = "updating"; (window as any).freezeUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 1, autoUpdate: true }); });
  await settle();
- assert.equal(await frozen(), "true", "frozen flag");
+ assert.equal(await frozen(), "true", "updating flag");
  assert.equal(await overlay(), true, "overlay visible");
- assert.equal(await page.evaluate(()=>((document.querySelector("#freeze-stage") as HTMLElement).innerText)), "copying sessions", "stage text");
+ assert.equal(await page.evaluate(()=>((document.querySelector("#freeze-stage") as HTMLElement).innerText)), "Updating…", "static text");
 
- // 3. Stage updates live.
- await page.evaluate(() => (window as any).freezeUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: true, frozen: true, freezeStage: "preparing update" }));
+ // 3. Lifecycle follows the relay status (updating while status says so).
+ await page.evaluate(() => (window as any).freezeUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: true }));
  await settle();
- assert.equal(await page.evaluate(()=>((document.querySelector("#freeze-stage") as HTMLElement).innerText)), "preparing update", "stage live");
+ assert.equal(await frozen(), "true", "still updating");
 
- // 4. Host switching works under freeze.
+ // 4. Host switching works while updating.
  await page.locator('[data-host="h2"]').click(); await settle();
  const cmds = await page.evaluate(()=>(window as any).freezeUI.commands);
  assert(cmds.some((c:any)=>c.type==="switch-host" && c.id==="h2"), "host switch allowed");
 
- // 5. Cancel sends daemon_update_cancel.
- await page.locator("#btn-cancel-update").click(); await settle();
- const cmds2 = await page.evaluate(()=>(window as any).freezeUI.commands);
- assert(cmds2.some((c:any)=>c.type==="daemon_update_cancel"), "cancel sends command");
-
- // 6. Unfreeze hides overlay.
- await page.evaluate(() => (window as any).freezeUI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 3, autoUpdate: true, frozen: false }));
+ // 5. Host back to online -> overlay hides.
+ await page.evaluate(() => { (window as any).freezeUI.statuses["h1"] = "online"; (window as any).freezeUI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 3, autoUpdate: true }); });
  await settle();
- assert.equal(await overlay(), false, "overlay hidden after unfreeze");
+ assert.equal(await overlay(), false, "overlay hidden after online");
 
  assert.equal(errors.length, 0, "zero page errors: " + errors.join("; "));
- console.log("PASS: freeze overlay show/stage/switch/cancel/hide");
+ console.log("PASS: updating overlay show/switch/hide");
  } finally { await browser.close(); server.stop(); }
 })();

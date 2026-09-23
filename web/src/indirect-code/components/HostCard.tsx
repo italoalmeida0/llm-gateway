@@ -46,7 +46,7 @@ export function HostCard(props: { id: "sidebar" | "overlay" }) {
           <span class="block truncate text-xs font-medium text-ink-200">{h.activeHost()?.name || h.activeHost()?.hostname || "Select host"}</span>
           <span class="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-500">
             <span class={`h-1.5 w-1.5 rounded-full ${h.connectionState() === "connected" && h.activeHost()?.status === "online" ? "bg-accent-500" : "bg-ink-600"}`} />
-            {h.connectionState() !== "connected" ? "Reconnecting…" : h.activeHost()?.status === "online" ? "Connected" : "Offline"}
+            {h.connectionState() !== "connected" ? "Reconnecting…" : h.activeHost()?.status === "online" ? "Connected" : h.activeHost()?.status === "updating" ? "Updating…" : "Offline"}
           </span>
         </span>
         <Iconify icon="lucide:chevrons-up-down" size={13} class="text-ink-500 shrink-0" />
@@ -60,7 +60,7 @@ export function HostCard(props: { id: "sidebar" | "overlay" }) {
               onClick={() => { h.setHostMenuOpen(false); h.setActiveHostId(host.id); }}>
               <Iconify icon="lucide:monitor" size={15} class="text-ink-500 shrink-0" />
               <span class="flex-1 min-w-0"><span class="block truncate text-xs text-ink-200">{host.name || host.hostname || host.id}</span>
-                <span class="block text-[11px] text-ink-500">{host.status === "online" ? "Online" : "Offline"}{host.os ? ` · ${host.os}` : ""}</span></span>
+                <span class="block text-[11px] text-ink-500">{host.status === "online" ? "Online" : host.status === "updating" ? "Updating…" : "Offline"}{host.os ? ` · ${host.os}` : ""}</span></span>
               <Show when={host.id === h.activeHostId()}><Iconify icon="lucide:check" size={14} /></Show>
             </button>
           )}</For>

@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import { Icon as Iconify } from "../../components/icon";
-import { useModal, useSession, useTranscriptCtx, useUI } from "../ctx";
+import { useHost, useModal, useSession, useTranscriptCtx, useUI } from "../ctx";
 import { SessionRow, type SessionRowCtx } from "./SessionSidebar";
 import { FloatMenu } from "./FloatMenu";
 import { HostCard } from "./HostCard";
@@ -8,6 +8,7 @@ import { SidebarToggle } from "./SidebarToggle";
 import type { SessionSummary } from "../types";
 
 export function WorkspaceSidebar() {
+  const hosts = useHost();
   const s = useSession();
   const t = useTranscriptCtx();
   const m = useModal();
@@ -265,7 +266,7 @@ export function WorkspaceSidebar() {
     {/* Daemon update: primary rounded-full button above host selector */}
     <Show when={(() => { const i = ui.daemonUpdate.info(); return !!i && !!i.available && i.available !== i.current; })()}>{(() => {
       const i = ui.daemonUpdate.info()!;
-      const busy = ui.daemonUpdate.applying() || i.frozen;
+      const busy = ui.daemonUpdate.applying() || hosts.activeHost()?.status === "updating";
       return (
         <button
           onClick={() => ui.daemonUpdate.apply()}
@@ -273,7 +274,7 @@ export function WorkspaceSidebar() {
           class="ui-button ui-button-primary w-full rounded-full h-[1.5rem] min-h-[1.5rem] py-0 text-xs gap-1.5"
         >
           <Iconify icon="lucide:arrow-down-to-line" size={13} />
-          <span>{busy ? (i.frozen ? (i.freezeStage || "Updating…") : "Updating…") : `Update to ${i.available}`}</span>
+          <span>{busy ? "Updating…" : `Update to ${i.available}`}</span>
         </button>
       );
     })()}</Show>

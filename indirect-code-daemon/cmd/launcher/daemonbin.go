@@ -10,11 +10,9 @@ import (
 	"time"
 )
 
-// standbyProc is a daemon started in standby (no WS) for health checks.
-type standbyProc struct {
-	cmd     *exec.Cmd
-	dataDir string
-}
+// Daemon binary helpers shared by the boot path (fetch.go) and the brutal
+// update path (update.go): download the floating daemon asset into a
+// slot's bin dir + verify it runs the expected version.
 
 // fetchDaemonTo downloads the floating daemon asset into slotDir/bin.
 // Freshness is enforced by --version self-verify after download
@@ -65,7 +63,7 @@ func fetchDaemonTo(slotDir, version string) (string, error) {
 // sane version string), without pinning to any expected version. Boot
 // path only: a promoted slot legitimately holds a NEWER daemon than the
 // launcher (post-flip power loss). Update freshness is enforced by the
-// takeover path (selfVerifyDaemon against the target version).
+// update path (selfVerifyDaemon against the target version).
 func selfVerifyRuns(path string) error {
 	done := make(chan struct{})
 	var out []byte
@@ -113,34 +111,7 @@ func selfVerifyDaemon(path, want string) error {
 	return nil
 }
 
-// startStandby launches the new daemon with --standby (loads storage,
-// shadow-connects, writes serving.json) against the inactive slot. The
-// caller waits serving proof via waitServingProof(). Config is slot-local
-// (canonical layout): the slot's own config.json.
-func startStandby(daemonPath, slotDir, version string) (*standbyProc, error) {
-	_ = version
-	cmd := exec.Command(daemonPath,
-		"--data-dir", slotDir, "--config", filepath.Join(slotDir, "config.json"), "--standby")
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	return &standbyProc{cmd: cmd, dataDir: slotDir}, nil
-}
-
-// terminateParent asks the active daemon to exit gracefully (SIGTERM;
-// it disconnects WS + exits on its own terms).
-func terminateParent(pid string) error {
-	n, err := parsePid(pid)
-	if err != nil {
-		return err
-	}
-	return terminatePid(n)
-}
-
 // runVersionCmd runs `bin --version` and returns combined output.
 func runVersionCmd(path string) ([]byte, error) {
 	return exec.Command(path, "--version").CombinedOutput()
 }
-
-// servingProof mirrors the daemon's serving.json declaration.

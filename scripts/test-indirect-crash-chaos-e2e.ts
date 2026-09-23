@@ -4,9 +4,9 @@
 // cleanly idle turns, never a torn slot, never a stuck freeze.
 //
 // Cases (each: fresh world, real binaries, no network, no model):
-//   K1 kill -9 old daemon mid-copy (frozen) -> relaunch: active=a,
+//   K1 kill -9 old daemon mid-serve -> relaunch: active=a,
 //      turn resumes from WAL (running+WAL preserved), no torn slot-b
-//   K2 kill -9 new launcher mid-takeover -> relaunch: active=a intact,
+//   K2 kill -9 new launcher mid-update -> relaunch: active=a intact,
 //      stale slot-b ignored/rebuilt, turn resumes
 //   K3 kill -9 AFTER active flip, before old exit -> relaunch: active=b
 //      serves (new daemon boots on slot-b, resumes turn); old pid dead
@@ -17,11 +17,10 @@
 //      never serves garbage
 //   K6 tamper: session JSON truncated mid-write + WAL intact -> boot
 //      replays WAL over frozen JSON (torn tail tolerated), turn resumes
-//   K7 tamper: handoff.json="promoted" forged without promote -> boot
-//      must NOT claim update_done falsely... (documents current behavior:
-//      announceUpdateDone fires on the marker; the marker is only
-//      written by takeover post-flip, so forgery requires disk access —
-//      assert the marker path is slot-local and consumed once)
+//   K7 tamper: update.done forged without promote -> boot must NOT
+//      claim update_done falsely (a normal boot never reads the signal
+//      files — only the --update-start waiter polls them; assert the
+//      signal path is slot-local and ignored by normal boots)
 //   K8 double boot: two daemons on the same root -> second must refuse
 //      (pidfile) or at worst not corrupt (tmp+rename writers)
 //
@@ -183,7 +182,7 @@ async function main() {
   build("./cmd/launcher", "vK1", LAUNCHER, "launcherVersion");
 
 
-  // ---- K1: kill -9 mid-copy (frozen, WAL open) -> relaunch resumes ----
+  // ---- K1: kill -9 mid-serve (WAL open) -> relaunch resumes ----
   {
     const { work, root } = mkWorld("k1");
     try {
@@ -217,11 +216,11 @@ async function main() {
     } finally { killAll(work); rmSync(work, { recursive: true, force: true }); }
   }
 
-  // ---- K2: torn slot-b (crashed takeover left garbage) -> ignored ----
+  // ---- K2: torn slot-b (crashed update left garbage) -> ignored ----
   {
     const { work, root } = mkWorld("k2");
     try {
-      // Simulate a takeover that died mid-copy: half slot-b, no active flip.
+      // Simulate a launcher --update that died mid-copy: half slot-b, no active flip.
       mkdirSync(join(root, "slots", "slot-b", "bin"), { recursive: true });
       mkdirSync(join(root, "slots", "slot-b", "sessions"), { recursive: true });
       wfs(join(root, "slots", "slot-b", "sessions", "half.jsonl"), '{"torn":');
@@ -346,8 +345,27 @@ async function main() {
     } finally { killAll(work); rmSync(work, { recursive: true, force: true }); }
   }
 
+  // ---- K7: forged update.done without promote -> normal boot ignores it ----
+  {
+    const { work, root } = mkWorld("k7");
+    try {
+      wfs(join(root, "slots", "update.done"), "9.9.9");
+      const d = launchDaemon(root);
+      const pid = await waitPid(root);
+      log("k7", `daemon up (pid ${pid}) with forged update.done`);
+      await sleep(3000);
+      // A normal boot never reads the signal files: no update_done can
+      // fire without a WS, and the stale file is cleaned at boot.
+      assert(!existsSync(join(root, "slots", "update.done")), "[k7] forged update.done survived boot");
+      assert.equal(rfs(join(root, "slots", "active"), "utf8").trim(), "a", "[k7] active moved by forged signal");
+      try { d.proc.kill("SIGKILL"); } catch {}
+      killAll(work);
+      log("k7", "forged update.done ignored + cleaned — PASS");
+    } finally { killAll(work); rmSync(work, { recursive: true, force: true }); }
+  }
+
   rmSync(work0, { recursive: true, force: true });
-  console.log("\n=== RESULT ===\nPASS: crash/kill/tamper chaos (k1-k6, k8)");
+  console.log("\n=== RESULT ===\nPASS: crash/kill/tamper chaos (k1-k8)");
 }
 
 main().catch((e) => { console.error("FAIL:", e); process.exit(1); });

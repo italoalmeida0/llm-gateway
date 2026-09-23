@@ -26,19 +26,13 @@ import assert from "node:assert/strict";
  // 1. Not frozen: no overlay, no brand takeover.
  assert(!(await text()).includes("Updating"), "no overlay initially");
 
- // 2. Freeze h1 -> full-screen overlay with brand + stage + host name.
- await page.evaluate(() => (window as any).overlayUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 1, autoUpdate: true, frozen: true, freezeStage: "copying sessions" }));
+ // 2. h1 goes updating -> full-screen overlay with brand + host name.
+ await page.evaluate(() => { (window as any).overlayUI.statuses["h1"] = "updating"; (window as any).overlayUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 1, autoUpdate: true }); });
  await settle();
  let t = await text();
- assert(t.includes("Updating one…"), "overlay titles frozen host: " + t.slice(0, 300));
- assert(t.includes("copying sessions"), "stage visible");
+ assert(t.includes("Updating one…"), "overlay titles updating host: " + t.slice(0, 300));
+ assert(t.includes("Updating…"), "static text visible");
  assert(t.includes("INDIRECT"), "brand visible");
- assert(t.includes("Cancel update"), "cancel button visible");
-
- // 3. Stage updates live.
- await page.evaluate(() => (window as any).overlayUI.noteUpdate("h1", { current: "1.0.0", available: "1.1.0", checkedAt: 2, autoUpdate: true, frozen: true, freezeStage: "waiting for promote" }));
- await settle();
- assert((await text()).includes("waiting for promote"), "stage live");
 
  // 4. Host card: open menu, switch to h2. (Two cards now: overlay
  // card first, #sidebar-card second — the menu must anchor to the
@@ -48,19 +42,19 @@ import assert from "node:assert/strict";
  assert(t.includes("Your hosts") && t.includes("two"), "host menu opens with hosts");
  await page.getByRole("menuitemradio", { name: /two/ }).click(); await settle();
  assert((await cmds()).some((c:any)=>c.type==="switch-host" && c.id==="h2"), "switch to h2");
- // Overlay is per-ACTIVE-host: switching away from the frozen host hides
+ // Overlay is per-ACTIVE-host: switching away from the updating host hides
  // it so you can keep working on h2 (the reported bug: overlay pinned
  // forever even after switching). The composer behind must be usable.
  assert(!(await text()).includes("Updating one…"), "overlay hides after switching away");
  assert(!(await text()).includes("Cancel update"), "cancel hidden with overlay");
 
- // 5. Switch back to h1 (still frozen) -> overlay RETURNS with its own
+ // 5. Switch back to h1 (still updating) -> overlay RETURNS with its own
  // host card (the overlay was hidden on h2, so open the SIDEBAR card —
  // same component pair; the fixture exposes the sidebar card button).
  // In the fixture the overlay IS the only host card, so drive the switch
  // through the stub directly (mirrors setActiveHostId from the sidebar).
  await page.evaluate(() => (window as any).overlayUI.setHostId("h1")); await settle();
- assert((await text()).includes("Updating one…"), "overlay returns on frozen host");
+ assert((await text()).includes("Updating one…"), "overlay returns on updating host");
 
  // 6. Menu actions: connect + refresh + remove send commands.
  // NOTE: Playwright clicks each menu item directly after opening (no
@@ -86,14 +80,10 @@ import assert from "node:assert/strict";
  // The real removeHost closes the menu before the confirm modal (same
  // as the fixture stub) — Cancel must be clickable right after.
 
- // 7. Cancel -> daemon_update_cancel stamped with the FROZEN host.
- await page.getByRole("button", { name: "Cancel update" }).click(); await settle();
- assert((await cmds()).some((c:any)=>c.type==="daemon_update_cancel" && c.hostId==="h1"), "cancel stamped frozen host");
-
- // 8. Unfreeze h1 -> overlay gone.
- await page.evaluate(() => (window as any).overlayUI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 3, autoUpdate: true, frozen: false }));
+ // 7. h1 back online -> overlay gone.
+ await page.evaluate(() => { (window as any).overlayUI.statuses["h1"] = "online"; (window as any).overlayUI.noteUpdate("h1", { current: "1.1.0", available: "", checkedAt: 3, autoUpdate: true }); });
  await settle();
- assert(!(await text()).includes("Updating"), "overlay hidden after unfreeze");
+ assert(!(await text()).includes("Updating"), "overlay hidden after online");
 
  // 9. Two HostCards, one shared menu (sidebar + overlay regression):
  // both cards visible at once, the menu must follow the CLICKED card.
@@ -103,7 +93,7 @@ import assert from "node:assert/strict";
  // — the very class of bug this step guards). Close it first so the
  // geometry below measures a fresh open from each card.
  await page.keyboard.press("Escape"); await settle();
- await page.evaluate(() => (window as any).overlayUI.noteUpdate("h1", { current: "1.1.0", available: "1.2.0", checkedAt: 4, autoUpdate: true, frozen: true, freezeStage: "copying sessions" }));
+ await page.evaluate(() => { (window as any).overlayUI.statuses["h1"] = "updating"; (window as any).overlayUI.noteUpdate("h1", { current: "1.1.0", available: "1.2.0", checkedAt: 4, autoUpdate: true }); });
  await settle();
  const cards = page.getByRole("button", { name: "Select host" });
  assert.equal(await cards.count(), 2, "two host cards (overlay + sidebar)");
@@ -127,6 +117,6 @@ import assert from "node:assert/strict";
  assert(!(await text()).includes("Your hosts"), "menu toggles closed on same card");
 
  assert.equal(errors.length, 0, "zero page errors: " + errors.join("; "));
- console.log("PASS: update overlay brand/stage/host-card/cancel/switch-away");
+ console.log("PASS: update overlay brand/host-card/switch-away");
  } finally { await browser.close(); server.stop(); }
 })();

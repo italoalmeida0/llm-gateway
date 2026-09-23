@@ -8,13 +8,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
-	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// Full handoff phases 0-2 against the fake mirror (no WS needed):
-// fetch launcher -> quiesce-for-handoff (pause, WAL kept) -> copy ->
+// Brutal update primitives against the fake mirror (no WS needed):
+// fetch launcher -> copy (source is SIGKILLed, WAL travels verbatim) ->
 // resume in the new slot. Canonical layout: dataDir IS the active slot
 // (<root>/slots/slot-a), root holds brain/slots/logs.
 func TestHandoffPrimitivesE2E(t *testing.T) {
@@ -68,14 +67,7 @@ func TestHandoffPrimitivesE2E(t *testing.T) {
 	if sl.active != "a" || sl.inactive != "b" {
 		t.Fatalf("slots: %+v", sl)
 	}
-	// Quiesce-for-handoff (running turn PAUSES, WAL kept — nothing is
-	// cancelled, nothing is committed).
-	d.quiesceForHandoff()
-	// Freeze + copy.
-	d.setFrozen(true, "e2e")
-	if !d.isFrozen() {
-		t.Fatal("not frozen")
-	}
+	// Copy (brutal: the source is already SIGKILLed, WAL verbatim).
 	if err := d.copyToSlot(sl, d.slotDir("b")); err != nil {
 		t.Fatal(err)
 	}
@@ -93,11 +85,8 @@ func TestHandoffPrimitivesE2E(t *testing.T) {
 	if err := selfVerifyBinary(lp, "vNOPE", "launcher"); err == nil {
 		t.Fatal("wrong version must fail verify")
 	}
-	// Abort path: cleans slot-b, unfreezes.
+	// Abort path: cleans slot-b.
 	d.abortHandoff("e2e-abort")
-	if d.isFrozen() {
-		t.Fatal("still frozen")
-	}
 	if _, err := os.Stat(filepath.Join(root, "slots", "slot-b")); !os.IsNotExist(err) {
 		t.Fatal("slot-b survived abort")
 	}
@@ -107,9 +96,10 @@ func TestHandoffPrimitivesE2E(t *testing.T) {
 	}
 }
 
-// Handoff pause/resume: a running turn (WAL + running JSON) survives
-// quiesceForHandoff + copyToSlot and resumes in the new slot — same turn
-// index, transcript intact, never marked cancelled.
+// SIGKILL/resume: a running turn (WAL + running JSON) survives
+// copyToSlot and resumes in the new slot — same turn index, transcript
+// intact, never marked cancelled (this is the crash-recovery path the
+// brutal protocol leans on: the old daemon is SIGKILLed mid-turn).
 func TestHandoffPauseResumesRunningTurn(t *testing.T) {
 	d := testDaemon(t)
 	root := t.TempDir()
@@ -136,13 +126,12 @@ func TestHandoffPauseResumesRunningTurn(t *testing.T) {
 	act := &ActiveSession{record: rec, wal: ww}
 	d.sessions[rec.ID] = act
 
-	// Pause (NOT cancel/commit) + copy.
-	d.quiesceForHandoff()
-	if act.wal != nil {
-		t.Fatal("quiesce must close the WAL handle")
-	}
+	// Close the WAL handle (flush) WITHOUT committing: the log is the
+	// turn's recovery record (this is what a SIGKILL leaves behind).
+	_ = act.wal.close()
+	act.wal = nil
 	if rec.Status != "running" || rec.Turn.Status != "running" {
-		t.Fatalf("quiesce cancelled the turn: %+v", rec.Turn)
+		t.Fatalf("turn state damaged: %+v", rec.Turn)
 	}
 	if err := d.copyToSlot(sl, d.slotDir("b")); err != nil {
 		t.Fatal(err)
@@ -167,57 +156,37 @@ func TestHandoffPauseResumesRunningTurn(t *testing.T) {
 	}
 }
 
-// Abort-after-pause resumes the turn in the SAME process: the WAL was
-// never cancelled, so abortHandoff restarts the worker and the turn
-// keeps running (no reboot, no new daemon).
+// Abort-before-spawn keeps serving: the brutal spawn never happened
+// (failure before --update-start), so NOTHING was killed or frozen — the
+// daemon keeps serving untouched and the update slot is cleaned.
 func TestAbortHandoffResumesPausedTurn(t *testing.T) {
 	d := testDaemon(t)
 	root := t.TempDir()
 	slotA := filepath.Join(root, "slots", "slot-a")
 	os.MkdirAll(filepath.Join(slotA, "sessions"), 0o700)
 	os.WriteFile(filepath.Join(root, "slots", "active"), []byte("a\n"), 0o600)
+	os.WriteFile(filepath.Join(root, "slots", "slot-b", "sessions", "x.jsonl"), []byte("x"), 0o600)
 	d.dataDir = slotA
 	d.sharedDir = filepath.Join(root, "external")
 
-	rec := &SessionRecord{ID: "run2", CWD: t.TempDir(), Model: "m",
-		Status: "running", TurnSeq: 1,
-		Turn:     &TurnActivity{StartedAt: 7, Status: "running"},
-		Messages: []provider.Message{{Role: provider.RoleUser, TurnIndex: 1, Content: []provider.Content{provider.TextBlock{Text: "hi"}}}},
+	d.abortHandoff("boom-before-spawn")
+	if _, err := os.Stat(filepath.Join(root, "slots", "slot-b")); !os.IsNotExist(err) {
+		t.Fatal("update slot survived abort")
 	}
-	if err := d.saveSession(rec); err != nil {
-		t.Fatal(err)
-	}
-	ww, err := d.openWAL(rec.ID, &walHeader{TurnIndex: 1, StartedAt: 7, Prompt: "hi"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	act := &ActiveSession{record: rec, wal: ww}
-	d.sessions[rec.ID] = act
-
-	// Pause (like phase 1), then fail AFTER pausing.
-	d.quiesceForHandoff()
-	d.setFrozen(true, "copying sessions")
-	resumed := make(chan string, 4)
-	d.runTurnHook = func(a *ActiveSession, prompt string) {
-		resumed <- a.record.ID + ":" + prompt
-	}
-	d.abortHandoff("boom-after-pause")
-	if d.isFrozen() {
-		t.Fatal("still frozen after abort")
-	}
-	select {
-	case got := <-resumed:
-		if got != "run2:hi" {
-			t.Fatalf("wrong resume: %q", got)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("paused turn did not resume after abort")
+	st := d.updateChecker()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.lastError != "boom-before-spawn" {
+		t.Fatalf("reason lost: %q", st.lastError)
 	}
 }
 
-// Copy audit: a session that starts writing between quiesce and copy
-// must abort the copy (fail = abort, never a torn snapshot).
-func TestCopyToSlotRefusesLiveWriter(t *testing.T) {
+
+
+func TestCopyToSlotCopiesLiveStateAsIs(t *testing.T) {
+	// Brutal protocol: --update-start SIGKILLs the old daemon first, so a
+	// running turn's WAL is copied verbatim and the new daemon resumes it
+	// from disk (crash recovery). The copy itself never refuses.
 	d := testDaemon(t)
 	root := t.TempDir()
 	slotA := filepath.Join(root, "slots", "slot-a")
@@ -239,17 +208,15 @@ func TestCopyToSlotRefusesLiveWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a turn that started AFTER quiesce (open WAL handle).
+	// Simulate a turn with an open WAL handle (SIGKILLed mid-turn).
 	d.sessions[rec.ID] = &ActiveSession{record: rec, wal: ww}
-	if err := d.copyToSlot(sl, d.slotDir("b")); err == nil {
+	if err := d.copyToSlot(sl, d.slotDir("b")); err != nil {
 		_ = ww.close()
-		t.Fatal("copy with a live writer must fail")
+		t.Fatalf("copy must succeed (SIGKILLed source has no live writers): %v", err)
 	}
-	// Windows locks open files: close the handle so TempDir cleanup can
-	// remove it (the assertions above already proved the copy refused).
 	_ = ww.close()
-	if _, err := os.Stat(filepath.Join(root, "slots", "slot-b")); !os.IsNotExist(err) {
-		t.Fatal("failed copy must not leave a half-copied slot")
+	if _, err := os.Stat(filepath.Join(root, "slots", "slot-b", "sessions", "live1.jsonl")); err != nil {
+		t.Fatalf("running session copied verbatim: %v", err)
 	}
 }
 

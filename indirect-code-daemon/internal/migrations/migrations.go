@@ -104,7 +104,7 @@ func writeVersion(slotDir string, v int) error {
 }
 
 // MigrateDir runs the chain with dir as the slot root (used for slot
-// takeover: the inactive slot dir is a full data root).
+// updates: the inactive slot dir is a full data root).
 func MigrateDir(dir string) ([]int, error) {
 	return Migrate(dir)
 }

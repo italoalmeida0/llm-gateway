@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,13 +22,11 @@ import (
 //	      projects.json           project list
 //	      daemon.pid              live pid (the daemon writes/removes it)
 //	      storage_version.json    storage schema stamp
-//	      serving.json            proof-of-serving (WS-connected)
-//	      handoff.json            takeover signal (promoted / failed: …)
-//	      takeover.log            last takeover attempt into THIS slot
+//	      update.log              last launcher --update attempt into THIS slot
 //	    slot-b/                   (same shape)
 //	  logs/
 //	    daemon.log                daemon stdout (install scripts wire it)
-//	    takeover-last.log         last takeover attempt (stable copy)
+//	    update-last.log           last --update attempt (stable copy)
 //	  external/
 //	    python/                   managed interpreter
 //	    bin/unish[.exe]           managed shell
@@ -69,7 +66,8 @@ func slotLauncherName() string {
 //   - missing root/slots dirs are created;
 //   - stray top-level state (sessions/, config.json, projects.json,
 //     daemon.pid, storage_version.json, serving.json, handoff.json,
-//     standby-ready.json, takeover.log) is MOVED into the active slot
+//     standby-ready.json, takeover.log, update.log) is MOVED into the
+//     active slot (legacy names kept: old installs may still carry them)
 //     (or slot-a when active is missing) — never copied, never deleted;
 //   - slots/active missing: pick the slot with the freshest content
 //     (sessions mtime, then slot dir mtime), default "a" when both are
@@ -116,7 +114,7 @@ func ensureLayout(root string) ([]string, error) {
 	// when sessions/ is stray, rename lands exactly at slot/sessions.
 	for _, name := range []string{"sessions", "config.json", "projects.json",
 		"daemon.pid", "storage_version.json", "serving.json", "handoff.json",
-		"standby-ready.json", "takeover.log"} {
+		"standby-ready.json", "takeover.log", "update.log"} {
 		src := filepath.Join(root, name)
 		if _, err := os.Lstat(src); err != nil {
 			continue
@@ -220,33 +218,4 @@ func freshestSlot(slotsDir string) string {
 		}
 	}
 	return best
-}
-
-// servingProof mirrors the daemon's serving.json declaration.
-type servingProof struct {
-	Version     string `json:"version"`
-	Pid         int    `json:"pid"`
-	ConnectedAt int64  `json:"connectedAt"`
-	Sessions    int    `json:"sessions"`
-}
-
-// waitServingProof waits for slotDir/serving.json to declare expectVersion
-// with a live pid (see standby.go for the proof format). Stale files
-// (crash leftovers) fail the pid check and are ignored — readers must
-// always verify liveness, never trust bytes.
-func waitServingProof(slotDir, expectVersion string, timeout time.Duration) error {
-	path := filepath.Join(slotDir, "serving.json")
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if raw, err := os.ReadFile(path); err == nil {
-			var p servingProof
-			if jerr := json.Unmarshal(raw, &p); jerr == nil && p.Version == expectVersion && p.Pid > 0 {
-				if pidAlive(fmt.Sprint(p.Pid)) {
-					return nil
-				}
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return fmt.Errorf("no serving proof for %s in time", expectVersion)
 }

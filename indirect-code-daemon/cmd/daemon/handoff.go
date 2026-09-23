@@ -14,26 +14,31 @@ import (
 	"time"
 )
 
-// Handoff orchestrator (daemon side): full-slot update with late freeze.
+// Brutal update orchestrator (daemon side): no quiesce, no freeze dance.
 //
-// Order (user-approved protocol):
-//  0. Background: detect (push manifest) + download new launcher to the
-//     INACTIVE slot + self-verify (--version). NOTHING pauses yet.
-//  1. Freeze (late): only after the launcher is verified. Mutations
-//     rejected, WS stays connected, frontend shows loading screen.
-//  2. Copy sessions (+ configs) active -> inactive slot.
-//  3. Exec new launcher --takeover with slot paths (daemon passes its own
-//     pid + active/inactive slot ids). The new launcher: migrates,
-//     downloads the new daemon into the inactive slot, verifies
-//     (--version), starts it in standby (no WS).
-//  4. Active daemon: disconnect WS + die. New daemon: connect, assume,
-//     unfreeze (broadcast update_done). Launcher flips `active`, deletes
-//     the previous slot.
-//  5. Any failure before step 4: delete inactive slot, UNFREEZE (no WS
-//     reconnect needed — it never dropped), broadcast update_failed.
+// Order:
+//  0. Background: detect (manifest poll) + clean the update slot (never
+//     the own one) + download the new launcher + self-verify (--version)
+//     + require the manifest version strictly newer than this daemon.
+//     NOTHING pauses yet.
+//  1. Spawn OURSELVES with --update-start (detached, own pid passed) and
+//     keep serving until SIGKILLed. The updater is fully naive (loads no
+//     sessions), kills us brutally (SIGKILL — crash recovery resumes the
+//     turns from WALs), takes over the pidfile, owns the host in "update"
+//     state (host_status updating via the relay), copies our slot
+//     into the update slot, and runs the new launcher in --update mode.
+//  2. The launcher migrates the update slot, fetches + verifies the new
+//     daemon (runs + expected version + strictly newer), then spawns it
+//     DETACHED with --update-end and exits.
+//  3. --update-end boots normally; after its first WS connect (end-to-end
+//     proof) it SIGKILLs the waiter, flips slots/active, deletes the old
+//     slot and reports update_done.
+//  4. Any failure: the launcher writes the fail file (only when ready to
+//     be killed); the waiter kills the launcher, deletes the update slot,
+//     reports update_failed + back-to-normal, and re-execs itself as a
+//     normal daemon (crash recovery resumes the turns).
 //
-// Queue-not-reject: prompts arriving while frozen are parked in the
-// session queue and delivered after unfreeze/handoff.
+// See update_flow.go (daemon --update-start/--update-end) + launcher/update.go.
 
 // slotLayout resolves active/inactive slot dirs under <dataDir>/slots.
 type slotLayout struct {
@@ -101,7 +106,7 @@ func (d *DaemonServer) slotDir(which string) string {
 func (d *DaemonServer) beginHandoff() {
 	st := d.updateChecker()
 	st.mu.Lock()
-	if st.handoffBusy || st.frozen {
+	if st.handoffBusy {
 		st.mu.Unlock()
 		return
 	}
@@ -132,8 +137,11 @@ func (d *DaemonServer) beginHandoff() {
 	go d.runHandoff(version)
 }
 
-// runHandoff executes the 5 phases. Any error before promote → cleanup +
-// unfreeze + update_failed broadcast.
+// runHandoff executes the brutal update: clean the target slot (never the
+// own one), download + verify the new launcher (runs the expected version
+// AND strictly newer than this daemon), then spawn ITSELF with
+// --update-start and keep serving until the updater SIGKILLs us. Any error
+// before the spawn → cleanup + update_failed broadcast (WS never dropped).
 func (d *DaemonServer) runHandoff(version string) {
 	defer func() {
 		st := d.updateChecker()
@@ -144,10 +152,18 @@ func (d *DaemonServer) runHandoff(version string) {
 	fail := func(reason string) {
 		d.abortHandoff(reason)
 	}
+	if !isVersionNewer(version, daemonVersion) {
+		fail(fmt.Sprintf("already on %s (target %s is not newer)", daemonVersion, version))
+		return
+	}
 	sl := d.slots()
-	inactiveDir := d.slotDir(sl.inactive)
-	// Phase 0: download new launcher into inactive slot + self-verify.
-	// (Background: user untouched, nothing frozen.)
+	// Clean the target slot FIRST (never the own slot: guard inside).
+	if err := cleanInactiveSlot(d.rootDir(), sl.active, sl.inactive, d.dataDir); err != nil {
+		fail(fmt.Sprintf("clean update slot: %v", err))
+		return
+	}
+	// Download the new launcher into the clean slot + self-verify.
+	// (Background: user untouched, still serving normally.)
 	launcherPath, err := d.fetchLauncherTo(version, sl)
 	if err != nil {
 		fail(fmt.Sprintf("launcher download: %v", err))
@@ -171,47 +187,28 @@ func (d *DaemonServer) runHandoff(version string) {
 		fail(fmt.Sprintf("launcher verify: %v", err))
 		return
 	}
-	// Phase 1: quiesce-for-handoff (pause turns, KEEP WALs for resume) THEN
-	// LATE freeze. Copying a live session dir races appends; quiesced
-	// state is stable. Running turns are NOT cancelled: the WAL stays on
-	// disk and the new daemon's resumeInterruptedTurns continues them
-	// (same index, no repeated user message). Background bash/python
-	// processes keep running detached (root brain scratch is slot-shared)
-	// and report as restart orphans on the resumed turn.
-	d.quiesceForHandoff()
-	// Phase 1b: LATE freeze (only now — download could have failed).
-	d.setFrozen(true, "copying sessions")
-	// Phase 2: copy sessions (+ configs) to inactive slot.
-	if err := d.copyToSlot(sl, inactiveDir); err != nil {
-		fail(fmt.Sprintf("copy sessions: %v", err))
+	// The manifest version is strictly newer than this daemon (checked
+	// above), and the launcher was verified to RUN that version: releases
+	// bump daemon+launcher in lockstep, so the launcher is newer too.
+	// Spawn OURSELVES in --update-start mode (detached): the updater kills
+	// us brutally (SIGKILL — crash recovery resumes the turns), takes over
+	// the pidfile + relay in "update" state, copies our slot, and runs
+	// the new launcher. We keep serving until the SIGKILL lands.
+	if err := spawnUpdateStart(d.rootDir(), sl.active, sl.inactive, version, launcherPath); err != nil {
+		fail(fmt.Sprintf("spawn updater: %v", err))
 		return
 	}
-	// Phase 3: exec new launcher --takeover. It migrates, fetches the new
-	// daemon, verifies, starts it in standby, and signals us back via
-	// exit code + a handoff file. WE WAIT (frozen, WS connected).
-	d.setFrozen(true, "preparing update")
-	if err := d.execTakeover(launcherPath, sl, version); err != nil {
-		fail(fmt.Sprintf("takeover: %v", err))
-		return
-	}
-	// Phase 4 happens in the new launcher/daemon (promote). If WE are
-	// still alive after execTakeover returned success, the new side
-	// failed to promote within timeout → unfreeze handled by fail() in
-	// execTakeover paths. Reaching here means promote confirmed: the old
-	// daemon disconnects WS + exits (the new one serves from here on).
-	_ = inactiveDir
-	d.gracefulShutdown("[HANDOFF] promoted to " + version)
+	// Spawned: the updater SIGKILLs us, owns the host and reports
+	// host_status updating via the relay — no broadcast needed here.
 }
 
-// abortHandoff: delete inactive slot, unfreeze (WS never dropped — no
-// reconnect needed), notify frontend. The paused turns were NEVER
-// cancelled: their WALs sit untouched in the ACTIVE slot, so the SAME
-// process resumes them immediately (no reboot, no new daemon) — the
-// frontend sees session_status running again and streaming continues.
+// abortHandoff: the brutal spawn never happened (failure before
+// --update-start), so NOTHING was killed: delete the update slot,
+// clear the busy flag via the runHandoff defer, and notify the
+// frontend. The daemon keeps serving untouched (WS never dropped).
 func (d *DaemonServer) abortHandoff(reason string) {
 	sl := d.slots()
 	_ = os.RemoveAll(d.slotDir(sl.inactive))
-	d.setFrozen(false, "")
 	st := d.updateChecker()
 	st.mu.Lock()
 	st.lastError = reason
@@ -220,7 +217,6 @@ func (d *DaemonServer) abortHandoff(reason string) {
 	_ = d.sendWS(map[string]any{
 		"type": "update_failed", "hostId": d.config.HostID, "reason": reason,
 	})
-	d.resumePausedTurns()
 }
 
 // fetchLauncherTo downloads the launcher asset for version into the
@@ -360,30 +356,16 @@ func extractGotVersion(err error) string {
 // active slot, so the source is dataDir itself.
 //
 // WAL sidecars (*.wal.jsonl) MUST travel with their session JSON: the
-// new daemon resumes running turns from them (quiesceForHandoff keeps
-// Status=running + WAL on purpose). The per-session brain scratch
+// new daemon resumes running turns from them (the old side is SIGKILLed,
+// so Status=running + WAL stay exactly as the crash left them). The per-session brain scratch
 // (<root>/brain/<sid>) is root-level, shared by both slots — nothing to
 // copy, and bg .log files survive the handoff there.
 func (d *DaemonServer) copyToSlot(sl slotLayout, inactiveDir string) error {
 	src := d.dataDir
 	srcSessions := d.sessionsDir()
 	// Sessions first: sourced from the live sessionsDir (slot-aware).
-	// Quiesce audit (fail = abort, nothing half-copied): every in-memory
-	// running session must be paused with its WAL closed and flushed.
-	// A live writer here means quiesceForHandoff raced a new turn —
-	// copying would snapshot a torn state, so refuse instead.
-	d.sessionsMu.RLock()
-	for _, act := range d.sessions {
-		act.mu.Lock()
-		live := act.record.Status == "running" && (act.wal != nil || act.cancel != nil)
-		act.mu.Unlock()
-		if live {
-			d.sessionsMu.RUnlock()
-			return fmt.Errorf("session %s still writing during copy", act.record.ID)
-		}
-	}
-	d.sessionsMu.RUnlock()
-	// Sessions first: sourced from the live sessionsDir (slot-aware).
+	// The brutal protocol never copies a LIVE daemon: --update-start runs
+	// AFTER SIGKILLing the old side, so no writer races this copy.
 	if s, err := os.Stat(srcSessions); err == nil && s.IsDir() {
 		if err := copyDirLink(filepath.Dir(srcSessions), filepath.Join(inactiveDir, "sessions"), "sessions"); err != nil {
 			return fmt.Errorf("copy sessions: %w", err)
@@ -509,86 +491,6 @@ func fetchURL(url string, w io.Writer) error {
 	}
 	_, err = io.Copy(w, resp.Body)
 	return err
-}
-
-// execTakeover runs the new launcher --takeover and waits for the handoff
-// result (promote confirmed or failure). Timeout -> failure.
-func (d *DaemonServer) execTakeover(launcherPath string, sl slotLayout, version string) error {
-	handoffFile := filepath.Join(d.slotDir(sl.inactive), "handoff.json")
-	_ = os.Remove(handoffFile)
-	// Pre-flight: the downloaded launcher must identify as the expected
-	// version (stale cache serving an OLD launcher without --takeover
-	// support dies with a bare exit code and no handoff file — exactly
-	// the mystery "exit status 1". Catch it here with a clear message.
-	if err := selfVerifyBinary(launcherPath, version, "launcher"); err != nil {
-		return fmt.Errorf("launcher pre-flight: %w", err)
-	}
-	cmd := exec.Command(launcherPath,
-		"--takeover",
-		"--root-dir", d.rootDir(),
-		"--from-slot", sl.active,
-		"--to-slot", sl.inactive,
-		"--expect-version", version,
-		"--handoff-file", handoffFile,
-		"--parent-pid", fmt.Sprint(os.Getpid()),
-	)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	// Takeover downloads from OUR gateway (instant, no CDN): pass it down
-	// so the new launcher never touches GitHub. Falls back to GitHub raw
-	// only when the gateway is unreachable (same rule as manifest fetch).
-	cmd.Env = append(os.Environ(), "INDIRECT_GATEWAY="+gatewayBaseURL(d))
-	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
-	timeout := time.After(10 * time.Minute)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case err := <-done:
-			// Launcher exited: read handoff result.
-			return readHandoffResult(handoffFile, err)
-		case <-timeout:
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			return fmt.Errorf("takeover timed out")
-		case <-ticker.C:
-			if res, ok := readHandoffReady(handoffFile); ok {
-				if res {
-					return nil // promoted
-				}
-				return fmt.Errorf("takeover refused by new launcher")
-			}
-		}
-	}
-}
-
-func readHandoffResult(path string, runErr error) error {
-	if ok, done := readHandoffReady(path); done {
-		if ok {
-			return nil
-		}
-		return fmt.Errorf("takeover failed (see new launcher log)")
-	}
-	if runErr != nil {
-		return fmt.Errorf("takeover launcher: %w", runErr)
-	}
-	return fmt.Errorf("takeover launcher exited without result")
-}
-
-func readHandoffReady(path string) (bool, bool) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return false, false
-	}
-	s := strings.TrimSpace(string(raw))
-	if s == "promoted" {
-		return true, true
-	}
-	if strings.HasPrefix(s, "failed") {
-		return false, true
-	}
-	return false, false
 }
 
 // debugMirror reports what the daemon's own download path resolves:

@@ -322,7 +322,7 @@ export interface RemoteHostDto {
   os: string | null;
   arch: string | null;
   apiKeyId: string | null;
-  status: "online" | "offline";
+  status: "online" | "offline" | "updating";
   lastSeenAt: number | null;
   createdAt: number;
 }

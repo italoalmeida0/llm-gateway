@@ -11,6 +11,7 @@ render(() => {
     send: (c) => api.commands.push(c),
     toast: (message, kind) => setNotices((p) => [...p, { message, kind }]),
     getHostId: () => api.hostId || "h1",
+    getHostStatus: (hid) => api.hostStatus?.(hid),
   });
   api.info = du.info;
   api.stateFor = du.stateFor;
@@ -19,7 +20,6 @@ render(() => {
   api.checkNow = du.checkNow;
   api.toggle = du.toggle;
   api.apply = du.apply;
-  api.cancel = du.cancel;
   api.noteFailed = du.noteFailed;
   api.noteDone = du.noteDone;
   return (
@@ -29,7 +29,6 @@ render(() => {
       <button id="btn-check" onClick={() => du.checkNow()}>check</button>
       <button id="btn-toggle" onClick={() => du.toggle(!(du.info()?.autoUpdate ?? true))}>toggle</button>
       <button id="btn-apply" onClick={() => du.apply()}>apply</button>
-      <button id="btn-cancel" onClick={() => du.cancel()}>cancel</button>
       <div id="notices">{JSON.stringify(notices())}</div>
     </div>
   );

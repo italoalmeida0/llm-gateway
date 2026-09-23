@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,10 +17,11 @@ import (
 // reconnect, and every updateCheckInterval, and broadcasts availability via
 // daemon_update. It never downloads anything itself.
 //
-// Download + verify + restart live in the LAUNCHER (takeover protocol):
-// the daemon freezes late, the new launcher prepares the inactive slot,
-// and promote happens through standby. See handoff.go (daemon side) and
-// cmd/launcher/takeover.go (launcher side).
+// Download + verify + restart live in the BRUTAL update protocol:
+// the daemon spawns itself --update-start (SIGKILLs the old side, copies
+// the slot, runs the new launcher), the launcher spawns --update-end,
+// and promote happens after its first WS connect. See handoff.go (active
+// side) + update_flow.go (--update-start/--update-end) + launcher/update.go.
 //
 // Version model: daemonVersion is stamped at build time via ldflags
 // (-X main.daemonVersion=vX.Y.Z); dev builds report "dev" and never
@@ -61,12 +61,6 @@ type updateState struct {
 	mismatchWant string
 	mismatchGot  string
 	mismatchAt   int64
-	// Handoff freeze (late pause): when frozen, the daemon rejects new
-	// turns and mutations but KEEPS the WS connected. Set only after the
-	// new launcher is downloaded + self-verified (never pause for a
-	// download that may fail). Unfreeze on any failure before handoff.
-	frozen      bool
-	freezeStage string // current stage label for the frontend loading screen
 }
 
 func (d *DaemonServer) updateChecker() *updateState {
@@ -222,49 +216,6 @@ func (d *DaemonServer) setUpdateError(msg string) {
 	d.broadcastUpdateState()
 }
 
-// setFrozen flips the handoff freeze and broadcasts the stage.
-func (d *DaemonServer) setFrozen(frozen bool, stage string) {
-	st := d.updateChecker()
-	st.mu.Lock()
-	st.frozen = frozen
-	if stage != "" {
-		st.freezeStage = stage
-	}
-	st.mu.Unlock()
-	d.broadcastUpdateState()
-}
-
-// isFrozen reports the handoff freeze (dispatchers reject mutations).
-func (d *DaemonServer) isFrozen() bool {
-	st := d.updateChecker()
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.frozen
-}
-
-// announceUpdateDone broadcasts update_done once when a handoff marker
-// exists (written by takeover on promote), then removes it. Called on
-// every (re)connect so the frontend learns even if WS was down at boot.
-func (d *DaemonServer) announceUpdateDone() {
-	marker := ""
-	// Marker lives in the slot next to the handoff file.
-	for _, cand := range []string{
-		filepath.Join(d.dataDir, "handoff.json"),
-	} {
-		if raw, err := os.ReadFile(cand); err == nil && strings.TrimSpace(string(raw)) == "promoted" {
-			marker = cand
-			break
-		}
-	}
-	if marker == "" {
-		return
-	}
-	_ = os.Remove(marker)
-	_ = d.sendWS(map[string]any{
-		"type": "update_done", "hostId": d.config.HostID, "version": daemonVersion,
-	})
-}
-
 // broadcastUpdateState emits daemon_update to all frontend clients.
 func (d *DaemonServer) broadcastUpdateState() {
 	st := d.updateChecker()
@@ -276,7 +227,6 @@ func (d *DaemonServer) broadcastUpdateState() {
 		"mismatchWant": st.mismatchWant, "mismatchGot": st.mismatchGot,
 		"mismatchAt": st.mismatchAt,
 		"autoUpdate": d.autoUpdateEnabled(),
-		"frozen":     st.frozen, "freezeStage": st.freezeStage,
 	}
 	if st.lastError != "" {
 		msg["error"] = st.lastError

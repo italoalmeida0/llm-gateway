@@ -94,15 +94,15 @@ export function WorkspaceLayout(props: { sidebar: JSX.Element; children: JSX.Ele
   );
 }
 
-/** Full-screen OS-style update screen (same look as Onboarding): while the
- * daemon handoff is frozen on a host, take over the whole page with the big
- * Indirect brand, a progress line and the stage. Frozen is per-host: the
- * overlay follows the host that is really updating, and host switching
- * keeps working through the same host card + menu as the sidebar
- * (WorkspaceSidebar, bottom card): select / refresh / connect / remove.
+/** Full-screen OS-style update screen (same look as Onboarding): while a
+ * host reports status updating (the relay says so — the naive updater owns
+ * the host), take over the whole page with the big Indirect brand and a
+ * progress line. Updating is per-host: the overlay follows the host that
+ * is really updating, and host switching keeps working through the same
+ * host card + menu as the sidebar (WorkspaceSidebar, bottom card):
+ * select / refresh / connect / remove.
  * PairModal/ConfirmModal/SettingsModal keep rendering above (z-50 modal
  * layer > overlay z-40), so pairing + remove-confirm never hide behind.
- * Stages stream from daemon_update.freezeStage.
  *
  * Exported for the overlay fixture test (same component, real browser).
  */
@@ -110,36 +110,35 @@ export function UpdateFreezeOverlay() {
   const ui = useUI();
   const hosts = useHost();
   // Overlay is per-ACTIVE-host: visible only while the host you are ON
-  // is frozen. Switching to a non-frozen host hides the overlay so you
-  // can keep working there; switching back re-shows it. (Scanning all
-  // hosts here would pin the overlay on screen forever — the exact bug
-  // where switching hosts never dismissed it.)
-  const frozenHostId = () => {
+  // reports status updating (the relay is the source of truth — the naive
+  // updater owns the host until --update-end promotes). Switching to a
+  // non-updating host hides the overlay so you can keep working there;
+  // switching back re-shows it. (Scanning all hosts here would pin the
+  // overlay on screen forever — the exact bug where switching hosts never
+  // dismissed it.)
+  const updatingHostId = () => {
     const aid = hosts.activeHostId();
     if (!aid) return "";
-    return ui.daemonUpdate.stateFor(aid)?.frozen ? aid : "";
+    if (hosts.hosts().find((h) => h.id === aid)?.status === "updating") return aid;
+    return "";
   };
-  const frozen = () => frozenHostId() !== "";
-  const stage = () => {
-    const hid = frozenHostId();
-    return (hid ? ui.daemonUpdate.stateFor(hid)?.freezeStage : "") || "preparing update";
-  };
-  const frozenHost = () => hosts.hosts().find((h) => h.id === frozenHostId());
+  const updating = () => updatingHostId() !== "";
+  const updatingHost = () => hosts.hosts().find((h) => h.id === updatingHostId());
   const upd = () => {
-    const hid = frozenHostId();
+    const hid = updatingHostId();
     return hid ? ui.daemonUpdate.stateFor(hid) : null;
   };
   return (
-    <Show when={frozen()}>
+    <Show when={updating()}>
       <div class="rc-update-screen fixed inset-0 z-40 flex flex-col items-center overflow-y-auto bg-ink-950 p-4 text-center sm:p-6">
         <div class="mx-auto my-auto w-full max-w-xl space-y-6 py-8">
           <div>
             <IndirectBrand />
             <h2 class="mt-5 text-lg font-semibold text-ink-100">
-              Updating {frozenHost()?.name || frozenHost()?.hostname || "daemon"}…
+              Updating {updatingHost()?.name || updatingHost()?.hostname || "daemon"}…
             </h2>
             <p class="mx-auto mt-2 max-w-sm text-[13px] leading-relaxed text-ink-400">
-              {upd()?.target ? `Installing ${upd()?.target} — ` : ""}{stage()}. Sessions are paused safely, nothing is lost.
+              {upd()?.target ? `Installing ${upd()?.target}. ` : ""}Sessions are safe, nothing is lost.
             </p>
           </div>
           <div class="ui-card mx-auto max-w-sm space-y-3 p-4 text-left">
@@ -148,22 +147,14 @@ export function UpdateFreezeOverlay() {
                 <Iconify icon="lucide:refresh-cw" size={16} class="animate-spin" />
               </div>
               <div class="min-w-0 flex-1 text-xs">
-                <p class="font-medium text-ink-200">{stage()}</p>
+                <p class="font-medium text-ink-200">Updating…</p>
                 <p class="mt-0.5 text-[11px] text-ink-400">
-                  {frozenHost()?.name || frozenHost()?.hostname || frozenHostId()} · {upd()?.current ? `from ${upd()?.current}` : "working"}…
+                  {updatingHost()?.name || updatingHost()?.hostname || updatingHostId()} · {upd()?.current ? `from ${upd()?.current}` : "working"}…
                 </p>
               </div>
             </div>
             <div class="h-1.5 overflow-hidden rounded-full bg-ink-800">
               <div class="h-full w-1/3 animate-[rc-update-slide_1.2s_ease-in-out_infinite_alternate] rounded-full bg-brand-500" />
-            </div>
-            <div class="flex items-center justify-end gap-2.5 pt-1 text-xs">
-              <button
-                onClick={() => ui.daemonUpdate.cancel(frozenHostId())}
-                class="px-3.5 py-1.5 rounded-lg border border-line text-ink-300 hover:text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer"
-              >
-                Cancel update
-              </button>
             </div>
           </div>
           {/* Shared HostCard (same component as the update overlay):
@@ -308,6 +299,7 @@ export default function IndirectCodePage() {
     send: (payload) => relay.send(payload),
     toast: notice.toast,
     getHostId: () => hosts.activeHostId(),
+    getHostStatus: (hid) => hosts.hosts().find((h) => h.id === hid)?.status,
   });
 
   const background = createBackground({
@@ -709,6 +701,8 @@ export default function IndirectCodePage() {
           if (activeSessionId()) transcript.fetchSession(activeSessionId());
           background.refresh();
         }
+        // The overlay reads host status directly (updating = naive
+        // updater owns the host). No per-host frozen flag needed.
         hosts.noteHostStatus(msg.hostId, msg.status);
         break;
       }

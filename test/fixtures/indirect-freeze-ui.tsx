@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { createDaemonUpdate } from "../../web/src/indirect-code/hooks/useDaemonUpdate";
 
@@ -13,26 +14,29 @@ render(() => {
     send: (c) => api.commands.push(c),
     toast: () => {},
     getHostId: () => api.hostId || "h1",
+    getHostStatus: (hid) => api.hostStatus?.(hid),
   });
   api.noteUpdate = du.noteUpdate;
-  api.cancel = du.cancel;
   api.stateFor = du.stateFor;
-  const ui = { daemonUpdate: du } as any;
-  const hosts = { hosts: () => [{ id: "h1", name: "one", status: "online" }, { id: "h2", name: "two", status: "offline" }], setActiveHostId: (id: string) => api.commands.push({ type: "switch-host", id }) };
-  const frozenHostId = () => {
+  api.setHostStatus = (id: string, st: string) => api.commands.push({ type: "set-status", id, st });
+  const [st1, setSt1] = createSignal("online");
+  const [st2, setSt2] = createSignal("offline");
+  const getStatus = (hid: string) => (hid === "h1" ? st1() : st2());
+  const setStatus = (hid: string, v: string) => (hid === "h1" ? setSt1(v) : setSt2(v));
+  api.statuses = new Proxy({}, { get: (_t, k) => getStatus(String(k)), set: (_t, k, v) => { setStatus(String(k), String(v)); return true; } });
+  const hosts = { hosts: () => [{ id: "h1", name: "one", status: st1() }, { id: "h2", name: "two", status: st2() }], setActiveHostId: (id: string) => api.commands.push({ type: "switch-host", id }) };
+  api.hostStatus = (hid: string) => getStatus(hid);
+  const updatingHostId = () => {
     for (const h of hosts.hosts() as any[]) {
-      if (ui.daemonUpdate.stateFor(h.id)?.frozen) return h.id;
+      if ((h as any).status === "updating") return h.id;
     }
     return "";
   };
   return (
     <div>
-      <Show when={frozenHostId() !== ""}>
+      <Show when={updatingHostId() !== ""}>
         <div id="freeze-overlay">
-          <p id="freeze-stage">{(frozenHostId() ? ui.daemonUpdate.stateFor(frozenHostId())?.freezeStage : "") || "preparing update"}</p>
-          <button id="btn-cancel-update" onClick={() => ui.daemonUpdate.cancel(frozenHostId())}>
-            Cancel update
-          </button>
+          <p id="freeze-stage">Updating…</p>
           <div id="host-list">
             {hosts.hosts().map((h: any) => (
               <button data-host={h.id} onClick={() => hosts.setActiveHostId(h.id)}>{h.name}</button>
@@ -40,7 +44,7 @@ render(() => {
           </div>
         </div>
       </Show>
-      <div id="frozen-flag">{String(frozenHostId() !== "")}</div>
+      <div id="frozen-flag">{String(updatingHostId() !== "")}</div>
     </div>
   );
 }, document.getElementById("root")!);

@@ -16,10 +16,16 @@ render(() => {
   // Reactive host id (mirrors hosts.activeHostId() in the real page).
   const [hostId, setHostId] = createSignal("h1");
   api.setHostId = setHostId;
+  const [st1, setSt1] = createSignal("online");
+  const [st2, setSt2] = createSignal("offline");
+  const getStatus = (hid: string) => (hid === "h1" ? st1() : st2());
+  const setStatus = (hid: string, v: string) => (hid === "h1" ? setSt1(v) : setSt2(v));
+  api.statuses = new Proxy({}, { get: (_t, k) => getStatus(String(k)), set: (_t, k, v) => { setStatus(String(k), String(v)); return true; } });
   const du = createDaemonUpdate({
     send: (c) => api.commands.push(c),
     toast: () => {},
     getHostId: () => hostId(),
+    getHostStatus: (hid) => getStatus(hid),
   });
   api.noteUpdate = du.noteUpdate;
   api.apply = du.apply;
@@ -27,7 +33,7 @@ render(() => {
   api.info = du.info;
   const host: any = {
     hosts: () => [],
-    activeHost: () => null,
+    activeHost: () => ({ id: hostId(), status: getStatus(hostId()) ?? "online" }),
     activeHostId: () => hostId(),
     setActiveHostId: () => {},
     loadHosts: () => Promise.resolve(),

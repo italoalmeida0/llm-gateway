@@ -6,8 +6,6 @@ export interface DaemonUpdateInfo {
   available: string;
   checkedAt: number;
   autoUpdate: boolean;
-  frozen: boolean;
-  freezeStage: string;
   error?: string;
 }
 
@@ -47,7 +45,7 @@ function writeStore(s: Record<string, HostUpdateState>) {
 function blank(): HostUpdateState {
   return {
     current: "", available: "", checkedAt: 0, autoUpdate: true,
-    frozen: false, freezeStage: "", lifecycle: "idle",
+    lifecycle: "idle",
   };
 }
 
@@ -58,6 +56,9 @@ export function createDaemonUpdate(opts: {
   send: (payload: DaemonCommand) => void;
   toast: (message: string, kind?: "ok" | "err") => void;
   getHostId: () => string;
+  /** Live host status (updating = the naive updater owns the host).
+   * Optional for fixtures; the page wires the real host store. */
+  getHostStatus?: (hostId: string) => string | undefined;
 }) {
   const [states, setStates] = createSignal<Record<string, HostUpdateState>>(readStore());
 
@@ -94,27 +95,38 @@ export function createDaemonUpdate(opts: {
     return !!s && (s.lifecycle === "pending" || s.lifecycle === "updating");
   }
 
-  function noteUpdate(hostId: string, msg: any) {
+  function noteUpdate(hostId: string | undefined, msg: any) {
     if (!hostId || !msg || typeof msg !== "object") return;
     const prev = states()[hostId];
-    const frozen = !!msg.frozen;
     const current = String(msg.current ?? prev?.current ?? "");
     const available = String(msg.available ?? "");
-    // Reconcile the persisted lifecycle against authoritative daemon
-    // state. Without this, a pending/updating flag stuck in localStorage
+    // Reconcile the persisted lifecycle against authoritative state.
+    // The relay is the source of truth for "updating" (host status);
+    // the daemon is the source of truth for versions (daemon_update).
+    // Without this, a pending/updating flag stuck in localStorage
     // (apply clicked, then update_done/failed missed because the user
     // switched hosts, F5'd, or the socket dropped) disables the Update
-    // button forever: banner + settings show "Updating…" with no
-    // overlay (frozen=false) and no way to retry.
-    // Rules: frozen=true -> really updating. Otherwise a stale
-    // pending/updating is resolved: target reached -> done (done event
-    // was missed); anything else -> idle so the button works again
-    // (the daemon's error/lastError, if any, stays visible).
+    // button forever with no overlay and no way to retry.
+    // Rules: status updating -> really updating (F5-safe: the relay
+    // replays updating to every frontend that connects mid-update).
+    // Otherwise a stale pending/updating is resolved: target reached
+    // -> done (done event was missed); anything else -> idle so the
+    // button works again (the daemon's error, if any, stays visible).
+    const status = opts.getHostStatus?.(hostId);
+    const updating = status === "updating";
     let lifecycle = prev?.lifecycle ?? "idle";
-    if (frozen) {
-      // Freeze broadcast arrived after our apply click: the handoff is
-      // really running on this host now (F5-safe: frozen survives).
+    if (updating) {
       lifecycle = "updating";
+    } else if (status === "online" && prev?.lifecycle === "updating" && !(prev.target && current && prev.target === current)) {
+      // Relay says online, we never saw update_done/failed, AND the
+      // version did NOT advance: the update died mid-flight (updater
+      // killed without promote, re-pair on the same host, crash). Drop
+      // the ghost "Updating…" so the button offers a retry instead of a
+      // dead end. A REAL promote always delivers update_done first (its
+      // WS message precedes the online announce), and a missed done
+      // still shows target === current (resolved to done below) — so
+      // reaching here means no promote happened.
+      lifecycle = "idle";
     } else if (prev && (prev.lifecycle === "pending" || prev.lifecycle === "updating")) {
       if (prev.target && current && prev.target === current) {
         lifecycle = "done";
@@ -140,8 +152,6 @@ export function createDaemonUpdate(opts: {
       available: finished ? "" : available,
       checkedAt: Number(msg.checkedAt ?? 0),
       autoUpdate: msg.autoUpdate !== false,
-      frozen,
-      freezeStage: String(msg.freezeStage ?? ""),
       error: typeof msg.error === "string" ? msg.error : undefined,
       lifecycle,
       // A missed done still counts as finished; a reset to idle drops
@@ -169,25 +179,14 @@ export function createDaemonUpdate(opts: {
       opts.toast("No update available to apply", "err");
       return;
     }
-    // Full-slot handoff: the daemon downloads the launcher, freezes late,
-    // copies, takes over and promotes. Failure unfreezes, WS never drops.
-    // The daemon reports frozen/freezeStage, then update_done/failed.
-    // Lifecycle is per-host + persisted: F5/reconnect/host-switch keeps
-    // showing the right host as updating.
+    // Brutal update: the daemon spawns --update-start (SIGKILLs the old
+    // side, copies the slot, runs launcher --update). The relay reports
+    // host_status updating while the updater owns the host, then
+    // update_done/failed. Lifecycle is per-host + persisted:
+    // F5/reconnect/host-switch keeps showing the right host as updating.
     patch(hid, { lifecycle: "pending", target: cur.available, failedReason: undefined });
     opts.send({ type: "daemon_update_apply", hostId: hid || undefined });
     opts.toast(`Updating to ${cur.available}…`, "ok");
-  }
-
-  function cancel(hostId?: string) {
-    const hid = hostId || opts.getHostId();
-    opts.send({ type: "daemon_update_cancel", hostId: hid || undefined });
-    if (hid) {
-      const s = states()[hid];
-      if (s && (s.lifecycle === "pending" || s.lifecycle === "updating")) {
-        patch(hid, { lifecycle: "failed", failedReason: "cancelled by user", finishedAt: Date.now() });
-      }
-    }
   }
 
   function noteFailed(hostId: string, reason: string) {
@@ -199,7 +198,7 @@ export function createDaemonUpdate(opts: {
     if (hostId) {
       patch(hostId, {
         lifecycle: "done", current: version || states()[hostId]?.current || "",
-        available: "", frozen: false, freezeStage: "", finishedAt: Date.now(),
+        available: "", finishedAt: Date.now(),
         // The finished target is terminal: record it so the NEXT version
         // can reset to idle. Without target, noteUpdate can't tell
         // "done for vX" from "done forever" and a newer available
@@ -240,7 +239,7 @@ export function createDaemonUpdate(opts: {
     }
   }
 
-  return { info, stateFor, states, applying, applyingFor, noteUpdate, checkNow, toggle, apply, cancel, noteFailed, noteDone, consumePostReloadToast, forgetHost };
+  return { info, stateFor, states, applying, applyingFor, noteUpdate, checkNow, toggle, apply, noteFailed, noteDone, consumePostReloadToast, forgetHost };
 }
 
 export type DaemonUpdate = ReturnType<typeof createDaemonUpdate>;

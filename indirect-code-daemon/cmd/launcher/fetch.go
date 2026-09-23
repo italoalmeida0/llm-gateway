@@ -112,14 +112,22 @@ func resolveSlotDaemon(dataDir string) (string, string, []string, error) {
 	} else if launcherVersion != "dev" && launcherVersion != "" {
 		// The daemon in a freshly-promoted slot is NEWER than this
 		// launcher (post-flip power loss: active=b, launcher vK1,
-		// daemon vK2). Accept any RUNNING binary here — strict version
-		// pinning would refuse to boot the good slot (K3 chaos caught
-		// it). Freshness for UPDATES is enforced by the update path
-		// (fetchDaemonTo + selfVerifyDaemon against the target), not
-		// by the boot path.
+		// daemon vK2). Accept any RUNNING binary when it MATCHES the
+		// manifest version — strict pinning would refuse to boot the
+		// good slot (K3 chaos caught it). A local binary OLDER than
+		// the manifest is stale (install/update leftovers): re-download
+		// so boot/install always converges to the release. Offline or
+		// manifest failure keeps the existing binary (best-effort).
 		if err := selfVerifyRuns(local); err != nil {
 			needDownload = true
+		} else if ver, _, merr := latestDaemonAsset(); merr == nil && ver != "" {
+			// got < ver (stale): download. got == ver: keep.
+			// got > ver (promoted slot newer than launcher): keep.
+			if got := daemonVersionOf(local); got != "" {
+				needDownload = compareVersionsUpdate(got, ver) < 0
+			}
 		}
+		// merr != nil (offline): keep whatever runs.
 	}
 
 	if needDownload {

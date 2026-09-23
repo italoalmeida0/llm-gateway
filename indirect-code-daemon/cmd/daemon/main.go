@@ -815,7 +815,15 @@ func (d *DaemonServer) sendWS(msg any) error {
 	if d.wsConn == nil {
 		return fmt.Errorf("websocket not connected")
 	}
-	return d.wsConn.WriteJSON(msg)
+	// Bounded write: a slow/dead relay must never stall the daemon's
+	// turn finalizer (which used to hold act.mu across this call).
+	// Without a deadline one stuck socket blocks every later WriteJSON
+	// behind wsMu, the client sees the host go offline, and the commit
+	// already done on disk looks like a "failed turn close".
+	_ = d.wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	err := d.wsConn.WriteJSON(msg)
+	_ = d.wsConn.SetWriteDeadline(time.Time{})
+	return err
 }
 
 // Session Storage Helpers
@@ -2166,6 +2174,9 @@ func (d *DaemonServer) startPrompt(sessionID, text string, attachmentIDs []strin
 
 // cancelTurn marks the running turn as cancelling and cancels its context.
 // The turn finalizer treats it as cancelled: the queue is NOT drained.
+// Idempotent (stop-spam safe): a second cancel while the turn is already
+// stopping is a no-op — it must not append a duplicate WAL event nor
+// re-fire the context cancel while the finalizer is committing.
 func (d *DaemonServer) cancelTurn(sessionID string) {
 	d.sessionsMu.RLock()
 	act := d.sessions[sessionID]
@@ -2182,10 +2193,11 @@ func (d *DaemonServer) cancelTurn(sessionID string) {
 			} else {
 				_ = d.saveSession(act.record)
 			}
+			if act.cancel != nil {
+				act.cancel()
+			}
 		}
-		if act.cancel != nil {
-			act.cancel()
-		}
+		// Already cancelling/cancelled/idle: no-op (stop-spam guard).
 		act.mu.Unlock()
 	}
 }

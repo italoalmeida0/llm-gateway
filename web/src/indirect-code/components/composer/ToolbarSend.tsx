@@ -30,9 +30,10 @@ export function ToolbarSend() {
   >
     <button
       onClick={t.cancelCurrentTurn}
-      class="ui-button ui-button-danger ui-button-sm w-8 h-8 p-0"
-      data-rc-tip="Stop"
-      aria-label="Stop"
+      disabled={t.turnActivity()?.status === "cancelling"}
+      class="ui-button ui-button-danger ui-button-sm w-8 h-8 p-0 disabled:opacity-60"
+      data-rc-tip={t.turnActivity()?.status === "cancelling" ? "Stopping…" : "Stop"}
+      aria-label={t.turnActivity()?.status === "cancelling" ? "Stopping turn" : "Stop"}
     >
       <Iconify icon="lucide:square" size={13} />
     </button>

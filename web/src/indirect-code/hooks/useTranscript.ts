@@ -641,6 +641,12 @@ export function createTranscript(opts: {
   function cancelTurnForSession(sessionId: string, e?: MouseEvent | KeyboardEvent) {
     e?.stopPropagation();
     if (!sessionId || !opts.isOpen()) return;
+    // Stop-spam guard: the sidebar button already disables itself while
+    // "cancelling", but the composer Stop button and keyboard paths
+    // don't — and the daemon treats a second cancel as a no-op anyway.
+    // Skip the duplicate send so an anxious double-click can't stack
+    // redundant cancels behind a slow relay.
+    if (sessionId === opts.getSessionId() && turnActivity()?.status === "cancelling") return;
     opts.send({ type: "cancel", sessionId });
     if (sessionId === opts.getSessionId()) {
       setTurnActivity((turn) => turn ? { ...turn, status: "cancelling" } : null);

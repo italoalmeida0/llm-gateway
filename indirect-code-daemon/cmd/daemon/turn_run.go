@@ -520,7 +520,18 @@ func (r *turnRun) finishTurn() {
 	// post-turn state, then the WAL is deleted. A crash before the
 	// commit replays the WAL; a crash after it is detected by the
 	// commit-window check and drops the stale log.
-	if err := r.d.commitWAL(r.act); err != nil {
+	// Transient disk failures (Windows AV locks, Linux IO pressure) must
+	// not strand a finished turn as running-with-WAL: the in-memory
+	// record is already final, so retry a few times before giving up.
+	// commitWAL is idempotent (same turn number + message count skips
+	// the turn line and only rewrites meta), so retries are safe.
+	commitErr := r.d.commitWAL(r.act)
+	for i := 0; i < 3 && commitErr != nil; i++ {
+		time.Sleep(time.Duration(100*(i+1)) * time.Millisecond)
+		commitErr = r.d.commitWAL(r.act)
+	}
+	if commitErr != nil {
+		fmt.Printf("[WARN] turn %d of session %s: commit failed (%v), keeping WAL for retry/resume\n", r.turnIndex, r.sessionID, commitErr)
 		r.act.mu.Unlock()
 		return // Keep the WAL until completion is durably committed.
 	}
@@ -530,19 +541,25 @@ func (r *turnRun) finishTurn() {
 		r.d.broadcastFileBalloon(r.cfg.HostID, r.sessionID, balloon)
 	}
 	r.act.cancel = nil
-	// Publish completion before a new turn can acquire this session.
-	_ = r.d.sendWS(map[string]any{"type": "session_data", "hostId": r.cfg.HostID, "session": sessionPayload(r.act.record)})
-	_ = r.d.sendWS(map[string]any{
-		"type":      "session_status",
-		"hostId":    r.cfg.HostID,
-		"sessionId": r.sessionID,
-		"status":    "idle",
-	})
+	// Snapshot the completion payload UNDER the lock, but publish it
+	// AFTER unlocking: sendWS takes the socket lock with a write
+	// deadline, and a slow/dead relay must never stall the session
+	// lock (or the queued promotion below) — that stall is what used
+	// to surface as "failed to close the turn" + host offline.
+	snapshot := sessionPayload(r.act.record)
 	sessionID := r.sessionID
+	hostID := r.cfg.HostID
 	// Queue drain: a normally completed turn promotes the head; a
 	// send-now promotes the head after a cancelled turn. A plain
 	// cancelled turn never drains. Unlock first: promotion re-acquires.
 	r.act.mu.Unlock()
+	_ = r.d.sendWS(map[string]any{"type": "session_data", "hostId": hostID, "session": snapshot})
+	_ = r.d.sendWS(map[string]any{
+		"type":      "session_status",
+		"hostId":    hostID,
+		"sessionId": sessionID,
+		"status":    "idle",
+	})
 	if !cancelled || sendNow {
 		r.d.promoteQueueHead(sessionID)
 	}

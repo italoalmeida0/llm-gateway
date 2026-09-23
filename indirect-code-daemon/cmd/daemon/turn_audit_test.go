@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -197,5 +198,48 @@ func TestRecoveryRetainsOriginalTurnAndPendingPrompt(t *testing.T) {
 				t.Fatal("finished recovery kept WAL")
 			}
 		})
+	}
+}
+
+func TestCancelSpamIsIdempotent(t *testing.T) {
+	d := testDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	act := &ActiveSession{record: &SessionRecord{ID: "spam", Status: "running", TurnSeq: 1, Turn: &TurnActivity{StartedAt: 1, Status: "running"}}, cancel: cancel}
+	d.sessions["spam"] = act
+	ww, err := d.openWAL("spam", &walHeader{TurnIndex: 1, Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	act.wal = ww
+	// Anxious user: stop, stop, stop. Only the first may flip + append.
+	d.cancelTurn("spam")
+	d.cancelTurn("spam")
+	d.cancelTurn("spam")
+	if ctx.Err() == nil {
+		t.Fatal("first cancel did not fire the context")
+	}
+	data, err := os.ReadFile(d.walPath("spam"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var ev walEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Type == walTypeTurnState {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("stop spam appended %d turn_state events, want 1", n)
+	}
+	if act.record.Turn.Status != "cancelling" {
+		t.Fatalf("status = %q, want cancelling", act.record.Turn.Status)
 	}
 }

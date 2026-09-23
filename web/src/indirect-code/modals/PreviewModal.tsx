@@ -2,6 +2,7 @@ import { Show } from "solid-js";
 import { Modal, Badge, Btn, copyWithToast } from "../../ui";
 import { Icon as Iconify } from "../../components/icon";
 import { languageForPath } from "../utils/lang";
+import { compactTokens } from "../context";
 import { CodeBlock } from "../components/CodeBlock";
 import { useModal } from "../ctx";
 
@@ -103,7 +104,7 @@ export function PreviewModal() {
                   onInput={(e) => m.setTruncateTokens(parseInt(e.currentTarget.value) || 16000)}
                 />
                 <span class="text-xs text-ink-500">
-                  tokens (~{(((m.truncateTokens() || 16000) * 4)).toLocaleString()} chars)
+                  tokens (~{compactTokens((m.truncateTokens() || 16000) * 4)} chars)
                 </span>
                 <div class="flex items-center gap-2 ml-auto">
                   <button

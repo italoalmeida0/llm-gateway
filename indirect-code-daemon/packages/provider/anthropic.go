@@ -668,28 +668,36 @@ func (c *anthropicClient) runStream(ctx context.Context, resp *http.Response, re
 						usage.CacheWriteTokens = *md.Usage.CacheWriteTokens
 					}
 				}
-				switch md.Delta.StopReason {
-				case "tool_use":
-					stop = StopToolUse
-					announcedAny := false
-					for _, b := range ordered() {
-						if b.kind == "tool_use" && b.announced {
-							announcedAny = true
-							out <- EventToolEnd{ID: b.toolID}
+				// A stop reason after message_stop is a stale replay
+				// from a provider retry: usage above already applied,
+				// the first stop reason wins.
+				if !sawStop {
+					switch md.Delta.StopReason {
+					case "tool_use":
+						stop = StopToolUse
+						announcedAny := false
+						for _, b := range ordered() {
+							if b.kind == "tool_use" && b.announced {
+								announcedAny = true
+								out <- EventToolEnd{ID: b.toolID}
+							}
 						}
-					}
-					if !announcedAny {
+						if !announcedAny {
+							stop = StopEnd
+						}
+					case "max_tokens":
+						stop = StopLength
+					default:
 						stop = StopEnd
 					}
-				case "max_tokens":
-					stop = StopLength
-				default:
-					stop = StopEnd
 				}
 			case "message_stop":
+				// Do NOT finish here: the gateway appends its
+				// authoritative `: x-gateway-usage` comment AFTER
+				// message_stop. sendDone runs when the body closes.
+				// (Duplicate message_stop frames after a provider
+				// retry carry no payload — the first stop reason wins.)
 				sawStop = true
-				sendDone()
-				return
 			}
 		}
 	}

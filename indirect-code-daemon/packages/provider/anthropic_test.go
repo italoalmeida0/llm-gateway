@@ -165,6 +165,63 @@ func TestAnthropicStreamHappyPath(t *testing.T) {
 	}
 }
 
+// Regression: the gateway emits message_stop, then a duplicate
+// message_delta/message_stop retry pair, and finally the authoritative
+// `: x-gateway-usage` tail comment. Usage must be the gateway figures
+// (not zero), and the first stop reason must win.
+func TestAnthropicGatewayUsageAfterMessageStop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		write := func(s string) {
+			_, _ = w.Write([]byte(s))
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		write("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":38}}}\n\n")
+		write("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		write("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"135\"}}\n\n")
+		write("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		write("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n")
+		write("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		// provider retry replay after stop: stale usage + no stop change
+		write("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":99}}\n\n")
+		write("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		write(": x-gateway-usage in=38,cache=0,out=3\n\n")
+	}))
+	defer srv.Close()
+
+	c := NewAnthropic("x", srv.URL)
+	evs, err := c.Stream(context.Background(), Request{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usage Usage
+	var done EventDone
+	var text string
+	for ev := range evs {
+		switch e := ev.(type) {
+		case EventTextDelta:
+			text += e.Delta
+		case EventUsage:
+			usage = e.Usage
+		case EventDone:
+			done = e
+		}
+	}
+	if text != "135" {
+		t.Fatalf("text=%q", text)
+	}
+	if usage.InputTokens != 38 || usage.OutputTokens != 3 {
+		t.Fatalf("usage=%+v want in=38 out=3", usage)
+	}
+	if done.Stop != StopEnd {
+		t.Fatalf("stop=%v want StopEnd (first reason wins, not max_tokens replay)", done.Stop)
+	}
+}
+
 func TestAnthropicRedactedThinkingRoundTrip(t *testing.T) {
 	const blob = "Q-PaDgFwOh2-a9QtXVxufcTIhYxZYEDDmu2n2cDsKwkH"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

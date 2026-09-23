@@ -3,6 +3,7 @@ import { Icon as Iconify } from "../../components/icon";
 import { StreamingMarkdown } from "./StreamingMarkdown";
 import { FileIcon } from "../presentation";
 import { baseNameOf } from "../transcript";
+import { compactTokens } from "../context";
 import { copyWithToast } from "../../ui";
 import type { CompactionState } from "../types";
 
@@ -88,7 +89,7 @@ export function CompactionBalloon(props: CompactionBalloonProps) {
               >
                 <Iconify icon="lucide:cpu" size={11} class="text-ink-500" />
                 <span>
-                  {inTok().toLocaleString()} in · {outTok().toLocaleString()} out
+                  {compactTokens(inTok())} in · {compactTokens(outTok())} out
                 </span>
                 <Show when={costUsd() > 0}>
                   <span class="text-ink-500">(${costUsd().toFixed(4)})</span>
@@ -175,22 +176,22 @@ export function CompactionBalloon(props: CompactionBalloonProps) {
               <div class="flex flex-wrap items-center gap-x-4 gap-y-1 p-2 rounded-lg bg-elev/60 border border-line/50 font-mono text-[11px] text-ink-400">
                 <div>
                   <span class="text-ink-500 mr-1">Input:</span>
-                  <span class="text-ink-200">{inTok().toLocaleString()}</span>
+                  <span class="text-ink-200">{compactTokens(inTok())}</span>
                 </div>
                 <Show when={cacheTok() > 0}>
                   <div>
                     <span class="text-ink-500 mr-1">Cache:</span>
-                    <span class="text-ink-200">{cacheTok().toLocaleString()}</span>
+                    <span class="text-ink-200">{compactTokens(cacheTok())}</span>
                   </div>
                 </Show>
                 <div>
                   <span class="text-ink-500 mr-1">Output:</span>
-                  <span class="text-ink-200">{outTok().toLocaleString()}</span>
+                  <span class="text-ink-200">{compactTokens(outTok())}</span>
                 </div>
                 <Show when={reasoningTok() > 0}>
                   <div>
                     <span class="text-ink-500 mr-1">Reasoning:</span>
-                    <span class="text-ink-200">{reasoningTok().toLocaleString()}</span>
+                    <span class="text-ink-200">{compactTokens(reasoningTok())}</span>
                   </div>
                 </Show>
                 <Show when={costUsd() > 0}>

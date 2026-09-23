@@ -287,11 +287,15 @@ test("hides checklist calls and results while preserving text, other tools and s
 describe("Indirect Code context", () => {
   test("uses configured gateway limits and keeps context separate from cumulative usage", () => {
     const context = { usedTokens: 432500, windowTokens: 200000, model: "custom/alias", estimated: false };
-    expect(contextDisplay(context, { id: context.model, name: "Alias", provider: "Test", upstreamModel: "alias", context: 1024000, output: 65536 }).label).toBe("432.5K (42%)");
+    expect(contextDisplay(context, { id: context.model, name: "Alias", provider: "Test", upstreamModel: "alias", context: 1024000, output: 65536 }).label).toBe("433K (42%)");
     expect(contextDisplay(context, { id: context.model, name: "Alias", provider: "", upstreamModel: "", context: 0, output: 0 }).percent).toBeNull();
     expect(contextDisplay(null).label).toBe("Context —");
     expect(compactTokens(128000)).toBe("128K");
-    expect(compactTokens(1000000)).toBe("1M");
+    expect(compactTokens(1000000)).toBe("1.00M");
+    expect(compactTokens(125300)).toBe("125K");
+    expect(compactTokens(12300000000)).toBe("12.3B");
+    expect(compactTokens(5230000000000)).toBe("5.23T");
+    expect(compactTokens(5e15)).toBe("999T");
   });
 
   test("skips encrypted-only thinking blobs (replay-only, nothing to display)", () => {

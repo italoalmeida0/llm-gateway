@@ -1,4 +1,5 @@
 import type { DaemonCommand } from "../daemon-protocol";
+import { compactTokens } from "../context";
 import { createEffect, createSignal, onCleanup } from "solid-js";
 import type { PreviewFile } from "../types";
 import type { AttachmentDataEvent } from "../daemon-protocol";
@@ -130,7 +131,7 @@ export function createReview(opts: {
       truncated: true,
     });
     opts.toast(
-      `Preview limited to ~${limit.toLocaleString()} tokens; the attachment is unchanged`,
+      `Preview limited to ~${compactTokens(limit)} tokens; the attachment is unchanged`,
       "ok",
     );
   }

@@ -122,10 +122,10 @@ export function ComposerFooter() {
               <Show when={costs && costs.total > 0}>
                 <div class="flex justify-between pb-1 border-b border-line/60"><span class="text-ink-500">Total</span><span class="text-ink-100">${fmtUsd(costs!.total)}</span></div>
               </Show>
-              <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{u().inTok.toLocaleString()}{chip(costs?.input)}</span></div>
-              <div class="flex justify-between"><span class="text-ink-500">Cache{(() => { const p = cacheHitPct(u()); return p === null ? "" : ` (${p}%)`; })()}</span><span class="text-ink-200">{u().cacheTok.toLocaleString()}{chip(costs?.cache)}</span></div>
-              <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{u().outTok.toLocaleString()}{chip(costs?.output)}</span></div>
-              <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{u().reasoningTok.toLocaleString()}{chip(costs?.reasoning)}</span></div>
+              <div class="flex justify-between"><span class="text-ink-500">Input</span><span class="text-ink-200">{compactTokens(u().inTok)}{chip(costs?.input)}</span></div>
+              <div class="flex justify-between"><span class="text-ink-500">Cache{(() => { const p = cacheHitPct(u()); return p === null ? "" : ` (${p}%)`; })()}</span><span class="text-ink-200">{compactTokens(u().cacheTok)}{chip(costs?.cache)}</span></div>
+              <div class="flex justify-between"><span class="text-ink-500">Output</span><span class="text-ink-200">{compactTokens(u().outTok)}{chip(costs?.output)}</span></div>
+              <div class="flex justify-between"><span class="text-ink-500">Reasoning</span><span class="text-ink-200">{compactTokens(u().reasoningTok)}{chip(costs?.reasoning)}</span></div>
             </div>
             );
           }}

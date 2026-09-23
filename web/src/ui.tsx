@@ -402,13 +402,24 @@ export function Segmented<T extends string>(props: {
 /**
  * Split an integer into an animatable numeric part + static unit suffix.
  * Thresholds/decimals mirror fmtNum so animated headers agree with the
- * static stats rendered next to them (950, 12.5K, 1.14M).
+ * static stats rendered next to them (950, 12.5K, 123M, 12.3B, 5.23T,
+ * capped at 999T).
  */
 export function compactParts(n: number): { count: string; suffix: string } {
-  if (n >= 1_000_000_000) return { count: (n / 1_000_000_000).toFixed(2), suffix: "B" };
-  if (n >= 1_000_000) return { count: (n / 1_000_000).toFixed(2), suffix: "M" };
-  if (n >= 10_000) return { count: (n / 1_000).toFixed(1), suffix: "K" };
-  return { count: String(n), suffix: "" };
+  if (!Number.isFinite(n)) return { count: "—", suffix: "" };
+  const neg = n < 0;
+  const v = Math.round(Math.abs(n));
+  if (v < 1000) return { count: neg ? String(-v) : String(v), suffix: "" };
+  const scaled = (limit: number, div: number, suffix: string): { count: string; suffix: string } => {
+    let s = v / div;
+    if (suffix === "T" && s >= 1000) s = 999;
+    const digits = s >= 100 ? 0 : s >= 10 ? 1 : 2;
+    return { count: (neg ? "-" : "") + s.toFixed(digits), suffix };
+  };
+  if (v >= 1_000_000_000_000) return scaled(v, 1_000_000_000_000, "T");
+  if (v >= 1_000_000_000) return scaled(v, 1_000_000_000, "B");
+  if (v >= 1_000_000) return scaled(v, 1_000_000, "M");
+  return scaled(v, 1_000, "K");
 }
 
 /**
@@ -1230,12 +1241,34 @@ export function ProgressBar(props: {
 
 // ===== Formatting helpers =====
 
+/**
+ * Compact token/number formatter: at most 4 significant chars + one
+ * K/M/B/T suffix (e.g. 12.3B, 123M, 5.23T, 125K — never "125.K",
+ * never a trailing "."). Anything at/above 1000T is capped at "999T".
+ * Plain integers below 1000 render as-is; null/undefined renders "—".
+ */
 export function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 10_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
+  if (!Number.isFinite(n)) return "—";
+  const neg = n < 0;
+  const v = Math.round(Math.abs(n));
+  if (v < 1000) return neg ? String(-v) : String(v);
+  const UNITS: Array<{ limit: number; div: number; suffix: string }> = [
+    { limit: 1_000_000_000_000, div: 1_000_000_000_000, suffix: "T" },
+    { limit: 1_000_000_000, div: 1_000_000_000, suffix: "B" },
+    { limit: 1_000_000, div: 1_000_000, suffix: "M" },
+    { limit: 1_000, div: 1_000, suffix: "K" },
+  ];
+  for (const u of UNITS) {
+    if (v >= u.limit) {
+      let scaled = v / u.div;
+      if (u.suffix === "T" && scaled >= 1000) scaled = 999;
+      const digits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+      const out = `${scaled.toFixed(digits)}${u.suffix}`;
+      return neg ? `-${out}` : out;
+    }
+  }
+  return neg ? String(-v) : String(v);
 }
 
 /** Human window name for the shared day selectors ("1" = hourly 24h view,

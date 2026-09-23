@@ -35,10 +35,26 @@ export function groupModelsByProvider(models: GatewayModel[]): Array<{ provider:
   return out;
 }
 
+/**
+ * Compact token formatter: at most 4 significant chars + one K/M/B/T
+ * suffix (e.g. 12.3B, 123M, 5.23T, 125K — never "125.K", never a
+ * trailing "."). Anything at/above 1000T is capped at "999T".
+ */
 export function compactTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
-  return String(Math.round(n));
+  if (!Number.isFinite(n)) return "—";
+  const neg = n < 0;
+  const v = Math.round(Math.abs(n));
+  if (v < 1000) return neg ? String(-v) : String(v);
+  const scaled = (div: number, suffix: string): string => {
+    let s = v / div;
+    if (suffix === "T" && s >= 1000) s = 999;
+    const digits = s >= 100 ? 0 : s >= 10 ? 1 : 2;
+    return `${neg ? "-" : ""}${s.toFixed(digits)}${suffix}`;
+  };
+  if (v >= 1_000_000_000_000) return scaled(1_000_000_000_000, "T");
+  if (v >= 1_000_000_000) return scaled(1_000_000_000, "B");
+  if (v >= 1_000_000) return scaled(1_000_000, "M");
+  return scaled(1_000, "K");
 }
 
 export function contextDisplay(context: SessionContext | null, model?: GatewayModel) {

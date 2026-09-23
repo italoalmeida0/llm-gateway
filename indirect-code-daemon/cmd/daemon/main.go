@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -63,8 +64,8 @@ type HarnessSettings struct {
 
 // DaemonConfig holds credentials and gateway connection details.
 type DaemonConfig struct {
-	// AutoUpdate enables staged self-updates (nil = default true).
-	// Frontend toggle; daemon checks + stages, restart applies.
+	// AutoUpdate stores the preference for future automatic application.
+	// Applying remains manual while the update system is being stabilized.
 	AutoUpdate    *bool                      `json:"auto_update,omitempty"`
 	LastSelection *ModelSelection            `json:"last_selection,omitempty"`
 	GatewayURL    string                     `json:"gateway_url"`
@@ -2604,6 +2605,10 @@ func (d *DaemonServer) connectWebSocketOnce() error {
 // keeps the host registered + online but broadcasts host_status updating
 // so the frontend shows the update overlay instead of offline).
 func (d *DaemonServer) connectWebSocketWithQuery(extra string) error {
+	return d.connectWebSocketContext(context.Background(), extra)
+}
+
+func (d *DaemonServer) connectWebSocketContext(ctx context.Context, extra string) error {
 	u, err := url.Parse(d.config.GatewayURL)
 	if err != nil {
 		return err
@@ -2618,8 +2623,24 @@ func (d *DaemonServer) connectWebSocketWithQuery(extra string) error {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
+	// Gorilla's DialContext bounds the handshake deadline but does not
+	// close a TCP connection when cancellation lands during the HTTP read.
+	// Bind the raw socket too, so updater shutdown joins promptly.
+	var stopDialClose func() bool
+	dialer.NetDialContext = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(dialCtx, network, addr)
+		if err == nil {
+			stopDialClose = context.AfterFunc(ctx, func() { _ = conn.Close() })
+		}
+		return conn, err
+	}
+	defer func() {
+		if stopDialClose != nil {
+			stopDialClose()
+		}
+	}()
 
-	conn, resp, err := dialer.Dial(wsURL, nil)
+	conn, resp, err := dialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
 		if isRevokedDialError(resp, err) {
 			// Host deleted while offline: token no longer exists server-side.
@@ -2632,8 +2653,19 @@ func (d *DaemonServer) connectWebSocketWithQuery(extra string) error {
 	}
 
 	d.wsMu.Lock()
+	if d.wsConn != nil {
+		_ = d.wsConn.Close()
+	}
 	d.wsConn = conn
 	d.wsMu.Unlock()
+	defer func() {
+		_ = conn.Close()
+		d.wsMu.Lock()
+		if d.wsConn == conn {
+			d.wsConn = nil
+		}
+		d.wsMu.Unlock()
+	}()
 
 	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", d.config.GatewayURL)
 	// Fresh (re)connect: re-check for updates + push state to clients.
@@ -2815,10 +2847,6 @@ func main() {
 	sweepTmpOrphans(filepath.Join(server.rootDir(), "logs"), time.Hour)
 	// A previous run dying mid-turn must not brick sessions forever.
 	server.resetRunningSessions()
-	// Turns interrupted by the death resume where they died: same index,
-	// restored incoming tracker, transcript replayed from disk. A turn is
-	// only ever finished by the AI or by user cancel.
-	server.resumeInterruptedTurns()
 	// Idle sessions idle too long (or too many residents) are dropped
 	// from RAM and reloaded on next touch — disk stays the truth.
 	server.startEvictionSweeper()
@@ -2833,11 +2861,16 @@ func main() {
 
 	// Track the background process so install scripts and --stop can find it.
 	server.writePidFile()
-	// --update-end promotes HERE (local-first, right after recovery, before
-	// the WS loop): one best-effort relay hello ("estou ok"), then kill
-	// the waiter + flip active + clean the old slot — relay or not, life
-	// goes on. The normal reconnect loop below keeps the WS alive after.
-	doUpdateEndPromote(server)
+	// Commit an update's active slot before retiring its waiter and old
+	// data. Network availability never gates the local commit.
+	if err := doUpdateEndPromote(server); err != nil {
+		fmt.Printf("[UPDATE-END] promotion failed: %v\n", err)
+		writeUpdateSignal(updateFailPath(server.rootDir()), "promote: "+err.Error())
+		os.Exit(1)
+	}
+	// Resume interrupted turns only after a candidate owns the active slot:
+	// same turn index, restored tracker, and transcript replayed from disk.
+	server.resumeInterruptedTurns()
 	// Stale update signals from a crashed update must never gate a fresh
 	// boot: the waiter/launcher own the fail/done files, a normal boot
 	// never reads them.

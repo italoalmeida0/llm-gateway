@@ -1,12 +1,128 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
+
+func TestWALResumeRepairsOnlyDamagedTail(t *testing.T) {
+	for _, tail := range []string{
+		`{"v":1,"type":"msg","msg":{"role":"user"`,
+		"{broken}\n",
+		"{broken}\n\n \r\n",
+		`{"v":1,"type":"msg"}`,
+		`{"v":1,"type":"title","title":"` + strings.Repeat("x", 70*1024),
+	} {
+		t.Run(tail[:min(24, len(tail))], func(t *testing.T) {
+			d := testDaemon(t)
+			ww, err := d.openWAL("resume", &walHeader{TurnIndex: 1, Prompt: "keep this"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ww.append(walMsgEvent(provider.Message{Role: provider.RoleUser, TurnIndex: 1})); err != nil {
+				t.Fatal(err)
+			}
+			if err := ww.close(); err != nil {
+				t.Fatal(err)
+			}
+			prefix, err := os.ReadFile(d.walPath("resume"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(d.walPath("resume"), append(append([]byte{}, prefix...), []byte(tail)...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Reading and repairing must agree about the usable prefix.
+			data, _ := os.ReadFile(d.walPath("resume"))
+			rec, h, err := replayWAL(&SessionRecord{}, data)
+			if err != nil || h == nil || h.Prompt != "keep this" || len(rec.Messages) != 1 {
+				t.Fatalf("prefix lost: %v", err)
+			}
+			for n := 0; n < 2; n++ {
+				ww, err = d.openWALAppend("resume")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := ww.append(walMsgEvent(provider.Message{Role: provider.RoleAssistant, TurnIndex: 1})); err != nil {
+					t.Fatal(err)
+				}
+				if err := ww.close(); err != nil {
+					t.Fatal(err)
+				}
+				data, _ = os.ReadFile(d.walPath("resume"))
+				rec, _, err = replayWAL(&SessionRecord{}, data)
+				if err != nil || len(rec.Messages) != n+2 {
+					t.Fatalf("resume %d: messages lost or duplicated: %v", n, err)
+				}
+				if !bytes.HasPrefix(data, prefix) {
+					t.Fatal("valid prefix changed")
+				}
+			}
+		})
+	}
+}
+
+func TestWALResumePreservesCompleteEventWithoutNewline(t *testing.T) {
+	d := testDaemon(t)
+	ww, err := d.openWAL("newline", &walHeader{TurnIndex: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ww.close(); err != nil {
+		t.Fatal(err)
+	}
+	p := d.walPath("newline")
+	data, _ := os.ReadFile(p)
+	data = append(data, []byte(`{"v":1,"type":"title","title":"keep"}`)...)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ww, err = d.openWALAppend("newline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ww.append(walEvent{Type: walTypeModel, Model: "new-model"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ww.close(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(p)
+	rec, _, err := replayWAL(&SessionRecord{}, data)
+	if err != nil || rec.Title != "keep" || rec.Model != "new-model" {
+		t.Fatalf("complete tail lost: %+v %v", rec, err)
+	}
+}
+
+func TestWALResumeDoesNotRewriteInteriorCorruption(t *testing.T) {
+	d := testDaemon(t)
+	ww, err := d.openWAL("interior", &walHeader{TurnIndex: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ww.close(); err != nil {
+		t.Fatal(err)
+	}
+	p := d.walPath("interior")
+	data, _ := os.ReadFile(p)
+	data = append(data, []byte("{broken}\n{\"v\":1,\"type\":\"title\",\"title\":\"after\"}\n")...)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ww, err := d.openWALAppend("interior"); err == nil {
+		ww.close()
+		t.Fatal("interior corruption accepted")
+	}
+	after, _ := os.ReadFile(p)
+	if !bytes.Equal(data, after) {
+		t.Fatal("interior corruption caused destructive repair")
+	}
+}
 
 // The WAL contract: while a turn runs the session file on disk stays
 // frozen; every mutation appends one WAL line; the turn end commits the

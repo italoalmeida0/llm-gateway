@@ -18,6 +18,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -161,6 +162,9 @@ func main() {
 	fmt.Println("Ready — listening for turns.")
 	for {
 		code, err := execDaemon(daemonPath, daemonDataDir, daemonArgs)
+		if errors.Is(err, errUpdateHandoff) {
+			return
+		}
 		if err == nil {
 			os.Exit(code)
 		}

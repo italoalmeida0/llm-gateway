@@ -286,14 +286,14 @@ func mirrorBase() string {
 		filepath.Join(defaultDataDir(), "slots", "slot-b", "config.json"),
 	}
 	for i, a := range os.Args {
-		if (a == "-data-dir" || a == "--data-dir") && i+1 < len(os.Args) {
+		if (a == "-data-dir" || a == "--data-dir" || a == "--root-dir") && i+1 < len(os.Args) {
 			root := os.Args[i+1]
 			cfgPaths = append([]string{
 				filepath.Join(root, "slots", "slot-a", "config.json"),
 				filepath.Join(root, "slots", "slot-b", "config.json"),
 			}, cfgPaths...)
 		}
-		if strings.HasPrefix(a, "-data-dir=") || strings.HasPrefix(a, "--data-dir=") {
+		if strings.HasPrefix(a, "-data-dir=") || strings.HasPrefix(a, "--data-dir=") || strings.HasPrefix(a, "--root-dir=") {
 			parts := strings.SplitN(a, "=", 2)
 			cfgPaths = append([]string{
 				filepath.Join(parts[1], "slots", "slot-a", "config.json"),

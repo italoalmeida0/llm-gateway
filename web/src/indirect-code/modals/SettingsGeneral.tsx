@@ -242,7 +242,7 @@ export function SettingsGeneralSection() {
       <span>
         <span class="text-ink-200 font-medium">Auto-update daemon</span>
         <span class="block text-[11px] text-ink-500 font-normal mt-0.5">
-          Check on start, reconnect and every 10 minutes. Applying restarts the daemon into the new version (sessions resume from disk).
+          Preference saved for when automatic updates become available. For now, check on start, reconnect and every 10 minutes; use Update now to apply.
         </span>
       </span>
     </label>

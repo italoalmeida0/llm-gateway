@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -38,10 +39,10 @@ import (
 //     (<root>/slots/update.fail) and exits — the signal is only ever
 //     emitted when the launcher is ready to be killed. On success it
 //     spawns the new daemon with --update-end (detached) and exits 0.
-//   - --update-end (new daemon): normal boot on the new slot. After the
-//     first WS connect it SIGKILLs the --update-start daemon (parent pid),
-//     flips slots/active, deletes the old slot, writes update.done and
-//     reports update_done. No success notice beyond that is needed.
+//   - --update-end (new daemon): boots on the new slot, atomically commits
+//     slots/active, then attempts one relay connection, SIGKILLs the waiter,
+//     deletes the old slot and reports update_done. Interrupted turns
+//     resume only after promotion succeeds.
 //
 // Fail path: --update-start sees update.fail (or a timeout/launcher exit
 // without update.done), SIGKILLs the launcher if still alive, deletes the
@@ -198,7 +199,7 @@ func slotPidFiles(slotDir string) []string {
 //  1. read the slot pidfiles (daemon.pid) and kill those pids;
 //  2. scan /proc for processes whose exe/cmdline points inside slotDir
 //     (catches the launcher --update child, which writes no pidfile).
-// Windows: pidfile step only (/proc scan is unix-only).
+// Windows uses a Toolhelp32 process snapshot instead of /proc.
 // Never kills ownPid, never fails the caller (best-effort, logs only).
 func killSlotProcesses(slotDir string, ownPid int, logf func(string, ...any)) {
 	seen := map[int]bool{}
@@ -270,24 +271,43 @@ func pidAliveStr(pid string) bool {
 // cleanInactiveSlot empties the update target dir. It REFUSES to touch the
 // daemon's own slot (passing active==inactive or an own-dir path aborts):
 // wiping the live slot would destroy the running daemon's storage.
-func cleanInactiveSlot(root, active, inactive, ownDir string) error {
-	if active == inactive || inactive == "" {
-		return fmt.Errorf("refusing to clean own slot %q", inactive)
+func inactiveSlotPath(root, active, inactive, ownDir string) (string, error) {
+	if (active != "a" && active != "b") || (inactive != "a" && inactive != "b") || active == inactive {
+		return "", fmt.Errorf("invalid slot cleanup %q -> %q", active, inactive)
 	}
 	target := filepath.Join(root, "slots", "slot-"+inactive)
 	absTarget, err := filepath.Abs(target)
 	if err != nil {
+		return "", err
+	}
+	own, err := filepath.Abs(ownDir)
+	if err != nil {
+		return "", err
+	}
+	targetInfo, targetErr := os.Stat(absTarget)
+	ownInfo, ownErr := os.Stat(own)
+	if absTarget == own || (targetErr == nil && ownErr == nil && os.SameFile(targetInfo, ownInfo)) {
+		return "", fmt.Errorf("refusing to clean own slot dir %q", absTarget)
+	}
+	if raw, err := os.ReadFile(filepath.Join(root, "slots", "active")); err == nil && strings.TrimSpace(string(raw)) == inactive {
+		return "", fmt.Errorf("refusing to clean active slot %q", inactive)
+	}
+	return absTarget, nil
+}
+
+func removeInactiveSlot(root, active, inactive, ownDir string) error {
+	target, err := inactiveSlotPath(root, active, inactive, ownDir)
+	if err != nil {
 		return err
 	}
-	if own, err := filepath.Abs(ownDir); err == nil {
-		if absTarget == own {
-			return fmt.Errorf("refusing to clean own slot dir %q", absTarget)
-		}
-	}
-	if err := os.RemoveAll(absTarget); err != nil {
+	return os.RemoveAll(target)
+}
+
+func cleanInactiveSlot(root, active, inactive, ownDir string) error {
+	if err := removeInactiveSlot(root, active, inactive, ownDir); err != nil {
 		return err
 	}
-	return os.MkdirAll(absTarget, 0o700)
+	return os.MkdirAll(filepath.Join(root, "slots", "slot-"+inactive), 0o700)
 }
 
 // spawnUpdateStart re-spawns THIS binary in --update-start mode (detached):
@@ -331,6 +351,7 @@ func spawnUpdateStart(root, active, inactive, version, launcherPath string) erro
 type updateStartParams struct {
 	root, fromSlot, toSlot, expectVersion, launcherPath string
 	parentPid                                           int
+	stopServing                                         func()
 }
 
 // runUpdateStart is the naive updater: no sessions are ever loaded (fully
@@ -345,13 +366,6 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 	_ = os.Remove(updateFailPath(p.root))
 	_ = os.Remove(updateDonePath(p.root))
 
-	// Brutal pause: SIGKILL the serving daemon (its WALs stay intact for
-	// crash recovery — a graceful stop would cancel the turns instead).
-	logf("stopping old daemon pid %d...", p.parentPid)
-	if err := killPidBrutal(p.parentPid); err != nil {
-		logf("old daemon kill: %v (continuing anyway)", err)
-	}
-
 	server := &DaemonServer{
 		configPath: cfgPath,
 		dataDir:    dataDir,
@@ -360,6 +374,19 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 	server.sharedDir = filepath.Join(server.rootDir(), "external")
 	if err := server.loadConfig(); err != nil || server.config == nil {
 		logf("config: %v", err)
+		return 1
+	}
+	// Claim this specific daemon's restart before SIGKILL. Its launcher
+	// must exit instead of racing the updater by respawning the old side.
+	requestPath := filepath.Join(dataDir, "update.req")
+	if err := writeConfigFile(requestPath, []byte(strconv.Itoa(p.parentPid)+"\n")); err != nil {
+		logf("claim restart: %v", err)
+		return 1
+	}
+	logf("stopping old daemon pid %d...", p.parentPid)
+	if err := killPidBrutal(p.parentPid); err != nil {
+		_ = os.Remove(requestPath)
+		logf("old daemon kill: %v (aborting)", err)
 		return 1
 	}
 	// Take over the ACTIVE pidfile so --stop/install scripts find US now.
@@ -374,7 +401,8 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 
 	// WS in the background with retry: without the relay the update still
 	// proceeds (the frontend sees offline, then the normal state after).
-	go server.updateStartServeLoop(logf)
+	p.stopServing = server.startUpdateRelay(logf)
+	defer p.stopServing()
 
 	// Copy OUR OWN slot data into the update slot (disk is stable now —
 	// the old daemon is dead, nothing appends; no quiesce needed).
@@ -402,9 +430,9 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 		"--parent-pid", strconv.Itoa(os.Getpid()),
 	)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	// The launcher resolves the mirror from the environment (harness /
-	// INDIRECT_REPO_RAW override): inherit it, else it 404s.
-	cmd.Env = os.Environ()
+	// Pass the paired gateway explicitly: --root-dir may be outside the
+	// default install, and ambient mirror settings may belong to another host.
+	cmd.Env = append(os.Environ(), "INDIRECT_GATEWAY="+gatewayBaseURL(server))
 	if err := cmd.Start(); err != nil {
 		return updateStartFail(server, nil, p, fmt.Sprintf("launcher start: %v", err), logf)
 	}
@@ -415,7 +443,7 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 
 	deadline := time.Now().Add(updateTimeout)
 	for time.Now().Before(deadline) {
-		if body, ok := readUpdateSignal(doneFile); ok && body != "" {
+		if body, ok := readUpdateSignal(doneFile); (ok && body != "") || updateSlotCommitted(p) {
 			logf("update done (%s), settling...", body)
 			// --update-end owns the host now; it SIGKILLs us. If the
 			// kill never arrives (it crashed post-flip), exit anyway
@@ -452,6 +480,10 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 // THIS binary as a normal daemon on the untouched active slot (crash
 // recovery resumes the SIGKILLed turns).
 func updateStartFail(server *DaemonServer, launcherProc *os.Process, p updateStartParams, reason string, logf func(string, ...any)) int {
+	// The active marker is authoritative even if the done signal was lost.
+	if updateSlotCommitted(p) {
+		return 0
+	}
 	logf("update failed: %s", reason)
 	if launcherProc != nil {
 		_ = launcherProc.Kill()
@@ -478,7 +510,11 @@ func updateStartFail(server *DaemonServer, launcherProc *os.Process, p updateSta
 	// recovery intact) resumes the interrupted turns. Brutal-philosophy:
 	// rebirth instead of in-place resuscitation.
 	activeDir := filepath.Join(p.root, "slots", "slot-"+p.fromSlot)
-	server.closeWS()
+	if p.stopServing != nil {
+		p.stopServing() // Join the loop before Windows spawns and waits.
+	} else {
+		server.closeWS()
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		logf("exe: %v", err)
@@ -501,16 +537,43 @@ func updateStartFail(server *DaemonServer, launcherProc *os.Process, p updateSta
 // connectWebSocket blocks until the socket drops, then the loop redials;
 // the relay re-emits updating on every (re)connect, and replays it to
 // frontends that connect mid-update.
-func (d *DaemonServer) updateStartServeLoop(logf func(string, ...any)) {
+func updateSlotCommitted(p updateStartParams) bool {
+	raw, err := os.ReadFile(filepath.Join(p.root, "slots", "active"))
+	return err == nil && (p.toSlot == "a" || p.toSlot == "b") && strings.TrimSpace(string(raw)) == p.toSlot
+}
+
+// startUpdateRelay returns an idempotent stop that cancels an in-flight
+// dial/read/backoff and waits until no updater can register again.
+func (d *DaemonServer) startUpdateRelay(logf func(string, ...any)) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.updateStartServeLoop(ctx, logf)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func (d *DaemonServer) updateStartServeLoop(ctx context.Context, logf func(string, ...any)) {
 	backoff := time.Second
-	for {
-		if err := d.connectWebSocketWithQuery("&updating=1"); err != nil {
+	for ctx.Err() == nil {
+		if err := d.connectWebSocketContext(ctx, "&updating=1"); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			if errors.Is(err, errDaemonRevoked) {
 				logf("relay revoked, continuing headless")
 				return
 			}
 			logf("relay: %v (retry in %v)", err, backoff)
-			time.Sleep(backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
 			backoff *= 2
 			if backoff > 30*time.Second {
 				backoff = 30 * time.Second
@@ -540,29 +603,30 @@ type updateEndParams struct {
 
 var updateEndInfo *updateEndParams
 
-// doUpdateEndPromote runs ONCE for an --update-end daemon: it SIGKILLs
-// the waiting --update-start daemon, flips slots/active, deletes the old
-// slot and reports update_done. The promote is LOCAL FIRST (kill + flip +
-// cleanup always happen, relay or not); the relay traffic (update.done
-// file + update_done WS message) is best-effort on top.
-//
-// Called from main() right after boot: the daemon tries ONE relay connect
-// (says "estou ok") and promotes either way — success or failure, life
-// goes on. The normal reconnect loop keeps retrying the WS afterwards
-// (same as booting without internet).
-func doUpdateEndPromote(d *DaemonServer) {
+// doUpdateEndPromote commits slots/active before retiring the waiting
+// updater or removing recovery data. The relay hello is best-effort:
+// normal reconnection retries later if the gateway is unavailable.
+func doUpdateEndPromote(d *DaemonServer) error {
 	if updateEndInfo == nil {
-		return
+		return nil
 	}
 	p := updateEndInfo
 	updateEndInfo = nil // once only
 	logf := func(format string, args ...any) {
 		fmt.Printf("[UPDATE-END] "+format+"\n", args...)
 	}
-	// Best-effort hello: one WS dial saying "estou ok". Failure changes
-	// nothing — the promote below runs either way.
+	// Commit the active marker before announcing success or removing any
+	// recovery process/data. On failure the waiter can still roll back.
+	ownSlot := p.slot
+	if ownSlot == "" {
+		ownSlot = strings.TrimPrefix(filepath.Base(d.dataDir), "slot-")
+	}
+	if err := commitUpdateSlot(d, *p, ownSlot); err != nil {
+		return err
+	}
+	// Best-effort hello after the local commit; no network rollback.
 	if err := d.connectWebSocketOnce(); err != nil {
-		logf("relay hello: %v (promoting anyway)", err)
+		logf("relay hello: %v (slot already committed)", err)
 	} else {
 		logf("relay hello ok")
 	}
@@ -577,31 +641,20 @@ func doUpdateEndPromote(d *DaemonServer) {
 			logf("old updater (pid %d) stopped", p.parentPid)
 		}
 	}
-	ownSlot := p.slot
-	if ownSlot == "" {
-		// Derive from dataDir (<root>/slots/slot-x).
-		if b := filepath.Base(d.dataDir); strings.HasPrefix(b, "slot-") {
-			ownSlot = strings.TrimPrefix(b, "slot-")
-		}
-	}
-	if ownSlot != "" && ownSlot != p.fromSlot {
-		_ = os.WriteFile(filepath.Join(p.root, "slots", "active"), []byte(ownSlot+"\n"), 0o600)
-		oldDir := filepath.Join(p.root, "slots", "slot-"+p.fromSlot)
+	if oldDir, err := inactiveSlotPath(p.root, ownSlot, p.fromSlot, d.dataDir); err == nil {
 		// Sweep the old slot first: kill EVERYTHING still running from
 		// it (a resurrected old daemon, stray children) so the RemoveAll
 		// below never hits "text file busy" and no zombie serves the
 		// deleted slot afterwards. Never kills us (own pid excluded;
 		// plus the guard below refuses our own dir).
 		killSlotProcesses(oldDir, os.Getpid(), logf)
-		// Guard: never delete our own dir (a flag mix-up must not wipe
-		// the slot we serve from).
-		if abs, err := filepath.Abs(oldDir); err != nil || abs != mustAbs(d.dataDir) {
-			if err == nil {
-				_ = os.RemoveAll(abs)
-			}
+		if err := removeInactiveSlot(p.root, ownSlot, p.fromSlot, d.dataDir); err != nil {
+			logf("old slot cleanup: %v", err)
 		}
-		logf("promoted to slot %s (old slot removed)", ownSlot)
+	} else {
+		logf("old slot cleanup refused: %v", err)
 	}
+	logf("promoted to slot %s", ownSlot)
 	_ = os.Remove(updateFailPath(p.root))
 	// Best-effort: if the hello above connected, this rides that socket;
 	// otherwise it is a no-op and the next reconnect delivers state.
@@ -613,12 +666,31 @@ func doUpdateEndPromote(d *DaemonServer) {
 	st.available = ""
 	st.mu.Unlock()
 	d.broadcastUpdateState()
+	return nil
 }
 
-func mustAbs(p string) string {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return p
+func commitUpdateSlot(d *DaemonServer, p updateEndParams, ownSlot string) error {
+	if (ownSlot != "a" && ownSlot != "b") || (p.fromSlot != "a" && p.fromSlot != "b") || ownSlot == p.fromSlot {
+		return fmt.Errorf("invalid promotion %q -> %q", p.fromSlot, ownSlot)
 	}
-	return abs
+	ownDir, err := filepath.Abs(d.dataDir)
+	if err != nil {
+		return err
+	}
+	expected, err := filepath.Abs(filepath.Join(p.root, "slots", "slot-"+ownSlot))
+	if err != nil || expected != ownDir {
+		return fmt.Errorf("promotion slot does not match data directory")
+	}
+	activePath := filepath.Join(p.root, "slots", "active")
+	raw, err := os.ReadFile(activePath)
+	if err != nil {
+		return fmt.Errorf("read active slot: %w", err)
+	}
+	if strings.TrimSpace(string(raw)) != p.fromSlot {
+		return fmt.Errorf("active slot changed before promotion")
+	}
+	if err := writeConfigFile(activePath, []byte(ownSlot+"\n")); err != nil {
+		return fmt.Errorf("commit active slot: %w", err)
+	}
+	return nil
 }

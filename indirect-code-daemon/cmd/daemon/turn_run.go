@@ -640,13 +640,14 @@ func (d *DaemonServer) resumeAgentTurn(act *ActiveSession, j *walHeader) {
 		d.discardWAL(act)
 	}
 	ww, werr := d.openWALAppend(sessionID)
-	if werr != nil {
+	if os.IsNotExist(werr) {
 		// No WAL file (header-only session): create fresh.
 		ww, werr = d.openWAL(sessionID, &walHeader{TurnIndex: j.TurnIndex, StartedAt: act.record.Turn.StartedAt, Model: modelToUse, Prompt: j.Prompt, AttachmentIDs: j.AttachmentIDs, Incoming: j.Incoming})
-		if werr != nil {
-			act.mu.Unlock()
-			return
-		}
+	}
+	if werr != nil {
+		fmt.Printf("[WARN] cannot reopen WAL for %s: %v\n", sessionID, werr)
+		act.mu.Unlock()
+		return
 	}
 	act.wal = ww
 	// Freeze the resumed running state (meta rewrite only); deltas append.

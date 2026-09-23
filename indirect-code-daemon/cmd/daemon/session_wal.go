@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,15 +146,46 @@ func (d *DaemonServer) openWAL(sessionID string, h *walHeader) (*walWriter, erro
 }
 
 // openWALAppend reopens an existing WAL for append (resume path): the
-// header and body stay intact, new events continue after them.
+// valid prefix stays intact; a damaged final event is removed before new
+// events are appended. Interior corruption fails without changing the file.
 func (d *DaemonServer) openWALAppend(sessionID string) (*walWriter, error) {
 	p := d.walPath(sessionID)
 	if p == "" {
 		return nil, fmt.Errorf("invalid session id")
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(p, os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	_, _, validEnd, err := replayWALPrefix(&SessionRecord{ID: sessionID}, data)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if validEnd < len(data) {
+		if err := f.Truncate(int64(validEnd)); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+	// A complete JSON event without its final newline is valid data too.
+	needsNewline := validEnd > 0 && data[validEnd-1] != '\n'
+	if needsNewline {
+		if _, err := f.WriteString("\n"); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+	if validEnd < len(data) || needsNewline {
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 	return &walWriter{file: f, w: bufio.NewWriterSize(f, 64*1024), path: p}, nil
 }
@@ -240,38 +272,57 @@ func (d *DaemonServer) readWALHeader(sessionID string) (*walHeader, error) {
 // line (crash mid-write) is ignored; a corrupt middle line aborts the
 // replay with an error (fail-closed: never half-apply).
 func replayWAL(base *SessionRecord, data []byte) (*SessionRecord, *walHeader, error) {
+	rec, header, _, err := replayWALPrefix(base, data)
+	return rec, header, err
+}
+
+// validEnd is the byte boundary shared by read recovery and append repair.
+// Never skip corrupt interior events or discard a valid prefix for a bad tail.
+func replayWALPrefix(base *SessionRecord, data []byte) (*SessionRecord, *walHeader, int, error) {
 	rec := base
 	var header *walHeader
 	lines := bytes.Split(data, []byte{'\n'})
+	last := len(lines) - 1
+	for last >= 0 && len(bytes.TrimSpace(lines[last])) == 0 {
+		last--
+	}
+	offset, validEnd := 0, 0
 	for i, line := range lines {
+		offset = min(offset+len(line)+1, len(data))
 		line = bytes.TrimRight(line, "\r")
 		if len(bytes.TrimSpace(line)) == 0 {
+			validEnd = offset
 			continue
 		}
 		var ev walEvent
 		if err := json.Unmarshal(line, &ev); err != nil {
 			// Tolerate only a torn tail write: the last non-empty line
 			// may be a partial append from a killed process.
-			if i == len(lines)-1 || (i == len(lines)-2 && len(bytes.TrimSpace(lines[len(lines)-1])) == 0) {
+			if i == last && header != nil {
 				break
 			}
-			return nil, nil, fmt.Errorf("wal line %d: %w", i+1, err)
+			return nil, nil, 0, fmt.Errorf("wal line %d: %w", i+1, err)
 		}
 		if i == 0 {
 			if ev.Type != walTypeHeader || ev.Header == nil {
-				return nil, nil, fmt.Errorf("wal: missing header")
+				return nil, nil, 0, fmt.Errorf("wal: missing header")
 			}
 			header = ev.Header
+			validEnd = offset
 			continue
 		}
 		if err := applyWALEvent(rec, &ev); err != nil {
-			return nil, nil, fmt.Errorf("wal line %d: %w", i+1, err)
+			if i == last {
+				break
+			}
+			return nil, nil, 0, fmt.Errorf("wal line %d: %w", i+1, err)
 		}
+		validEnd = offset
 	}
 	if header == nil {
-		return nil, nil, fmt.Errorf("wal: empty")
+		return nil, nil, 0, fmt.Errorf("wal: empty")
 	}
-	return rec, header, nil
+	return rec, header, validEnd, nil
 }
 
 func applyWALEvent(rec *SessionRecord, ev *walEvent) error {

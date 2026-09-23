@@ -30,9 +30,8 @@ import (
 //  2. The launcher migrates the update slot, fetches + verifies the new
 //     daemon (runs + expected version + strictly newer), then spawns it
 //     DETACHED with --update-end and exits.
-//  3. --update-end boots normally; after its first WS connect (end-to-end
-//     proof) it SIGKILLs the waiter, flips slots/active, deletes the old
-//     slot and reports update_done.
+//  3. --update-end boots, commits slots/active, attempts a relay hello,
+//     SIGKILLs the waiter, deletes the old slot and reports update_done.
 //  4. Any failure: the launcher writes the fail file (only when ready to
 //     be killed); the waiter kills the launcher, deletes the update slot,
 //     reports update_failed + back-to-normal, and re-execs itself as a
@@ -208,7 +207,9 @@ func (d *DaemonServer) runHandoff(version string) {
 // frontend. The daemon keeps serving untouched (WS never dropped).
 func (d *DaemonServer) abortHandoff(reason string) {
 	sl := d.slots()
-	_ = os.RemoveAll(d.slotDir(sl.inactive))
+	if err := removeInactiveSlot(d.rootDir(), sl.active, sl.inactive, d.dataDir); err != nil {
+		reason += fmt.Sprintf(" (cleanup refused: %v)", err)
+	}
 	st := d.updateChecker()
 	st.mu.Lock()
 	st.lastError = reason
@@ -351,8 +352,8 @@ func extractGotVersion(err error) string {
 }
 
 // copyToSlot copies the slot's sessions (+ WALs, + small configs) active ->
-// inactive. Uses hardlinks when possible (instant, CoW-safe: all our
-// writes are tmp+rename), plain copy fallback otherwise. dataDir IS the
+// inactive. Immutable/replaced files use hardlinks when possible; WALs
+// are independent copies because they append in place. dataDir IS the
 // active slot, so the source is dataDir itself.
 //
 // WAL sidecars (*.wal.jsonl) MUST travel with their session JSON: the
@@ -420,13 +421,15 @@ func copyDirLink(srcDir, dst, name string) error {
 // Windows without privilege). Binaries are NEVER hardlinked: the daemon
 // overwrites dist/r assets in place during tests/releases, and a
 // hardlinked slot binary would silently change under a running process
-// (same inode = new bytes). Sessions/configs stay hardlinked (they are
-// always tmp+rename, CoW-safe).
+// (same inode = new bytes). Session snapshots/configs stay hardlinked
+// (tmp+rename); WALs are copied because resume repairs and appends them.
 func copyFileLink(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
-	if !isBinaryAsset(src) {
+	// WALs append in place and may need tail repair on resume: they must
+	// never share storage with the rollback slot.
+	if !isBinaryAsset(src) && !strings.HasSuffix(src, ".wal.jsonl") {
 		if err := os.Link(src, dst); err == nil {
 			return nil
 		}

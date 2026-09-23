@@ -207,6 +207,25 @@ func TestMirrorBaseGatewayFirst(t *testing.T) {
 	}
 }
 
+func TestUpdateMirrorUsesCustomRoot(t *testing.T) {
+	t.Setenv("INDIRECT_GATEWAY", "")
+	t.Setenv("INDIRECT_REPO_RAW", "")
+	root := t.TempDir()
+	slot := filepath.Join(root, "slots", "slot-b")
+	if err := os.MkdirAll(slot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(slot, "config.json"), []byte(`{"gateway_url":"https://paired.example"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := os.Args
+	defer func() { os.Args = args }()
+	os.Args = []string{"launcher", "--update", "--root-dir", root}
+	if got := mirrorBase(); got != "https://paired.example/r" {
+		t.Fatalf("custom update root lost its gateway: %q", got)
+	}
+}
+
 // ws:// connect/config URLs map to the http(s) mirror (K5 chaos: the old
 // code built a ws:// mirror URL and the download failed with
 // "unsupported protocol scheme").

@@ -35,6 +35,63 @@ func TestAbortHandoffCleansInactive(t *testing.T) {
 	}
 }
 
+func TestAbortHandoffRefusesOwnSlotWithStaleActiveMarker(t *testing.T) {
+	d := testDaemon(t)
+	root := t.TempDir()
+	d.dataDir = testSlot(t, root, "b")
+	marker := filepath.Join(d.dataDir, "sessions", "keep.jsonl")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "slots", "active"), []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.abortHandoff("stale active marker")
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "keep" {
+		t.Fatal("abort deleted its own data")
+	}
+}
+
+func TestCopyToSlotKeepsWALRepairIsolated(t *testing.T) {
+	d := testDaemon(t)
+	root := t.TempDir()
+	d.dataDir = testSlot(t, root, "a")
+	if err := os.WriteFile(filepath.Join(root, "slots", "active"), []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ww, err := d.openWAL("repair", &walHeader{TurnIndex: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ww.close(); err != nil {
+		t.Fatal(err)
+	}
+	prefix, _ := os.ReadFile(d.walPath("repair"))
+	original := append(prefix, []byte("{broken")...)
+	if err := os.WriteFile(d.walPath("repair"), original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.copyToSlot(d.slots(), d.slotDir("b")); err != nil {
+		t.Fatal(err)
+	}
+	d2 := testDaemon(t)
+	d2.dataDir = d.slotDir("b")
+	ww, err = d2.openWALAppend("repair")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ww.append(walEvent{Type: walTypeTitle, Title: "new slot"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ww.close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(d.walPath("repair"))
+	if err != nil || string(after) != string(original) {
+		t.Fatal("new slot changed rollback WAL")
+	}
+}
+
 func TestCopyToSlotHardlink(t *testing.T) {
 	d := testDaemon(t)
 	root := t.TempDir()

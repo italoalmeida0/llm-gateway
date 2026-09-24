@@ -55,3 +55,34 @@ func TestParityV1Format(t *testing.T) {
 		t.Fatalf("listSessionSummaries missed v1 session")
 	}
 }
+
+func TestApprovalDeadlineSurvivesDisk(t *testing.T) {
+	dir := t.TempDir()
+	st := newDiskStore(dir)
+	rec := &SessionRecord{ID: "dl1", CWD: "/tmp", Title: "t", Model: "m", Status: "running", CreatedAt: 1, UpdatedAt: 1, ApprovalDeadlineUnix: 1790000000000}
+	if err := st.saveSessionSync(rec); err != nil {
+		t.Fatal(err)
+	}
+	// Reload from disk: the deadline must survive (plan §8).
+	loaded, _, err := st.loadSessionFused("dl1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ApprovalDeadlineUnix != 1790000000000 {
+		t.Fatalf("deadline lost across save/load: got %d", loaded.ApprovalDeadlineUnix)
+	}
+	// And through the WAL replay path.
+	ww, err := st.openWAL("dl1", &walHeader{TurnIndex: 1, StartedAt: 1, Model: "m", Prompt: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendWALEvent(ww, walEvent{Type: walTypeMeta, UpdatedAt: 2, ApprovalDeadlineUnix: 1790000000001})
+	_ = ww.close()
+	fused, _, err := st.loadSessionFused("dl1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fused.ApprovalDeadlineUnix != 1790000000001 {
+		t.Fatalf("deadline lost across WAL replay: got %d", fused.ApprovalDeadlineUnix)
+	}
+}

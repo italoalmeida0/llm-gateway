@@ -132,10 +132,6 @@ type bgRecentResult struct {
 	OK    bool
 }
 
-type bgJobExitedMsg struct {
-	JobID string
-}
-
 // bgLogPathMsg corrects the log path after the worker renames the pending
 // file to the final <jobID>.log.
 type bgLogPathMsg struct {
@@ -183,8 +179,8 @@ func (b *bgSupervisor) run(wg *sync.WaitGroup) {
 			switch msg.(type) {
 			case shutdownMsg:
 				return
-			case bgJobExitedMsg:
-				// waiter exit report (same as bgFinishMsg path via control)
+			default:
+				_ = msg
 			}
 		}
 	}

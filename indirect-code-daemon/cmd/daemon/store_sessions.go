@@ -73,6 +73,10 @@ type metaLine struct {
 	Compaction  *core.CompactionState `json:"compaction,omitempty"`
 	TurnSeq     int                   `json:"turnSeq,omitempty"`
 	Queue       []QueuedMessage       `json:"queue,omitempty"`
+	// ApprovalDeadlineUnix bounds a pending approval/question (15-min timer).
+	// Persisted so a respawn recomputes the remainder — a restart never
+	// bypasses the timeout (plan §8). Zero = no pending decision.
+	ApprovalDeadlineUnix int64 `json:"approvalDeadlineUnix,omitempty"`
 }
 
 
@@ -137,6 +141,7 @@ func splitRecord(rec *SessionRecord) ([]turnLine, metaLine) {
 		CreatedAt: rec.CreatedAt, UpdatedAt: rec.UpdatedAt,
 		Attachments: rec.Attachments, LastDate: rec.LastDate, LastMode: rec.LastMode,
 		Compaction: rec.Compaction, TurnSeq: rec.TurnSeq, Queue: rec.Queue,
+		ApprovalDeadlineUnix: rec.ApprovalDeadlineUnix,
 	}
 	// Group message indices by turn.
 	type group struct {
@@ -358,6 +363,7 @@ func assembleRecord(lines []turnLine, meta metaLine) *SessionRecord {
 		CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt,
 		Attachments: meta.Attachments, Compaction: meta.Compaction,
 		TurnSeq: meta.TurnSeq, Queue: meta.Queue,
+		ApprovalDeadlineUnix: meta.ApprovalDeadlineUnix,
 	}
 	for _, tl := range lines {
 		for _, raw := range tl.Messages {

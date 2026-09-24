@@ -52,7 +52,7 @@ func main() {
 	)
 	flag.Parse()
 	if *versionFlag {
-		fmt.Println("indirect-code daemon v2", Version)
+		fmt.Println("indirect-code daemon", Version)
 		os.Exit(0)
 	}
 	dataDir := *dataDirFlag

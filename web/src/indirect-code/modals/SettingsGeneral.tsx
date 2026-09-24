@@ -204,26 +204,6 @@ export function SettingsGeneralSection() {
     <span>Agent</span>
 
   </h3>
-  <div class="space-y-4 text-xs">
-    <div class="space-y-2">
-      <label class="flex items-center gap-2 cursor-pointer select-none">
-        <input
-          type="checkbox"
-          checked={m.daemonSettings().autoSwarmEnabled ?? false}
-          onChange={(e) =>
-            m.setDaemonSettings({
-              ...m.daemonSettings(),
-              autoSwarmEnabled: e.currentTarget.checked,
-            })
-          }
-          class="rounded accent-brand-500"
-        />
-        <span class="text-ink-200 font-medium">
-          Auto-Swarm (Allow agent to spawn parallel sub-agents)
-        </span>
-      </label>
-    </div>
-  </div>
 </div>
 
 <div class="border-b border-line pb-4 last:border-0 last:pb-0 space-y-3">

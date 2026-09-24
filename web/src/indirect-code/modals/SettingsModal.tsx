@@ -4,8 +4,6 @@ import { Icon as Iconify } from "../../components/icon";
 import { useModal, useUI } from "../ctx";
 
 import { SettingsGeneralSection } from "./SettingsGeneral";
-import { SettingsMcpSection } from "./SettingsMcp";
-import { SettingsSkillsSection } from "./SettingsSkills";
 
 export function SettingsModal() {
   const m = useModal();
@@ -85,57 +83,13 @@ export function SettingsModal() {
               <Iconify icon="lucide:sliders" size={13} />
               <span>General</span>
             </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("mcp")}
-              aria-pressed={activeTab() === "mcp"}
-              class="ui-segment flex flex-1 items-center justify-center gap-1.5 px-2"
-            >
-              <Iconify icon="lucide:cpu" size={13} />
-              <span>MCP servers</span>
-              <Show when={Object.keys(m.mcpServers()).length > 0}>
-                <span
-                  class={`text-[10px] px-1.5 py-0.2 rounded-full ${
-                    activeTab() === "mcp"
-                      ? "bg-ink-800 text-ink-200"
-                      : "bg-ink-800 text-ink-400"
-                  }`}
-                >
-                  {Object.keys(m.mcpServers()).length}
-                </span>
-              </Show>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("skills")}
-              aria-pressed={activeTab() === "skills"}
-              class="ui-segment flex flex-1 items-center justify-center gap-1.5 px-2"
-            >
-              <Iconify icon="lucide:puzzle" size={13} />
-              <span>Skills</span>
-              <Show when={Object.keys(m.skills()).length > 0}>
-                <span
-                  class={`text-[10px] px-1.5 py-0.2 rounded-full ${
-                    activeTab() === "skills"
-                      ? "bg-ink-800 text-ink-200"
-                      : "bg-ink-800 text-ink-400"
-                  }`}
-                >
-                  {Object.keys(m.skills()).length}
-                </span>
-              </Show>
-            </button>
+
           </div>
 
           <Show when={activeTab() === "general"}>
             <SettingsGeneralSection />
           </Show>
-          <Show when={activeTab() === "mcp"}>
-            <SettingsMcpSection />
-          </Show>
-          <Show when={activeTab() === "skills"}>
-            <SettingsSkillsSection />
-          </Show>
+
         </fieldset>
       </div>
     </Modal>

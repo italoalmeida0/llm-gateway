@@ -83,6 +83,10 @@ type walEvent struct {
 	TurnStatus  string                  `json:"turnStatus,omitempty"`
 	Attachments []AttachmentRef         `json:"attachments,omitempty"`
 	UpdatedAt   int64                   `json:"updatedAt,omitempty"`
+	// ApprovalDeadlineUnix persists the 15-min decision deadline inside the
+	// WAL (plan §8): a respawn recomputes the remainder instead of
+	// restarting the timer.
+	ApprovalDeadlineUnix int64 `json:"approvalDeadlineUnix,omitempty"`
 	LastDate    string                  `json:"lastDate,omitempty"`
 	LastMode    string                  `json:"lastMode,omitempty"`
 }
@@ -414,6 +418,9 @@ func applyWALEvent(rec *SessionRecord, ev *walEvent) error {
 	case walTypeMeta:
 		if ev.UpdatedAt > 0 {
 			rec.UpdatedAt = ev.UpdatedAt
+		}
+		if ev.ApprovalDeadlineUnix > 0 {
+			rec.ApprovalDeadlineUnix = ev.ApprovalDeadlineUnix
 		}
 		if ev.LastDate != "" {
 			rec.LastDate = ev.LastDate

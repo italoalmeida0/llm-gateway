@@ -44,9 +44,7 @@ export function createSettings(opts: {
   refreshConfig: () => Promise<void>;
 }) {
   const [showConfigModal, setShowConfigModal] = createSignal(false);
-  const [settingsTab, setSettingsTab] = createSignal<
-    "general" | "mcp" | "skills"
-  >("general");
+  const [settingsTab, setSettingsTab] = createSignal<"general">("general");
   const [daemonSettings, setDaemonSettings] = createSignal<AgentSettings>({
     ...defaults,
   });
@@ -135,7 +133,7 @@ export function createSettings(opts: {
   );
   onCleanup(stopPending);
 
-  function openSettings(sectionId?: string) {
+  function openSettings(_sectionId?: string) {
     if (!configDoc()) {
       opts.toast("Wait for the host settings to load", "err");
       return;
@@ -144,13 +142,7 @@ export function createSettings(opts: {
     setSettingsError("");
     resetMcpEditor();
     resetSkillEditor();
-    setSettingsTab(
-      sectionId?.includes("mcp")
-        ? "mcp"
-        : sectionId?.includes("skill")
-          ? "skills"
-          : "general",
-    );
+    setSettingsTab("general");
     setShowConfigModal(true);
   }
   function cancelSettings() {

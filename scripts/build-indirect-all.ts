@@ -41,16 +41,13 @@ const TARGETS = [
 ];
 
 for (const { goos, goarch } of TARGETS) {
-  const isWin = goos === "windows";
-  const ext = isWin ? ".exe" : "";
+  const ext = goos === "windows" ? ".exe" : "";
   const name = `indirect-code-${goos}-${goarch}${ext}`;
-  const lname = `indirect-launcher-${goos}-${goarch}${ext}`;
 
   console.log(`==> ${name} (daemon)`);
   await $`go build -trimpath -ldflags ${daemonLdflags} -o ${path.join(OUT, name)} ./cmd/daemon`
     .cwd(DAEMON_DIR)
     .env({ ...process.env, CGO_ENABLED: "0", GOOS: goos, GOARCH: goarch });
-
 }
 
 // 2. Prune any deprecated versioned copies

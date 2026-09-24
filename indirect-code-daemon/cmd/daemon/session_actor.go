@@ -666,8 +666,13 @@ func (a *sessionActor) doCancel(reason string) {
 func (a *sessionActor) enterAwait(kind, id string, recommended [][]string) {
 	now := time.Now().UnixMilli()
 	deadline := now + int64(awaitTimeout/time.Millisecond)
+	// Respawn clamp (plan §8): a persisted deadline from before the crash
+	// wins over a fresh 15-min window — a restart never extends the wait.
+	if a.rec.ApprovalDeadlineUnix > 0 && a.rec.ApprovalDeadlineUnix < deadline {
+		deadline = a.rec.ApprovalDeadlineUnix
+	}
 	a.rec.ApprovalDeadlineUnix = deadline
-	appendWALEvent(a.wal, walEvent{Type: walTypeMeta, UpdatedAt: now})
+	appendWALEvent(a.wal, walEvent{Type: walTypeMeta, UpdatedAt: now, ApprovalDeadlineUnix: deadline})
 	myID := id
 	if myID == "" {
 		myID = randomID8()

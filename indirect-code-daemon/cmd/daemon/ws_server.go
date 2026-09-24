@@ -2,9 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +20,8 @@ import (
 type wsServer struct {
 	dataDir string
 	cfg     *configCell
+	// configDir is where config.json lives (== dataDir unless --config).
+	configDir string
 	onRemoteKill func(reason string)
 
 	sessions *sessionSupervisor
@@ -43,7 +42,7 @@ type convertOutcome struct {
 
 func newWSServer(dataDir string, cfg *configCell, sessions *sessionSupervisor, bg *bgSupervisor, projects *projectsActor, admin *sessionAdmin, ws *wsActor) *wsServer {
 	return &wsServer{
-		dataDir: dataDir, cfg: cfg, sessions: sessions, bg: bg,
+		dataDir: dataDir, configDir: dataDir, cfg: cfg, sessions: sessions, bg: bg,
 		projects: projects, admin: admin, ws: ws,
 		debounce:       map[string]*time.Timer{},
 	}
@@ -585,9 +584,18 @@ func (s *wsServer) dispatch(raw []byte) {
 	case "update_config":
 		s.onUpdateConfig(raw)
 
-	case "daemon_update_check", "daemon_update_apply", "daemon_update_toggle", "debug_mirror", "test_mcp":
-		// Removed in v2 (MCP deleted; self-update out of scope): ack as error.
-		s.emit(map[string]any{"type": "error", "hostId": s.host(), "message": "unsupported in daemon v2"})
+	case "daemon_update_check":
+		// No self-update in this daemon (single binary, gateway ships it):
+		// answer with authoritative state so the frontend card shows the
+		// current version as up-to-date instead of erroring. replyTo-less
+		// errors would toast on every reconnect (checkNow runs onOpen).
+		s.emit(map[string]any{"type": "daemon_update", "hostId": s.host(), "current": Version, "autoUpdate": false})
+	case "daemon_update_apply", "daemon_update_toggle":
+		s.emit(map[string]any{"type": "daemon_update", "hostId": s.host(), "current": Version, "autoUpdate": false})
+	case "debug_mirror", "test_mcp":
+		// Removed (MCP deleted): silent no-op. Emitting a replyTo-less
+		// error would toast on the generic handler for no user benefit.
+		_ = base
 	}
 }
 
@@ -1158,14 +1166,14 @@ func (s *wsServer) onUpdateConfig(raw []byte) {
 	applySettingsMap(&next.Settings, req.Settings)
 	next.Settings = normalizedHarness(next.Settings)
 	s.cfg.store(&next)
-	if err := saveDaemonConfig(s.dataDir, &next); err != nil {
+	cfgDir := s.configDir
+	if cfgDir == "" {
+		cfgDir = s.dataDir
+	}
+	if err := saveDaemonConfig(cfgDir, &next); err != nil {
 		s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": false, "error": err.Error()})
 		return
 	}
 	s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": true, "revision": configRevision(&next)})
 	s.notifyChange("config")
 }
-
-var _ = fmt.Sprint
-var _ = filepath.Join
-var _ = os.MkdirAll

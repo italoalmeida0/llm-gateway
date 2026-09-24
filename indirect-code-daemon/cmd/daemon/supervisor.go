@@ -75,7 +75,6 @@ func newSessionSupervisor(dataDir string, cfg *configCell, ws *wsActor, bg *bgSu
 type residentEntry struct {
 	handle   *sessionHandle
 	idleTTL  time.Duration
-	warned   bool // watchdog already escalated once
 	staleRounds int
 	// workerAlive tracks whether the actor's turn goroutine was observed
 	// running (via workerDone channel). A reap that would orphan a live
@@ -371,9 +370,16 @@ func (s *sessionSupervisor) passivate(id string) {
 	}
 	delete(s.resident, id)
 	s.mu.Unlock()
+	// Blocking send with watchdog timeout: a passivate swallowed by
+	// `default` would orphan a live actor (goroutine + open WAL) that no
+	// longer exists in the map — the exact leak class F4 calls out.
+	// Control lane is drained continuously by a live actor, so 5s only
+	// fires when it is truly wedged (then the watchdog reaps the handle,
+	// which is already gone from the map — nothing more to do).
 	select {
 	case ent.handle.control <- passivateMsg{}:
-	default:
+	case <-time.After(5 * time.Second):
+		fmt.Printf("[WARN] passivate %s: control lane stuck, actor orphaned (watchdog will reap)\n", id)
 	}
 }
 

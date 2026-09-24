@@ -30,6 +30,7 @@ version = (version || "1.0.0").replace(/^v/, "").trim();
 console.log(`==> Building Indirect Code v${version}`);
 
 const daemonLdflags = `-s -w -X main.Version=${version}`;
+const launcherLdflags = `-s -w -X main.launcherVersion=${version}`;
 
 const TARGETS = [
   { goos: "linux", goarch: "amd64" },
@@ -48,6 +49,12 @@ for (const { goos, goarch } of TARGETS) {
   await $`go build -trimpath -ldflags ${daemonLdflags} -o ${path.join(OUT, name)} ./cmd/daemon`
     .cwd(DAEMON_DIR)
     .env({ ...process.env, CGO_ENABLED: "0", GOOS: goos, GOARCH: goarch });
+
+  const lname = `indirect-launcher-${goos}-${goarch}${ext}`;
+  console.log(`==> ${lname} (launcher)`);
+  await $`go build -trimpath -ldflags ${launcherLdflags} -o ${path.join(OUT, lname)} ./cmd/launcher`
+    .cwd(DAEMON_DIR)
+    .env({ ...process.env, CGO_ENABLED: "0", GOOS: goos, GOARCH: goarch });
 }
 
 // 2. Prune any deprecated versioned copies
@@ -64,7 +71,7 @@ const allFiles = readdirSync(OUT).sort();
 const sumsLines: string[] = [];
 
 for (const fn of allFiles) {
-  if (fn.startsWith("indirect-code-")) {
+  if (fn.startsWith("indirect-code-") || fn.startsWith("indirect-launcher-")) {
     const content = readFileSync(path.join(OUT, fn));
     const hash = createHash("sha256").update(content).digest("hex");
     sums[fn] = hash;
@@ -90,6 +97,11 @@ const manifest = {
   daemon: {
     version,
     assets: getAssets("indirect-code"),
+    sums,
+  },
+  launcher: {
+    version,
+    assets: getAssets("indirect-launcher"),
     sums,
   },
 };

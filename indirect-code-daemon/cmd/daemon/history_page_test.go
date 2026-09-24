@@ -89,8 +89,89 @@ func TestTurnTokenCountPositive(t *testing.T) {
 	}
 }
 
-func TestSessionPayloadPagedTail(t *testing.T) {
+func TestSliceLastTurns(t *testing.T) {
+	msgs := pageTestMessages()
+	// Last 2 whole turns: turn 2 (3 msgs) + turn 3 (1 msg).
+	b := sliceLastTurns(msgs, nil, 2)
+	if len(b.Messages) != 4 || b.OldestTurn != 2 || b.NewestTurn != 3 {
+		t.Fatalf("last-2 wrong: %d msgs %+v", len(b.Messages), b)
+	}
+	if !b.HasOlder || b.TotalTurns != 3 {
+		t.Fatalf("last-2 flags wrong: %+v", b)
+	}
+	if b.FirstIndex != 2 {
+		t.Fatalf("last-2 firstIndex = %d; want 2", b.FirstIndex)
+	}
+	// n larger than the session ships everything, no older.
+	all := sliceLastTurns(msgs, nil, 9)
+	if len(all.Messages) != 6 || all.HasOlder {
+		t.Fatalf("oversized n wrong: %+v", all)
+	}
+	// Empty transcript: empty block, no cursor.
+	empty := sliceLastTurns(nil, nil, 2)
+	if len(empty.Messages) != 0 || empty.HasOlder || empty.TotalTurns != 0 {
+		t.Fatalf("empty wrong: %+v", empty)
+	}
+}
+
+func TestCompletionPayloadTailOnly(t *testing.T) {
 	d := testDaemon(t)
+	rec := &SessionRecord{ID: "completion", CWD: "/tmp", Model: "m", Status: "idle"}
+	for i := 1; i <= 4; i++ {
+		for j := 0; j < 2; j++ {
+			rec.Messages = append(rec.Messages, provider.Message{
+				Role:      provider.RoleUser,
+				TurnIndex: i,
+				Content:   []provider.Content{provider.TextBlock{Text: "hello"}},
+			})
+		}
+	}
+	if err := d.saveSession(rec); err != nil {
+		t.Fatal(err)
+	}
+	p := completionPayload(rec)
+	msgs, _ := p["messages"].([]provider.Message)
+	h, _ := p["history"].(map[string]any)
+	// Only turns 3-4 ship; the cursor still points at the full session.
+	if len(msgs) != 4 || h["oldestTurn"] != 3 || h["newestTurn"] != 4 {
+		t.Fatalf("completion tail wrong: %d msgs %+v", len(msgs), h)
+	}
+	if h["hasOlder"] != true || h["totalTurns"] != 4 || h["firstIndex"] != 4 {
+		t.Fatalf("completion cursor wrong: %+v", h)
+	}
+	// Closing metadata rides whole, not truncated.
+	if _, ok := p["usage"]; !ok {
+		t.Fatal("completion payload missing usage key")
+	}
+	if _, ok := p["compaction"]; !ok {
+		t.Fatal("completion payload missing compaction key")
+	}
+}
+
+func TestTailContentEventShape(t *testing.T) {
+	rec := &SessionRecord{ID: "tail", CWD: "/tmp", Model: "m", Status: "idle"}
+	for i := 1; i <= 3; i++ {
+		rec.Messages = append(rec.Messages, provider.Message{
+			Role:      provider.RoleUser,
+			TurnIndex: i,
+			Content:   []provider.Content{provider.TextBlock{Text: "hello"}},
+		})
+	}
+	ev := tailContentEvent("h", "tail", "session_content", rec, 0, nil)
+	msgs, _ := ev["messages"].([]provider.Message)
+	h, _ := ev["history"].(map[string]any)
+	if ev["type"] != "session_content" || ev["sessionId"] != "tail" {
+		t.Fatalf("event envelope wrong: %+v", ev)
+	}
+	if len(msgs) != 2 || h["oldestTurn"] != 2 || h["newestTurn"] != 3 {
+		t.Fatalf("tail event wrong: %d msgs %+v", len(msgs), h)
+	}
+	if _, ok := ev["compaction"]; !ok {
+		t.Fatal("tail event missing compaction key")
+	}
+}
+
+func TestSessionPayloadPagedTail(t *testing.T) {	d := testDaemon(t)
 	rec := &SessionRecord{ID: "paged", CWD: "/tmp", Model: "m", Status: "idle"}
 	for i := 1; i <= 3; i++ {
 		for j := 0; j < 2; j++ {

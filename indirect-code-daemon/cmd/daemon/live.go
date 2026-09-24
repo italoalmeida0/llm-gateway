@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
+	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // A transient replay of only the current assistant response. Completed
@@ -115,9 +116,16 @@ func liveSessionPayload(act *ActiveSession) map[string]any {
 	if act.live == nil {
 		return payload
 	}
-	messages := make([]any, 0, len(act.record.Messages)+1)
-	for _, message := range sanitizeMessagesForFrontend(act.record.Messages, act.record.Attachments) {
-		messages = append(messages, message)
+	// Live tail: the in-progress assistant response rides on the paged
+	// tail block (same cursor shape), never on a full transcript.
+	block := payload["messages"]
+	messages := make([]any, 0)
+	if arr, ok := block.([]provider.Message); ok {
+		for _, message := range arr {
+			messages = append(messages, message)
+		}
+	} else if arr, ok := block.([]any); ok {
+		messages = append(messages, arr...)
 	}
 	live := *act.live
 	live.Content = append([]liveBlock(nil), act.live.Content...)

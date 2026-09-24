@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1578,7 +1579,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 		if removed < 0 {
 			removed = 0
 		}
-		broadcastTruncated(d, req.SessionID, req.Index, removed, rec.Messages, rec.Compaction, rec.Attachments)
+		broadcastTruncated(d, req.SessionID, req.Index, removed, rec)
 		// Turn-granular persist: clean prefix turns byte-copied, dirty
 		// suffix re-split from memory (the edited message changed content
 		// disk lines can't provide).
@@ -1614,13 +1615,7 @@ func (d *DaemonServer) handleMessage(raw []byte) {
 			}
 			_ = d.persistEdited(rec.ID, firstDirty, append([]provider.Message{}, rec.Messages[start:]...), sbal, recordMeta(rec))
 		}
-		_ = d.sendWS(map[string]any{
-			"type":       "session_content",
-			"hostId":     d.config.HostID,
-			"sessionId":  rec.ID,
-			"messages":   sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
-			"compaction": rec.Compaction,
-		})
+		_ = d.sendWS(tailContentEvent(d.config.HostID, rec.ID, "session_content", rec, 0, nil))
 		d.sessionsMu.RLock()
 		if act, ok := d.sessions[req.SessionID]; ok {
 			act.mu.Lock()
@@ -2222,13 +2217,7 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 	act.record.UpdatedAt = time.Now().UnixMilli()
 	_ = d.saveSession(act.record)
 
-	_ = d.sendWS(map[string]any{
-		"type":       "session_content",
-		"hostId":     d.config.HostID,
-		"sessionId":  act.record.ID,
-		"messages":   sanitizeMessagesForFrontend(act.record.Messages, act.record.Attachments),
-		"compaction": act.record.Compaction,
-	})
+	_ = d.sendWS(tailContentEvent(d.config.HostID, act.record.ID, "session_content", act.record, 1, nil))
 }
 
 // Agent Loop Runner for a Session
@@ -2236,16 +2225,15 @@ func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
 // broadcastTruncated tells clients to drop rendered messages below keepIdx
 // (the authoritative cut after edit/regenerate). Clients apply the same cut
 // optimistically; this event reconciles them (and other devices).
-func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int, msgs []provider.Message, compaction *core.CompactionState, attachments ...[]AttachmentRef) {
+func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int, rec *SessionRecord) {
 	_ = d.sendWS(map[string]any{
 		"type": "session_truncated", "hostId": d.config.HostID, "sessionId": sessionID,
 		"keepIndex": keepIdx, "removed": removed,
 	})
-	_ = d.sendWS(map[string]any{
-		"type": "session_content", "hostId": d.config.HostID, "sessionId": sessionID,
-		"messages":   sanitizeMessagesForFrontend(msgs, attachments...),
-		"compaction": compaction,
-	})
+	// Tail turns + cursor: the client already cut its list at keepIndex
+	// and merges the fresh tail by id (same path as the end-of-turn
+	// snapshot), instead of receiving the full transcript again.
+	_ = d.sendWS(tailContentEvent(d.config.HostID, sessionID, "session_content", rec, 0, nil))
 }
 
 // dropBalloonsAbove discards balloons anchored past the kept message
@@ -2341,7 +2329,7 @@ func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, mo
 	act.mu.Unlock()
 	d.sessionsMu.Unlock()
 
-	broadcastTruncated(d, rec.ID, keep-1, removed, rec.Messages, rec.Compaction, rec.Attachments)
+	broadcastTruncated(d, rec.ID, keep-1, removed, rec)
 	go d.runAgentTurn(act, promptText, "", yolo, attachmentIDs)
 }
 
@@ -2582,7 +2570,7 @@ func (d *DaemonServer) connectWebSocketOnce() error {
 		scheme = "wss"
 	}
 	wsURL := fmt.Sprintf("%s://%s/api/indirect-code/daemon/ws?token=%s", scheme, u.Host, url.QueryEscape(d.config.DaemonToken))
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true}
 	conn, resp, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		if isRevokedDialError(resp, err) {
@@ -2595,6 +2583,12 @@ func (d *DaemonServer) connectWebSocketOnce() error {
 		_ = d.wsConn.Close()
 	}
 	d.wsConn = conn
+	// Transcript JSON compresses 5-10x; BestSpeed keeps added latency
+	// sub-ms while shrinking the end-of-turn session_data burst that
+	// used to blow the 5s write deadline on slow uplinks (host flapped
+	// offline at every turn end). Noop if the relay didn't negotiate
+	// permessage-deflate.
+	_ = conn.SetCompressionLevel(flate.BestSpeed)
 	d.wsMu.Unlock()
 	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", d.config.GatewayURL)
 	return nil
@@ -2621,7 +2615,8 @@ func (d *DaemonServer) connectWebSocketContext(ctx context.Context, extra string
 	wsURL := fmt.Sprintf("%s://%s/api/indirect-code/daemon/ws?token=%s%s", scheme, u.Host, url.QueryEscape(d.config.DaemonToken), extra)
 
 	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+		HandshakeTimeout:  10 * time.Second,
+		EnableCompression: true,
 	}
 	// Gorilla's DialContext bounds the handshake deadline but does not
 	// close a TCP connection when cancellation lands during the HTTP read.
@@ -2657,6 +2652,7 @@ func (d *DaemonServer) connectWebSocketContext(ctx context.Context, extra string
 		_ = d.wsConn.Close()
 	}
 	d.wsConn = conn
+	_ = conn.SetCompressionLevel(flate.BestSpeed)
 	d.wsMu.Unlock()
 	defer func() {
 		_ = conn.Close()

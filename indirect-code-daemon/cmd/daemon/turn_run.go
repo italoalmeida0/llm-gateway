@@ -222,8 +222,11 @@ func (r *turnRun) setupAgent() bool {
 	// Quiet-context hook: background completion notices injected into the
 	// live turn (AppendUserContextQuiet — the caller holds act.mu, so the
 	// loud hook above would self-deadlock). Persist the record and push
-	// the updated transcript so every client sees the notice immediately
+	// just the new message so every client sees the notice immediately
 	// (the frontend filters it from rendering) and it survives reloads.
+	// Full-transcript push here used to resend the whole session on every
+	// background notice — same unbounded-payload problem as the old
+	// end-of-turn snapshot (5s write deadline on slow uplinks).
 	r.agent.OnContextAppended = func(m provider.Message) {
 		r.act.mu.Lock()
 		if r.act.gen != r.myGen {
@@ -236,13 +239,20 @@ func (r *turnRun) setupAgent() bool {
 		r.act.record.Messages = append(r.act.record.Messages, m)
 		r.act.record.UpdatedAt = time.Now().UnixMilli()
 		r.d.appendWALEvent(r.act, walMsgEvent(m))
+		msgCopy := m
+		comp := r.act.record.Compaction
 		r.act.mu.Unlock()
+		// Single-message event with the same cursor shape: the client
+		// appends by id instead of replacing the list. The cursor
+		// covers the notice's turn so get_history stays consistent.
+		block := sliceLastTurns(r.act.record.Messages, r.act.record.FileBalloons, 1)
 		_ = r.d.sendWS(map[string]any{
 			"type":       "session_content",
 			"hostId":     r.cfg.HostID,
 			"sessionId":  r.sessionID,
-			"messages":   sanitizeMessagesForFrontend(r.act.record.Messages, r.act.record.Attachments),
-			"compaction": r.act.record.Compaction,
+			"messages":   sanitizeMessagesForFrontend([]provider.Message{msgCopy}, r.act.record.Attachments),
+			"compaction": comp,
+			"history":    historyCursorMap(block),
 		})
 	}
 
@@ -269,16 +279,14 @@ func (r *turnRun) setupAgent() bool {
 		stateCopy := *state
 		r.d.appendWALEvent(r.act, walEvent{Type: walTypeCompaction, Compaction: &stateCopy, Usage: &usageCopy, Context: ctxCopy})
 		r.act.mu.Unlock()
-		_ = r.d.sendWS(map[string]any{
-			"type":       "session_compacted",
-			"hostId":     r.cfg.HostID,
-			"sessionId":  rec.ID,
-			"messages":   sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
-			"context":    rec.Context,
-			"compaction": rec.Compaction,
-			"usage":      rec.Usage,
-			"auto":       true,
-		})
+		// Tail turns + cursor (same merge path as the end-of-turn
+		// snapshot): compaction rewrites how older messages render, so
+		// the client needs the fresh tail, never the full transcript.
+		_ = r.d.sendWS(tailContentEvent(r.cfg.HostID, rec.ID, "session_compacted", &rec, 0, map[string]any{
+			"context": rec.Context,
+			"usage":   rec.Usage,
+			"auto":    true,
+		}))
 	}
 	r.agent.OnUsage = func(cumulative provider.Usage) {
 		r.act.mu.Lock()
@@ -546,7 +554,14 @@ func (r *turnRun) finishTurn() {
 	// deadline, and a slow/dead relay must never stall the session
 	// lock (or the queued promotion below) — that stall is what used
 	// to surface as "failed to close the turn" + host offline.
-	snapshot := sessionPayload(r.act.record)
+	// Completion tail, never the full transcript: the foreground client
+	// already received every turn message as deltas, so the snapshot
+	// carries the full closing metadata (usage, compaction, context,
+	// todos, model/options, queue, attachments) plus only the last two
+	// whole turns + the get_history cursor. The client merges the fresh
+	// turns by id; older turns are untouched and the payload stops
+	// growing with session age.
+	snapshot := completionPayload(r.act.record)
 	sessionID := r.sessionID
 	hostID := r.cfg.HostID
 	// Queue drain: a normally completed turn promotes the head; a

@@ -844,7 +844,10 @@ export default function IndirectCodePage() {
           if ((msg as any).fileBalloons) turnChanges.noteHistoryBalloons((msg as any).fileBalloons);
           break;
         }
-        transcript.applySessionContent(msg.sessionId, msg.messages || [], msg.compaction);
+        // Tail events (end-of-turn tail, edit/slash/truncate tail,
+        // single-message notice) carry the same history cursor as
+        // session_data: merge by id + seal, never replace the list.
+        transcript.applySessionContent(msg.sessionId, msg.messages || [], msg.compaction, (msg as any).history);
         break;
       }
 
@@ -911,7 +914,7 @@ export default function IndirectCodePage() {
         if (msg.usage) {
           transcript.applyUsage(sid, msg.usage, null);
         }
-        transcript.applySessionContent(sid, msg.messages || [], msg.compaction);
+        transcript.applySessionContent(sid, msg.messages || [], msg.compaction, (msg as any).history);
         notice.toast(
           msg.auto
             ? "Context auto-compacted — older turns summarized, recent context preserved"

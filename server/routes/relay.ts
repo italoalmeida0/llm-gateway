@@ -114,6 +114,11 @@ export async function handleIndirectCodeUpgrade(
 }
 
 export const remoteRelayWsHandlers = {
+  // Transcript JSON (session_data/session_content) compresses 5-10x.
+  // The daemon negotiates permessage-deflate (gorilla EnableCompression)
+  // and this flag accepts it; large fan-out sends below opt in per
+  // message via send(payload, true). Small signals stay uncompressed.
+  perMessageDeflate: true,
   open(ws: ServerWebSocket<WsData>) {
     if (ws.data.type === "daemon") {
       const { hostId, userId } = ws.data;
@@ -175,7 +180,7 @@ export const remoteRelayWsHandlers = {
     if (ws.data.type === "daemon") {
       // Message originating from Daemon -> forward to user's web client(s)
       const { userId } = ws.data;
-      broadcastToUser(userId, rawStr);
+      broadcastToUserCompressed(userId, rawStr, shouldCompressRelayEvent(parsed));
       // Turn finished while the user has no tab open: wake the browser
       // via Web Push. Tabs open (Camada A) already notified — skip.
       maybePushTurnEnd(userId, ws.data.hostId, parsed);
@@ -325,12 +330,29 @@ function maybePushTurnEnd(userId: string, hostId: string, parsed: any): void {
 }
 
 function broadcastToUser(userId: string, data: string | object): void {
+  broadcastToUserCompressed(userId, data, false);
+}
+
+/** Large transcript-carrying events compress 5-10x; small status
+ *  signals skip it (deflate overhead exceeds the savings). */
+function shouldCompressRelayEvent(parsed: any): boolean {
+  const t = parsed?.type;
+  return (
+    t === "session_data" ||
+    t === "session_content" ||
+    t === "agent_event" ||
+    t === "file_balloon"
+  );
+}
+
+function broadcastToUserCompressed(userId: string, data: string | object, compress: boolean): void {
   const set = clientsByUserId.get(userId);
   if (!set || set.size === 0) return;
   const payload = typeof data === "string" ? data : JSON.stringify(data);
   for (const client of set) {
     try {
-      client.send(payload);
+      if (compress) client.send(payload, true);
+      else client.send(payload);
     } catch {
       set.delete(client);
     }

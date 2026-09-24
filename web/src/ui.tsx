@@ -731,8 +731,9 @@ export function Tooltip(props: {
   let showTimer: number | undefined;
 
   const open = () => {
-    // Touch pointers don't hover — a tap shouldn't pin a tooltip on screen.
-    if (!window.matchMedia("(hover: hover)").matches) return;
+    // Touch devices don't hover — a tap shouldn't pin a tooltip on screen.
+    // Same source of truth as the CSS: the pre-paint html.mobile flag.
+    if (document.documentElement.classList.contains("mobile")) return;
     window.clearTimeout(showTimer);
     showTimer = window.setTimeout(
       () => setShow(true),

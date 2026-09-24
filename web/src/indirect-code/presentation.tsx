@@ -29,7 +29,8 @@ export function RemoteHints() {
   };
   onMount(() => {
     const over = (e: PointerEvent) => {
-      if (e.pointerType === "touch" || !matchMedia("(hover: hover)").matches) return;
+      // Same source of truth as the CSS: the pre-paint html.mobile flag.
+      if (e.pointerType === "touch" || document.documentElement.classList.contains("mobile")) return;
       const el = (e.target as Element)?.closest<HTMLElement>("[data-rc-tip]");
       if (!el || el.contains(e.relatedTarget as Node)) return;
       close(); timer = setTimeout(() => open(el), 150);

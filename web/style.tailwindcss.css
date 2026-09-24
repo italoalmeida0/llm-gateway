@@ -1,6 +1,13 @@
 @import "tailwindcss";
 
-@custom-variant hover (&:hover);
+/* Touch-aware interaction variants (same idea as the masa-inter-druck
+ * `hocus`/`hover` UnoCSS matchers): `hover:` / `hocus:` expand to `:hover`
+ * on precise pointers and to `:active` on touch devices, so tapping gives
+ * the same feedback a mouse hover would. `html.mobile` is set before
+ * first paint by the inline script in web/index.html (coarse primary
+ * pointer, or touch + small screen — touch laptops stay desktop). */
+@custom-variant hover (html:not(.mobile) &:hover, html.mobile &:active);
+@custom-variant hocus (html:not(.mobile) &:hover, html.mobile &:active, &:focus-visible);
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /*
@@ -508,12 +515,16 @@ body {
     .rc-brand-image { height: 8rem; }
     .rc-draft { padding-block: 3rem 1rem; }
   }
-  @media (hover: hover) {
-    .ui-button-primary:hover, .ui-button-brand:hover, .ui-button-danger:hover { filter: brightness(1.07); }
-    .ui-button-outline:hover { border-color: var(--ink-500); background-color: var(--ink-800); }
-    .ui-button-ghost:hover, .ui-segment:hover { color: var(--ink-100); background-color: var(--ink-800); }
-    .ui-field:hover:not(:focus):not(:disabled), .ui-switch-card:hover, .ui-card-interactive:hover { border-color: var(--control-border); }
-  }
+  /* Hover on desktop, :active feedback on touch (html.mobile is set by the
+   * pre-paint script in web/index.html). Touch taps get the same emphasis
+   * a desktop hover would. (`hover:` utilities resolve the same way by
+   * themselves via the @custom-variant at the top of this file.) */
+  html:not(.mobile) .ui-button-primary:hover, html:not(.mobile) .ui-button-brand:hover, html:not(.mobile) .ui-button-danger:hover,
+  html.mobile .ui-button-primary:active, html.mobile .ui-button-brand:active, html.mobile .ui-button-danger:active { filter: brightness(1.07); }
+  html:not(.mobile) .ui-button-outline:hover, html.mobile .ui-button-outline:active { border-color: var(--ink-500); background-color: var(--ink-800); }
+  html:not(.mobile) .ui-button-ghost:hover, html:not(.mobile) .ui-segment:hover,
+  html.mobile .ui-button-ghost:active, html.mobile .ui-segment:active { color: var(--ink-100); background-color: var(--ink-800); }
+  html:not(.mobile) .ui-field:hover:not(:focus):not(:disabled), html:not(.mobile) .ui-switch-card:hover, html:not(.mobile) .ui-card-interactive:hover { border-color: var(--control-border); }
   @media (max-width: 639px) {
     .ui-dialog-full { max-height: 100dvh; height: 100dvh; border-radius: 0; border-width: 0; }
     .ui-dialog-backdrop:has(.ui-dialog-full) { padding: 0; }
@@ -676,7 +687,8 @@ html.theme-xfade body * {
   border-radius: 8px;
   border: 2px solid var(--ink-950);
 }
-::-webkit-scrollbar-thumb:hover {
+/* Touch devices never show hover affordances — keep the thumb subtle. */
+html:not(.mobile) ::-webkit-scrollbar-thumb:hover {
   background: var(--ink-600);
 }
 ::-webkit-scrollbar-corner {
@@ -684,6 +696,33 @@ html.theme-xfade body * {
 }
 ::-webkit-resizer {
   background: transparent;
+}
+/* Firefox: thin overlay-style scrollbars on desktop only. */
+@-moz-document url-prefix() {
+  html:not(.mobile) * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--ink-700) transparent;
+  }
+}
+/* Mobile (html.mobile, set before first paint in web/index.html): hide
+ * scrollbars — overlay momentum scrolling already signals position, and
+ * thin desktop rails just eat layout width on a phone. Scrolling itself
+ * is untouched. `.no-scrollbar` does the same opt-in for any element. */
+html.mobile ::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+html.mobile * {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
 @keyframes fade-in {
@@ -773,7 +812,8 @@ html.theme-xfade body * {
   opacity: 0;
   transition: opacity 0.15s ease;
 }
-.chart-root:hover .chart-cursor {
+html:not(.mobile) .chart-root:hover .chart-cursor,
+html.mobile .chart-root:active .chart-cursor {
   opacity: 1;
 }
 .chart-tooltip {
@@ -1087,18 +1127,17 @@ html[data-theme="light"] [data-streamdown="inline-code"] {
   color: var(--ink-500); background: transparent; cursor: pointer;
   transition: color .15s, background-color .15s;
 }
-.rc-markdown-control:hover { color: var(--ink-100); background: var(--elev); }
+html:not(.mobile) .rc-markdown-control:hover, html.mobile .rc-markdown-control:active { color: var(--ink-100); background: var(--elev); }
 .rc-markdown-control:focus-visible, .rc-msg-action:focus-visible {
   outline: 1px solid var(--ink-400); outline-offset: 1px;
 }
 .rc-markdown-control[data-copy-state="copied"] { color: var(--ink-100); }
 .rc-markdown-control[data-copy-state="error"] { color: var(--brand-400); }
-@media (hover: hover) and (pointer: fine) {
-  .rc-message-actions { opacity: 0; }
-  .group\/msg:hover .rc-message-actions,
-  .group\/msg:focus-within .rc-message-actions { opacity: 1; }
-}
-@media (any-pointer: coarse) { .rc-message-actions { opacity: 1; } }
+/* Reveal-on-hover on desktop; always visible on touch (no hover there). */
+html:not(.mobile) .rc-message-actions { opacity: 0; }
+html:not(.mobile) .group\/msg:hover .rc-message-actions,
+html:not(.mobile) .group\/msg:focus-within .rc-message-actions { opacity: 1; }
+html.mobile .rc-message-actions { opacity: 1; }
 .rc-markdown blockquote {
   margin: 0 0 0.6rem; padding: 0.15rem 0 0.15rem 0.8rem;
   border-left: 2px solid var(--line); color: var(--ink-400);

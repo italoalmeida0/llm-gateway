@@ -16,6 +16,28 @@
     <!--PWA-HEAD-->
     <title>LLM Gateway</title>
     <script>
+      // Touch-device flag (before first paint): `html.mobile` marks phones/
+      // tablets so hover-only affordances can fall back to :active feedback
+      // and scrollbars can hide (see style.tailwindcss.css). A coarse primary
+      // pointer is the signal — touch laptops keep desktop behavior. Small
+      // touch screens match even without a coarse pointer as a fallback.
+      (function () {
+        try {
+          var coarse = window.matchMedia("(pointer: coarse)").matches;
+          var touch = "ontouchstart" in window || navigator.maxTouchPoints > 0;
+          var small = Math.min(window.innerWidth, window.innerHeight) <= 768;
+          var mobile = (coarse && touch) || (touch && small);
+          document.documentElement.classList.toggle("mobile", mobile);
+          var onResize = function () {
+            var s = Math.min(window.innerWidth, window.innerHeight) <= 768;
+            document.documentElement.classList.toggle("mobile", (coarse && touch) || (touch && s));
+          };
+          window.addEventListener("resize", onResize, { passive: true });
+          window.addEventListener("orientationchange", onResize, { passive: true });
+        } catch (e) { /* desktop defaults: no .mobile class */ }
+      })();
+    </script>
+    <script>
       // Theme init (before first paint): stored choice wins, otherwise follow
       // the OS. Sets data-theme + no FOUC. Also keeps the favicon in sync with
       // the theme (dark tile on light theme, light tile on dark) — including

@@ -72,30 +72,6 @@ func TestClampReasoningForModel(t *testing.T) {
 	}
 }
 
-func TestOpenAIRequestUsesReasoningLevelMap(t *testing.T) {
-	client := NewGatewayOpenAI("test", "", Model{
-		Provider:          "custom",
-		ID:                "mapped-reasoning-model",
-		Reasoning:         true,
-		ReasoningLevelMap: map[string]string{"high": "low", "max": "max"},
-	}).(*openaiClient)
-	for _, tt := range []struct {
-		requested string
-		want      string
-	}{
-		{requested: "high", want: "low"},
-		{requested: "max", want: "max"},
-	} {
-		request, err := client.buildRequest(Request{Model: "mapped-reasoning-model", Reasoning: tt.requested})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if request.ReasoningEffort != tt.want {
-			t.Errorf("reasoning effort for %q = %q, want %q", tt.requested, request.ReasoningEffort, tt.want)
-		}
-	}
-}
-
 func TestReasoningEffortMappings(t *testing.T) {
 	cases := []struct {
 		level      string

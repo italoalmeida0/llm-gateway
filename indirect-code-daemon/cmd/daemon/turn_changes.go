@@ -27,16 +27,14 @@ type turnFileChanges struct {
 }
 
 // beginTurnTracking creates the per-turn incoming-changes area.
-// The caller must hold act.mu (runAgentTurn does at this point).
-func beginTurnTracking(act *ActiveSession, cwd string, turnIndex int, brainDir string) *turnFileChanges {
-	tfc := &turnFileChanges{
+// v2: no session binding — the worker owns the tfc for the turn.
+func beginTurnTracking(cwd string, turnIndex int, brainDir string) *turnFileChanges {
+	return &turnFileChanges{
 		tracker:   filetrack.NewTurnTracker(),
 		turnIndex: turnIndex,
 		cwd:       cwd,
 		brainDir:  brainDir,
 	}
-	act.fileChanges = tfc
-	return tfc
 }
 
 // dropBrainTracked removes tracked paths living under the per-session
@@ -96,16 +94,11 @@ func previewIncoming(tfc *turnFileChanges) []filetrack.ChangedFile {
 	return filetrack.PreviewChanged(dropBrainTracked(tfc.tracker.Snapshot(), tfc.brainDir), tfc.cwd)
 }
 
-// finishTurnTracking builds the final changed list, resets incoming, appends
-// the persistent balloon to the session record, and returns it for broadcast.
-func (d *DaemonServer) finishTurnTracking(act *ActiveSession, tfc *turnFileChanges) *filetrack.TurnChanges {
-	act.mu.Lock()
-	defer act.mu.Unlock()
-	return d.finishTurnTrackingLocked(act, tfc)
-}
-
-// Caller holds act.mu through the final completion save.
-func (d *DaemonServer) finishTurnTrackingLocked(act *ActiveSession, tfc *turnFileChanges) *filetrack.TurnChanges {
+// finishTurnTracking builds the final changed list and resets incoming.
+// v2: the caller (turn worker) appends the balloon to the record via the
+// actor mailbox; this helper only computes it. messageIndex is supplied by
+// the caller (len(rec.Messages) at finish time).
+func finishTurnTracking(tfc *turnFileChanges, messageIndex int) *filetrack.TurnChanges {
 	if tfc == nil {
 		return nil
 	}
@@ -114,28 +107,23 @@ func (d *DaemonServer) finishTurnTrackingLocked(act *ActiveSession, tfc *turnFil
 	if len(files) == 0 {
 		return nil
 	}
-	balloon := &filetrack.TurnChanges{
-		TurnIndex: tfc.turnIndex,
-		At:        time.Now().UnixMilli(),
-		Files:     files,
+	return &filetrack.TurnChanges{
+		TurnIndex:    tfc.turnIndex,
+		At:           time.Now().UnixMilli(),
+		Files:        files,
+		MessageIndex: messageIndex,
 	}
-	if act.record != nil {
-		balloon.MessageIndex = len(act.record.Messages)
-		act.record.FileBalloons = append(act.record.FileBalloons, *balloon)
-		act.record.UpdatedAt = time.Now().UnixMilli()
-	}
-	return balloon
 }
 
 // broadcastFileBalloon emits the persistent per-turn balloon to the frontend.
 // The frontend only knows "changes": live=true while the turn runs (the
 // balloon floats above the composer), live=false once the turn finished
 // (the balloon sits below its turn, persistently).
-func (d *DaemonServer) broadcastFileBalloon(hostID, sessionID string, balloon *filetrack.TurnChanges) {
-	if balloon == nil {
+func broadcastFileBalloon(emit func(any), hostID, sessionID string, balloon *filetrack.TurnChanges) {
+	if balloon == nil || emit == nil {
 		return
 	}
-	_ = d.sendWS(map[string]any{
+	emit(map[string]any{
 		"type":      "turn_file_changes",
 		"hostId":    hostID,
 		"sessionId": sessionID,
@@ -148,11 +136,11 @@ func (d *DaemonServer) broadcastFileBalloon(hostID, sessionID string, balloon *f
 // turn_file_changes event with live=true, computed from the incoming
 // snapshot. Incoming is a daemon-internal detail; the frontend never sees
 // it — it only reads the changes field either way.
-func (d *DaemonServer) broadcastLiveChanges(hostID, sessionID string, tfc *turnFileChanges) {
-	if tfc == nil || tfc.tracker.Count() == 0 {
+func broadcastLiveChanges(emit func(any), hostID, sessionID string, tfc *turnFileChanges) {
+	if tfc == nil || tfc.tracker.Count() == 0 || emit == nil {
 		return
 	}
-	_ = d.sendWS(map[string]any{
+	emit(map[string]any{
 		"type":      "turn_file_changes",
 		"hostId":    hostID,
 		"sessionId": sessionID,
@@ -174,60 +162,8 @@ type undoFileResult struct {
 	Message string `json:"message,omitempty"`
 }
 
-func (d *DaemonServer) undoTurnChanges(act *ActiveSession, turnIndex int, onlyPath string) (results []undoFileResult, complete bool) {
-	act.mu.Lock()
-	var balloons []filetrack.TurnChanges
-	cwd := ""
-	if act.record != nil {
-		balloons = append([]filetrack.TurnChanges{}, act.record.FileBalloons...)
-		cwd = act.record.CWD
-	}
-	act.mu.Unlock()
+// undoTurnChanges is re-wired in V2.3 (WS command path).
 
-	complete = true
-	for bi := range balloons {
-		if balloons[bi].TurnIndex != turnIndex {
-			continue
-		}
-		for fi := range balloons[bi].Files {
-			f := &balloons[bi].Files[fi]
-			if onlyPath != "" && f.Path != onlyPath && f.Rel != onlyPath {
-				continue
-			}
-			res := undoOneFile(cwd, f)
-			results = append(results, res)
-			if !res.OK {
-				complete = false
-				continue
-			}
-			// Mark undone in the persisted balloon (record only, never delete).
-			act.mu.Lock()
-			if act.record != nil {
-				for bj := range act.record.FileBalloons {
-					if act.record.FileBalloons[bj].TurnIndex != turnIndex {
-						continue
-					}
-					for fj := range act.record.FileBalloons[bj].Files {
-						if act.record.FileBalloons[bj].Files[fj].Path == f.Path {
-							act.record.FileBalloons[bj].Files[fj].Undone = true
-						}
-					}
-				}
-				act.record.UpdatedAt = time.Now().UnixMilli()
-				if act.record.Status == "running" && act.wal != nil {
-					// Balloon flags are memory + commit; the WAL has no
-					// balloon event, so force a fused-consistent commit
-					// marker via meta (commit writes full record).
-					d.appendWALEvent(act, walEvent{Type: walTypeMeta})
-				} else {
-					_ = d.saveSession(act.record)
-				}
-			}
-			act.mu.Unlock()
-		}
-	}
-	return results, complete
-}
 
 func undoOneFile(cwd string, f *filetrack.ChangedFile) undoFileResult {
 	res := undoFileResult{Path: f.Path, Rel: f.Rel, OK: true}
@@ -319,6 +255,16 @@ func undoOneFile(cwd string, f *filetrack.ChangedFile) undoFileResult {
 func fileBalloonPayload(b filetrack.TurnChanges) map[string]any {
 	return map[string]any{"turnIndex": b.TurnIndex, "files": b.Files, "messageIndex": b.MessageIndex}
 }
+// lastBalloon returns the finished turn's balloon (the one finishTurn just
+// appended), or nil when the turn touched no files.
+func lastBalloon(rec *SessionRecord) *filetrack.TurnChanges {
+	if rec == nil || len(rec.FileBalloons) == 0 {
+		return nil
+	}
+	b := rec.FileBalloons[len(rec.FileBalloons)-1]
+	return &b
+}
+
 func fileBalloonPayloads(balloons []filetrack.TurnChanges) []map[string]any {
 	out := make([]map[string]any, 0, len(balloons))
 	for _, b := range balloons {

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"compress/flate"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,2610 +16,169 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
-	"llm-gateway/indirect-code-daemon/packages/core"
-	"llm-gateway/indirect-code-daemon/packages/filetrack"
-	"llm-gateway/indirect-code-daemon/packages/mcp"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// MCPServerConfig describes one Model Context Protocol server entry.
-type MCPServerConfig = mcp.Config
+// Version is set at build time via -ldflags "-X main.Version=...".
+var Version = "v2-dev"
 
-// SkillConfig describes one custom user or project skill.
-type SkillConfig struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Body        string `json:"body"`
-	Enabled     bool   `json:"enabled"`
+var errDaemonRevoked = errors.New("daemon revoked")
+
+// link is the single gateway socket: one read loop (dispatch), writes
+// serialized by the ws actor. Reconnect loop with backoff; revoked token
+// exits instead of ghost-spinning.
+type link struct {
+	server *wsServer
+	cfg    *configCell
+
+	mu   sync.Mutex
+	conn *websocket.Conn
 }
 
-// HarnessSettings stores user-tunable agent behavior and runtime flags.
-type HarnessSettings struct {
-	Model                string  `json:"model,omitempty"`
-	Reasoning            string  `json:"reasoning,omitempty"` // "off" | "low" | "medium" | "high"
-	Temperature          float32 `json:"temperature,omitempty"`
-	AutoCompactThreshold int     `json:"auto_compact_threshold"`  // 0=off, 80, 85, 90, 95
-	NoAutoTitle          bool    `json:"no_auto_title,omitempty"` // disable LLM session titles
-	JailByDefault        bool    `json:"jail_by_default"`
-	AutoSwarmEnabled     bool    `json:"auto_swarm_enabled"`
-	ToolRender           string  `json:"tool_render,omitempty"` // "box" | "flat"
-	CompactInput         bool    `json:"compact_input"`
-	CompactMode          bool    `json:"compact_mode"`
-	RecursiveFileSuggest bool    `json:"recursive_file_suggest"`
-	RespectGitignore     bool    `json:"respect_gitignore"`
-	Insecure             bool    `json:"insecure"`
-	HTTPProxy            string  `json:"http_proxy,omitempty"`
-}
-
-// DaemonConfig holds credentials and gateway connection details.
-type DaemonConfig struct {
-	// AutoUpdate stores the preference for future automatic application.
-	// Applying remains manual while the update system is being stabilized.
-	AutoUpdate    *bool                      `json:"auto_update,omitempty"`
-	LastSelection *ModelSelection            `json:"last_selection,omitempty"`
-	GatewayURL    string                     `json:"gateway_url"`
-	DaemonToken   string                     `json:"daemon_token"`
-	APIKey        string                     `json:"api_key"`
-	HostID        string                     `json:"host_id"`
-	Name          string                     `json:"name"`
-	Settings      HarnessSettings            `json:"settings"`
-	MCPServers    map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
-	Skills        map[string]SkillConfig     `json:"skills,omitempty"`
-}
-
-// AttachmentRef is a file the user attached to a session. The bytes live on
-// the host (the daemon's disk) so transcripts stay replayable locally.
-// TextPath, when set, holds browser-extracted markdown (pdf/office) that is
-// inlined as context instead of the raw bytes.
-type AttachmentRef struct {
-	ID        string `json:"id"`
-	UploadKey string `json:"uploadKey,omitempty"`
-	Name      string `json:"name"`
-	Mime      string `json:"mime"`
-	Size      int64  `json:"size"`
-	Path      string `json:"path"`
-	TextPath  string `json:"textPath,omitempty"`
-	TextChars int    `json:"textChars,omitempty"` // chars inlined as context (0 = binary/image)
-}
-
-// ProjectEntry groups sessions by host folder. Stored in projects.json next
-// to the sessions dir — the daemon is the source of truth, the web client
-// only mirrors it as a cache. The default (home) project is protected: it
-// can never be deleted and the frontend hides its delete button.
-type ProjectEntry struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	CreatedAt int64  `json:"created_at"`
-	Protected bool   `json:"protected,omitempty"`
-	Collapsed bool   `json:"collapsed,omitempty"`
-}
-
-// SessionRecord is the on-disk format for each local session.
-type SessionRecord struct {
-	Turn        *TurnActivity      `json:"turn,omitempty"`
-	Todos       []tools.TodoItem   `json:"todos,omitempty"`
-	TodosOpen   *bool              `json:"todosOpen,omitempty"`
-	Options     SessionOptions     `json:"options"`
-	ID          string             `json:"id"`
-	CWD         string             `json:"cwd"`
-	Title       string             `json:"title"`
-	TitleSource string             `json:"titleSource,omitempty"`
-	Usage       provider.Usage     `json:"usage"`
-	Context     *SessionContext    `json:"context,omitempty"`
-	Model       string             `json:"model"`
-	Status      string             `json:"status"` // "idle" | "running"
-	Pinned      bool               `json:"pinned,omitempty"`
-	CreatedAt   int64              `json:"createdAt"`
-	UpdatedAt   int64              `json:"updatedAt"`
-	Messages    []provider.Message `json:"messages"`
-	Attachments []AttachmentRef    `json:"attachments,omitempty"`
-	LastDate    string             `json:"lastDate,omitempty"`
-	LastMode    string             `json:"lastMode,omitempty"`
-	// Compaction is the incremental chain head (previous summary +
-	// file ops + cut anchor + count). Persisted on every compaction so the
-	// next summarization — even after a daemon restart — builds an update
-	// prompt instead of re-summarizing from scratch.
-	Compaction *core.CompactionState `json:"compaction,omitempty"`
-	// TurnSeq counts started turns (monotonic per session). It indexes the
-	// per-turn file-change balloons below.
-	TurnSeq int `json:"turnSeq,omitempty"`
-	// FileBalloons holds one persistent file-changes balloon per finished
-	// turn that touched files (snapshot-based, no git).
-	FileBalloons []filetrack.TurnChanges `json:"fileBalloons,omitempty"`
-	// Queue holds user messages waiting for the running turn to finish.
-	// Drained FIFO: when a turn completes normally, the head is promoted
-	// to a new turn. A cancelled turn never drains the queue.
-	Queue []QueuedMessage `json:"queue,omitempty"`
-}
-
-// SessionSummary is returned to the web client for listing.
-type SessionSummary struct {
-	ID        string          `json:"id"`
-	CWD       string          `json:"cwd"`
-	Title     string          `json:"title"`
-	Model     string          `json:"model"`
-	Status    string          `json:"status"`
-	Pinned    bool            `json:"pinned"`
-	CreatedAt int64           `json:"createdAt"`
-	UpdatedAt int64           `json:"updatedAt"`
-	TodosOpen *bool           `json:"todosOpen,omitempty"`
-	Options   *SessionOptions `json:"options,omitempty"`
-}
-
-// sessionListItem serializes a summary for the web client.
-func sessionListItem(s SessionSummary) map[string]any {
-	return map[string]any{
-		"id": s.ID, "cwd": s.CWD, "title": s.Title, "model": s.Model, "status": s.Status,
-		"pinned":    s.Pinned,
-		"createdAt": s.CreatedAt,
-		"updatedAt": s.UpdatedAt,
-		"options":   s.Options,
+func main() {
+	var (
+		connectFlag = flag.String("connect", "", "Pairing connect URL (e.g. https://.../api/indirect-code/connect/<token>)")
+		nameFlag    = flag.String("name", "", "Host display name")
+		configFlag  = flag.String("config", "", "Path to config.json")
+		dataDirFlag = flag.String("data-dir", "", "Path to daemon data directory")
+		stopFlag    = flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
+		versionFlag = flag.Bool("version", false, "Print daemon version and exit")
+	)
+	flag.Parse()
+	if *versionFlag {
+		fmt.Println("indirect-code daemon v2", Version)
+		os.Exit(0)
 	}
-}
-
-func sanitizeMessagesForFrontend(msgs []provider.Message, attachments ...[]AttachmentRef) []provider.Message {
-	if len(msgs) == 0 {
-		return msgs
+	dataDir := *dataDirFlag
+	if dataDir == "" {
+		dataDir = defaultDataDir()
 	}
-	out := make([]provider.Message, len(msgs))
-	for i, m := range msgs {
-		if _, modern := m.Meta["user_text"]; m.Role == provider.RoleUser && !modern && len(attachments) > 0 {
-			if ids := messageAttachmentIDs(m, attachments[0]); len(ids) > 0 {
-				meta := attachmentMessageMeta(messageUserText(m), ids, attachments[0])
-				for k, v := range m.Meta {
-					meta[k] = v
-				}
-				m.Meta = meta
-			}
+	if *stopFlag {
+		if err := stopDaemonFromPidFile(dataDir); err != nil {
+			fmt.Printf("Stop failed: %v.\n", err)
+			os.Exit(1)
 		}
-		if text, ok := m.Meta["user_text"]; m.Role == provider.RoleUser && ok {
-			m.Content = []provider.Content{provider.TextBlock{Text: text}}
+		os.Exit(0)
+	}
+	configPath := *configFlag
+	if configPath == "" {
+		configPath = filepath.Join(dataDir, "config.json")
+	}
+
+	root := newRoot(dataDir)
+	root.configPath = configPath
+	if *connectFlag != "" {
+		_ = root.loadConfig()
+		fmt.Println("Pairing ...")
+		if err := root.performPairing(*connectFlag, *nameFlag); err != nil {
+			fmt.Printf("Error: pairing failed (%v).\n", err)
+			os.Exit(1)
 		}
-		if m.Role != provider.RoleTool {
-			out[i] = m
-			continue
+	} else if err := root.loadConfig(); err != nil || root.cfg.load() == nil {
+		fmt.Println("No pairing found. In the gateway dashboard (#/code), click 'Connect Host'")
+		fmt.Println("and paste the connection URL below:")
+		fmt.Print("\nConnection URL: ")
+		var pairURL string
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			pairURL = strings.TrimSpace(scanner.Text())
 		}
-		newBlocks := make([]provider.Content, len(m.Content))
-		for j, c := range m.Content {
-			tr, ok := c.(provider.ToolResultBlock)
-			if !ok {
-				newBlocks[j] = c
-				continue
-			}
-			innerContent := make([]provider.Content, len(tr.Content))
-			for k, inner := range tr.Content {
-				if tb, ok := inner.(provider.TextBlock); ok {
-					cleaned := strings.ReplaceAll(tb.Text, tools.LinePrefixNotice, "")
-					innerContent[k] = provider.TextBlock{
-						Text:             cleaned,
-						ThoughtSignature: tb.ThoughtSignature,
-					}
-				} else {
-					innerContent[k] = inner
-				}
-			}
-			tr.Content = innerContent
-			newBlocks[j] = tr
+		if pairURL == "" {
+			fmt.Println("Error: connection URL is required.")
+			os.Exit(1)
 		}
-		mCopy := m
-		mCopy.Content = newBlocks
-		out[i] = mCopy
-	}
-	return out
-}
-
-// sessionPayload serializes a full record for the web client.
-func sessionPayload(rec *SessionRecord) map[string]any {
-	return map[string]any{
-		"id": rec.ID, "cwd": rec.CWD, "title": rec.Title, "model": rec.Model, "status": rec.Status,
-		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
-		"turn": rec.Turn, "todos": rec.Todos, "todosOpen": rec.TodosOpen,
-		"workspace": inspectWorkspace(rec.CWD),
-		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
-		"attachments":  rec.Attachments,
-		"queue":        queuePayload(rec.Queue),
-		"compaction":   rec.Compaction,
-		"turnSeq":      rec.TurnSeq,
-		"fileBalloons": fileBalloonPayloads(rec.FileBalloons),
-	}
-}
-
-// pagedHistoryBlock swaps a full payload's transcript for the tail
-// history block (whole turns up to the token budget) plus the cursor
-// the client passes back to get_history. Call with the record lock
-// held. Every session_data/session_created/session_forked event goes
-// through here so no path ships a full transcript anymore.
-func pagedHistoryBlock(p map[string]any, rec *SessionRecord) map[string]any {
-	block := sliceHistoryBlock(rec.Messages, rec.FileBalloons, 0)
-	p["messages"] = sanitizeMessagesForFrontend(block.Messages, rec.Attachments)
-	p["fileBalloons"] = fileBalloonPayloads(block.Balloons)
-	p["history"] = map[string]any{
-		"oldestTurn": block.OldestTurn,
-		"newestTurn": block.NewestTurn,
-		"hasOlder":   block.HasOlder,
-		"totalTurns": block.TotalTurns,
-		"firstIndex": block.FirstIndex,
-	}
-	return p
-}
-
-// sessionPayloadPaged is the gradual-loading shape: the tail history
-// block (whole turns up to the token budget) plus the cursor the client
-// passes back to get_history. Everything else is identical to
-// sessionPayload — small metadata, always sent whole.
-func sessionPayloadPaged(rec *SessionRecord, beforeTurn int) map[string]any {
-	if beforeTurn > 0 {
-		p := sessionPayload(rec)
-		block := sliceHistoryBlock(rec.Messages, rec.FileBalloons, beforeTurn)
-		p["messages"] = sanitizeMessagesForFrontend(block.Messages, rec.Attachments)
-		p["fileBalloons"] = fileBalloonPayloads(block.Balloons)
-		p["history"] = map[string]any{
-			"oldestTurn": block.OldestTurn,
-			"newestTurn": block.NewestTurn,
-			"hasOlder":   block.HasOlder,
-			"totalTurns": block.TotalTurns,
-			"firstIndex": block.FirstIndex,
+		if err := root.performPairing(pairURL, *nameFlag); err != nil {
+			fmt.Printf("Error: pairing failed (%v).\n", err)
+			os.Exit(1)
 		}
-		return p
+	} else {
+		if cfg := root.cfg.load(); cfg != nil {
+			fmt.Printf("Ready - host '%s' connected.\n", cfg.Name)
+		}
 	}
-	return pagedHistoryBlock(sessionPayload(rec), rec)
-}
 
-func projectPayload(p ProjectEntry) map[string]any {
-	return map[string]any{
-		"id": p.ID, "name": p.Name, "path": p.Path,
-		"createdAt":    p.CreatedAt,
-		"protected":    p.Protected,
-		"collapsed":    p.Collapsed,
-		"folderStatus": inspectWorkspace(p.Path).Status,
+	// Python/shell checks (same as v1: failure disables tools, not boot).
+	sharedDir := filepath.Join(root.rootDir(), "external")
+	if bin, err := tools.EnsurePython(sharedDir); err != nil {
+		tools.SetPythonOverride("", err)
+	} else {
+		tools.SetPythonOverride(bin, nil)
 	}
-}
-
-func (d *DaemonServer) projectsFile() string {
-	return filepath.Join(d.dataDir, "projects.json")
-}
-
-func (d *DaemonServer) loadProjects() []ProjectEntry {
-	data, _ := os.ReadFile(d.projectsFile())
-	var list []ProjectEntry
-	_ = json.Unmarshal(data, &list)
-	home, _ := os.UserHomeDir()
-	cleanHome := filepath.Clean(home)
-	found := false
-	modified := false
-	for i := range list {
-		cleanP := filepath.Clean(resolvePath(list[i].Path))
-		if cleanP == cleanHome {
-			list[i].Path, list[i].Name, list[i].Protected = home, "Home", true
-			found = true
+	if err := tools.EnsureShell(sharedDir); err != nil {
+		if bin, perr := tools.PythonAvailable(); perr == nil && bin != "" {
+			fmt.Printf("Warning: no shell available (%v); bash tool disabled, python tool active.\n", err)
 		} else {
-			if list[i].Protected {
-				list[i].Protected = false
-				modified = true
-			}
-			if list[i].Name == "Home" {
-				base := filepath.Base(list[i].Path)
-				if base == "." || base == "" {
-					list[i].Name = list[i].Path
-				} else {
-					list[i].Name = base
-				}
-				modified = true
-			}
+			fmt.Printf("Error: no usable shell or python (%v).\n", err)
+			os.Exit(1)
 		}
 	}
-	if !found && home != "" {
-		list = append(list, ProjectEntry{ID: "home", Name: "Home", Path: home, Protected: true})
-		modified = true
-	}
-	if modified && len(data) > 0 {
-		_ = d.saveProjects(list)
-	}
-
-	return list
-}
-
-func (d *DaemonServer) saveProjects(list []ProjectEntry) error {
-	if err := os.MkdirAll(d.dataDir, 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(d.projectsFile(), data, 0o600); err != nil {
-		return err
-	}
-	d.notifyChange("projects")
-	return nil
-}
-
-// indexRunes reports the rune offset of the first occurrence of sub in s,
-// or -1 when absent.
-func indexRunes(s, sub []rune) int {
-	if len(sub) == 0 {
-		return 0
-	}
-outer:
-	for i := 0; i+len(sub) <= len(s); i++ {
-		for j := range sub {
-			if s[i+j] != sub[j] {
-				continue outer
-			}
-		}
-		return i
-	}
-	return -1
-}
-
-// canonicalReasoning maps the UI's effort labels (plus the daemon's own
-// historic guesses) onto the canonical tier the provider layer clamps per
-// model. Mirrors NormalizeReasoning in packages/provider/reasoning.go minus
-// the per-model clamping step. Empty/allies-of-off come back as "" so the
-// call site can distinguish "unknown" from "disabled".
-func canonicalReasoning(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "":
-		return ""
-	case "off", "none", "no", "false", "disabled":
-		return "none"
-	case "min", "minimal", "minimum":
-		return "minimum"
-	case "low":
-		return "low"
-	case "med", "medium":
-		return "medium"
-	case "hi", "high":
-		return "high"
-	case "xhigh", "maximum":
-		return "xhigh"
-	case "max":
-		return "max"
-	default:
-		return ""
-	}
-}
-
-func isTextMime(mime, name string) bool {
-	m := strings.ToLower(mime)
-	if strings.HasPrefix(m, "text/") {
-		return true
-	}
-	switch m {
-	case "application/json", "application/xml", "application/javascript", "application/typescript", "application/yaml", "application/toml":
-		return true
-	}
-	ext := strings.ToLower(filepath.Ext(name))
-	switch ext {
-	case ".md", ".mdx", ".txt", ".json", ".js", ".jsx", ".ts", ".tsx", ".go", ".py", ".rb", ".java", ".c", ".h", ".cpp", ".hpp", ".rs", ".css", ".html", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sh", ".sql", ".vue", ".svelte", ".log", ".csv", ".tsv":
-		return true
-	}
-	return false
-}
-
-// ActiveSession holds in-memory execution state for a session.
-type ActiveSession struct {
-	toolStarts        map[string]int64
-	question          *pendingQuestion
-	convert           *pendingConvert
-	sendNow           bool
-	pendingApproval   *toolApproval
-	toolProgress      map[string]string
-	thinkingStartedAt int64
-	live              *liveAssistant
-	mu                sync.Mutex
-	record            *SessionRecord
-	agent             *core.Agent
-	cancel            context.CancelFunc
-	approvalReqs      map[string]chan bool
-	// fileChanges is the live incoming-changes area of the running turn.
-	fileChanges *turnFileChanges
-	// wal is the buffered write-ahead log handle while a turn runs.
-	// Non-nil exactly while Status==running in WAL mode: the session
-	// JSON on disk stays frozen and every mutation appends one JSONL
-	// line, committed with a single save at turn end.
-	wal *walWriter
-	// gen counts started turns; a stale turn's finalizer skips when it no
-	// longer matches, so edit/regenerate can't corrupt the new turn.
-	gen int
-	// lastUsedUnixMilli is the LRU clock for idle eviction (RAM only,
-	// never persisted). Refreshed on every touch; sessions idle past
-	// the cutoff are dropped from the map and reloaded on next use.
-	lastUsedUnixMilli int64
-}
-
-// DaemonServer coordinates WebSocket connection, relay commands, and local sessions.
-type DaemonServer struct {
-	mcpTestBusy atomic.Bool
-	filesMu     sync.Mutex
-	configPath  string
-	dataDir     string
-	// sharedDir roots <root>/external (python, unish). Set once at boot
-	// from the slot dataDir; the daemon never guesses it elsewhere.
-	sharedDir string
-	config    *DaemonConfig
-	configMu  sync.RWMutex
-	wsConn    *websocket.Conn
-	wsMu      sync.Mutex
-
-	sessionsMu sync.RWMutex
-	sessions   map[string]*ActiveSession
-
-	// Self-update runtime (see update.go).
-	updateMu sync.Mutex
-	update   *updateState
-
-	// Idle eviction sweeper state (RAM-only LRU, see session_eviction.go).
-	evictMu   sync.Mutex
-	evictStop chan struct{}
-
-	// Background tasks (detached bash/python): process-local registry,
-	// never persisted. Guarded by bgMu; jobs broadcast bg_update.
-	bgMu   sync.Mutex
-	bgJobs map[string]*BgJob
-
-	// runTurnHook overrides turn execution (tests only): when set, both
-	// user turns and background wake-up turns call it instead of
-	// runAgentTurn, so tests never need a provider or network.
-	runTurnHook func(act *ActiveSession, prompt string)
-
-	// Change pings (SignalDB sync): one debounced timer per collection so a
-	// busy turn (a save per appended message) collapses into a single ping.
-	pingMu     sync.Mutex
-	pingTimers map[string]*time.Timer
-}
-
-// notifyChange broadcasts {type:"change", collection} to every connected
-// web client (the relay fans out), telling SignalDB sync managers to re-pull.
-// Debounced 300ms per collection; every persistence mutation funnelled here.
-func (d *DaemonServer) notifyChange(collection string) {
-	d.pingMu.Lock()
-	defer d.pingMu.Unlock()
-	if d.pingTimers == nil {
-		d.pingTimers = make(map[string]*time.Timer)
-	}
-	if t, ok := d.pingTimers[collection]; ok {
-		t.Stop()
-	}
-	d.pingTimers[collection] = time.AfterFunc(300*time.Millisecond, func() {
-		d.configMu.RLock()
-		cfg := d.config
-		d.configMu.RUnlock()
-		if cfg == nil {
-			return
-		}
-		_ = d.sendWS(map[string]any{
-			"type":       "change",
-			"hostId":     cfg.HostID,
-			"collection": collection,
-		})
-	})
-}
-
-func defaultDataDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	return filepath.Join(home, ".indirect-code")
-}
-
-// errDaemonRevoked aborts the reconnect loop: the gateway deleted/revoked
-// this host (DELETE /api/indirect-code/hosts/:id), so retrying forever
-// would resurrect a ghost process. Both the explicit WS shutdown message
-// and a 401 on dial map to this sentinel.
-var errDaemonRevoked = errors.New("daemon credentials revoked by gateway")
-
-func (d *DaemonServer) pidFile() string {
-	return filepath.Join(d.dataDir, "daemon.pid")
-}
-
-func (d *DaemonServer) writePidFile() {
-	if err := os.MkdirAll(d.dataDir, 0o700); err != nil {
-		return
-	}
-	_ = os.WriteFile(d.pidFile(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
-}
-
-func (d *DaemonServer) removePidFile() {
-	_ = os.Remove(d.pidFile())
-}
-
-// gracefulShutdown persists idle sessions, closes the WS cleanly, removes
-// the pidfile and exits. Used by SIGINT/SIGTERM AND by the remote
-// shutdown message (frontend "Desconectar") so both paths behave alike.
-func (d *DaemonServer) gracefulShutdown(reason string) {
-	fmt.Printf("\n[SHUTDOWN] %s\n", reason)
-	d.stopEvictionSweeper()
-	d.quiesceSessions()
-	d.wsMu.Lock()
-	if d.wsConn != nil {
-		_ = d.wsConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
-		_ = d.wsConn.Close()
-	}
-	d.wsMu.Unlock()
-	d.removePidFile()
-	os.Exit(0)
-}
-
-// stopDaemonFromPidFile implements "--stop" for the local fallback kill
-// (gateway offline => no remote shutdown possible). Returns nil when a
-// process was signalled, error otherwise.
-func stopDaemonFromPidFile(dataDir string) error {
-	// pid is slot-local (canonical: dataDir IS the slot). Fall back to
-	// the sibling slot and a stray root pidfile for broken layouts.
-	pidPath := filepath.Join(dataDir, "daemon.pid")
-	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
-		if filepath.Base(filepath.Dir(dataDir)) == "slots" {
-			root := filepath.Dir(filepath.Dir(dataDir))
-		base := filepath.Base(dataDir)
-			other := "slot-a"
-			if base == "slot-a" {
-				other = "slot-b"
-			}
-			for _, c := range []string{
-				filepath.Join(root, "slots", other, "daemon.pid"),
-			filepath.Join(root, "daemon.pid"),
-			} {
-				if _, err := os.Stat(c); err == nil {
-					pidPath = c
-					break
-				}
-			}
-		}
-	}
-	raw, err := os.ReadFile(pidPath)
-	if err != nil {
-		return fmt.Errorf("no daemon.pid in %s (is the daemon running?)", dataDir)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil || pid <= 0 {
-		return fmt.Errorf("invalid daemon.pid content")
-	}
-	if pid == os.Getpid() {
-		return fmt.Errorf("refusing to stop self")
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	// Unix: SIGTERM lets the daemon quiesce sessions. Windows has no
-	// SIGTERM semantics in Go — Signal fails and we fall back to Kill.
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		if kerr := proc.Kill(); kerr != nil {
-			return fmt.Errorf("failed to stop pid %d: %v / %v", pid, err, kerr)
-		}
-	}
-	// Best-effort pidfile cleanup; the dying daemon removes it too.
-	_ = os.Remove(pidPath)
-	fmt.Printf("[STOP] signalled daemon pid %d\n", pid)
-	return nil
-}
-
-// isRevokedDialError reports a 401 handshake: token deleted/revoked via
-// DELETE /hosts/:id while the daemon was offline.
-func isRevokedDialError(resp *http.Response, err error) bool {
-	if resp != nil && resp.StatusCode == http.StatusUnauthorized {
-		return true
-	}
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "401") ||
-		strings.Contains(msg, "unauthorized daemon token") ||
-		strings.Contains(msg, "unauth")
-}
-
-func (d *DaemonServer) sessionsDir() string {
-	// Canonical layout: the daemon ALWAYS runs with dataDir = the slot
-	// dir (<root>/slots/slot-a|b), so sessions live at <slot>/sessions.
-	// No fallback branches: the launcher guarantees the layout before exec.
-	return filepath.Join(d.dataDir, "sessions")
-}
-
-// rootDir resolves <root> from the slot dataDir (<root>/slots/slot-x).
-// Root holds only: brain/, slots/, logs/, external/. Everything the
-// daemon serves (sessions, config, projects, pid) lives in the slot.
-func (d *DaemonServer) rootDir() string {
-	if filepath.Base(filepath.Dir(d.dataDir)) == "slots" {
-		return filepath.Dir(filepath.Dir(d.dataDir))
-	}
-	return d.dataDir
-}
-
-// brainDir resolves the per-session private scratch space
-// (<root>/brain/<sessionID>), refusing traversal. Created lazily;
-// allowed through the jail so the model always has temp space.
-func (d *DaemonServer) brainDir(sessionID string) string {
-	if sessionID == "" || filepath.Base(sessionID) != sessionID {
-		return ""
-	}
-	return filepath.Join(d.rootDir(), "brain", sessionID)
-}
-
-func resolvePath(p string) string {
-	target := strings.TrimSpace(p)
-	if target == "" || target == "~" {
-		home, _ := os.UserHomeDir()
-		return home
-	}
-	if strings.HasPrefix(target, "~/") || strings.HasPrefix(target, `~\`) {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, target[2:])
-	}
-	return target
-}
-
-func (d *DaemonServer) loadConfig() error {
-	data, err := os.ReadFile(d.configPath)
-	if err != nil {
-		return err
-	}
-	var cfg DaemonConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return err
-	}
-	// 0 = off is a valid choice; only fresh configs (key absent) get the default.
-	thresholdPresent := false
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err == nil {
-		if settings, ok := raw["settings"].(map[string]any); ok {
-			_, thresholdPresent = settings["auto_compact_threshold"]
-		}
-	}
-	if !thresholdPresent && cfg.Settings.AutoCompactThreshold == 0 {
-		cfg.Settings.AutoCompactThreshold = 95
-	}
-	if cfg.Settings.ToolRender == "" {
-		cfg.Settings.ToolRender = "box"
-	}
-	if cfg.Settings.Reasoning == "" {
-		cfg.Settings.Reasoning = "medium"
-	}
-	if cfg.MCPServers == nil {
-		cfg.MCPServers = make(map[string]MCPServerConfig)
-	}
-	if cfg.Skills == nil {
-		cfg.Skills = make(map[string]SkillConfig)
-	}
-	d.config = &cfg
-	return nil
-}
-
-func (d *DaemonServer) saveConfig() error {
-	if err := os.MkdirAll(filepath.Dir(d.configPath), 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(d.config, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := writeConfigFile(d.configPath, data); err != nil {
-		return err
-	}
-	d.notifyChange("config")
-	return nil
-}
-
-func (d *DaemonServer) performPairing(connectURL string, hostName string) error {
-	u, err := url.Parse(strings.TrimSpace(connectURL))
-	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
-	}
-
-	hostname, _ := os.Hostname()
-	if hostName == "" {
-		hostName = hostname
-	}
-
-	// Host reuse (B): when this PC paired before, prove the previous
-	// identity (hostId + daemonToken from config.json) so the gateway
-	// rotates credentials on the SAME host row instead of inserting a
-	// duplicate. A deleted/unknown row simply falls back to a fresh pair.
-	pairReq := map[string]string{
-		"name":     hostName,
-		"hostname": hostname,
-		"os":       runtime.GOOS,
-		"arch":     runtime.GOARCH,
-	}
-	if d.config != nil && d.config.HostID != "" && d.config.DaemonToken != "" {
-		pairReq["hostId"] = d.config.HostID
-		pairReq["daemonToken"] = d.config.DaemonToken
-	}
-
-	reqBody, _ := json.Marshal(pairReq)
-
-	resp, err := http.Post(u.String(), "application/json", bytes.NewReader(reqBody))
-	if err != nil {
-		return fmt.Errorf("pairing request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("pairing failed (status %d): %s", resp.StatusCode, string(b))
-	}
-
-	var result struct {
-		Success     bool   `json:"success"`
-		HostID      string `json:"hostId"`
-		DaemonToken string `json:"daemonToken"`
-		APIKey      string `json:"apiKey"`
-		GatewayURL  string `json:"gatewayUrl"`
-		Reused      bool   `json:"reused"`
-		Error       string `json:"error"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return fmt.Errorf("pairing unsuccessful: %s", result.Error)
-	}
-
-	if d.config == nil {
-		d.config = &DaemonConfig{
-			Settings: HarnessSettings{
-				AutoCompactThreshold: 95,
-				RespectGitignore:     true,
-				ToolRender:           "box",
-				Reasoning:            "medium",
-				Temperature:          0.7,
-			},
-			MCPServers: make(map[string]MCPServerConfig),
-			Skills:     make(map[string]SkillConfig),
-		}
-	}
-
-	d.config.GatewayURL = result.GatewayURL
-	d.config.DaemonToken = result.DaemonToken
-	d.config.APIKey = result.APIKey
-	d.config.HostID = result.HostID
-	d.config.Name = hostName
-
-	if err := d.saveConfig(); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
-	}
-
-	fmt.Printf("Paired - host %s ready.\n", result.HostID)
-	if result.Reused {
-		fmt.Println("Reused existing host registration.")
-	}
-	return nil
-}
-
-func (d *DaemonServer) sendWS(msg any) error {
-	d.wsMu.Lock()
-	defer d.wsMu.Unlock()
-	if d.wsConn == nil {
-		return fmt.Errorf("websocket not connected")
-	}
-	// Bounded write: a slow/dead relay must never stall the daemon's
-	// turn finalizer (which used to hold act.mu across this call).
-	// Without a deadline one stuck socket blocks every later WriteJSON
-	// behind wsMu, the client sees the host go offline, and the commit
-	// already done on disk looks like a "failed turn close".
-	_ = d.wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	err := d.wsConn.WriteJSON(msg)
-	_ = d.wsConn.SetWriteDeadline(time.Time{})
-	return err
-}
-
-// Session Storage Helpers
-
-func (d *DaemonServer) saveSession(rec *SessionRecord) error {
-	if err := d.saveSessionSync(rec); err != nil {
-		return err
-	}
-	d.notifyChange("sessions")
-	return nil
-}
-
-func (d *DaemonServer) loadSession(id string) (*SessionRecord, error) {
-	if !validSessionID(id) {
-		return nil, fmt.Errorf("Invalid session ID")
-	}
-	lines, meta, err := d.readSessionFile(id)
-	if err != nil {
-		return nil, err
-	}
-	rec := assembleRecord(lines, meta)
-	if rec.ID != id || rec.ID == "" {
-		return nil, fmt.Errorf("session id mismatch")
-	}
-	return rec, nil
-}
-
-func (d *DaemonServer) listSessions() []SessionSummary {
-	dir := d.sessionsDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-
-	var summaries []SessionSummary
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
-			continue
-		}
-		id := strings.TrimSuffix(e.Name(), ".jsonl")
-		meta, err := d.readMetaTail(id)
-		if err != nil || meta.ID != id || meta.ID == "" {
-			continue
-		}
-		summaries = append(summaries, SessionSummary{
-			ID:        meta.ID,
-			CWD:       resolvePath(meta.CWD),
-			Title:     meta.Title,
-			Model:     meta.Model,
-			Status:    meta.Status,
-			Pinned:    meta.Pinned,
-			CreatedAt: meta.CreatedAt,
-			UpdatedAt: meta.UpdatedAt,
-			TodosOpen: meta.TodosOpen,
-			Options:   &meta.Options,
-		})
-	}
-
-	sort.Slice(summaries, func(i, j int) bool {
-		return summaries[i].UpdatedAt > summaries[j].UpdatedAt
-	})
-	return summaries
-}
-
-// purgeSession removes a session completely: any in-flight turn is marked
-// stale and cancelled (its deferred save can't resurrect the transcript),
-// then the JSON record, the WAL and the attachment folder are wiped from
-// disk and a session_deleted event goes out. Deletions are always 100%,
-// never hides. The shared per-project review repo is KEPT: sibling
-// sessions of the same root still need it.
-func (d *DaemonServer) purgeSession(id string) {
-	// Stop the session's background jobs first: their .log files live in
-	// the brain dir removed below, and no completion notice may land in a
-	// deleted session. Cancelled jobs never deliver.
-	d.cancelBackgroundJobs(id)
-	d.sessionsMu.Lock()
-	if act, ok := d.sessions[id]; ok {
-		act.mu.Lock()
-		act.gen++
-		if act.cancel != nil {
-			act.cancel()
-		}
-		act.mu.Unlock()
-		delete(d.sessions, id)
-	}
-	d.sessionsMu.Unlock()
-	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".jsonl"))
-	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".json"))
-	_ = os.Remove(filepath.Join(d.sessionsDir(), id+".wal.jsonl"))
-	_ = os.RemoveAll(filepath.Join(d.sessionsDir(), id))
-	_ = os.RemoveAll(d.brainDir(id))
-	_ = d.sendWS(map[string]any{
-		"type":      "session_deleted",
-		"hostId":    d.config.HostID,
-		"sessionId": id,
-	})
-	d.notifyChange("sessions")
-}
-
-// sessionRaw mirrors the on-disk record without hydrating message content —
-// pull/list sweeps must stay cheap even with fat transcripts on disk.
-type sessionRaw struct {
-	ID          string            `json:"id"`
-	CWD         string            `json:"cwd"`
-	Title       string            `json:"title"`
-	Model       string            `json:"model"`
-	Status      string            `json:"status"`
-	Pinned      bool              `json:"pinned"`
-	CreatedAt   int64             `json:"createdAt"`
-	UpdatedAt   int64             `json:"updatedAt"`
-	Messages    []json.RawMessage `json:"messages"`
-	Attachments []AttachmentRef   `json:"attachments"`
-	TodosOpen   *bool             `json:"todosOpen"`
-	Options     *SessionOptions   `json:"options"`
-}
-
-// listSessionSummaries reads every session record but parses messages only
-// as opaque blobs (count, no hydration) — the SignalDB pull path calls this
-// on every change ping, possibly mid-turn.
-func (d *DaemonServer) listSessionSummaries() []SessionSummary {
-	dir := d.sessionsDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var summaries []SessionSummary
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
-			continue
-		}
-		id := strings.TrimSuffix(e.Name(), ".jsonl")
-		// Ghost guard: corrupt leftovers (empty id or content id ≠
-		// filename). Listing any of them shows a blank row in the
-		// sidebar whose click always fails with "Session not found".
-		meta, err := d.readMetaTail(id)
-		if err != nil || meta.ID == "" || meta.ID != id {
-			continue
-		}
-		summaries = append(summaries, SessionSummary{
-			ID:        meta.ID,
-			CWD:       resolvePath(meta.CWD),
-			Title:     meta.Title,
-			Model:     meta.Model,
-			Status:    meta.Status,
-			Pinned:    meta.Pinned,
-			CreatedAt: meta.CreatedAt,
-			UpdatedAt: meta.UpdatedAt,
-			TodosOpen: meta.TodosOpen,
-			Options:   &meta.Options,
-		})
-	}
-	sort.Slice(summaries, func(i, j int) bool {
-		return summaries[i].UpdatedAt > summaries[j].UpdatedAt
-	})
-	return summaries
-}
-
-// resetRunningSessions handles records left "running" by a previous
-// process (crash/kill/power loss mid-turn). Sessions WITH a WAL are left
-// running: resumeInterruptedTurns replays them. Sessions with NO recovery
-// data are flipped back to idle — no turn can be in flight at boot, and
-// without this the stale flag permanently refuses new prompts with
-// "Turn already in flight".
-func (d *DaemonServer) resetRunningSessions() {
-	dir := d.sessionsDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") || strings.HasSuffix(e.Name(), ".wal.jsonl") {
-			continue
-		}
-		sid := strings.TrimSuffix(e.Name(), ".jsonl")
-		// A WAL means resume owns this session.
-		if _, err := os.Stat(filepath.Join(dir, sid+".wal.jsonl")); err == nil {
-			continue
-		}
-		meta, err := d.readMetaTail(sid)
-		if err != nil || meta.Status != "running" {
-			continue
-		}
-		meta.Status = "idle"
-		if err := d.rewriteMetaOnly(sid, meta); err != nil {
-			continue
-		}
-		fmt.Printf("[INFO] Reset stale running session: %s\n", e.Name())
-	}
-}
-
-func (d *DaemonServer) quiesceSessions() {
-	d.sessionsMu.Lock()
-	defer d.sessionsMu.Unlock()
-	for _, act := range d.sessions {
-		act.mu.Lock()
-		act.gen++
-		if act.cancel != nil {
-			act.cancel()
-		}
-		if act.record.Status == "running" && act.fileChanges != nil {
-			// Snapshot the tracker into the WAL before committing, so a
-			// later resume (or audit) sees the final incoming state.
-			d.appendWALEvent(act, walEvent{Type: walTypeIncoming, Incoming: act.fileChanges.tracker.Snapshot()})
-		}
-		act.pendingApproval = nil
-		act.question = nil
-		act.convert = nil
-		act.sendNow = false
-		act.toolProgress = nil
-		act.toolStarts = nil
-		act.record.Status = "idle"
-		if act.record.Turn != nil && act.record.Turn.Status == "running" {
-			act.record.Turn.Status = "cancelled"
-			act.record.Turn.EndedAt = time.Now().UnixMilli()
-		}
-		if act.wal != nil {
-			// Graceful shutdown commits: the turn will NOT resume —
-			// the record carries everything, the WAL is removed.
-			if act.record.Turn != nil && act.record.Turn.Status == "running" {
-				act.record.Turn.Status = "cancelled"
-				act.record.Turn.EndedAt = time.Now().UnixMilli()
-			}
-			_ = d.commitWAL(act)
-		} else {
-			_ = d.saveSession(act.record)
-		}
-		act.mu.Unlock()
-	}
-}
-
-func (d *DaemonServer) getOrCreateActiveSession(id string) (*ActiveSession, error) {
-	d.sessionsMu.Lock()
-	defer d.sessionsMu.Unlock()
-
-	if act, ok := d.sessions[id]; ok {
-		touchSession(act)
-		return act, nil
-	}
-
-	rec, _, err := d.loadSessionFused(id)
-	if err != nil {
-		return nil, err
-	}
-
-	act := &ActiveSession{
-		record:       rec,
-		approvalReqs: make(map[string]chan bool),
-	}
-	touchSession(act)
-	d.sessions[id] = act
-	return act, nil
-}
-
-// sessionRunning reports whether the session has a turn in flight.
-func (d *DaemonServer) sessionRunning(id string) bool {
-	d.sessionsMu.RLock()
-	act, ok := d.sessions[id]
-	d.sessionsMu.RUnlock()
-	if !ok || act == nil {
-		return false
-	}
-	act.mu.Lock()
-	defer act.mu.Unlock()
-	return act.record.Status == "running"
-}
-
-// WebSocket Dispatcher
-
-func (d *DaemonServer) handleMessage(raw []byte) {
-	d.configMu.Lock()
-	defer d.configMu.Unlock()
-	var base struct {
-		Type      string `json:"type"`
-		HostID    string `json:"hostId"`
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(raw, &base); err != nil {
-		return
-	}
-
-	switch base.Type {
-	case "shutdown", "disconnected":
-		// Remote kill from the gateway (DELETE /api/indirect-code/hosts/:id
-		// while online). The relay sends this right before closing the WS.
-		// Self-terminate instead of reconnecting: the host row is gone, so
-		// any redial would 401 anyway. Unlock first: gracefulShutdown exits.
-		d.configMu.Unlock()
-		d.gracefulShutdown("[REMOTE] Host removed from gateway, shutting down.")
-		return
-	case "get_turn_changes":
-		d.handleGetTurnChanges(raw)
-	case "undo_turn_changes":
-		d.handleUndoTurnChanges(raw)
-	case "question_response":
-		d.answerQuestions(raw)
-	case "convert_response":
-		d.answerFileConvert(raw)
-	case "queue_add":
-		d.handleQueueAdd(raw)
-	case "queue_update":
-		d.handleQueueUpdate(raw)
-	case "queue_remove":
-		d.handleQueueRemove(raw)
-	case "queue_send_now":
-		d.handleQueueSendNow(raw)
-	case "check_workspace":
-		d.checkWorkspace(raw)
-	case "configure_session":
-		d.configureSession(raw)
-	case "browse_folders":
-		var req struct {
-			Path      string `json:"path"`
-			RequestID string `json:"requestId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		path, parent, folders, err := browseFolders(req.Path)
-		response := map[string]any{"type": "folders", "hostId": d.config.HostID, "requestId": req.RequestID, "path": path, "parent": parent, "folders": folders}
-		if err != nil {
-			response["error"] = err.Error()
-		}
-		_ = d.sendWS(response)
-	case "get_session":
-		var req struct {
-			SessionID string `json:"sessionId"`
-			RequestID string `json:"requestId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		reply := func(payload map[string]any) {
-			_ = d.sendWS(map[string]any{"type": "session_data", "requestId": req.RequestID, "hostId": d.config.HostID, "session": payload})
-		}
-		d.sessionsMu.RLock()
-		act := d.sessions[req.SessionID]
-		d.sessionsMu.RUnlock()
-		if act != nil {
-			act.mu.Lock()
-			reply(pagedHistoryBlock(liveSessionPayload(act), act.record))
-			touchSession(act)
-			act.mu.Unlock()
-			return
-		}
-		// Reading history must not keep every opened transcript in memory.
-		// Fused read: frozen JSON + WAL replay when a turn is running.
-		rec, _, err := d.loadSessionFused(req.SessionID)
-		if err != nil {
-			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "sessionId": req.SessionID, "message": "Session not found"})
-			return
-		}
-		reply(sessionPayloadPaged(rec, 0))
-
-	case "get_history":
-		// Older history page: turns strictly below beforeTurn, newest
-		// last, up to the token budget. Pure read — never hydrates RAM
-		// (fused disk load when the session is not resident).
-		var hreq struct {
-			SessionID  string `json:"sessionId"`
-			BeforeTurn int    `json:"beforeTurn"`
-		}
-		_ = json.Unmarshal(raw, &hreq)
-		if hreq.SessionID == "" || hreq.BeforeTurn <= 0 {
-			return
-		}
-		d.sessionsMu.RLock()
-		hact := d.sessions[hreq.SessionID]
-		d.sessionsMu.RUnlock()
-		var hmsgs []provider.Message
-		var hbals []filetrack.TurnChanges
-		var hatts []AttachmentRef
-		if hact != nil {
-			hact.mu.Lock()
-			hmsgs = append([]provider.Message{}, hact.record.Messages...)
-			hbals = append([]filetrack.TurnChanges{}, hact.record.FileBalloons...)
-			hatts = append([]AttachmentRef{}, hact.record.Attachments...)
-			touchSession(hact)
-			hact.mu.Unlock()
-		} else {
-			hrec, _, herr := d.loadSessionFused(hreq.SessionID)
-			if herr != nil {
-				_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "sessionId": hreq.SessionID, "message": "Session not found"})
-				return
-			}
-			hmsgs, hbals, hatts = hrec.Messages, hrec.FileBalloons, hrec.Attachments
-		}
-		hblock := sliceHistoryBlock(hmsgs, hbals, hreq.BeforeTurn)
-		_ = d.sendWS(map[string]any{
-			"type": "session_content", "hostId": d.config.HostID, "sessionId": hreq.SessionID,
-			"page":         true,
-			"messages":     sanitizeMessagesForFrontend(hblock.Messages, hatts),
-			"fileBalloons": fileBalloonPayloads(hblock.Balloons),
-			"history": map[string]any{
-				"oldestTurn": hblock.OldestTurn,
-				"newestTurn": hblock.NewestTurn,
-				"hasOlder":   hblock.HasOlder,
-				"totalTurns": hblock.TotalTurns,
-				"firstIndex": hblock.FirstIndex,
-			},
-		})
-
-	case "rename_session":
-		var req struct {
-			SessionID string `json:"sessionId"`
-			Title     string `json:"title"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		title := strings.TrimSpace(req.Title)
-		if req.SessionID == "" || title == "" {
-			return
-		}
-		if runes := []rune(title); len(runes) > 120 {
-			title = string(runes[:120])
-		}
-		act, err := d.getOrCreateActiveSession(req.SessionID)
-		if err != nil {
-			return
-		}
-		act.mu.Lock()
-		act.record.Title = title
-		act.record.TitleSource = "manual"
-		act.record.UpdatedAt = time.Now().UnixMilli()
-		touchSession(act)
-		if act.record.Status == "running" && act.wal != nil {
-			d.appendWALEvent(act, walEvent{Type: walTypeTitle, Title: title, TitleSource: "manual"})
-		} else {
-			_ = d.saveSession(act.record)
-		}
-		sid := act.record.ID
-		act.mu.Unlock()
-		_ = d.sendWS(map[string]any{
-			"type":      "session_renamed",
-			"hostId":    d.config.HostID,
-			"sessionId": sid,
-			"title":     title,
-		})
-
-	case "pull":
-		// SignalDB sync protocol: the client asks for the full snapshot of a
-		// collection; live updates ride the debounced {type:"change"} pings.
-		var req struct {
-			ID         json.RawMessage `json:"id"`
-			Collection string          `json:"collection"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		reply := func(items []map[string]any, errMsg string) {
-			msg := map[string]any{
-				"type":       "pull-response",
-				"hostId":     d.config.HostID,
-				"id":         req.ID,
-				"collection": req.Collection,
-			}
-			if errMsg != "" {
-				msg["error"] = errMsg
-			} else {
-				msg["items"] = items
-			}
-			_ = d.sendWS(msg)
-		}
-		switch req.Collection {
-		case "projects":
-			list := d.loadProjects()
-			items := make([]map[string]any, 0, len(list))
-			for _, p := range list {
-				items = append(items, projectPayload(p))
-			}
-			reply(items, "")
-		case "sessions":
-			items := make([]map[string]any, 0)
-			for _, s := range d.listSessionSummaries() {
-				items = append(items, sessionListItem(s))
-			}
-			reply(items, "")
-		case "config":
-			reply([]map[string]any{{
-				"id":            "daemon",
-				"revision":      configRevision(d.config),
-				"settings":      d.config.Settings,
-				"lastSelection": d.config.LastSelection,
-				"mcpServers":    d.mirroredMCP(),
-				"skills":        d.config.Skills,
-				"name":          d.config.Name,
-			}}, "")
-		default:
-			reply(nil, "unknown collection")
-		}
 
-	case "set_todos_open":
-		var req struct {
-			SessionID string `json:"sessionId"`
-			Open      bool   `json:"open"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		if req.SessionID != "" {
-			act, err := d.getOrCreateActiveSession(req.SessionID)
-			if err == nil {
-				act.mu.Lock()
-				act.record.TodosOpen = &req.Open
-				act.record.UpdatedAt = time.Now().UnixMilli()
-				if act.record.Status == "running" && act.wal != nil {
-					d.appendWALEvent(act, walEvent{Type: walTypeMeta})
-				} else {
-					_ = d.saveSession(act.record)
-				}
-				act.mu.Unlock()
-			}
-		}
-
-	case "set_project_collapsed":
-		var req struct {
-			ProjectID string `json:"projectId"`
-			Collapsed bool   `json:"collapsed"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		if req.ProjectID != "" {
-			list := d.loadProjects()
-			for i := range list {
-				if list[i].ID == req.ProjectID {
-					list[i].Collapsed = req.Collapsed
-					_ = d.saveProjects(list)
-					break
-				}
-			}
-		}
-
-	case "create_project":
-		var req struct {
-			RequestID string `json:"requestId"`
-			Path      string `json:"path"`
-			Name      string `json:"name"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		rawPath := strings.TrimSpace(req.Path)
-		if rawPath == "" {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "requestId": req.RequestID, "hostId": d.config.HostID,
-				"message": "Project path cannot be empty",
-			})
-			return
-		}
-		// Store the resolved absolute path ("~" → the user's home) so session
-		// cwd containment checks compare like with like.
-		path := resolvePath(rawPath)
-		if path == "" {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "requestId": req.RequestID, "hostId": d.config.HostID,
-				"message": "Project path cannot be resolved",
-			})
-			return
-		}
-		_ = os.MkdirAll(path, 0o755)
-		name := strings.TrimSpace(req.Name)
-		home, _ := os.UserHomeDir()
-		cleanPath := filepath.Clean(path)
-		cleanHome := filepath.Clean(home)
-		isHome := home != "" && cleanPath == cleanHome
-		if name == "" {
-			if isHome {
-				name = "Home"
-			} else {
-				base := filepath.Base(path)
-				if base == "." || base == "" {
-					name = path
-				} else {
-					name = base
-				}
-			}
-		}
-		if len(name) > 80 {
-			name = name[:80]
-		}
-		list := d.loadProjects()
-		for _, p := range list {
-			if filepath.Clean(resolvePath(p.Path)) == cleanPath {
-				// Idempotent "ensure": re-ack the existing entry so flows like
-				// Quick Start (~) just reopen the project instead of failing.
-				// The re-acked home project comes back protected even on
-				// hosts whose projects.json predates the protected flag.
-				if isHome && !p.Protected {
-					p.Protected = true
-					_ = d.saveProjects(list)
-				}
-				_ = d.sendWS(map[string]any{
-					"type":      "project_created",
-					"requestId": req.RequestID, "hostId": d.config.HostID,
-					"project": projectPayload(p),
-				})
-				return
-			}
-		}
-		entry := ProjectEntry{
-			ID:        fmt.Sprintf("proj_%d", time.Now().UnixNano()/1000),
-			Name:      name,
-			Path:      path,
-			CreatedAt: time.Now().UnixMilli(),
-			Protected: isHome,
-		}
-		list = append([]ProjectEntry{entry}, list...)
-		if err := d.saveProjects(list); err != nil {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "requestId": req.RequestID, "hostId": d.config.HostID,
-				"message": "Failed to save project: " + err.Error(),
-			})
-			return
-		}
-		_ = d.sendWS(map[string]any{
-			"type":      "project_created",
-			"requestId": req.RequestID, "hostId": d.config.HostID,
-			"project": projectPayload(entry),
-		})
-
-	case "delete_project":
-		var req struct {
-			ProjectID string `json:"projectId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		if req.ProjectID == "" {
-			return
-		}
-		list := d.loadProjects()
-		next := make([]ProjectEntry, 0, len(list))
-		var doomed *ProjectEntry
-		for _, p := range list {
-			if p.ID == req.ProjectID {
-				cp := p
-				doomed = &cp
-				continue
-			}
-			next = append(next, p)
-		}
-		// The default (home) project is part of the furniture: frontend
-		// hides the button and the daemon refuses the delete too.
-		if doomed != nil && doomed.Protected {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
-				"message": "The default Home project cannot be deleted",
-			})
-			return
-		}
-		// Cascade only this project's conversations. A nested project owns
-		// its own sessions, matching the sidebar's deepest-folder grouping.
-		if doomed != nil {
-			target := strings.TrimRight(resolvePath(doomed.Path), "/")
-			if len(target) > 1 {
-				for _, s := range d.listSessionSummaries() {
-					owner := projectForDirectory(s.CWD, list)
-					if owner == nil || owner.ID != doomed.ID {
-						continue
-					}
-					d.purgeSession(s.ID)
-				}
-			}
-		}
-		_ = d.saveProjects(next)
-		_ = d.sendWS(map[string]any{
-			"type":      "project_deleted",
-			"hostId":    d.config.HostID,
-			"projectId": req.ProjectID,
-		})
-
-	case "toggle_pin":
-		var req struct {
-			SessionID string `json:"sessionId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		if req.SessionID == "" {
-			return
-		}
-		rec, _, err := d.loadSessionFused(req.SessionID)
-		if err != nil {
-			return
-		}
-		rec.Pinned = !rec.Pinned
-		rec.UpdatedAt = time.Now().UnixMilli()
-		// Pin flips go through the live record so a running turn's WAL
-		// stays the single source of post-freeze mutations.
-		d.sessionsMu.RLock()
-		if act, ok := d.sessions[req.SessionID]; ok && act != nil {
-			act.mu.Lock()
-			act.record.Pinned = rec.Pinned
-			act.record.UpdatedAt = rec.UpdatedAt
-			touchSession(act)
-			if act.record.Status == "running" && act.wal != nil {
-				d.appendWALEvent(act, walEvent{Type: walTypeMeta})
-			} else {
-				_ = d.saveSession(act.record)
-			}
-			act.mu.Unlock()
-		} else {
-			_ = d.saveSession(rec)
-		}
-		d.sessionsMu.RUnlock()
-		_ = d.sendWS(map[string]any{
-			"type":      "session_pinned",
-			"hostId":    d.config.HostID,
-			"sessionId": rec.ID,
-			"pinned":    rec.Pinned,
-		})
-
-	case "edit_message":
-		var req struct {
-			SessionID     string    `json:"sessionId"`
-			Index         int       `json:"index"`
-			Text          string    `json:"text"`
-			Model         string    `json:"model"`
-			YOLO          bool      `json:"yolo"`
-			Regen         bool      `json:"regenerate"`
-			AttachmentIDs *[]string `json:"attachmentIds"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		rec, err := d.loadSession(req.SessionID)
-		if err != nil || req.Index < 0 || req.Index >= len(rec.Messages) {
-			return
-		}
-		if d.sessionRunning(req.SessionID) {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID, "sessionId": req.SessionID,
-				"message": "Stop the current turn before editing",
-			})
-			return
-		}
-		msg := rec.Messages[req.Index]
-		if msg.Role != provider.RoleUser {
-			return
-		}
-		req.Text = core.SanitizeUserText(req.Text)
-		ids := messageAttachmentIDs(msg, rec.Attachments)
-		if req.AttachmentIDs != nil {
-			ids = *req.AttachmentIDs
-		}
-		if err := validateAttachmentIDs(rec, ids); err != nil {
-			d.attachmentError("", req.SessionID, err.Error())
-			return
-		}
-		if strings.TrimSpace(req.Text) == "" && len(ids) == 0 {
-			d.attachmentError("", req.SessionID, "Message cannot be empty")
-			return
-		}
-		if req.Regen {
-			d.truncateAndRun(req.SessionID, req.Index, req.Text, req.Model, req.YOLO, ids)
-			return
-		}
-		// Rebuild attachment context as well as display metadata for a saved edit.
-		temporary := &ActiveSession{record: rec}
-		fullText, images := d.turnPrompt(temporary, req.Text, ids, normalizedOptions(rec.Options).Mode)
-		msg.Content = []provider.Content{provider.TextBlock{Text: fullText}}
-		for _, img := range images {
-			msg.Content = append(msg.Content, img)
-		}
-		msg.Meta = d.promptMeta(temporary, req.Text, ids)
-		// Truncate everything below the edited message: stale assistant
-		// replies (and later turns) no longer belong to this timeline.
-		// Attachments belong to their turn: files referenced only by the
-		// discarded tail are pruned (bytes + extracted text removed).
-		before := len(rec.Messages)
-		rec.Messages[req.Index] = msg
-		rec.Messages = append([]provider.Message(nil), rec.Messages[:req.Index+1]...)
-		rec.FileBalloons = dropBalloonsAbove(rec.FileBalloons, req.Index+1)
-		rec.Messages = provider.RepairOrphanedToolResults(rec.Messages)
-		pruneOrphanAttachments(rec, nil)
-		rec.UpdatedAt = time.Now().UnixMilli()
-		removed := before - len(rec.Messages)
-		if removed < 0 {
-			removed = 0
-		}
-		broadcastTruncated(d, req.SessionID, req.Index, removed, rec)
-		// Turn-granular persist: clean prefix turns byte-copied, dirty
-		// suffix re-split from memory (the edited message changed content
-		// disk lines can't provide).
-		firstDirty := 0
-		for _, m := range rec.Messages[req.Index:] {
-			if m.TurnIndex > 0 {
-				firstDirty = m.TurnIndex
-				break
-			}
-		}
-		if firstDirty <= 0 {
-			// All-zero tail: full re-split of the kept prefix.
-			lines, _ := splitRecord(rec)
-			_ = d.writeSessionFile(rec.ID, lines, recordMeta(rec))
-		} else {
-			// Suffix from the first message of the dirty turn (plus
-			// attached leading zeros just before it).
-			start := len(rec.Messages)
-			for i, m := range rec.Messages {
-				if m.TurnIndex >= firstDirty {
-					start = i
-					break
-				}
-			}
-			for start > 0 && rec.Messages[start-1].TurnIndex <= 0 {
-				start--
-			}
-			var sbal []filetrack.TurnChanges
-			for _, b := range rec.FileBalloons {
-				if b.TurnIndex >= firstDirty {
-					sbal = append(sbal, b)
-				}
-			}
-			_ = d.persistEdited(rec.ID, firstDirty, append([]provider.Message{}, rec.Messages[start:]...), sbal, recordMeta(rec))
-		}
-		_ = d.sendWS(tailContentEvent(d.config.HostID, rec.ID, "session_content", rec, 0, nil))
-		d.sessionsMu.RLock()
-		if act, ok := d.sessions[req.SessionID]; ok {
-			act.mu.Lock()
-			act.record = rec
-			act.mu.Unlock()
-		}
-		d.sessionsMu.RUnlock()
-
-	case "regenerate":
-		var req struct {
-			SessionID string `json:"sessionId"`
-			Index     int    `json:"index"`
-			Text      string `json:"text"`
-			Model     string `json:"model"`
-			YOLO      bool   `json:"yolo"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		rec, err := d.loadSession(req.SessionID)
-		if err != nil {
-			return
-		}
-		// Last user message at or before index; drop it and everything after,
-		// then re-run the turn with its text.
-		userIdx := -1
-		var userText string
-		upper := req.Index
-		if upper >= len(rec.Messages) || upper < 0 {
-			upper = len(rec.Messages) - 1
-		}
-		for i := upper; i >= 0; i-- {
-			if rec.Messages[i].Role == provider.RoleUser {
-				var parts []string
-				for _, c := range rec.Messages[i].Content {
-					if tb, ok := c.(provider.TextBlock); ok && strings.TrimSpace(tb.Text) != "" {
-						parts = append(parts, tb.Text)
-					}
-				}
-				if len(parts) > 0 {
-					userText = core.StripLeadingSystemPrompt(strings.Join(parts, "\n"))
-					userIdx = i
-					break
-				}
-			}
-		}
-		if userText == "" && strings.TrimSpace(req.Text) != "" {
-			userText = core.StripLeadingSystemPrompt(strings.TrimSpace(req.Text))
-		}
-		if userIdx < 0 || userText == "" {
-			return
-		}
-		// Drop the resent user message itself (and everything below): the
-		// turn re-sends its text, so keeping it would duplicate it.
-		d.truncateAndRun(req.SessionID, userIdx, messageUserText(rec.Messages[userIdx]), req.Model, req.YOLO, messageAttachmentIDs(rec.Messages[userIdx], rec.Attachments))
-
-	case "get_attachment":
-		d.getAttachment(raw)
-	case "upload_attachment":
-		d.uploadAttachment(raw)
-	case "search_files":
-		d.searchMentionFiles(raw)
-
-	case "search":
-		var req struct {
-			Query string `json:"query"`
-			Limit int    `json:"limit"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		q := strings.TrimSpace(req.Query)
-		limit := req.Limit
-		if limit <= 0 || limit > 50 {
-			limit = 30
-		}
-		type hit struct {
-			SessionID  string `json:"sessionId"`
-			Title      string `json:"title"`
-			CWD        string `json:"cwd"`
-			UpdatedAt  int64  `json:"updatedAt"`
-			Snippet    string `json:"snippet"`
-			MatchCount int    `json:"matchCount"`
-		}
-		results := []hit{}
-		if len([]rune(q)) >= 2 {
-			lq := strings.ToLower(q)
-			for _, s := range d.listSessions() {
-				if len(results) >= limit {
-					break
-				}
-				matched := strings.Contains(strings.ToLower(s.Title), lq) ||
-					strings.Contains(strings.ToLower(s.CWD), lq)
-				snippet := ""
-				count := 0
-				rec, _, err := d.loadSessionFused(s.ID)
-				if err == nil {
-					for _, m := range rec.Messages {
-						for _, c := range m.Content {
-							var txt string
-							switch v := c.(type) {
-							case provider.TextBlock:
-								txt = v.Text
-							case provider.ToolCallBlock:
-								txt = v.Name + " " + string(v.Arguments)
-							case provider.ReasoningBlock:
-								txt = v.Summary
-							}
-							if txt == "" {
-								continue
-							}
-							// Rune-level matching so multibyte text yields valid snippets.
-							runes := []rune(txt)
-							lowerRunes := []rune(strings.ToLower(txt))
-							qlen := len([]rune(lq))
-							off := 0
-							for {
-								rel := indexRunes(lowerRunes[off:], []rune(lq))
-								if rel < 0 {
-									break
-								}
-								count++
-								if snippet == "" {
-									start := off + rel - 60
-									if start < 0 {
-										start = 0
-									}
-									end := off + rel + qlen + 100
-									if end > len(runes) {
-										end = len(runes)
-									}
-									snippet = strings.TrimSpace(string(runes[start:end]))
-								}
-								off += rel + qlen
-							}
-						}
-					}
-				}
-				if matched || count > 0 {
-					if snippet == "" {
-						snippet = s.Title
-					}
-					results = append(results, hit{
-						SessionID: s.ID, Title: s.Title, CWD: s.CWD,
-						UpdatedAt: s.UpdatedAt, Snippet: snippet, MatchCount: count,
-					})
-				}
-			}
-		}
-		_ = d.sendWS(map[string]any{
-			"type":    "search_results",
-			"hostId":  d.config.HostID,
-			"query":   q,
-			"results": results,
-		})
-
-	case "create_session":
-		var req struct {
-			Options   SessionOptions `json:"options"`
-			RequestID string         `json:"requestId"`
-			CWD       string         `json:"cwd"`
-			Title     string         `json:"title"`
-			Model     string         `json:"model"`
-		}
-		_ = json.Unmarshal(raw, &req)
-
-		cwd := strings.TrimSpace(req.CWD)
-		if cwd == "" || cwd == "~" {
-			home, _ := os.UserHomeDir()
-			cwd = home
-		} else if strings.HasPrefix(cwd, "~/") {
-			home, _ := os.UserHomeDir()
-			cwd = filepath.Join(home, cwd[2:])
-		}
-		cwd, err := filepath.Abs(cwd)
-		if err == nil {
-			err = os.MkdirAll(cwd, 0o755)
-		}
-		info, statErr := os.Stat(cwd)
-		if err != nil || statErr != nil || !info.IsDir() {
-			_ = d.sendWS(map[string]any{"type": "error", "hostId": d.config.HostID, "requestId": req.RequestID, "message": "Select an existing project folder before starting a conversation"})
-			return
-		}
-
-		sessID := fmt.Sprintf("sess_%d", time.Now().UnixNano()/1000)
-		title := strings.TrimSpace(req.Title)
-		if title == "" {
-			// Blank titles are auto-generated after the first exchange.
-			title = "New conversation"
-		}
-
-		req.Options = d.defaultSessionOptions(req.Options)
-		if req.Model == "" && d.config.LastSelection != nil {
-			req.Model = d.config.LastSelection.Model
-		}
-		now := time.Now().UnixMilli()
-		rec := &SessionRecord{
-			Options:     normalizedOptions(req.Options),
-			ID:          sessID,
-			CWD:         cwd,
-			Title:       title,
-			TitleSource: "pending",
-			Model:       req.Model,
-			Status:      "idle",
-			CreatedAt:   now,
-			UpdatedAt:   now,
-			Messages:    nil,
-		}
-		if strings.TrimSpace(req.Title) != "" {
-			rec.TitleSource = "manual"
-		}
-		if err := d.saveSession(rec); err != nil {
-			_ = d.sendWS(map[string]any{
-				"type":      "error",
-				"hostId":    d.config.HostID,
-				"requestId": req.RequestID, "message": "Failed to create session: " + err.Error(),
-			})
-			return
-		}
-
-		_ = d.sendWS(map[string]any{
-			"type":      "session_created",
-			"requestId": req.RequestID,
-			"hostId":    d.config.HostID,
-			"session":   sessionPayloadPaged(rec, 0),
-		})
-
-	case "fork_session":
-		d.forkSession(raw)
-
-	case "delete_session":
-		var req struct {
-			SessionID string `json:"sessionId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		d.purgeSession(req.SessionID)
-
-	case "cancel":
-		var req struct {
-			SessionID string `json:"sessionId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		d.cancelTurn(req.SessionID)
-
-	case "bg_list":
-		d.handleBgList()
-
-	case "bg_cancel":
-		d.handleBgCancel(raw)
-
-	case "bg_tail":
-		d.handleBgTail(raw)
-
-	case "tool_approval_response":
-		var req struct {
-			Always    bool   `json:"always"`
-			SessionID string `json:"sessionId"`
-			CallID    string `json:"callId"`
-			Approved  bool   `json:"approved"`
-		}
-		_ = json.Unmarshal(raw, &req)
-
-		d.sessionsMu.RLock()
-		act := d.sessions[req.SessionID]
-		d.sessionsMu.RUnlock()
-
-		if act != nil {
-			act.mu.Lock()
-			if _, pending := act.approvalReqs[req.CallID]; !pending {
-				act.mu.Unlock()
-				return
-			}
-			if req.Always && req.Approved {
-				act.record.Options.Access = "full"
-				d.rememberSelection(act.record.Model, act.record.Options)
-				d.allowPendingTools(act)
-				act.record.UpdatedAt = time.Now().UnixMilli()
-				if act.record.Status == "running" && act.wal != nil {
-					opts := act.record.Options
-					d.appendWALEvent(act, walEvent{Type: walTypeOptions, Options: &opts})
-				} else {
-					_ = d.saveSession(act.record)
-				}
-				_ = d.sendWS(map[string]any{"type": "session_data", "hostId": d.config.HostID, "session": liveSessionPayload(act)})
-			}
-			if ch, ok := act.approvalReqs[req.CallID]; ok {
-				ch <- req.Approved
-				delete(act.approvalReqs, req.CallID)
-			}
-			act.mu.Unlock()
-		}
-
-	case "update_config":
-		d.updateConfig(raw)
-	case "daemon_update_check":
-		// Async only: checkForUpdates broadcasts at the end. A direct
-		// broadcastUpdateState() here would deadlock — handleMessage
-		// holds configMu and broadcast reads it via autoUpdateEnabled
-		// (Go mutexes are not reentrant).
-		go d.checkForUpdates("manual")
-	case "debug_mirror":
-		// E2E forensics: report what the daemon's own download path
-		// resolves (gateway base from slot config, manifest version
-		// from the daemon's poll, launcher asset bytes head). Never
-		// fails the caller — best-effort diagnostics only.
-		go d.debugMirror(raw)
-	case "daemon_update_apply":
-		// Brutal update: clean slot -> fetch launcher -> spawn
-		// --update-start (SIGKILLs us, copies slot, runs launcher
-		// --update, watches fail/done). Failure before the spawn
-		// aborts in place, WS never dropped.
-		go d.beginHandoff()
-	case "daemon_update_toggle":
-		var treq struct {
-			Enabled bool `json:"enabled"`
-		}
-		_ = json.Unmarshal(raw, &treq)
-		// NOTE: handleMessage already holds configMu (non-reentrant) —
-		// mutate directly like updateConfig does.
-		d.config.AutoUpdate = &treq.Enabled
-		_ = d.saveConfig()
-		// Async: broadcastUpdateState reads configMu (held here) — never
-		// call it synchronously from the dispatcher. checkForUpdates
-		// broadcasts at the end, outside the lock.
-		go d.checkForUpdates("toggle")
-	case "test_mcp":
-		d.testMCP(raw)
-
-	case "prompt":
-		var req struct {
-			Options       *SessionOptions `json:"options"`
-			SessionID     string          `json:"sessionId"`
-			Text          string          `json:"text"`
-			Model         string          `json:"model"`
-			YOLO          bool            `json:"yolo"`
-			AttachmentIDs []string        `json:"attachmentIds"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		d.startPrompt(req.SessionID, req.Text, req.AttachmentIDs, req.Model, req.YOLO, req.Options)
-	}
-}
-
-// startPrompt validates and launches a new turn for sessionID. It is the
-// single entry for user prompts: the "prompt" command, queue promotion
-// (auto-start and send-now) all flow through here.
-func (d *DaemonServer) startPrompt(sessionID, text string, attachmentIDs []string, model string, yolo bool, options *SessionOptions) {
-	cleanText := strings.TrimSpace(text)
-	if isSlashCommand(cleanText) {
-		if len(attachmentIDs) > 0 {
-			d.attachmentError("", sessionID, "Send attachments in a message before running a command")
-			return
-		}
-		d.handleSlashCommand(sessionID, cleanText)
-		return
-	}
-
-	act, err := d.getOrCreateActiveSession(sessionID)
-	if err != nil {
-		_ = d.sendWS(map[string]any{
-			"type":      "error",
-			"hostId":    d.config.HostID,
-			"sessionId": sessionID,
-			"message":   "Session not found: " + err.Error(),
-		})
-		return
-	}
-
-	act.mu.Lock()
-	err = validateAttachmentIDs(act.record, attachmentIDs)
-	running := act.record.Status == "running"
-	act.mu.Unlock()
-	if err != nil {
-		d.attachmentError("", sessionID, err.Error())
-		return
-	}
-	if running {
-		d.attachmentError("", sessionID, "Turn already in flight")
-		return
-	}
-	if cleanText == "" && len(attachmentIDs) == 0 {
-		return
-	}
-
-	// Instant provisional title from the prompt's own words (their first 6
-	// content words); the LLM-generated title replaces it later via
-	// rename. Instant feedback: the sidebar never shows five stale "New
-	// conversation" rows again.
-	act.mu.Lock()
-	if model != "" {
-		act.record.Model = model
-	}
-	if options != nil {
-		act.record.Options = normalizedOptions(*options)
-	}
-	_ = d.saveSession(act.record)
-	if !d.config.Settings.NoAutoTitle && (act.record.Title == "" || act.record.Title == "New conversation") {
-		if t := instantTitle(cleanText); t != "" {
-			act.record.Title = t
-			act.record.TitleSource = "pending"
-			act.record.UpdatedAt = time.Now().UnixMilli()
-			_ = d.saveSession(act.record)
-			_ = d.sendWS(map[string]any{
-				"type":      "session_renamed",
-				"hostId":    d.config.HostID,
-				"sessionId": act.record.ID,
-				"title":     t,
-				"auto":      true,
-			})
-		}
-	}
-	act.mu.Unlock()
-
-	go d.runAgentTurn(act, text, "", yolo, attachmentIDs)
-}
-
-// cancelTurn marks the running turn as cancelling and cancels its context.
-// The turn finalizer treats it as cancelled: the queue is NOT drained.
-// Idempotent (stop-spam safe): a second cancel while the turn is already
-// stopping is a no-op — it must not append a duplicate WAL event nor
-// re-fire the context cancel while the finalizer is committing.
-func (d *DaemonServer) cancelTurn(sessionID string) {
-	d.sessionsMu.RLock()
-	act := d.sessions[sessionID]
-	d.sessionsMu.RUnlock()
-
-	if act != nil {
-		act.mu.Lock()
-		touchSession(act)
-		if act.record.Turn != nil && act.record.Turn.Status == "running" {
-			act.record.Turn.Status = "cancelling"
-			act.record.UpdatedAt = time.Now().UnixMilli()
-			if act.wal != nil {
-				d.appendWALEvent(act, walEvent{Type: walTypeTurnState, TurnStatus: "cancelling"})
-			} else {
-				_ = d.saveSession(act.record)
-			}
-			if act.cancel != nil {
-				act.cancel()
-			}
-		}
-		// Already cancelling/cancelled/idle: no-op (stop-spam guard).
-		act.mu.Unlock()
-	}
-}
-
-func isSlashCommand(text string) bool {
-	parts := strings.Fields(text)
-	if len(parts) == 0 {
-		return false
-	}
-	switch strings.ToLower(parts[0]) {
-	case "/clear", "/compact", "/jail", "/unjail", "/skills", "/mcp", "/help":
-		return true
-	}
-	return false
-}
-
-func (d *DaemonServer) handleSlashCommand(sessionID string, cmdText string) {
-	act, err := d.getOrCreateActiveSession(sessionID)
-	if err != nil {
-		_ = d.sendWS(map[string]any{
-			"type":      "error",
-			"hostId":    d.config.HostID,
-			"sessionId": sessionID,
-			"message":   "Session not found: " + err.Error(),
-		})
-		return
-	}
-
-	parts := strings.Fields(cmdText)
-	if len(parts) == 0 {
-		return
-	}
-	head := strings.ToLower(parts[0])
-
-	act.mu.Lock()
-	defer act.mu.Unlock()
-
-	if act.record.Status == "running" {
-		d.attachmentError("", sessionID, "Stop the current turn before running a command")
-		return
-	}
-	var reply string
-
-	switch head {
-	case "/clear":
-		// /clear starts a fresh blank session (same folder/model) instead of
-		// wiping the transcript. History stays on disk under the old session.
-		now := time.Now().UnixMilli()
-		rec := &SessionRecord{
-			ID:        fmt.Sprintf("sess_%d", time.Now().UnixNano()/1000),
-			CWD:       act.record.CWD,
-			Title:     "New conversation",
-			Model:     act.record.Model,
-			Status:    "idle",
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		if err := d.saveSession(rec); err != nil {
-			_ = d.sendWS(map[string]any{
-				"type": "error", "hostId": d.config.HostID,
-				"message": "Failed to create session: " + err.Error(),
-			})
-			return
-		}
-		_ = d.sendWS(map[string]any{
-			"type":    "session_created",
-			"hostId":  d.config.HostID,
-			"session": sessionPayloadPaged(rec, 0),
-		})
-		return
-
-	case "/compact":
-		go d.compactSession(act)
-		return
-
-	case "/jail":
-		d.config.Settings.JailByDefault = true
-		_ = d.saveConfig()
-		_ = d.sendWS(map[string]any{
-			"type": "notice", "hostId": d.config.HostID, "sessionId": act.record.ID,
-			"message": "Tools jailed to " + act.record.CWD,
-		})
-		return
-
-	case "/unjail":
-		d.config.Settings.JailByDefault = false
-		_ = d.saveConfig()
-		_ = d.sendWS(map[string]any{
-			"type": "notice", "hostId": d.config.HostID, "sessionId": act.record.ID,
-			"message": "Tools unjailed — external paths allowed",
-		})
-		return
-
-	case "/skills":
-		var b strings.Builder
-		b.WriteString("### 🛠️ Configured Skills & Built-in Tools\n\n")
-		b.WriteString("**Built-in Tools:**\n")
-		b.WriteString("- `read` — Read file contents with line limits\n")
-		b.WriteString("- `write` — Create or overwrite files atomically\n")
-		b.WriteString("- `edit` — Precise substring / regex file editing\n")
-		b.WriteString("- `bash` — Execute arbitrary shell commands in sandbox\n")
-		b.WriteString("- `glob` — Fuzzy search directory tree with gitignore support\n\n")
-		if len(d.config.Skills) > 0 {
-			b.WriteString("**Custom Skills:**\n")
-			for _, name := range sortedKeys(d.config.Skills) {
-				sk := d.config.Skills[name]
-				status := "enabled"
-				if !sk.Enabled {
-					status = "disabled"
-				}
-				b.WriteString(fmt.Sprintf("- `%s` (%s): %s\n", name, status, sk.Description))
-			}
-		} else {
-			b.WriteString("*No custom skills configured yet. Add them in Settings > Skills.*\n")
-		}
-		reply = b.String()
-
-	case "/mcp":
-		var b strings.Builder
-		b.WriteString("### 🔌 Configured MCP Servers\n\nTools connect during Build turns when jail is off. Use Settings > MCP servers to test a connection.\n\n")
-		if len(d.config.MCPServers) > 0 {
-			for _, name := range sortedKeys(d.config.MCPServers) {
-				s := d.config.MCPServers[name]
-				status := "enabled"
-				if s.Disabled {
-					status = "disabled"
-				}
-				b.WriteString(fmt.Sprintf("- **%s** (%s)\n", name, status))
-			}
-		} else {
-			b.WriteString("*No MCP servers configured yet. Add them in Settings > MCP Servers.*\n")
-		}
-		reply = b.String()
-
-	case "/help":
-		reply = "### ⚡ Indirect Code Slash Commands\n" +
-			"- `/compact` — Summarize and compact conversation to free up context\n" +
-			"- `/clear` — Start a fresh blank session (history is kept)\n" +
-			"- `/jail` — Confine agent tools strictly to session directory\n" +
-			"- `/unjail` — Allow agent tools to read/write external paths\n\n" +
-			"*Choose model, effort and skills in the composer. Manage custom skills and MCP servers in Settings.*"
-
-	default:
-		reply = fmt.Sprintf("❓ Unknown command `%s`. Type `/help` for available commands.", head)
-	}
-
-	// Slash exchanges are turns like any other: fresh sequence number so
-	// the user/assistant pair groups under its own turn index.
-	act.record.TurnSeq++
-	slashTurn := act.record.TurnSeq
-	userMsg := provider.Message{
-		Role:      provider.RoleUser,
-		Content:   []provider.Content{provider.TextBlock{Text: core.SanitizeUserText(cmdText)}},
-		TurnIndex: slashTurn,
+	// Crash debris: sweep stale tmp files; boot() in the supervisor flips
+	// stale running sessions back to idle (WAL sessions resume on route).
+	st := newDiskStore(dataDir)
+	if n := sweepTmpOrphans(filepath.Join(dataDir, "sessions"), time.Hour); n > 0 {
+		fmt.Printf("Cleaned %d leftover temp file(s).\n", n)
 	}
-	asstMsg := provider.Message{
-		Role:      provider.RoleAssistant,
-		Content:   []provider.Content{provider.TextBlock{Text: reply}},
-		TurnIndex: slashTurn,
-	}
-	act.record.Messages = append(act.record.Messages, userMsg, asstMsg)
-	act.record.UpdatedAt = time.Now().UnixMilli()
-	_ = d.saveSession(act.record)
-
-	_ = d.sendWS(tailContentEvent(d.config.HostID, act.record.ID, "session_content", act.record, 1, nil))
-}
-
-// Agent Loop Runner for a Session
-
-// broadcastTruncated tells clients to drop rendered messages below keepIdx
-// (the authoritative cut after edit/regenerate). Clients apply the same cut
-// optimistically; this event reconciles them (and other devices).
-func broadcastTruncated(d *DaemonServer, sessionID string, keepIdx, removed int, rec *SessionRecord) {
-	_ = d.sendWS(map[string]any{
-		"type": "session_truncated", "hostId": d.config.HostID, "sessionId": sessionID,
-		"keepIndex": keepIdx, "removed": removed,
-	})
-	// Tail turns + cursor: the client already cut its list at keepIndex
-	// and merges the fresh tail by id (same path as the end-of-turn
-	// snapshot), instead of receiving the full transcript again.
-	_ = d.sendWS(tailContentEvent(d.config.HostID, sessionID, "session_content", rec, 0, nil))
-}
-
-// dropBalloonsAbove discards balloons anchored past the kept message
-// prefix. Tail cuts (edit/regenerate) must take the discarded turns'
-// balloons with them — otherwise the sidebar keeps showing file changes
-// for turns that no longer exist. Unanchored balloons (MessageIndex <= 0,
-// pre-anchor records) are kept: they may belong to surviving turns.
-// (fork.go filters the same way when copying the prefix.)
-func dropBalloonsAbove(in []filetrack.TurnChanges, keep int) []filetrack.TurnChanges {
-	if len(in) == 0 {
-		return in
-	}
-	out := make([]filetrack.TurnChanges, 0, len(in))
-	for _, b := range in {
-		if b.MessageIndex > keep {
-			continue
-		}
-		out = append(out, b)
-	}
-	return out
-}
-
-// truncateAndRun replaces the transcript tail (keeping the first `keep`
-// messages) and starts a fresh turn. It powers edit & regenerate: any
-// in-flight turn is cancelled first and a generation counter keeps the old
-// turn's deferred finalizer from clobbering the new one.
-func (d *DaemonServer) truncateAndRun(sessionID string, keep int, promptText, model string, yolo bool, attachmentIDs []string) {
-	// Truncation needs the fused view (a WAL may hold uncommitted tail),
-	// but it is refused while a turn runs (see below), so by commit time
-	// no WAL exists and the fused read equals the JSON.
-	rec, _, err := d.loadSessionFused(sessionID)
-	if err != nil {
-		return
-	}
-	d.sessionsMu.Lock()
-	act, ok := d.sessions[sessionID]
-	if !ok {
-		act = &ActiveSession{
-			record:       rec,
-			approvalReqs: make(map[string]chan bool),
-		}
-		d.sessions[sessionID] = act
-	}
-	act.mu.Lock()
-	if act.record.Status == "running" {
-		act.mu.Unlock()
-		d.sessionsMu.Unlock()
-		d.attachmentError("", sessionID, "Stop the current turn first")
-		return
-	}
-	if err := validateAttachmentIDs(rec, attachmentIDs); err != nil {
-		act.mu.Unlock()
-		d.sessionsMu.Unlock()
-		d.attachmentError("", sessionID, err.Error())
-		return
-	}
-	if act.cancel != nil {
-		act.cancel()
-		act.cancel = nil
-	}
-	act.gen++
-	if keep < 0 {
-		keep = 0
-	}
-	if keep > len(rec.Messages) {
-		keep = len(rec.Messages)
-	}
-	if model != "" {
-		rec.Model = model
-	}
-	removed := len(rec.Messages) - keep
-	if removed < 0 {
-		removed = 0
-	}
-	rec.Messages = append([]provider.Message(nil), rec.Messages[:keep]...)
-	rec.FileBalloons = dropBalloonsAbove(rec.FileBalloons, keep)
-	// Turn-granular persist: pure tail cut (no content change above the
-	// cut) — clean prefix lines byte-copied, nothing re-marshaled.
-	keepTurn := dropTurnForPrefix(rec.Messages)
-	// The new turn re-sends attachmentIDs right after: keep them while
-	// pruning files orphaned by the discarded tail.
-	pruneOrphanAttachments(rec, attachmentIDs)
-	// Projection anchor invalidation: truncating the append-only history
-	// below the compaction cut point would leave the chain head pointing
-	// past the end of the log. Drop it; the next compaction re-anchors.
-	if st := rec.Compaction; st != nil && st.KeepFrom > keep {
-		rec.Compaction = nil
-	}
-	rec.Status = "idle"
-	rec.UpdatedAt = time.Now().UnixMilli()
-	_ = d.truncateTail(rec.ID, keepTurn, recordMeta(rec))
-	act.record = rec
-	act.mu.Unlock()
-	d.sessionsMu.Unlock()
-
-	broadcastTruncated(d, rec.ID, keep-1, removed, rec)
-	go d.runAgentTurn(act, promptText, "", yolo, attachmentIDs)
-}
+	sweepTmpOrphans(dataDir, time.Hour)
+	_ = st
 
-// buildTurnSystemDirectives checks if the date or mode changed compared to the last
-// known state in SessionRecord. When changed, it builds a leading <system-reminder> block
-// and updates rec.LastDate and rec.LastMode.
-func buildTurnSystemDirectives(rec *SessionRecord, mode string, now time.Time) string {
-	today := now.Format("2006-01-02")
-	todayDisplay := now.Format("Monday, 2006-01-02")
-	if mode == "" {
-		mode = "build"
-	}
-	var sysParts []string
-	if rec.LastDate != today {
-		sysParts = append(sysParts, fmt.Sprintf("Current date: %s", todayDisplay))
-		rec.LastDate = today
-	}
-	if rec.LastMode != mode {
-		switch mode {
-		case "plan":
-			sysParts = append(sysParts, "Operational mode: Plan. You are in READ-ONLY phase. Inspect, read, and plan; file modifications (write/edit) are disabled. When your plan is ready, call mark_plan_as_ready_to_execute.")
-		case "build":
-			sysParts = append(sysParts, "Operational mode: Build. You are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed. When finished, call mark_task_as_complete.")
-		case "learning":
-			sysParts = append(sysParts, "Operational mode: Learning. You are a patient Socratic programming tutor. Never write the solution or modify project files. You may run inline python and terminal commands to test, and create test files in your private brain workspace if needed.")
-		case "talk":
-			sysParts = append(sysParts, "Operational mode: Talk. Conversational mode. No workspace modifications or executions.")
-		}
-		rec.LastMode = mode
-	}
-	if len(sysParts) == 0 {
-		return ""
-	}
-	return "<system-reminder>\n" + strings.Join(sysParts, "\n") + "\n</system-reminder>"
-}
-
-func (d *DaemonServer) runAgentTurn(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string) {
-	d.runAgentTurnWithMeta(act, promptText, requestedModel, yolo, attachmentIDs, nil)
-}
-
-// runAgentTurnWithMeta runs a turn whose initial user message carries
-// extraMeta merged into promptMeta (background wake-ups stamp a
-// background_delivery key so the completion notice is never rendered as a
-// common user message, even though SanitizeUserText strips its tags).
-func (d *DaemonServer) runAgentTurnWithMeta(act *ActiveSession, promptText, requestedModel string, yolo bool, attachmentIDs []string, extraMeta map[string]string) {
-	// A user message identical to the synthetic continue nudge must stay
-	// visible: strip the brackets so it no longer matches the hidden form.
-	promptText = core.SanitizeUserText(promptText)
-	d.configMu.RLock()
-	cfg := *d.config
-	d.configMu.RUnlock()
-	d.sessionsMu.RLock()
-	act.mu.Lock()
-	if d.sessions[act.record.ID] != act {
-		act.mu.Unlock()
-		d.sessionsMu.RUnlock()
-		return
-	}
-	d.sessionsMu.RUnlock()
-	if act.record.Status == "running" {
-		act.mu.Unlock()
-		_ = d.sendWS(map[string]any{
-			"type":      "error",
-			"hostId":    cfg.HostID,
-			"sessionId": act.record.ID,
-			"message":   "Turn already in flight",
-		})
-		return
-	}
-
-	if act.record.CWD != "" && inspectWorkspace(act.record.CWD).Status != "available" {
-		_ = d.sendWS(map[string]any{"type": "session_data", "hostId": cfg.HostID, "session": pagedHistoryBlock(sessionPayload(act.record), act.record)})
-		act.mu.Unlock()
-		return
-	}
-	act.record.Status = "running"
-	act.question = nil
-	act.convert = nil
-	act.sendNow = false
-	act.record.TurnSeq++
-	turnSeq := act.record.TurnSeq
-	act.record.Turn = &TurnActivity{StartedAt: time.Now().UnixMilli(), Status: "running"}
-	act.toolProgress = map[string]string{}
-	act.toolStarts = map[string]int64{}
-	act.thinkingStartedAt = 0
-	if act.record.Options.Access == "" {
-		act.record.Options.Access = "ask"
-		if yolo {
-			act.record.Options.Access = "full"
-		}
-	}
-	if requestedModel != "" {
-		act.record.Model = requestedModel
-	}
-	act.record.UpdatedAt = time.Now().UnixMilli()
-	sessionID, sessionCWD := act.record.ID, act.record.CWD
-	modelToUse := act.record.Model
-	tfc := beginTurnTracking(act, sessionCWD, turnSeq, d.brainDir(sessionID))
-	// WAL mode: freeze the JSON (single running-state commit) and open the
-	// append log whose header carries the recovery prompt. Every mid-turn
-	// mutation appends one line; the next full JSON rewrite is the commit
-	// in finishTurn.
-	ww, err := d.openWAL(sessionID, &walHeader{TurnIndex: turnSeq, StartedAt: act.record.Turn.StartedAt, Model: modelToUse, Prompt: promptText, AttachmentIDs: attachmentIDs})
-	if err != nil {
-		act.record.Status = "idle"
-		act.record.TurnSeq--
-		act.record.Turn = nil
-		act.fileChanges = nil
-		act.mu.Unlock()
-		_ = d.sendWS(map[string]any{
-			"type":      "error",
-			"hostId":    cfg.HostID,
-			"sessionId": sessionID,
-			"message":   "Could not start turn: " + err.Error(),
-		})
-		return
-	}
-	act.wal = ww
-	// Publish running state only after the recovery header exists.
-	if err := d.saveSessionSync(act.record); err != nil {
-		d.discardWAL(act)
-		_ = os.Remove(d.walPath(sessionID))
-		act.wal = nil
-		act.record.Status = "idle"
-		act.record.TurnSeq--
-		act.record.Turn = nil
-		act.fileChanges = nil
-		act.mu.Unlock()
-		_ = d.sendWS(map[string]any{
-			"type":      "error",
-			"hostId":    cfg.HostID,
-			"sessionId": sessionID,
-			"message":   "Could not start turn: " + err.Error(),
-		})
-		return
-	}
-	d.notifyChange("sessions")
+	root.bootActors()
+	root.writePidFile()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	act.cancel = cancel
-	touchSession(act)
-	act.gen++
-	myGen := act.gen
-	options := normalizedOptions(act.record.Options)
-	turnStarted := *act.record.Turn
-
-	act.mu.Unlock()
-	r := &turnRun{
-		d: d, cfg: cfg, act: act,
-		sessionID: sessionID, sessionCWD: sessionCWD,
-		modelToUse: modelToUse, turnIndex: turnSeq, tfc: tfc,
-		ctx: ctx, myGen: myGen, options: options, turnStarted: turnStarted,
-	}
-	defer r.finishTurn()
-
-	_ = d.sendWS(map[string]any{
-		"type":      "session_status",
-		"hostId":    cfg.HostID,
-		"sessionId": sessionID,
-		"status":    "running",
-		"turn":      turnStarted,
-	})
-
-	// Provider client (forced Anthropic surface; OpenAI-only providers via
-	// gateway translation), tools, agent and all turn hooks.
-	if !r.setupAgent() {
-		return
-	}
-	defer func() {
-		if !r.cfg.Settings.NoAutoTitle && r.ctx.Err() == nil {
-			go r.d.maybeAutoTitle(r.act, r.myGen, r.client, r.modelToUse)
-		}
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		root.shutdown("interrupted")
 	}()
-	// Stream events to WebSocket
-	sink := func(ev core.AgentEvent) { r.handleEvent(ev) }
 
-	fullPrompt, images := d.turnPrompt(act, promptText, attachmentIDs, options.Mode)
-
-	// Proactive compaction happens INSIDE the loop now (agent.AutoCompact,
-	// wired above): it is re-evaluated before every model request —
-	// including this turn's first one and every mid-run continuation.
-	// Prompt only returns on AI conclusion or context cancellation;
-	// provider errors retry inside the loop, never surfacing here.
-	if err := r.agent.PromptWithMeta(r.ctx, fullPrompt, images, d.promptMetaWith(act, promptText, attachmentIDs, extraMeta), sink); err != nil && ctx.Err() == nil {
-		fmt.Printf("[WARN] turn %d of session %s exited with live context: %v\n", turnSeq, sessionID, err)
-	}
-
-}
-
-// instantTitle derives an immediate provisional title from the user's own
-// words (first 6 content words, ellipsis when truncated). The LLM-generated
-// title from maybeAutoTitle replaces it after the first exchange.
-func instantTitle(text string) string {
-	clean := strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' {
-			return ' '
+	lk := &link{server: root.server, cfg: &root.cfg}
+	backoff := 1 * time.Second
+	for {
+		err := lk.connectLoop(context.Background())
+		if err != nil {
+			if errors.Is(err, errDaemonRevoked) {
+				root.removePidFile()
+				os.Exit(0)
+			}
+			fmt.Printf("[DISCONNECTED] %v. Retrying in %v...\n", err, backoff)
 		}
-		if r == '/' || r == '"' || r == '\'' || r == '`' {
-			return -1
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
 		}
-		return r
-	}, strings.TrimSpace(text))
-	words := strings.Fields(clean)
-	if len(words) == 0 {
-		return ""
 	}
-	cut := false
-	if len(words) > 6 {
-		words = words[:6]
-		cut = true
-	}
-	out := strings.TrimSpace(strings.Join(words, " "))
-	if cut {
-		out += "…"
-	}
-	if r := []rune(out); len(r) > 60 {
-		out = strings.TrimSpace(string(r[:60])) + "…"
-	}
-	return out
 }
 
-func (d *DaemonServer) connectWebSocket() error {
-	return d.connectWebSocketWithQuery("")
-}
-
-// connectWebSocketOnce dials the relay, takes the socket (so a later
-// sendWS/update_done rides it), and returns. One shot: no read loop, no
-// retry, no reconnect — the caller decides what failure means. Used by
-// --update-end's best-effort hello (promote runs either way).
-func (d *DaemonServer) connectWebSocketOnce() error {
-	u, err := url.Parse(d.config.GatewayURL)
+func (l *link) wsURL(extra string) (string, error) {
+	cfg := l.cfg.load()
+	if cfg == nil {
+		return "", fmt.Errorf("no config")
+	}
+	u, err := url.Parse(cfg.GatewayURL)
 	if err != nil {
-		return err
+		return "", err
 	}
 	scheme := "ws"
 	if u.Scheme == "https" {
 		scheme = "wss"
 	}
-	wsURL := fmt.Sprintf("%s://%s/api/indirect-code/daemon/ws?token=%s", scheme, u.Host, url.QueryEscape(d.config.DaemonToken))
+	return fmt.Sprintf("%s://%s/api/indirect-code/daemon/ws?token=%s%s", scheme, u.Host, url.QueryEscape(cfg.DaemonToken), extra), nil
+}
+
+func (l *link) connectLoop(ctx context.Context) error {
+	wsURL, err := l.wsURL("")
+	if err != nil {
+		return err
+	}
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true}
-	conn, resp, err := dialer.Dial(wsURL, nil)
-	if err != nil {
-		if isRevokedDialError(resp, err) {
-			return errDaemonRevoked
-		}
-		return err
-	}
-	d.wsMu.Lock()
-	if d.wsConn != nil {
-		_ = d.wsConn.Close()
-	}
-	d.wsConn = conn
-	// Transcript JSON compresses 5-10x; BestSpeed keeps added latency
-	// sub-ms while shrinking the end-of-turn session_data burst that
-	// used to blow the 5s write deadline on slow uplinks (host flapped
-	// offline at every turn end). Noop if the relay didn't negotiate
-	// permessage-deflate.
-	_ = conn.SetCompressionLevel(flate.BestSpeed)
-	d.wsMu.Unlock()
-	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", d.config.GatewayURL)
-	return nil
-}
-
-// connectWebSocketWithQuery dials the relay with an extra query suffix
-// (e.g. "&updating=1" for the --update-start naive updater: the relay
-// keeps the host registered + online but broadcasts host_status updating
-// so the frontend shows the update overlay instead of offline).
-func (d *DaemonServer) connectWebSocketWithQuery(extra string) error {
-	return d.connectWebSocketContext(context.Background(), extra)
-}
-
-func (d *DaemonServer) connectWebSocketContext(ctx context.Context, extra string) error {
-	u, err := url.Parse(d.config.GatewayURL)
-	if err != nil {
-		return err
-	}
-
-	scheme := "ws"
-	if u.Scheme == "https" {
-		scheme = "wss"
-	}
-	wsURL := fmt.Sprintf("%s://%s/api/indirect-code/daemon/ws?token=%s%s", scheme, u.Host, url.QueryEscape(d.config.DaemonToken), extra)
-
-	dialer := websocket.Dialer{
-		HandshakeTimeout:  10 * time.Second,
-		EnableCompression: true,
-	}
-	// Gorilla's DialContext bounds the handshake deadline but does not
-	// close a TCP connection when cancellation lands during the HTTP read.
-	// Bind the raw socket too, so updater shutdown joins promptly.
 	var stopDialClose func() bool
 	dialer.NetDialContext = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := (&net.Dialer{}).DialContext(dialCtx, network, addr)
@@ -2634,43 +192,23 @@ func (d *DaemonServer) connectWebSocketContext(ctx context.Context, extra string
 			stopDialClose()
 		}
 	}()
-
 	conn, resp, err := dialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
 		if isRevokedDialError(resp, err) {
-			// Host deleted while offline: token no longer exists server-side.
-			// Do NOT backoff-retry forever; surface the sentinel so main()
-			// exits instead of spinning as a ghost process.
 			fmt.Println("[REVOKED] This host was removed from the gateway. Exiting (re-pair to reconnect).")
 			return errDaemonRevoked
 		}
 		return err
 	}
-
-	d.wsMu.Lock()
-	if d.wsConn != nil {
-		_ = d.wsConn.Close()
-	}
-	d.wsConn = conn
-	_ = conn.SetCompressionLevel(flate.BestSpeed)
-	d.wsMu.Unlock()
+	l.setConn(conn)
+	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", l.cfg.load().GatewayURL)
 	defer func() {
 		_ = conn.Close()
-		d.wsMu.Lock()
-		if d.wsConn == conn {
-			d.wsConn = nil
-		}
-		d.wsMu.Unlock()
+		l.clearConn(conn)
 	}()
 
-	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", d.config.GatewayURL)
-	// Fresh (re)connect: re-check for updates + push state to clients.
-	go d.checkForUpdates("reconnect")
-
-	// Heartbeat ticker
 	ticker := time.NewTicker(15 * time.Second)
 	done := make(chan struct{})
-
 	go func() {
 		for {
 			select {
@@ -2684,7 +222,6 @@ func (d *DaemonServer) connectWebSocketContext(ctx context.Context, extra string
 			}
 		}
 	}()
-
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
@@ -2692,298 +229,234 @@ func (d *DaemonServer) connectWebSocketContext(ctx context.Context, extra string
 			ticker.Stop()
 			return err
 		}
-		d.handleMessage(msg)
+		l.server.dispatch(msg)
 	}
 }
 
-func main() {
-	connectFlag := flag.String("connect", "", "Pairing connect URL (e.g. https://.../api/indirect-code/connect/<token>)")
-	nameFlag := flag.String("name", "", "Host display name")
-	configFlag := flag.String("config", "", "Path to config.json")
-	dataDirFlag := flag.String("data-dir", "", "Path to daemon data directory")
-	stopFlag := flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
-	versionFlag := flag.Bool("version", false, "Print daemon version and exit")
-	updateStartFlag := flag.Bool("update-start", false, "Brutal update: kill the old daemon, own the host in update state, copy slot, run the new launcher")
-	updateEndFlag := flag.Bool("update-end", false, "Brutal update: boot the new daemon, promote local-first (hello relay, kill waiter, flip active, clean old slot)")
-	rootDirFlag := flag.String("root-dir", "", "Update slots root (<root> holding slots/)")
-	fromSlotFlag := flag.String("from-slot", "", "Update source slot (a|b)")
-	toSlotFlag := flag.String("to-slot", "", "Update target slot (a|b)")
-	expectVersionFlag := flag.String("expect-version", "", "Update target version")
-	parentPidFlag := flag.Int("parent-pid", 0, "PID of the daemon waiting to be killed")
-	launcherPathFlag := flag.String("launcher-path", "", "Verified new launcher binary (--update-start only)")
-	slotFlag := flag.String("slot", "", "Active slot id (a|b), informational: passed by the launcher; dataDir already points at the slot")
-	flag.Parse()
-	if *versionFlag {
-		fmt.Printf("indirect-code daemon %s\n", daemonVersion)
-		os.Exit(0)
+func (l *link) setConn(conn *websocket.Conn) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.conn != nil {
+		_ = l.conn.Close()
 	}
+	l.conn = conn
+	// Outbound path: ws actor emits call this send.
+	l.server.ws.control <- wsReplaceMsg{Send: func(msg any) error {
+		l.mu.Lock()
+		c := l.conn
+		l.mu.Unlock()
+		if c == nil {
+			return fmt.Errorf("websocket not connected")
+		}
+		_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		err := c.WriteJSON(msg)
+		_ = c.SetWriteDeadline(time.Time{})
+		return err
+	}}
+}
 
-	dataDir := *dataDirFlag
-	if dataDir == "" {
-		dataDir = defaultDataDir()
+func (l *link) clearConn(conn *websocket.Conn) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.conn == conn {
+		l.conn = nil
 	}
-	_ = *slotFlag
-	if *updateStartFlag {
-		cfgPath := *configFlag
-		if cfgPath == "" {
-			cfgPath = filepath.Join(dataDir, "config.json")
-		}
-		os.Exit(runUpdateStart(dataDir, cfgPath, updateStartParams{
-			root:          *rootDirFlag,
-			fromSlot:      *fromSlotFlag,
-			toSlot:        *toSlotFlag,
-			expectVersion: *expectVersionFlag,
-			launcherPath:  *launcherPathFlag,
-			parentPid:     *parentPidFlag,
-		}))
+}
+
+func isRevokedDialError(resp *http.Response, err error) bool {
+	if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		return true
 	}
-	if *updateEndFlag {
-		updateEndInfo = &updateEndParams{
-			root:          *rootDirFlag,
-			fromSlot:      *fromSlotFlag,
-			expectVersion: *expectVersionFlag,
-			parentPid:     *parentPidFlag,
-			slot:          *slotFlag,
-		}
-		// --update-end boots like a normal daemon on the new slot;
-		// promote (best-effort relay hello, kill the waiter, flip
-		// active, clean old slot) runs local-first right after boot,
-		// relay or not — see doUpdateEndPromote(server) below.
+	if err == nil {
+		return false
 	}
-	// Local fallback kill: works even with broken storage or the gateway
-	// offline (only reads daemon.pid + signals — never touches storage).
-	// Used by the user directly, not the frontend.
-	if *stopFlag {
-		if err := stopDaemonFromPidFile(dataDir); err != nil {
-			fmt.Printf("Stop failed: %v\n", err)
-			os.Exit(1)
-		}
-		os.Exit(0)
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "401") || strings.Contains(msg, "403") || strings.Contains(msg, "revoked")
+}
+
+// ---- root runtime plumbing (config/pair/pid, mirrors v1) ----
+
+func defaultDataDir() string {
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "indirect-code")
 	}
-
-	configPath := *configFlag
-	if configPath == "" {
-		configPath = filepath.Join(dataDir, "config.json")
+	home, _ := os.UserHomeDir()
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "indirect-code")
+	case "windows":
+		if app := os.Getenv("APPDATA"); app != "" {
+			return filepath.Join(app, "indirect-code")
+		}
+		return filepath.Join(home, ".indirect-code")
+	default:
+		return filepath.Join(home, ".local", "share", "indirect-code")
 	}
+}
 
-	server := &DaemonServer{
-		configPath: configPath,
-		dataDir:    dataDir,
-		sessions:   make(map[string]*ActiveSession),
+func (r *root) rootDir() string {
+	if filepath.Base(filepath.Dir(r.dataDir)) == "slots" {
+		return filepath.Dir(filepath.Dir(r.dataDir))
 	}
-	// external/ (python, unish) lives at the root, next to slots/.
-	server.sharedDir = filepath.Join(server.rootDir(), "external")
+	return r.dataDir
+}
 
-	// If -connect was explicitly passed, ALWAYS perform pairing to the new link (disconnects from old gateway)
-	if *connectFlag != "" {
-		_ = server.loadConfig()
-		fmt.Println("Pairing ...")
-		if err := server.performPairing(*connectFlag, *nameFlag); err != nil {
-			fmt.Printf("Error: pairing failed (%v).\nSee logs/daemon.log for details.\n", err)
-			os.Exit(1)
-		}
-	} else if err := server.loadConfig(); err != nil || server.config == nil {
-		// No existing config and no -connect flag -> prompt interactively
-		fmt.Println("No pairing found. In the gateway dashboard (#/code), click 'Connect Host'")
-		fmt.Println("and paste the connection URL below:")
-		fmt.Print("\nConnection URL: ")
+func (r *root) loadConfig() error {
+	cfg, err := loadDaemonConfig(r.configPathDir())
+	if err != nil {
+		return err
+	}
+	r.cfg.store(cfg)
+	return nil
+}
 
-		var pairURL string
-		scanner := bufio.NewScanner(os.Stdin)
-		if scanner.Scan() {
-			pairURL = strings.TrimSpace(scanner.Text())
-		}
+func (r *root) configPathDir() string {
+	if r.configPath != "" {
+		return filepath.Dir(r.configPath)
+	}
+	return r.dataDir
+}
 
-		if pairURL == "" {
-			fmt.Println("Error: connection URL is required.")
-			os.Exit(1)
-		}
-
-		if err := server.performPairing(pairURL, *nameFlag); err != nil {
-			fmt.Printf("Error: pairing failed (%v).\nSee logs/daemon.log for details.\n", err)
-			os.Exit(1)
-		}
+func (r *root) performPairing(connectURL, hostName string) error {
+	u, err := url.Parse(strings.TrimSpace(connectURL))
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	hostname, _ := os.Hostname()
+	if hostName == "" {
+		hostName = hostname
+	}
+	pairReq := map[string]string{"name": hostName, "hostname": hostname, "os": runtime.GOOS, "arch": runtime.GOARCH}
+	if cfg := r.cfg.load(); cfg != nil && cfg.HostID != "" && cfg.DaemonToken != "" {
+		pairReq["hostId"] = cfg.HostID
+		pairReq["daemonToken"] = cfg.DaemonToken
+	}
+	reqBody, _ := json.Marshal(pairReq)
+	resp, err := http.Post(u.String(), "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("pairing request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("pairing failed (status %d): %s", resp.StatusCode, string(b))
+	}
+	var result struct {
+		Success     bool   `json:"success"`
+		HostID      string `json:"hostId"`
+		DaemonToken string `json:"daemonToken"`
+		APIKey      string `json:"apiKey"`
+		GatewayURL  string `json:"gatewayUrl"`
+		Reused      bool   `json:"reused"`
+		Error       string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+	if !result.Success {
+		return fmt.Errorf("pairing unsuccessful: %s", result.Error)
+	}
+	cfg := r.cfg.load()
+	if cfg == nil {
+		cfg = &DaemonConfig{Settings: HarnessSettings{AutoCompactThreshold: 95, RespectGitignore: true, ToolRender: "box", Reasoning: "medium", Temperature: 0.7}}
 	} else {
-		fmt.Printf("Ready - host '%s' connected.\n", server.config.Name)
+		cp := *cfg
+		cfg = &cp
 	}
-
-	// Python check: managed copy in <root>/external -> PATH ->
-	// standalone download (astral-sh/python-build-standalone). Failure only
-	// DISABLES the python tool — startup continues.
-	if bin, err := tools.EnsurePython(server.sharedDir); err != nil {
-		// python unavailable: tool disabled (silent; visible in the dashboard).
-		tools.SetPythonOverride("", err)
-	} else {
-		// python ready (silent; visible in the dashboard).
-		tools.SetPythonOverride(bin, nil)
+	cfg.GatewayURL = result.GatewayURL
+	cfg.DaemonToken = result.DaemonToken
+	cfg.APIKey = result.APIKey
+	cfg.HostID = result.HostID
+	cfg.Name = hostName
+	r.cfg.store(cfg)
+	if err := saveDaemonConfig(r.configPathDir(), cfg); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
 	}
+	fmt.Printf("Paired - host %s ready.\n", result.HostID)
+	if result.Reused {
+		fmt.Println("Reused existing host registration.")
+	}
+	return nil
+}
 
-	// Terminal check BEFORE anything else: unix probes bash -> managed
-	// unish (auto-downloaded from the unish releases) -> zsh -> sh,
-	// Windows requires unish. No usable shell = refuse to start, since
-	// every turn depends on terminal commands.
-	if err := tools.EnsureShell(server.sharedDir); err != nil {
-		// No shell, but a valid python exists: the daemon still starts —
-		// the bash tool stays advertised but refuses with "unavailable"
-		// when used, while the python tool works normally. Only when
-		// NEITHER shell NOR python works does the daemon refuse to start.
-		if bin, perr := tools.PythonAvailable(); perr == nil && bin != "" {
-			fmt.Printf("Warning: no shell available (%v); bash tool disabled, python tool active.\n", err)
-		} else {
-			fmt.Printf("Error: no usable shell or python (%v).\n", err)
-			os.Exit(1)
+func stopDaemonFromPidFile(dataDir string) error {
+	data, err := os.ReadFile(filepath.Join(dataDir, "daemon.pid"))
+	if err != nil {
+		return fmt.Errorf("no running daemon found: %w", err)
+	}
+	var pid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil || pid <= 0 {
+		return fmt.Errorf("invalid pid file")
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(syscall.SIGTERM)
+}
+
+func (r *root) writePidFile() {
+	_ = os.WriteFile(filepath.Join(r.dataDir, "daemon.pid"), []byte(fmt.Sprintf("%d", os.Getpid())), 0o600)
+}
+
+func (r *root) removePidFile() {
+	_ = os.Remove(filepath.Join(r.dataDir, "daemon.pid"))
+}
+
+func (r *root) shutdown(reason string) {
+	fmt.Println("[SHUTDOWN]", reason)
+	// Ordered, awaited shutdown: session commits (commitWAL per resident)
+	// complete BEFORE the process exits. Each stage has a deadline; a
+	// wedged actor delays exit but never skips the commit attempt.
+	r.projects.control <- shutdownMsg{}
+	r.bgSup.control <- shutdownMsg{}
+	r.sessionSup.control <- shutdownMsg{}
+	waitActors("sessions", 45*time.Second, r.sessionSupDone())
+	// WS last: completion snapshots must still flush to the socket.
+	r.ws.control <- shutdownMsg{}
+	r.waitWG(5 * time.Second)
+	r.removePidFile()
+	os.Exit(0)
+}
+
+// sessionSupDone collects resident Done channels at call time.
+func (r *root) sessionSupDone() []<-chan struct{} {
+	if r.sessionSup == nil {
+		return nil
+	}
+	r.sessionSup.mu.Lock()
+	defer r.sessionSup.mu.Unlock()
+	out := make([]<-chan struct{}, 0, len(r.sessionSup.resident))
+	for _, ent := range r.sessionSup.resident {
+		if ent.handle.done != nil {
+			out = append(out, ent.handle.done)
 		}
 	}
+	return out
+}
 
-	// Crashed runs leave tmp files (tmp+rename writers): sweep stale ones.
-	if n := sweepTmpOrphans(server.sessionsDir(), time.Hour); n > 0 {
-		fmt.Printf("Cleaned %d leftover temp file(s).\n", n)
+func waitActors(what string, timeout time.Duration, dones []<-chan struct{}) {
+	if len(dones) == 0 {
+		return
 	}
-	sweepTmpOrphans(dataDir, time.Hour)
-	sweepTmpOrphans(filepath.Join(server.rootDir(), "logs"), time.Hour)
-	// A previous run dying mid-turn must not brick sessions forever.
-	server.resetRunningSessions()
-	// Idle sessions idle too long (or too many residents) are dropped
-	// from RAM and reloaded on next touch — disk stays the truth.
-	server.startEvictionSweeper()
-	// Stale tmp files (crash between CreateTemp and Rename) accumulate
-	// forever without a sweep — a slow disk-full leak. Hourly, >1h old.
-	go server.sweepTmpLoop()
-	// Self-update: check on start, every 10min, and on reconnect.
-	// Stops with the process (no explicit shutdown needed).
-	updateStop := make(chan struct{})
-	defer close(updateStop)
-	go server.startUpdateLoop(updateStop)
-
-	// Track the background process so install scripts and --stop can find it.
-	server.writePidFile()
-	// Commit an update's active slot before retiring its waiter and old
-	// data. Network availability never gates the local commit.
-	if err := doUpdateEndPromote(server); err != nil {
-		fmt.Printf("[UPDATE-END] promotion failed: %v\n", err)
-		writeUpdateSignal(updateFailPath(server.rootDir()), "promote: "+err.Error())
-		os.Exit(1)
-	}
-	// Resume interrupted turns only after a candidate owns the active slot:
-	// same turn index, restored tracker, and transcript replayed from disk.
-	server.resumeInterruptedTurns()
-	// Stale update signals from a crashed update must never gate a fresh
-	// boot: the waiter/launcher own the fail/done files, a normal boot
-	// never reads them.
-	_ = os.Remove(filepath.Join(server.rootDir(), "slots", "update.fail"))
-	_ = os.Remove(filepath.Join(server.rootDir(), "slots", "update.done"))
-
-	// Graceful shutdown handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		server.gracefulShutdown("[SHUTDOWN] Exiting daemon...")
-	}()
-
-	// Reconnection loop
-	backoff := 1 * time.Second
-	for {
-		err := server.connectWebSocket()
-		if err != nil {
-			if errors.Is(err, errDaemonRevoked) {
-				server.removePidFile()
-				os.Exit(0)
-			}
-			fmt.Printf("[DISCONNECTED] %v. Retrying in %v...\n", err, backoff)
-		}
-		time.Sleep(backoff)
-		backoff *= 2
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
+	deadline := time.After(timeout)
+	for _, d := range dones {
+		select {
+		case <-d:
+		case <-deadline:
+			fmt.Printf("[WARN] shutdown: %s commit timed out\n", what)
+			return
 		}
 	}
 }
 
-// Resolve the durable prompt in both fresh and recovered turns.
-func (d *DaemonServer) turnPrompt(act *ActiveSession, promptText string, attachmentIDs []string, mode string) (string, []provider.ImageBlock) {
-	// Resolve attachments: images ride as ImageBlocks, text files are inlined
-	// as context (capped), anything else becomes a short pointer note.
-	var images []provider.ImageBlock
-	var contextParts []string
-	if len(attachmentIDs) > 0 {
-		byID := map[string]AttachmentRef{}
-		act.mu.Lock()
-		for _, a := range act.record.Attachments {
-			byID[a.ID] = a
-		}
-		act.mu.Unlock()
-		const maxInlineChars = 48 * 1024
-		for _, id := range attachmentIDs {
-			ref, ok := byID[id]
-			if !ok {
-				continue
-			}
-			data, err := os.ReadFile(ref.Path)
-			if err != nil {
-				contextParts = append(contextParts, fmt.Sprintf("[Attachment %q could not be read: %s]", ref.Name, err.Error()))
-				continue
-			}
-			mime := ref.Mime
-			if strings.HasPrefix(strings.ToLower(mime), "image/") {
-				images = append(images, provider.ImageBlock{MimeType: mime, Data: data})
-				contextParts = append(contextParts, fmt.Sprintf("[Attached image: %s]", ref.Name))
-				continue
-			}
-			// Browser-extracted text (pdf/office) wins over raw bytes.
-			if ref.TextPath != "" {
-				if tdata, err := os.ReadFile(ref.TextPath); err == nil && utf8.Valid(tdata) {
-					text := string(tdata)
-					truncated := false
-					if len([]rune(text)) > maxInlineChars {
-						text = string([]rune(text)[:maxInlineChars])
-						truncated = true
-					}
-					note := ""
-					if truncated {
-						note = fmt.Sprintf(" (truncated to %d chars)", maxInlineChars)
-					}
-					contextParts = append(contextParts, fmt.Sprintf("[Attached file: %s%s]\n%s", ref.Name, note, text))
-					continue
-				}
-			}
-			if isTextMime(mime, ref.Name) && utf8.Valid(data) {
-				text := string(data)
-				truncated := false
-				if len([]rune(text)) > maxInlineChars {
-					text = string([]rune(text)[:maxInlineChars])
-					truncated = true
-				}
-				note := ""
-				if truncated {
-					note = fmt.Sprintf(" (truncated to %d chars of %d bytes; full file at %s)", maxInlineChars, len(data), ref.Path)
-				}
-				contextParts = append(contextParts, fmt.Sprintf("[Attached file: %s%s]\n%s", ref.Name, note, text))
-				continue
-			}
-			contextParts = append(contextParts, fmt.Sprintf("[Attached binary file: %s (%d bytes, stored at %s) — use tools to inspect it]", ref.Name, len(data), ref.Path))
-		}
+// waitWG waits for the actor WaitGroup (supervisors themselves).
+func (r *root) waitWG(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() { r.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		fmt.Printf("[WARN] shutdown: actor loop exit timed out\n")
 	}
-	fullPrompt := promptText
-	if len(contextParts) > 0 {
-		fullPrompt = promptText + "\n\n" + strings.Join(contextParts, "\n\n")
-	}
-
-	act.mu.Lock()
-	sysBlock := buildTurnSystemDirectives(act.record, mode, time.Now())
-	if sysBlock != "" {
-		_ = d.saveSession(act.record)
-	}
-	act.mu.Unlock()
-
-	if sysBlock != "" {
-		if fullPrompt == "" {
-			fullPrompt = sysBlock
-		} else {
-			fullPrompt = sysBlock + "\n\n" + fullPrompt
-		}
-	}
-
-	return fullPrompt, images
 }

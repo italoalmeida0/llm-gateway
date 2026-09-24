@@ -1,317 +1,344 @@
-# Actor-model migration plan — indirect-code-daemon
+# Daemon v2 — actor-model rewrite plan (NEW PROJECT)
 
-Status: **PLAN — for review, no code changes yet.**
-Goal: replace cross-goroutine `Mutex` state sharing with actors
-(goroutine + mailbox), keeping the same external behavior (WS protocol,
-HTTP relay, disk format, WAL semantics).
+Status: **PLAN — for review, no code written yet.**
+Decision: build a **new Go project** (`indirect-code-daemon-v2/`) from scratch,
+actor-model, copying over only what survives. The v1 daemon is not migrated
+file-by-file; it stays untouched as reference + parity oracle until v2 replaces it.
 
-## 0. Context: what exists today
+## 0. Why a new project (decided)
 
-- `cmd/daemon/main.go` — `DaemonServer`, `ActiveSession`, WS dispatch
-  (`handleMessage` holds `configMu.Lock()` for the whole dispatch),
-  shutdown, truncate path.
-- `cmd/daemon/turn_run.go` — `runAgentTurn`, finalizer, `gen` guard.
-- `cmd/daemon/queue.go` — bounded FIFO (cap 30), `mutateQueue` under lock.
-- `cmd/daemon/session_wal.go` — WAL (`walWriter` + own `mu`), fused load,
-  `commitWAL` (idempotent).
-- `cmd/daemon/background.go` — `bgJobs` map under `bgMu`, `doneOnce`,
-  `WaitForAnyJob`.
-- `cmd/daemon/session_eviction.go` — idle sweep under `evictMu`.
-- Sync primitives in use: ~24 declarations (`Mutex`/`RWMutex`/`Once`/
-  `WaitGroup`/`atomic`) across 129 `.go` files; lock traffic concentrated
-  in `main.go`, `turn_run.go`, `background.go`, `packages/core/agent.go`.
+- The change is too big for in-place migration: actor rewrite + removal of
+  MCP/skills/OpenAI-provider/search-backend + frontend swarm-UI removal.
+- In-place would leave a v1/v2 Frankenstein behind flags. A new project stays
+  focused and testable in parts.
+- v1 remains runnable and is the **parity oracle**: same scripted conversation
+  on v1 and v2 must produce identical disk state + transcript.
 
-### 0.1 Known risks (audit, 2026-09-24)
+## 1. Frozen borders (v2 must be drop-in)
 
-1. `handleMessage` holds `configMu.Lock()` for the entire WS dispatch —
-   one slow message stalls all others. Fix: parse envelope lock-free,
-   lock only where config is mutated.
-2. Truncate path (`main.go` ~2271) does disk I/O (`truncateTail`)
-   while holding `sessionsMu.Lock()` + `act.mu.Lock()` — a disk stall
-   freezes every session lookup. Fix: snapshot under lock, I/O after unlock.
-3. `gracefulShutdown` does per-session `commitWAL`/`saveSession` (disk)
-   while holding `sessionsMu` + each `act.mu`. Fix: parallel per-session
-   commit with `WaitGroup` + timeout, no global lock held during I/O.
+These do **NOT** change, so the frontend and gateway never notice the swap:
 
-These three fixes are **Phase 0** (cheap, no actor needed) and should land
-before or alongside the pilot.
+1. **WS protocol** (`web/src/indirect-code/daemon-protocol.ts`): same message
+   names, same envelopes. Removed domains (mcp, skills, swarm, search) simply
+   stop having backend handlers — see §2.
+2. **Disk format**: `sessions/<id>.jsonl`, `<id>.wal.jsonl`, `projects.json`,
+   `config.json`, bg `.log` layout — byte-compatible, so an existing data dir
+   opens in v2 with zero migration. WAL replay semantics (`loadSessionFused`)
+   are reimplemented identically.
+3. **Gateway relay** (`server/routes/relay.ts`): untouched; it only forwards
+   bytes keyed by `hostId`.
 
-## 1. Target architecture
+## 2. Cuts — removed before/with v2 (decided, real removal, no flags)
+
+| Area | Cut |
+|---|---|
+| `packages/mcp` + `mcp_runtime.go` + `syncMCP` + `getMCPStatus` | delete entirely (never used, no legacy) |
+| skills (agent skills wiring) | delete entirely |
+| OpenAI provider path in daemon (`packages/provider/openai*.go`, openai clamp) | delete; daemon speaks **Anthropic-native only** (gateway translates) |
+| search backend (`search_sessions` handler + endpoint) | delete handler; frontend keeps the UI component inert (renders, does nothing) |
+| agent-swarm frontend UI | remove component |
+| `history_page` stays, but served from RAM/cache (§6), not fresh disk scan per request | rework, not removal |
+
+Anything referencing the above (docs, tests, fixture bundles) is deleted or
+updated in the same commit — no dead code left behind.
+
+## 3. Target architecture (v2)
 
 ```
 root supervisor
 ├── session supervisor ── session actor × N
 ├── bg supervisor ── job (goroutine + done msg, NOT a full actor)
 ├── ws actor (writer, chan outbound cap ~256)
+├── projects actor (owner of projects.json)
 └── config (atomic.Pointer[Config], copy-on-write — NOT an actor)
 ```
 
-### 1.1 Why this shape (decisions already taken)
+### 3.1 Component roles
 
-- **Job is not an actor and has no watchdog.** A bg job is an OS process
-  (bash/python) + a `.log` file. If the process is running, it's running;
-  if it exited, `cmd.Wait()` reaps it and a `jobExited` message fires.
-  There is no goroutine to wedge and no mailbox to flood, so there is
-  nothing for a watchdog to observe. The only liveness question is "did
-  the exit notice get lost?", and that is answered structurally: the
-  waiter goroutine sends `jobExited` on a channel the bg supervisor
-  always receives (control lane), so a lost notice is impossible by
-  construction. What gets watched is the **bg supervisor** (a real actor,
-  §4).
-- **WS actor IS a real actor** (goroutine + `chan outbound`), so it gets a
-  watchdog like any other actor (§4). **Config is NOT an actor** — it is an
-  `atomic.Pointer[Config]` (copy-on-write): lock-free reads, pointer swap
-  on write. No goroutine, no mailbox, no watchdog; there is nothing to
-  wedge. A torn-read is impossible by construction (pointer swap is atomic).
-- **The actor never blocks its mailbox.** "Paused" is a value in the
-  `state` field (`awaitingApproval`), not a blocked goroutine. While
-  waiting for a human, the actor keeps processing: transcript chunks flow
-  to the frontend, `cancelTurn` is served immediately, watchdog pings
-  are answered.
-- **Bounded mailboxes + separate control lane** (no unbounded channel).
-  Go has no native unbounded chan; hand-rolled ones hide a lock and,
-  worse, hide backpressure — a flood looks healthy to the watchdog until
-  OOM kills the whole process. Instead: `inbox` (data, bounded, explicit
-  busy/drop policy) + `control` (cancel/timeout/watchdog/shutdown, small
-  cap, always accepted).
+- **Root supervisor**: starts/stops/restarts the 4 actors. Owns shutdown
+  (`WaitGroup` + per-child deadline; logs which child didn't answer — no
+  infinite wait). Watched from **outside** the process (systemd/docker/launchd
+  + health endpoint reporting "all supervisors answered last ping round?").
+- **Session supervisor**: owns `map[id]inbox`. Spawn-on-demand (disk/WAL
+  replay if absent), `passivate` on eviction, watchdog pings (§5), `shutdown`.
+- **Session actor** (1 per session): owns `record`, `Status`, `gen` (local
+  sequence number), `wal`, `Queue` (cap 30), pending approval/question state.
+  Turn runs in a **worker-daughter goroutine** (current `runAgentTurn` shape,
+  minus MCP/skills); state mutations return as inbox messages. Mailbox is
+  dual-lane: `inbox` (data, bounded cap 64–128, explicit busy/drop policy)
+  + `control` (cancel/timeout/watchdog/shutdown, cap 8, always accepted).
+- **BG supervisor** (real actor): owns `map[jobID]handle`. Serves `bgStart`,
+  `bgList` (snapshot copy), `bgCancel`, `bgRead`, `jobExited`; forwards
+  `bgJobFinished` to the owning session actor; serves **sleep/wake** (§4).
+- **Job** (NOT an actor, no watchdog): OS process (bash/python) + `.log`.
+  A waiter goroutine sends exactly one `jobExited` on the supervisor's
+  control lane. Crash-safety for jobs: §5.3 (never re-run, preserve logs,
+  re-adopt via pidfile).
+- **WS actor** (real actor): single writer goroutine, `chan outbound`
+  cap ~256. Slow client → drop + counter, never stalls sessions.
+  Emergency fatal-path write keeps a tiny mutex outside the actor.
+- **Projects actor** (real actor, ~100 lines): sole owner of `projects.json`.
+  Messages: `create`, `delete` (cascade-purge sessions inside), `get`,
+  `setCollapsed`. Eliminates today's file-level lost-update
+  (read-modify-write with no lock).
+- **Config** (NOT an actor, no watchdog): `atomic.Pointer[Config]`,
+  copy-on-write. Lock-free reads on the hot path; writer swaps pointer.
 
-### 1.2 Where mutex survives (and why)
+### 3.2 What is copied from v1 (adapted) vs written new
 
-| Lock | Lives where | Why it stays |
+- **Copy + adapt**: `SessionRecord` types, WAL format + fused-load logic,
+  `packages/provider/anthropic.go`, agent turn loop (`packages/core/agent.go`
+  minus MCP/skills), `packages/filetrack`, `packages/ignore`, file tools,
+  queue/compact/fork/title/question/convert **logic** (locks removed, state
+  transitions become messages).
+- **New**: all actors, `Envelope` protocol, state machine (§7), watchdog (§5),
+  15-min timers (§8), LRU/TTL session cache (§6), pidfile job recovery (§5.3).
+- **Not copied**: §2 cuts.
+
+### 3.3 Remaining locks (small, never cross actors)
+
+| Lock | Where | Why |
 |---|---|---|
-| WAL `walWriter.mu` | inside session actor's worker | append to shared `bufio.Writer` + file offset; microsecond critical section, buffer copy only, no blocking I/O inside |
-| WS emergency write | root/shutdown path | socket is a physical shared resource; actor is the normal owner, a small mutex covers fatal paths outside the actor |
-| MCP client, filetrack internals | inside those packages | library-boundary invariants; actors don't cross library borders |
-| `sync.Once` (job `done`), `WaitGroup` (shutdown), `atomic.*` (flags, config pointer, counters) | various | not state locks; non-blocking, no deadlock cycles |
+| WAL `walWriter.mu` | inside session worker | shared `bufio.Writer` + file offset; buffer-copy only, no blocking I/O inside |
+| WS emergency write mutex | root fatal path | socket is physical shared resource; actor is normal owner |
+| `sync.Once` (job `done`), `WaitGroup` (shutdown), `atomic.*` | various | non-blocking primitives, no wait cycles |
+| filetrack internals | inside package | library-boundary invariant |
 
-Rule: **no lock spans two actors.** Every remaining lock lives inside one
-box of the diagram. No shared lock ⇒ no wait cycle ⇒ no deadlock by
-construction (today safety depends on acquisition-order discipline).
+Rule: **no lock spans two actors** → no wait cycle → no deadlock by topology
+(today safety = acquisition-order discipline).
 
-## 2. Message protocol
+## 4. Sleep/wake via bg-supervisor push (decided: option 1, push)
 
-### 2.1 Envelope
+v1 semantic preserved: `sleep(secs)` wakes **early** when any bg job of the
+session finishes — the model must not sleep pointlessly.
+
+- The turn worker executing `sleep` waits with `select` on
+  `time.After(remaining)` vs a per-sleep channel the **bg supervisor** pushes
+  `jobFinished{jobID}` onto (subscribed at sleep start, unsubscribed at end).
+- No 500 ms polling of a locked map. `RecentBgFinish`-style freshness (60 s
+  grace: a job that finished *just before* sleep started still wakes it) is
+  kept: supervisor checks `finishedSince{sessionID, ts}` at subscribe time.
+- Pure timeout fallback if the supervisor is unreachable (bounded wait, never
+  infinite).
+
+## 5. Crash-safety: watchdog kill == process crash (decided)
+
+**Every actor must be safe against force-kill at any point.** A watchdog kill
+is handled exactly like "the process died and came back": replay + resume,
+never half-state.
+
+### 5.1 Session actor killed
+
+- Supervisor re-spawns → replay disk + WAL (`loadSessionFused` semantics).
+- Died with turn `running` + valid WAL → **resume from WAL** (same as v1 boot
+  `resumeTurn`), not discard. Work is preserved.
+- Died in `awaitingApproval/Question` → back to the same state; the 15-min
+  deadline is **persisted** (`deadlineUnix` in record/WAL), so respawn
+  recomputes the *remainder* — restart never bypasses the timeout (§8).
+- Commit-WAL failure: internal retry with backoff (3x, as v1), then stay
+  `running`-with-WAL (v1 semantic kept); next boot/respawn resumes. Never
+  silently mark idle on failed commit.
+
+### 5.2 Supervisors / WS actor killed
+
+- Session supervisor: rebuilds `map[id]inbox` on demand (spawn-on-lookup +
+  disk/WAL replay). Nothing persisted to lose.
+- BG supervisor: rebuilds by **scanning pidfiles** (§5.3), re-attaching
+  waiters to live processes.
+- WS actor: reopens `outbound`; in-flight messages during restart are dropped
+  + counted; clients re-pull snapshots via existing `{type:"pull"}`.
+
+### 5.3 BG jobs: NEVER re-run after a kill (decided)
+
+Rationale: a kill can't know what the job was doing — re-running a half-done
+`rm -rf`, migration, or deploy causes side effects. So:
+
+- **No re-execution, ever.** A killed-while-running job is marked
+  `orphaned` (or `finished` if the process actually exited).
+- **Logs + state preserved**: `.log` file stays readable; job row keeps
+  `status/exitCode/finishedAt`.
+- **Recoverable re-adoption via pidfile**: each started job writes a pidfile
+  `{jobID, pid, logPath, sessionID, startedAt}` (same dir as logs). On bg
+  supervisor (re)start it scans pidfiles: pid alive → re-attach a waiter
+  (poll `pidAlive`, since the original `cmd.Process` handle died with the
+  supervisor) and keep the job `running`; pid dead → finalize the row from
+  the `.log` tail (exit unknown → `orphaned`, log intact).
+- The OS process keeps running across a supervisor kill (child of the daemon
+  process, not of the goroutine) — re-adoption, not restart, is the mechanism.
+
+### 5.4 Watchdog coverage (only actors are watched)
+
+| Component | Actor? | Watched by | Signal |
+|---|---|---|---|
+| Session actor | yes | session supervisor | ping → `{alive, lastProgress, stateName}`; 3-level policy (§5.5) |
+| Session supervisor | yes | root | `{alive, children, queueDepth}` |
+| BG supervisor | yes | root | `{alive, jobs, queueDepth}` |
+| WS actor | yes | root | `{alive, queueDepth, dropCounter}` |
+| Projects actor | yes | root | `{alive, queueDepth}` (light, same as other infra actors) |
+| BG job | no | — | structural exit notice; §5.3 |
+| Config | no | — | atomic swap; nothing to wedge |
+| Root | top | outside (process manager + health) | — |
+
+### 5.5 Session watchdog policy (3 levels)
+
+- **No reply to ping** → goroutine wedged: kill + respawn (§5.1).
+- **Alive, stale `lastProgress`, `state==awaiting*`** → normal (human may take
+  hours; §8 timer bounds it).
+- **Alive, stale `lastProgress`, `state==running`** → wedged turn: first
+  `cancel()` worker ctx; kill actor only if it ignores cancellation.
+
+## 6. Session RAM: LRU + TTL (decided)
+
+`session_eviction.go`'s idle sweep becomes supervisor-owned passivation:
+
+- **Never-used session**: not in RAM. A read (`history_page`, `session_data`)
+  loads from disk, serves, and keeps it in an LRU with **TTL 1 min**.
+- **`user_prompt` arrives** → session active; TTL suspended while the turn
+  runs (incl. `awaiting*` — a human-pending turn is active, bounded by §8).
+- **Turn truly ends** (`idle` + queue empty) → back to LRU with
+  **TTL 30 min** (decided).
+- **Eviction** = `passivate`: `commitWAL`, close WAL, drop from RAM. Next
+  message re-spawns transparently (disk/WAL replay).
+
+### 6.1 Capacity (decided by reviewer: memory-based, not fixed count)
+
+Not a fixed "10 sessions". The supervisor enforces a **memory budget**:
+
+- Each resident session reports an estimated footprint
+  (`len(messages)` bytes + attachments + WAL buffer — cheap heuristic,
+  refined with real numbers in testing).
+- Budget default: **512 MB** resident sessions (tunable via env/config).
+- Over budget → evict oldest-idle first (LRU), regardless of TTL.
+- Safety valve: if a *single* session exceeds the budget, it is NOT evicted
+  mid-turn (turns are never killed for memory); the supervisor logs + counts,
+  eviction applies to idle residents first.
+- Hard cap fallback: max 64 resident actors (prevents fd/goroutine sprawl if
+  the heuristic undercounts). Both numbers tunable; first load test calibrates.
+
+## 7. Message protocol (session actor)
+
+### 7.1 Envelope
 
 ```go
 type Envelope struct {
     SessionID string
-    Payload   any      // one of the message types below
+    Payload   any      // one of §7.2/7.3
     Reply     chan any // nil = fire-and-forget
 }
 ```
 
-- Callers that need a response use `Reply` with `select + timeout`
-  (e.g. `select { case r := <-reply: ...; case <-time.After(5*time.Second): busy }`).
-  A dead actor surfaces as a timeout (logged + metric), never as a hung caller.
-- Producers use non-blocking send on `inbox` (`select/default` → busy/drop
-  policy per type, §2.4). Control lane is always accepted.
+- `Reply` always with `select + timeout` (5 s): dead actor → timeout
+  (logged + metric), never a hung caller.
+- Producers use non-blocking send on `inbox` (`select/default` → §7.5).
+  Control lane always accepted.
 
-### 2.2 Session actor — mailbox messages
-
-**Data lane (`inbox`, cap 64–128):**
+### 7.2 Data lane (`inbox`, cap 64–128)
 
 | Message | From | Effect |
 |---|---|---|
-| `userPrompt{text, attachments, model}` | ws dispatch | if `state==running` → append to `Queue` (cap 30, else `queue_full` error); else start turn worker |
-| `queueOp{op, ...}` | ws dispatch | add/remove/reorder/clear — served only when it doesn't disturb a running turn |
-| `transcriptChunk{delta}` | turn worker | forward to ws actor (even while `awaitingApproval`) |
-| `toolResult{id, payload}` | turn worker | feed back into the turn's pending tool batch |
-| `approvalResponse{id, decision}` | ws dispatch | if `id != state.id` → drop (stale); else resume turn worker |
-| `questionResponse{id, answers}` | ws dispatch | same correlation as approval |
-| `bgJobFinished{jobID, exit}` | bg supervisor | fold notice into transcript; wake `sleep`-ing turn if it waits on this job |
-| `stateTimeout{id}` | self (AfterFunc) | §3 — question → resume with recommended; approval → cancel turn |
-| `editRegenerate{keep, ...}` / `forkReq{...}` | ws dispatch | bump local `gen`, cancel worker ctx, truncate, start new turn |
-| `tickFlush` | self timer | flush WAL buffer |
+| `userPrompt{text, attachments, model}` | ws dispatch | `running` → `Queue` (cap 30 else `queue_full`); else start worker |
+| `queueOp{op, ...}` | ws dispatch | only when not disturbing a running turn |
+| `transcriptChunk{delta}` | worker | → ws actor (even in `awaiting*`) |
+| `toolResult{id, payload}` | worker | into pending tool batch |
+| `approvalResponse{id, decision}` | ws dispatch | `id != state.id` → drop; else resume worker |
+| `questionResponse{id, answers}` | ws dispatch | same correlation |
+| `bgJobFinished{jobID, exit}` | bg supervisor | fold into transcript; wake sleeping worker (§4) |
+| `stateTimeout{id}` | self (AfterFunc) | §8 |
+| `editRegenerate{keep,...}` / `forkReq{...}` | ws dispatch | **only in `idle`** (simpler than v1's branches); `gen++`, cancel ctx, truncate, new turn |
+| `readReq{what, reply}` | ws dispatch | `history_page`/`session_data` served from actor RAM (§6); loads from disk only if passivated |
+| `tickFlush` | self timer | WAL buffer flush |
 
-**Control lane (`control`, cap 8, always accepted):**
+### 7.3 Control lane (`control`, cap 8)
 
-| Message | From | Effect |
-|---|---|---|
-| `cancelTurn{reason}` | ws dispatch | `cancel()` worker ctx, `state=idle`, discard `awaiting*` |
-| `watchdogPing{reply}` | session supervisor | reply `{alive, lastProgress, stateName}` immediately |
-| `passivate` | session supervisor | `commitWAL`, close WAL, terminate goroutine (state persists on disk) |
-| `shutdown` | root via supervisors | `commitWAL`, terminate |
+`cancelTurn`, `watchdogPing{reply}`, `passivate`, `shutdown` — as before.
 
-### 2.3 Session actor — state machine
+### 7.4 State machine
 
 ```
-idle ──userPrompt──▶ running ──needsApproval──▶ awaitingApproval{id, timer15m}
+idle ──userPrompt──▶ running ──needsApproval──▶ awaitingApproval{id, deadline}
  │                      │  ▲                          │ response(id ok) / timeout(question)
  │                      │  │                          ▼
- │                      │  └──── resume ──── running (question: inject recommended + notice)
+ │                      │  └──── resume ──── running (question: recommended + notice)
  │                      │                              (approval timeout: ──▶ idle + notice, queue intact)
  │                      ▼
- │                   cancelling ──worker exits──▶ idle ──queue non-empty──▶ running (promote head)
- └──edit/fork──▶ (gen++, cancel, truncate) ──▶ idle/running
+ │                   cancelling ──worker exits──▶ idle ──queue non-empty──▶ running
+ └──edit/fork (idle only)──▶ (gen++, truncate) ──▶ idle/running
 ```
 
-- `gen` becomes a **local sequence number** (no lock to guard): every new
-  turn bumps it; worker callbacks carry `myGen`; mismatch → no-op.
-  Stale `approvalResponse`/`stateTimeout` (wrong `id`) → dropped.
-- Only the finalizer path (`running→idle`) promotes the queue head —
-  same invariant as today, now enforced by single ownership instead of lock.
+- `gen` = local sequence number; worker callbacks carry `myGen`; mismatch →
+  no-op. Stale responses/timeouts (wrong `id`) → dropped.
+- Only the finalizer (`running→idle`) promotes the queue head.
 
-### 2.4 Backpressure policy (mailbox full)
+### 7.5 Backpressure (mailbox full)
 
-| Message class | Policy |
+| Class | Policy |
 |---|---|
-| `userPrompt`, `queueOp` | reply `busy, try again` — honest backpressure to the client |
-| `transcriptChunk` | must not happen (producer is our own worker); counter + log, investigate as bug |
-| `control` lane | never dropped — separate channel, always received |
-| ws actor `outbound` full | drop + counter (slow client must not stall sessions) |
+| `userPrompt`, `queueOp` | `busy, try again` |
+| `transcriptChunk` | impossible by construction (own worker); counter + log as bug signal |
+| `control` lane | never dropped |
+| ws `outbound` full | drop + counter |
 
-### 2.5 Other actors' protocols
+## 8. Timeout semantics (decided: 15 min per request, persisted deadline)
 
-- **Session supervisor:** owns `map[id]chan Envelope`. Handles
-  `route{sessionID, env}` (spawn-on-demand + replay disk/WAL if absent),
-  `tickEvict` (idle → `passivate`), `heartbeat` collection, `shutdown`.
-- **BG supervisor:** a real actor (goroutine + mailbox) owning
-  `map[jobID]handle`. Handles `bgStart`, `bgList` (reply with snapshot
-  copy), `bgCancel{id}`, `bgRead{id}`, `jobExited{id}`. Forwards
-  `bgJobFinished` to the owning session actor's inbox. Watched by root (§4).
-- **WS actor:** a real actor (goroutine + `chan outbound` cap ~256).
-  Handles `send{msg}`, `broadcast{collection-ping}`,
-  `closeAndReplace{conn}`. Emits nothing back except drop counters.
-  Watched by root (§4).
-- **Config:** NOT an actor. No goroutine, no mailbox, no watchdog. Readers
-  `cfg := configPtr.Load()`; writers build a new `Config` value and
-  `configPtr.Store(&new)`.
-
-## 3. Timeout semantics (decided: 15 min per request)
-
-- Timer is armed on entering `awaitingApproval`/`awaitingQuestion` via
-  `time.AfterFunc(15min, func(){ inbox <- stateTimeout{id} })` and stopped
-  on leaving the state. Timeout is a normal message: whoever reaches the
-  mailbox first (response or timeout) wins; the loser finds a mismatched
-  `id` and is dropped. No race between "answer arrived" and "timer fired".
-- **Question unanswered in 15 min:** inject `recommended` answers,
-  resume the turn, emit a system transcript notice:
+- Armed on entering `awaiting*` via `time.AfterFunc(15min, inbox <- stateTimeout{id})`,
+  stopped on exit. Mailbox order decides response-vs-timeout; loser finds id
+  mismatch → dropped.
+- **Deadline persisted** (`deadlineUnix` in record/WAL): respawn recomputes
+  remainder — restart never bypasses the timeout.
+- **Question unanswered**: inject `recommended` (payload must carry
+  `recommendedIndices`; fallback TBD if absent — abort turn vs first option,
+  see §10.3), resume turn, system notice:
   `"User didn't respond in 15min — proceeding with recommended."`
-  Queue untouched, turn continues.
-- **Tool approval unanswered in 15 min:** cancel the turn (`cancel()` worker
-  ctx, `state=idle`), emit a system transcript notice:
-  `"Approval timed out after 15min — turn cancelled."`
-  Queue **intact** — next user message or queue promotion starts a fresh turn.
-  Local `gen++`, so a late approval is discarded by id mismatch.
-- Timeout is **per request, not per turn**: three approvals answered at
-  14 min each legitimately extend the turn to 42 min — that is progress,
-  not stall.
+- **Approval unanswered**: cancel turn (`cancel()` ctx, `state=idle`, `gen++`),
+  system notice: `"Approval timed out after 15min — turn cancelled."`
+  Queue **intact**.
+- Per-request, not per-turn: three approvals answered at 14 min each = 42-min
+  turn (progress, not stall).
 
-## 4. Watchdog ("tô vivo")
+## 9. Build order (v2, tested in parts)
 
-Principle: **every actor (goroutine + mailbox) is watched; anything that is
-not an actor is not watched.** That gives:
+**V2.0 cuts + skeleton.** New module `indirect-code-daemon-v2/`
+(`go.mod`, minimal deps: gorilla/websocket, go-diff, x/image, x/net only).
+Copy `SessionRecord`/disk-format code + anthropic provider + filetrack/ignore.
+Delete-list (§2) enforced from day one — nothing cut is ever copied.
+*Gate: `go build ./...`, `go test -race ./...` on copied packages.*
 
-| Component | Actor? | Watched? | How |
-|---|---|---|---|
-| Session actor | yes | yes, by session supervisor | ping → `{alive, lastProgress, stateName}` (§4.1) |
-| Session supervisor | yes | yes, by root | ping → `{alive, children, queueDepth}` (§4.2) |
-| BG supervisor | yes | yes, by root | ping → `{alive, jobs, queueDepth}` (§4.2) |
-| WS actor | yes | yes, by root | ping → `{alive, queueDepth, dropCounter}` (§4.2) |
-| BG job | no (OS process + `.log`) | no | exit notice is structural (`jobExited` on a control lane that can't be lost); nothing to wedge |
-| Config | no (`atomic.Pointer`) | no | pointer swap is atomic; nothing to wedge |
-| Root | top of chain | yes, from OUTSIDE the process | systemd/docker/launchd + health check (§4.3) |
+**V2.1 session actor + supervisor + WAL.** Envelope, dual-lane mailbox, state
+machine, WAL writer + fused load, 15-min timers, LRU/TTL cache (§6),
+watchdog §5.1/§5.5. Turn worker = adapted `runAgentTurn` (Anthropic-only,
+no MCP/skills).
+*Gate: state-machine unit tests; WAL crash tests (kill -9 mid-turn → resume);
+parity vs v1 on scripted conversations (prompt → approval → question →
+cancel → edit → fork).*
 
-### 4.1 Session actor (full 3-level watchdog)
+**V2.2 bg supervisor + jobs + sleep/wake.** pidfile write/scan/re-adopt
+(§5.3), push-wake sleep (§4), `bg_*` handlers.
+*Gate: job lifecycle tests incl. supervisor-kill → re-adopt (no re-run, log
+intact); bg e2e script green.*
 
-- Each session actor reports on `watchdogPing`: `{alive, lastProgressUnixMilli,
-  stateName}`. `lastProgress` advances on any useful message (prompt, chunk,
-  tool result, response) — not on the ping itself.
-- Supervisor policy:
-  - **No reply to ping** → goroutine wedged: kill + respawn from disk/WAL.
-  - **Alive, stale `lastProgress`, `state==awaitingApproval/Question`** →
-    normal (human may take hours; the 15-min timer in §3 bounds it anyway).
-  - **Alive, stale `lastProgress`, `state==running`** → wedged turn
-    (provider/tool silence): first `cancel()` the worker ctx; kill the actor
-    only if it ignores cancellation.
+**V2.3 ws actor + projects actor + atomic config + read path.** `readReq`
+serving `history_page`/`session_data` from RAM; projects CRUD; health endpoint.
+*Gate: full WS parity vs v1 (minus removed domains); `-race` clean.*
 
-### 4.2 Supervisors + WS actor (light watchdog)
+**V2.4 cutover.** v2 becomes the shipped daemon (build scripts + `dist/`
+release point at v2); v1 kept one release as fallback (same disk format, so
+rollback = restart with the old binary). Then v1 deleted.
+*Gate: `bun test`, `go test ./... -race`, Playwright component scripts green.*
 
-Small protocol, so a light ping suffices: `{alive, queueDepth}` (+ `jobs`
-for bg supervisor, `dropCounter` for ws actor). Root policy:
+**Rollback (all phases):** disk + WS protocol unchanged ⇒ any phase rolls back
+by running the other binary. No migration to undo.
 
-- **No reply** → actor wedged: restart it. Restarting a supervisor is cheap:
-  session supervisor rebuilds `map[id]inbox` on demand (spawn-on-lookup +
-  disk/WAL replay); bg supervisor rebuilds by scanning live job handles;
-  ws actor just reopens `outbound` (in-flight messages during restart are
-  dropped + counted — clients re-pull snapshots via the existing
-  `{type:"pull"}` mechanism).
-- **Reply, `queueDepth` grows unboundedly across rounds** → actor drowning
-  (producer bug or flood): log + alert, apply backpressure policy (§2.4),
-  do NOT restart blindly (restart wouldn't fix the producer).
-- **WS `dropCounter` rising** → slow client or producer loop: log + alert.
+## 10. Open items for reviewer
 
-### 4.3 Root (watched from outside)
-
-The root has no parent inside the process. It is watched by the process
-manager (systemd / docker / launchd) plus a health endpoint that reports
-"did all supervisors answer the last ping round?". Root-internal waits
-(shutdown `WaitGroup`) all carry deadlines and log which child didn't
-answer — no infinite wait inside the process.
-
-## 5. Migration plan (phases + gates)
-
-**Phase 0 — cheap lock fixes (1–2 days, no actor).**
-P0.1 Dispatch: parse WS envelope without `configMu`; lock only on config
-mutation paths. P0.2 Truncate: snapshot needed state under lock, release,
-then do `truncateTail` I/O. P0.3 Shutdown: per-session `commitWAL` in
-parallel (`WaitGroup` + timeout), no global lock held during I/O.
-*Gate: `bun test` green, `go test ./...` green, `go test -race ./...` clean.*
-
-**Phase 1 — pilot: session actor + session supervisor (main work).**
-P1.1 Add `cmd/daemon/actor_*.go` (new files, no edits to old paths):
-envelope, session actor loop, supervisor, state machine, 15-min timers,
-dual-lane mailbox. P1.2 Adapt `runAgentTurn` into a worker: it already
-takes `ctx`; reroute its state mutations (`BeforeRequest`, `OnChange`,
-finalizer) into `inbox` messages instead of direct `act.mu` writes.
-P1.3 Dual-run flag: route a configurable subset of sessions (env var,
-default off) through the actor path; rest stay on the lock path.
-*Gate: parity tests — same scripted WS conversation on both paths produces
-identical disk state + transcript; `-race` clean; cancel/approval/eviction/
-restart-via-WAL covered.*
-
-**Phase 2 — bg supervisor + ws actor + atomic config.**
-P2.1 Move `bgJobs` map into bg supervisor; jobs report via messages.
-P2.2 WS writes through ws actor; `wsMu` shrinks to the emergency path.
-P2.3 Config behind `atomic.Pointer`.
-*Gate: same as P1 + bg e2e script
-(`scripts/test-indirect-bg-e2e.ts`) green on the actor path.*
-
-**Phase 3 — cutover + removal.**
-P3.1 Actor path becomes default; lock path behind flag for one release.
-P3.2 Delete `act.mu`, `sessionsMu`, `bgMu`, `pingMu`, `evictMu`,
-`gen`-as-lock-guard; keep WAL/`walWriter.mu`, `Once`/`WaitGroup`/`atomic`,
-library-internal locks.
-*Gate: full suite (`bun test`, `go test ./... -race`, relevant Playwright
-component scripts) green with the flag removed.*
-
-**Rollback:** every phase keeps the previous path working behind a flag
-until the next phase's gate passes. Disk format and WS protocol never
-change, so rollback is a restart with the flag flipped.
-
-## 6. Test strategy
-
-- `go test -race ./...` from `indirect-code-daemon/` on every phase
-  (today: confirm it is in CI; if not, add it in Phase 0).
-- New `actor_*_test.go`: state-machine unit tests (approval timeout →
-  idle; question timeout → recommended; stale id dropped; queue promotion
-  only via finalizer; passivate/respawn replays WAL).
-- Parity harness: scripted conversation (prompt → tool approval → question
-  → cancel → bg job → evict → restart) run against both paths; diff disk
-  state + transcript.
-- Existing gates unchanged: `bun test`, Go tests, Playwright component
-  scripts; full-stack bg e2e stays a manual gate.
-
-## 7. Open items for reviewer
-
-1. Turn worker placement: **worker-daughter goroutine** (recommended —
-   minimal rewrite of `runAgentTurn`) vs. turn inline in the actor loop.
-2. `inbox` capacity 64–128 — acceptable, or tune after first load numbers?
-3. Question payload must carry `recommendedIndices` for the timeout path —
-   confirm the provider/agent layer always supplies them (fallback if absent:
-   first option? abort turn?).
-4. Confirm 15-min values and the two notice strings (§3) are final.
+1. Worker placement confirmed: **worker-daughter goroutine** (minimal rewrite).
+   OK?
+2. `inbox` cap 64–128 — accept, or tune after first load numbers?
+3. Question-timeout fallback when `recommendedIndices` absent: first option vs
+   abort turn?
+4. Memory budget defaults (§6.1): 512 MB + 64 residents — accept?
+5. New module name: `indirect-code-daemon-v2/` or another name?
+6. Confirm the two notice strings (§8) + 15-min value final.
 
 ---
-*Written 2026-09-24. Reviewer: approve / request changes per §7 before any
-Phase 1 code is written.*
+*Rewritten 2026-09-24 from full-code read + reviewer decisions. Approve §10
+(or reply inline) before V2.0 code is written.*

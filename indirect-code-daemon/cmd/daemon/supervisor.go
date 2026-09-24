@@ -14,17 +14,23 @@ import (
 )
 
 // Session lifecycle TTLs (plan §6).
-const (
+// Session TTLs: single source of truth is tuning.go (F4).
+var (
 	// idleCacheTTL keeps a never-used (passively loaded) session in RAM.
-	idleCacheTTL = 1 * time.Minute
+	idleCacheTTL = tuneIdleTTL
 	// postTurnTTL keeps a session after its turn truly ends.
-	postTurnTTL = 30 * time.Minute
+	postTurnTTL = tunePostTurnTTL
 )
 
-// Memory budget for resident sessions (plan §6.1). Tunable.
-const (
-	sessionMemoryBudget = 512 * 1024 * 1024 // 512 MB
-	maxResidentActors   = 64
+// maxCancelRounds bounds F3 escalation: ~4 rounds x 30s ≈ 2min of an
+// ignored context before the actor quarantines itself.
+const maxCancelRounds = 4
+
+// Memory budget for resident sessions (plan §6.1). Single source of truth:
+// tuning.go (F4); vars because env overrides resolve at startup, not const.
+var (
+	sessionMemoryBudget = tuneMemBudget
+	maxResidentActors   = tuneMaxResidents
 )
 
 // routeMsg asks the supervisor for a session handle, spawning on demand.
@@ -41,6 +47,10 @@ type sessionHandle struct {
 	inbox   chan Envelope
 	control chan any
 	done    <-chan struct{}
+	// epoch identifies this incarnation. A respawned actor for the same id
+	// gets epoch+1; stale writers (orphaned passivate, late worker) carry
+	// the old epoch and are refused by epoch-guarded paths.
+	epoch int
 }
 
 // sessionSupervisor owns map[id]sessionHandle. Spawn-on-demand with
@@ -75,6 +85,7 @@ func newSessionSupervisor(dataDir string, cfg *configCell, ws *wsActor, bg *bgSu
 type residentEntry struct {
 	handle   *sessionHandle
 	idleTTL  time.Duration
+	epoch    int
 	staleRounds int
 	// workerAlive tracks whether the actor's turn goroutine was observed
 	// running (via workerDone channel). A reap that would orphan a live
@@ -95,7 +106,12 @@ func (s *sessionSupervisor) run(wg *sync.WaitGroup) {
 		select {
 		case env := <-s.inbox:
 			if rm, ok := env.Payload.(routeMsg); ok {
-				rm.Reply <- s.route(rm.SessionID, rm.ForRead)
+				// Spawn off-loop: loadSessionFused is disk I/O and must
+				// not stall eviction/watchdog/shutdown on run(). Reply
+				// ordering per caller is preserved (one reply per msg).
+				go func(rm routeMsg) {
+					rm.Reply <- s.route(rm.SessionID, rm.ForRead)
+				}(rm)
 			}
 		case msg := <-s.control:
 			switch msg.(type) {
@@ -168,10 +184,18 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 	}
 	s.mu.Unlock()
 
+	// NOTE (F1): this disk I/O runs WITHOUT s.mu held (map ops above and
+	// below are lock-only, microsecond-scale). route() blocks its CALLER
+	// during load, but never the supervisor loop — route is invoked from
+	// dispatch goroutines, not from run(). Only evict/watchdog run on the
+	// loop, and both now fan-out (see evictIdle/watchdogRound).
 	st := s.disk()
 	rec, _, err := st.loadSessionFused(id)
 	if err != nil {
 		return spawnResult{Error: err.Error()}
+	}
+	if rec.Status == stateOrphaned && !forRead {
+		return spawnResult{Error: "session quarantined: turn worker stuck (context ignored); start a new turn to recover"}
 	}
 	act := newSessionActor(id, rec, st, s.emit, s.bg, s.onEvent)
 	act.supCfg = s.cfg
@@ -200,23 +224,7 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 			rec.Status = "running"
 		}
 		rec.TurnSeq = max(rec.TurnSeq, resumeHeader.TurnIndex)
-		act.resumeSnap = &workerSnapshot{
-			gen: -1, // filled at spawn: next gen
-			jailed: rec.Jailed,
-			turnIndex:   resumeHeader.TurnIndex,
-			model:       rec.Model,
-			options:     normalizedOptions(rec.Options),
-			messages:    append([]provider.Message(nil), rec.Messages...),
-			usage:       rec.Usage,
-			compaction:  rec.Compaction,
-			context:     rec.Context,
-			attachments: append([]AttachmentRef(nil), rec.Attachments...),
-			cwd:         rec.CWD,
-			prompt:      resumeHeader.Prompt,
-			attachIDs:   append([]string(nil), resumeHeader.AttachmentIDs...),
-			incoming:    append([]filetrack.TrackedFile(nil), resumeHeader.Incoming...),
-			resume:      true,
-		}
+		act.resumeSnap = newResumeSnapshot(rec, resumeHeader)
 		// A restart never bypasses the 15-min timeout: an already-expired
 		// deadline is cleared (the resumed worker re-arms on next block);
 		// a future one is kept and enforced by the worker hooks.
@@ -257,7 +265,7 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 			"status": "running", "turn": map[string]any{"startedAt": rec.Turn.StartedAt}, "resumed": true,
 		})
 	}
-	h := &sessionHandle{inbox: act.inbox, control: act.control, done: act.done}
+	h := &sessionHandle{inbox: act.inbox, control: act.control, done: act.done, epoch: 1}
 	ttl := postTurnTTL
 	if forRead && act.state == stateIdle {
 		ttl = idleCacheTTL
@@ -303,26 +311,43 @@ func (s *sessionSupervisor) evictIdle(force bool) {
 		bytes      int64
 	}
 	now := time.Now().UnixMilli()
-	var cands []cand
-	var totalBytes int64
 	s.mu.Lock()
 	ids := make([]string, 0, len(s.resident))
 	for id := range s.resident {
 		ids = append(ids, id)
 	}
 	s.mu.Unlock()
-	reports := map[string]*watchdogReport{}
+	// F1: fan-out pings in parallel with ONE collective deadline. Sequential
+	// ping() is 2x5s worst-case per resident on the supervisor loop — with
+	// 64 residents that stalls route() (same goroutine) for minutes.
+	type res struct {
+		id  string
+		rep *watchdogReport
+	}
+	repCh := make(chan res, len(ids))
 	for _, id := range ids {
-		rep := s.ping(id)
-		if rep == nil {
-			continue // dead; watchdog round reaps it
-		}
-		reports[id] = rep
-		totalBytes += rep.ResidentBytes
-		if rep.State == stateIdle {
-			cands = append(cands, cand{id: id, lastActive: rep.LastProgress, bytes: rep.ResidentBytes})
+		go func(id string) { repCh <- res{id, s.ping(id)} }(id)
+	}
+	var cands []cand
+	var totalBytes int64
+	timeout := time.After(6 * time.Second)
+	for range ids {
+		select {
+		case r := <-repCh:
+			if r.rep == nil {
+				continue // dead; watchdog round reaps it
+			}
+			totalBytes += r.rep.ResidentBytes
+			if r.rep.State == stateIdle {
+				cands = append(cands, cand{id: r.id, lastActive: r.rep.LastProgress, bytes: r.rep.ResidentBytes})
+			}
+		case <-timeout:
+			// Collective deadline: slow actors are simply skipped this
+			// round (the watchdog, not eviction, judges liveness).
+			goto decided
 		}
 	}
+decided:
 	overBudget := totalBytes > sessionMemoryBudget
 	s.mu.Lock()
 	ttls := map[string]time.Duration{}
@@ -349,7 +374,10 @@ func (s *sessionSupervisor) evictIdle(force bool) {
 		}
 	}
 	for _, c := range cands {
-		ttl := ttls[c.id]
+		ttl, ok := ttls[c.id]
+		if !ok {
+			continue // passivated by a concurrent round
+		}
 		if force || now-c.lastActive > int64(ttl/time.Millisecond) {
 			evict = append(evict, c.id)
 		}
@@ -368,19 +396,30 @@ func (s *sessionSupervisor) passivate(id string) {
 		s.mu.Unlock()
 		return
 	}
-	delete(s.resident, id)
+	// F2: do NOT delete-then-send. The entry stays mapped while the actor
+	// drains; a concurrent route() hits the SAME handle (no double spawn,
+	// no dual WAL writer). Removal happens after done closes.
+	handle := ent.handle
 	s.mu.Unlock()
-	// Blocking send with watchdog timeout: a passivate swallowed by
-	// `default` would orphan a live actor (goroutine + open WAL) that no
-	// longer exists in the map — the exact leak class F4 calls out.
-	// Control lane is drained continuously by a live actor, so 5s only
-	// fires when it is truly wedged (then the watchdog reaps the handle,
-	// which is already gone from the map — nothing more to do).
+	// Blocking send with watchdog timeout (a `default`-swallowed passivate
+	// would orphan a live actor with an open WAL).
 	select {
-	case ent.handle.control <- passivateMsg{}:
+	case handle.control <- passivateMsg{}:
 	case <-time.After(5 * time.Second):
-		fmt.Printf("[WARN] passivate %s: control lane stuck, actor orphaned (watchdog will reap)\n", id)
+		fmt.Printf("[WARN] passivate %s: control lane stuck\n", id)
+		return // stays mapped; watchdog judges liveness, route reuses it
 	}
+	select {
+	case <-handle.done:
+	case <-time.After(15 * time.Second):
+		fmt.Printf("[WARN] passivate %s: actor did not exit, keeping mapped (no orphan, no double spawn)\n", id)
+		return
+	}
+	s.mu.Lock()
+	if cur, ok := s.resident[id]; ok && cur.handle == handle {
+		delete(s.resident, id)
+	}
+	s.mu.Unlock()
 }
 
 // ping asks one resident for its watchdog report (nil = dead).
@@ -421,14 +460,55 @@ func (s *sessionSupervisor) watchdogRound() {
 		ids = append(ids, id)
 	}
 	s.mu.Unlock()
+	type wdRes struct {
+		id  string
+		rep *watchdogReport
+	}
+	wdCh := make(chan wdRes, len(ids))
 	for _, id := range ids {
-		rep := s.ping(id)
+		go func(id string) { wdCh <- wdRes{id, s.ping(id)} }(id)
+	}
+	collected := make([]wdRes, 0, len(ids))
+	wdTimeout := time.After(6 * time.Second)
+	for range ids {
+		select {
+		case r := <-wdCh:
+			collected = append(collected, r)
+		case <-wdTimeout:
+			goto judged
+		}
+	}
+judged:
+	for _, r := range collected {
+		id, rep := r.id, r.rep
 		if rep == nil {
-			// Wedged or gone: drop the handle; next route respawns.
-			// (A truly wedged goroutine leaks — logged, unavoidable in Go.)
-			fmt.Printf("[WARN] watchdog: session %s unresponsive, reaping handle\n", id)
+			// F2: no reply does NOT mean dead — the goroutine may be wedged
+			// but alive (and holding the WAL). Deleting the handle here and
+			// spawning fresh on next route() would create the dual-writer
+			// the old code warned about. Instead: keep mapped, escalate.
+			// Only delete when done is provably closed (actor really dead).
 			s.mu.Lock()
-			delete(s.resident, id)
+			ent, ok := s.resident[id]
+			s.mu.Unlock()
+			if !ok {
+				continue
+			}
+			select {
+			case <-ent.handle.done:
+				s.mu.Lock()
+				if cur, ok := s.resident[id]; ok && cur.handle == ent.handle {
+					delete(s.resident, id)
+					fmt.Printf("[WARN] watchdog: session %s dead, handle reaped\n", id)
+				}
+				s.mu.Unlock()
+				continue
+			default:
+			}
+			fmt.Printf("[WARN] watchdog: session %s unresponsive but possibly alive, keeping mapped (no dual-writer spawn)\n", id)
+			s.mu.Lock()
+			if ent2, ok := s.resident[id]; ok && ent2.handle == ent.handle {
+				ent2.staleRounds++
+			}
 			s.mu.Unlock()
 			continue
 		}
@@ -454,21 +534,21 @@ func (s *sessionSupervisor) watchdogRound() {
 			if !ok {
 				continue
 			}
-			if ent.staleRounds == 1 {
-				select {
-				case ent.handle.control <- cancelTurnMsg{Reason: "watchdog_stale"}:
-				default:
-				}
-			} else {
-				// Never reap while the worker goroutine may still be alive:
-				// two actors sharing one WAL corrupts it. Keep cancelling
-				// and wait for the worker exit (finishTurn → idle, which
-				// clears staleness) instead of dropping the handle.
-				fmt.Printf("[WARN] watchdog: session %s still stale after cancel, re-cancelling (no reap while worker may live)\n", id)
-				select {
-				case ent.handle.control <- cancelTurnMsg{Reason: "watchdog_stale_retry"}:
-				default:
-				}
+			// F3 escalation ladder: cancel → re-cancel → quarantine.
+			// Never reap-while-alive (F2): the actor quarantines ITSELF
+			// (close WAL, mark orphaned) after maxCancelRounds, and route()
+			// refuses orphaned sessions with an explicit error.
+			reason := "watchdog_stale"
+			if ent.staleRounds > 1 {
+				reason = "watchdog_stale_retry"
+			}
+			if ent.staleRounds >= maxCancelRounds {
+				reason = "watchdog_quarantine"
+				fmt.Printf("[WARN] watchdog: session %s stuck %d rounds, quarantining\n", id, ent.staleRounds)
+			}
+			select {
+			case ent.handle.control <- cancelTurnMsg{Reason: reason}:
+			default:
 			}
 		}
 	}
@@ -550,4 +630,27 @@ func turnResumeCandidate(rec *SessionRecord, st *diskStore, id string) (*walHead
 		return nil, nil
 	}
 	return header, ww
+}
+
+// newResumeSnapshot builds the Continue-mode snapshot for a crash-resumed
+// turn. gen is assigned at spawn (act.gen+1); the sentinel is gone —
+// callers must set gen before use (route() does).
+func newResumeSnapshot(rec *SessionRecord, header *walHeader) *workerSnapshot {
+	return &workerSnapshot{
+		// gen assigned at spawn (route sets act.gen+1).
+		jailed:      rec.Jailed,
+		turnIndex:   header.TurnIndex,
+		model:       rec.Model,
+		options:     normalizedOptions(rec.Options),
+		messages:    append([]provider.Message(nil), rec.Messages...),
+		usage:       rec.Usage,
+		compaction:  rec.Compaction,
+		context:     rec.Context,
+		attachments: append([]AttachmentRef(nil), rec.Attachments...),
+		cwd:         rec.CWD,
+		prompt:      header.Prompt,
+		attachIDs:   append([]string(nil), header.AttachmentIDs...),
+		incoming:    append([]filetrack.TrackedFile(nil), header.Incoming...),
+		resume:      true,
+	}
 }

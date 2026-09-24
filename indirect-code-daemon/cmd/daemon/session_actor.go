@@ -19,7 +19,8 @@ import (
 var _ = core.StripLeadingSystemPrompt
 
 // Turn timeout: 15 min per approval/question request (plan §8).
-const awaitTimeout = 15 * time.Minute
+// Overridable via ICD_AWAIT_TIMEOUT (see tuning.go).
+var awaitTimeout = tuneAwaitTimeout
 
 // actorState names.
 const (
@@ -28,6 +29,7 @@ const (
 	stateAwaitAppr = "awaitingApproval"
 	stateAwaitQ    = "awaitingQuestion"
 	stateCancel    = "cancelling"
+	stateOrphaned  = "orphaned"
 )
 
 // pendingAsk describes one outstanding human decision.
@@ -82,6 +84,9 @@ type sessionActor struct {
 	// sendNow promotes the queue head after a cancelled turn
 	// (queue_send_now semantics: cancel + promote).
 	sendNow bool
+	// cancelRounds counts consecutive watchdog cancels without worker exit
+	// (F3 escalation → quarantine).
+	cancelRounds int
 
 	// resumeSnap, when non-nil, carries a crash-resume snapshot: after the
 	// actor loop starts, the supervisor spawns a Continue worker on the
@@ -91,7 +96,9 @@ type sessionActor struct {
 	lastProgress int64 // unix milli, for watchdog
 	residentBytes int64
 
-	// startWorker is swapped in tests; production wires the agent loop (V2.1b).
+	// startWorker runs the turn. Production: defaultStartWorker (agent loop).
+	// Tests use newTestActor (test-only constructor below) to substitute a
+	// stub. The field is set once at construction, never reassigned.
 	startWorker func(act *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string)
 }
 
@@ -364,6 +371,13 @@ func (a *sessionActor) pingChange() {
 
 func (a *sessionActor) onUserPrompt(m userPromptMsg) {
 	a.touch()
+	if a.state == stateOrphaned {
+		// F3 recovery: a fresh prompt un-quarantines (new turn, new gen,
+		// stuck worker's gen is stale so its late finish is ignored).
+		a.rec.Status = "idle"
+		a.state = stateIdle
+		a.pingChange()
+	}
 	if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
 		if len(a.rec.Queue) >= 30 {
 			m.Reply <- promptResult{Error: "queue_full"}
@@ -552,6 +566,7 @@ func (a *sessionActor) onWorkerFinished(m workerFinishedMsg) {
 	if m.gen != a.gen {
 		return // stale worker
 	}
+	a.cancelRounds = 0
 	a.finishTurn(!m.cancelled && m.err == "")
 }
 
@@ -621,6 +636,10 @@ func (a *sessionActor) doCancel(reason string) {
 	if a.state == stateIdle {
 		return
 	}
+	// F3: cancelling escalation. Each watchdog cancel bumps cancelRounds;
+	// a fresh worker exit (finishTurn) resets it. Past the limit the worker
+	// is declared stuck: quarantine instead of pinning the session forever.
+	a.cancelRounds++
 	// Wake blocked workers as stale so no worker hangs forever.
 	for id, ch := range a.approvalWaiters {
 		delete(a.approvalWaiters, id)
@@ -645,6 +664,10 @@ func (a *sessionActor) doCancel(reason string) {
 		}
 	}
 	a.clearPending()
+	if reason == "watchdog_quarantine" && a.cancelRounds >= maxCancelRounds {
+		a.quarantine()
+		return
+	}
 	if a.cancel != nil {
 		a.cancel()
 		a.cancel = nil
@@ -1143,6 +1166,33 @@ func (a *sessionActor) onConvertResponse(m convertResponseMsg) {
 }
 
 // ---- passivate / shutdown ----
+
+// quarantine (F3): the worker ignores context. Close the WAL, mark the
+// record orphaned, go idle-but-refusing. route() surfaces stateOrphaned as
+// an explicit error; a fresh prompt may un-quarantine (new turn, new gen).
+func (a *sessionActor) quarantine() {
+	if a.cancel != nil {
+		a.cancel()
+		a.cancel = nil
+	}
+	for i := 0; i < 3; i++ {
+		if err := a.store.commitWAL(a.id, a.rec, a.wal); err == nil {
+			break
+		}
+		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
+	}
+	a.wal = nil
+	a.cancelRounds = 0
+	a.sendNow = false
+	a.clearPending()
+	a.rec.Status = "orphaned"
+	a.rec.UpdatedAt = time.Now().UnixMilli()
+	_ = a.store.saveSessionSync(a.rec)
+	a.state = stateOrphaned
+	a.pingChange()
+	a.emit(map[string]any{"type": "session_status", "hostId": a.hostID(), "sessionId": a.id, "status": "orphaned",
+		"error": "turn worker stuck: context ignored for ~2min; session quarantined, start a new turn to recover"})
+}
 
 func (a *sessionActor) doPassivate() {
 	a.clearPending()

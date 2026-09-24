@@ -143,8 +143,9 @@ func autoTitleFor(firstText string, client provider.Client, model string) string
 	return title
 }
 
-// convertTimeout bounds one browser-assisted conversion (v1: 60s).
-const convertTimeout = 60 * time.Second
+// convertTimeout bounds one browser-assisted conversion.
+// Overridable via ICD_CONVERT_TIMEOUT (see tuning.go).
+var convertTimeout = tuneConvertTimeout
 
 func randomConvertID() []byte {
 	id := make([]byte, 16)

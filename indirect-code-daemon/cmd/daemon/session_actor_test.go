@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func testActor(t *testing.T, rec *SessionRecord, worker func(*sessionActor, context.Context, int, string, map[string]string)) (*sessionActor, *diskStore, chan any, func()) {
+func newTestActor(t *testing.T, rec *SessionRecord, worker func(*sessionActor, context.Context, int, string, map[string]string)) (*sessionActor, *diskStore, chan any, func()) {
 	t.Helper()
 	dir := t.TempDir()
 	store := newDiskStore(dir)
@@ -28,7 +28,7 @@ func newTestRecord(id string) *SessionRecord {
 }
 
 func TestPromptStartsTurn(t *testing.T) {
-	act, _, _, stop := testActor(t, newTestRecord("s1"), nil)
+	act, _, _, stop := newTestActor(t, newTestRecord("s1"), nil)
 	defer stop()
 	reply := make(chan any, 1)
 	act.inbox <- Envelope{Payload: userPromptMsg{Text: "hi", Reply: reply}}
@@ -63,7 +63,7 @@ func TestPromptQueuesWhileRunning(t *testing.T) {
 			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen, cancelled: true}}
 		}
 	}
-	act, _, _, stop := testActor(t, newTestRecord("s2"), blockingWorker)
+	act, _, _, stop := newTestActor(t, newTestRecord("s2"), blockingWorker)
 	defer stop()
 	r1 := make(chan any, 1)
 	act.inbox <- Envelope{Payload: userPromptMsg{Text: "first", Reply: r1}}
@@ -96,7 +96,7 @@ func TestPromptQueuesWhileRunning(t *testing.T) {
 }
 
 func TestStaleWorkerIgnored(t *testing.T) {
-	act, _, _, stop := testActor(t, newTestRecord("s3"), nil)
+	act, _, _, stop := newTestActor(t, newTestRecord("s3"), nil)
 	defer stop()
 	act.inbox <- Envelope{Payload: workerFinishedMsg{gen: 999}}
 	repCh := make(chan any, 1)
@@ -124,7 +124,7 @@ func TestBgNoticeIdleStartsWakeupTurn(t *testing.T) {
 		}
 		blocking(a, ctx, gen, prompt, meta)
 	}
-	act, _, _, stop := testActor(t, newTestRecord("wake1"), capturing)
+	act, _, _, stop := newTestActor(t, newTestRecord("wake1"), capturing)
 	defer stop()
 	act.inbox <- Envelope{Payload: bgNoticeMsg{JobID: "bg_1", Text: "job done", Finished: true}}
 	deadline := time.Now().Add(3 * time.Second)
@@ -162,7 +162,7 @@ func TestBgNoticeRunningFoldsLateResult(t *testing.T) {
 			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen, cancelled: true}}
 		}
 	}
-	act, _, _, stop := testActor(t, newTestRecord("wake2"), blocking)
+	act, _, _, stop := newTestActor(t, newTestRecord("wake2"), blocking)
 	defer stop()
 	r1 := make(chan any, 1)
 	act.inbox <- Envelope{Payload: userPromptMsg{Text: "work", Reply: r1}}

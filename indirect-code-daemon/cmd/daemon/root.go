@@ -87,6 +87,7 @@ func (r *root) bootActors() {
 
 	// WS dispatch server.
 	r.server = newWSServer(r.dataDir, &r.cfg, r.sessionSup, r.bgSup, r.projects, r.admin, r.ws)
+	r.server.root = r
 	r.server.configDir = r.configPathDir()
 	r.server.onRemoteKill = r.shutdown
 

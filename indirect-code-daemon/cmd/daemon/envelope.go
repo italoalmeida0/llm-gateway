@@ -24,6 +24,11 @@ type Envelope struct {
 	SessionID string
 	Payload   any
 	Reply     chan any
+	// Epoch is the sender's spawn incarnation (0 = pre-epoch caller:
+	// always accepted). The actor drops worker mail with a mismatched
+	// epoch — a late finish from an orphaned incarnation must never
+	// commit into the respawned actor's turn (report item 1).
+	Epoch int
 }
 
 // replyWithTimeout sends env to inbox and waits for the reply (or timeout).

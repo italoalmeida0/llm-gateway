@@ -29,6 +29,7 @@ type wsServer struct {
 	projects *projectsActor
 	admin    *sessionAdmin
 	ws       *wsActor
+	root     *root
 
 	debounceMu sync.Mutex
 	debounce   map[string]*time.Timer
@@ -192,6 +193,17 @@ func (s *wsServer) dispatch(raw []byte) {
 				}
 			}
 		case <-time.After(replyTimeout):
+		}
+
+	case "health":
+		// Infra observability (report item 4): serve the root watchdog's
+		// last ping round over the existing socket. polled by dashboards,
+		// costs one message, no HTTP surface on the daemon by design.
+		if s.root != nil {
+			infra, at := s.root.healthSnapshot()
+			s.emit(map[string]any{"type": "health", "hostId": s.host(), "infra": infra, "asOf": at})
+		} else {
+			s.emit(map[string]any{"type": "health", "hostId": s.host(), "infra": map[string]any{}, "asOf": 0})
 		}
 
 	case "pull":

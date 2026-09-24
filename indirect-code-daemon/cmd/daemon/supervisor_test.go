@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"sync"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -206,4 +207,36 @@ func TestAbandonedWALDiscarded(t *testing.T) {
 	}
 	res.Control <- shutdownMsg{}
 	<-res.Done
+}
+
+func TestRouteSingleflight(t *testing.T) {
+	sup, _, _ := testSupervisor(t)
+	writeV1Session(t, sup.dataDir, "sf1", "idle", 1, 1)
+	const n = 16
+	results := make([]spawnResult, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = sup.route("sf1", false)
+		}(i)
+	}
+	wg.Wait()
+	var first spawnResult
+	for i, r := range results {
+		if r.Error != "" {
+			t.Fatalf("route %d: %s", i, r.Error)
+		}
+		if i == 0 {
+			first = r
+			continue
+		}
+		// All callers share the winner's handle (single load, single actor).
+		if r.Inbox != first.Inbox {
+			t.Fatalf("route %d got a different actor: spawn-storm", i)
+		}
+	}
+	first.Control <- shutdownMsg{}
+	<-first.Done
 }

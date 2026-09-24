@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func newTestActor(t *testing.T, rec *SessionRecord, worker func(*sessionActor, context.Context, int, string, map[string]string)) (*sessionActor, *diskStore, chan any, func()) {
+func newTestActor(t *testing.T, rec *SessionRecord, worker func(snap workerSnapshot, env workerEnv, ctx context.Context)) (*sessionActor, *diskStore, chan any, func()) {
 	t.Helper()
 	dir := t.TempDir()
 	store := newDiskStore(dir)
@@ -14,8 +14,8 @@ func newTestActor(t *testing.T, rec *SessionRecord, worker func(*sessionActor, c
 	var events []string
 	act := newSessionActor(rec.ID, rec, store, func(ev any) { wsCh <- ev }, nil, func(c string) { events = append(events, c) })
 	if worker == nil {
-		worker = func(a *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string) {
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen}}
+		worker = func(snap workerSnapshot, env workerEnv, ctx context.Context) {
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}, Epoch: snap.epoch}
 		}
 	}
 	act.startWorker = worker
@@ -55,12 +55,12 @@ func TestPromptStartsTurn(t *testing.T) {
 func TestPromptQueuesWhileRunning(t *testing.T) {
 	// Block the worker so the turn stays running.
 	release := make(chan struct{})
-	blockingWorker := func(a *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string) {
+	blockingWorker := func(snap workerSnapshot, env workerEnv, ctx context.Context) {
 		select {
 		case <-release:
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}, Epoch: snap.epoch}
 		case <-ctx.Done():
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen, cancelled: true}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: true}, Epoch: snap.epoch}
 		}
 	}
 	act, _, _, stop := newTestActor(t, newTestRecord("s2"), blockingWorker)
@@ -108,21 +108,21 @@ func TestStaleWorkerIgnored(t *testing.T) {
 
 func TestBgNoticeIdleStartsWakeupTurn(t *testing.T) {
 	release := make(chan struct{})
-	blocking := func(a *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string) {
+	blocking := func(snap workerSnapshot, env workerEnv, ctx context.Context) {
 		select {
 		case <-release:
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}, Epoch: snap.epoch}
 		case <-ctx.Done():
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen, cancelled: true}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: true}, Epoch: snap.epoch}
 		}
 	}
 	metaCh := make(chan map[string]string, 1)
-	capturing := func(a *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string) {
+	capturing := func(snap workerSnapshot, env workerEnv, ctx context.Context) {
 		select {
-		case metaCh <- meta:
+		case metaCh <- snap.promptMeta:
 		default:
 		}
-		blocking(a, ctx, gen, prompt, meta)
+		blocking(snap, env, ctx)
 	}
 	act, _, _, stop := newTestActor(t, newTestRecord("wake1"), capturing)
 	defer stop()
@@ -154,12 +154,12 @@ func TestBgNoticeIdleStartsWakeupTurn(t *testing.T) {
 
 func TestBgNoticeRunningFoldsLateResult(t *testing.T) {
 	release := make(chan struct{})
-	blocking := func(a *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string) {
+	blocking := func(snap workerSnapshot, env workerEnv, ctx context.Context) {
 		select {
 		case <-release:
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}, Epoch: snap.epoch}
 		case <-ctx.Done():
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen, cancelled: true}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: true}, Epoch: snap.epoch}
 		}
 	}
 	act, _, _, stop := newTestActor(t, newTestRecord("wake2"), blocking)
@@ -209,12 +209,12 @@ func TestConvertRoundTrip(t *testing.T) {
 		act.inbox <- Envelope{Payload: convertResponseMsg{id: msg["requestId"].(string), text: "# converted"}}
 	}
 	release := make(chan struct{})
-	act.startWorker = func(a *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string) {
+	act.startWorker = func(snap workerSnapshot, env workerEnv, ctx context.Context) {
 		select {
 		case <-release:
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}, Epoch: snap.epoch}
 		case <-ctx.Done():
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen, cancelled: true}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: true}, Epoch: snap.epoch}
 		}
 	}
 	go act.run()
@@ -245,6 +245,95 @@ func TestConvertRoundTrip(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no convert_resolved emitted")
+	}
+	close(release)
+}
+
+func TestQuarantinePath(t *testing.T) {
+	// Worker ignores ctx (stuck tool): force cancelRounds to the limit,
+	// assert orphaned + explicit refuse + fresh-prompt recovery + stale
+	// finish ignored.
+	release := make(chan struct{})
+	stuck := func(snap workerSnapshot, env workerEnv, ctx context.Context) {
+		<-release // ignores ctx.Done forever
+		env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}, Epoch: snap.epoch}
+	}
+	act, _, _, stop := newTestActor(t, newTestRecord("qz1"), stuck)
+	defer stop()
+	r1 := make(chan any, 1)
+	act.inbox <- Envelope{Payload: userPromptMsg{Text: "work", Reply: r1}}
+	if res := (<-r1).(promptResult); !res.Accepted {
+		t.Fatalf("not accepted")
+	}
+	// Drive the F3 ladder directly on the actor goroutine.
+	done := make(chan struct{})
+	act.inbox <- Envelope{Payload: hookMsg{fn: func() {
+		act.cancelRounds = maxCancelRounds
+		act.doCancel("watchdog_quarantine")
+		close(done)
+	}}}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("hook never ran")
+	}
+	repCh := make(chan any, 1)
+	act.control <- watchdogPingMsg{Reply: repCh}
+	if rep := (<-repCh).(watchdogReport); rep.State != stateOrphaned {
+		t.Fatalf("want orphaned, got %s", rep.State)
+	}
+	// Stale finish from the stuck worker (same gen, old epoch irrelevant
+	// here — gen matches but turn is gone; finishTurn on orphaned must not
+	// resurrect running).
+	act.inbox <- Envelope{Payload: workerFinishedMsg{gen: 1}, Epoch: 1}
+	time.Sleep(100 * time.Millisecond)
+	act.control <- watchdogPingMsg{Reply: repCh}
+	if rep := (<-repCh).(watchdogReport); rep.State != stateOrphaned {
+		t.Fatalf("stale finish resurrected: %s", rep.State)
+	}
+	// Fresh prompt un-quarantines and starts a turn.
+	r2 := make(chan any, 1)
+	act.inbox <- Envelope{Payload: userPromptMsg{Text: "again", Reply: r2}}
+	if res := (<-r2).(promptResult); !res.Accepted || res.Queued {
+		t.Fatalf("fresh prompt should start a turn: %+v", res)
+	}
+	close(release)
+}
+
+func TestEpochDropsStaleWorkerMail(t *testing.T) {
+	release := make(chan struct{})
+	blocking := func(snap workerSnapshot, env workerEnv, ctx context.Context) {
+		select {
+		case <-release:
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}, Epoch: 99}
+		case <-ctx.Done():
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: true}, Epoch: 99}
+		}
+	}
+	act, _, _, stop := newTestActor(t, newTestRecord("ep1"), blocking)
+	defer stop()
+	// Actor is epoch 0 in tests (no supervisor) — set epoch 1, send mail
+	// from epoch 99: must be dropped (no state change, no finish).
+	act.inbox <- Envelope{Payload: hookMsg{fn: func() { act.epoch = 1 }}}
+	done := make(chan struct{})
+	act.inbox <- Envelope{Payload: hookMsg{fn: func() { close(done) }}}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("hooks never ran")
+	}
+	r1 := make(chan any, 1)
+	act.inbox <- Envelope{Payload: userPromptMsg{Text: "work", Reply: r1}}
+	if res := (<-r1).(promptResult); !res.Accepted {
+		t.Fatalf("not accepted")
+	}
+	// Stale-epoch finish must not finish the turn.
+	act.inbox <- Envelope{Payload: workerFinishedMsg{gen: 1}, Epoch: 99}
+	time.Sleep(150 * time.Millisecond)
+	repCh := make(chan any, 1)
+	act.control <- watchdogPingMsg{Reply: repCh}
+	if rep := (<-repCh).(watchdogReport); rep.State != stateRunning {
+		t.Fatalf("stale epoch mail changed state to %s", rep.State)
 	}
 	close(release)
 }

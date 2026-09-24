@@ -41,3 +41,10 @@ func envDur(key string, def time.Duration) time.Duration {
 	}
 	return def
 }
+
+// traceEnabled gates dev-only logging (see docs/logging-plan.md).
+// Prod binaries stay clean: lifecycle + warnings only.
+var traceEnabled = func() bool {
+	v := os.Getenv("ICD_TRACE")
+	return v == "1" || v == "true" || v == "yes"
+}()

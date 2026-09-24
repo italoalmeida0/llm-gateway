@@ -467,7 +467,54 @@ implementation matches, not the choice itself.
   `SIGKILL` + WAL replay + resume offer), not just in-process.
 - Do NOT file "seam leaks to prod" unless a prod path reassigns it.
 
-### D11. Root watches infra on a loop + snapshot (F2 closed)
+### D11. Root watches infra on a loop + snapshot, served on WS (F2 closed)
+
+- Update: `healthSnapshot()` is now served on the socket
+  (`{"type":"health"}` → `{type:"health", infra, asOf}`), so dashboards can
+  poll without an HTTP surface on the daemon (by design).
+
+### D12. Epoch is enforced, not decorative (report item 1)
+
+- **DECIDED:** `Envelope.Epoch` + actor gate + `workerSnapshot.epoch` +
+  `snapshotTurn` discipline. Stale-incarnation mail is dropped; the field
+  the report called "dead code" is now the dual-writer guard. Covered by
+  `TestEpochDropsStaleWorkerMail`.
+
+### D13. Quarantine path is tested (report item 2)
+
+- **DECIDED:** `TestQuarantinePath` (stuck worker → forced ladder →
+  `orphaned` → stale finish ignored → fresh prompt recovers) plus the
+  `onWorkerFinished` orphaned-guard the test caught (late exit from a
+  quarantined worker changes nothing).
+
+### D14. Tuning vars are wired, not decorative (report item 3)
+
+- **DECIDED:** tickers + stale threshold read `tuneEvictEvery` /
+  `tuneWatchEvery`; caps/TTLs/budget/convert-timeout all resolve from
+  `tuning.go` (`ICD_*`). `ICD_*` actually takes effect now.
+
+### D15. Singleflight on cold route (report item 5)
+
+- **DECIDED:** `flightGroup` — N concurrent routes for a cold id share one
+  load + one spawn (`TestRouteSingleflight`). Documented as sufficient for
+  the current profile (1 user, few sessions); revisit if fan-out grows.
+
+### D16. Nits closed (report item 6)
+
+- Timeout-path requeue: drop + `droppedRequeue` counter (no blocking
+  goroutine, inbox-first ordering preserved).
+- `randomID8`/`randomConvertID`: fallback instead of `panic` on CSPRNG
+  failure (crash-worse-than-collision trade, logged).
+- `estimateResidentBytes`: stays a heuristic, labeled as such; calibrate
+  via perf sim before trusting `ICD_MEM_BUDGET_MB`.
+
+### D17. Prod-clean / dev-trace logging (owner decision)
+
+- **DECIDED:** prod binaries log lifecycle + warnings only. Dev tracing
+  (`ICD_TRACE=1` → `<dataDir>/trace/<date>.jsonl`, timestamps, no secrets)
+  via `trace()` (no-op when disabled) — see `docs/logging-plan.md`.
+  `trace()` is wired at actor dispatch + watchdog quarantine; fuller
+  coverage lands with the F4 bench work.
 
 - **DECIDED:** `root.watchdogLoop` (30s) pings bg/projects/ws;
   `healthSnapshot()` serves the last round. No HTTP health endpoint — the

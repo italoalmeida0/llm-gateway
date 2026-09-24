@@ -217,3 +217,30 @@ func TestWSPullSessions(t *testing.T) {
 		t.Fatalf("want 1 session, got %+v", m)
 	}
 }
+
+func TestHealthDispatch(t *testing.T) {
+	h := newWSHarness(t)
+	r := &root{}
+	r.cfg.store(&DaemonConfig{HostID: "h"})
+	h.server.root = r
+	h.cfg.store(&DaemonConfig{HostID: "h"})
+	h.send(map[string]any{"type": "health"})
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		h.mu.Lock()
+		found := false
+		for _, m := range h.sent {
+			if m["type"] == "health" {
+				found = true
+			}
+		}
+		h.mu.Unlock()
+		if found {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no health reply")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

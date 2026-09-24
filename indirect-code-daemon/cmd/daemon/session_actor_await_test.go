@@ -21,12 +21,12 @@ func TestApprovalTimeoutCancelsTurn(t *testing.T) {
 	wsCh := make(chan any, 64)
 	act := newSessionActor(rec.ID, rec, store, func(ev any) { wsCh <- ev }, nil, nil)
 	release := make(chan struct{})
-	act.startWorker = func(a *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string) {
+	act.startWorker = func(snap workerSnapshot, env workerEnv, ctx context.Context) {
 		select {
 		case <-release:
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}, Epoch: snap.epoch}
 		case <-ctx.Done():
-			a.inbox <- Envelope{Payload: workerFinishedMsg{gen: gen, cancelled: true}}
+			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: true}, Epoch: snap.epoch}
 		}
 	}
 	// startWorker assigned before run: happens-before via goroutine start.

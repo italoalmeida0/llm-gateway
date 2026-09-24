@@ -57,6 +57,40 @@ type sessionHandle struct {
 // disk/WAL replay when absent; passivate on eviction; watchdog pings.
 // Rebuilding the map is always possible (spawn-on-lookup), so a supervisor
 // restart loses nothing.
+// flightGroup dedupes concurrent cold loads for the same session id
+// (report item 5): N prompts for a cold session share ONE loadSessionFused
+// + ONE spawn instead of N loads + N-1 synchronous teardowns.
+type flightGroup struct {
+	mu      sync.Mutex
+	pending map[string]*flightCall
+}
+
+type flightCall struct {
+	done chan struct{}
+	res  spawnResult
+}
+
+func (g *flightGroup) do(id string, fn func() spawnResult) spawnResult {
+	g.mu.Lock()
+	if g.pending == nil {
+		g.pending = map[string]*flightCall{}
+	}
+	if c, ok := g.pending[id]; ok {
+		g.mu.Unlock()
+		<-c.done
+		return c.res
+	}
+	c := &flightCall{done: make(chan struct{})}
+	g.pending[id] = c
+	g.mu.Unlock()
+	c.res = fn()
+	g.mu.Lock()
+	delete(g.pending, id)
+	g.mu.Unlock()
+	close(c.done)
+	return c.res
+}
+
 type sessionSupervisor struct {
 	dataDir string
 	cfg     *configCell
@@ -68,6 +102,7 @@ type sessionSupervisor struct {
 
 	mu       sync.Mutex // guards residents ONLY; never held during I/O or actor calls
 	resident map[string]*residentEntry
+	flights  flightGroup
 
 	emitFn   func(any)
 	notifyFn func(string)
@@ -98,9 +133,9 @@ func (s *sessionSupervisor) run(wg *sync.WaitGroup) {
 	if err := s.boot(); err != nil {
 		fmt.Printf("[WARN] session supervisor boot: %v\n", err)
 	}
-	evictTick := time.NewTicker(30 * time.Second)
+	evictTick := time.NewTicker(tuneEvictEvery)
 	defer evictTick.Stop()
-	watchTick := time.NewTicker(15 * time.Second)
+	watchTick := time.NewTicker(tuneWatchEvery)
 	defer watchTick.Stop()
 	for {
 		select {
@@ -184,6 +219,14 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 	}
 	s.mu.Unlock()
 
+	return s.flights.do(id, func() spawnResult {
+		return s.routeCold(id, forRead)
+	})
+}
+
+// routeCold performs the cold spawn (disk I/O + actor start). At most one
+// routeCold per id runs at a time (flightGroup); losers share the winner.
+func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 	// NOTE (F1): this disk I/O runs WITHOUT s.mu held (map ops above and
 	// below are lock-only, microsecond-scale). route() blocks its CALLER
 	// during load, but never the supervisor loop — route is invoked from
@@ -197,7 +240,16 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 	if rec.Status == stateOrphaned && !forRead {
 		return spawnResult{Error: "session quarantined: turn worker stuck (context ignored); start a new turn to recover"}
 	}
+	// Epoch first: the incarnation number must exist before any worker
+	// can be spawned (resume path below stamps it on the snapshot).
+	s.mu.Lock()
+	prevEpoch := 0
+	if prev, ok := s.resident[id]; ok {
+		prevEpoch = prev.epoch
+	}
+	s.mu.Unlock()
 	act := newSessionActor(id, rec, st, s.emit, s.bg, s.onEvent)
+	act.epoch = prevEpoch + 1
 	act.supCfg = s.cfg
 	act.convertServer = func(msg map[string]any) {
 		if host := s.cfg.load(); host != nil {
@@ -244,17 +296,23 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 		// loop hasn't processed any message yet — still, be strict).
 		snap.gen = act.gen + 1
 		act.gen = snap.gen
+		snap.epoch = act.epoch
 		ctx, cancel := context.WithCancel(context.Background())
 		act.cancel = cancel
 		act.workerDone = make(chan struct{})
-		gen := act.gen
 		workerDone := act.workerDone
+		// Pre-loop single-threaded: the actor isn't running yet, so
+		// reading act.* here races nothing. The goroutine captures only
+		// values (env/snap); runTurnWorker never touches the actor.
+		env := workerEnv{
+			cfg: act.cfgRef(), store: act.store, emit: act.emit, inbox: act.inbox,
+			actorID: act.id, bg: act.bg,
+			hostID:   func() string { return act.cfgRef().load().HostID },
+			brainDir: func(sid string) string { return act.store.ensureBrainDir(sid) },
+		}
 		go func() {
 			defer close(workerDone)
-			// startWorker signature is (act, ctx, gen, prompt); resume uses
-			// the snapshot path directly.
-			_ = gen
-			runResumeWorker(act, ctx, snap)
+			runResumeWorker(env, ctx, snap)
 		}()
 		hostID := ""
 		if cfg := s.cfg.load(); cfg != nil {
@@ -265,13 +323,14 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 			"status": "running", "turn": map[string]any{"startedAt": rec.Turn.StartedAt}, "resumed": true,
 		})
 	}
-	h := &sessionHandle{inbox: act.inbox, control: act.control, done: act.done, epoch: 1}
+	h := &sessionHandle{inbox: act.inbox, control: act.control, done: act.done, epoch: act.epoch}
 	ttl := postTurnTTL
 	if forRead && act.state == stateIdle {
 		ttl = idleCacheTTL
 	}
 	s.mu.Lock()
 	// Lost race: someone spawned while we loaded — keep the first winner.
+	// (The loser already consumed an epoch number; gaps are fine, reuse is not.)
 	if ent, ok := s.resident[id]; ok {
 		s.mu.Unlock()
 		act.control <- shutdownMsg{}
@@ -281,7 +340,7 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 		}
 		return spawnResult{Inbox: ent.handle.inbox, Control: ent.handle.control, Done: ent.handle.done}
 	}
-	s.resident[id] = &residentEntry{handle: h, idleTTL: ttl}
+	s.resident[id] = &residentEntry{handle: h, idleTTL: ttl, epoch: h.epoch}
 	n := len(s.resident)
 	s.mu.Unlock()
 	if n > maxResidentActors {
@@ -512,7 +571,10 @@ judged:
 			s.mu.Unlock()
 			continue
 		}
-		stale := now-rep.LastProgress > int64((2*15*time.Second)/time.Millisecond)
+		// Stale threshold scales with the watch interval (default 2x15s):
+		// a healthy stream heartbeats every event, so 2 missed rounds
+		// means wedged, regardless of the configured cadence.
+		stale := now-rep.LastProgress > int64((2*tuneWatchEvery)/time.Millisecond)
 		if !stale {
 			s.mu.Lock()
 			if ent, ok := s.resident[id]; ok {
@@ -544,7 +606,8 @@ judged:
 			}
 			if ent.staleRounds >= maxCancelRounds {
 				reason = "watchdog_quarantine"
-				fmt.Printf("[WARN] watchdog: session %s stuck %d rounds, quarantining\n", id, ent.staleRounds)
+				trace("watchdog.quarantine", map[string]any{"sid": id, "rounds": ent.staleRounds})
+			fmt.Printf("[WARN] watchdog: session %s stuck %d rounds, quarantining\n", id, ent.staleRounds)
 			}
 			select {
 			case ent.handle.control <- cancelTurnMsg{Reason: reason}:

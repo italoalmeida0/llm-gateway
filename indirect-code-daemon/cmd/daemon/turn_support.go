@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"crypto/rand"
+	"os"
 	"strings"
 	"time"
 
@@ -150,7 +151,8 @@ var convertTimeout = tuneConvertTimeout
 func randomConvertID() []byte {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
-		panic(err)
+		fmt.Printf("[WARN] crypto/rand failed, using fallback ids: %v\n", err)
+		copy(id, []byte(fallbackID8()+fallbackID8()))
 	}
 	return id
 }
@@ -188,4 +190,14 @@ func buildTurnSystemDirectives(snap *workerSnapshot, now time.Time) string {
 		return ""
 	}
 	return "<system-reminder>\n" + strings.Join(sysParts, "\n") + "\n</system-reminder>"
+}
+
+// fallbackID8 is the non-crypto id fallback (report item 6). Seeded once
+// from nanos + pid; collisions across processes are acceptable for
+// queue/convert ids (actor state, not security tokens).
+var fallbackSeed = time.Now().UnixNano() ^ int64(os.Getpid()<<32)
+
+func fallbackID8() string {
+	fallbackSeed = fallbackSeed*6364136223846793005 + 1442695040888963407
+	return fmt.Sprintf("%016x", uint64(fallbackSeed>>11))
 }

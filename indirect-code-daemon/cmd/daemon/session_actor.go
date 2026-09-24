@@ -87,7 +87,12 @@ type sessionActor struct {
 	// cancelRounds counts consecutive watchdog cancels without worker exit
 	// (F3 escalation → quarantine).
 	cancelRounds int
+	// droppedRequeue counts timeout-path inbox drops (report item 6).
+	droppedRequeue int64
 
+	// epoch is this incarnation's spawn number (supervisor assigns;
+	// worker mail carrying another epoch is dropped — see handleData).
+	epoch int
 	// resumeSnap, when non-nil, carries a crash-resume snapshot: after the
 	// actor loop starts, the supervisor spawns a Continue worker on the
 	// same turn index (v1 resumeAgentTurn parity).
@@ -99,7 +104,7 @@ type sessionActor struct {
 	// startWorker runs the turn. Production: defaultStartWorker (agent loop).
 	// Tests use newTestActor (test-only constructor below) to substitute a
 	// stub. The field is set once at construction, never reassigned.
-	startWorker func(act *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string)
+	startWorker func(snap workerSnapshot, env workerEnv, ctx context.Context)
 }
 
 func newSessionActor(id string, rec *SessionRecord, store *diskStore, wsSend func(any), bg *bgSupervisor, onEvent func(string)) *sessionActor {
@@ -125,7 +130,11 @@ func (a *sessionActor) touch() { a.lastProgress = time.Now().UnixMilli() }
 func randomID8() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic(err)
+		// Report item 6: never panic the process on CSPRNG failure in the
+		// hot path — fall back to a time-seeded mix (ids stay unique
+		// enough; worst case is a queue-id collision, not a crash).
+		fmt.Printf("[WARN] crypto/rand failed, using fallback ids: %v\n", err)
+		return fallbackID8()
 	}
 	return fmt.Sprintf("%x", b[:])
 }
@@ -165,6 +174,13 @@ func (a *sessionActor) run() {
 }
 
 func (a *sessionActor) handleData(env Envelope) {
+	trace("actor.msg", map[string]any{"sid": a.id, "type": msgType(env.Payload), "state": a.state, "gen": a.gen})
+	// Epoch gate: worker mail (finish/heartbeat/WAL appends) from a stale
+	// incarnation is dropped. Dispatcher/client mail uses epoch 0 and
+	// always passes (it carries its own gen/id correlation).
+	if env.Epoch != 0 && a.epoch != 0 && env.Epoch != a.epoch {
+		return
+	}
 	switch m := env.Payload.(type) {
 	case userPromptMsg:
 		a.onUserPrompt(m)
@@ -522,10 +538,17 @@ func (a *sessionActor) startTurnWithMeta(prompt string, attachmentIDs []string, 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	a.workerDone = make(chan struct{})
+	// Race discipline: snapshot on-loop (snapshotTurn copies act.* while
+	// we own this goroutine). The goroutine below captures ONLY values —
+	// the pre-split code closed over `a` and raced with the loop's next
+	// mutation (caught by -race in TestQuarantinePath).
 	gen := a.gen
+	snap, env := snapshotTurn(a, gen, prompt, meta)
+	startFn := a.startWorker
+	workerDone := a.workerDone
 	go func() {
-		defer close(a.workerDone)
-		a.startWorker(a, ctx, gen, prompt, meta)
+		defer close(workerDone)
+		startFn(snap, env, ctx)
 	}()
 	a.pingChange()
 	// Foreground contract (v1 parity): running status so the UI flips to
@@ -537,9 +560,10 @@ func (a *sessionActor) startTurnWithMeta(prompt string, attachmentIDs []string, 
 	})
 }
 
-// defaultStartWorker runs the real agent turn on a daughter goroutine.
-func defaultStartWorker(a *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string) {
-	startTurnWorker(a, ctx, gen, prompt, meta)
+// defaultStartWorker runs the real agent turn (values only — the snapshot
+// ran on-loop in startTurnWithMeta, so this never touches the actor).
+func defaultStartWorker(snap workerSnapshot, env workerEnv, ctx context.Context) {
+	go runTurnWorker(ctx, env, snap)
 }
 
 // hookMsg runs fn on the actor goroutine. Production use: none yet;
@@ -566,11 +590,16 @@ func (a *sessionActor) onWorkerFinished(m workerFinishedMsg) {
 	if m.gen != a.gen {
 		return // stale worker
 	}
+	if a.state == stateOrphaned {
+		return // quarantined: the stuck worker's late exit changes nothing
+	}
 	a.cancelRounds = 0
 	a.finishTurn(!m.cancelled && m.err == "")
 }
 
 // finishTurn commits (or retries) the WAL and promotes the queue head.
+func msgType(p any) string { return fmt.Sprintf("%T", p) }
+
 func (a *sessionActor) finishTurn(ok bool) {
 	a.clearPending()
 	if a.cancel != nil {
@@ -773,11 +802,13 @@ func (a *sessionActor) onStateTimeout(m stateTimeoutMsg) {
 		a.emit(map[string]any{"type": "system_notice", "sessionId": a.id, "text": "Approval timed out after 15min — turn cancelled."})
 		// Approval timeout cancels the turn but keeps the queue intact.
 		a.doCancel("approval_timeout")
-		// doCancel waits for worker exit; force finish if worker already gone.
+		// Do NOT requeue: a blocking `go inbox <- env` leaks under a full
+		// mailbox and breaks inbox-first single-file ordering (report item
+		// 6). The drained message is a duplicate of state the actor already
+		// holds (worker progress re-sends on its next event); drop + count.
 		select {
-		case env := <-a.inbox:
-			// never block the timeout path on unrelated mail; requeue
-			go func() { a.inbox <- env }()
+		case <-a.inbox:
+			a.droppedRequeue++
 		default:
 		}
 	}

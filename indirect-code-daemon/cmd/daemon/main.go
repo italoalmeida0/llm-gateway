@@ -71,6 +71,10 @@ func main() {
 		configPath = filepath.Join(dataDir, "config.json")
 	}
 
+	if traceEnabled {
+		setTraceDir(dataDir)
+		fmt.Println("[TRACE] dev tracing to", dataDir+"/trace")
+	}
 	root := newRoot(dataDir)
 	root.configPath = configPath
 	if *connectFlag != "" {

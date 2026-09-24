@@ -29,6 +29,7 @@ import (
 // workerSnapshot is the actor state a turn needs, copied at start.
 type workerSnapshot struct {
 	gen         int
+	epoch       int
 	jailed      bool
 	promptMeta  map[string]string
 	lastDate    string
@@ -64,9 +65,12 @@ type workerEnv struct {
 	brainDir func(sessionID string) string
 }
 
-func startTurnWorker(act *sessionActor, ctx context.Context, gen int, prompt string, meta map[string]string) {
+// snapshotTurn copies everything the worker needs. Call on-loop only:
+// off-loop callers race with the actor's next mutation (report item: the
+// -race caught startTurnWithMeta's `go` closure touching `a`).
+func snapshotTurn(act *sessionActor, gen int, prompt string, meta map[string]string) (workerSnapshot, workerEnv) {
 	snap := workerSnapshot{
-		gen: gen, turnIndex: act.rec.TurnSeq, jailed: act.jailed,
+		gen: gen, epoch: act.epoch, turnIndex: act.rec.TurnSeq, jailed: act.jailed,
 		model: act.rec.Model, options: normalizedOptions(act.recordOptions()),
 		messages:    append([]provider.Message(nil), act.rec.Messages...),
 		usage:       act.rec.Usage,
@@ -83,7 +87,7 @@ func startTurnWorker(act *sessionActor, ctx context.Context, gen int, prompt str
 		hostID:   func() string { return act.cfgRef().load().HostID },
 		brainDir: func(sid string) string { return act.store.ensureBrainDir(sid) },
 	}
-	go runTurnWorker(ctx, env, snap)
+	return snap, env
 }
 
 // recordOptions reads options without locking: called on the actor
@@ -102,7 +106,7 @@ func runTurnWorker(ctx context.Context, env workerEnv, snap workerSnapshot) {
 		// session in running forever (disk shows only the user turn).
 		for i := 0; i < 100; i++ {
 			select {
-			case env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: cancelled, err: errStr}}:
+			case env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: cancelled, err: errStr}, Epoch: snap.epoch}:
 				return
 			case <-ctx.Done():
 				// Actor gone; nothing to report to.
@@ -278,6 +282,12 @@ func (w *turnBridge) emit(ev any) {
 // worker drops only transcript deltas under extreme pressure — state
 // messages use the control lane fallback inside the actor's timer path;
 // here we block briefly since the worker has nothing better to do).
+// stamp tags worker mail with the spawn epoch so the actor can drop mail
+// from orphaned incarnations (report item 1).
+func (w *turnBridge) stamp(payload any) Envelope {
+	return Envelope{Payload: payload, Epoch: w.snap.epoch}
+}
+
 func (w *turnBridge) sendInbox(payload any) {
 	// Transcript integrity beats loop pacing: walAppendMsg carries the
 	// authoritative transcript (WAL + in-memory record), so it must NEVER
@@ -285,13 +295,13 @@ func (w *turnBridge) sendInbox(payload any) {
 	// traffic (bgJobFinishedMsg) stays non-blocking via the select below.
 	if _, ok := payload.(walAppendMsg); ok {
 		select {
-		case w.env.inbox <- Envelope{Payload: payload}:
+		case w.env.inbox <- w.stamp(payload):
 		case <-w.ctx.Done():
 		}
 		return
 	}
 	select {
-	case w.env.inbox <- Envelope{Payload: payload}:
+	case w.env.inbox <- w.stamp(payload):
 	case <-w.ctx.Done():
 	default:
 		fmt.Printf("[WARN] turn %d of session %s dropped inbox message %T (inbox full)\n", w.snap.turnIndex, w.env.actorID, payload)
@@ -301,7 +311,7 @@ func (w *turnBridge) sendInbox(payload any) {
 // heartbeat sends a non-blocking liveness ping for the current gen.
 func (w *turnBridge) heartbeat() {
 	select {
-	case w.env.inbox <- Envelope{Payload: workerHeartbeatMsg{gen: w.snap.gen}}:
+	case w.env.inbox <- w.stamp(workerHeartbeatMsg{gen: w.snap.gen}):
 	default:
 	}
 }
@@ -323,7 +333,7 @@ func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
 	}
 	reply := make(chan any, 1)
 	select {
-	case w.env.inbox <- Envelope{Payload: workerRefreshMsg{gen: w.snap.gen, Reply: reply}}:
+	case w.env.inbox <- w.stamp(workerRefreshMsg{gen: w.snap.gen, Reply: reply}):
 	case <-requestCtx.Done():
 		return requestCtx.Err()
 	case <-w.ctx.Done():
@@ -390,7 +400,7 @@ func (w *turnBridge) approveTool(call provider.ToolCallBlock) (bool, string, jso
 	ch := make(chan approvalOutcome, 1)
 	id := randomID8()
 	select {
-	case w.env.inbox <- Envelope{Payload: workerApprovalReqMsg{gen: w.snap.gen, id: id, tool: call.Name, args: call.Arguments, callID: call.ID, reply: ch}}:
+	case w.env.inbox <- w.stamp(workerApprovalReqMsg{gen: w.snap.gen, id: id, tool: call.Name, args: call.Arguments, callID: call.ID, reply: ch}):
 	case <-w.ctx.Done():
 		return false, "Turn cancelled", nil
 	}
@@ -417,7 +427,7 @@ func (w *turnBridge) askQuestions(ctx context.Context, req tools.QuestionRequest
 	ch := make(chan questionOutcome, 1)
 	id := randomID8()
 	select {
-	case w.env.inbox <- Envelope{Payload: workerQuestionReqMsg{gen: w.snap.gen, id: id, req: req, reply: ch}}:
+	case w.env.inbox <- w.stamp(workerQuestionReqMsg{gen: w.snap.gen, id: id, req: req, reply: ch}):
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-w.ctx.Done():
@@ -448,7 +458,7 @@ func (w *turnBridge) requestConvert(ctx context.Context, filename string, b64dat
 	id := fmt.Sprintf("%x", randomConvertID())
 	reply := make(chan any, 1)
 	select {
-	case w.env.inbox <- Envelope{Payload: workerConvertReqMsg{gen: w.snap.gen, id: id, filename: filename, data: b64data, reply: reply}}:
+	case w.env.inbox <- w.stamp(workerConvertReqMsg{gen: w.snap.gen, id: id, filename: filename, data: b64data, reply: reply}):
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case <-w.ctx.Done():
@@ -859,12 +869,6 @@ func buildTurnPrompt(attachments []AttachmentRef, promptText string, attachmentI
 
 // runResumeWorker runs a crash-resume turn: same snapshot the supervisor
 // built from disk + WAL replay, agent.Continue picks up the pending loop.
-func runResumeWorker(act *sessionActor, ctx context.Context, snap *workerSnapshot) {
-	env := workerEnv{
-		cfg: act.cfgRef(), store: act.store, emit: act.emit, inbox: act.inbox,
-		actorID: act.id, bg: act.bg,
-		hostID:   func() string { return act.cfgRef().load().HostID },
-		brainDir: func(sid string) string { return act.store.ensureBrainDir(sid) },
-	}
+func runResumeWorker(env workerEnv, ctx context.Context, snap *workerSnapshot) {
 	runTurnWorker(ctx, env, *snap)
 }

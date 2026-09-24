@@ -66,6 +66,11 @@ func assertSubsequence(t *testing.T, got, want []string) {
 	}
 }
 
+// Static goldens below are HISTORICAL: the live scenarios in
+// trace_live_test.go are the real contract (they fail when a trace() call
+// is deleted). These files are kept as a readable backbone for humans and
+// as a schema fixture; they are not the enforcement.
+//
 // TestTraceGoldenTurn replays a hand-written golden trace of a full turn
 // (prompt → running → WAL → usage → finish → idle) and asserts the
 // transition backbone. If the state machine ever reorders these, the
@@ -118,29 +123,55 @@ func TestTraceGoldenTimeout(t *testing.T) {
 	})
 }
 
+// knownGaps lists contracted events with no live scenario yet. Each entry
+// states WHY it is hard to trigger and what would cover it — this is the
+// explicit tracker the review asked for, not a silent pass.
+var knownGaps = map[string]string{
+	// worker.* fire inside turnBridge (real agent loop). Stub workers send
+	// the actor messages directly, so these need a bridge-level scenario
+	// with a fake provider — planned with the F4 bench work.
+	"worker.approve.enter":    "needs turnBridge + fake provider",
+	"worker.approve.resolved": "needs turnBridge + fake provider",
+	"worker.question.enter":   "needs turnBridge + fake provider",
+	"worker.convert.enter":    "needs turnBridge + fake provider",
+	// Drop paths need a saturated mailbox at the exact send moment.
+	"worker.drop": "needs a full (128) inbox during a worker send",
+	"actor.drop":  "needs the timeout path with a non-empty inbox",
+}
+
 // TestTraceSchemaContracts: every known event carries its required keys.
 // Catches "added a trace() call but forgot the debugger's grep keys".
 func TestTraceSchemaContracts(t *testing.T) {
 	required := map[string][]string{
-		"actor.state":    {"sid", "from", "to", "gen"},
-		"actor.wal":      {"sid", "type", "turn"},
-		"actor.wait":     {"sid", "kind", "id"},
-		"actor.approval": {"sid", "id", "approved"},
-		"actor.timeout":  {"sid", "kind", "id"},
-		"actor.cancel":   {"sid", "reason", "state"},
-		"sup.route":      {"sid"},
-		"sup.evict":      {"n"},
-		"sup.passivate":  {"sid", "ok"},
-		"bg.register":    {"job", "sid"},
-		"bg.finish":      {"job", "status"},
-		"bg.cancel":      {"job", "by"},
-		"bg.wake":        {"job", "sid", "woke"},
-		"ws.dispatch":    {"type"},
+		"actor.state":            {"sid", "from", "to", "gen"},
+		"actor.wal":              {"sid", "type", "turn"},
+		"actor.wait":             {"sid", "kind", "id"},
+		"actor.approval":         {"sid", "id", "approved"},
+		"actor.approval.stale":   {"sid", "id", "state"},
+		"actor.question":         {"sid", "id", "nAnswers"},
+		"actor.question.stale":   {"sid", "id", "state"},
+		"actor.waiter.lost":      {"sid", "kind", "id"},
+		"actor.timeout":          {"sid", "kind", "id"},
+		"actor.cancel":           {"sid", "reason", "state"},
+		"actor.quarantine":       {"sid", "rounds"},
+		"actor.drop":             {"sid", "where"},
+		"worker.approve.enter":   {"sid", "tool", "gen"},
+		"worker.approve.resolved": {"sid", "tool", "approved", "stale"},
+		"worker.question.enter":  {"sid", "n", "gen"},
+		"worker.convert.enter":   {"sid", "file"},
+		"worker.drop":            {"sid", "type"},
+		"sup.route":              {"sid"},
+		"sup.evict":              {"n"},
+		"sup.passivate":          {"sid", "ok"},
+		"bg.register":            {"job", "sid"},
+		"bg.finish":              {"job", "status"},
+		"bg.cancel":              {"job", "by"},
+		"bg.wake":                {"job", "sid", "woke"},
+		"ws.dispatch":            {"type"},
 	}
-	files := []string{"testdata/trace/turn.jsonl", "testdata/trace/approval.jsonl", "testdata/trace/timeout.jsonl"}
 	seen := map[string]bool{}
-	for _, f := range files {
-		for _, r := range replayTrace(t, f) {
+	check := func(src string, recs []map[string]any) {
+		for _, r := range recs {
 			ev, _ := r["ev"].(string)
 			seen[ev] = true
 			keys, ok := required[ev]
@@ -149,22 +180,48 @@ func TestTraceSchemaContracts(t *testing.T) {
 			}
 			for _, k := range keys {
 				if _, ok := r[k]; !ok {
-					t.Fatalf("%s in %s missing %q: %v", ev, f, k, r)
+					t.Fatalf("%s in %s missing %q: %v", ev, src, k, r)
 				}
 			}
 		}
 	}
-	// Every contracted event must appear in at least one golden.
+	// Real emissions first (the enforcement that matters).
+	for _, sc := range liveScenarios {
+		check("live:"+sc.name, sc.run(t))
+	}
+	// Static goldens (kept for the historical backbone).
+	for _, f := range []string{"testdata/trace/turn.jsonl", "testdata/trace/approval.jsonl", "testdata/trace/timeout.jsonl"} {
+		check(f, replayTrace(t, f))
+	}
+	// Enforcement (review item 3): every contracted event must be covered
+	// by a LIVE scenario, or be listed in knownGaps with a reason. Adding a
+	// trace() call without coverage therefore FAILS CI — the author either
+	// writes the scenario or records the gap deliberately. The backlog is
+	// explicit, never silent.
 	var missing []string
 	for ev := range required {
-		if !seen[ev] {
-			missing = append(missing, ev)
+		if seen[ev] {
+			continue
 		}
+		if _, ok := knownGaps[ev]; ok {
+			continue
+		}
+		missing = append(missing, ev)
 	}
 	sort.Strings(missing)
-	// Not fatal today (goldens grow over time), but visible.
 	if len(missing) > 0 {
-		t.Logf("contracted events without golden coverage yet: %v", missing)
+		t.Fatalf("contracted events with neither coverage nor a knownGaps entry: %v", missing)
+	}
+	// Surface the explicit backlog every run so it cannot rot unnoticed.
+	var gaps []string
+	for ev := range knownGaps {
+		if !seen[ev] {
+			gaps = append(gaps, ev)
+		}
+	}
+	sort.Strings(gaps)
+	if len(gaps) > 0 {
+		t.Logf("known trace gaps (deliberate, tracked): %v", gaps)
 	}
 }
 

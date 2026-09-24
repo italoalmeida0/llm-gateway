@@ -50,25 +50,42 @@ drops, worker approve/question/convert/finish/drop, supervisor
 route/evict/watchdog-rounds/passivate, bg register/finish/cancel/deliver/
 wake, ws dispatch/health.
 
-## Golden traces (theory-testing)
+## Golden traces (theory-testing) — LIVE, not fiction
 
-`cmd/daemon/testdata/trace/*.jsonl` + `trace_replay_test.go`:
-- `turn.jsonl` — full turn backbone (dispatch→route→msg→running→wal→idle)
-- `approval.jsonl` — wait→approve→resume
-- `timeout.jsonl` — wait→timeout→cancel
-- `TestTraceLiveSink` — real sink E2E (stub turn → trace file → backbone)
-- `TestTraceSchemaContracts` — every event's grep-keys enforced; logs
-  uncovered contracted events (bg.*, sup.evict/passivate need goldens)
+The contract is enforced by scenarios that RUN the real actor/bg/supervisor
+with tracing on and assert the emitted sequence (`trace_live_test.go`):
+
+| scenario | asserts |
+|---|---|
+| `scenarioTurn` | exact: msg→state→msg→state |
+| `scenarioApproval` | exact: prompt→wait→answer→resume→finish |
+| `scenarioStaleApproval` | `actor.approval.stale` then real approval |
+| `scenarioTimeout` | wait→timeout→cancel |
+| `scenarioQuarantine` | cancel→quarantine→state |
+| `scenarioQuestionAnswered` | wait→question |
+| `scenarioQuestionStale` | `actor.question.stale` then real answer |
+| `scenarioWaiterLost` | `actor.waiter.lost` (consumed waiter) |
+| `scenarioBgWake` | register→finish→wake |
+| `scenarioBgCancel` | register→cancel |
+| `scenarioEvict` | route→evict→passivate |
+
+Delete a `trace()` call and these fail — the goldens are derived from
+behavior. `TestTraceSchemaContracts` runs every scenario and enforces each
+event's grep-keys; uncovered events must be listed in `knownGaps` with a
+reason, so the backlog is explicit and CI never smiles at a silent gap.
+`testdata/trace/*.jsonl` remain as human-readable historical backbones.
 
 Workflow (the owner's motto): bug report ships with a trace (`ICD_TRACE=1`
-run), the fix ships with a golden asserting the corrected sequence, and
+run), the fix ships with a scenario asserting the corrected sequence, and
 the schema test guarantees the next debugger can still grep it at 3am.
 
 ## Still open (with F4 bench work)
 
 - `ICD_TRACE=1` enabling debug counters in `session_status` payloads.
-- bg goldens (`bg.register→finish→wake` sequence) — schema lists them,
-  no golden file yet.
+- `worker.*` scenarios (need a real `turnBridge` + fake provider).
+- Drop-path scenarios (`worker.drop`, `actor.drop`) with a saturated inbox.
 - ws outbound drop counter trace (`ws.emit` drop path).
 - Perf: measure sink overhead under load before trusting it in long
   dev sessions (flush-per-write is crash-safe but syscall-heavy).
+- `withTrace` mutates package-level state: never add `t.Parallel` to the
+  trace tests without a per-test sink first.

@@ -774,7 +774,14 @@ func (a *sessionActor) clearPending() {
 
 func (a *sessionActor) onApprovalResponse(m approvalResponseMsg) {
 	if a.state != stateAwaitAppr || a.pending == nil || m.ID != a.pending.id {
-		return // stale
+		// Visible stale: without this line a 3am "approval stuck" debug
+		// cannot tell stale-response from lost-waiter from dead-worker.
+		cur := ""
+		if a.pending != nil {
+			cur = a.pending.id
+		}
+		trace("actor.approval.stale", map[string]any{"sid": a.id, "id": m.ID, "state": a.state, "pending": cur})
+		return
 	}
 	a.touch()
 	approved := m.Approved
@@ -787,7 +794,12 @@ func (a *sessionActor) onApprovalResponse(m approvalResponseMsg) {
 
 func (a *sessionActor) onQuestionResponse(m questionResponseMsg) {
 	if a.state != stateAwaitQ || a.pending == nil || m.ID != a.pending.id {
-		return // stale
+		cur := ""
+		if a.pending != nil {
+			cur = a.pending.id
+		}
+		trace("actor.question.stale", map[string]any{"sid": a.id, "id": m.ID, "state": a.state, "pending": cur})
+		return
 	}
 	a.touch()
 	trace("actor.question", map[string]any{"sid": a.id, "id": m.ID, "nAnswers": len(m.Answers)})
@@ -1116,6 +1128,7 @@ func (a *sessionActor) onWorkerQuestionReq(m workerQuestionReqMsg) {
 func (a *sessionActor) wakeApproval(id string, approved bool) {
 	ch, ok := a.approvalWaiters[id]
 	if !ok {
+		trace("actor.waiter.lost", map[string]any{"sid": a.id, "kind": "approval", "id": id})
 		return
 	}
 	delete(a.approvalWaiters, id)
@@ -1128,6 +1141,7 @@ func (a *sessionActor) wakeApproval(id string, approved bool) {
 func (a *sessionActor) wakeQuestion(id string, answers [][]string) {
 	ch, ok := a.questionWaiters[id]
 	if !ok {
+		trace("actor.waiter.lost", map[string]any{"sid": a.id, "kind": "question", "id": id})
 		return
 	}
 	delete(a.questionWaiters, id)
@@ -1233,6 +1247,7 @@ func (a *sessionActor) quarantine() {
 		}
 		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
 	}
+	rounds := a.cancelRounds
 	a.wal = nil
 	a.cancelRounds = 0
 	a.sendNow = false
@@ -1240,6 +1255,7 @@ func (a *sessionActor) quarantine() {
 	a.rec.Status = "orphaned"
 	a.rec.UpdatedAt = time.Now().UnixMilli()
 	_ = a.store.saveSessionSync(a.rec)
+	trace("actor.quarantine", map[string]any{"sid": a.id, "gen": a.gen, "rounds": rounds})
 	a.setState(stateOrphaned)
 	a.pingChange()
 	a.emit(map[string]any{"type": "session_status", "hostId": a.hostID(), "sessionId": a.id, "status": "orphaned",

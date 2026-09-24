@@ -268,9 +268,9 @@ func (b *bgSupervisor) onFinish(jobID, status, result string) {
 			}
 		}
 	}
-	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": woke})
 	_ = os.Remove(b.pidPath(jobID))
 	trace("bg.finish", map[string]any{"job": j.ID, "sid": j.SessionID, "status": status, "resultLen": len(result)})
+	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": woke})
 	b.broadcast()
 	b.deliver(j, status == BgStatusDone || status == BgStatusError)
 	j.closeDone()

@@ -220,13 +220,7 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 	s.mu.Unlock()
 
 	return s.flights.do(id, func() spawnResult {
-		res := s.routeCold(id, forRead)
-		if res.Error != "" {
-			trace("sup.route", map[string]any{"sid": id, "err": res.Error, "forRead": forRead})
-		} else {
-			trace("sup.route", map[string]any{"sid": id, "forRead": forRead, "resumed": res.Resumed})
-		}
-		return res
+		return s.routeCold(id, forRead)
 	})
 }
 
@@ -354,7 +348,8 @@ func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 	if n > maxResidentActors {
 		go s.evictIdle(false)
 	}
-	return spawnResult{Inbox: h.inbox, Control: h.control, Done: h.done, Resumed: resumed}
+	trace("sup.route", map[string]any{"sid": id, "forRead": forRead, "resumed": resumed})
+	return spawnResult{Inbox: h.inbox, Control: h.control, Done: h.done}
 }
 
 func (s *sessionSupervisor) emit(ev any) {

@@ -1,11 +1,17 @@
-# Daemon v2 — actor-model rewrite plan (NEW PROJECT)
+# Indirect-code daemon — actor model (IMPLEMENTED)
 
-Status: **PLAN — for review, no code written yet.**
-Decision: build a **new Go project** (`indirect-code-daemon-v2/`) from scratch,
-actor-model, copying over only what survives. The v1 daemon is not migrated
-file-by-file; it stays untouched as reference + parity oracle until v2 replaces it.
+Status: **IMPLEMENTED — this doc is the decision record.** The mutex-based
+implementation was deleted (`git rm indirect-code-daemon`, history preserves
+it); the actor-model code now lives at `indirect-code-daemon/` (module
+`llm-gateway/indirect-code-daemon`). There is no v1/v2 split anymore —
+references to "v2" below mean "the current code".
 
-## 0. Why a new project (decided)
+> **Reviewer note (read before re-auditing):** §11 locks every decision
+> the owner already took, with rationale. Points marked **DECIDED** are
+> closed — do not re-raise them as findings; challenge only the
+> implementation, not the decision.
+
+## 0. Why a new project (decided, done)
 
 - The change is too big for in-place migration: actor rewrite + removal of
   MCP/skills/OpenAI-provider/search-backend + frontend swarm-UI removal.
@@ -14,7 +20,7 @@ file-by-file; it stays untouched as reference + parity oracle until v2 replaces 
 - v1 remains runnable and is the **parity oracle**: same scripted conversation
   on v1 and v2 must produce identical disk state + transcript.
 
-## 1. Frozen borders (v2 must be drop-in)
+## 1. Frozen borders (drop-in — kept)
 
 These do **NOT** change, so the frontend and gateway never notice the swap:
 
@@ -295,7 +301,12 @@ idle ──userPrompt──▶ running ──needsApproval──▶ awaitingAppr
 - Per-request, not per-turn: three approvals answered at 14 min each = 42-min
   turn (progress, not stall).
 
-## 9. Build order (v2, tested in parts)
+## 9. Build order (done — all gates passed)
+
+> Historical record: V2.0–V2.4 shipped in order with gates green
+> (`go build`, `go vet`, `go test ./...`, `-race`, live E2E vs Meta).
+> The cutover happened (v2 promoted to `indirect-code-daemon/`, v1 deleted).
+> What follows is the original phase plan, kept for archaeology.
 
 **V2.0 cuts + skeleton.** New module `indirect-code-daemon-v2/`
 (`go.mod`, minimal deps: gorilla/websocket, go-diff, x/image, x/net only).
@@ -339,6 +350,114 @@ by running the other binary. No migration to undo.
 5. New module name: `indirect-code-daemon-v2/` or another name?
 6. Confirm the two notice strings (§8) + 15-min value final.
 
+## 11. Locked decisions (DECIDED — do not re-raise as findings)
+
+Each entry: the decision, why, and where it lives in code. An audit that
+reports these as bugs is auditing the wrong layer — verify the
+implementation matches, not the choice itself.
+
+### D1. Launcher was never part of the rewrite (restored, not removed)
+
+- **DECIDED:** `cmd/launcher` + `internal/migrations` + `dist/` release
+  artifacts were restored from the pre-rewrite tree. The launcher
+  supervises ANY daemon binary via `--version` probing; it never touched
+  mutex/actor code.
+- A previous cleanup wrongly deleted it as "v1 leftover". That was a
+  mistake, corrected in commit `8b2b391`.
+- `scripts/build-indirect-all.ts` builds daemon (`-X main.Version`) +
+  launcher (`-X main.launcherVersion`) and manifests both. `bun run release
+  X.Y.Z` is unchanged. Auto-update keeps working through the launcher as
+  before — no operational regression.
+
+### D2. MCP / skills / OpenAI-path / search-backend / swarm-UI: deleted for real
+
+- **DECIDED:** never used, no legacy, no flags. Backend packages gone;
+  frontend tabs (MCP/Skills) and Auto-Swarm toggle removed from Settings
+  (`SettingsModal.tsx`, `SettingsGeneral.tsx`); `search` answers empty so
+  the inert UI never errors.
+- `update_config` applies settings only; unknown keys ignored.
+
+### D3. Daemon is Anthropic-native only (constraint, not gap)
+
+- **DECIDED:** the OpenAI provider path was deleted; the daemon speaks
+  Anthropic and the gateway translates. Consequence, accepted by owner:
+  **"daemon never outside the gateway"** — standalone manual testing and
+  gateway-less debugging are harder (use the local gateway +
+  `META_TEST_KEY`). Self-hosted single-upstream setup makes this fine.
+- Do NOT file "daemon can't talk to provider directly" as a bug.
+
+### D4. No self-update inside the daemon; launcher owns updates
+
+- **DECIDED:** `daemon_update_*` answers authoritative state
+  (`{current: Version, autoUpdate: false}`) instead of erroring, so no
+  toast-on-reconnect. Real updates flow through the launcher + `dist/`
+  manifest exactly as before the rewrite.
+- Do NOT file "daemon has no updater" as a bug.
+
+### D5. BG jobs are NEVER re-run (side-effect safety beats convenience)
+
+- **DECIDED (§5.3):** a kill can't know what the job was doing — re-running
+  a half-done `rm -rf`/migration/deploy is worse than losing the run.
+  Killed jobs → `orphaned`, logs preserved, live pids re-adopted via
+  pidfile. No re-execution, ever.
+- Do NOT file "job not retried after crash" as a bug.
+
+### D6. Watchdog never reaps a possibly-live actor (no dual-writer spawn)
+
+- **DECIDED (F2):** deleting a wedged handle and spawning fresh would put
+  two writers on one `.wal.jsonl`. So: passivate keeps the entry mapped
+  until `done` closes; watchdog deletes only provably-dead handles;
+  `epoch` field exists for incarnation discipline.
+- A "reap the wedged goroutine" recommendation contradicts this on
+  purpose — Go cannot kill goroutines; the alternative (dual writers) is
+  the only true corruption vector. Do NOT file "watchdog doesn't reap" as
+  a bug.
+
+### D7. Stuck workers quarantine, they are not force-killed (F3)
+
+- **DECIDED:** after `maxCancelRounds` (4 × 30s ≈ 2min) of ignored context,
+  the actor quarantines itself (commit WAL, mark `orphaned`, explicit
+  `session_status: orphaned` + route error). A fresh prompt un-quarantines
+  (new gen invalidates the stuck worker). Go has no goroutine kill-switch;
+  quarantine is the honest terminal state, not silent pinning.
+- Do NOT file "no kill-switch" as a bug.
+
+### D8. Tuning numbers are starting points with env overrides (F4)
+
+- **DECIDED:** `cmd/daemon/tuning.go` is the single source (`ICD_*` env
+  vars wire every cap/timeout/TTL/budget). Defaults (128/8/256, 15min,
+  512MB/64) are explicitly uncalibrated starting points; the bench plan is
+  future work, not a ship-blocker.
+- Do NOT file "magic numbers" as a bug; file wrong *behavior* with numbers.
+
+### D9. Canonical helpers vs inline timeouts (F5)
+
+- **DECIDED:** `replyWithTimeout` is canonical for plain request/reply.
+  `subscribeFinish`/`recentFinish`/`cancelJob` keep inline selects for
+  their extra `<-done` arms — forcing the helper would be worse code.
+  `envelope.go` documents the rule.
+- Do NOT file "helper has zero call sites, delete it" — the comment
+  already scopes its use.
+
+### D10. Test seams are test-only and fenced (Decision-4)
+
+- **DECIDED:** `newResumeSnapshot` constructor (no `gen=-1` sentinel);
+  `startWorker` substitutable only via `newTestActor`, never reassigned in
+  prod paths. Crash coverage is real (`crash_test.go`: helper process +
+  `SIGKILL` + WAL replay + resume offer), not just in-process.
+- Do NOT file "seam leaks to prod" unless a prod path reassigns it.
+
+### D11. Root watches infra on a loop + snapshot (F2 closed)
+
+- **DECIDED:** `root.watchdogLoop` (30s) pings bg/projects/ws;
+  `healthSnapshot()` serves the last round. No HTTP health endpoint — the
+  daemon serves no HTTP by design; recovery of wedged infra is
+  restart-scoped (process manager owns it), sessions have their own
+  supervisor watchdog.
+- Do NOT file "no health endpoint" as a bug; file a missed ping round.
+
 ---
-*Rewritten 2026-09-24 from full-code read + reviewer decisions. Approve §10
-(or reply inline) before V2.0 code is written.*
+*Rewritten 2026-09-24 from full-code read + reviewer decisions. Implemented
+fully (V2.0–V2.4 + audit rounds 1–3); §11 locks owner decisions against
+re-audit. Change the code or challenge with new evidence — not re-reviews
+of closed decisions.*

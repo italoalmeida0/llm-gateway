@@ -1,0 +1,4 @@
+{"ts": 1000, "ev": "actor.wait", "sid": "s1", "kind": "approval", "id": "ap1", "tool": "bash"}
+{"ts": 1000, "ev": "actor.timeout", "sid": "s1", "kind": "approval", "id": "ap1"}
+{"ts": 1000, "ev": "actor.cancel", "sid": "s1", "reason": "approval_timeout", "state": "awaitingApproval", "gen": 1}
+{"ts": 1000, "ev": "actor.state", "sid": "s1", "from": "awaitingApproval", "to": "idle", "gen": 1}

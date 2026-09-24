@@ -235,6 +235,7 @@ func (b *bgSupervisor) onRegister(m bgRegisterMsg) {
 	}
 	b.jobs[j.ID] = j
 	b.writePidfile(j)
+	trace("bg.register", map[string]any{"job": j.ID, "sid": j.SessionID, "kind": j.Kind, "labelLen": len(j.Label)})
 	b.broadcast()
 	m.Reply <- bgRegisterResult{JobID: j.ID, Done: j.done}
 }
@@ -257,15 +258,19 @@ func (b *bgSupervisor) onFinish(jobID, status, result string) {
 		delete(j.sleepers, ch)
 	}
 	// Wake sleepers of the whole session (push, plan §4).
+	woke := 0
 	for _, other := range b.jobs {
 		if other.SessionID == j.SessionID {
 			for ch := range other.sleepers {
 				close(ch)
 				delete(other.sleepers, ch)
+				woke++
 			}
 		}
 	}
+	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": woke})
 	_ = os.Remove(b.pidPath(jobID))
+	trace("bg.finish", map[string]any{"job": j.ID, "sid": j.SessionID, "status": status, "resultLen": len(result)})
 	b.broadcast()
 	b.deliver(j, status == BgStatusDone || status == BgStatusError)
 	j.closeDone()
@@ -304,6 +309,7 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 		}
 	}
 	_ = os.Remove(b.pidPath(jobID))
+	trace("bg.cancel", map[string]any{"job": j.ID, "sid": j.SessionID, "by": by})
 	b.broadcast()
 	if by == "user" {
 		b.deliver(j, false)
@@ -469,6 +475,7 @@ func (b *bgSupervisor) cancelJob(callerSessionID, jobID string) (tools.BgCancelO
 // ---- delivery (completion/cancel notices to the owner session) ----
 
 func (b *bgSupervisor) deliver(j *bgJob, finished bool) {
+	trace("bg.deliver", map[string]any{"job": j.ID, "sid": j.SessionID, "finished": finished})
 	if b.session == nil {
 		return
 	}

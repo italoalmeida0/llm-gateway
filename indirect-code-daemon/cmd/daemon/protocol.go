@@ -171,6 +171,9 @@ type spawnResult struct {
 	Control chan any
 	Done    <-chan struct{}
 	Error   string
+	// Resumed reports a crash-resume spawn (Continue worker on the WAL
+	// turn). Traced at route; informational for dashboards.
+	Resumed bool
 }
 
 // ---- worker -> actor (sent by the turn worker, handled on the actor loop) ----

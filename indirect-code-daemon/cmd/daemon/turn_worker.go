@@ -115,6 +115,7 @@ func runTurnWorker(ctx context.Context, env workerEnv, snap workerSnapshot) {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
+		trace("worker.finish.undelivered", map[string]any{"sid": env.actorID, "turn": snap.turnIndex})
 		fmt.Printf("[WARN] turn %d of session %s could not deliver finish (inbox full)\n", snap.turnIndex, env.actorID)
 	}
 	cfg := env.cfg.load()
@@ -304,6 +305,7 @@ func (w *turnBridge) sendInbox(payload any) {
 	case w.env.inbox <- w.stamp(payload):
 	case <-w.ctx.Done():
 	default:
+		trace("worker.drop", map[string]any{"sid": w.env.actorID, "type": fmt.Sprintf("%T", payload), "turn": w.snap.turnIndex})
 		fmt.Printf("[WARN] turn %d of session %s dropped inbox message %T (inbox full)\n", w.snap.turnIndex, w.env.actorID, payload)
 	}
 }
@@ -388,6 +390,7 @@ func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
 // arrives as approvalResponseMsg → the actor wakes this hook via the
 // per-call channel.
 func (w *turnBridge) approveTool(call provider.ToolCallBlock) (bool, string, json.RawMessage) {
+	trace("worker.approve.enter", map[string]any{"sid": w.env.actorID, "tool": call.Name, "gen": w.snap.gen})
 	if w.ctx.Err() != nil {
 		return false, "Turn cancelled", nil
 	}
@@ -406,6 +409,7 @@ func (w *turnBridge) approveTool(call provider.ToolCallBlock) (bool, string, jso
 	}
 	select {
 	case out := <-ch:
+		trace("worker.approve.resolved", map[string]any{"sid": w.env.actorID, "tool": call.Name, "approved": out.approved, "stale": out.stale})
 		if out.stale || w.ctx.Err() != nil {
 			return false, "Turn cancelled", nil
 		}
@@ -424,6 +428,7 @@ type approvalOutcome struct {
 }
 
 func (w *turnBridge) askQuestions(ctx context.Context, req tools.QuestionRequest) ([][]string, error) {
+	trace("worker.question.enter", map[string]any{"sid": w.env.actorID, "n": len(req.Questions), "gen": w.snap.gen})
 	ch := make(chan questionOutcome, 1)
 	id := randomID8()
 	select {
@@ -435,6 +440,7 @@ func (w *turnBridge) askQuestions(ctx context.Context, req tools.QuestionRequest
 	}
 	select {
 	case out := <-ch:
+		trace("worker.question.resolved", map[string]any{"sid": w.env.actorID, "stale": out.stale, "nAnswers": len(out.answers)})
 		if out.stale || w.ctx.Err() != nil {
 			return nil, context.Canceled
 		}
@@ -452,6 +458,7 @@ type questionOutcome struct {
 }
 
 func (w *turnBridge) requestConvert(ctx context.Context, filename string, b64data string) (string, error) {
+	trace("worker.convert.enter", map[string]any{"sid": w.env.actorID, "file": filename, "bytes": len(b64data)})
 	// Browser-assisted conversion (v1 convert.go semantics): emit
 	// convert_request, wait for convert_response (60s), stale gen aborts.
 	// No browser (or timeout) falls back to the binary error — never hangs.

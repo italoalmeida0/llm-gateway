@@ -220,7 +220,13 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 	s.mu.Unlock()
 
 	return s.flights.do(id, func() spawnResult {
-		return s.routeCold(id, forRead)
+		res := s.routeCold(id, forRead)
+		if res.Error != "" {
+			trace("sup.route", map[string]any{"sid": id, "err": res.Error, "forRead": forRead})
+		} else {
+			trace("sup.route", map[string]any{"sid": id, "forRead": forRead, "resumed": res.Resumed})
+		}
+		return res
 	})
 }
 
@@ -288,6 +294,7 @@ func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 		act.done = make(chan struct{})
 	}
 	go act.run()
+	resumed := false
 	if act.resumeSnap != nil {
 		snap := act.resumeSnap
 		act.resumeSnap = nil
@@ -322,6 +329,7 @@ func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 			"type": "session_status", "hostId": hostID, "sessionId": id,
 			"status": "running", "turn": map[string]any{"startedAt": rec.Turn.StartedAt}, "resumed": true,
 		})
+		resumed = true
 	}
 	h := &sessionHandle{inbox: act.inbox, control: act.control, done: act.done, epoch: act.epoch}
 	ttl := postTurnTTL
@@ -346,7 +354,7 @@ func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 	if n > maxResidentActors {
 		go s.evictIdle(false)
 	}
-	return spawnResult{Inbox: h.inbox, Control: h.control, Done: h.done}
+	return spawnResult{Inbox: h.inbox, Control: h.control, Done: h.done, Resumed: resumed}
 }
 
 func (s *sessionSupervisor) emit(ev any) {
@@ -441,6 +449,7 @@ decided:
 			evict = append(evict, c.id)
 		}
 	}
+	trace("sup.evict", map[string]any{"n": len(evict), "force": force})
 	for _, id := range evict {
 		s.passivate(id)
 	}
@@ -470,7 +479,9 @@ func (s *sessionSupervisor) passivate(id string) {
 	}
 	select {
 	case <-handle.done:
+		trace("sup.passivate", map[string]any{"sid": id, "ok": true})
 	case <-time.After(15 * time.Second):
+		trace("sup.passivate", map[string]any{"sid": id, "ok": false})
 		fmt.Printf("[WARN] passivate %s: actor did not exit, keeping mapped (no orphan, no double spawn)\n", id)
 		return
 	}
@@ -538,6 +549,7 @@ func (s *sessionSupervisor) watchdogRound() {
 		}
 	}
 judged:
+	trace("sup.watchdog", map[string]any{"n": len(collected)})
 	for _, r := range collected {
 		id, rep := r.id, r.rep
 		if rep == nil {

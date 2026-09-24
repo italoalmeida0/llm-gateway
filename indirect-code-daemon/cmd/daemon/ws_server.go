@@ -90,6 +90,7 @@ func (s *wsServer) dispatch(raw []byte) {
 	if err := json.Unmarshal(raw, &base); err != nil {
 		return
 	}
+	trace("ws.dispatch", map[string]any{"type": base.Type, "sid": base.SessionID})
 	switch base.Type {
 	case "shutdown", "disconnected":
 		// Remote kill from the gateway (host row deleted while online).
@@ -201,6 +202,7 @@ func (s *wsServer) dispatch(raw []byte) {
 		// costs one message, no HTTP surface on the daemon by design.
 		if s.root != nil {
 			infra, at := s.root.healthSnapshot()
+			trace("ws.health", map[string]any{"n": len(infra), "asOf": at})
 			s.emit(map[string]any{"type": "health", "hostId": s.host(), "infra": infra, "asOf": at})
 		} else {
 			s.emit(map[string]any{"type": "health", "hostId": s.host(), "infra": map[string]any{}, "asOf": 0})

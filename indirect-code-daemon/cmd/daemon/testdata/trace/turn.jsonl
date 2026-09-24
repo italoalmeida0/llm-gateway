@@ -1,0 +1,8 @@
+{"ts": 1000, "ev": "ws.dispatch", "type": "prompt", "sid": "s1"}
+{"ts": 1000, "ev": "sup.route", "sid": "s1", "forRead": false, "resumed": false}
+{"ts": 1000, "ev": "actor.msg", "sid": "s1", "type": "userPromptMsg", "state": "idle", "gen": 0}
+{"ts": 1000, "ev": "actor.state", "sid": "s1", "from": "idle", "to": "running", "gen": 1}
+{"ts": 1000, "ev": "actor.wal", "sid": "s1", "type": "msg", "turn": 1, "msgs": 1}
+{"ts": 1000, "ev": "worker.approve.enter", "sid": "s1", "tool": "bash", "gen": 1}
+{"ts": 1000, "ev": "actor.wal", "sid": "s1", "type": "usage", "turn": 1, "msgs": 2}
+{"ts": 1000, "ev": "actor.state", "sid": "s1", "from": "running", "to": "idle", "gen": 1}

@@ -43,6 +43,32 @@ trace file to a replayer test and assert the state machine path.
 
 ## Status
 
-ACCEPTED by owner (report: "versão debug enche file de logs append com
-timestamp; nada disso vai pra prod"). Not yet implemented — implement
-with the F4 bench work.
+IMPLEMENTED (core). Sink (`trace.go`: JSONL per-day, 0600, flush-per-write
+in dev, single-check no-op in prod) + `ICD_TRACE=1` gate + `setTraceDir` at
+boot. Wired: actor dispatch/state/WAL/waits/timeouts/cancel/quarantine/
+drops, worker approve/question/convert/finish/drop, supervisor
+route/evict/watchdog-rounds/passivate, bg register/finish/cancel/deliver/
+wake, ws dispatch/health.
+
+## Golden traces (theory-testing)
+
+`cmd/daemon/testdata/trace/*.jsonl` + `trace_replay_test.go`:
+- `turn.jsonl` — full turn backbone (dispatch→route→msg→running→wal→idle)
+- `approval.jsonl` — wait→approve→resume
+- `timeout.jsonl` — wait→timeout→cancel
+- `TestTraceLiveSink` — real sink E2E (stub turn → trace file → backbone)
+- `TestTraceSchemaContracts` — every event's grep-keys enforced; logs
+  uncovered contracted events (bg.*, sup.evict/passivate need goldens)
+
+Workflow (the owner's motto): bug report ships with a trace (`ICD_TRACE=1`
+run), the fix ships with a golden asserting the corrected sequence, and
+the schema test guarantees the next debugger can still grep it at 3am.
+
+## Still open (with F4 bench work)
+
+- `ICD_TRACE=1` enabling debug counters in `session_status` payloads.
+- bg goldens (`bg.register→finish→wake` sequence) — schema lists them,
+  no golden file yet.
+- ws outbound drop counter trace (`ws.emit` drop path).
+- Perf: measure sink overhead under load before trusting it in long
+  dev sessions (flush-per-write is crash-safe but syscall-heavy).

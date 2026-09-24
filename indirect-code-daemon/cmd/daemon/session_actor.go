@@ -127,6 +127,17 @@ func newSessionActor(id string, rec *SessionRecord, store *diskStore, wsSend fun
 
 func (a *sessionActor) touch() { a.lastProgress = time.Now().UnixMilli() }
 
+// setState is the ONLY way to change a.state. Every transition is traced
+// (dev) with before/after + gen, so a trace file tells the exact story of
+// a session: idle->running->awaitingApproval->running->idle, etc.
+func (a *sessionActor) setState(next string) {
+	if a.state == next {
+		return
+	}
+	trace("actor.state", map[string]any{"sid": a.id, "from": a.state, "to": next, "gen": a.gen})
+	a.state = next
+}
+
 func randomID8() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -391,7 +402,7 @@ func (a *sessionActor) onUserPrompt(m userPromptMsg) {
 		// F3 recovery: a fresh prompt un-quarantines (new turn, new gen,
 		// stuck worker's gen is stale so its late finish is ignored).
 		a.rec.Status = "idle"
-		a.state = stateIdle
+		a.setState(stateIdle)
 		a.pingChange()
 	}
 	if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
@@ -534,7 +545,7 @@ func (a *sessionActor) startTurnWithMeta(prompt string, attachmentIDs []string, 
 	// → walAppendMsg → record + WAL). Seeding here AND in the agent would
 	// duplicate the user turn (caught by live E2E: 2× user + 1× assistant).
 	_ = meta
-	a.state = stateRunning
+	a.setState(stateRunning)
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	a.workerDone = make(chan struct{})
@@ -631,7 +642,7 @@ func (a *sessionActor) finishTurn(ok bool) {
 	if err != nil {
 		a.emit(map[string]any{"type": "commit_error", "sessionId": a.id, "error": err.Error()})
 	}
-	a.state = stateIdle
+	a.setState(stateIdle)
 	a.pingChange()
 	// Foreground contract (v1 parity): completion snapshot first (closing
 	// metadata + last two turns + history cursor — the client merges by id),
@@ -662,6 +673,7 @@ func (a *sessionActor) finishTurn(ok bool) {
 }
 
 func (a *sessionActor) doCancel(reason string) {
+	trace("actor.cancel", map[string]any{"sid": a.id, "reason": reason, "state": a.state, "gen": a.gen})
 	if a.state == stateIdle {
 		return
 	}
@@ -707,7 +719,7 @@ func (a *sessionActor) doCancel(reason string) {
 		a.finishTurn(false)
 		return
 	}
-	a.state = stateCancel
+	a.setState(stateCancel)
 	_ = reason
 }
 
@@ -746,9 +758,9 @@ func (a *sessionActor) enterAwait(kind, id string, recommended [][]string) {
 		}
 	})
 	if kind == "approval" {
-		a.state = stateAwaitAppr
+		a.setState(stateAwaitAppr)
 	} else {
-		a.state = stateAwaitQ
+		a.setState(stateAwaitQ)
 	}
 }
 
@@ -766,8 +778,9 @@ func (a *sessionActor) onApprovalResponse(m approvalResponseMsg) {
 	}
 	a.touch()
 	approved := m.Approved
+	trace("actor.approval", map[string]any{"sid": a.id, "id": m.ID, "approved": approved})
 	a.clearPending()
-	a.state = stateRunning
+	a.setState(stateRunning)
 	a.wakeApproval(m.ID, approved)
 	a.emit(map[string]any{"type": "approval_resolved", "sessionId": a.id, "callId": m.ID, "approved": approved})
 }
@@ -777,8 +790,9 @@ func (a *sessionActor) onQuestionResponse(m questionResponseMsg) {
 		return // stale
 	}
 	a.touch()
+	trace("actor.question", map[string]any{"sid": a.id, "id": m.ID, "nAnswers": len(m.Answers)})
 	a.clearPending()
-	a.state = stateRunning
+	a.setState(stateRunning)
 	a.wakeQuestion(m.ID, m.Answers)
 	a.emit(map[string]any{"type": "question_resolved", "sessionId": a.id, "questionId": m.ID})
 }
@@ -793,12 +807,15 @@ func (a *sessionActor) onStateTimeout(m stateTimeoutMsg) {
 		id := a.pending.id
 		rec := append([][]string{}, a.pending.recommended...)
 		a.clearPending()
-		a.state = stateRunning
+	a.setState(stateRunning)
 		a.emit(map[string]any{"type": "system_notice", "sessionId": a.id, "text": "User didn't respond in 15min — proceeding with recommended."})
+		trace("actor.timeout", map[string]any{"sid": a.id, "kind": "question", "id": id})
 		a.wakeQuestion(id, rec)
 		a.emit(map[string]any{"type": "question_resolved", "sessionId": a.id, "questionId": id})
 	case "approval":
+		timeoutID := a.pending.id
 		a.clearPending()
+		trace("actor.timeout", map[string]any{"sid": a.id, "kind": "approval", "id": timeoutID})
 		a.emit(map[string]any{"type": "system_notice", "sessionId": a.id, "text": "Approval timed out after 15min — turn cancelled."})
 		// Approval timeout cancels the turn but keeps the queue intact.
 		a.doCancel("approval_timeout")
@@ -809,6 +826,7 @@ func (a *sessionActor) onStateTimeout(m stateTimeoutMsg) {
 		select {
 		case <-a.inbox:
 			a.droppedRequeue++
+			trace("actor.drop", map[string]any{"sid": a.id, "where": "timeout-requeue", "total": a.droppedRequeue})
 		default:
 		}
 	}
@@ -1015,6 +1033,7 @@ func (a *sessionActor) onWALAppend(m walAppendMsg) {
 		a.applyControlWAL(ev)
 	}
 	a.rec.UpdatedAt = time.Now().UnixMilli()
+	trace("actor.wal", map[string]any{"sid": a.id, "type": ev.Type, "turn": a.rec.TurnSeq, "msgs": len(a.rec.Messages)})
 	appendWALEvent(a.wal, ev)
 }
 
@@ -1067,6 +1086,7 @@ func (a *sessionActor) onWorkerApprovalReq(m workerApprovalReqMsg) {
 	}
 	a.touch()
 	a.approvalWaiters[m.id] = m.reply
+	trace("actor.wait", map[string]any{"sid": a.id, "kind": "approval", "id": m.id, "tool": m.tool})
 	a.enterAwait("approval", m.id, nil)
 	a.emit(map[string]any{"type": "tool_approval_request", "sessionId": a.id, "callId": m.callID, "tool": m.tool, "args": m.args})
 }
@@ -1078,6 +1098,7 @@ func (a *sessionActor) onWorkerQuestionReq(m workerQuestionReqMsg) {
 		return
 	}
 	a.touch()
+	trace("actor.wait", map[string]any{"sid": a.id, "kind": "question", "id": m.id})
 	a.questionWaiters[m.id] = m.reply
 	var rec [][]string
 	for _, q := range m.req.Questions {
@@ -1219,7 +1240,7 @@ func (a *sessionActor) quarantine() {
 	a.rec.Status = "orphaned"
 	a.rec.UpdatedAt = time.Now().UnixMilli()
 	_ = a.store.saveSessionSync(a.rec)
-	a.state = stateOrphaned
+	a.setState(stateOrphaned)
 	a.pingChange()
 	a.emit(map[string]any{"type": "session_status", "hostId": a.hostID(), "sessionId": a.id, "status": "orphaned",
 		"error": "turn worker stuck: context ignored for ~2min; session quarantined, start a new turn to recover"})

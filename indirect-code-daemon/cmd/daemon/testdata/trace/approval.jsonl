@@ -1,0 +1,4 @@
+{"ts": 1000, "ev": "actor.wait", "sid": "s1", "kind": "approval", "id": "ap1", "tool": "bash"}
+{"ts": 1000, "ev": "actor.approval", "sid": "s1", "id": "ap1", "approved": true}
+{"ts": 1000, "ev": "worker.approve.resolved", "sid": "s1", "tool": "bash", "approved": true, "stale": false}
+{"ts": 1000, "ev": "actor.state", "sid": "s1", "from": "awaitingApproval", "to": "running", "gen": 1}

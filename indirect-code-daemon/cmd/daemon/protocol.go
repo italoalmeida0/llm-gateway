@@ -176,7 +176,12 @@ type spawnResult struct {
 // ---- worker -> actor (sent by the turn worker, handled on the actor loop) ----
 
 // walAppendMsg appends one WAL event + applies it to the in-memory record.
+// gen is the worker's turn generation (set by turnBridge.sendInbox). A
+// quarantined worker keeps its old incarnation: after recovery a fresh
+// prompt bumps gen without changing epoch, so gen is the guard that stops
+// a zombie worker's late appends from landing in the NEW turn (B1).
 type walAppendMsg struct {
+	gen            int
 	ev             walEvent
 	liveReset      bool // assistant message started: clear live tail
 	contextNotice  provider.Message
@@ -233,8 +238,10 @@ type convertResponseMsg struct {
 	stale bool // worker gone: just emit convert_resolved
 }
 
-// turnBalloonMsg carries the finished file-changes balloon.
+// turnBalloonMsg carries the finished file-changes balloon. gen guard as
+// in walAppendMsg: a zombie worker's balloon must not anchor to a new turn.
 type turnBalloonMsg struct {
+	gen     int
 	balloon filetrack.TurnChanges
 }
 
@@ -304,6 +311,16 @@ type editApplyResult struct {
 // compactNowMsg triggers manual compaction (runs inside the turn worker
 // when idle: starts a compaction-only turn).
 type compactNowMsg struct{}
+
+// slashReplyMsg appends a deterministic user/assistant pair (a slash
+// command and its canned reply) with no model call — v1 /help parity.
+// It is the only deterministic transcript seeder, so the black-box tests
+// rely on it; keeping it actor-owned keeps the record single-writer.
+type slashReplyMsg struct {
+	Command string
+	Reply   string
+	Ack     chan any
+}
 
 // jailMsg locks/unlocks the sandbox for future turns.
 type jailMsg struct {

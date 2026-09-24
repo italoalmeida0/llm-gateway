@@ -310,6 +310,37 @@ func (a *sessionActor) onCompactNow() {
 	}()
 }
 
+// onSlashReply appends a deterministic user/assistant pair (a slash command
+// and its canned reply) with no model call — v1 /help parity. The record
+// stays single-writer: only the actor touches a.rec.
+func (a *sessionActor) onSlashReply(m slashReplyMsg) {
+	a.touch()
+	a.rec.TurnSeq++
+	turn := a.rec.TurnSeq
+	userMsg := provider.Message{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: m.Command}}, TurnIndex: turn}
+	asstMsg := provider.Message{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: m.Reply}}, TurnIndex: turn}
+	a.rec.Messages = append(a.rec.Messages, userMsg, asstMsg)
+	a.rec.UpdatedAt = time.Now().UnixMilli()
+	// Mirror saveOrAppend's rule (plus stateCancel, where the worker is
+	// exiting but the WAL is still open): while a WAL is open the messages
+	// must be journaled, never written to disk directly — a direct save
+	// would race the pending commitWAL and duplicate the turn.
+	if a.wal != nil {
+		appendWALEvent(a.wal, walMsgEvent(userMsg))
+		appendWALEvent(a.wal, walMsgEvent(asstMsg))
+	} else {
+		_ = a.store.saveSessionSync(a.rec)
+	}
+	a.pingChange()
+	a.emit(tailContentEvent("", a.id, "session_content", a.rec, 0, nil))
+	if m.Ack != nil {
+		select {
+		case m.Ack <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func jailNotice(jailed bool) string {
 	if jailed {
 		return "Sandbox locked for future turns."

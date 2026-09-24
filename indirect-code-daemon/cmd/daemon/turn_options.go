@@ -48,6 +48,9 @@ func normalizedOptions(o SessionOptions) SessionOptions {
 	if o.Access != "ask" {
 		o.Access = "full"
 	}
+	// Skills wiring is gone in v2; keep the wire field a non-nil empty
+	// slice so JSON emits [] (not null/omitted) for the frozen envelope.
+	o.Skills = []string{}
 	return o
 }
 // optionsEqual compares two SessionOptions (Skills is a slice).

@@ -290,6 +290,18 @@ func (w *turnBridge) stamp(payload any) Envelope {
 }
 
 func (w *turnBridge) sendInbox(payload any) {
+	// Stamp the turn generation onto worker-mail payloads that carry
+	// transcript state: the actor's epoch gate cannot see a same-epoch
+	// zombie (quarantine recovery bumps gen, not epoch), so these must
+	// carry gen themselves (B1).
+	switch p := payload.(type) {
+	case walAppendMsg:
+		p.gen = w.snap.gen
+		payload = p
+	case turnBalloonMsg:
+		p.gen = w.snap.gen
+		payload = p
+	}
 	// Transcript integrity beats loop pacing: walAppendMsg carries the
 	// authoritative transcript (WAL + in-memory record), so it must NEVER
 	// be dropped — block until delivered or the turn is cancelled. Control

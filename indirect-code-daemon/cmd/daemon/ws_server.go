@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -72,7 +74,9 @@ func (s *wsServer) notifyChange(collection string) {
 	}
 	c := collection
 	s.debounce[c] = time.AfterFunc(300*time.Millisecond, func() {
-		s.emit(map[string]any{"type": "change", "collection": c})
+		// v1 parity: the ping carries hostId so multi-host clients can
+		// attribute the invalidation (the frozen protocol declares it).
+		s.emit(map[string]any{"type": "change", "hostId": s.host(), "collection": c})
 		s.debounceMu.Lock()
 		delete(s.debounce, c)
 		s.debounceMu.Unlock()
@@ -303,6 +307,9 @@ func (s *wsServer) dispatch(raw []byte) {
 			case <-time.After(replyTimeout):
 			}
 		}
+		// v1 parity: every explicit choice also becomes the default for new
+		// sessions (persisted in config.json, read back via pull config).
+		s.rememberSelection(req.Model, req.Options)
 
 	case "queue_add":
 		var req struct {
@@ -1012,10 +1019,40 @@ func (s *wsServer) onSlashCommand(res spawnResult, sessionID, text string) bool 
 		}
 		return true
 	case "/help":
-		s.emit(map[string]any{"type": "notice", "hostId": s.host(), "sessionId": sessionID, "message": "Commands: /clear /compact /jail /unjail"})
+		// v1 parity: /help is a transcript turn (user command + canned
+		// assistant reply), not a transient toast. The frontend and the
+		// black-box tests both rely on it as a deterministic, model-free
+		// way to seed a [user, assistant] pair.
+		s.slashReply(sessionID, text, "### ⚡ Indirect Code Slash Commands\n"+
+			"- `/compact` — Summarize and compact conversation to free up context\n"+
+			"- `/clear` — Start a fresh blank session (history is kept)\n"+
+			"- `/jail` — Confine agent tools strictly to session directory\n"+
+			"- `/unjail` — Allow agent tools to read/write external paths")
 		return true
 	}
 	return false
+}
+
+// slashReply appends a deterministic user/assistant pair to the transcript
+// (no model call) and pushes the tail to clients. Kept actor-owned so the
+// record stays single-writer; v1 did the same under the session lock.
+func (s *wsServer) slashReply(sessionID, command, reply string) {
+	res := s.sessions.route(sessionID, false)
+	if res.Error != "" {
+		s.error(sessionID, "", "Session not found")
+		return
+	}
+	er := make(chan any, 1)
+	select {
+	case res.Inbox <- Envelope{SessionID: sessionID, Payload: slashReplyMsg{Command: core.SanitizeUserText(command), Reply: reply, Ack: er}}:
+	case <-time.After(replyTimeout):
+		s.error(sessionID, "", "Session busy")
+		return
+	}
+	select {
+	case <-er:
+	case <-time.After(replyTimeout):
+	}
 }
 
 func (s *wsServer) onUploadAttachment(requestID, sessionID, name, mime, data, text string) {
@@ -1051,10 +1088,27 @@ func (s *wsServer) onGetAttachment(sessionID, attachmentID string) {
 		return
 	}
 	for _, a := range rec.Attachments {
-		if a.ID == attachmentID {
-			s.emit(map[string]any{"type": "attachment_data", "hostId": s.host(), "sessionId": sessionID, "attachment": a})
-			return
+		if a.ID != attachmentID {
+			continue
 		}
+		// v1 parity: the payload carries the file bytes (base64) plus the
+		// extracted text. v2 emitted only the ref, so clients got no data.
+		payload := map[string]any{"id": a.ID, "name": a.Name, "mime": a.Mime, "size": a.Size}
+		if data, err := os.ReadFile(a.Path); err == nil {
+			payload["data"] = base64.StdEncoding.EncodeToString(data)
+		}
+		if a.TextPath != "" {
+			if text, err := os.ReadFile(a.TextPath); err == nil {
+				chars := []rune(string(text))
+				if len(chars) > 256*1024 {
+					chars = chars[:256*1024]
+					payload["textTruncated"] = true
+				}
+				payload["text"] = string(chars)
+			}
+		}
+		s.emit(map[string]any{"type": "attachment_data", "hostId": s.host(), "sessionId": sessionID, "attachment": payload})
+		return
 	}
 }
 
@@ -1191,4 +1245,24 @@ func (s *wsServer) onUpdateConfig(raw []byte) {
 	}
 	s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": true, "revision": configRevision(&next)})
 	s.notifyChange("config")
+}
+
+// rememberSelection persists the last explicit model/options choice as the
+// default for new sessions (v1 parity: pull config exposes lastSelection).
+func (s *wsServer) rememberSelection(model string, options SessionOptions) {
+	cfg := s.cfg.load()
+	if cfg == nil {
+		return
+	}
+	if model == "" && cfg.LastSelection != nil {
+		model = cfg.LastSelection.Model
+	}
+	next := *cfg
+	next.LastSelection = &ModelSelection{Model: model, SessionOptions: normalizedOptions(options)}
+	s.cfg.store(&next)
+	cfgDir := s.configDir
+	if cfgDir == "" {
+		cfgDir = s.dataDir
+	}
+	_ = saveDaemonConfig(cfgDir, &next)
 }

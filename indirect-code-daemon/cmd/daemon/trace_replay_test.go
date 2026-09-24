@@ -136,7 +136,6 @@ var knownGaps = map[string]string{
 	"worker.convert.enter":    "needs turnBridge + fake provider",
 	// Drop paths need a saturated mailbox at the exact send moment.
 	"worker.drop": "needs a full (128) inbox during a worker send",
-	"actor.drop":  "needs the timeout path with a non-empty inbox",
 }
 
 // TestTraceSchemaContracts: every known event carries its required keys.
@@ -154,7 +153,6 @@ func TestTraceSchemaContracts(t *testing.T) {
 		"actor.timeout":          {"sid", "kind", "id"},
 		"actor.cancel":           {"sid", "reason", "state"},
 		"actor.quarantine":       {"sid", "rounds"},
-		"actor.drop":             {"sid", "where"},
 		"worker.approve.enter":   {"sid", "tool", "gen"},
 		"worker.approve.resolved": {"sid", "tool", "approved", "stale"},
 		"worker.question.enter":  {"sid", "n", "gen"},

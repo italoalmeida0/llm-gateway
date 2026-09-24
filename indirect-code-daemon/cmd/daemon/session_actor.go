@@ -87,8 +87,6 @@ type sessionActor struct {
 	// cancelRounds counts consecutive watchdog cancels without worker exit
 	// (F3 escalation → quarantine).
 	cancelRounds int
-	// droppedRequeue counts timeout-path inbox drops (report item 6).
-	droppedRequeue int64
 
 	// epoch is this incarnation's spawn number (supervisor assigns;
 	// worker mail carrying another epoch is dropped — see handleData).
@@ -250,6 +248,12 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.onBgNotice(m)
 	case turnBalloonMsg:
 		// Stashed until finishTurn appends it with the final message count.
+		// Gen gate (B1): a zombie worker's balloon must not anchor to a new
+		// turn. gen==0 is the legacy/pre-gen caller and is accepted.
+		if m.gen != 0 && m.gen != a.gen {
+			trace("actor.balloon.stale", map[string]any{"sid": a.id, "gen": m.gen, "cur": a.gen})
+			break
+		}
 		a.pendingBalloon = &m.balloon
 	case workerTitleReqMsg:
 		var res workerTitleResult
@@ -278,6 +282,9 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.rec.UpdatedAt = time.Now().UnixMilli()
 		a.saveOrAppend(walEvent{Type: walTypeMeta})
 		a.pingChange()
+		// v1 parity: clients track the pin badge from this event (the frozen
+		// protocol declares session_pinned). v2 dropped the emit.
+		a.emit(map[string]any{"type": "session_pinned", "hostId": a.hostID(), "sessionId": a.id, "pinned": a.rec.Pinned})
 	case todosOpenMsg:
 		a.touch()
 		open := m.Open
@@ -295,6 +302,10 @@ func (a *sessionActor) handleData(env Envelope) {
 		appendWALEvent(a.wal, walEvent{Type: walTypeOptions, Options: &opts})
 		a.rec.UpdatedAt = time.Now().UnixMilli()
 		a.pingChange()
+		// v1 parity: configuring a session acks with the updated snapshot so
+		// the composer reflects the new options immediately. v2 dropped this
+		// and clients saw stale options until the next turn.
+		a.emit(map[string]any{"type": "session_data", "hostId": a.hostID(), "session": pagedHistoryBlock(sessionPayload(a.rec), a.rec)})
 	case queueSendNowMsg:
 		a.onQueueSendNow(m)
 	case alwaysAllowMsg:
@@ -308,6 +319,8 @@ func (a *sessionActor) handleData(env Envelope) {
 		m.Reply <- a.onEditApply(m)
 	case compactNowMsg:
 		a.onCompactNow()
+	case slashReplyMsg:
+		a.onSlashReply(m)
 	case jailMsg:
 		a.touch()
 		a.jailed = m.Jail
@@ -830,17 +843,13 @@ func (a *sessionActor) onStateTimeout(m stateTimeoutMsg) {
 		trace("actor.timeout", map[string]any{"sid": a.id, "kind": "approval", "id": timeoutID})
 		a.emit(map[string]any{"type": "system_notice", "sessionId": a.id, "text": "Approval timed out after 15min — turn cancelled."})
 		// Approval timeout cancels the turn but keeps the queue intact.
+		// Do NOT drain the inbox here (B2): the timeout message was already
+		// delivered, so there is nothing to "requeue" — and the next slot
+		// is arbitrary mail (a blocking walAppendMsg, workerFinishedMsg, or
+		// a user prompt). Consuming it silently lost transcripts, wedged
+		// sessions in `cancelling`, and dropped user prompts. The actor
+		// loop continues with the mailbox untouched.
 		a.doCancel("approval_timeout")
-		// Do NOT requeue: a blocking `go inbox <- env` leaks under a full
-		// mailbox and breaks inbox-first single-file ordering (report item
-		// 6). The drained message is a duplicate of state the actor already
-		// holds (worker progress re-sends on its next event); drop + count.
-		select {
-		case <-a.inbox:
-			a.droppedRequeue++
-			trace("actor.drop", map[string]any{"sid": a.id, "where": "timeout-requeue", "total": a.droppedRequeue})
-		default:
-		}
 	}
 }
 
@@ -1003,7 +1012,20 @@ func (a *sessionActor) onRead(m readReqMsg) {
 // onWALAppend applies one worker event to the in-memory record + WAL.
 // Runs on the actor goroutine: single ownership, no locks.
 func (a *sessionActor) onWALAppend(m walAppendMsg) {
-	if a.state != stateRunning && a.state != stateAwaitAppr && a.state != stateAwaitQ {
+	// Gen gate (B1): a zombie worker from a quarantined incarnation keeps
+	// the same epoch but an older gen. Without this check its late appends
+	// pass the epoch gate and are written into the NEW turn's WAL — durable
+	// corruption. gen==0 is the legacy/pre-gen caller (tests, older wire
+	// shapes) and is accepted.
+	if m.gen != 0 && m.gen != a.gen {
+		trace("actor.wal.stale", map[string]any{"sid": a.id, "gen": m.gen, "cur": a.gen})
+		return
+	}
+	// State gate: apply worker appends while the turn owns the open WAL.
+	// stateCancel is included on purpose — a cancelled worker still emits
+	// its partial assistant message (agent preserves visible text on abort)
+	// before exiting, and dropping it lost that content (v1 kept it).
+	if a.state != stateRunning && a.state != stateAwaitAppr && a.state != stateAwaitQ && a.state != stateCancel {
 		return
 	}
 	a.touch()
@@ -1312,19 +1334,15 @@ func instantTitle(text string) string {
 
 // estimateResidentBytes is the LRU-budget heuristic: serialized message
 // bytes + attachment sizes + queue + WAL buffer estimate. Cheap (no JSON
-// marshal — sums content lengths), refined with real numbers in load tests.
+// marshal — walks content blocks by length), refined with real numbers in
+// load tests.
 func estimateResidentBytes(rec *SessionRecord) int64 {
 	if rec == nil {
 		return 0
 	}
 	var n int64
 	for _, m := range rec.Messages {
-		for _, c := range m.Content {
-			if tb, ok := c.(provider.TextBlock); ok {
-				n += int64(len(tb.Text))
-			}
-		}
-		n += int64(len(m.Meta) * 64)
+		n += estimateMessageBytes(m)
 	}
 	for _, a := range rec.Attachments {
 		n += a.Size
@@ -1338,4 +1356,47 @@ func estimateResidentBytes(rec *SessionRecord) int64 {
 	// WAL buffer + record overhead slack.
 	n += 256 * 1024
 	return n
+}
+
+// estimateMessageBytes sums every content block of a message, recursing
+// into tool results (nested Content + frontend Details). B3: the old
+// top-level TextBlock-only walk ignored tool output and images, which
+// dominate real sessions — a 2 MB tool result counted as ~0, so the LRU
+// budget never tripped and the daemon could blow past its memory cap.
+func estimateMessageBytes(m provider.Message) int64 {
+	var n int64
+	for _, c := range m.Content {
+		n += estimateContentBytes(c)
+	}
+	for k, v := range m.Meta {
+		n += int64(len(k) + len(v))
+	}
+	return n
+}
+
+func estimateContentBytes(c provider.Content) int64 {
+	switch b := c.(type) {
+	case provider.TextBlock:
+		return int64(len(b.Text))
+	case provider.ImageBlock:
+		return int64(len(b.Data))
+	case provider.ReasoningBlock:
+		return int64(len(b.Summary) + len(b.Encrypted))
+	case provider.ToolCallBlock:
+		return int64(len(b.Name) + len(b.Arguments))
+	case provider.ToolResultBlock:
+		var n int64
+		for _, inner := range b.Content {
+			n += estimateContentBytes(inner)
+		}
+		// Details is frontend-only rendering data (persisted with the
+		// transcript), so it counts against RAM like any other field.
+		if b.Details != nil {
+			if raw, err := json.Marshal(b.Details); err == nil {
+				n += int64(len(raw))
+			}
+		}
+		return n
+	}
+	return 0
 }

@@ -606,10 +606,12 @@ describe("Indirect Code Relay and Pairing", () => {
         expect(forked.session.options).toEqual(configured.session.options);
       }
 
-      // Search finds seeded transcript terms (before we edit/delete them)
+      // Search backend was deliberately removed in v2 (plan §D2): the
+      // handler answers with an empty result set so the inert UI never
+      // errors. Assert the documented contract, not v1 full-text behavior.
       send({ type: "search", query: "Slash Commands" });
       const hits = await waitFor((m) => m.type === "search_results");
-      expect(hits.results.some((r: any) => r.sessionId === sid)).toBe(true);
+      expect(hits.results).toEqual([]);
 
       // Saved edits truncate stale replies and survive a fresh snapshot.
       send({ type: "edit_message", sessionId: sid, index: 0, text: "edited hello", regenerate: false });

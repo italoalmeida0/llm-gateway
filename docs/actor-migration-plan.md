@@ -386,13 +386,33 @@ implementation matches, not the choice itself.
   `META_TEST_KEY`). Self-hosted single-upstream setup makes this fine.
 - Do NOT file "daemon can't talk to provider directly" as a bug.
 
-### D4. No self-update inside the daemon; launcher owns updates
+### D4. Self-update protocol: daemon side removed, launcher side intact
 
-- **DECIDED:** `daemon_update_*` answers authoritative state
-  (`{current: Version, autoUpdate: false}`) instead of erroring, so no
-  toast-on-reconnect. Real updates flow through the launcher + `dist/`
-  manifest exactly as before the rewrite.
-- Do NOT file "daemon has no updater" as a bug.
+- **What v1 did:** the daemon polled `versions.json` (gateway-first, then
+  public mirror), broadcast availability via `daemon_update`, and on apply
+  ran the "brutal update" (`update.go` + `handoff.go` + `update_flow.go`:
+  clean slot → fetch launcher → spawn `--update-start`, SIGKILL itself,
+  copy slot, launcher `--update-end`, promote after first WS connect).
+  The launcher executed the swap; the daemon orchestrated it.
+- **What the rewrite changed (DECIDED):** the daemon-side orchestration
+  (`update.go`, `handoff.go`, `update_flow.go`, manifest polling) was
+  deleted with the mutex code — it was deeply coupled to `DaemonServer`
+  state (locks, `ActiveSession`, quiesce paths) and would have needed a
+  full actor-protocol redesign, not a port. `daemon_update_*` now answers
+  authoritative state (`{current: Version, autoUpdate: false}`) so the
+  frontend card shows up-to-date instead of erroring (and no
+  toast-on-reconnect).
+- **What still works:** the launcher (`cmd/launcher`, restored — see D1)
+  still fetches, verifies, swaps and supervises any daemon binary. Manual
+  update = `build:daemon:all` + launcher swap, same binaries, same
+  `dist/` manifest shape (minus the daemon-driven auto-check/apply).
+- **Gap, owned:** in-daemon auto-check (10-min poll), availability
+  broadcast (`available`/`staged`), one-click apply from the dashboard,
+  and the slot A/B handoff are GONE until reimplemented as actor messages
+  (a `updateSupervisor` actor driving the launcher over the existing
+  protocol is the natural shape — not yet scheduled).
+- Do NOT file "daemon_update answers static state" as a bug — file
+  missing *launcher-side* behavior (fetch/verify/swap) if it breaks.
 
 ### D5. BG jobs are NEVER re-run (side-effect safety beats convenience)
 

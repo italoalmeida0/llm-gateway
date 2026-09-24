@@ -585,10 +585,11 @@ func (s *wsServer) dispatch(raw []byte) {
 		s.onUpdateConfig(raw)
 
 	case "daemon_update_check":
-		// No self-update in this daemon (single binary, gateway ships it):
-		// answer with authoritative state so the frontend card shows the
-		// current version as up-to-date instead of erroring. replyTo-less
-		// errors would toast on every reconnect (checkNow runs onOpen).
+		// Daemon-side self-update orchestration was removed in the rewrite
+		// (see docs §D4): answer authoritative state so the frontend card
+		// shows the current version as up-to-date instead of erroring.
+		// replyTo-less errors would toast on every reconnect (checkNow
+		// runs onOpen). Real swaps still go through the launcher.
 		s.emit(map[string]any{"type": "daemon_update", "hostId": s.host(), "current": Version, "autoUpdate": false})
 	case "daemon_update_apply", "daemon_update_toggle":
 		s.emit(map[string]any{"type": "daemon_update", "hostId": s.host(), "current": Version, "autoUpdate": false})

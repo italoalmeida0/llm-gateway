@@ -21,6 +21,7 @@
 export type IRRole = "system" | "user" | "assistant" | "tool";
 
 import { countTextTokens, estimateThinkingTokens } from "../tokens";
+import { DsmlStreamExtractor, type DsmlEmit, type DsmlToolHint } from "./dsml";
 
 /** Canonical content block. `text` is shared; media/tool blocks are typed. */
 export type IRBlock =
@@ -1532,7 +1533,7 @@ export interface IRStreamDelta {
   text?: string;
   /** True for thinking text (reasoning_content): shown, not billed. */
   thinking?: boolean;
-  toolUse?: { id: string; name: string; inputDelta: string; thoughtSignature?: string };
+  toolUse?: { id: string; name: string; inputDelta: string; thoughtSignature?: string; index?: number };
   usage?: { inTok: number; cacheTok: number; outTok: number; cacheCreation?: number; reasonTok?: number };
   finish?: "stop" | "length" | "tool_calls";
 }
@@ -1564,17 +1565,21 @@ function chatStreamParser(data: string): IRStreamDelta[] {
     if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
       out.push({ text: delta.reasoning_content, thinking: true });
     }
-    const tc = delta.tool_calls?.[0];
-    if (tc) {
+    const tc = asArr(delta.tool_calls);
+    for (const rawTc of tc) {
+      const t = asRecord(rawTc) as any;
       const sig =
-        typeof (tc.extra_content as any)?.google?.thought_signature === "string"
-          ? (tc.extra_content as any).google.thought_signature
+        typeof t.extra_content?.google?.thought_signature === "string"
+          ? t.extra_content.google.thought_signature
           : undefined;
       out.push({
         toolUse: {
-          id: typeof tc.id === "string" ? tc.id : "",
-          name: typeof tc.function?.name === "string" ? tc.function.name : "",
-          inputDelta: typeof tc.function?.arguments === "string" ? tc.function.arguments : "",
+          id: typeof t.id === "string" ? t.id : "",
+          name: typeof t.function?.name === "string" ? t.function.name : "",
+          inputDelta: typeof t.function?.arguments === "string" ? t.function.arguments : "",
+          // Upstream call index (parallel calls); synthesized recoveries
+          // carry their own, the writers fall back to id/name tracking.
+          ...(typeof t.index === "number" ? { index: t.index } : {}),
           ...(sig ? { thoughtSignature: sig } : {}),
         },
       });
@@ -1737,6 +1742,9 @@ class ChatStreamWriter implements IRStreamWriter {
   private sentRole = false;
   private headerSent = false;
   private id = `chatcmpl-${Date.now().toString(36)}`;
+  /** Parallel tool-call index bookkeeping for sources that carry none. */
+  private callIdx = -1;
+  private lastCallKey = "";
   constructor(private model: string) {}
   feed(deltas: IRStreamDelta[]): Uint8Array[] {
     const out: Uint8Array[] = [];
@@ -1775,9 +1783,26 @@ class ChatStreamWriter implements IRStreamWriter {
           this.sentRole = true;
           out.push(sseBytes(`data: ${JSON.stringify({ id: this.id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: this.model, choices: [{ index: 0, delta: { role: "assistant" } }] })}\n\n`));
         }
+        // Every tool call needs its OWN `index` — clients accumulate
+        // parallel calls per index, so a hardcoded 0 would merge them.
+        const t = d.toolUse;
+        let idx: number;
+        if (typeof t.index === "number") {
+          idx = t.index;
+          if (idx > this.callIdx) this.callIdx = idx;
+        } else if (t.id || t.name) {
+          const key = t.id || t.name;
+          if (key !== this.lastCallKey) {
+            this.callIdx++;
+            this.lastCallKey = key;
+          }
+          idx = Math.max(0, this.callIdx);
+        } else {
+          idx = Math.max(0, this.callIdx);
+        }
         out.push(
           sseBytes(
-            `data: ${JSON.stringify({ id: this.id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: this.model, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: d.toolUse.id || undefined, type: "function", function: { name: d.toolUse.name || undefined, arguments: d.toolUse.inputDelta } }] } }] })}\n\n`,
+            `data: ${JSON.stringify({ id: this.id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: this.model, choices: [{ index: 0, delta: { tool_calls: [{ index: idx, id: t.id || undefined, type: "function", function: { name: t.name || undefined, arguments: t.inputDelta } }] } }] })}\n\n`,
           ),
         );
       }
@@ -1866,6 +1891,11 @@ class AnthropicStreamWriter implements IRStreamWriter {
           out.push(ev("content_block_stop", { type: "content_block_stop", index: sigIndex }));
         }
         out.push(ev("content_block_start", { type: "content_block_start", index: this.toolIndex, content_block: { type: "tool_use", id: d.toolUse.id, name: d.toolUse.name, input: {} } }));
+        // A combined delta (id/name + args in one frame) still owes its
+        // JSON — the block start alone would silently drop the arguments.
+        if (d.toolUse.inputDelta) {
+          out.push(ev("content_block_delta", { type: "content_block_delta", index: this.toolIndex, delta: { type: "input_json_delta", partial_json: d.toolUse.inputDelta } }));
+        }
       } else if (d.toolUse && d.toolUse.inputDelta) {
         if (this.toolIndex === -1) {
           this.toolIndex = this.nextIndex++;
@@ -1946,11 +1976,17 @@ class ResponsesStreamWriter implements IRStreamWriter {
       if (d.toolUse && (d.toolUse.id || d.toolUse.name || d.toolUse.inputDelta)) {
         if (d.toolUse.id) this.fnCallId = d.toolUse.id;
         if (d.toolUse.name) this.fnName = d.toolUse.name;
+        const hadArgs = !!d.toolUse.inputDelta;
         if (d.toolUse.inputDelta) this.fnArgs += d.toolUse.inputDelta;
         if (!this.fnAnnounced && (this.fnName || this.fnCallId)) {
           this.fnAnnounced = true;
           out.push(sseBytes(`event: response.output_item.added\ndata: ${JSON.stringify({ type: "response.output_item.added", sequence_number: this.seq++, output_index: 1, item: { type: "function_call", id: this.fnCallId, call_id: this.fnCallId, name: this.fnName, arguments: "", status: "in_progress" } })}\n\n`));
-        } else if (d.toolUse.inputDelta) {
+          // Combined delta: the args ride the SAME frame — stream them
+          // right after the item add instead of only in the terminal.
+          if (hadArgs) {
+            out.push(sseBytes(`event: response.function_call_arguments.delta\ndata: ${JSON.stringify({ type: "response.function_call_arguments.delta", sequence_number: this.seq++, item_id: this.fnCallId, output_index: 1, delta: d.toolUse.inputDelta })}\n\n`));
+          }
+        } else if (hadArgs) {
           out.push(sseBytes(`event: response.function_call_arguments.delta\ndata: ${JSON.stringify({ type: "response.function_call_arguments.delta", sequence_number: this.seq++, item_id: this.fnCallId, output_index: 1, delta: d.toolUse.inputDelta })}\n\n`));
         }
       }
@@ -2028,11 +2064,14 @@ export class IRStreamTranslator {
   /** Opaque thinking payloads (thought_signature / encrypted blobs): billed
    *  output the upstream never itemizes — estimated via btdby4. */
   private opaqueThinking: string[] = [];
+  /** DSML tool-call recovery (DeepSeek V4 markup leaking into content). */
+  private dsml: DsmlStreamExtractor;
 
   constructor(
     private upstream: Proto,
     client: Proto,
     private fallbackModel: string,
+    dsmlTools?: DsmlToolHint[],
   ) {
     this.writer =
       client === "anthropic"
@@ -2046,6 +2085,50 @@ export class IRStreamTranslator {
         : upstream === "responses"
           ? responsesStreamParser
           : (_ev, data) => chatStreamParser(data);
+    this.dsml = new DsmlStreamExtractor(dsmlTools ?? []);
+  }
+
+  /** Map one DSML emit to IR deltas (a recovered call streams as one
+   *  combined tool_use delta — the writers handle id+name+args together). */
+  private static emitToDeltas(e: DsmlEmit): IRStreamDelta[] {
+    if ("call" in e) {
+      return [{ toolUse: { id: e.call.id, name: e.call.name, inputDelta: e.call.argsJson, index: e.call.index } }];
+    }
+    return e.text ? [{ text: e.text }] : [];
+  }
+
+  /**
+   * Expand parsed deltas: DSML marker text is recovered into tool calls
+   * (held tails land BEFORE any terminal frame) and a recovered call
+   * upgrades a plain `stop` finish into `tool_calls`.
+   */
+  private expand(deltas: IRStreamDelta[]): IRStreamDelta[] {
+    const out: IRStreamDelta[] = [];
+    for (const d of deltas) {
+      const content: IRStreamDelta = {};
+      if (d.text && !d.thinking && this.dsml.active) {
+        for (const e of this.dsml.feed(d.text)) out.push(...IRStreamTranslator.emitToDeltas(e));
+      } else if (d.text) {
+        content.text = d.text;
+      }
+      if (d.thinking) content.thinking = d.thinking;
+      if (d.toolUse) content.toolUse = d.toolUse;
+      if (d.usage) content.usage = d.usage;
+      if (content.text || content.thinking || content.toolUse || content.usage) out.push(content);
+      if (d.finish) {
+        for (const e of this.dsml.flush()) out.push(...IRStreamTranslator.emitToDeltas(e));
+        out.push({ finish: d.finish === "stop" && this.dsml.committed > 0 ? "tool_calls" : d.finish });
+      }
+    }
+    return out;
+  }
+
+  /** Terminal sequence: flush the held DSML tail first, then the finish. */
+  private terminal(finish: "stop" | "length" | "tool_calls"): IRStreamDelta[] {
+    const out: IRStreamDelta[] = [];
+    for (const e of this.dsml.flush()) out.push(...IRStreamTranslator.emitToDeltas(e));
+    out.push({ finish: finish === "stop" && this.dsml.committed > 0 ? "tool_calls" : finish });
+    return out;
   }
 
   get isDone(): boolean {
@@ -2075,13 +2158,9 @@ export class IRStreamTranslator {
       if (this.upstream === "openai" && data === "[DONE]") {
         // [DONE] after a held bare finish: emit the terminal sequence now
         // (usage arrived or not — flush the pending finish first).
-        if (this.pendingFinish !== null) {
-          const pf = this.pendingFinish;
-          this.pendingFinish = null;
-          for (const b of this.writer.feed([{ finish: pf }])) out.push(b);
-        } else {
-          for (const b of this.writer.feed([{ finish: "stop" }])) out.push(b);
-        }
+        const pf = this.pendingFinish ?? "stop";
+        this.pendingFinish = null;
+        for (const b of this.writer.feed(this.terminal(pf))) out.push(b);
         // Chat-client writers terminate with [DONE] on the finish delta
         // itself (legacy finish() parity); other writers terminate on
         // flush() below. Either way the upstream terminator ends the stream.
@@ -2122,7 +2201,8 @@ export class IRStreamTranslator {
         }
       }
       if (!deltas.length) continue;
-      for (const d of deltas) {
+      const expanded = this.expand(deltas);
+      for (const d of expanded) {
         if (d.text) {
           // Thinking text feeds the estimate sample ONLY when no visible
           // text exists yet (pure-reasoning streams still estimate
@@ -2177,8 +2257,8 @@ export class IRStreamTranslator {
       // Empty-delta feeds still reach the writer: it emits first-byte
       // liveness frames (role/message_start/response.created) so TTFB
       // timeouts never fire on reasoning-only prefixes.
-      for (const b of this.writer.feed(deltas)) out.push(b);
-      if (deltas.some((d) => d.finish)) {
+      for (const b of this.writer.feed(expanded)) out.push(b);
+      if (expanded.some((d) => d.finish)) {
         this.sawFinish = true;
         this.done = true;
       }
@@ -2194,14 +2274,14 @@ export class IRStreamTranslator {
     if (this.pendingFinish !== null) {
       const pf = this.pendingFinish;
       this.pendingFinish = null;
-      for (const b of this.writer.feed([{ finish: pf }])) out.push(b);
+      for (const b of this.writer.feed(this.terminal(pf))) out.push(b);
       this.sawFinish = true;
     }
     if (!this.sawFinish) {
       // Upstream closed the SSE stream without a terminal frame (stub
       // upstreams, cut connections): synthesize finish so the writer emits
       // the same terminal sequence as on a clean finish (legacy parity).
-      for (const b of this.writer.feed([{ finish: "stop" }])) out.push(b);
+      for (const b of this.writer.feed(this.terminal("stop"))) out.push(b);
     }
     for (const b of this.writer.flush()) out.push(b);
     return out;

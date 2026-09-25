@@ -30,6 +30,7 @@ import {
   stickySet,
 } from "../failover";
 import { normalizeAttemptBody } from "./target-profile";
+import { extractDsmlToolCalls, patchRawResponseDsml, toolHintsFromRequest } from "./dsml";
 import {
   decodeToIR,
   encodeIR,
@@ -856,6 +857,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       }
     }
 
+    // Declared tools (any protocol shape) drive DSML tool-call recovery on
+    // the response side — empty (no tools / tool_choice none) disables it.
+    const dsmlTools = toolHintsFromRequest(bodyJson);
+
     // ---- model registry (routing mode + router-backed /v1/models) ----
     const snap = await routerSnapshot();
     let routedPublicModel: string | null = null;
@@ -1335,7 +1340,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // Usage comes from the translator (terminal chunk), with the
         // request-body estimate as the input fallback.
         const modelName = routedPublicModel ?? String((bodyJson as any)?.model ?? "");
-        const translator = new IRStreamTranslator(cand.via as IRProto, proto as IRProto, modelName);
+        const translator = new IRStreamTranslator(cand.via as IRProto, proto as IRProto, modelName, dsmlTools);
         let counted = false;
         // The finalized usage, once known — queued into the stream tail as
         // a terminal `: x-gateway-usage` comment (see pull() below).
@@ -1515,6 +1520,19 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         let translatedUsage: UsageResult;
         try {
           const irr = decodeResponseToIR(cand.via as IRProto, respText, modelName);
+          // DSML tool-call recovery (DeepSeek V4 markup leaking into content):
+          // recovered calls join the IR tool uses, the markup is stripped.
+          const recovered = extractDsmlToolCalls(irr.text, dsmlTools);
+          if (recovered.changed) {
+            irr.text = recovered.text;
+            if (recovered.calls.length) {
+              irr.toolUses = [
+                ...irr.toolUses,
+                ...recovered.calls.map((c) => ({ id: c.id, name: c.name, input: c.input })),
+              ];
+              if (irr.finish === "stop") irr.finish = "tool_calls";
+            }
+          }
           converted = encodeResponseFromIR(proto as IRProto, irr, modelName);
           translatedUsage = {
             inTok: irr.inTok, cacheTok: irr.cacheTok, outTok: irr.outTok,
@@ -1535,7 +1553,10 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         setUsageHeader(h, translatedUsage!);
         return new Response(converted, { status: upstream.status, headers: h });
       }
-      return new Response(respText, { status: upstream.status, headers: clientHeaders });
+      // Same-protocol pass-through: bytes stay untouched unless DSML
+      // recovery actually rewrote the body (then it is re-serialized).
+      const patched = patchRawResponseDsml(cand.via as IRProto, respText, dsmlTools);
+      return new Response(patched ?? respText, { status: upstream.status, headers: clientHeaders });
     }
 
     // ---- every candidate failed ----

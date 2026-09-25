@@ -170,6 +170,13 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 		if a.CaseInsensitive {
 			matchTarget = strings.ToLower(relSlash)
 		}
+		curDepth := strings.Count(filepath.Clean(p), string(os.PathSeparator)) - rootDepth
+		if curDepth > depth {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		// Exclusions apply even when a directory itself misses include;
 		// include controls emitted rows, while traversal can reach matching children.
 		if excludeMatch(matchTarget) {
@@ -181,13 +188,7 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 		if !includeMatch(matchTarget) {
 			return nil
 		}
-		curDepth := strings.Count(filepath.Clean(p), string(os.PathSeparator)) - rootDepth
-		if curDepth > depth {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+
 		var size int64
 		var modTime time.Time
 		if info, err := d.Info(); err == nil {

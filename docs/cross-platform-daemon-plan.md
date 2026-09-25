@@ -13,11 +13,11 @@ Reference: `tmp/unish`, cloned at `82da4f40f8f9100325a7593e40013757ca1ed7aa` (ig
 - [x] Repair and resume torn WAL files on Windows without losing valid events.
 - [x] Provision pinned unish in CI and exercise the real shell/tool boundary on every OS.
 - [x] Audit relevant unish builtins; keep that repository unchanged per user clarification.
-- [ ] Validate Python UTF-8 stdin/stdout/stderr and files on all platforms.
-- [ ] Fix demonstrated search/inspect filter, output cap, and Unicode issues.
+- [x] Validate Python UTF-8 stdin/stdout/stderr and files on all platforms.
+- [x] Fix demonstrated search/inspect filter, output cap, and Unicode issues.
 - [x] Run local gateway, daemon, race, and unish validation.
-- [ ] Run GitHub CI for both repositories; fix failures and record final run links.
-- [ ] Refresh local and committed build artifacts and write the final assessment.
+- [x] Run GitHub CI for both repositories; fix failures and record final run links.
+- [x] Refresh local and committed build artifacts and write the final assessment.
 
 ## Acceptance criteria
 
@@ -63,3 +63,18 @@ PYTHONIOENCODING override; search preserves capped count rows, enforces explicit
 file size limits, propagates cancellation, and avoids splitting UTF-8 output;
 search/inspect share precompiled recursive glob semantics; inspect honors
 exclusions during traversal and parses raw NUL-delimited Git filenames.
+
+
+Second fix revision: `1548c4f`; [CI run 36142786599](https://github.com/italoalmeida0/llm-gateway/actions/runs/36142786599)
+passed all five jobs: gateway, Linux daemon, macOS daemon, Windows daemon, and
+Linux race. Python 3.12 is provisioned in every native daemon job. Local full
+race validation passed after the tool fixes as well.
+
+Final review: [cross-platform-daemon-review.md](cross-platform-daemon-review.md).
+The final artifact refresh also preserves inspect's depth bound before include
+filtering; targeted search/inspect/Python tests passed after that adjustment.
+
+`bun run build` and `bun run build:daemon` completed. All 12 release binary
+checksums and both six-platform manifests were verified. SPA output is available
+in `dist/`; the native daemon is in `indirect-code-daemon/bin/`. The artifacts
+retain the existing version; no tag or release was published.

@@ -349,8 +349,11 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 ## Commands
 
 - CI: `.github/workflows/ci.yml` runs on `dev`/`main` pushes and PRs — gateway
-  gates (lint/typecheck/test/SPA build) on Linux plus the full Go suite on
-  **Linux, macOS and Windows** (the daemon/launcher ship per-platform) and the
+  gates (lint/typecheck/test/SPA build) on Linux plus the full Go suite NATIVE
+  on every shipped OS/arch (linux amd64/arm64, windows amd64/arm64, macos
+  arm64/amd64 — the daemon/launcher ship per-platform), the full suite on a
+  musl userland (Alpine) plus a glibc-free proof of the shipped linux
+  artifacts (exec on bare Alpine + `statically linked` assert), and the
   complete race detector on Linux. The release workflow reuses this matrix as
   its gate (`workflow_call`).
 - Release by tag (replaces the manual `bun run release <version>`): push a tag

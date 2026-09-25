@@ -3,10 +3,14 @@ name: CI
 # Cross-platform CI for llm-gateway:
 #   - gateway: Bun-side gates on Linux only (lint, typecheck, unit+integration
 #     tests, SPA build sanity).
-#   - daemon: Go gates on Linux, macOS AND Windows — the daemon/launcher ship
-#     per-platform (killslot/spawn/pidalive/process-stop have OS variants), so
-#     every PR runs the full suite on every OS we release for. fail-fast is off:
-#     we want the FULL matrix verdict, not the first failure.
+#   - daemon: Go gates NATIVE on every OS/arch we ship — linux amd64/arm64,
+#     windows amd64/arm64, macos amd64/arm64 (the daemon/launcher ship for all
+#     six; killslot/spawn/pidalive/process-stop have OS variants), so every PR
+#     runs the full suite on every target. fail-fast is off: we want the FULL
+#     matrix verdict, not the first failure.
+#   - daemon-musl: the full suite on a musl userland (Alpine) + a glibc-free
+#     proof of the SHIPPED linux artifacts (exec on bare Alpine + static
+#     assertion).
 #   - daemon-race: the complete race detector on Linux.
 on:
   push:
@@ -54,13 +58,29 @@ jobs:
         run: bun run build:web
 
   daemon:
-    name: Daemon (${{ matrix.os }})
+    name: Daemon (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # One NATIVE lane per shipped OS/arch — the daemon/launcher ship for
+        # all six (scripts/build-indirect-all.ts) and every one of them must
+        # build and pass the full suite.
+        # (linux amd64 musl + the glibc-free proof run in `daemon-musl` below.)
+        include:
+          - name: linux amd64 glibc
+            os: ubuntu-latest
+          - name: linux arm64
+            os: ubuntu-24.04-arm
+          - name: windows amd64
+            os: windows-latest
+          - name: windows arm64
+            os: windows-11-arm
+          - name: macos arm64
+            os: macos-latest
+          - name: macos amd64
+            os: macos-15-intel
     defaults:
       run:
         working-directory: indirect-code-daemon
@@ -105,6 +125,54 @@ jobs:
 
       - name: Tests
         run: go test ./... -count=1 -timeout 900s
+
+  daemon-musl:
+    name: Daemon (linux amd64 musl + glibc-free proof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      # 1) Full Go suite on a musl userland: the daemon must build and pass
+      #    its tests against musl libc + busybox (golang:alpine), not only on
+      #    glibc distros / macOS / Windows.
+      - name: Tests (musl userland, Alpine)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src/indirect-code-daemon golang:1.26-alpine \
+            sh -c "apk add --no-cache git bash >/dev/null && go vet ./... && go test ./... -count=1 -timeout 900s"
+
+      # 2) Build the REAL shipped artifacts — same script the release uses
+      #    (CGO_ENABLED=0, -trimpath, all six GOOS/GOARCH targets), so this
+      #    also proves every cross target still compiles.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: indirect-code-daemon/go.mod
+          cache-dependency-path: indirect-code-daemon/go.sum
+
+      - name: Build release artifacts (all targets)
+        run: bun run build:daemon:all
+
+      # 3) PROVE the linux artifacts are glibc-free: execute the shipped
+      #    binaries on a bare Alpine (musl only, no glibc package installed —
+      #    a glibc-linked binary cannot even exec there) and statically assert
+      #    EVERY linux artifact, including the cross-built arm64 ones.
+      - name: Prove glibc-free (run shipped binaries on bare Alpine)
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w alpine:3.22 sh -euxc '
+            apk add --no-cache file >/dev/null
+            dist=indirect-code-daemon/dist
+            "$dist/indirect-code-linux-amd64" --version
+            "$dist/indirect-launcher-linux-amd64" --version
+            for b in "$dist"/indirect-code-linux-* "$dist"/indirect-launcher-linux-*; do
+              file "$b"
+              file "$b" | grep -q "statically linked"
+            done
+            echo "OK: all linux artifacts are glibc-free"
+          '
 
   daemon-race:
     name: Daemon race (Linux)

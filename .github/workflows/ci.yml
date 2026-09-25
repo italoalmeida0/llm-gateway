@@ -13,6 +13,10 @@ on:
     branches: [dev, main]
   pull_request:
   workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   gateway:
@@ -34,6 +38,14 @@ jobs:
 
       - name: Typecheck
         run: bun run typecheck
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: indirect-code-daemon/go.mod
+          cache-dependency-path: indirect-code-daemon/go.sum
+
+      - name: Build daemon for integration tests
+        run: bun run build:daemon
 
       - name: Unit + integration tests
         run: bun test
@@ -60,6 +72,26 @@ jobs:
         with:
           go-version-file: indirect-code-daemon/go.mod
           cache-dependency-path: indirect-code-daemon/go.sum
+
+      # Source pin makes shell behavior reproducible and avoids release API limits.
+      - uses: actions/checkout@v4
+        with:
+          repository: italoalmeida0/unish
+          ref: 82da4f40f8f9100325a7593e40013757ca1ed7aa
+          path: tmp/unish
+          persist-credentials: false
+
+      - name: Build unish for native tool tests
+        working-directory: tmp/unish
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p "$RUNNER_TEMP/unish-bin"
+          shell_binary=unish
+          if [ "$RUNNER_OS" = "Windows" ]; then shell_binary=unish.exe; fi
+          go build -mod=vendor -trimpath -o "$RUNNER_TEMP/unish-bin/$shell_binary" .
+          echo "$RUNNER_TEMP/unish-bin" >> "$GITHUB_PATH"
+          echo "UNISH_TEST_BINARY=$RUNNER_TEMP/unish-bin/$shell_binary" >> "$GITHUB_ENV"
 
       - name: Vet
         run: go vet ./...

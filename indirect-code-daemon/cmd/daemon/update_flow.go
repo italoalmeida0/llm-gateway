@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -251,21 +250,10 @@ func killSlotProcesses(slotDir string, ownPid int, logf func(string, ...any)) {
 	}
 }
 
-// pidAliveStr probes liveness without affecting the process:
-// unix signal 0 (+ /proc zombie filter), windows tasklist probe.
+// pidAliveStr probes without affecting the process and excludes zombies.
 func pidAliveStr(pid string) bool {
-	n, err := strconv.Atoi(strings.TrimSpace(pid))
-	if err != nil || n <= 0 {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", n), "/NH").Output()
-		if err != nil {
-			return true // unknown: assume live, caller re-checks
-		}
-		return strings.Contains(string(out), strconv.Itoa(n))
-	}
-	return pidAliveUnixSignal(n)
+ n, err := strconv.Atoi(strings.TrimSpace(pid))
+ return err == nil && pidAlive(n)
 }
 
 // cleanInactiveSlot empties the update target dir. It REFUSES to touch the

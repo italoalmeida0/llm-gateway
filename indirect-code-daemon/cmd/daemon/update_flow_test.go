@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // Brutal update unit tests: version ordering, signal files, slot cleaning
@@ -14,7 +15,10 @@ import (
 // launcher stubborn test + the handoff E2E script).
 
 func TestCompareVersions(t *testing.T) {
-	cases := []struct{ a, b string; want int }{
+	cases := []struct {
+		a, b string
+		want int
+	}{
 		{"1.0.27", "1.0.27", 0},
 		{"1.0.28", "1.0.27", 1},
 		{"1.0.27", "1.0.28", -1},
@@ -52,42 +56,65 @@ func TestIsVersionNewer(t *testing.T) {
 	}
 }
 
+// This executable also serves as a native child fixture on every platform.
+func TestSlotProcessHelper(t *testing.T) {
+	if os.Getenv("SLOT_PROCESS_CHILD") == "1" {
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
+}
+
 func TestKillSlotProcesses(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("unix /proc scan only")
-	}
 	root := t.TempDir()
-	slot := filepath.Join(root, "slots", "slot-b")
-	binDir := filepath.Join(slot, "bin")
-	if err := os.MkdirAll(binDir, 0o700); err != nil {
+	slot := filepath.Join(root, "slot with spaces")
+	exe, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Fake "slot binary": a shell script inside the slot dir that sleeps.
-	script := filepath.Join(binDir, "sleeper.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+	data, err := os.ReadFile(exe)
+	if err != nil {
 		t.Fatal(err)
 	}
-	insider := exec.Command(script)
-	if err := insider.Start(); err != nil {
-		t.Fatal(err)
+	spawn := func(dir string) *exec.Cmd {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		name := "sleeper"
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0700); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(path, "-test.run=^TestSlotProcessHelper$")
+		cmd.Env = append(os.Environ(), "SLOT_PROCESS_CHILD=1")
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+		return cmd
 	}
-	defer insider.Process.Kill()
-	outsider := exec.Command("sleep", "30")
-	if err := outsider.Start(); err != nil {
-		t.Fatal(err)
+	insider := spawn(filepath.Join(slot, "bin"))
+	outsider := spawn(slot + "-neighbor")
+	// No pidfile: the directory scan itself must discover the launcher.
+	found := map[int]bool{}
+	killSlotProcessesByDir(slot, os.Getpid(), func(pid int, _ string) { found[pid] = true })
+	if !found[insider.Process.Pid] || found[outsider.Process.Pid] {
+		t.Fatalf("directory discovery: %v", found)
 	}
-	defer outsider.Process.Kill()
-	// Fake pidfile pointing at the insider.
-	if err := os.WriteFile(filepath.Join(slot, "daemon.pid"), []byte(strconv.Itoa(insider.Process.Pid)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	logs := []string{}
-	killSlotProcesses(slot, os.Getpid(), func(f string, a ...any) { logs = append(logs, f) })
+	killSlotProcessesByDir(slot, insider.Process.Pid, func(pid int, _ string) {
+		if pid == insider.Process.Pid {
+			t.Fatal("scan selected its own process")
+		}
+	})
+	killSlotProcesses(slot, os.Getpid(), t.Logf)
 	if pidAliveStr(strconv.Itoa(insider.Process.Pid)) {
-		t.Fatal("insider (slot process) survived the sweep")
+		t.Fatal("insider survived sweep")
 	}
 	if !pidAliveStr(strconv.Itoa(outsider.Process.Pid)) {
-		t.Fatal("outsider killed by slot sweep")
+		t.Fatal("sibling with shared prefix killed")
 	}
 }
 

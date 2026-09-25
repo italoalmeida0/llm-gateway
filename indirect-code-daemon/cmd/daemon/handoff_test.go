@@ -86,6 +86,14 @@ func TestCopyToSlotKeepsWALRepairIsolated(t *testing.T) {
 	if err := ww.close(); err != nil {
 		t.Fatal(err)
 	}
+	repaired, err := os.ReadFile(storeOf(d2).walPath("repair"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := replayWAL(&SessionRecord{ID: "repair"}, repaired)
+	if err != nil || record.Title != "new slot" {
+		t.Fatalf("repaired WAL did not append a replayable event: %v, %s", err, repaired)
+	}
 	after, err := os.ReadFile(storeOf(d).walPath("repair"))
 	if err != nil || string(after) != string(original) {
 		t.Fatal("new slot changed rollback WAL")

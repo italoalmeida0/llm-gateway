@@ -87,7 +87,7 @@ func TestEnsureUnishDownloadsWhenMissing(t *testing.T) {
 	defer func() { unishLatestTagFunc, unishDownloadFunc = oldTag, oldDl }()
 
 	dataDir := t.TempDir()
-	asset, err := UnishAssetName("linux", "amd64")
+	asset, err := UnishAssetName(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		t.Fatal(err)
 	}

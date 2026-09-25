@@ -3,14 +3,36 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-func setProcessGroup(_ *exec.Cmd) {}
+func setProcessGroup(cmd *exec.Cmd) {
+	// Cancel must terminate the tree BEFORE the root disappears. The default
+	// CommandContext cancellation kills only the root and orphans descendants.
+	var once sync.Once
+	var stopErr error
+	cmd.Cancel = func() error {
+		once.Do(func() {
+			if cmd.Process == nil {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			stopErr = exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(cmd.Process.Pid), "/T", "/F").Run()
+			if stopErr != nil {
+				stopErr = cmd.Process.Kill()
+			}
+		})
+		return stopErr
+	}
+}
 
 // isExecutableFile reports whether path can be executed. Windows has no
 // unix exec bits: any existing non-directory with an executable extension
@@ -35,8 +57,9 @@ func killProcessGroup(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return
 	}
-	_ = cmd.Process.Kill()
-	time.AfterFunc(3*time.Second, func() {
+	if cmd.Cancel != nil {
+		_ = cmd.Cancel()
+	} else {
 		_ = cmd.Process.Kill()
-	})
+	}
 }

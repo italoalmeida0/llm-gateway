@@ -165,7 +165,9 @@ func (s *diskStore) openWALAppend(sessionID string) (*walWriter, error) {
 	if p == "" {
 		return nil, fmt.Errorf("invalid session id")
 	}
-	f, err := os.OpenFile(p, os.O_RDWR|os.O_APPEND, 0o600)
+	// Windows append handles omit FILE_WRITE_DATA and cannot truncate. The
+	// session actor owns this writer exclusively, so seek after tail repair.
+	f, err := os.OpenFile(p, os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +186,10 @@ func (s *diskStore) openWALAppend(sessionID string) (*walWriter, error) {
 			f.Close()
 			return nil, err
 		}
+	}
+	if _, err := f.Seek(int64(validEnd), io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
 	}
 	needsNewline := validEnd > 0 && data[validEnd-1] != '\n'
 	if needsNewline {

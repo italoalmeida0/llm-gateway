@@ -4,36 +4,17 @@ package main
 
 import (
 	"fmt"
-	"os"
+	"llm-gateway/indirect-code-daemon/packages/processutil"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-// pidAlive reports whether pid (decimal) names a live process.
-// Signal 0 probes existence without affecting the process. Unreaped
-// children (zombies) answer signal 0 but are dead — on Linux the
-// /proc state field filters them (state Z).
+// pidAlive shares the daemon's platform-aware liveness probe.
 func pidAlive(pid string) bool {
-	n, err := strconv.Atoi(pid)
-	if err != nil || n <= 0 {
-		return false
-	}
-	if err := syscall.Kill(n, 0); err != nil {
-		// ESRCH = no such process; EPERM = exists but owned by another user.
-		return err == syscall.EPERM
-	}
-	if st, rerr := os.ReadFile("/proc/" + pid + "/stat"); rerr == nil {
-		// comm (2nd field) may contain spaces/parens: state follows the
-		// LAST ')'.
-		if i := strings.LastIndex(string(st), ")"); i >= 0 && i+2 < len(st) {
-			if st[i+2] == 'Z' {
-				return false
-			}
-		}
-	}
-	return true
+	n, err := strconv.Atoi(strings.TrimSpace(pid))
+	return err == nil && processutil.Alive(n)
 }
 
 // parsePid parses a decimal pid.

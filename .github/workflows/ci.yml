@@ -166,8 +166,7 @@ jobs:
             apk add --no-cache file >/dev/null
             dist=indirect-code-daemon/dist
             "$dist/indirect-code-linux-amd64" --version
-            "$dist/indirect-launcher-linux-amd64" --version
-            for b in "$dist"/indirect-code-linux-* "$dist"/indirect-launcher-linux-*; do
+            for b in "$dist"/indirect-code-linux-*; do
               file "$b"
               file "$b" | grep -q "statically linked"
             done

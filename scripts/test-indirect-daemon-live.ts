@@ -78,7 +78,7 @@ assert(pair.success && pair.connectUrl, "pairing failed");
 const daemonDir = mkdtempSync(path.join(tmpdir(), "llmgw-icd-d-"));
 mkdirSync(path.join(daemonDir, "workspace"), { recursive: true });
 const workDir = path.join(daemonDir, "workspace");
-const daemonProc = Bun.spawn([v2bin, "--connect", pair.connectUrl, "--data-dir", daemonDir, "--name", "Test Daemon"],
+const daemonProc = Bun.spawn([v2bin, "--worker", "--connect", pair.connectUrl, "--data-dir", daemonDir, "--name", "Test Daemon"],
   { cwd: WS, env: { ...process.env, HOME: daemonDir }, stdout: "ignore", stderr: "ignore" });
 procs.push(daemonProc);
 const prov: any = await (await fetch(`${GW}/api/admin/providers`, {

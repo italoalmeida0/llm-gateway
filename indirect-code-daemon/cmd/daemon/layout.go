@@ -9,20 +9,20 @@ import (
 	"time"
 )
 
-// Canonical on-disk layout (the launcher owns it — the daemon assumes it):
+// Canonical on-disk layout (the boot role owns it — the worker assumes it):
 //
 //	<root>/                       (default: ~/.indirect-code)
 //	  brain/                      per-session agent scratch (<id>/…)
 //	  slots/
 //	    active                    "a\n" or "b\n"
 //	    slot-a/
-//	      bin/                    indirect-code[-exe], indirect-launcher[-exe]
+//	      bin/                    the multi-call app (indirect-code-<goos>-<goarch>[.exe])
 //	      sessions/               sess_*.jsonl + sess_*/ attachments
 //	      config.json             gateway pairing (secrets)
 //	      projects.json           project list
 //	      daemon.pid              live pid (the daemon writes/removes it)
 //	      storage_version.json    storage schema stamp
-//	      update.log              last launcher --update attempt into THIS slot
+//	      update.log              last app --update attempt into THIS slot
 //	    slot-b/                   (same shape)
 //	  logs/
 //	    daemon.log                daemon stdout (install scripts wire it)
@@ -37,23 +37,15 @@ import (
 // top-level state into the active slot (or slot-a on first boot) and
 // reports what it fixed, so a manual install always recovers to bootable.
 
-// slotBinName is the daemon binary name inside a slot bin dir.
+// slotBinName is the app binary name inside a slot bin dir.
 // Unix keeps the full platform asset name (indirect-code-linux-amd64);
 // Windows uses the short name (indirect-code.exe) — same rule as
-// fetchDaemonTo, so resolve and download never disagree.
+// stageAppTo, so resolve and staging never disagree.
 func slotBinName() string {
 	if runtime.GOOS == "windows" {
 		return "indirect-code.exe"
 	}
 	return daemonAssetName()
-}
-
-// slotLauncherName is the launcher binary name inside a slot bin dir.
-func slotLauncherName() string {
-	if runtime.GOOS == "windows" {
-		return "indirect-launcher.exe"
-	}
-	return "indirect-launcher-" + daemonAssetName()[len("indirect-code-"):]
 }
 
 // ensureLayout guarantees the canonical layout under root, repairing a
@@ -74,7 +66,7 @@ func slotLauncherName() string {
 //     empty/missing; a live daemon.pid also votes (its slot wins);
 //   - slots/active corrupt (no a/b): same discovery as missing.
 //   - stale update signals (slots/update.done, slots/update.fail) are
-//     REMOVED: a normal boot never reads them (the waiter/launcher own
+//     REMOVED: a normal boot never reads them (the waiter/updater own
 //     them), so a forged or crashed-update marker can never gate or
 //     bless a boot (hardening D4: a fake update.done must not bypass
 //     verification). Real ack markers are slot-local and travel with

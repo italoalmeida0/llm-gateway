@@ -23,28 +23,28 @@ import (
 //
 // Roles:
 //   - ACTIVE daemon (serving): cleans the target slot (never its own),
-//     downloads the new launcher, verifies it runs the expected version
+//     downloads the new app, verifies it runs the expected version
 //     AND that the version is newer than its own, then spawns ITSELF with
 //     --update-start (passing its own pid) and keeps serving until killed.
 //   - --update-start (naive): loads NO sessions (fully naive, zero turn
 //     state), SIGKILLs the old daemon (the brutal pause), takes over the
 //     active pidfile, connects to the relay with ?updating=1 (the relay
 //     broadcasts host_status updating so the frontend shows the overlay), copies its own
-//     slot data into the update slot, spawns the NEW launcher in --update
+//     slot data into the update slot, spawns the NEW app in --update
 //     mode, then polls the slots dir every 100ms up to 2 minutes.
-//   - launcher --update: migrates the new slot, downloads the new daemon,
-//     verifies it (runs + expected version + strictly newer than the old
+//   - app --update: migrates the new slot, stages + verifies ITSELF in
+//     the slot bin (runs + expected version + strictly newer than the old
 //     one). On ANY failure it writes the fail file
 //     (<root>/slots/update.fail) and exits — the signal is only ever
-//     emitted when the launcher is ready to be killed. On success it
+//     emitted when the updater is ready to be killed. On success it
 //     spawns the new daemon with --update-end (detached) and exits 0.
 //   - --update-end (new daemon): boots on the new slot, atomically commits
 //     slots/active, then attempts one relay connection, SIGKILLs the waiter,
 //     deletes the old slot and reports update_done. Interrupted turns
 //     resume only after promotion succeeds.
 //
-// Fail path: --update-start sees update.fail (or a timeout/launcher exit
-// without update.done), SIGKILLs the launcher if still alive, deletes the
+// Fail path: --update-start sees update.fail (or a timeout/updater exit
+// without update.done), SIGKILLs the updater if still alive, deletes the
 // update slot, reports update_failed + back-to-normal daemon_update to the
 // relay, then re-execs ITSELF as a normal daemon on the untouched active
 // slot (crash recovery resumes the turns the SIGKILL interrupted).
@@ -52,13 +52,13 @@ import (
 const (
 	// updatePollInterval is the fail/done file poll step (never a 2min sleep).
 	updatePollInterval = 100 * time.Millisecond
-	// updateTimeout caps the whole launcher phase watched by --update-start.
+	// updateTimeout caps the whole updater phase watched by --update-start.
 	updateTimeout = 2 * time.Minute
 	// updateSettleWait caps the wait-to-be-killed after update.done.
 	updateSettleWait = 30 * time.Second
 )
 
-// updateFailPath is the launcher failure signal inside the slots dir.
+// updateFailPath is the updater failure signal inside the slots dir.
 func updateFailPath(root string) string { return filepath.Join(root, "slots", "update.fail") }
 
 // updateDonePath is the --update-end success signal inside the slots dir.
@@ -187,17 +187,17 @@ func killPidBrutal(pid int) error {
 }
 
 // slotPidFiles lists every pidfile that can hold our processes inside
-// a slot dir (daemon + updater share daemon.pid; the launcher never
+// a slot dir (daemon + updater share daemon.pid; the updater never
 // writes one, so it is found via /proc scan below).
 func slotPidFiles(slotDir string) []string {
 	return []string{filepath.Join(slotDir, "daemon.pid")}
 }
 
 // killSlotProcesses SIGKILLs every OUR process running from slotDir
-// (daemon or launcher binaries), except ownPid. Strategy:
+// (daemon or app binaries), except ownPid. Strategy:
 //  1. read the slot pidfiles (daemon.pid) and kill those pids;
 //  2. scan /proc for processes whose exe/cmdline points inside slotDir
-//     (catches the launcher --update child, which writes no pidfile).
+//     (catches the app --update child, which writes no pidfile).
 // Windows uses a Toolhelp32 process snapshot instead of /proc.
 // Never kills ownPid, never fails the caller (best-effort, logs only).
 func killSlotProcesses(slotDir string, ownPid int, logf func(string, ...any)) {
@@ -252,8 +252,7 @@ func killSlotProcesses(slotDir string, ownPid int, logf func(string, ...any)) {
 
 // pidAliveStr probes without affecting the process and excludes zombies.
 func pidAliveStr(pid string) bool {
- n, err := strconv.Atoi(strings.TrimSpace(pid))
- return err == nil && pidAlive(n)
+	return pidAlive(pid)
 }
 
 // cleanInactiveSlot empties the update target dir. It REFUSES to touch the
@@ -301,15 +300,15 @@ func cleanInactiveSlot(root, active, inactive, ownDir string) error {
 // spawnUpdateStart re-spawns THIS binary in --update-start mode (detached):
 // the child SIGKILLs us once it is ready, so we just keep serving until
 // that happens. root/active/inactive identify the slots, version is the
-// manifest target, launcherPath is the verified new launcher binary.
-func spawnUpdateStart(root, active, inactive, version, launcherPath string) error {
+// manifest target, appPath is the verified new app binary.
+func spawnUpdateStart(root, active, inactive, version, appPath string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	activeDir := filepath.Join(root, "slots", "slot-"+active)
 	// The child needs the mirror: inherit INDIRECT_REPO_RAW (harness/mirror
-	// override) plus the gateway base so launcher --update can fetch.
+	// override) plus the gateway base so the new app's --update has context.
 	envGateway := os.Getenv("INDIRECT_REPO_RAW")
 	cmd := exec.Command(exe,
 		"--data-dir", activeDir,
@@ -321,7 +320,7 @@ func spawnUpdateStart(root, active, inactive, version, launcherPath string) erro
 		"--to-slot", inactive,
 		"--expect-version", version,
 		"--parent-pid", strconv.Itoa(os.Getpid()),
-		"--launcher-path", launcherPath,
+		"--app-path", appPath,
 	)
 	if envGateway != "" {
 		cmd.Env = append(os.Environ(), "INDIRECT_REPO_RAW="+envGateway)
@@ -337,15 +336,15 @@ func spawnUpdateStart(root, active, inactive, version, launcherPath string) erro
 
 // updateStartParams carries the --update-start CLI flags.
 type updateStartParams struct {
-	root, fromSlot, toSlot, expectVersion, launcherPath string
-	parentPid                                           int
-	stopServing                                         func()
+	root, fromSlot, toSlot, expectVersion, appPath string
+	parentPid                                     int
+	stopServing                                   func()
 }
 
 // runUpdateStart is the naive updater: no sessions are ever loaded (fully
 // naive pre-start), it kills the old daemon brutally, owns the host in
 // "update" state, copies its own slot into the update slot, runs the new
-// launcher and watches the fail/done signals. Returns the process exit code.
+// updater and watches the fail/done signals. Returns the process exit code.
 func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 	logf := func(format string, args ...any) {
 		fmt.Printf("[UPDATE-START] "+format+"\n", args...)
@@ -360,7 +359,7 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 		logf("config: %v", err)
 		return 1
 	}
-	// Claim this specific daemon's restart before SIGKILL. Its launcher
+	// Claim this specific daemon's restart before SIGKILL. Its updater
 	// must exit instead of racing the updater by respawning the old side.
 	requestPath := filepath.Join(dataDir, "update.req")
 	if err := writeConfigFile(requestPath, []byte(strconv.Itoa(p.parentPid)+"\n")); err != nil {
@@ -396,13 +395,13 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 		return updateStartFail(server, nil, p, fmt.Sprintf("copy sessions: %v", err), logf)
 	}
 
-	// Run the NEW launcher in --update mode (it migrates + fetches +
+	// Run the NEW app in --update mode (it migrates + fetches +
 	// verifies the new daemon, then spawns --update-end detached).
 	failFile := updateFailPath(p.root)
 	doneFile := updateDonePath(p.root)
 	_ = os.Remove(failFile)
 	_ = os.Remove(doneFile)
-	cmd := exec.Command(p.launcherPath,
+	cmd := exec.Command(p.appPath,
 		"--update",
 		"--root-dir", p.root,
 		"--from-slot", p.fromSlot,
@@ -426,12 +425,12 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 		cmd.Env = os.Environ()
 	}
 	if err := cmd.Start(); err != nil {
-		return updateStartFail(server, nil, p, fmt.Sprintf("launcher start: %v", err), logf)
+		return updateStartFail(server, nil, p, fmt.Sprintf("updater start: %v", err), logf)
 	}
-	logf("launcher started (pid %d), watching signals...", cmd.Process.Pid)
-	launcherDone := make(chan error, 1)
-	go func() { launcherDone <- cmd.Wait() }()
-	launcherErr, launcherExitedAt := error(nil), time.Time{}
+	logf("updater started (pid %d), watching signals...", cmd.Process.Pid)
+	updaterDone := make(chan error, 1)
+	go func() { updaterDone <- cmd.Wait() }()
+	updaterErr, updaterExitedAt := error(nil), time.Time{}
 
 	deadline := time.Now().Add(updateTimeout)
 	for time.Now().Before(deadline) {
@@ -451,37 +450,37 @@ func runUpdateStart(dataDir, cfgPath string, p updateStartParams) int {
 			return updateStartFail(server, cmd.Process, p, body, logf)
 		}
 		select {
-		case err := <-launcherDone:
-			launcherErr, launcherExitedAt = err, time.Now()
-			logf("launcher exited: %v", err)
+		case err := <-updaterDone:
+			updaterErr, updaterExitedAt = err, time.Now()
+			logf("updater exited: %v", err)
 		default:
 		}
-		if launcherErr != nil && time.Since(launcherExitedAt) > 5*time.Second {
+		if updaterErr != nil && time.Since(updaterExitedAt) > 5*time.Second {
 			// Launcher died WITHOUT writing the fail signal: synthesize
-			// the failure (the signal must only come from the launcher
-			// when it is ready, but a dead launcher is a failure too).
-			return updateStartFail(server, nil, p, fmt.Sprintf("launcher exited: %v", launcherErr), logf)
+			// the failure (the signal must only come from the updater
+			// when it is ready, but a dead updater is a failure too).
+			return updateStartFail(server, nil, p, fmt.Sprintf("updater exited: %v", updaterErr), logf)
 		}
 		time.Sleep(updatePollInterval)
 	}
 	return updateStartFail(server, cmd.Process, p, "update timed out (2min)", logf)
 }
 
-// updateStartFail kills the launcher if still alive, deletes the update
+// updateStartFail kills the updater if still alive, deletes the update
 // slot, reports update_failed + back-to-normal to the relay, then re-execs
 // THIS binary as a normal daemon on the untouched active slot (crash
 // recovery resumes the SIGKILLed turns).
-func updateStartFail(server *DaemonServer, launcherProc *os.Process, p updateStartParams, reason string, logf func(string, ...any)) int {
+func updateStartFail(server *DaemonServer, updaterProc *os.Process, p updateStartParams, reason string, logf func(string, ...any)) int {
 	// The active marker is authoritative even if the done signal was lost.
 	if updateSlotCommitted(p) {
 		return 0
 	}
 	logf("update failed: %s", reason)
-	if launcherProc != nil {
-		_ = launcherProc.Kill()
+	if updaterProc != nil {
+		_ = updaterProc.Kill()
 	}
 	// Sweep the update slot: kill EVERYTHING still running from it
-	// (launcher --update child, stray --update-end that booted but never
+	// (app --update child, stray --update-end that booted but never
 	// promoted) so the RemoveAll below never hits "text file busy" and
 	// no zombie serves the dead slot afterwards.
 	toDir := filepath.Join(p.root, "slots", "slot-"+p.toSlot)

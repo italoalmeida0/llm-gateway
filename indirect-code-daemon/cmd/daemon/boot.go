@@ -1,17 +1,15 @@
-// Command launcher is the distribution entry point for Indirect Code.
-//
-// The launcher owns everything that prepares the ground before the daemon
-// runs — dependency checkup, storage migrations, integrity verification —
-// and then execs the daemon with resolved metadata. The daemon itself
-// assumes the current storage format and fails fast otherwise: zero
-// The daemon assumes the current layout and fails fast otherwise:
-// versioned as a migration chain (see internal/migrations).
+// bootMain is the BOOT role of the multi-call Indirect Code binary (see
+// main.go for routing): everything that prepares the ground before the
+// worker runs — dependency checkup, storage migrations, integrity
+// verification — then self-starts the worker and supervises it. The
+// worker assumes the current layout and fails fast otherwise (storage is
+// versioned as a migration chain, see internal/migrations).
 //
 // Usage:
 //
-//	launcher [flags] [-- daemon-args...]
-//	  -data-dir DIR     daemon data directory (default: platform default)
-//	  -daemon PATH      daemon binary (default: indirect-code next to launcher)
+//	indirect-code [flags] [-- worker-args...]
+//	  -data-dir DIR     data root (default: platform default)
+//	  -daemon PATH      worker binary (default: this binary, worker mode)
 //	  -check-only       run checkup + migrations + verify, then exit (no exec)
 //	  -migrate-only     run pending migrations, then exit
 //	  -verify-only      run integrity verification, then exit
@@ -33,13 +31,13 @@ import (
 // (-X main.launcherVersion=vX.Y.Z); dev builds report "dev".
 var launcherVersion = "dev"
 
-func main() {
+func bootMain() {
 	dataDirFlag := flag.String("data-dir", "", "Path to daemon data directory")
-	daemonFlag := flag.String("daemon", "", "Path to daemon binary (default: self-managed download)")
+	daemonFlag := flag.String("daemon", "", "Path to the worker binary (default: this binary, self-started in worker mode)")
 	checkOnly := flag.Bool("check-only", false, "Run checkup + migrations + verify, then exit without starting the daemon")
 	migrateOnly := flag.Bool("migrate-only", false, "Run pending migrations, then exit")
 	verifyOnly := flag.Bool("verify-only", false, "Run integrity verification, then exit")
-	versionFlag := flag.Bool("version", false, "Print launcher version and exit")
+	versionFlag := flag.Bool("version", false, "Print version and exit (boot role banner)")
 	stopFlag := flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
 	connectFlag := flag.String("connect", "", "Pairing connect URL (forwarded to the daemon)")
 	nameFlag := flag.String("name", "", "Host display name (forwarded to the daemon)")
@@ -52,7 +50,7 @@ func main() {
 	}
 	flag.Parse()
 	if *versionFlag {
-		fmt.Printf("indirect-code launcher %s\n", launcherVersion)
+		fmt.Printf("indirect-code boot %s\n", launcherVersion)
 		return
 	}
 
@@ -148,7 +146,7 @@ func main() {
 
 	// 4. Run the daemon with --data-dir pointing AT THE SLOT (canonical:
 	// dataDir = <root>/slots/slot-x; sessions/config/pid are slot-local).
-	// Update restarts are driven by the brutal protocol (launcher --update
+	// Update restarts are driven by the brutal protocol (app --update
 	// spawns --update-end detached) — no exit-code protocol. Unexpected exits restart with
 	// backoff a few times (crash resilience), then give up.
 	daemonDataDir := slotDir
@@ -225,7 +223,7 @@ func stopDaemon(rootDir string) error {
 		return nil
 	}
 
-	// Signal stop to prevent launcher loop from restarting daemon
+	// Signal stop to prevent the boot loop from restarting daemon
 	// (stop.req lives next to the pidfile: slot-local).
 	stopReq := filepath.Join(filepath.Dir(pidPath), "stop.req")
 	_ = os.WriteFile(stopReq, []byte("stop\n"), 0o600)

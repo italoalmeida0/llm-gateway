@@ -229,7 +229,7 @@ try {
   mkdirSync(join(daemonHome, "workspace"), { recursive: true });
   const pair: any = await (await fetch(`${GW}/api/indirect-code/pair`, { method: "POST", headers: { Authorization: `Bearer ${login.accessToken}` } })).json();
   assert(pair.success && pair.connectUrl, "pairing failed");
-  const launcherBin = buildBin("./cmd/launcher", "vE2E.1", join(work, "launcher"), "launcherVersion", DAEMON_DIR);
+  const launcherBin = buildBin("./cmd/daemon", "vE2E.1", join(work, "app"), ["daemonVersion", "launcherVersion"], DAEMON_DIR);
   const daemonProc = Bun.spawn(
     [launcherBin, "--connect", pair.connectUrl, "--data-dir", daemonHome, "--name", "Lifecycle E2E"],
     { cwd: WS, env: { ...process.env, INDIRECT_GATEWAY: GW, INDIRECT_REPO_RAW: `${GW}/r`, ...homeEnv(daemonHome) }, stdout: "ignore", stderr: "ignore" });
@@ -260,8 +260,8 @@ try {
   log("update", "building vE2E.2 binaries...");
   const relDir = join(work, "rel");
   mkdirSync(relDir, { recursive: true });
-  const daemonNew = buildBin("./cmd/daemon", "vE2E.2", join(relDir, "daemon-new"), "daemonVersion", DAEMON_DIR);
-  const launcherNew = buildBin("./cmd/launcher", "vE2E.2", join(relDir, "launcher-new"), "launcherVersion", DAEMON_DIR);
+  // Multi-call binary: ONE vE2E.2 build stamped for both roles.
+  const daemonNew = buildBin("./cmd/daemon", "vE2E.2", join(relDir, "app-new"), ["daemonVersion", "launcherVersion"], DAEMON_DIR);
   // Serve the mirror over HTTP (INDIRECT_REPO_RAW fallback) — the gateway
   // manifest still says the old version, so force the check via mirror:
   // we emulate a release by serving versions.json + assets locally and
@@ -284,25 +284,22 @@ try {
     const { readFileSync: rf } = await import("node:fs");
     const manifest: any = JSON.parse(rf(join(distR, "versions.json"), "utf8"));
     // Publish the locally-built vE2E.2 under the CURRENT platform asset
-    // names, keeping the manifest shape (gateway serves bytes as-is).
+    // name, keeping the manifest shape (gateway serves bytes as-is).
+    // ONE multi-call artifact: the daemon field IS the app.
     const dAsset = manifest.daemon.assets[plat];
-    const lAsset = manifest.launcher.assets[plat];
-    assert(dAsset && lAsset, `platform ${plat} not in manifest`);
+    assert(dAsset, `platform ${plat} not in manifest`);
     copyFileSync(daemonNew, join(distR, dAsset));
-    copyFileSync(launcherNew, join(distR, lAsset));
     // Re-hash + re-version ONLY in the served manifest copy.
     const { createHash } = await import("node:crypto");
     const sha = (p: string) => createHash("sha256").update(rf(p)).digest("hex");
     manifest.daemon.version = "vE2E.2";
-    manifest.launcher.version = "vE2E.2";
     manifest.daemon.sums[dAsset] = sha(join(distR, dAsset));
-    manifest.launcher.sums[lAsset] = sha(join(distR, lAsset));
     writeFileSync(join(distR, "versions.json"), JSON.stringify(manifest));
-    log("update", `published vE2E.2 to dist/r (${plat}: ${dAsset}, ${lAsset})`);
+    log("update", `published vE2E.2 to dist/r (${plat}: ${dAsset})`);
     // Sanity: the gateway serves dist/r statically — verify the new
     // bytes are actually reachable before triggering the update.
-    // (A stale copy here = the launcher fetches old bytes = verify fail.)
-    for (const [asset, want] of [[lAsset, "vE2E.2"], [dAsset, "vE2E.2"]] as const) {
+    // (A stale copy here = the updater fetches old bytes = verify fail.)
+    for (const [asset, want] of [[dAsset, "vE2E.2"]] as const) {
       const probe = await fetch(`${GW}/r/${asset}?u=probe-${Date.now()}`);
       assert(probe.ok, `gateway does not serve /r/${asset}: ${probe.status}`);
       const buf = Buffer.from(await probe.arrayBuffer());
@@ -463,7 +460,7 @@ try {
       mkdirSync(join(home, "workspace"), { recursive: true });
       const p2: any = await (await fetch(`${GW}/api/indirect-code/pair`, { headers: { Authorization: `Bearer ${login.accessToken}` }, method: "POST" })).json();
       assert(p2.success && p2.connectUrl, `pairing ${i} failed`);
-      const lb = buildBin("./cmd/launcher", "vE2E.1", join(work, `launcher-${i}`), "launcherVersion", DAEMON_DIR);
+      const lb = buildBin("./cmd/daemon", "vE2E.1", join(work, `app-${i}`), ["daemonVersion", "launcherVersion"], DAEMON_DIR);
       const dp = Bun.spawn([lb, "--connect", p2.connectUrl, "--data-dir", home, "--name", hostNames[i]],
         { cwd: WS, env: { ...process.env, INDIRECT_GATEWAY: GW, INDIRECT_REPO_RAW: `${GW}/r`, ...homeEnv(home) }, stdout: "ignore", stderr: "ignore" });
       procs.push(dp); extraProcs.push(dp);

@@ -41,7 +41,34 @@ type link struct {
 	conn *websocket.Conn
 }
 
+// Multi-call binary: ONE artifact, two roles.
+//   - boot (default)  — bootMain(): checkup/migrate/verify, then
+//     self-spawns the worker and supervises it. No downloads at boot.
+//   - worker          — daemonMain(): the daemon itself.
+// Routing is explicit: the worker role is selected by its own flags
+// (--worker / the update handoff flags / --slot). Everything else is
+// boot. No legacy shapes: an invocation that mixes roles fails loudly.
 func main() {
+	if workerMode(os.Args[1:]) {
+		daemonMain()
+		return
+	}
+	bootMain()
+}
+
+func workerMode(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		if a == "--worker" || a == "--update-start" || a == "--update-end" || a == "--slot" {
+			return true
+		}
+	}
+	return false
+}
+
+func daemonMain() {
 	var (
 		connectFlag = flag.String("connect", "", "Pairing connect URL (e.g. https://.../api/indirect-code/connect/<token>)")
 		nameFlag    = flag.String("name", "", "Host display name")
@@ -52,18 +79,20 @@ func main() {
 
 		// Brutal update protocol (see update_flow.go): --update-start is the
 		// naive updater (zero sessions; SIGKILLs the old daemon, copies the
-		// slot, runs the new launcher), --update-end is the promoted daemon
+		// slot, runs the new app), --update-end is the promoted daemon
 		// (local-first promote: hello relay, kill waiter, flip active).
-		updateStartFlag = flag.Bool("update-start", false, "Brutal update: kill the old daemon, own the host in update state, copy slot, run the new launcher")
+		updateStartFlag = flag.Bool("update-start", false, "Brutal update: kill the old daemon, own the host in update state, copy slot, run the new app")
 		updateEndFlag   = flag.Bool("update-end", false, "Brutal update: boot the new daemon, promote local-first (hello relay, kill waiter, flip active, clean old slot)")
 		rootDirFlag     = flag.String("root-dir", "", "Update slots root (<root> holding slots/)")
 		fromSlotFlag    = flag.String("from-slot", "", "Update source slot (a|b)")
 		toSlotFlag      = flag.String("to-slot", "", "Update target slot (a|b)")
 		expectVerFlag   = flag.String("expect-version", "", "Update target version")
 		parentPidFlag   = flag.Int("parent-pid", 0, "PID of the daemon waiting to be killed")
-		launcherFlag    = flag.String("launcher-path", "", "Verified new launcher binary (--update-start only)")
-		slotFlag        = flag.String("slot", "", "Active slot id (a|b), informational: passed by the launcher; dataDir already points at the slot")
+		appFlag         = flag.String("app-path", "", "Verified new app binary (--update-start only)")
+		slotFlag        = flag.String("slot", "", "Active slot id (a|b), informational: passed by the boot role; dataDir already points at the slot")
 	)
+	// Registered so flag.Parse accepts the multi-call routing flag.
+	flag.Bool("worker", false, "internal: worker role (multi-call binary routing)")
 	flag.Parse()
 	// Version adoption: releases stamp main.Version (build-indirect-all),
 	// the chaos/e2e harnesses stamp main.daemonVersion directly to build
@@ -90,7 +119,7 @@ func main() {
 			fromSlot:      *fromSlotFlag,
 			toSlot:        *toSlotFlag,
 			expectVersion: *expectVerFlag,
-			launcherPath:  *launcherFlag,
+			appPath:       *appFlag,
 			parentPid:     *parentPidFlag,
 		}))
 	}
@@ -190,7 +219,7 @@ func main() {
 	// connection from here (v1 replaced it in the same single-conn model).
 	upd.closeWS()
 	// Stale update signals from a crashed update must never gate a fresh
-	// boot: the waiter/launcher own the fail/done files, a normal boot
+	// boot: the waiter/updater own the fail/done files, a normal boot
 	// never reads them.
 	_ = os.Remove(updateFailPath(root.rootDir()))
 	_ = os.Remove(updateDonePath(root.rootDir()))
@@ -349,24 +378,6 @@ func isRevokedDialError(resp *http.Response, err error) bool {
 }
 
 // ---- root runtime plumbing (config/pair/pid, mirrors v1) ----
-
-func defaultDataDir() string {
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "indirect-code")
-	}
-	home, _ := os.UserHomeDir()
-	switch runtime.GOOS {
-	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "indirect-code")
-	case "windows":
-		if app := os.Getenv("APPDATA"); app != "" {
-			return filepath.Join(app, "indirect-code")
-		}
-		return filepath.Join(home, ".indirect-code")
-	default:
-		return filepath.Join(home, ".local", "share", "indirect-code")
-	}
-}
 
 func (r *root) rootDir() string {
 	if filepath.Base(filepath.Dir(r.dataDir)) == "slots" {

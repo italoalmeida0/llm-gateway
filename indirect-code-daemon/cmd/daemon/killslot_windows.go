@@ -11,7 +11,7 @@ import (
 
 // killSlotProcessesByDir snapshots processes via Toolhelp32 (kernel32,
 // stdlib only — same pattern as unish sysinfo_windows.go) and kills
-// those whose executable lives inside slotDir. Catches launcher children
+// those whose executable lives inside slotDir. Catches app children
 // (no pidfile). Access-denied processes are skipped (their image path
 // can't be read, but they also can't be ours without admin rights).
 func killSlotProcessesByDir(slotDir string, ownPid int, kill func(pid int, why string)) {

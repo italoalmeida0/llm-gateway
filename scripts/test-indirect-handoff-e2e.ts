@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { DAEMON_BIN, LAUNCHER_BIN, PLAT, IS_WIN, buildBin, killAll, killProc } from "./indirect-e2e-win";
+import { DAEMON_BIN, PLAT, IS_WIN, buildBin, killAll, killProc } from "./indirect-e2e-win";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const DAEMON_DIR = join(ROOT, "indirect-code-daemon");
@@ -29,31 +29,29 @@ async function main() {
   mkdirSync(mirror, { recursive: true });
 
   // Versioned builds: old=9.9.8, new=9.9.9 (numeric: the brutal path requires strictly-newer).
-  const build = (pkg: string, ver: string, out: string, vvar: string) =>
+  // Multi-call binary: ONE build per version, stamped for BOTH roles —
+  // published under BOTH asset names (the launcher asset is a
+  // byte-identical compat duplicate of the app).
+  const build = (pkg: string, ver: string, out: string, vvar: string | string[]) =>
     buildBin(pkg, ver, out, vvar, DAEMON_DIR);
-  const oldBin = build("./cmd/daemon", "9.9.8", join(work, "daemon-old"), "daemonVersion");
-  const newBin = build("./cmd/daemon", "9.9.9", join(work, "daemon-new"), "daemonVersion");
-  const launcherOldBin = build("./cmd/launcher", "9.9.8", join(work, "launcher-old"), "launcherVersion");
-  const launcherBin = build("./cmd/launcher", "9.9.9", join(work, "launcher-new"), "launcherVersion");
+  const both = ["daemonVersion", "launcherVersion"];
+  const oldBin = build("./cmd/daemon", "9.9.8", join(work, "app-old"), both);
+  const newBin = build("./cmd/daemon", "9.9.9", join(work, "app-new"), both);
   const daemonAsset = `indirect-code-${PLAT}${IS_WIN ? ".exe" : ""}`;
-  const launcherAsset = `indirect-launcher-${PLAT}${IS_WIN ? ".exe" : ""}`;
 
-  // Mirror serves new binaries + manifest 9.9.9.
+  // Mirror serves the new app + manifest 9.9.9 (ONE artifact, ONE field).
   const { copyFileSync, writeFileSync: wfs, readFileSync, mkdirSync: mkMirror } = await import("node:fs");
   mkMirror(mirror, { recursive: true });
   copyFileSync(newBin, join(mirror, daemonAsset));
-  copyFileSync(launcherBin, join(mirror, launcherAsset));
   const manifest = {
     daemon: { version: "9.9.9", assets: { [PLAT]: daemonAsset }, sums: {} },
-    launcher: { version: "9.9.9", assets: { [PLAT]: launcherAsset }, sums: {} },
   };
   wfs(join(mirror, "versions.json"), JSON.stringify(manifest));
 
-  // Seed slot-a: old binaries + session + version + config.
+  // Seed slot-a: old app + session + version + config.
   // Canonical layout: the daemon runs with dataDir = the SLOT dir
   // (<root>/slots/slot-x), so slots/active lives two levels up.
   copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", DAEMON_BIN));
-  copyFileSync(launcherOldBin, join(root, "slots", "slot-a", "bin", LAUNCHER_BIN));
   wfs(join(root, "slots", "active"), "a\n");
   wfs(join(root, "slots", "slot-a", "daemon.pid"), "1\n"); // stale pid: proves the updater takes over the pidfile
   wfs(join(root, "slots", "slot-a", "storage_version.json"), JSON.stringify({ version: 1 }));

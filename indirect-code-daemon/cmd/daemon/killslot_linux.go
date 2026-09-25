@@ -11,7 +11,7 @@ import (
 
 // killSlotProcessesByDir scans /proc for processes whose executable or
 // first cmdline arg lives inside slotDir and kills them via kill().
-// Catches launcher children (no pidfile).
+// Catches app children (no pidfile).
 func killSlotProcessesByDir(slotDir string, ownPid int, kill func(pid int, why string)) {
 	absDir, err := filepath.Abs(slotDir)
 	if err != nil {

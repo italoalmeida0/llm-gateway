@@ -114,7 +114,7 @@ async function boot(): Promise<{ jwt: string; login: any; hostId: string; ws: We
   mkdirSync(path.join(daemonDir, "workspace"), { recursive: true });
   const workDir = path.join(daemonDir, "workspace");
   const daemonProc = Bun.spawn(
-    [daemonBin, "--connect", pair.connectUrl, "--data-dir", daemonDir, "--name", "E2E Daemon"],
+    [daemonBin, "--worker", "--connect", pair.connectUrl, "--data-dir", daemonDir, "--name", "E2E Daemon"],
     { cwd: WS, env: { ...process.env, HOME: daemonDir }, stdout: "ignore", stderr: "ignore" });
   procs.push(daemonProc);
   const prov: any = await (await fetch(`${GW}/api/admin/providers`, {

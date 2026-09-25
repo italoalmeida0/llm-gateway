@@ -33,14 +33,14 @@ case "$ARCH" in
   arm64|aarch64) GOARCH=arm64 ;;
   *) fail "unsupported arch: $ARCH" ;;
 esac
-ASSET="indirect-launcher-$GOOS-$GOARCH"
+ASSET="indirect-code-$GOOS-$GOARCH"
 ok
 
 have() { command -v "$1" >/dev/null 2>&1; }
 fetch() { 
   if have curl; then curl -fsSL --retry 3 "$1" -o "$2"
   elif have wget; then wget -qO "$2" "$1"
-  else fail "need curl or wget to download the launcher"; fi
+  else fail "need curl or wget to download the app"; fi
 }
 
 ACTIVE=""
@@ -80,14 +80,14 @@ for s in "$ACTIVE" a b; do
   fi
 done
 
-step "Downloading launcher"
+step "Downloading app"
 SLOTDIR="$ROOT/slots/slot-$ACTIVE"
 mkdir -p "$SLOTDIR/bin" "$LOGS" "$ROOT/brain" "$ROOT/external"
-TMP="$(mktemp "$SLOTDIR/bin/.launcher-XXXXXX")"
+TMP="$(mktemp "$SLOTDIR/bin/.app-XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
 fetch "$GW/r/$ASSET?u=install-$(date +%s)" "$TMP" || fail "could not download $ASSET from $GW"
 chmod +x "$TMP"
-"$TMP" --version 2>&1 | grep -q "launcher" || fail "downloaded file is not a launcher (bad gateway response?)"
+"$TMP" --version 2>&1 | grep -q "boot" || fail "downloaded file is not the app (bad gateway response?)"
 mv -f "$TMP" "$SLOTDIR/bin/$ASSET"
 trap - EXIT
 ok

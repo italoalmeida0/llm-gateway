@@ -79,7 +79,7 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $V"
 
-      - name: Build daemon + launcher (all platforms)
+      - name: Build multi-call app (all platforms)
         run: bun ./scripts/build-indirect-all.ts "${{ steps.ver.outputs.version }}"
 
       - name: Verify checksums and manifests

@@ -7,7 +7,7 @@ import (
 )
 
 // Canonical layout in every test: dataDir IS the active slot
-// (<root>/slots/slot-a). The launcher guarantees the layout before exec.
+// (<root>/slots/slot-a). The boot role guarantees the layout before exec.
 
 func testSlot(t *testing.T, root, which string) string {
 	t.Helper()

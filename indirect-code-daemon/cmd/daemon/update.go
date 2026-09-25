@@ -19,9 +19,9 @@ import (
 //
 // Download + verify + restart live in the BRUTAL update protocol:
 // the daemon spawns itself --update-start (SIGKILLs the old side, copies
-// the slot, runs the new launcher), the launcher spawns --update-end,
+// the slot, runs the new app), the app spawns --update-end,
 // and promote happens after its first WS connect. See handoff.go (active
-// side) + update_flow.go (--update-start/--update-end) + launcher/update.go.
+// side) + update_flow.go (--update-start/--update-end) + boot_update.go (--update).
 //
 // Version model: daemonVersion is stamped at build time via ldflags
 // (-X main.daemonVersion=vX.Y.Z); dev builds report "dev" and never
@@ -36,8 +36,7 @@ const (
 
 // versionManifest is dist/versions.json (published by the release script).
 type versionManifest struct {
-	Daemon   releaseAsset `json:"daemon"`
-	Launcher releaseAsset `json:"launcher"`
+	Daemon releaseAsset `json:"daemon"`
 }
 
 type releaseAsset struct {
@@ -91,7 +90,7 @@ func fetchManifest() (*versionManifest, error) {
 }
 
 // fetchManifestWithConfig tries the gateway first (instant, no CDN cache),
-// then the public mirror. d may be nil (launcher-side callers pass explicit
+// then the public mirror. d may be nil (boot-side callers pass explicit
 // gateway URL + token via fetchManifestGateway).
 func fetchManifestWithConfig(d *DaemonServer) (*versionManifest, error) {
 	if d != nil {

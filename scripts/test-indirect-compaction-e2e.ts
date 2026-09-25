@@ -123,7 +123,7 @@ async function boot() {
   mkdirSync(path.join(daemonDir, "workspace"), { recursive: true });
   const workDir = path.join(daemonDir, "workspace");
   const daemonProc = Bun.spawn(
-    [daemonBin, "--connect", pair.connectUrl, "--data-dir", daemonDir, "--name", "Compact E2E"],
+    [daemonBin, "--worker", "--connect", pair.connectUrl, "--data-dir", daemonDir, "--name", "Compact E2E"],
     { cwd: WS, env: { ...process.env, HOME: daemonDir }, stdout: "ignore", stderr: "ignore" });
   procs.push(daemonProc);
   // Meta provider (Anthropic-native) + registry model with a small window.

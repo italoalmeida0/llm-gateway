@@ -13,15 +13,14 @@ import (
 )
 
 // Brutal update primitives against the fake mirror (no WS needed):
-// fetch launcher -> copy (source is SIGKILLed, WAL travels verbatim) ->
+// fetch app -> copy (source is SIGKILLed, WAL travels verbatim) ->
 // resume in the new slot. Canonical layout: dataDir IS the active slot
 // (<root>/slots/slot-a), root holds brain/slots/logs.
 func TestHandoffPrimitivesE2E(t *testing.T) {
 	// The fake mirror must serve a REAL binary for the current platform:
 	// shell scripts can't exec on Windows and a fixture .exe can't run
-	// on unix (caught on windows/arm64 — same rule as the launcher's
-	// floating-URL test).
-	fakeSrc := "package main\nimport \"fmt\"\nfunc main(){fmt.Println(\"indirect-code launcher vE2E.2\")}\n"
+	// on unix (caught on windows/arm64).
+	fakeSrc := "package main\nimport \"fmt\"\nfunc main(){fmt.Println(\"indirect-code boot vE2E.2\")}\n"
 	srcDir := t.TempDir()
 	src := filepath.Join(srcDir, "fake.go")
 	if err := os.WriteFile(src, []byte(fakeSrc), 0o600); err != nil {
@@ -74,15 +73,15 @@ func TestHandoffPrimitivesE2E(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "slots", "slot-b", "sessions", "s1.jsonl")); err != nil {
 		t.Fatalf("copy missing: %v", err)
 	}
-	// Fetch launcher into slot-b + self-verify via --version.
-	lp, err := d.fetchLauncherTo("vE2E.2", sl)
+	// Fetch the app into slot-b + self-verify via --version.
+	ap, err := d.fetchAppTo("vE2E.2", sl)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := selfVerifyBinary(lp, "vE2E.2", "launcher"); err != nil {
+	if err := selfVerifyBinary(ap, "vE2E.2", "app"); err != nil {
 		t.Fatalf("self-verify: %v", err)
 	}
-	if err := selfVerifyBinary(lp, "vNOPE", "launcher"); err == nil {
+	if err := selfVerifyBinary(ap, "vNOPE", "app"); err == nil {
 		t.Fatal("wrong version must fail verify")
 	}
 	// Abort path: cleans slot-b.

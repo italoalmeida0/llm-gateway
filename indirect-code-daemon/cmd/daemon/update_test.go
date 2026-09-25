@@ -11,7 +11,7 @@ import (
 
 func TestFetchManifestParse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"daemon":{"version":"v9.9.9","assets":{"linux-amd64":"indirect-code-linux-amd64"},"sums":{}},"launcher":{"version":"v9.9.9","assets":{},"sums":{}}}`))
+		w.Write([]byte(`{"daemon":{"version":"v9.9.9","assets":{"linux-amd64":"indirect-code-linux-amd64"},"sums":{}}}`))
 	}))
 	defer srv.Close()
 	t.Setenv("INDIRECT_REPO_RAW", srv.URL)

@@ -76,7 +76,7 @@ async function main() {
   mkdirSync(path.join(daemonDir, "workspace"), { recursive: true });
   const workDir = path.join(daemonDir, "workspace");
   const daemonProc = Bun.spawn(
-    [daemonBin, "--connect", pair.connectUrl, "--data-dir", daemonDir, "--name", "Hezz Probe"],
+    [daemonBin, "--worker", "--connect", pair.connectUrl, "--data-dir", daemonDir, "--name", "Hezz Probe"],
     { cwd: WS, env: { ...process.env, HOME: daemonDir }, stdout: "ignore", stderr: "ignore" });
   procs.push(daemonProc);
   const ws = new WebSocket(`ws://127.0.0.1:${GW_PORT}/api/indirect-code/ws?token=${encodeURIComponent(login.accessToken)}`);

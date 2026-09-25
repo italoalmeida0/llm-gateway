@@ -18,7 +18,17 @@ import (
  "strconv"
 )
 func main() {
- dir, mode := os.Args[2], os.Args[3]
+ var dir, mode string
+ for i := 1; i < len(os.Args); i++ {
+  switch os.Args[i] {
+  case "--worker":
+  case "--data-dir":
+   i++
+   dir = os.Args[i]
+  default:
+   mode = os.Args[i]
+  }
+ }
  pid := os.Getpid()
  if mode == "stale" { pid++ }
  if mode != "crash" {

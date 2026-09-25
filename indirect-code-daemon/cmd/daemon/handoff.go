@@ -16,9 +16,9 @@ import (
 
 // Brutal update orchestrator (daemon side): no quiesce, no freeze dance.
 //
-// Order:
+// Order (ONE multi-call artifact — the "new app" is the same binary):
 //  0. Background: detect (manifest poll) + clean the update slot (never
-//     the own one) + download the new launcher + self-verify (--version)
+//     the own one) + download the new app + self-verify (--version)
 //     + require the manifest version strictly newer than this daemon.
 //     NOTHING pauses yet.
 //  1. Spawn OURSELVES with --update-start (detached, own pid passed) and
@@ -26,18 +26,18 @@ import (
 //     sessions), kills us brutally (SIGKILL — crash recovery resumes the
 //     turns from WALs), takes over the pidfile, owns the host in "update"
 //     state (host_status updating via the relay), copies our slot
-//     into the update slot, and runs the new launcher in --update mode.
-//  2. The launcher migrates the update slot, fetches + verifies the new
-//     daemon (runs + expected version + strictly newer), then spawns it
-//     DETACHED with --update-end and exits.
+//     into the update slot, and runs the new app in --update mode.
+//  2. The new app migrates the update slot, stages + verifies ITSELF in
+//     the slot bin (expected version + strictly newer), then spawns the
+//     staged copy DETACHED with --update-end and exits.
 //  3. --update-end boots, commits slots/active, attempts a relay hello,
 //     SIGKILLs the waiter, deletes the old slot and reports update_done.
-//  4. Any failure: the launcher writes the fail file (only when ready to
-//     be killed); the waiter kills the launcher, deletes the update slot,
+//  4. Any failure: the boot role writes the fail file (only when ready to
+//     be killed); the waiter kills it, deletes the update slot,
 //     reports update_failed + back-to-normal, and re-execs itself as a
 //     normal daemon (crash recovery resumes the turns).
 //
-// See update_flow.go (daemon --update-start/--update-end) + launcher/update.go.
+// See update_flow.go (--update-start/--update-end) + boot_update.go (--update).
 
 // slotLayout resolves active/inactive slot dirs under <dataDir>/slots.
 type slotLayout struct {
@@ -48,7 +48,7 @@ type slotLayout struct {
 
 func (d *DaemonServer) slots() slotLayout {
 	// Canonical layout: dataDir IS the active slot (<root>/slots/slot-x),
-	// so the root is two levels up. The launcher guarantees the layout
+	// so the root is two levels up. The boot role guarantees the layout
 	// before exec.
 	//
 	// TEST/LEGACY layout: dataDir IS the root (slots/ directly inside,
@@ -56,11 +56,11 @@ func (d *DaemonServer) slots() slotLayout {
 	// itself contains slots/active, the root is dataDir. Without this,
 	// rootDir() walks two levels up from dataDir (which is NOT inside
 	// slots/), reads a nonexistent slots/active, and every slot path
-	// (fetchLauncherTo, copyToSlot, abort cleanup) fans out to a WRONG
+	// (fetchAppTo, copyToSlot, abort cleanup) fans out to a WRONG
 	// directory — phase-0 verify then fails with the version of
 	// whatever stale binary was already there (caught on Windows: the
 	// E2E daemon-home root layout downloaded vE2E.2 into a phantom dir
-	// while slot-a kept the installed vE2E.1 launcher).
+	// while slot-a kept the vE2E.1 app).
 	if raw, err := os.ReadFile(filepath.Join(d.dataDir, "slots", "active")); err == nil {
 		if s := strings.TrimSpace(string(raw)); s == "a" || s == "b" {
 			active := s
@@ -137,7 +137,7 @@ func (d *DaemonServer) beginHandoff() {
 }
 
 // runHandoff executes the brutal update: clean the target slot (never the
-// own one), download + verify the new launcher (runs the expected version
+// own one), download + verify the new app (runs the expected version
 // AND strictly newer than this daemon), then spawn ITSELF with
 // --update-start and keep serving until the updater SIGKILLs us. Any error
 // before the spawn → cleanup + update_failed broadcast (WS never dropped).
@@ -161,39 +161,38 @@ func (d *DaemonServer) runHandoff(version string) {
 		fail(fmt.Sprintf("clean update slot: %v", err))
 		return
 	}
-	// Download the new launcher into the clean slot + self-verify.
+	// Download the new app into the clean slot + self-verify.
 	// (Background: user untouched, still serving normally.)
-	launcherPath, err := d.fetchLauncherTo(version, sl)
+	appPath, err := d.fetchAppTo(version, sl)
 	if err != nil {
-		fail(fmt.Sprintf("launcher download: %v", err))
+		fail(fmt.Sprintf("app download: %v", err))
 		return
 	}
-	// The launcher MUST have been (re)downloaded by the fetch above:
-	// a pre-existing binary (installed vE2E.1 launcher, stale cache)
-	// would verify against the OLD version and fail with a confusing
-	// "got 1.0.21" mismatch. Stat the mtime to prove freshness in
-	// failure reports (caught on Windows: phase-0 verify failed with
-	// the installed launcher's version).
-	if st, serr := os.Stat(launcherPath); serr != nil {
-		fail(fmt.Sprintf("launcher missing after download: %v", serr))
+	// The app MUST have been (re)downloaded by the fetch above:
+	// a pre-existing binary (stale cache) would verify against the OLD
+	// version and fail with a confusing "got 1.0.21" mismatch. Stat the
+	// mtime to prove freshness in failure reports (caught on Windows:
+	// phase-0 verify failed with a stale binary's version).
+	if st, serr := os.Stat(appPath); serr != nil {
+		fail(fmt.Sprintf("app missing after download: %v", serr))
 		return
 	} else if time.Since(st.ModTime()) > 5*time.Minute {
-		fail(fmt.Sprintf("launcher not refreshed by download (mtime %v)", st.ModTime()))
+		fail(fmt.Sprintf("app not refreshed by download (mtime %v)", st.ModTime()))
 		return
 	}
-	if err := selfVerifyBinary(launcherPath, version, "launcher"); err != nil {
+	if err := selfVerifyBinary(appPath, version, "app"); err != nil {
 		d.recordMismatch(version, extractGotVersion(err))
-		fail(fmt.Sprintf("launcher verify: %v", err))
+		fail(fmt.Sprintf("app verify: %v", err))
 		return
 	}
 	// The manifest version is strictly newer than this daemon (checked
-	// above), and the launcher was verified to RUN that version: releases
-	// bump daemon+launcher in lockstep, so the launcher is newer too.
-	// Spawn OURSELVES in --update-start mode (detached): the updater kills
-	// us brutally (SIGKILL — crash recovery resumes the turns), takes over
-	// the pidfile + relay in "update" state, copies our slot, and runs
-	// the new launcher. We keep serving until the SIGKILL lands.
-	if err := spawnUpdateStart(d.rootDir(), sl.active, sl.inactive, version, launcherPath); err != nil {
+	// above), and the app was verified to RUN that version — one artifact,
+	// one version ("all or nothing"). Spawn OURSELVES in --update-start
+	// mode (detached): the updater kills us brutally (SIGKILL — crash
+	// recovery resumes the turns), takes over the pidfile + relay in
+	// "update" state, copies our slot, and runs the new app. We keep
+	// serving until the SIGKILL lands.
+	if err := spawnUpdateStart(d.rootDir(), sl.active, sl.inactive, version, appPath); err != nil {
 		fail(fmt.Sprintf("spawn updater: %v", err))
 		return
 	}
@@ -220,26 +219,21 @@ func (d *DaemonServer) abortHandoff(reason string) {
 	})
 }
 
-// fetchLauncherTo downloads the launcher asset for version into the
-// inactive slot's bin dir. Returns the local path.
-func (d *DaemonServer) fetchLauncherTo(version string, sl slotLayout) (string, error) {
-	asset := "indirect-launcher-" + runtime.GOOS + "-" + runtime.GOARCH
-	if runtime.GOOS == "windows" {
-		asset += ".exe"
-	}
+// fetchAppTo downloads the app asset (the multi-call binary — the ONLY
+// artifact) for version into the inactive slot's bin dir. Returns the
+// local path.
+func (d *DaemonServer) fetchAppTo(version string, sl slotLayout) (string, error) {
+	asset := daemonAssetName()
 	binDir := filepath.Join(d.slotDir(sl.inactive), "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		return "", err
 	}
-	local := filepath.Join(binDir, asset)
-	if runtime.GOOS == "windows" {
-		local = filepath.Join(binDir, "indirect-launcher.exe")
-	}
+	local := filepath.Join(binDir, slotBinName())
 	// NOTE: no reuse of a leftover binary here. A previous attempt may
 	// have left bytes for a DIFFERENT version (or a stale-cache copy);
 	// the caller (runHandoff phase 0) always downloads fresh and
 	// self-verifies. Reusing by size alone once promoted a stale daemon
-	// past the point of rollback (E2E caught it: launcher vE2E.2 reused
+	// past the point of rollback (E2E caught it: app vE2E.2 reused
 	// 1.0.21 bytes, new side fetched the same stale daemon, verify
 	// failed after the old daemon was already gone).
 	// Gateway first (serves dist/ itself — instant, no CDN), mirror fallback.
@@ -261,7 +255,7 @@ func (d *DaemonServer) fetchLauncherTo(version string, sl slotLayout) (string, e
 			fmt.Sprintf("%s%s?u=%s-%d", b, asset, version, time.Now().Unix()),
 		)
 	}
-	tmp, err := os.CreateTemp(binDir, ".launcher-*")
+	tmp, err := os.CreateTemp(binDir, ".app-*")
 	if err != nil {
 		return "", err
 	}
@@ -452,11 +446,11 @@ func copyFileLink(src, dst string) error {
 }
 
 // isBinaryAsset reports whether a slot file is a release binary (never
-// hardlinked — see copyFileLink). Matches the build's dist/r asset
-// pattern: indirect-code-*, indirect-launcher-*.
+// hardlinked — see copyFileLink). Matches the multi-call app asset
+// pattern: indirect-code-* and the short Windows name indirect-code.exe.
 func isBinaryAsset(path string) bool {
 	base := filepath.Base(path)
-	return strings.HasPrefix(base, "indirect-code-") || strings.HasPrefix(base, "indirect-launcher")
+	return strings.HasPrefix(base, "indirect-code")
 }
 
 // gatewayBaseURL returns scheme://host of the connected gateway ("" when
@@ -496,8 +490,8 @@ func fetchURL(url string, w io.Writer) error {
 
 // debugMirror reports what the daemon's own download path resolves:
 // the gateway base (from slot config), the manifest version the daemon
-// last polled, and the first bytes of the launcher asset as fetched
-// through fetchLauncherTo's candidate chain. E2E forensics only.
+// last polled, and the first bytes of the app asset as fetched
+// through fetchAppTo's candidate chain. E2E forensics only.
 func (d *DaemonServer) debugMirror(raw []byte) {
 	var req struct {
 		RequestID string `json:"requestId"`
@@ -511,12 +505,9 @@ func (d *DaemonServer) debugMirror(raw []byte) {
 	info["available"] = st.available
 	info["current"] = daemonVersion
 	st.mu.Unlock()
-	// What would fetchLauncherTo download? HEAD the first candidate.
+	// What would fetchAppTo download? HEAD the first candidate.
 	sl := d.slots()
-	asset := "indirect-launcher-" + runtime.GOOS + "-" + runtime.GOARCH
-	if runtime.GOOS == "windows" {
-		asset += ".exe"
-	}
+	asset := daemonAssetName()
 	var bases []string
 	if gb := gatewayBaseURL(d); gb != "" {
 		bases = append(bases, strings.TrimRight(gb, "/")+"/r/")

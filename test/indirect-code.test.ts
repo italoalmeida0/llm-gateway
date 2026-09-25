@@ -396,7 +396,7 @@ describe("Indirect Code Relay and Pairing", () => {
 
     // Spawn Go daemon
     const daemonSubproc = Bun.spawn(
-      [daemonBin, "--connect", pairJson.connectUrl, "--data-dir", daemonData, "--name", "Real Go Daemon"],
+      [daemonBin, "--worker", "--connect", pairJson.connectUrl, "--data-dir", daemonData, "--name", "Real Go Daemon"],
       {
         stdout: "inherit",
         stderr: "inherit",
@@ -504,7 +504,7 @@ describe("Indirect Code Relay and Pairing", () => {
     const workDir = mkdtempSync(path.join(tmpdir(), "llmgw-daemon-work2-"));
     const daemonBin = path.join(import.meta.dir, "../indirect-code-daemon/bin/indirect-code");
     const daemonSubproc = Bun.spawn(
-      [daemonBin, "--connect", pairJson.connectUrl, "--data-dir", daemonData, "--name", "Feature Daemon"],
+      [daemonBin, "--worker", "--connect", pairJson.connectUrl, "--data-dir", daemonData, "--name", "Feature Daemon"],
       { stdout: "inherit", stderr: "inherit" },
     );
 
@@ -749,7 +749,7 @@ describe("Indirect Code Relay and Pairing", () => {
     const workDir = mkdtempSync(path.join(tmpdir(), "llmgw-daemon-dedup-work-"));
     const daemonBin = path.join(import.meta.dir, "../indirect-code-daemon/bin/indirect-code");
     const daemonSubproc = Bun.spawn(
-      [daemonBin, "--connect", pairJson.connectUrl, "--data-dir", daemonData, "--name", "Dedup Daemon"],
+      [daemonBin, "--worker", "--connect", pairJson.connectUrl, "--data-dir", daemonData, "--name", "Dedup Daemon"],
       { stdout: "inherit", stderr: "inherit" },
     );
 

@@ -219,6 +219,16 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   - **Daemon project** (`indirect-code-daemon/`, Go 1.25: `cmd/daemon` +
     `packages/agent|core|provider|…`; external deps are gorilla/websocket,
     sergi/go-diff, x/image, x/net — keep both projects' dep lists minimal).
+    ONE multi-call binary (the old `cmd/launcher` is merged into `cmd/daemon`):
+    the default role is boot (checkup/migrate/verify → self-spawns the worker
+    and supervises it — NO downloads at boot), `--worker` runs the daemon
+    itself. Routing (`workerMode` in `cmd/daemon/main.go`) is explicit:
+    `--worker`/`--update-start`/`--update-end`/`--slot` select the worker
+    role, everything else is boot — no legacy invocation shapes. Release
+    publishes ONE app artifact
+    `indirect-code-<goos>-<goarch>`; `versions.json` has ONE `daemon` field
+    carrying those assets (there is no separate launcher concept anywhere
+    in the protocol) — version skew is impossible by construction.
     The bg registry is **memory-only**: a restart drops running jobs (only
     their `.log` files survive, still readable). Background tasks (bash/python
     only): a command outliving `AutoBackgroundAfter` (10s) detaches — the

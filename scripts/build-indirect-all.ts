@@ -29,8 +29,7 @@ version = (version || "1.0.0").replace(/^v/, "").trim();
 
 console.log(`==> Building Indirect Code v${version}`);
 
-const daemonLdflags = `-s -w -X main.Version=${version}`;
-const launcherLdflags = `-s -w -X main.launcherVersion=${version}`;
+const daemonLdflags = `-s -w -X main.Version=${version} -X main.launcherVersion=${version}`;
 
 const TARGETS = [
   { goos: "linux", goarch: "amd64" },
@@ -45,21 +44,18 @@ for (const { goos, goarch } of TARGETS) {
   const ext = goos === "windows" ? ".exe" : "";
   const name = `indirect-code-${goos}-${goarch}${ext}`;
 
-  console.log(`==> ${name} (daemon)`);
+  // ONE multi-call binary per target (boot + worker roles, see cmd/daemon
+  // main.go) — launcher and daemon used to be two builds.
+  console.log(`==> ${name} (multi-call: boot + worker)`);
   await $`go build -trimpath -ldflags ${daemonLdflags} -o ${path.join(OUT, name)} ./cmd/daemon`
-    .cwd(DAEMON_DIR)
-    .env({ ...process.env, CGO_ENABLED: "0", GOOS: goos, GOARCH: goarch });
-
-  const lname = `indirect-launcher-${goos}-${goarch}${ext}`;
-  console.log(`==> ${lname} (launcher)`);
-  await $`go build -trimpath -ldflags ${launcherLdflags} -o ${path.join(OUT, lname)} ./cmd/launcher`
     .cwd(DAEMON_DIR)
     .env({ ...process.env, CGO_ENABLED: "0", GOOS: goos, GOARCH: goarch });
 }
 
-// 2. Prune any deprecated versioned copies
+// 2. Prune any deprecated versioned copies and legacy launcher duplicates
+// (the multi-call binary replaced the separate launcher artifact).
 for (const fn of readdirSync(OUT)) {
-  if (/-v\d+\.\d+\.\d+/.test(fn)) {
+  if (/-v\d+\.\d+\.\d+/.test(fn) || fn.startsWith("indirect-launcher-")) {
     rmSync(path.join(OUT, fn), { force: true });
     console.log(`pruned ${fn}`);
   }
@@ -81,7 +77,9 @@ for (const fn of allFiles) {
 
 writeFileSync(path.join(OUT, "SHA256SUMS.txt"), sumsLines.join("\n") + "\n");
 
-// 4. Generate versions.json manifest
+// 4. Generate versions.json manifest. ONE artifact (the multi-call
+// binary), ONE field: `daemon` carries the app assets — the update
+// protocol has no separate launcher concept.
 function getAssets(prefix: string) {
   const res: Record<string, string> = {};
   for (const fn of Object.keys(sums).sort()) {
@@ -97,11 +95,6 @@ const manifest = {
   daemon: {
     version,
     assets: getAssets("indirect-code"),
-    sums,
-  },
-  launcher: {
-    version,
-    assets: getAssets("indirect-launcher"),
     sums,
   },
 };

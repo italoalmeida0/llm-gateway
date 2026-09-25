@@ -5,7 +5,7 @@
 // ported scripts (lifecycle, gateway-death, handoff) import from here so
 // platform quirks live in exactly one place.
 //
-//   import { IS_WIN, PLAT, DAEMON_BIN, LAUNCHER_BIN, GO_BIN, buildBin, killAll, copyDir, exe } from "./indirect-e2e-win";
+//   import { IS_WIN, PLAT, DAEMON_BIN, GO_BIN, buildBin, killAll, copyDir, exe } from "./indirect-e2e-win";
 //   import { cdpFrontend } from "./indirect-e2e-win"; // browser phases
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, copyFileSync, readdirSync, statSync } from "node:fs";
@@ -38,7 +38,6 @@ export const PLAT = daemonPlat();
 
 // Slot binary names (daemon layout.go: slotBinName/slotLauncherName).
 export const DAEMON_BIN = IS_WIN ? "indirect-code.exe" : `indirect-code-${PLAT}`;
-export const LAUNCHER_BIN = IS_WIN ? "indirect-launcher.exe" : `indirect-launcher-${PLAT}`;
 
 // Go binary: PATH on unix; on Windows resolve via `where go` at runtime
 // (a remote-exec channel may not inherit the user's PATH, and hardcoded
@@ -77,9 +76,11 @@ export function bunBin(): string {
 
 // `go build -trimpath -ldflags "-s -w -X main.<vvar>=<ver>" -o <out> <pkg>`
 // in the daemon dir. Returns the actual output path (with .exe on win).
-export function buildBin(pkg: string, ver: string, out: string, vvar: string, daemonDir: string): string {
+export function buildBin(pkg: string, ver: string, out: string, vvar: string | string[], daemonDir: string): string {
   const finalOut = exe(out);
-  execFileSync(GO_BIN, ["build", "-trimpath", "-ldflags", `-s -w -X main.${vvar}=${ver}`, "-o", finalOut, pkg], { cwd: daemonDir, stdio: "pipe" });
+  const vars = Array.isArray(vvar) ? vvar : [vvar];
+  const ldflags = ["-s", "-w", ...vars.map((v) => `-X main.${v}=${ver}`)].join(" ");
+  execFileSync(GO_BIN, ["build", "-trimpath", "-ldflags", ldflags, "-o", finalOut, pkg], { cwd: daemonDir, stdio: "pipe" });
   return finalOut;
 }
 

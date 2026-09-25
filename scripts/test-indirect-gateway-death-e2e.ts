@@ -28,14 +28,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { DAEMON_BIN, LAUNCHER_BIN, PLAT, buildBin, killAll, killProc } from "./indirect-e2e-win";
+import { DAEMON_BIN, PLAT, buildBin, killAll, killProc } from "./indirect-e2e-win";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const DAEMON_DIR = join(ROOT, "indirect-code-daemon");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (tag: string, msg: string) => console.log(`[${new Date().toISOString().slice(11, 19)}][${tag}] ${msg}`);
 
-const build = (pkg: string, ver: string, out: string, vvar: string) =>
+const build = (pkg: string, ver: string, out: string, vvar: string | string[]) =>
     buildBin(pkg, ver, out, vvar, DAEMON_DIR);
 
 interface World {
@@ -56,25 +56,20 @@ async function bootWorld(tag: string, opts: { mirrorDelayMs?: number; mirrorFail
   mkdirSync(join(root, "slots", "slot-a", "sessions"), { recursive: true });
   mkdirSync(mirror, { recursive: true });
 
-  const oldBin = join(work, "daemon-old");
-  const newBin = join(work, "daemon-new");
-  const launcherBin = join(work, "launcher-new");
-  const launcherOldBin = join(work, "launcher-old");
-  build("./cmd/daemon", "9.9.8", oldBin, "daemonVersion");
-  build("./cmd/daemon", "9.9.9", newBin, "daemonVersion");
-  build("./cmd/launcher", "9.9.8", launcherOldBin, "launcherVersion");
-  build("./cmd/launcher", "9.9.9", launcherBin, "launcherVersion");
+  const oldBin = join(work, "app-old");
+  const newBin = join(work, "app-new");
+  // Multi-call binary: ONE build per version, stamped for both roles.
+  const both = ["daemonVersion", "launcherVersion"];
+  build("./cmd/daemon", "9.9.8", oldBin, both);
+  build("./cmd/daemon", "9.9.9", newBin, both);
 
   const { copyFileSync, writeFileSync: wfs, readFileSync } = await import("node:fs");
   copyFileSync(newBin, join(mirror, DAEMON_BIN));
-  copyFileSync(launcherBin, join(mirror, LAUNCHER_BIN));
   wfs(join(mirror, "versions.json"), JSON.stringify({
     daemon: { version: "9.9.9", assets: { [PLAT]: DAEMON_BIN }, sums: {} },
-    launcher: { version: "9.9.9", assets: { [PLAT]: LAUNCHER_BIN }, sums: {} },
   }));
 
   copyFileSync(oldBin, join(root, "slots", "slot-a", "bin", DAEMON_BIN));
-  copyFileSync(launcherOldBin, join(root, "slots", "slot-a", "bin", LAUNCHER_BIN));
   wfs(join(root, "slots", "active"), "a\n");
   wfs(join(root, "slots", "slot-a", "storage_version.json"), JSON.stringify({ version: 1 }));
   wfs(join(root, "slots", "slot-a", "sessions", "s1.jsonl"),

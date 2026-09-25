@@ -7,7 +7,7 @@ import (
 )
 
 // defaultDataDir mirrors the daemon's defaultDataDir (kept in sync by
-// convention; the launcher passes it explicitly via --data-dir metadata
+// convention; the boot role passes it explicitly via --data-dir metadata
 // so the daemon never has to guess).
 func defaultDataDir() string {
 	home, err := os.UserHomeDir()

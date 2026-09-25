@@ -48,7 +48,7 @@ try {
   if ($ARCH -eq 64) {
     $archName = if ($env:PROCESSOR_ARCHITECTURE -match "ARM64") { "arm64" } else { "amd64" }
   } else { Fail "unsupported arch: $env:PROCESSOR_ARCHITECTURE" }
-  $ASSET = "indirect-launcher-windows-$archName.exe"
+  $ASSET = "indirect-code-windows-$archName.exe"
   Ok
 
   $ACTIVE = ""
@@ -93,7 +93,7 @@ try {
     }
   }
 
-  Step "Downloading launcher"
+  Step "Downloading app"
   $SLOTDIR = Join-Path $ROOT "slots/slot-${ACTIVE}"
   New-Item -ItemType Directory -Force -Path (Join-Path $SLOTDIR "bin") | Out-Null
   New-Item -ItemType Directory -Force -Path (Join-Path $ROOT "brain") | Out-Null
@@ -106,9 +106,9 @@ try {
   } catch { Fail "could not download ${ASSET} from ${GW} ($($_.Exception.Message))" }
 
   $ver = & $tmp --version 2>&1
-  if ($ver -notmatch "launcher") {
+  if ($ver -notmatch "boot") {
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
-    Fail "downloaded file is not a launcher (bad gateway response?)"
+    Fail "downloaded file is not the app (bad gateway response?)"
   }
   Move-Item -Force $tmp $dest
   Ok

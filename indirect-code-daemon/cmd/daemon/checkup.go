@@ -23,7 +23,7 @@ func probePython() (string, error) {
 // runCheckup verifies the environment before the daemon starts: daemon
 // binary present and executable, data dir writable, disk space sane,
 // python/shell availability (informational — the daemon degrades, the
-// launcher only reports).
+// boot role only reports).
 type checkItem struct {
 	name   string
 	ok     bool
@@ -127,7 +127,7 @@ func runCheckup(dataDir, daemonPath string) *checkReport {
 	}
 
 	// Python / shell: informational only. EnsurePython/EnsureShell have
-	// side effects (managed downloads) — the launcher only PROBES here;
+	// side effects (managed downloads) — the boot role only PROBES here;
 	// the daemon performs the real ensure at startup.
 	if bin, err := probePython(); err == nil && bin != "" {
 		r.add("python", true, bin, false)

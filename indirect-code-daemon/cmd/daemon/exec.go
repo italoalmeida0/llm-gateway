@@ -24,12 +24,13 @@ var errUpdateHandoff = errors.New("daemon handed over to updater")
 // A request for a different PID never suppresses ordinary crash recovery.
 func execDaemon(daemonPath, dataDir string, daemonArgs []string) (int, error) {
 	args := []string{
+		"--worker",
 		"--data-dir", dataDir,
 	}
 	args = append(args, daemonArgs...)
 	cmd := exec.Command(daemonPath, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	// Own process group (Unix): signals to the launcher don't implicitly
+	// Own process group (Unix): signals to the boot role don't implicitly
 	// hit the child — we forward explicitly below, exactly once.
 	setChildPgid(cmd)
 	requestPath := filepath.Join(dataDir, "update.req")

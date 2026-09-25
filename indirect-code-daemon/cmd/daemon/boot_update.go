@@ -11,7 +11,7 @@ import (
 )
 
 // Brutal update mode (--update), invoked by the --update-start daemon as
-//   launcher-new --update --root-dir R --from-slot a --to-slot b
+//   app-new --update --root-dir R --from-slot a --to-slot b
 //     --expect-version V --old-version O --fail-file F --done-file D
 //     --parent-pid PID
 //
@@ -28,7 +28,7 @@ import (
 //  4. exit 0 — our job is done, the daemons finish the handoff.
 //
 // Failure signal: on ANY failure write the fail file and exit non-zero.
-// The signal is only ever emitted when the launcher is READY TO BE KILLED
+// The signal is only ever emitted when the app is READY TO BE KILLED
 // (nothing is left running that the waiter must clean up first). Success
 // needs no signal from us: --update-end writes the done file itself after
 // it proves end-to-end serving.
@@ -73,11 +73,14 @@ func runUpdate(
 	} else if len(applied) > 0 {
 		logf("[UPDATE] applied: %v", applied)
 	}
-	// 2. Fetch the new daemon into the update slot + verify.
-	logf("[UPDATE] fetching daemon %s...", expectVersion)
-	daemonPath, err := fetchDaemonTo(toDir, expectVersion)
+	// 2. Stage the app into the update slot + verify. The multi-call
+	// binary stages ITSELF: this process IS the new version (spawned by
+	// --update-start after the worker's update checker downloaded and
+	// verified it) — no fetch here, ever.
+	logf("[UPDATE] staging app %s...", expectVersion)
+	daemonPath, err := stageAppTo(toDir)
 	if err != nil {
-		return fail(fmt.Sprintf("fetch daemon: %v", err))
+		return fail(fmt.Sprintf("stage app: %v", err))
 	}
 	if err := selfVerifyDaemon(daemonPath, expectVersion); err != nil {
 		return fail(fmt.Sprintf("verify daemon: %v", err))

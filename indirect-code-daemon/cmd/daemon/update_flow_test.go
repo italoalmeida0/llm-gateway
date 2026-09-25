@@ -12,7 +12,7 @@ import (
 
 // Brutal update unit tests: version ordering, signal files, slot cleaning
 // guards. No processes are spawned here (kill paths are covered by the
-// launcher stubborn test + the handoff E2E script).
+// boot stubborn test + the handoff E2E script).
 
 func TestCompareVersions(t *testing.T) {
 	cases := []struct {
@@ -98,7 +98,7 @@ func TestKillSlotProcesses(t *testing.T) {
 	}
 	insider := spawn(filepath.Join(slot, "bin"))
 	outsider := spawn(slot + "-neighbor")
-	// No pidfile: the directory scan itself must discover the launcher.
+	// No pidfile: the directory scan itself must discover the updater.
 	found := map[int]bool{}
 	killSlotProcessesByDir(slot, os.Getpid(), func(pid int, _ string) { found[pid] = true })
 	if !found[insider.Process.Pid] || found[outsider.Process.Pid] {

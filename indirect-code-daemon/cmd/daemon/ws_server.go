@@ -619,8 +619,8 @@ func (s *wsServer) dispatch(raw []byte) {
 			go s.updates.checkForUpdates("manual")
 		}
 	case "daemon_update_apply":
-		// Brutal update: clean slot -> fetch launcher -> spawn
-		// --update-start (SIGKILLs us, copies slot, runs launcher --update,
+		// Brutal update: clean slot -> fetch app -> spawn
+		// --update-start (SIGKILLs us, copies slot, runs app --update,
 		// watches fail/done). Failure before the spawn aborts in place,
 		// the serving WS is never dropped.
 		if s.updates != nil {
@@ -638,7 +638,7 @@ func (s *wsServer) dispatch(raw []byte) {
 	case "debug_mirror":
 		// E2E forensics: report what the daemon's own download path resolves
 		// (gateway base from slot config, manifest version from the daemon's
-		// poll, launcher asset bytes head). Never fails the caller.
+		// poll, app asset bytes head). Never fails the caller.
 		if s.updates != nil {
 			go s.updates.debugMirror(raw)
 		}

@@ -49,15 +49,59 @@ func main() {
 		dataDirFlag = flag.String("data-dir", "", "Path to daemon data directory")
 		stopFlag    = flag.Bool("stop", false, "Stop the background daemon (reads daemon.pid) and exit")
 		versionFlag = flag.Bool("version", false, "Print daemon version and exit")
+
+		// Brutal update protocol (see update_flow.go): --update-start is the
+		// naive updater (zero sessions; SIGKILLs the old daemon, copies the
+		// slot, runs the new launcher), --update-end is the promoted daemon
+		// (local-first promote: hello relay, kill waiter, flip active).
+		updateStartFlag = flag.Bool("update-start", false, "Brutal update: kill the old daemon, own the host in update state, copy slot, run the new launcher")
+		updateEndFlag   = flag.Bool("update-end", false, "Brutal update: boot the new daemon, promote local-first (hello relay, kill waiter, flip active, clean old slot)")
+		rootDirFlag     = flag.String("root-dir", "", "Update slots root (<root> holding slots/)")
+		fromSlotFlag    = flag.String("from-slot", "", "Update source slot (a|b)")
+		toSlotFlag      = flag.String("to-slot", "", "Update target slot (a|b)")
+		expectVerFlag   = flag.String("expect-version", "", "Update target version")
+		parentPidFlag   = flag.Int("parent-pid", 0, "PID of the daemon waiting to be killed")
+		launcherFlag    = flag.String("launcher-path", "", "Verified new launcher binary (--update-start only)")
+		slotFlag        = flag.String("slot", "", "Active slot id (a|b), informational: passed by the launcher; dataDir already points at the slot")
 	)
 	flag.Parse()
+	// Version adoption: releases stamp main.Version (build-indirect-all),
+	// the chaos/e2e harnesses stamp main.daemonVersion directly to build
+	// distinct old/new binaries. Adopt the release stamp only when the
+	// harness did not set one; dev builds keep "dev" (never self-update).
+	if daemonVersion == "dev" && Version != "" && !strings.Contains(strings.ToLower(Version), "dev") {
+		daemonVersion = Version
+	}
 	if *versionFlag {
-		fmt.Println("indirect-code daemon", Version)
+		fmt.Println("indirect-code daemon", daemonVersion)
 		os.Exit(0)
 	}
 	dataDir := *dataDirFlag
 	if dataDir == "" {
 		dataDir = defaultDataDir()
+	}
+	configPath := *configFlag
+	if configPath == "" {
+		configPath = filepath.Join(dataDir, "config.json")
+	}
+	if *updateStartFlag {
+		os.Exit(runUpdateStart(dataDir, configPath, updateStartParams{
+			root:          *rootDirFlag,
+			fromSlot:      *fromSlotFlag,
+			toSlot:        *toSlotFlag,
+			expectVersion: *expectVerFlag,
+			launcherPath:  *launcherFlag,
+			parentPid:     *parentPidFlag,
+		}))
+	}
+	if *updateEndFlag {
+		updateEndInfo = &updateEndParams{
+			root:          *rootDirFlag,
+			fromSlot:      *fromSlotFlag,
+			expectVersion: *expectVerFlag,
+			parentPid:     *parentPidFlag,
+			slot:          *slotFlag,
+		}
 	}
 	if *stopFlag {
 		if err := stopDaemonFromPidFile(dataDir); err != nil {
@@ -65,10 +109,6 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(0)
-	}
-	configPath := *configFlag
-	if configPath == "" {
-		configPath = filepath.Join(dataDir, "config.json")
 	}
 
 	if traceEnabled {
@@ -134,6 +174,31 @@ func main() {
 
 	root.bootActors()
 	root.writePidFile()
+
+	// Brutal update protocol boot hooks (v1.0.28 semantics): a promoted
+	// --update-end daemon commits slots/active BEFORE announcing anything
+	// (local-first, right after recovery, before the WS loop), then every
+	// normal boot clears stale update signals.
+	upd := attachUpdateHost(root)
+	upd.sharedDir = filepath.Join(root.rootDir(), "external")
+	upd.emitLive = func(ev any) { root.server.emit(ev) }
+	root.server.updates = upd
+	if err := doUpdateEndPromote(upd); err != nil {
+		fmt.Printf("[UPDATE-END] promote: %v\n", err)
+	}
+	// The hello socket's job is done: the link loop owns the long-lived
+	// connection from here (v1 replaced it in the same single-conn model).
+	upd.closeWS()
+	// Stale update signals from a crashed update must never gate a fresh
+	// boot: the waiter/launcher own the fail/done files, a normal boot
+	// never reads them.
+	_ = os.Remove(updateFailPath(root.rootDir()))
+	_ = os.Remove(updateDonePath(root.rootDir()))
+	// Self-update: check on start and every 10min (reconnect checks run
+	// from the link loop). Stops with the process.
+	updateStop := make(chan struct{})
+	defer close(updateStop)
+	go upd.startUpdateLoop(updateStop)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -206,6 +271,11 @@ func (l *link) connectLoop(ctx context.Context) error {
 	}
 	l.setConn(conn)
 	fmt.Printf("[CONNECTED] Connected to gateway at %s\n", l.cfg.load().GatewayURL)
+	// Fresh (re)connect: re-check for updates + push state to clients
+	// (v1 parity: checks run on start, every 10min and on reconnect).
+	if l.server != nil && l.server.updates != nil {
+		go l.server.updates.checkForUpdates("reconnect")
+	}
 	defer func() {
 		_ = conn.Close()
 		l.clearConn(conn)

@@ -1,0 +1,43 @@
+--- FAIL: TestReviewApprovalWireRoundTrip (0.16s)
+    reviewer_behavior_test.go:70: the exact callId sent to the browser does not resolve approval
+--- FAIL: TestReviewSleepTransitionsDoNotPanic (0.00s)
+    --- FAIL: TestReviewSleepTransitionsDoNotPanic/two-jobs (0.00s)
+        reviewer_behavior_test.go:95: job completion panicked: close of closed channel
+    --- FAIL: TestReviewSleepTransitionsDoNotPanic/sleep-expired (0.00s)
+        reviewer_behavior_test.go:95: job completion panicked: close of closed channel
+--- FAIL: TestReviewIdleMutationsVisibleOnDiskAndMirror (0.02s)
+    --- FAIL: TestReviewIdleMutationsVisibleOnDiskAndMirror/rename (0.00s)
+        reviewer_behavior_test.go:123: acknowledged rename lost: disk="t" RAM="new title"
+        reviewer_behavior_test.go:133: mirror reads stale disk state after accepted mutation
+    --- FAIL: TestReviewIdleMutationsVisibleOnDiskAndMirror/configure (0.00s)
+        reviewer_behavior_test.go:126: configuration lost: disk="m" RAM="new-model"
+        reviewer_behavior_test.go:133: mirror reads stale disk state after accepted mutation
+    --- FAIL: TestReviewIdleMutationsVisibleOnDiskAndMirror/queue (0.01s)
+        reviewer_behavior_test.go:129: queue lost: disk=0 RAM=1
+--- FAIL: TestReviewWatchdogEscalatesRealCancelState (0.01s)
+    reviewer_behavior_test.go:154: after six watchdog rounds, stuck worker remains cancelling instead of orphaned
+--- FAIL: TestReviewCancelledWorkerAlwaysReportsFinish (0.00s)
+    reviewer_behavior_test.go:171: 98/200 terminal notifications discarded despite available inbox
+--- FAIL: TestReviewPromptSnapshotIncludesAttachmentIDs (0.01s)
+    reviewer_behavior_test.go:184: selected attachment lost before worker: []string(nil)
+--- FAIL: TestReviewManualCompactActuallyCompacts (0.13s)
+    reviewer_behavior_test.go:248: manual compact produced an ordinary request containing /compact=true; compaction is nil and messages grew from 12 to 14
+--- FAIL: TestReviewBackgroundNoticeReachesWorkerRequest (0.01s)
+    reviewer_behavior_test.go:271: actor stored completion, but worker context still has no background_delivery before its next request
+--- FAIL: TestReviewRealBackgroundProcessRecordsPID (0.03s)
+    reviewer_behavior_test.go:301: real detached process persisted PID=0; restart will classify live work as orphaned
+--- FAIL: TestReviewCommitFailureRetainsRecoveryWAL (1.21s)
+    reviewer_behavior_test.go:331: failed commit reported idle, accepted new turn, and truncated the only recovery WAL
+--- FAIL: TestReviewQuestionWireContainsFrontendID (0.00s)
+    reviewer_behavior_test.go:350: question.id required by showQuestion/answerQuestion is missing: {"question":{"questions":[{"header":"Choice","question":"Pick?","options":[{"label":"One"}]}]},"questionId":"question-one","sessionId":"review","type":"question_request"}
+--- FAIL: TestReviewLiveAccessChangeEnforcedBeforeTool (0.01s)
+    reviewer_behavior_test.go:377: full -> ask was accepted, but next bash still bypassed approval
+--- FAIL: TestReviewResidentCapEnforcedBelowMemoryBudget (0.02s)
+    reviewer_behavior_test.go:408: cap=2 but 3 idle actors remain (under memory budget and before TTL)
+--- FAIL: TestReviewPassivationRechecksIdleAfterPrompt (0.01s)
+    reviewer_behavior_test.go:425: an idle-eviction request terminated a newly accepted running turn
+--- FAIL: TestReviewBackgroundWakeMetaPersists (0.03s)
+    reviewer_behavior_test.go:460: real wake-up worker dropped background_delivery metadata (2 messages)
+FAIL
+FAIL	llm-gateway/indirect-code-daemon/cmd/daemon	1.705s
+FAIL

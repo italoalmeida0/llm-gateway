@@ -177,6 +177,36 @@ assert(/PONG/i.test(text), `PONG not in transcript: ${text.slice(0, 500)}`);
 assert(sawRunning, "missing session_status running (Stop button never flips)");
 assert(sawIdle, "missing session_status idle (UI stuck on running)");
 assert(sawSnapshot, "missing completion snapshot (session_data idle + tail + cursor)");
+// 2b. follow-up turn on the same session (refresh identity): the worker
+// re-runs the BeforeRequest refresh round-trip against the actor and the
+// request carries the growing history, so the model must still see turn 1.
+send({
+  type: "prompt",
+  sessionId: sessId,
+  text: "What single word did I ask you to reply with in the previous message? Reply with exactly that one word.",
+  model: MODEL,
+});
+let done2 = false, text2 = "";
+{
+  const t0 = Date.now();
+  // Incremental scan: only messages appended after the prompt was sent
+  // belong to turn 2 (the shared `seen` array holds every event).
+  let idx = seen.length;
+  while (!done2 && Date.now() - t0 < 180000) {
+    await Bun.sleep(1000);
+    for (; idx < seen.length; idx++) {
+      const m = seen[idx];
+      if (m.type === "agent_event" && m.sessionId === sessId) {
+        const e = m.event;
+        if (e?.type === "text_delta" && e.delta) text2 += e.delta;
+        if (e?.type === "turn_end") done2 = true;
+      }
+    }
+  }
+}
+log("follow-up", `done=${done2} text=${JSON.stringify(text2.slice(0, 200))}`);
+assert(done2, "follow-up turn never ended");
+assert(/PONG/i.test(text2), `turn-1 context lost on follow-up: ${text2.slice(0, 500)}`);
 // 3. session persisted on daemon disk
 const files = await fs.readdir(path.join(daemonDir, "sessions")).catch(() => []);
 assert(files.some((f) => f.startsWith(sessId)), `session file missing: ${files.join(",")}`);

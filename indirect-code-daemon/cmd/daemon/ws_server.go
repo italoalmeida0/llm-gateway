@@ -23,7 +23,7 @@ type wsServer struct {
 	dataDir string
 	cfg     *configCell
 	// configDir is where config.json lives (== dataDir unless --config).
-	configDir string
+	configDir    string
 	onRemoteKill func(reason string)
 
 	sessions *sessionSupervisor
@@ -32,6 +32,9 @@ type wsServer struct {
 	admin    *sessionAdmin
 	ws       *wsActor
 	root     *root
+	// updates is the brutal-update protocol host (check/apply/toggle);
+	// nil in tests that never boot the update flow.
+	updates *DaemonServer
 
 	debounceMu sync.Mutex
 	debounce   map[string]*time.Timer
@@ -47,7 +50,7 @@ func newWSServer(dataDir string, cfg *configCell, sessions *sessionSupervisor, b
 	return &wsServer{
 		dataDir: dataDir, configDir: dataDir, cfg: cfg, sessions: sessions, bg: bg,
 		projects: projects, admin: admin, ws: ws,
-		debounce:       map[string]*time.Timer{},
+		debounce: map[string]*time.Timer{},
 	}
 }
 
@@ -188,7 +191,7 @@ func (s *wsServer) dispatch(raw []byte) {
 					atts := block.Attachments
 					s.emit(map[string]any{
 						"type": "session_content", "hostId": s.host(), "sessionId": req.SessionID, "page": true,
-						"messages": sanitizeMessagesForFrontend(block.Messages, atts),
+						"messages":     sanitizeMessagesForFrontend(block.Messages, atts),
 						"fileBalloons": fileBalloonPayloads(block.Balloons),
 						"history": map[string]any{
 							"oldestTurn": block.OldestTurn, "newestTurn": block.NewestTurn,
@@ -262,7 +265,11 @@ func (s *wsServer) dispatch(raw []byte) {
 			return
 		}
 		select {
-		case <-rr:
+		case result := <-rr:
+			if err, ok := result.(error); ok {
+				s.error(req.SessionID, "", err.Error())
+				return
+			}
 			s.emit(map[string]any{"type": "session_renamed", "hostId": s.host(), "sessionId": req.SessionID, "title": title})
 		case <-time.After(replyTimeout):
 		}
@@ -606,15 +613,36 @@ func (s *wsServer) dispatch(raw []byte) {
 		s.onUpdateConfig(raw)
 
 	case "daemon_update_check":
-		// Daemon-side self-update orchestration was removed in the rewrite
-		// (see docs §D4): answer authoritative state so the frontend card
-		// shows the current version as up-to-date instead of erroring.
-		// replyTo-less errors would toast on every reconnect (checkNow
-		// runs onOpen). Real swaps still go through the launcher.
-		s.emit(map[string]any{"type": "daemon_update", "hostId": s.host(), "current": Version, "autoUpdate": false})
-	case "daemon_update_apply", "daemon_update_toggle":
-		s.emit(map[string]any{"type": "daemon_update", "hostId": s.host(), "current": Version, "autoUpdate": false})
-	case "debug_mirror", "test_mcp":
+		// Async only: checkForUpdates fetches the manifest and broadcasts
+		// daemon_update at the end (dispatch must never block the read loop).
+		if s.updates != nil {
+			go s.updates.checkForUpdates("manual")
+		}
+	case "daemon_update_apply":
+		// Brutal update: clean slot -> fetch launcher -> spawn
+		// --update-start (SIGKILLs us, copies slot, runs launcher --update,
+		// watches fail/done). Failure before the spawn aborts in place,
+		// the serving WS is never dropped.
+		if s.updates != nil {
+			go s.updates.beginHandoff()
+		}
+	case "daemon_update_toggle":
+		var treq struct {
+			Enabled bool `json:"enabled"`
+		}
+		_ = json.Unmarshal(raw, &treq)
+		if s.updates != nil {
+			s.updates.setAutoUpdate(treq.Enabled)
+			go s.updates.checkForUpdates("toggle")
+		}
+	case "debug_mirror":
+		// E2E forensics: report what the daemon's own download path resolves
+		// (gateway base from slot config, manifest version from the daemon's
+		// poll, launcher asset bytes head). Never fails the caller.
+		if s.updates != nil {
+			go s.updates.debugMirror(raw)
+		}
+	case "test_mcp":
 		// Removed (MCP deleted): silent no-op. Emitting a replyTo-less
 		// error would toast on the generic handler for no user benefit.
 		_ = base
@@ -746,11 +774,12 @@ func (s *wsServer) onPull(id json.RawMessage, collection string) {
 			reply(nil, "projects busy")
 		}
 	case "sessions":
-		items := make([]map[string]any, 0)
-		for _, sm := range listSessionSummaries(s.dataDir) {
-			items = append(items, sessionListItem(sm))
+		items, err := s.sessions.mirrorSummaries()
+		if err != nil {
+			reply(nil, err.Error())
+		} else {
+			reply(items, "")
 		}
-		reply(items, "")
 	case "config":
 		cfg := s.cfg.load()
 		settings := HarnessSettings{}

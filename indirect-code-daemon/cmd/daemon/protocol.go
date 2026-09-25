@@ -102,9 +102,9 @@ type forkReqMsg struct {
 // readReqMsg serves history_page/session_data from actor RAM. If the session
 // is passivated the supervisor loads it from disk first (see supervisor.go).
 type readReqMsg struct {
-	What string // "session" | "data" | "history" | "historyBlock"
+	What       string // "session" | "data" | "history" | "historyBlock"
 	Limit      int
-	BeforeTurn int // historyBlock cursor
+	BeforeTurn int      // historyBlock cursor
 	Reply      chan any // readResult
 }
 
@@ -125,7 +125,7 @@ type watchdogPingMsg struct {
 
 // passivateMsg commits the WAL, closes it and terminates the actor.
 // State persists on disk; the next message re-spawns transparently.
-type passivateMsg struct{}
+type passivateMsg struct{ Reply chan bool }
 
 // shutdownMsg commits the WAL and terminates the actor.
 type shutdownMsg struct{}
@@ -181,11 +181,11 @@ type spawnResult struct {
 // prompt bumps gen without changing epoch, so gen is the guard that stops
 // a zombie worker's late appends from landing in the NEW turn (B1).
 type walAppendMsg struct {
-	gen            int
-	ev             walEvent
-	liveReset      bool // assistant message started: clear live tail
-	contextNotice  provider.Message
-	hasContext     bool
+	gen           int
+	ev            walEvent
+	liveReset     bool // assistant message started: clear live tail
+	contextNotice provider.Message
+	hasContext    bool
 }
 
 // workerRefreshMsg asks the actor for current model/options (BeforeRequest).
@@ -198,6 +198,7 @@ type workerRefreshResult struct {
 	stale   bool
 	model   string
 	options SessionOptions
+	context []provider.Message
 }
 
 // workerApprovalReqMsg: worker blocked in approveTool; actor moves to
@@ -252,9 +253,9 @@ type workerTitleReqMsg struct {
 }
 
 type workerTitleResult struct {
-	stale      bool
-	firstText  string
-	original   string
+	stale     bool
+	firstText string
+	original  string
 }
 
 type workerTitleMsg struct {
@@ -353,4 +354,10 @@ type undoResult struct {
 	Warning  string
 	Results  []any
 	Complete bool
+}
+
+// workerEmitMsg fences streaming events from a quarantined turn.
+type workerEmitMsg struct {
+	gen   int
+	event any
 }

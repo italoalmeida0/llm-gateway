@@ -79,7 +79,7 @@ func (r *root) bootActors() {
 		onEvent: notifyTo,
 		bg:      r.bgSup,
 	}
-	r.admin.purge = r.admin.purgeSession
+	r.admin.purge = r.sessionSup.purge
 	r.projects.emit = emitTo
 	r.projects.hostID = hostOf
 	r.projects.onEvent = notifyTo

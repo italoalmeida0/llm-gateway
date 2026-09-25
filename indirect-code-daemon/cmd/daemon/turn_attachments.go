@@ -19,8 +19,8 @@ import (
 // event, idle turns save directly (v1 semantics).
 
 const (
-	maxAttachmentBytes      = 4 << 20
-	maxAttachmentTextRunes  = 512 * 1024
+	maxAttachmentBytes       = 4 << 20
+	maxAttachmentTextRunes   = 512 * 1024
 	maxAttachmentsPerMessage = 30
 )
 
@@ -203,11 +203,15 @@ func (a *sessionActor) onQueueSendNow(m queueSendNowMsg) {
 	rest := append([]QueuedMessage(nil), a.rec.Queue[:idx]...)
 	rest = append(rest, a.rec.Queue[idx+1:]...)
 	a.rec.Queue = append([]QueuedMessage{item}, rest...)
-	appendWALEvent(a.wal, walEvent{Type: walTypeQueue, Queue: a.rec.Queue})
+	if err := a.saveOrAppend(walEvent{Type: walTypeQueue, Queue: a.rec.Queue}); err != nil {
+		return
+	}
 	if a.state == stateIdle {
 		head := a.rec.Queue[0]
 		a.rec.Queue = a.rec.Queue[1:]
-		a.startTurn(head.Text, head.AttachmentIDs, head.Model, head.YOLO, nil)
+		if err := a.startTurn(head.Text, head.AttachmentIDs, head.Model, head.YOLO, nil); err != nil {
+			a.rec.Queue = append([]QueuedMessage{head}, a.rec.Queue...)
+		}
 		return
 	}
 	// Running: flag send-now and cancel; the finalizer (the single
@@ -220,6 +224,10 @@ func (a *sessionActor) onQueueSendNow(m queueSendNowMsg) {
 // onEditApply applies a saved (non-regen) edit. Runs on the actor; caller
 // guarantees idle (ws_server checks state first).
 func (a *sessionActor) onEditApply(m editApplyMsg) editApplyResult {
+	if a.state != stateIdle || a.persistErr != nil {
+		return editApplyResult{Error: "Stop the current turn before editing"}
+	}
+	previous := cloneRecord(a.rec)
 	if m.Index < 0 || m.Index >= len(a.rec.Messages) {
 		return editApplyResult{Error: "bad index"}
 	}
@@ -264,9 +272,10 @@ func (a *sessionActor) onEditApply(m editApplyMsg) editApplyResult {
 		}
 	}
 	st := a.store
+	var persistErr error
 	if firstDirty <= 0 {
 		lines, _ := splitRecord(a.rec)
-		_ = st.writeSessionFile(a.rec.ID, lines, recordMeta(a.rec))
+		persistErr = st.writeSessionFile(a.rec.ID, lines, recordMeta(a.rec))
 	} else {
 		start := len(a.rec.Messages)
 		for i, mm := range a.rec.Messages {
@@ -284,7 +293,11 @@ func (a *sessionActor) onEditApply(m editApplyMsg) editApplyResult {
 				sbal = append(sbal, b)
 			}
 		}
-		_ = st.persistEdited(a.rec.ID, firstDirty, append([]provider.Message{}, a.rec.Messages[start:]...), sbal, recordMeta(a.rec))
+		persistErr = st.persistEdited(a.rec.ID, firstDirty, append([]provider.Message{}, a.rec.Messages[start:]...), sbal, recordMeta(a.rec))
+	}
+	if persistErr != nil {
+		a.rec = previous
+		return editApplyResult{Error: persistErr.Error()}
 	}
 	a.emit(map[string]any{"type": "session_truncated", "sessionId": a.id, "keepIndex": m.Index})
 	a.emit(tailContentEvent("", a.id, "session_content", a.rec, 0, nil))
@@ -298,16 +311,11 @@ func (a *sessionActor) onCompactNow() {
 		return
 	}
 	a.touch()
-	// Compaction runs as a worker with empty prompt: the bridge compacts
-	// when the agent reports context pressure. If no pressure, it no-ops.
-	reply := make(chan any, 1)
-	a.inbox <- Envelope{Payload: userPromptMsg{Text: "/compact", Reply: reply}}
-	go func() {
-		select {
-		case <-reply:
-		case <-time.After(replyTimeout):
-		}
-	}()
+	if len(a.rec.Messages) < 4 {
+		a.emit(map[string]any{"type": "notice", "sessionId": a.id, "message": "Not enough history to compact"})
+		return
+	}
+	_ = a.startTurnWithMeta("", nil, "", map[string]string{"operation": "compact"})
 }
 
 // onSlashReply appends a deterministic user/assistant pair (a slash command
@@ -365,6 +373,11 @@ func (a *sessionActor) onUndo(m undoMsg) undoResult {
 		return undoResult{Error: "Turn has no file changes"}
 	}
 	results, complete := undoTurnBalloon(rec.CWD, target, m.Path)
+	if err := a.store.saveSessionSync(rec); err != nil {
+		a.storageError(err)
+		return undoResult{Error: err.Error(), Results: undoPayloads(results)}
+	}
+	a.pingChange()
 	return undoResult{Results: undoPayloads(results), Complete: complete}
 }
 

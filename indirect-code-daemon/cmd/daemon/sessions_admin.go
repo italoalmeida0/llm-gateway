@@ -28,15 +28,17 @@ func listSessionSummaries(dataDir string) []SessionSummary {
 		if err != nil || meta.ID == "" || meta.ID != id {
 			continue
 		}
-		out = append(out, SessionSummary{
-			ID: meta.ID, CWD: resolvePath(meta.CWD), Title: meta.Title,
-			Model: meta.Model, Status: meta.Status, Pinned: meta.Pinned,
-			CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt,
-			TodosOpen: meta.TodosOpen, Options: &meta.Options,
-		})
+		out = append(out, summaryFromMeta(meta))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	return out
+}
+
+func summaryFromMeta(meta metaLine) SessionSummary {
+	return SessionSummary{ID: meta.ID, CWD: resolvePath(meta.CWD), Title: meta.Title,
+		Model: meta.Model, Status: meta.Status, Pinned: meta.Pinned,
+		CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt,
+		TodosOpen: meta.TodosOpen, Options: &meta.Options}
 }
 
 func sessionListItem(s SessionSummary) map[string]any {
@@ -53,7 +55,7 @@ func sessionListItem(s SessionSummary) map[string]any {
 type sessionAdmin struct {
 	dataDir string
 	route   func(id string, forRead bool) spawnResult
-	purge   func(id string)
+	purge   func(id string) error
 	bg      *bgSupervisor
 	cfg     *configCell
 	emit    func(any)
@@ -103,23 +105,13 @@ func (a *sessionAdmin) purgeSession(id string) {
 		case <-time.After(replyTimeout):
 		}
 	}
-	res := a.route(id, false)
-	if res.Error == "" {
-		select {
-		case res.Control <- shutdownMsg{}:
-		case <-time.After(5 * time.Second):
-		}
-		select {
-		case <-res.Done:
-		case <-time.After(10 * time.Second):
-		}
+	if a.purge == nil {
+		return
 	}
-	st := newDiskStore(a.dataDir)
-	_ = os.Remove(filepath.Join(st.sessionsDir(), id+".jsonl"))
-	_ = os.Remove(filepath.Join(st.sessionsDir(), id+".json"))
-	_ = os.Remove(filepath.Join(st.sessionsDir(), id+".wal.jsonl"))
-	_ = os.RemoveAll(filepath.Join(st.sessionsDir(), id))
-	_ = os.RemoveAll(st.brainDir(id))
+	if err := a.purge(id); err != nil {
+		a.emit(map[string]any{"type": "error", "hostId": a.host(), "sessionId": id, "message": err.Error()})
+		return
+	}
 	a.emit(map[string]any{"type": "session_deleted", "hostId": a.host(), "sessionId": id})
 	if a.onEvent != nil {
 		a.onEvent("sessions")

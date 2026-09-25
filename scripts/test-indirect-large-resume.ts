@@ -2,7 +2,10 @@
 // Visibility overrides test application suspension; CDP freeze additionally
 // exercises real queued network traffic while browser execution is suspended.
 import assert from "node:assert/strict";
-import { countTextTokens } from "../server/tokens";
+import { countTextTokens, initTokenEstimator } from "../server/tokens";
+// The wasm token engine is gateway-boot work: this harness counts tokens
+// directly, so it must initialize the estimator itself.
+await initTokenEstimator();
 import solidPlugin from "../plugins/solid-plugin";
 import iconifyPlugin from "../plugins/iconify-solid-plugin";
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");

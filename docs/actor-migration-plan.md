@@ -388,6 +388,20 @@ implementation matches, not the choice itself.
 
 ### D4. Self-update protocol: daemon side removed, launcher side intact
 
+> **Restored (2026-09-25).** A follow-up review found that the deleted
+> orchestration was NOT legacy: it was the 2026-09-23 update
+> reformulation (v1.0.28, `update_flow.go` + `launcher --update`), which
+> the `ex-v2` fork simply predates — the rewrite lost it, it was never
+> retired. The full brutal-update protocol is now ported into the actor
+> daemon (`update_flow.go`/`update.go`/`handoff.go` + `update_host.go`
+> adapting it to `root`/link plumbing; the update flow still never
+> touches session state — SIGKILL + crash recovery is the resume
+> mechanism). The gap below is closed: auto-check, availability
+> broadcast, one-click apply, slot A/B handoff and the `update.done`
+> acknowledge all work again, with the v1.0.28 test suite green and the
+> handoff/gateway-death e2e scenarios live. The historical decision
+> record below is kept as written.
+
 - **What v1 did:** the daemon polled `versions.json` (gateway-first, then
   public mirror), broadcast availability via `daemon_update`, and on apply
   ran the "brutal update" (`update.go` + `handoff.go` + `update_flow.go`:

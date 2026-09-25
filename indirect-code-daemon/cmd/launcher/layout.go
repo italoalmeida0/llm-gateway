@@ -73,6 +73,12 @@ func slotLauncherName() string {
 //     (sessions mtime, then slot dir mtime), default "a" when both are
 //     empty/missing; a live daemon.pid also votes (its slot wins);
 //   - slots/active corrupt (no a/b): same discovery as missing.
+//   - stale update signals (slots/update.done, slots/update.fail) are
+//     REMOVED: a normal boot never reads them (the waiter/launcher own
+//     them), so a forged or crashed-update marker can never gate or
+//     bless a boot (hardening D4: a fake update.done must not bypass
+//     verification). Real ack markers are slot-local and travel with
+//     their slot — those are never touched here.
 //   - an active slot with no daemon binary is NOT fatal here —
 //     resolveSlotDaemon downloads it (needs network).
 func ensureLayout(root string) ([]string, error) {
@@ -128,6 +134,11 @@ func ensureLayout(root string) ([]string, error) {
 			return notes, fmt.Errorf("adopt %s: %w", name, err)
 		}
 		note("adopted root %s into slot %s", name, active)
+	}
+	// Clear the legacy root-level update signal path (see repair policy):
+	// stale/forged markers must never gate a fresh boot.
+	for _, name := range []string{"update.done", "update.fail"} {
+		_ = os.Remove(filepath.Join(slotsDir, name))
 	}
 	if err := os.MkdirAll(filepath.Join(slotDir, "bin"), 0o700); err != nil {
 		return notes, err

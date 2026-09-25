@@ -17,12 +17,10 @@ import (
 // bridgeFixture spawns a session actor with the REAL defaultStartWorker
 // replaced by a hook-only driver: tests call bridge methods directly.
 
-
-
 func TestWorkerApprovalViaActor(t *testing.T) {
 	dir := t.TempDir()
 	store := newDiskStore(dir)
-	rec := &SessionRecord{ID: "w2", CWD: "/tmp", Title: "t", Model: "m", Status: "idle", CreatedAt: 1, UpdatedAt: 1}
+	rec := &SessionRecord{ID: "w2", CWD: "/tmp", Title: "t", Model: "m", Status: "idle", Options: SessionOptions{Access: "ask"}, CreatedAt: 1, UpdatedAt: 1}
 	act := newSessionActor("w2", rec, store, nil, nil, nil)
 	act.supCfg = new(configCell)
 	act.supCfg.store(&DaemonConfig{GatewayURL: "http://127.0.0.1:1", HostID: "h"})
@@ -46,8 +44,8 @@ func TestWorkerApprovalViaActor(t *testing.T) {
 	// Build a bridge bound to this actor + gen 1.
 	env := workerEnv{
 		cfg: act.supCfg, store: store, emit: func(any) {}, inbox: act.inbox,
-		actorID: "w2",
-		hostID:  func() string { return "h" },
+		actorID:  "w2",
+		hostID:   func() string { return "h" },
 		brainDir: func(string) string { return "" },
 	}
 	snap := workerSnapshot{gen: 1, turnIndex: 1, model: "m", options: SessionOptions{Mode: "build", Access: "ask", Effort: "none"}}
@@ -116,7 +114,7 @@ func TestWorkerApprovalViaActor(t *testing.T) {
 func TestWorkerQuestionTimeoutResumesRecommended(t *testing.T) {
 	dir := t.TempDir()
 	store := newDiskStore(dir)
-	rec := &SessionRecord{ID: "w3", CWD: "/tmp", Title: "t", Model: "m", Status: "idle", CreatedAt: 1, UpdatedAt: 1}
+	rec := &SessionRecord{ID: "w3", CWD: "/tmp", Title: "t", Model: "m", Status: "idle", Options: SessionOptions{Access: "ask"}, CreatedAt: 1, UpdatedAt: 1}
 	act := newSessionActor("w3", rec, store, nil, nil, nil)
 	act.supCfg = new(configCell)
 	act.supCfg.store(&DaemonConfig{GatewayURL: "http://127.0.0.1:1", HostID: "h"})
@@ -198,7 +196,7 @@ func TestWorkerQuestionTimeoutResumesRecommended(t *testing.T) {
 func TestWorkerTodoAndMessageAppend(t *testing.T) {
 	dir := t.TempDir()
 	store := newDiskStore(dir)
-	rec := &SessionRecord{ID: "w4", CWD: "/tmp", Title: "t", Model: "m", Status: "idle", CreatedAt: 1, UpdatedAt: 1}
+	rec := &SessionRecord{ID: "w4", CWD: "/tmp", Title: "t", Model: "m", Status: "idle", Options: SessionOptions{Access: "ask"}, CreatedAt: 1, UpdatedAt: 1}
 	act := newSessionActor("w4", rec, store, nil, nil, nil)
 	act.supCfg = new(configCell)
 	act.supCfg.store(&DaemonConfig{GatewayURL: "http://127.0.0.1:1", HostID: "h"})

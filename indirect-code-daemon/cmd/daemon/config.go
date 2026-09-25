@@ -24,7 +24,10 @@ func configRevision(cfg *DaemonConfig) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func writeConfigFile(path string, data []byte) error {
+func writeConfigFile(path string, data []byte) error { return writeAtomicFile(path, data) }
+
+// writeAtomicFile commits a private file using fsync, rename and directory sync.
+func writeAtomicFile(path string, data []byte) error {
 	file, err := os.CreateTemp(filepath.Dir(path), ".config-*")
 	if err != nil {
 		return err

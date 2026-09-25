@@ -36,16 +36,18 @@ const (
 // goroutine's single exit report. stop/cancel/done are set at register
 // and never mutated afterwards (safe for concurrent read).
 type bgJob struct {
-	ID        string
-	Kind      string
-	SessionID string
-	Label     string
-	PID       int
-	Status    string
-	StartedAt int64
-	EndedAt   int64
-	Result    string
-	LogPath   string
+	ID         string
+	Kind       string
+	SessionID  string
+	Label      string
+	PID        int
+	Identity   string
+	Status     string
+	StartedAt  int64
+	EndedAt    int64
+	Result     string
+	StderrPath string
+	LogPath    string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -54,8 +56,6 @@ type bgJob struct {
 	done     chan struct{}
 	doneOnce sync.Once
 
-	// sleepers are closed when the job leaves running (push wake-up, plan §4).
-	sleepers   map[chan struct{}]struct{}
 	lastFinish int64 // unix milli of terminal transition (freshness)
 	finishName string
 }
@@ -67,28 +67,32 @@ func (j *bgJob) closeDone() {
 // bgPidfile is written per job so a supervisor (re)start can re-adopt live
 // processes (plan §5.3). Jobs are NEVER re-run: re-adoption only.
 type bgPidfile struct {
-	JobID     string `json:"jobId"`
-	PID       int    `json:"pid"`
-	SessionID string `json:"sessionId"`
-	Kind      string `json:"kind"`
-	Label     string `json:"label"`
-	LogPath   string `json:"logPath"`
-	StartedAt int64  `json:"startedAt"`
+	JobID      string `json:"jobId"`
+	PID        int    `json:"pid"`
+	SessionID  string `json:"sessionId"`
+	Kind       string `json:"kind"`
+	Label      string `json:"label"`
+	Identity   string `json:"identity,omitempty"`
+	StderrPath string `json:"stderrPath,omitempty"`
+	LogPath    string `json:"logPath"`
+	StartedAt  int64  `json:"startedAt"`
 }
 
 // ---- supervisor messages ----
 
 type bgRegisterMsg struct {
-	Kind      string
-	SessionID string
-	Label     string
-	LogPath   string
-	PID       int
-	Stop      func()
-	Reply     chan any
+	Kind       string
+	SessionID  string
+	Label      string
+	StderrPath string
+	LogPath    string
+	PID        int
+	Stop       func()
+	Reply      chan any
 }
 
 type bgRegisterResult struct {
+	Error string
 	JobID string
 	Done  <-chan struct{}
 }
@@ -100,9 +104,9 @@ type bgFinishMsg struct {
 }
 
 type bgCancelMsg struct {
-	JobID  string
-	By     string // "user" | "assistant" | "" silent
-	Reply  chan any
+	JobID string
+	By    string // "user" | "assistant" | "" silent
+	Reply chan any
 }
 
 type bgListMsg struct {
@@ -150,15 +154,18 @@ type bgSupervisor struct {
 	hostID  func() string
 	session func(id string) (chan Envelope, chan any, bool) // route to session actor
 
-	jobs map[string]*bgJob
+	jobs        map[string]*bgJob
+	subscribers map[chan struct{}]string
+	done        chan struct{}
 }
 
 func newBGSupervisor(dataDir string) *bgSupervisor {
 	return &bgSupervisor{
-		dataDir: dataDir,
-		inbox:   make(chan Envelope, inboxCap),
-		control: make(chan any, controlCap),
-		jobs:    map[string]*bgJob{},
+		dataDir:     dataDir,
+		inbox:       make(chan Envelope, inboxCap),
+		control:     make(chan any, controlCap),
+		jobs:        map[string]*bgJob{},
+		subscribers: map[chan struct{}]string{}, done: make(chan struct{}),
 	}
 }
 
@@ -170,6 +177,12 @@ func (b *bgSupervisor) pidPath(jobID string) string {
 
 func (b *bgSupervisor) run(wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer close(b.done)
+	defer func() {
+		for ch := range b.subscribers {
+			b.unsubscribe(ch)
+		}
+	}()
 	b.readopt()
 	for {
 		select {
@@ -206,6 +219,8 @@ func (b *bgSupervisor) handle(env Envelope) {
 		}
 	case bgSubscribeMsg:
 		m.Reply <- b.onSubscribe(m.SessionID, m.Done)
+	case bgUnsubscribeMsg:
+		b.unsubscribe(m.ch)
 	case bgRecentMsg:
 		m.Reply <- b.onRecent(m.SessionID)
 	}
@@ -216,25 +231,29 @@ func (b *bgSupervisor) handle(env Envelope) {
 func (b *bgSupervisor) onRegister(m bgRegisterMsg) {
 	jobCtx, cancel := context.WithCancel(context.Background())
 	j := &bgJob{
-		ID:        fmt.Sprintf("bg_%d", time.Now().UnixNano()/1000),
+		ID:        "bg_" + randomID8(),
 		Kind:      m.Kind,
 		SessionID: m.SessionID,
 		Label:     truncateBgLabel(m.Label),
-		PID:       m.PID,
+		PID:       m.PID, Identity: tools.ProcessIdentity(m.PID),
 		Status:    BgStatusRunning,
 		StartedAt: time.Now().UnixMilli(),
-		LogPath:   m.LogPath,
-		ctx:       jobCtx,
-		cancel:    cancel,
-		stop:      m.Stop,
-		done:      make(chan struct{}),
-		sleepers:  map[chan struct{}]struct{}{},
+		LogPath:   m.LogPath, StderrPath: m.StderrPath,
+		ctx:    jobCtx,
+		cancel: cancel,
+		stop:   m.Stop,
+		done:   make(chan struct{}),
 	}
 	if b.jobs == nil {
 		b.jobs = map[string]*bgJob{}
 	}
+	if err := b.writePidfile(j); err != nil {
+		if j.stop != nil { j.stop() }
+		cancel()
+		m.Reply <- bgRegisterResult{Error: err.Error()}
+		return
+	}
 	b.jobs[j.ID] = j
-	b.writePidfile(j)
 	trace("bg.register", map[string]any{"job": j.ID, "sid": j.SessionID, "kind": j.Kind, "labelLen": len(j.Label)})
 	b.broadcast()
 	m.Reply <- bgRegisterResult{JobID: j.ID, Done: j.done}
@@ -253,26 +272,12 @@ func (b *bgSupervisor) onFinish(jobID, status, result string) {
 	j.Result = result
 	j.lastFinish = j.EndedAt
 	j.finishName = j.Label
-	for ch := range j.sleepers {
-		close(ch)
-		delete(j.sleepers, ch)
-	}
-	// Wake sleepers of the whole session (push, plan §4).
-	woke := 0
-	for _, other := range b.jobs {
-		if other.SessionID == j.SessionID {
-			for ch := range other.sleepers {
-				close(ch)
-				delete(other.sleepers, ch)
-				woke++
-			}
-		}
-	}
 	_ = os.Remove(b.pidPath(jobID))
 	trace("bg.finish", map[string]any{"job": j.ID, "sid": j.SessionID, "status": status, "resultLen": len(result)})
-	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": woke})
 	b.broadcast()
-	b.deliver(j, status == BgStatusDone || status == BgStatusError)
+	b.deliver(j, status == BgStatusDone || status == BgStatusError || status == BgStatusOrphaned)
+	b.wakeSession(j.SessionID)
+	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": 1})
 	j.closeDone()
 }
 
@@ -296,53 +301,56 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 		}
 		bgAppendLogLine(j.LogPath, fmt.Sprintf("\n[cancelled by %s]\n", by))
 	}
-	for ch := range j.sleepers {
-		close(ch)
-		delete(j.sleepers, ch)
-	}
-	for _, other := range b.jobs {
-		if other.SessionID == j.SessionID {
-			for ch := range other.sleepers {
-				close(ch)
-				delete(other.sleepers, ch)
-			}
-		}
-	}
 	_ = os.Remove(b.pidPath(jobID))
 	trace("bg.cancel", map[string]any{"job": j.ID, "sid": j.SessionID, "by": by})
 	b.broadcast()
 	if by == "user" {
 		b.deliver(j, false)
 	}
+	j.lastFinish, j.finishName = j.EndedAt, j.Label
+	b.wakeSession(j.SessionID)
+	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": 1})
 	j.closeDone()
 	return true
 }
 
 // ---- sleep/wake (plan §4: push, no polling) ----
 
-func (b *bgSupervisor) onSubscribe(sessionID string, hostDone <-chan struct{}) any {
-	ch := make(chan struct{})
-	var fire sync.Once
-	wake := func() { fire.Do(func() { close(ch) }) }
-	// Freshness: a job that finished just before sleep started still wakes it.
-	if _, _, ok := b.recentLocked(sessionID); ok {
-		wake()
-		return ch
+type bgUnsubscribeMsg struct{ ch chan struct{} }
+
+// Only the supervisor closes subscriptions. Jobs never own shared channels.
+func (b *bgSupervisor) unsubscribe(ch chan struct{}) {
+	if _, ok := b.subscribers[ch]; ok {
+		delete(b.subscribers, ch)
+		close(ch)
 	}
-	for _, j := range b.jobs {
-		if j.SessionID == sessionID && j.Status == BgStatusRunning {
-			if j.sleepers == nil {
-				j.sleepers = map[chan struct{}]struct{}{}
-			}
-			j.sleepers[ch] = struct{}{}
+}
+
+func (b *bgSupervisor) wakeSession(sessionID string) {
+	for ch, owner := range b.subscribers {
+		if owner == sessionID {
+			b.unsubscribe(ch)
 		}
 	}
+}
+
+func (b *bgSupervisor) onSubscribe(sessionID string, hostDone <-chan struct{}) any {
+	ch := make(chan struct{})
+	if _, _, ok := b.recentLocked(sessionID); ok {
+		close(ch)
+		return ch
+	}
+	b.subscribers[ch] = sessionID
 	if hostDone != nil {
 		go func() {
 			select {
 			case <-hostDone:
-				wake()
+				select {
+				case b.inbox <- Envelope{Payload: bgUnsubscribeMsg{ch}}:
+				case <-b.done:
+				}
 			case <-ch:
+			case <-b.done:
 			}
 		}()
 	}
@@ -489,11 +497,17 @@ func (b *bgSupervisor) deliver(j *bgJob, finished bool) {
 		if j.Status == BgStatusError {
 			state = "finished with an error"
 		}
+		if j.Status == BgStatusOrphaned {
+			state = "ended after daemon restart; its exit status is unavailable"
+		}
 		var sb strings.Builder
 		sb.WriteString("<system-reminder>\n")
 		fmt.Fprintf(&sb, "Background task %s %s.\n", j.Label, state)
 		if j.LogPath != "" {
 			fmt.Fprintf(&sb, "The output is NOT included here — read the full log at: %s\n", j.LogPath)
+		}
+		if j.StderrPath != "" {
+			fmt.Fprintf(&sb, "Standard error is in: %s\n", j.StderrPath)
 		}
 		sb.WriteString("Continue your work based on what the log shows.</system-reminder>")
 		text = sb.String()
@@ -522,7 +536,7 @@ func (b *bgSupervisor) snapshot() []map[string]any {
 			"id": j.ID, "kind": j.Kind, "sessionId": j.SessionID,
 			"label": j.Label, "status": j.Status,
 			"startedAt": j.StartedAt, "endedAt": j.EndedAt,
-			"result": j.Result, "logPath": j.LogPath,
+			"result": j.Result, "logPath": j.LogPath, "stderrPath": j.StderrPath,
 		})
 	}
 	return out
@@ -547,14 +561,7 @@ func bgReadTail(jobID string, b *bgSupervisor, max int) (string, bool) {
 	if !ok || j.LogPath == "" {
 		return "", false
 	}
-	data, err := os.ReadFile(j.LogPath)
-	if err != nil {
-		return "", false
-	}
-	if len(data) > max {
-		data = data[len(data)-max:]
-	}
-	return string(data), true
+	return bgReadTailPath(j.LogPath, max)
 }
 
 func bgAppendLogLine(logPath, line string) {

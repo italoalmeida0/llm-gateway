@@ -1,4 +1,12 @@
 // Browser regression tests using an existing Playwright installation.
+//
+// The settings pipeline (skills/mcpServers config edits, expectedRevision
+// saves, config_updated/mcp_status routing) is driven through the
+// createSettings hook surface — the Settings modal only renders the
+// General tab today (the Skills/MCP form sections were cut from the modal),
+// so the forms' DOM is gone but the full pipeline and its wire protocol
+// remain behind the hook. Modal-level interactions (Save/Cancel/reload
+// latest, the error alert, the Saving… state) stay real DOM.
 import assert from "node:assert/strict";
 import solidPlugin from "../plugins/solid-plugin";
 import iconifyPlugin from "../plugins/iconify-solid-plugin";
@@ -35,16 +43,15 @@ try {
   page.on("pageerror", (error: Error) => errors.push(String(error)));
   await page.goto(server.url.toString());
   await page.waitForFunction(() => (window as any).settingsUI.m);
-  await page.evaluate(() =>
-    (window as any).settingsUI.m.openSettings("sec-skills"),
-  );
-  await page.getByLabel("Skill name", { exact: true }).fill("style");
-  await page
-    .getByLabel("Skill instructions", { exact: true })
-    .fill("Use consistent formatting.");
-  await page
-    .getByRole("button", { name: "Add to changes", exact: true })
-    .click();
+
+  // Add a skill through the editor pipeline.
+  await page.evaluate(() => {
+    const a = (window as any).settingsUI;
+    a.m.openSettings();
+    a.m.setNewSkillName("style");
+    a.m.setNewSkillBody("Use consistent formatting.");
+    a.m.handleAddSkill();
+  });
   assert.deepEqual(
     await page.evaluate(() => {
       const m = (window as any).settingsUI.m;
@@ -52,16 +59,25 @@ try {
     }),
     [["review", "style"], ["review"]],
   );
+
+  // Edit the skill: the editor is anchored to it (the name is locked).
   await page.evaluate(() => (window as any).settingsUI.m.editSkill("style"));
   assert.equal(
-    await page.getByLabel("Skill name", { exact: true }).isDisabled(),
-    true,
+    await page.evaluate(() => (window as any).settingsUI.m.editingSkill()),
+    "style",
   );
+  assert.equal(
+    await page.evaluate(() => (window as any).settingsUI.m.newSkillName()),
+    "style",
+  );
+  await page.evaluate(() => {
+    const a = (window as any).settingsUI;
+    a.m.setNewSkillBody("Edited instructions");
+    a.m.handleAddSkill();
+  });
   await page
-    .getByLabel("Skill instructions", { exact: true })
-    .fill("Edited instructions");
-  await page.getByRole("button", { name: "Apply skill edit" }).click();
-  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
   let request = await page.evaluate(() =>
     (window as any).settingsUI.commands.at(-1),
   );
@@ -71,6 +87,9 @@ try {
     await page.getByRole("button", { name: "Saving…" }).isDisabled(),
     true,
   );
+
+  // config_updated routing: foreign host and foreign requestId never
+  // release the save; the matching one does.
   await page.evaluate((id: string) => {
     const a = (window as any).settingsUI;
     a.m.handleSettingsMessage({
@@ -114,7 +133,9 @@ try {
     await page.evaluate(() => (window as any).settingsUI.m.skills().style.body),
     "Edited instructions",
   );
-  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
   request = await page.evaluate(() =>
     (window as any).settingsUI.commands.at(-1),
   );
@@ -146,16 +167,13 @@ try {
     "Settings saved on the host",
   );
 
+  // A local unsaved edit survives a remote doc change (conflict state),
+  // "Reload latest" restores the authoritative doc, Cancel closes.
   await page.evaluate(() => {
     const a = (window as any).settingsUI;
-    a.m.openSettings("sec-skills");
+    a.m.openSettings();
     a.m.editSkill("review");
-  });
-  await page
-    .getByLabel("Skill instructions", { exact: true })
-    .fill("Unsaved edit");
-  await page.evaluate(() => {
-    const a = (window as any).settingsUI;
+    a.m.setNewSkillBody("Unsaved edit");
     a.setDoc({
       ...a.doc(),
       revision: "v3",
@@ -166,7 +184,7 @@ try {
     });
   });
   assert.equal(
-    await page.getByLabel("Skill instructions", { exact: true }).inputValue(),
+    await page.evaluate(() => (window as any).settingsUI.m.newSkillBody()),
     "Unsaved edit",
   );
   assert.equal(
@@ -187,21 +205,23 @@ try {
     "Remote change",
   );
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.evaluate(() =>
-    (window as any).settingsUI.m.openSettings("sec-mcp"),
-  );
-  await page
-    .locator('[data-mcp-server="local"]')
-    .getByRole("button", { name: "Edit", exact: true })
-    .click();
+
+  // MCP edit pipeline: args are parsed from JSON, saved secrets stay
+  // omitted, and a duplicate name never overwrites an existing server.
+  await page.evaluate(() => {
+    const a = (window as any).settingsUI;
+    a.m.openSettings();
+    a.m.editMcpServer("local");
+  });
   assert.equal(
-    await page.getByLabel("Arguments", { exact: true }).inputValue(),
+    await page.evaluate(() => (window as any).settingsUI.m.newMcpArgs()),
     '["path with spaces"]',
   );
-  await page
-    .getByLabel("Arguments", { exact: true })
-    .fill('["-y", "/path with spaces"]');
-  await page.getByRole("button", { name: "Apply server edit" }).click();
+  await page.evaluate(() => {
+    const a = (window as any).settingsUI;
+    a.m.setNewMcpArgs('["-y", "/path with spaces"]');
+    a.m.handleAddMcpServer();
+  });
   assert.deepEqual(
     await page.evaluate(
       () => (window as any).settingsUI.m.mcpServers().local.args,
@@ -215,13 +235,12 @@ try {
     undefined,
     "saved secrets must remain omitted",
   );
-  await page.getByLabel("Server name", { exact: true }).fill("local");
-  await page
-    .getByLabel("Executable command", { exact: true })
-    .fill("overwrite");
-  await page
-    .getByRole("button", { name: "Add to changes", exact: true })
-    .click();
+  await page.evaluate(() => {
+    const a = (window as any).settingsUI;
+    a.m.setNewMcpName("local");
+    a.m.setNewMcpCmd("overwrite");
+    a.m.handleAddMcpServer();
+  });
   assert.equal(
     await page.evaluate(
       () => (window as any).settingsUI.m.mcpServers().local.command,
@@ -229,13 +248,11 @@ try {
     "exe",
     "duplicate name silently overwrote server",
   );
-  await page
-    .getByRole("button", { name: "Cancel editor", exact: true })
-    .click();
-  await page
-    .locator('[data-mcp-server="local"]')
-    .getByRole("button", { name: "Test connection" })
-    .click();
+  await page.evaluate(() => (window as any).settingsUI.m.resetMcpEditor());
+
+  // test_mcp round trip: the result is scoped to the matching requestId
+  // and a config change clears the stale test result.
+  await page.evaluate(() => (window as any).settingsUI.m.testMcpServer("local"));
   request = await page.evaluate(() =>
     (window as any).settingsUI.commands.at(-1),
   );
@@ -253,11 +270,13 @@ try {
       }),
     request.requestId,
   );
-  assert.match(await page.getByRole("status").textContent(), /3 tools/);
-  await page
-    .locator('[data-mcp-server="local"]')
-    .getByRole("button", { name: "Disable", exact: true })
-    .click();
+  assert.equal(
+    await page.evaluate(
+      () => (window as any).settingsUI.m.mcpTest("local").toolCount,
+    ),
+    3,
+  );
+  await page.evaluate(() => (window as any).settingsUI.m.toggleMcp("local"));
   assert.equal(
     await page.evaluate(() => (window as any).settingsUI.m.mcpTest("local")),
     undefined,
@@ -272,9 +291,11 @@ try {
     "cancel did not restore server state",
   );
 
+  // Host change clears drafts and closes the modal; foreign-host status
+  // events are ignored; invalid skill names (__proto__) are rejected.
   await page.evaluate(() => {
     const a = (window as any).settingsUI;
-    a.m.openSettings("sec-mcp");
+    a.m.openSettings();
     a.m.setNewMcpName("draft");
     a.setHost("host-b");
   });
@@ -299,7 +320,7 @@ try {
       name: "local",
       status: "tested",
     });
-    a.m.openSettings("sec-skills");
+    a.m.openSettings();
     a.m.setNewSkillName("__proto__");
     a.m.setNewSkillBody("Invalid name");
     a.m.handleAddSkill();

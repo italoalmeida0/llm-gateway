@@ -48,6 +48,7 @@ type workerSnapshot struct {
 	incoming    []filetrack.TrackedFile
 	// resume, when True, continues the fused transcript via agent.Continue
 	// instead of opening a new user turn (crash/watchdog resume path).
+	compact   bool
 	resume    bool
 	resumeGen int
 }
@@ -58,7 +59,8 @@ type workerEnv struct {
 	cfg      *configCell
 	store    *diskStore
 	emit     func(any)
-	inbox    chan Envelope // actor inbox (for state-change messages)
+	inbox    chan Envelope   // actor inbox (for state-change messages)
+	done     <-chan struct{} // actor lifetime, independent of work cancellation
 	actorID  string
 	bg       *bgSupervisor
 	hostID   func() string
@@ -72,18 +74,20 @@ func snapshotTurn(act *sessionActor, gen int, prompt string, meta map[string]str
 	snap := workerSnapshot{
 		gen: gen, epoch: act.epoch, turnIndex: act.rec.TurnSeq, jailed: act.jailed,
 		model: act.rec.Model, options: normalizedOptions(act.recordOptions()),
-		messages:    append([]provider.Message(nil), act.rec.Messages...),
+		messages:    cloneMessages(act.rec.Messages),
 		usage:       act.rec.Usage,
-		compaction:  act.rec.Compaction,
-		context:     act.rec.Context,
+		compaction:  cloneJSON(act.rec.Compaction),
+		context:     cloneJSON(act.rec.Context),
 		attachments: append([]AttachmentRef(nil), act.rec.Attachments...),
 		cwd:         act.rec.CWD,
 		prompt:      prompt,
-		promptMeta:  meta,
+		promptMeta:  cloneJSON(meta),
+		compact:     meta["operation"] == "compact",
+		lastDate:    act.rec.LastDate, lastMode: act.rec.LastMode,
 	}
 	env := workerEnv{
 		cfg: act.cfgRef(), store: act.store, emit: act.emit, inbox: act.inbox,
-		actorID: act.id, bg: act.bg,
+		actorID: act.id, bg: act.bg, done: act.done,
 		hostID:   func() string { return act.cfgRef().load().HostID },
 		brainDir: func(sid string) string { return act.store.ensureBrainDir(sid) },
 	}
@@ -101,22 +105,10 @@ func (a *sessionActor) cfgRef() *configCell { return a.supCfg }
 // workerFinishedMsg to env.inbox.
 func runTurnWorker(ctx context.Context, env workerEnv, snap workerSnapshot) {
 	finished := func(cancelled bool, errStr string) {
-		// The actor drains continuously, but under a burst the inbox may be
-		// momentarily full. Retry briefly: a dropped finish would leak a
-		// session in running forever (disk shows only the user turn).
-		for i := 0; i < 100; i++ {
-			select {
-			case env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: cancelled, err: errStr}, Epoch: snap.epoch}:
-				return
-			case <-ctx.Done():
-				// Actor gone; nothing to report to.
-				return
-			default:
-			}
-			time.Sleep(50 * time.Millisecond)
+		select {
+		case env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen, cancelled: cancelled, err: errStr}, Epoch: snap.epoch}:
+		case <-env.done:
 		}
-		trace("worker.finish.undelivered", map[string]any{"sid": env.actorID, "turn": snap.turnIndex})
-		fmt.Printf("[WARN] turn %d of session %s could not deliver finish (inbox full)\n", snap.turnIndex, env.actorID)
 	}
 	cfg := env.cfg.load()
 	if cfg == nil {
@@ -137,10 +129,10 @@ func runTurnWorker(ctx context.Context, env workerEnv, snap workerSnapshot) {
 
 // turnBridge holds per-turn execution state: agent, hooks, tracker.
 type turnBridge struct {
-	env workerEnv
+	env  workerEnv
 	snap workerSnapshot
-	cfg DaemonConfig
-	ctx context.Context
+	cfg  DaemonConfig
+	ctx  context.Context
 
 	sessionCWD string
 	modelToUse string
@@ -185,7 +177,7 @@ func (w *turnBridge) run() error {
 		&tools.ReadTool{CWD: w.sessionCWD, Sandbox: sb, Changes: w.tfc.tracker, BrainDir: brainDir, Convert: w.requestConvert},
 		&tools.WriteTool{CWD: w.sessionCWD, Sandbox: sb, Changes: w.tfc.tracker, BrainDir: brainDir},
 		&tools.EditTool{CWD: w.sessionCWD, Sandbox: sb, Changes: w.tfc.tracker, BrainDir: brainDir},
-		&tools.BashTool{CWD: w.sessionCWD, Sandbox: sb, Slow: w.slowHook()},
+		&tools.BashTool{CWD: w.sessionCWD, Sandbox: sb, Slow: w.slowHook(), LogDir: brainDir},
 		&tools.GlobTool{CWD: w.sessionCWD, Sandbox: sb},
 		&tools.SearchTool{CWD: w.sessionCWD, Sandbox: sb},
 		&tools.InspectTool{CWD: w.sessionCWD, Sandbox: sb},
@@ -193,7 +185,7 @@ func (w *turnBridge) run() error {
 		&tools.FetchURLTool{CWD: w.sessionCWD, Sandbox: sb},
 	}
 	if _, err := tools.PythonAvailable(); err == nil {
-		baseTools = append(baseTools, &tools.PythonTool{CWD: w.sessionCWD, Sandbox: sb, Slow: w.slowHook()})
+		baseTools = append(baseTools, &tools.PythonTool{CWD: w.sessionCWD, Sandbox: sb, Slow: w.slowHook(), LogDir: brainDir})
 	}
 	bgCancelTool := &tools.BgCancelTool{Host: w, SessionID: w.env.actorID}
 	sleepTool := &tools.SleepTool{Host: w, SessionID: w.env.actorID}
@@ -240,14 +232,17 @@ func (w *turnBridge) run() error {
 	sysBlock := buildTurnSystemDirectives(&w.snap, time.Now())
 	w.sendInbox(walAppendMsg{ev: walEvent{Type: walTypeMeta, LastDate: w.snap.lastDate, LastMode: w.snap.lastMode}})
 	sink := func(ev core.AgentEvent) { w.handleEvent(ev) }
+	if w.snap.compact {
+		_, err := w.agent.Compact(w.ctx, max(2, len(w.agent.Messages())*7/10), func(delta string) { w.handleEvent(core.EvToolProgress{Text: delta}) })
+		return err
+	}
+	var turnErr error
 	if w.snap.resume {
 		// Resume: no new user message — the fused transcript (disk + WAL
 		// replay) already holds everything; Continue picks up the pending
 		// assistant/tool loop where it died. Same turn index (numbering
 		// never advances for a turn that never ended).
-		if err := w.agent.Continue(w.ctx, sink); err != nil && w.ctx.Err() == nil {
-			fmt.Printf("[WARN] resumed turn %d of session %s exited with live context: %v\n", w.snap.turnIndex, w.env.actorID, err)
-		}
+		turnErr = w.agent.Continue(w.ctx, sink)
 	} else {
 		fullPrompt, images := buildTurnPrompt(w.snap.attachments, w.snap.prompt, w.snap.attachIDs, w.snap.options.Mode)
 		if sysBlock != "" {
@@ -258,31 +253,35 @@ func (w *turnBridge) run() error {
 			}
 		}
 		meta := attachmentMessageMeta(w.snap.prompt, w.snap.attachIDs, w.snap.attachments)
-		if err := w.agent.PromptWithMeta(w.ctx, fullPrompt, images, meta, sink); err != nil && w.ctx.Err() == nil {
-			fmt.Printf("[WARN] turn %d of session %s exited with live context: %v\n", w.snap.turnIndex, w.env.actorID, err)
+		if meta == nil {
+			meta = make(map[string]string)
 		}
+		for k, v := range w.snap.promptMeta {
+			meta[k] = v
+		}
+		turnErr = w.agent.PromptWithMeta(w.ctx, fullPrompt, images, meta, sink)
 	}
 	// Final balloon computed here; the actor appends it at finish.
 	if b := finishTurnTracking(w.tfc, -1); b != nil {
 		w.sendInbox(turnBalloonMsg{balloon: *b})
 	}
 	// Auto-title in background (fire-and-forget goroutine, gen-guarded).
-	if !cfg.Settings.NoAutoTitle && w.ctx.Err() == nil {
+	if !cfg.Settings.NoAutoTitle && w.ctx.Err() == nil && turnErr == nil {
 		go w.maybeAutoTitle()
 	}
-	return nil
+	return turnErr
 }
 
 func (w *turnBridge) emit(ev any) {
-	if w.env.emit != nil {
+	if w.env.inbox != nil {
+		w.sendInbox(workerEmitMsg{gen: w.snap.gen, event: ev})
+	} else if w.env.emit != nil {
 		w.env.emit(ev)
 	}
 }
 
-// sendInbox delivers a state-change message to the actor (non-blocking;
-// worker drops only transcript deltas under extreme pressure — state
-// messages use the control lane fallback inside the actor's timer path;
-// here we block briefly since the worker has nothing better to do).
+// State and stream delivery applies backpressure until the actor exits.
+// Work cancellation cannot discard the partial transcript or its finalizer.
 // stamp tags worker mail with the spawn epoch so the actor can drop mail
 // from orphaned incarnations (report item 1).
 func (w *turnBridge) stamp(payload any) Envelope {
@@ -302,23 +301,10 @@ func (w *turnBridge) sendInbox(payload any) {
 		p.gen = w.snap.gen
 		payload = p
 	}
-	// Transcript integrity beats loop pacing: walAppendMsg carries the
-	// authoritative transcript (WAL + in-memory record), so it must NEVER
-	// be dropped — block until delivered or the turn is cancelled. Control
-	// traffic (bgJobFinishedMsg) stays non-blocking via the select below.
-	if _, ok := payload.(walAppendMsg); ok {
-		select {
-		case w.env.inbox <- w.stamp(payload):
-		case <-w.ctx.Done():
-		}
-		return
-	}
+	// Work cancellation must not discard the partial transcript or finalizer.
 	select {
 	case w.env.inbox <- w.stamp(payload):
-	case <-w.ctx.Done():
-	default:
-		trace("worker.drop", map[string]any{"sid": w.env.actorID, "type": fmt.Sprintf("%T", payload), "turn": w.snap.turnIndex})
-		fmt.Printf("[WARN] turn %d of session %s dropped inbox message %T (inbox full)\n", w.snap.turnIndex, w.env.actorID, payload)
+	case <-w.env.done:
 	}
 }
 
@@ -361,6 +347,9 @@ func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
 			return context.Canceled
 		}
 		rf.model, rf.options = rr.model, rr.options
+		if len(rr.context) > 0 {
+			w.agent.SetMessages(append(w.agent.History(), rr.context...))
+		}
 	case <-requestCtx.Done():
 		return requestCtx.Err()
 	case <-w.ctx.Done():
@@ -406,14 +395,11 @@ func (w *turnBridge) approveTool(call provider.ToolCallBlock) (bool, string, jso
 	if w.ctx.Err() != nil {
 		return false, "Turn cancelled", nil
 	}
-	if reason := modeToolRestriction(w.snap.options.Mode, call.Name); reason != "" {
-		return false, reason, nil
-	}
-	if w.snap.options.Access == "full" || call.Name == "question" || call.Name == "todo" || call.Name == "mark_task_as_complete" || call.Name == "mark_plan_as_ready_to_execute" {
-		return true, "", nil
-	}
 	ch := make(chan approvalOutcome, 1)
-	id := randomID8()
+	id := call.ID
+	if id == "" {
+		id = randomID8()
+	}
 	select {
 	case w.env.inbox <- w.stamp(workerApprovalReqMsg{gen: w.snap.gen, id: id, tool: call.Name, args: call.Arguments, callID: call.ID, reply: ch}):
 	case <-w.ctx.Done():
@@ -426,6 +412,9 @@ func (w *turnBridge) approveTool(call provider.ToolCallBlock) (bool, string, jso
 			return false, "Turn cancelled", nil
 		}
 		if !out.approved {
+			if out.reason != "" {
+				return false, out.reason, nil
+			}
 			return false, "User rejected tool execution", nil
 		}
 		return true, "", nil
@@ -435,6 +424,7 @@ func (w *turnBridge) approveTool(call provider.ToolCallBlock) (bool, string, jso
 }
 
 type approvalOutcome struct {
+	reason   string
 	approved bool
 	stale    bool
 }
@@ -536,64 +526,56 @@ func (w *turnBridge) CancelBackgroundJob(callerSessionID, jobID string) (tools.B
 }
 
 // slowHook registers a bg job on the supervisor and returns the
-// (id, logPath, stream, finish) tuple. Stream appends to the .log and
-// emits live bg_output; finish reports the terminal state exactly once.
+// (id, logPath, stream, finish) tuple. The child owns its log output;
+// stream emits live bg_output and finish uses the supervisor lifetime.
 func (w *turnBridge) slowHook() tools.SlowHook {
-	return func(kind, label string, stop func()) (string, string, func(string), func(string, bool)) {
+	return func(kind, label string, process tools.BackgroundProcess) (string, string, func(string), func(string, bool)) {
 		if w.env.bg == nil {
 			// No supervisor (tests): local stub that still detaches.
 			id := "bg_" + randomID8()
 			finish := func(result string, isError bool) {
 				_ = result
 				_ = isError
-				w.sendInbox(bgJobFinishedMsg{JobID: id})
 			}
 			return id, "", func(string) {}, finish
 		}
-		logPath := ""
-		if dir := w.env.brainDir(w.env.actorID); dir != "" {
-			_ = os.MkdirAll(dir, 0o700)
-			// temp name; real id comes from register
-			logPath = dir + "/bg_pending.log"
-		}
+		logPath := process.LogPath
 		reply := make(chan any, 1)
-		pid := 0
-		if v := ctxPID(w.ctx); v > 0 {
-			pid = v
-		}
 		select {
-		case w.env.bg.inbox <- Envelope{Payload: bgRegisterMsg{Kind: kind, SessionID: w.env.actorID, Label: label, LogPath: logPath, PID: pid, Stop: stop, Reply: reply}}:
+		case w.env.bg.inbox <- Envelope{Payload: bgRegisterMsg{Kind: kind, SessionID: w.env.actorID, Label: label, LogPath: logPath, StderrPath: process.StderrPath, PID: process.PID, Stop: process.Stop, Reply: reply}}:
 		case <-w.ctx.Done():
-			return "bg_cancelled", "", func(string) {}, func(string, bool) {}
+			if process.Stop != nil {
+				process.Stop()
+			}
+			return "", "", func(string) {}, func(string, bool) {}
 		}
 		var reg bgRegisterResult
 		select {
 		case r := <-reply:
 			reg, _ = r.(bgRegisterResult)
 		case <-w.ctx.Done():
-			return "bg_cancelled", "", func(string) {}, func(string, bool) {}
+			if process.Stop != nil {
+				process.Stop()
+			}
+			return "", "", func(string) {}, func(string, bool) {}
 		case <-time.After(replyTimeout):
-			return "bg_cancelled", "", func(string) {}, func(string, bool) {}
+			if process.Stop != nil {
+				process.Stop()
+			}
+			return "", "", func(string) {}, func(string, bool) {}
+		}
+		if reg.Error != "" || reg.JobID == "" {
+			if process.Stop != nil { process.Stop() }
+			return "", "", func(string) {}, func(string, bool) {}
 		}
 		id := reg.JobID
-		if logPath != "" {
-			final := strings.Replace(logPath, "bg_pending.log", id+".log", 1)
-			_ = os.Rename(logPath, final)
-			logPath = final
-			// fix the registered path via finish-time pidfile rewrite is
-			// unnecessary: pidfile stores logPath at register; update it.
-			select {
-			case w.env.bg.inbox <- Envelope{Payload: bgLogPathMsg{JobID: id, LogPath: logPath}}:
-			case <-w.ctx.Done():
-			case <-time.After(replyTimeout):
-			}
-		}
 		stream := func(chunk string) {
 			if chunk == "" {
 				return
 			}
-			bgAppendLogLine(logPath, chunk)
-			w.emit(map[string]any{"type": "bg_output", "sessionId": w.env.actorID, "jobId": id, "text": chunk})
+			if w.env.emit != nil {
+				w.env.emit(map[string]any{"type": "bg_output", "sessionId": w.env.actorID, "jobId": id, "text": chunk})
+			}
 		}
 		var once sync.Once
 		finish := func(result string, isError bool) {
@@ -604,28 +586,13 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 				}
 				select {
 				case w.env.bg.inbox <- Envelope{Payload: bgFinishMsg{JobID: id, Status: status, Result: result}}:
-				case <-w.ctx.Done():
-				case <-time.After(replyTimeout):
+				case <-w.env.bg.done:
 				}
-				w.sendInbox(bgJobFinishedMsg{JobID: id})
 			})
 		}
 		return id, logPath, stream, finish
 	}
 }
-
-// ctxPID extracts a process pid stashed in the context by callers that
-// manage real OS processes (bash/python tools pass it when known).
-func ctxPID(ctx context.Context) int {
-	if v := ctx.Value(ctxPidKey{}); v != nil {
-		if n, ok := v.(int); ok {
-			return n
-		}
-	}
-	return 0
-}
-
-type ctxPidKey struct{}
 
 // ---- message persistence hooks ----
 
@@ -658,7 +625,7 @@ func (w *turnBridge) onCompactionState(state *core.CompactionState) {
 	}()
 	w.sendInbox(walAppendMsg{ev: walEvent{Type: walTypeCompaction, Compaction: &cp, Usage: &usage, Context: ctxCopy}})
 	w.emit(tailContentEvent(w.cfg.HostID, w.env.actorID, "session_compacted", w.compactionView(&cp, usage, ctxCopy), 0, map[string]any{
-		"context": ctxCopy, "usage": usage, "auto": true,
+		"context": ctxCopy, "usage": usage, "auto": !w.snap.compact,
 	}))
 }
 

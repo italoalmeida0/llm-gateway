@@ -105,7 +105,8 @@ type PythonTool struct {
 	Sandbox *Sandbox
 	// Slow detaches long-running executions into a background job. Nil =
 	// legacy behavior (block until the script ends).
-	Slow SlowHook
+	Slow   SlowHook
+	LogDir string
 }
 
 func (t *PythonTool) Name() string { return "python" }
@@ -207,78 +208,83 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	if a.Stdin != "" {
 		cmd.Stdin = strings.NewReader(a.Stdin)
 	}
+	setProcessGroup(cmd)
 	var stdout, stderr bytes.Buffer
-	// Cap captured output at ~256KB per stream; the model gets the head,
-	// the full text stays in the session transcript via the journal.
-	// A fan-out sits in front of every sink: at detach time the job .log
-	// file and the live stream forwarder are attached WITHOUT touching
-	// exec's wiring (which captures cmd.Stdout once at Start — reassigning
-	// it later would silently keep writing to the old buffers only).
-	outFan, errFan := &fanOutWriter{}, &fanOutWriter{}
-	outFan.Add(&cappedWriter{W: &stdout, Max: 256 * 1024})
-	errFan.Add(&cappedWriter{W: &stderr, Max: 256 * 1024})
-	cmd.Stdout = outFan
-	cmd.Stderr = errFan
-
-	start := time.Now()
-	type pyOutcome struct {
-		runErr error
+	outLog, err := newProcessLog(t.LogDir, "bg_python_stdout_*.log")
+	if err != nil {
+		bgCancel()
+		return core.ToolResult{}, err
 	}
+	errLog, err := newProcessLog(t.LogDir, "bg_python_stderr_*.log")
+	if err != nil {
+		outLog.close(true)
+		bgCancel()
+		return core.ToolResult{}, err
+	}
+	cmd.Stdout, cmd.Stderr = outLog.file, errLog.file
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		outLog.close(true)
+		errLog.close(true)
+		bgCancel()
+		return core.ToolResult{}, err
+	}
+	exited := make(chan struct{})
+	detached := make(chan struct{})
+	var stream func(string)
+	pump := func(log *processLog, target *bytes.Buffer) {
+		w := &cappedWriter{W: target, Max: 256 * 1024}
+		log.pump(exited, func(chunk []byte) {
+			_, _ = w.Write(chunk)
+			select {
+			case <-detached:
+				if stream != nil {
+					stream(string(chunk))
+				}
+			default:
+			}
+		})
+	}
+	go pump(outLog, &stdout)
+	go pump(errLog, &stderr)
+	type pyOutcome struct{ runErr error }
 	doneCh := make(chan pyOutcome, 1)
 	go func() {
-		doneCh <- pyOutcome{runErr: cmd.Run()}
+		err := cmd.Wait()
+		close(exited)
+		<-outLog.finished
+		<-errLog.finished
+		doneCh <- pyOutcome{runErr: err}
 	}()
+	stop := func() { bgCancel(); killProcessGroup(cmd) }
+	cleanup := func(remove bool) { outLog.close(remove); errLog.close(remove); bgCancel() }
 	select {
 	case out := <-doneCh:
-		bgCancel()
+		cleanup(true)
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	case <-ctx.Done():
 		// Turn cancelled before the threshold: kill and keep legacy shape.
-		bgCancel()
+		stop()
 		out := <-doneCh
+		cleanup(true)
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	case <-time.After(AutoBackgroundAfter):
 	}
 	if t.Slow == nil {
 		out := <-doneCh
-		bgCancel()
+		cleanup(true)
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	}
-	// The daemon hands us the job's .log file (in the session's brain
-	// scratch space): from now on ALL output appends into it AND streams
-	// live to the frontend row, so the model can also tail the file with
-	// its own tools and the full output survives the delivery. The
-	// in-memory buffers keep feeding the final result.
-	jobID, logPath, stream, deliver := t.Slow("python", label, bgCancel)
-	var logFile *os.File
-	if logPath != "" {
-		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-			// Flush under the fan-out lock: the process copy goroutine
-			// may be writing into these buffers right now.
-			outFan.WithLock(func() {
-				if stdout.Len() > 0 {
-					_, _ = f.Write(stdout.Bytes())
-				}
-			})
-			errFan.WithLock(func() {
-				if stderr.Len() > 0 {
-					_, _ = f.Write(stderr.Bytes())
-				}
-			})
-			outFan.Add(f)
-			errFan.Add(f)
-			logFile = f
-		}
+	jobID, logPath, sink, deliver := t.Slow("python", label, BackgroundProcess{PID: cmd.Process.Pid, LogPath: outLog.file.Name(), StderrPath: errLog.file.Name(), Stop: stop})
+	if jobID == "" {
+		stop(); <-doneCh; cleanup(false)
+		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", outLog.file.Name())
 	}
-	if stream != nil {
-		outFan.Add(streamFuncWriter{fn: stream})
-		errFan.Add(streamFuncWriter{fn: stream})
-	}
+	stream = sink
+	close(detached)
 	go func() {
 		out := <-doneCh
-		if logFile != nil {
-			_ = logFile.Close()
-		}
+		cleanup(false)
 		res, _ := finishPythonCommand(out.runErr, stdout, stderr, start, nil)
 		text := ""
 		for _, c := range res.Content {

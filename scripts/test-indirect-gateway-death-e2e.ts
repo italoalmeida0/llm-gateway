@@ -223,7 +223,10 @@ async function main() {
       await waitFor(w, "__updating_reconnect__", () => true, 90000, "p2-updater");
       log("p2", "updater running — killing gateway + mirror mid-update");
       w.gw.stop();
-      w.mirrorSrv.stop();
+      // A real mirror death ABORTS in-flight downloads (TCP RST); Bun's
+      // graceful stop() would let the sleeping handler finish the body
+      // and the update would legitimately succeed.
+      w.mirrorSrv.stop(true);
       const failed = await waitFor(w, "update_failed", () => true, 180000, "p2-failed");
       log("p2", `update_failed: ${String((failed as any)?.reason || "").slice(0, 160)}`);
       await sleep(5000);

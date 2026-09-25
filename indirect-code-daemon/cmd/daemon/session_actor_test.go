@@ -24,7 +24,7 @@ func newTestActor(t *testing.T, rec *SessionRecord, worker func(snap workerSnaps
 }
 
 func newTestRecord(id string) *SessionRecord {
-	return &SessionRecord{ID: id, CWD: "/tmp", Title: "t", Model: "m", Status: "idle", CreatedAt: 1, UpdatedAt: 1}
+	return &SessionRecord{ID: id, CWD: "/tmp", Title: "t", Model: "m", Status: "idle", Options: SessionOptions{Access: "ask"}, CreatedAt: 1, UpdatedAt: 1}
 }
 
 func TestPromptStartsTurn(t *testing.T) {
@@ -193,7 +193,7 @@ func TestBgNoticeRunningFoldsLateResult(t *testing.T) {
 func TestConvertRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	store := newDiskStore(dir)
-	rec := &SessionRecord{ID: "cv1", CWD: "/tmp", Title: "t", Model: "m", Status: "idle", CreatedAt: 1, UpdatedAt: 1}
+	rec := &SessionRecord{ID: "cv1", CWD: "/tmp", Title: "t", Model: "m", Status: "idle", Options: SessionOptions{Access: "ask"}, CreatedAt: 1, UpdatedAt: 1}
 	act := newSessionActor("cv1", rec, store, nil, nil, nil)
 	act.supCfg = new(configCell)
 	act.supCfg.store(&DaemonConfig{GatewayURL: "http://127.0.0.1:1", HostID: "h"})

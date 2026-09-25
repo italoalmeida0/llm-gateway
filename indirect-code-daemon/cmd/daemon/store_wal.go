@@ -55,6 +55,7 @@ type walHeader struct {
 	TurnIndex     int                     `json:"turnIndex"`
 	StartedAt     int64                   `json:"startedAt"`
 	Model         string                  `json:"model,omitempty"`
+	PromptMeta    map[string]string       `json:"promptMeta,omitempty"`
 	Prompt        string                  `json:"prompt,omitempty"`
 	AttachmentIDs []string                `json:"attachmentIds,omitempty"`
 	Incoming      []filetrack.TrackedFile `json:"incoming,omitempty"`
@@ -86,17 +87,23 @@ type walEvent struct {
 	// ApprovalDeadlineUnix persists the 15-min decision deadline inside the
 	// WAL (plan §8): a respawn recomputes the remainder instead of
 	// restarting the timer.
-	ApprovalDeadlineUnix int64 `json:"approvalDeadlineUnix,omitempty"`
-	LastDate    string                  `json:"lastDate,omitempty"`
-	LastMode    string                  `json:"lastMode,omitempty"`
+	ApprovalDeadlineUnix int64  `json:"approvalDeadlineUnix,omitempty"`
+	ClearApprovalDeadline bool `json:"clearApprovalDeadline,omitempty"`
+	Pinned               *bool  `json:"pinned,omitempty"`
+	Jailed               *bool  `json:"jailed,omitempty"`
+	TodosOpen            *bool  `json:"todosOpen,omitempty"`
+	LastDate             string `json:"lastDate,omitempty"`
+	LastMode             string `json:"lastMode,omitempty"`
 }
 
 // walWriter is the buffered append handle for one running turn.
 type walWriter struct {
-	mu   sync.Mutex
-	file *os.File
-	w    *bufio.Writer
-	path string
+	mu       sync.Mutex
+	file     *os.File
+	w        *bufio.Writer
+	path     string
+	closed   bool
+	closeErr error
 }
 
 // ensureBrainDir creates the scratch space (0700, like the data dir).
@@ -132,7 +139,7 @@ func (s *diskStore) openWAL(sessionID string, h *walHeader) (*walWriter, error) 
 	if err := os.MkdirAll(s.sessionsDir(), 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +268,10 @@ func (ww *walWriter) close() error {
 	}
 	ww.mu.Lock()
 	defer ww.mu.Unlock()
+	if ww.closed {
+		return ww.closeErr
+	}
+	ww.closed = true
 	err := ww.w.Flush()
 	if syncErr := ww.file.Sync(); err == nil {
 		err = syncErr
@@ -268,6 +279,7 @@ func (ww *walWriter) close() error {
 	if closeErr := ww.file.Close(); err == nil {
 		err = closeErr
 	}
+	ww.closeErr = err
 	return err
 }
 
@@ -416,9 +428,20 @@ func applyWALEvent(rec *SessionRecord, ev *walEvent) error {
 			rec.UpdatedAt = ev.UpdatedAt
 		}
 	case walTypeMeta:
+		if ev.Pinned != nil {
+			rec.Pinned = *ev.Pinned
+		}
+		if ev.Jailed != nil {
+			rec.Jailed = *ev.Jailed
+		}
+		if ev.TodosOpen != nil {
+			v := *ev.TodosOpen
+			rec.TodosOpen = &v
+		}
 		if ev.UpdatedAt > 0 {
 			rec.UpdatedAt = ev.UpdatedAt
 		}
+		if ev.ClearApprovalDeadline { rec.ApprovalDeadlineUnix = 0 }
 		if ev.ApprovalDeadlineUnix > 0 {
 			rec.ApprovalDeadlineUnix = ev.ApprovalDeadlineUnix
 		}
@@ -448,14 +471,27 @@ func (s *diskStore) commitWAL(id string, rec *SessionRecord, wal *walWriter) err
 	if rec == nil {
 		return fmt.Errorf("nil session")
 	}
+	var walErr error
 	if wal != nil {
-		_ = wal.close()
+		walErr = wal.close()
 	}
-rec.UpdatedAt = time.Now().UnixMilli()
+	rec.UpdatedAt = time.Now().UnixMilli()
 	// Fast path: does the disk already have this turn line?
 	lines, _, rerr := s.readSessionFile(id)
 	if rerr != nil && !os.IsNotExist(rerr) {
 		return rerr
+	}
+	if walErr != nil {
+		// The buffered writer retains its first I/O error. Once storage is
+		// writable again, checkpoint the owner's complete record atomically
+		// instead of retrying that permanently failed buffer.
+		if err := s.saveSessionSync(rec); err != nil {
+			return err
+		}
+		if err := os.Remove(s.walPath(id)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	}
 	turnIdx := rec.TurnSeq
 	// Messages of the finished turn (in-memory, includes WAL replay).
@@ -521,7 +557,9 @@ rec.UpdatedAt = time.Now().UnixMilli()
 		}
 	}
 	if p := s.walPath(id); p != "" {
-		_ = os.Remove(p)
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
 }
@@ -566,10 +604,10 @@ func recordMeta(rec *SessionRecord) metaLine {
 		Options: rec.Options, ID: rec.ID, CWD: rec.CWD,
 		Title: rec.Title, TitleSource: rec.TitleSource,
 		Usage: rec.Usage, Context: rec.Context, Model: rec.Model,
-		Status: rec.Status, Pinned: rec.Pinned,
+		Status: rec.Status, Pinned: rec.Pinned, Jailed: rec.Jailed,
 		CreatedAt: rec.CreatedAt, UpdatedAt: rec.UpdatedAt,
 		Attachments: rec.Attachments, LastDate: rec.LastDate, LastMode: rec.LastMode,
-		Compaction: rec.Compaction, TurnSeq: rec.TurnSeq, Queue: rec.Queue,
+		Compaction: rec.Compaction, TurnSeq: rec.TurnSeq, Queue: rec.Queue, ApprovalDeadlineUnix: rec.ApprovalDeadlineUnix,
 	}
 }
 
@@ -580,6 +618,7 @@ func closeWAL(wal **walWriter) {
 		*wal = nil
 	}
 }
+
 // saveSessionSync writes the record atomically (tmp + rename + fsync)
 // without emitting a change ping. The WAL commit path batches its own
 // single ping after the write.
@@ -601,9 +640,9 @@ func walMsgEvent(m provider.Message) walEvent {
 // nothing; only an OS/power crash loses the tail. The fsync happens
 // once at commit. A nil handle means no turn is in WAL mode and the event
 // is dropped (callers fall back to a direct save in that case).
-func appendWALEvent(wal *walWriter, ev walEvent) {
+func appendWALEvent(wal *walWriter, ev walEvent) error {
 	if wal == nil {
-		return
+		return nil
 	}
 	if ev.UpdatedAt == 0 {
 		switch ev.Type {
@@ -613,9 +652,12 @@ func appendWALEvent(wal *walWriter, ev walEvent) {
 			ev.UpdatedAt = time.Now().UnixMilli()
 		}
 	}
-	_ = wal.append(ev)
-	_ = wal.flush()
+	if err := wal.append(ev); err != nil {
+		return err
+	}
+	return wal.flush()
 }
+
 // cloneWALHeader deep-copies a header so resume can overlay the latest
 // body snapshots without mutating the caller's copy.
 func cloneWALHeader(h *walHeader) *walHeader {

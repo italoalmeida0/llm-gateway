@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,16 +16,14 @@ import (
 // A live pid is re-adopted (new waiter, keeps running); a dead pid is
 // finalized from the .log tail as orphaned. Jobs are NEVER re-run.
 
-func (b *bgSupervisor) writePidfile(j *bgJob) {
+func (b *bgSupervisor) writePidfile(j *bgJob) error {
 	if err := os.MkdirAll(b.bgDir(), 0o700); err != nil {
-		return
+		return err
 	}
-	pf := bgPidfile{JobID: j.ID, PID: j.PID, SessionID: j.SessionID, Kind: j.Kind, Label: j.Label, LogPath: j.LogPath, StartedAt: j.StartedAt}
+	pf := bgPidfile{JobID: j.ID, PID: j.PID, Identity: j.Identity, SessionID: j.SessionID, Kind: j.Kind, Label: j.Label, LogPath: j.LogPath, StderrPath: j.StderrPath, StartedAt: j.StartedAt}
 	data, err := json.Marshal(pf)
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(b.pidPath(j.ID), append(data, '\n'), 0o600)
+	if err != nil { return err }
+	return writeAtomicFile(b.pidPath(j.ID), append(data, '\n'))
 }
 
 func (b *bgSupervisor) readopt() {
@@ -47,13 +46,14 @@ func (b *bgSupervisor) readopt() {
 		if b.jobs == nil {
 			b.jobs = map[string]*bgJob{}
 		}
-		if pidAlive(pf.PID) {
+		if pf.Identity != "" && tools.ProcessIdentity(pf.PID) == pf.Identity {
 			j := &bgJob{
 				ID: pf.JobID, Kind: pf.Kind, SessionID: pf.SessionID,
-				Label: pf.Label, PID: pf.PID, Status: BgStatusRunning,
-				StartedAt: pf.StartedAt, LogPath: pf.LogPath,
-				done: make(chan struct{}), sleepers: map[chan struct{}]struct{}{},
+				Label: pf.Label, PID: pf.PID, Identity: pf.Identity, Status: BgStatusRunning,
+				StartedAt: pf.StartedAt, LogPath: pf.LogPath, StderrPath: pf.StderrPath,
+				done: make(chan struct{}),
 			}
+			j.stop = func() { tools.StopRecoveredProcess(pf.PID, pf.Identity) }
 			b.jobs[j.ID] = j
 			b.watchReadopted(j)
 			fmt.Printf("[INFO] re-adopted live bg job %s (pid %d)\n", j.ID, j.PID)
@@ -61,11 +61,11 @@ func (b *bgSupervisor) readopt() {
 			tail, _ := bgReadTailPath(pf.LogPath, 4*1024)
 			j := &bgJob{
 				ID: pf.JobID, Kind: pf.Kind, SessionID: pf.SessionID,
-				Label: pf.Label, PID: pf.PID, Status: BgStatusOrphaned,
+				Label: pf.Label, PID: pf.PID, Identity: pf.Identity, Status: BgStatusOrphaned,
 				StartedAt: pf.StartedAt, EndedAt: time.Now().UnixMilli(),
-				LogPath: pf.LogPath,
-				Result:  fmt.Sprintf("Background task %s orphaned by daemon restart (process gone). Partial output (if any) is in the .log at: %s\n%s", pf.Label, pf.LogPath, tail),
-				done:    make(chan struct{}),
+				LogPath: pf.LogPath, StderrPath: pf.StderrPath,
+				Result: fmt.Sprintf("Background task %s orphaned by daemon restart (process gone). Partial output (if any) is in the .log at: %s\n%s", pf.Label, pf.LogPath, tail),
+				done:   make(chan struct{}),
 			}
 			j.closeDone()
 			b.jobs[j.ID] = j
@@ -78,16 +78,25 @@ func (b *bgSupervisor) readopt() {
 // watchReadopted polls a re-adopted pid until it exits, then finalizes the
 // job exactly like a normal finish (no re-run, log preserved).
 func (b *bgSupervisor) watchReadopted(j *bgJob) {
+	// Capture immutable values; the supervisor owns subsequent job mutations.
+	pid, identity, id, label, path, done := j.PID, j.Identity, j.ID, j.Label, j.LogPath, j.done
 	go func() {
 		tick := time.NewTicker(2 * time.Second)
 		defer tick.Stop()
-		for range tick.C {
-			if !pidAlive(j.PID) {
-				select {
-				case b.inbox <- Envelope{Payload: bgFinishMsg{JobID: j.ID, Status: BgStatusDone, Result: fmt.Sprintf("Background task %s finished (re-adopted after restart). Full output is in the .log at: %s", j.Label, j.LogPath)}}:
-				case <-time.After(replyTimeout):
-				}
+		for {
+			select {
+			case <-done:
 				return
+			case <-b.done:
+				return
+			case <-tick.C:
+				if tools.ProcessIdentity(pid) != identity {
+					select {
+					case b.inbox <- Envelope{Payload: bgFinishMsg{JobID: id, Status: BgStatusOrphaned, Result: fmt.Sprintf("Background task %s ended after restart; exit status unavailable. Read %s", label, path)}}:
+					case <-b.done:
+					}
+					return
+				}
 			}
 		}
 	}()
@@ -97,14 +106,16 @@ func bgReadTailPath(path string, max int) (string, bool) {
 	if path == "" {
 		return "", false
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
-	}
-	if len(data) > max {
-		data = data[len(data)-max:]
-	}
-	return string(data), true
+	if max <= 0 || max > 256*1024 { max = 64*1024 }
+	f, err := os.Open(path)
+	if err != nil { return "", false }
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil { return "", false }
+	n := min(int64(max), info.Size())
+	buf := make([]byte, n)
+	read, err := f.ReadAt(buf, info.Size()-n)
+	return string(buf[:read]), err == nil || err == io.EOF
 }
 
 var _ = tools.BgLabelMax

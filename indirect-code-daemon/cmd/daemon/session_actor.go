@@ -30,6 +30,7 @@ const (
 	stateAwaitQ    = "awaitingQuestion"
 	stateCancel    = "cancelling"
 	stateOrphaned  = "orphaned"
+	statePersist   = "persisting"
 )
 
 // pendingAsk describes one outstanding human decision.
@@ -41,6 +42,8 @@ type pendingAsk struct {
 	// question resume data
 	recommended [][]string
 	notice      string
+	tool        string
+	question    *tools.QuestionRequest
 }
 
 // sessionActor owns one SessionRecord. Single goroutine, no locks.
@@ -51,7 +54,7 @@ type sessionActor struct {
 	store   *diskStore
 	wsSend  func(any)
 	bg      *bgSupervisor
-	supCfg  *configCell // supervisor-owned config; worker reads via load()
+	supCfg  *configCell             // supervisor-owned config; worker reads via load()
 	onEvent func(collection string) // change ping fan-out (notifyChange)
 
 	inbox   chan Envelope
@@ -63,10 +66,14 @@ type sessionActor struct {
 	state string
 	gen   int
 
-	cancel context.CancelFunc // worker ctx
+	cancel     context.CancelFunc // worker ctx
 	workerDone chan struct{}
 
-	pending *pendingAsk
+	persistErr     error
+	finishOK       bool
+	closing        bool
+	pendingContext []provider.Message
+	pending        *pendingAsk
 
 	// pendingBalloon holds the finished file-changes balloon until the
 	// finalizer appends it with the true message count.
@@ -96,7 +103,7 @@ type sessionActor struct {
 	// same turn index (v1 resumeAgentTurn parity).
 	resumeSnap *workerSnapshot
 
-	lastProgress int64 // unix milli, for watchdog
+	lastProgress  int64 // unix milli, for watchdog
 	residentBytes int64
 
 	// startWorker runs the turn. Production: defaultStartWorker (agent loop).
@@ -114,9 +121,9 @@ func newSessionActor(id string, rec *SessionRecord, store *diskStore, wsSend fun
 	}
 	return &sessionActor{
 		id: id, store: store, wsSend: wsSend, bg: bg, onEvent: onEvent, supCfg: cfg, jailed: jailed,
-		inbox: make(chan Envelope, inboxCap), control: make(chan any, controlCap),
+		inbox: make(chan Envelope, inboxCap), control: make(chan any, controlCap), done: make(chan struct{}),
 		rec: rec, state: stateIdle, lastProgress: time.Now().UnixMilli(),
-		startWorker: defaultStartWorker,
+		startWorker:     defaultStartWorker,
 		approvalWaiters: map[string]chan approvalOutcome{},
 		questionWaiters: map[string]chan questionOutcome{},
 		convertWaiters:  map[string]chan any{},
@@ -154,19 +161,15 @@ func (a *sessionActor) run() {
 		a.done = make(chan struct{})
 	}
 	defer close(a.done)
-	flushTick := time.NewTicker(30 * time.Second)
+	flushTick := time.NewTicker(time.Second)
 	defer flushTick.Stop()
 	for {
-		// Drain inbox fully before control: bursty workers (usage +
-		// compaction + message + finish in one step) must not leave the
-		// finish stranded behind a control ping. Inbox-first also keeps
-		// response-vs-timeout ordering single-file.
-		select {
-		case env := <-a.inbox:
-			a.handleData(env)
-			continue
-		default:
+		// Process a bounded data batch before checking control. This preserves
+		// burst ordering without starving cancellation under a busy stream.
+		for n := min(len(a.inbox), 64); n > 0; n-- {
+			a.handleData(<-a.inbox)
 		}
+
 		select {
 		case env := <-a.inbox:
 			a.handleData(env)
@@ -175,6 +178,15 @@ func (a *sessionActor) run() {
 				return
 			}
 		case <-flushTick.C:
+			if a.state == stateIdle && a.persistErr != nil {
+				if err := a.store.saveSessionSync(a.rec); err == nil {
+					a.persistErr = nil
+					a.pingChange()
+				}
+			}
+			if a.state == statePersist {
+				a.finishTurn(a.finishOK)
+			}
 			if a.wal != nil {
 				_ = a.wal.flush()
 			}
@@ -223,15 +235,20 @@ func (a *sessionActor) handleData(env Envelope) {
 		m.fn()
 	case walAppendMsg:
 		a.onWALAppend(m)
+	case workerEmitMsg:
+		if m.gen == a.gen && a.state != stateOrphaned {
+			a.emit(m.event)
+		}
 	case workerRefreshMsg:
-		if m.gen != a.gen {
+		if m.gen != a.gen || a.persistErr != nil || a.closing {
 			select {
 			case m.Reply <- workerRefreshResult{stale: true}:
 			default:
 			}
 		} else {
 			select {
-			case m.Reply <- workerRefreshResult{model: a.rec.Model, options: normalizedOptions(a.rec.Options)}:
+			case m.Reply <- workerRefreshResult{model: a.rec.Model, options: normalizedOptions(a.rec.Options), context: a.pendingContext}:
+				a.pendingContext = nil
 			default:
 				// Worker stopped waiting (cancelled/timeout): drop.
 			}
@@ -273,9 +290,11 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.rec.Title = m.Title
 		a.rec.TitleSource = "manual"
 		a.rec.UpdatedAt = time.Now().UnixMilli()
-		appendWALEvent(a.wal, walEvent{Type: walTypeTitle, Title: m.Title, TitleSource: "manual"})
-		a.pingChange()
-		m.Reply <- struct{}{}
+		err := a.saveOrAppend(walEvent{Type: walTypeTitle, Title: m.Title, TitleSource: "manual"})
+		if err == nil {
+			a.pingChange()
+		}
+		m.Reply <- err
 	case togglePinMsg:
 		a.touch()
 		a.rec.Pinned = !a.rec.Pinned
@@ -295,12 +314,15 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.touch()
 		if m.Model != "" {
 			a.rec.Model = m.Model
-			appendWALEvent(a.wal, walEvent{Type: walTypeModel, Model: m.Model})
+			a.saveOrAppend(walEvent{Type: walTypeModel, Model: m.Model})
 		}
 		a.rec.Options = normalizedOptions(m.Options)
 		opts := a.rec.Options
-		appendWALEvent(a.wal, walEvent{Type: walTypeOptions, Options: &opts})
+		a.saveOrAppend(walEvent{Type: walTypeOptions, Options: &opts})
 		a.rec.UpdatedAt = time.Now().UnixMilli()
+		if a.persistErr != nil {
+			break
+		}
 		a.pingChange()
 		// v1 parity: configuring a session acks with the updated snapshot so
 		// the composer reflects the new options immediately. v2 dropped this
@@ -337,7 +359,7 @@ func (a *sessionActor) handleData(env Envelope) {
 			a.rec.Title = m.title
 			a.rec.TitleSource = "generated"
 			a.rec.UpdatedAt = time.Now().UnixMilli()
-			appendWALEvent(a.wal, walEvent{Type: walTypeTitle, Title: m.title, TitleSource: "generated"})
+			a.saveOrAppend(walEvent{Type: walTypeTitle, Title: m.title, TitleSource: "generated"})
 			a.pingChange()
 			a.emit(map[string]any{"type": "session_renamed", "sessionId": a.id, "title": m.title, "auto": true})
 		}
@@ -364,22 +386,22 @@ func (a *sessionActor) handleControl(msg any) bool {
 		a.residentBytes = estimateResidentBytes(a.rec)
 		m.Reply <- watchdogReport{Alive: true, LastProgress: a.lastProgress, State: a.state, QueueDepth: depth, ResidentBytes: a.residentBytes}
 	case passivateMsg:
-		a.doPassivate()
-		return true
+		ok := a.state == stateIdle && a.persistErr == nil
+		if ok {
+			a.doPassivate()
+			ok = a.persistErr == nil
+		}
+		if m.Reply != nil {
+			m.Reply <- ok
+		}
+		return ok
 	case shutdownMsg:
 		a.doShutdown()
 		return true
 	case stateTimeoutMsg:
-		// Timer fallback path (inbox was full at fire time): requeue to
-		// the data lane so response-vs-timeout ordering stays single-file.
-		// Non-blocking: if the inbox is STILL full the timeout is dropped
-		// — the timer already fired once, and a wedged inbox means the
-		// actor is back-pressured, not idle; the next watchdog round
-		// observes it. Never lose liveness over this.
-		select {
-		case a.inbox <- Envelope{Payload: m}:
-		default:
-		}
+		a.onStateTimeout(m)
+	case convertResponseMsg:
+		a.onConvertResponse(m)
 	}
 	return false
 }
@@ -410,6 +432,10 @@ func (a *sessionActor) pingChange() {
 // ---- prompts & queue ----
 
 func (a *sessionActor) onUserPrompt(m userPromptMsg) {
+	if a.closing || a.persistErr != nil {
+		m.Reply <- promptResult{Error: "Session storage is unavailable; retry after recovery"}
+		return
+	}
 	a.touch()
 	if a.state == stateOrphaned {
 		// F3 recovery: a fresh prompt un-quarantines (new turn, new gen,
@@ -424,7 +450,10 @@ func (a *sessionActor) onUserPrompt(m userPromptMsg) {
 			return
 		}
 		a.rec.Queue = append(a.rec.Queue, QueuedMessage{ID: randomID8(), Text: m.Text, AttachmentIDs: m.AttachmentIDs, Model: m.Model, YOLO: m.YOLO, CreatedAt: time.Now().UnixMilli()})
-		appendWALEvent(a.wal, walEvent{Type: walTypeQueue, Queue: a.rec.Queue})
+		if err := a.saveOrAppend(walEvent{Type: walTypeQueue, Queue: a.rec.Queue}); err != nil {
+			m.Reply <- promptResult{Error: err.Error()}
+			return
+		}
 		a.pingChange()
 		m.Reply <- promptResult{Accepted: true, Queued: true}
 		return
@@ -439,12 +468,12 @@ func (a *sessionActor) onUserPrompt(m userPromptMsg) {
 	}
 	if m.Model != "" {
 		a.rec.Model = m.Model
-		appendWALEvent(a.wal, walEvent{Type: walTypeModel, Model: m.Model})
+		a.saveOrAppend(walEvent{Type: walTypeModel, Model: m.Model})
 	}
 	if m.Options != nil {
 		a.rec.Options = normalizedOptions(*m.Options)
 		opts := a.rec.Options
-		appendWALEvent(a.wal, walEvent{Type: walTypeOptions, Options: &opts})
+		a.saveOrAppend(walEvent{Type: walTypeOptions, Options: &opts})
 	}
 	// Instant provisional title (v1 startPrompt parity): sidebar feedback
 	// before the LLM title lands.
@@ -453,7 +482,10 @@ func (a *sessionActor) onUserPrompt(m userPromptMsg) {
 		a.rec.TitleSource = "pending"
 		a.emit(map[string]any{"type": "session_renamed", "sessionId": a.id, "title": t, "auto": true})
 	}
-	a.startTurn(m.Text, m.AttachmentIDs, m.Model, m.YOLO, m.Options)
+	if err := a.startTurn(m.Text, m.AttachmentIDs, m.Model, m.YOLO, m.Options); err != nil {
+		m.Reply <- promptResult{Error: err.Error()}
+		return
+	}
 	m.Reply <- promptResult{Accepted: true}
 }
 
@@ -512,34 +544,43 @@ func (a *sessionActor) onQueueOp(m queueOpMsg) {
 		m.Reply <- queueOpResult{Error: "unknown op"}
 		return
 	}
-	appendWALEvent(a.wal, walEvent{Type: walTypeQueue, Queue: a.rec.Queue})
+	if err := a.saveOrAppend(walEvent{Type: walTypeQueue, Queue: a.rec.Queue}); err != nil {
+		m.Reply <- queueOpResult{Error: err.Error()}
+		return
+	}
 	a.pingChange()
 	m.Reply <- queueOpResult{Items: a.rec.Queue}
 }
 
 // ---- turn lifecycle ----
 
-func (a *sessionActor) startTurn(prompt string, attachmentIDs []string, model string, yolo bool, options *SessionOptions) {
+func (a *sessionActor) startTurn(prompt string, attachmentIDs []string, model string, yolo bool, options *SessionOptions) error {
 	if yolo && a.rec.Options.Access == "ask" {
 		a.rec.Options.Access = "full"
-		opts := a.rec.Options
-		appendWALEvent(a.wal, walEvent{Type: walTypeOptions, Options: &opts})
 	}
 	if options != nil {
 		a.rec.Options = normalizedOptions(*options)
-		opts := a.rec.Options
-		appendWALEvent(a.wal, walEvent{Type: walTypeOptions, Options: &opts})
 	}
-	a.startTurnWithMeta(prompt, attachmentIDs, model, nil)
+	return a.startTurnWithMeta(prompt, attachmentIDs, model, nil)
 }
 
 // startTurnWithMeta seeds the opening user message with extra meta (used by
 // background wake-up turns for background_delivery). Refuses when not idle:
 // callers racing a fresh user turn fold the notice as late-result instead.
-func (a *sessionActor) startTurnWithMeta(prompt string, attachmentIDs []string, model string, meta map[string]string) {
-	if a.state != stateIdle {
-		return
+func (a *sessionActor) startTurnWithMeta(prompt string, attachmentIDs []string, model string, meta map[string]string) error {
+	if a.state != stateIdle || a.persistErr != nil || a.closing {
+		return fmt.Errorf("session is busy or cannot persist")
 	}
+	if _, err := os.Stat(a.store.sessionFile(a.id)); os.IsNotExist(err) {
+		if err := a.store.saveSessionSync(a.rec); err != nil {
+			a.storageError(err)
+			return err
+		}
+	} else if err != nil {
+		a.storageError(err)
+		return err
+	}
+	previous := *a.rec
 	a.gen++
 	if model != "" {
 		a.rec.Model = model
@@ -548,10 +589,27 @@ func (a *sessionActor) startTurnWithMeta(prompt string, attachmentIDs []string, 
 	a.rec.Status = "running"
 	a.rec.Turn = &TurnActivity{StartedAt: time.Now().UnixMilli(), Status: "running"}
 	a.rec.UpdatedAt = time.Now().UnixMilli()
-	h := &walHeader{TurnIndex: a.rec.TurnSeq, StartedAt: a.rec.Turn.StartedAt, Model: a.rec.Model, Prompt: prompt, AttachmentIDs: attachmentIDs}
+	h := &walHeader{TurnIndex: a.rec.TurnSeq, StartedAt: a.rec.Turn.StartedAt, Model: a.rec.Model, Prompt: prompt, AttachmentIDs: attachmentIDs, PromptMeta: meta}
 	wal, err := a.store.openWAL(a.id, h)
-	if err == nil {
-		a.wal = wal
+	if err != nil {
+		*a.rec = previous
+		a.storageError(err)
+		return err
+	}
+	a.wal = wal
+	// Persist turn configuration and queue consumption with the header. A
+	// crash before the opening message must retain enough to resume once.
+	for _, ev := range []walEvent{
+		{Type: walTypeOptions, Options: &a.rec.Options},
+		{Type: walTypeQueue, Queue: a.rec.Queue},
+		{Type: walTypeTitle, Title: a.rec.Title, TitleSource: a.rec.TitleSource},
+	} {
+		if err := appendWALEvent(a.wal, ev); err != nil {
+			a.storageError(err)
+			a.setState(statePersist)
+			a.finishOK = false
+			return err
+		}
 	}
 	// NOTE (v1 parity): the actor does NOT seed the user message here.
 	// The worker's agent.PromptWithMeta appends it (fires OnMessageAppended
@@ -568,6 +626,8 @@ func (a *sessionActor) startTurnWithMeta(prompt string, attachmentIDs []string, 
 	// mutation (caught by -race in TestQuarantinePath).
 	gen := a.gen
 	snap, env := snapshotTurn(a, gen, prompt, meta)
+	a.pendingContext = nil // Already included in the new worker history.
+	snap.attachIDs = append([]string(nil), attachmentIDs...)
 	startFn := a.startWorker
 	workerDone := a.workerDone
 	go func() {
@@ -582,12 +642,13 @@ func (a *sessionActor) startTurnWithMeta(prompt string, attachmentIDs []string, 
 		"type": "session_status", "hostId": hostID, "sessionId": a.id,
 		"status": "running", "turn": map[string]any{"startedAt": a.rec.Turn.StartedAt},
 	})
+	return nil
 }
 
 // defaultStartWorker runs the real agent turn (values only — the snapshot
 // ran on-loop in startTurnWithMeta, so this never touches the actor).
 func defaultStartWorker(snap workerSnapshot, env workerEnv, ctx context.Context) {
-	go runTurnWorker(ctx, env, snap)
+	runTurnWorker(ctx, env, snap)
 }
 
 // hookMsg runs fn on the actor goroutine. Production use: none yet;
@@ -641,20 +702,14 @@ func (a *sessionActor) finishTurn(ok bool) {
 	}
 	a.rec.Status = "idle"
 	a.rec.ApprovalDeadlineUnix = 0
-	// Commit with retry (3x, v1 semantic). On persistent failure stay
-	// running-with-WAL is NOT possible here (worker exited) — record the
-	// commit error visibly and keep the WAL for the next boot/respawn.
-	var err error
-	for i := 0; i < 3; i++ {
-		if err = a.store.commitWAL(a.id, a.rec, a.wal); err == nil {
-			break
-		}
-		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
+	a.finishOK = ok
+	if err := a.store.commitWAL(a.id, a.rec, a.wal); err != nil {
+		a.storageError(err)
+		a.setState(statePersist)
+		return
 	}
+	a.persistErr = nil
 	a.wal = nil
-	if err != nil {
-		a.emit(map[string]any{"type": "commit_error", "sessionId": a.id, "error": err.Error()})
-	}
 	a.setState(stateIdle)
 	a.pingChange()
 	// Foreground contract (v1 parity): completion snapshot first (closing
@@ -675,11 +730,13 @@ func (a *sessionActor) finishTurn(ok bool) {
 	// Promote queue head (only the finalizer promotes): a normally
 	// completed turn promotes the head; a cancelled turn promotes only
 	// when flagged send-now (queue_send_now semantics).
-	if len(a.rec.Queue) > 0 && (ok || a.sendNow) {
+	if !a.closing && len(a.rec.Queue) > 0 && (ok || a.sendNow) {
 		head := a.rec.Queue[0]
 		a.rec.Queue = a.rec.Queue[1:]
 		a.sendNow = false
-		a.startTurn(head.Text, head.AttachmentIDs, head.Model, head.YOLO, nil)
+		if err := a.startTurn(head.Text, head.AttachmentIDs, head.Model, head.YOLO, nil); err != nil {
+			a.rec.Queue = append([]QueuedMessage{head}, a.rec.Queue...)
+		}
 	} else {
 		a.sendNow = false
 	}
@@ -687,7 +744,7 @@ func (a *sessionActor) finishTurn(ok bool) {
 
 func (a *sessionActor) doCancel(reason string) {
 	trace("actor.cancel", map[string]any{"sid": a.id, "reason": reason, "state": a.state, "gen": a.gen})
-	if a.state == stateIdle {
+	if a.state == stateIdle || a.state == statePersist {
 		return
 	}
 	// F3: cancelling escalation. Each watchdog cancel bumps cancelRounds;
@@ -749,7 +806,7 @@ func (a *sessionActor) enterAwait(kind, id string, recommended [][]string) {
 		deadline = a.rec.ApprovalDeadlineUnix
 	}
 	a.rec.ApprovalDeadlineUnix = deadline
-	appendWALEvent(a.wal, walEvent{Type: walTypeMeta, UpdatedAt: now, ApprovalDeadlineUnix: deadline})
+	a.saveOrAppend(walEvent{Type: walTypeMeta, UpdatedAt: now, ApprovalDeadlineUnix: deadline})
 	myID := id
 	if myID == "" {
 		myID = randomID8()
@@ -762,12 +819,7 @@ func (a *sessionActor) enterAwait(kind, id string, recommended [][]string) {
 	a.pending.timer = time.AfterFunc(remaining*time.Millisecond, func() {
 		select {
 		case a.inbox <- Envelope{Payload: stateTimeoutMsg{ID: myID}}:
-		default:
-			// inbox full: route via control lane so the timeout is never lost
-			select {
-			case a.control <- stateTimeoutMsg{ID: myID}:
-			default:
-			}
+		case <-a.done:
 		}
 	})
 	if kind == "approval" {
@@ -782,7 +834,10 @@ func (a *sessionActor) clearPending() {
 		a.pending.timer.Stop()
 	}
 	a.pending = nil
-	a.rec.ApprovalDeadlineUnix = 0
+	if a.rec.ApprovalDeadlineUnix != 0 {
+		a.rec.ApprovalDeadlineUnix = 0
+		if a.wal != nil { a.saveOrAppend(walEvent{Type: walTypeMeta, ClearApprovalDeadline: true}) }
+	}
 }
 
 func (a *sessionActor) onApprovalResponse(m approvalResponseMsg) {
@@ -797,10 +852,11 @@ func (a *sessionActor) onApprovalResponse(m approvalResponseMsg) {
 		return
 	}
 	a.touch()
-	approved := m.Approved
+	approved := m.Approved && modeToolRestriction(a.rec.Options.Mode, a.pending.tool) == ""
 	trace("actor.approval", map[string]any{"sid": a.id, "id": m.ID, "approved": approved})
 	a.clearPending()
 	a.setState(stateRunning)
+	approved = approved && a.persistErr == nil
 	a.wakeApproval(m.ID, approved)
 	a.emit(map[string]any{"type": "approval_resolved", "sessionId": a.id, "callId": m.ID, "approved": approved})
 }
@@ -813,6 +869,12 @@ func (a *sessionActor) onQuestionResponse(m questionResponseMsg) {
 		}
 		trace("actor.question.stale", map[string]any{"sid": a.id, "id": m.ID, "state": a.state, "pending": cur})
 		return
+	}
+	if a.pending.question != nil {
+		if err := a.pending.question.ValidateAnswers(m.Answers); err != nil {
+			a.emit(map[string]any{"type": "error", "sessionId": a.id, "message": err.Error()})
+			return
+		}
 	}
 	a.touch()
 	trace("actor.question", map[string]any{"sid": a.id, "id": m.ID, "nAnswers": len(m.Answers)})
@@ -832,7 +894,7 @@ func (a *sessionActor) onStateTimeout(m stateTimeoutMsg) {
 		id := a.pending.id
 		rec := append([][]string{}, a.pending.recommended...)
 		a.clearPending()
-	a.setState(stateRunning)
+		a.setState(stateRunning)
 		a.emit(map[string]any{"type": "system_notice", "sessionId": a.id, "text": "User didn't respond in 15min — proceeding with recommended."})
 		trace("actor.timeout", map[string]any{"sid": a.id, "kind": "question", "id": id})
 		a.wakeQuestion(id, rec)
@@ -987,21 +1049,20 @@ func (a *sessionActor) onRead(m readReqMsg) {
 	// (or its backing array) is a data race. Copies are cheap next to the
 	// disk/network work around them.
 	switch m.What {
+	case "summary":
+		meta := recordMeta(a.rec)
+		m.Reply <- readResult{Payload: sessionListItem(summaryFromMeta(meta))}
 	case "session", "data":
-		cp := *a.rec
-		cp.Messages = append([]provider.Message(nil), a.rec.Messages...)
-		cp.Queue = append([]QueuedMessage(nil), a.rec.Queue...)
-		cp.Attachments = append([]AttachmentRef(nil), a.rec.Attachments...)
-		cp.FileBalloons = append([]filetrack.TurnChanges(nil), a.rec.FileBalloons...)
-		m.Reply <- readResult{Payload: &cp}
+		m.Reply <- readResult{Payload: cloneRecord(a.rec)}
 	case "history":
 		msgs := a.rec.Messages
 		if m.Limit > 0 && len(msgs) > m.Limit {
 			msgs = msgs[len(msgs)-m.Limit:]
 		}
-		m.Reply <- readResult{Payload: append([]provider.Message(nil), msgs...)}
+		m.Reply <- readResult{Payload: cloneMessages(msgs)}
 	case "historyBlock":
 		block := sliceHistoryBlock(a.rec.Messages, a.rec.FileBalloons, m.BeforeTurn)
+		block.Messages = cloneMessages(block.Messages)
 		block.Attachments = append([]AttachmentRef(nil), a.rec.Attachments...)
 		m.Reply <- readResult{Payload: block}
 	default:
@@ -1068,7 +1129,7 @@ func (a *sessionActor) onWALAppend(m walAppendMsg) {
 	}
 	a.rec.UpdatedAt = time.Now().UnixMilli()
 	trace("actor.wal", map[string]any{"sid": a.id, "type": ev.Type, "turn": a.rec.TurnSeq, "msgs": len(a.rec.Messages)})
-	appendWALEvent(a.wal, ev)
+	a.saveOrAppend(ev)
 }
 
 // applyControlWAL applies non-transcript WAL events to the record.
@@ -1096,9 +1157,18 @@ func (a *sessionActor) applyControlWAL(ev walEvent) {
 			a.rec.Turn.Status = ev.TurnStatus
 		}
 	case walTypeAttach:
-		// v1 has no attach WAL event in practice; attachments persist via commit.
-		_ = ev.Attachments
+		a.rec.Attachments = append([]AttachmentRef(nil), ev.Attachments...)
 	case walTypeMeta:
+		if ev.Pinned != nil {
+			a.rec.Pinned = *ev.Pinned
+		}
+		if ev.Jailed != nil {
+			a.rec.Jailed = *ev.Jailed
+		}
+		if ev.TodosOpen != nil {
+			v := *ev.TodosOpen
+			a.rec.TodosOpen = &v
+		}
 		// Commit marker / deadline persistence + LastDate/LastMode (date/mode
 		// directives fire once per change).
 		if ev.LastDate != "" {
@@ -1114,15 +1184,29 @@ func (a *sessionActor) applyControlWAL(ev walEvent) {
 // arms the 15-min timer. The worker blocks on m.reply until the human
 // answers, the timer fires, or the turn is cancelled.
 func (a *sessionActor) onWorkerApprovalReq(m workerApprovalReqMsg) {
-	if m.gen != a.gen || (a.state != stateRunning) {
+	if m.gen != a.gen || a.persistErr != nil || (a.state != stateRunning) {
 		m.reply <- approvalOutcome{stale: true}
 		return
+	}
+	options := normalizedOptions(a.rec.Options)
+	if reason := modeToolRestriction(options.Mode, m.tool); reason != "" {
+		m.reply <- approvalOutcome{reason: reason}
+		return
+	}
+	if options.Access == "full" || m.tool == "question" || m.tool == "todo" || m.tool == "mark_task_as_complete" || m.tool == "mark_plan_as_ready_to_execute" {
+		m.reply <- approvalOutcome{approved: true}
+		return
+	}
+	// The browser returns callId; use that identity for both sides.
+	if m.callID != "" {
+		m.id = m.callID
 	}
 	a.touch()
 	a.approvalWaiters[m.id] = m.reply
 	trace("actor.wait", map[string]any{"sid": a.id, "kind": "approval", "id": m.id, "tool": m.tool})
 	a.enterAwait("approval", m.id, nil)
-	a.emit(map[string]any{"type": "tool_approval_request", "sessionId": a.id, "callId": m.callID, "tool": m.tool, "args": m.args})
+	a.pending.tool = m.tool
+	a.emit(map[string]any{"type": "tool_approval_request", "sessionId": a.id, "callId": m.id, "tool": m.tool, "args": m.args})
 }
 
 // onWorkerQuestionReq: same for the question tool.
@@ -1143,7 +1227,8 @@ func (a *sessionActor) onWorkerQuestionReq(m workerQuestionReqMsg) {
 		}
 	}
 	a.enterAwait("question", m.id, rec)
-	a.emit(map[string]any{"type": "question_request", "sessionId": a.id, "questionId": m.id, "question": m.req})
+	a.pending.question = &m.req
+	a.emit(map[string]any{"type": "question_request", "sessionId": a.id, "questionId": m.id, "question": map[string]any{"id": m.id, "questions": m.req.Questions}})
 }
 
 // wakeApproval delivers the human decision to the blocked worker.
@@ -1182,7 +1267,8 @@ func (a *sessionActor) onBgNotice(m bgNoticeMsg) {
 	if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
 		msg := provider.Message{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: m.Text}}, TurnIndex: a.rec.TurnSeq, Meta: map[string]string{"background_delivery": m.JobID}}
 		a.rec.Messages = append(a.rec.Messages, msg)
-		appendWALEvent(a.wal, walMsgEvent(msg))
+		a.pendingContext = append(a.pendingContext, msg)
+		a.saveOrAppend(walMsgEvent(msg))
 		a.pingChange()
 		return
 	}
@@ -1205,13 +1291,27 @@ func noticePreview(text string) string {
 }
 
 // saveOrAppend persists a control event: WAL when running, direct save idle.
-func (a *sessionActor) saveOrAppend(ev walEvent) {
-	if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
-		appendWALEvent(a.wal, ev)
-		return
-	}
+func (a *sessionActor) storageError(err error) {
+	a.persistErr = err
+	a.emit(map[string]any{"type": "error", "hostId": a.hostID(), "sessionId": a.id, "message": "Could not save session: " + err.Error()})
+}
+
+func (a *sessionActor) saveOrAppend(ev walEvent) error {
 	a.rec.UpdatedAt = time.Now().UnixMilli()
-	_ = a.store.saveSessionSync(a.rec)
+	var err error
+	if a.wal != nil {
+		if ev.Type == walTypeMeta {
+			pinned, jailed := a.rec.Pinned, a.rec.Jailed
+			ev.Pinned, ev.Jailed, ev.TodosOpen = &pinned, &jailed, a.rec.TodosOpen
+		}
+		err = appendWALEvent(a.wal, ev)
+	} else {
+		err = a.store.saveSessionSync(a.rec)
+	}
+	if err != nil {
+		a.storageError(err)
+	}
+	return err
 }
 
 // onWorkerConvertReq emits convert_request to the browser and arms a 60s
@@ -1263,20 +1363,20 @@ func (a *sessionActor) quarantine() {
 		a.cancel()
 		a.cancel = nil
 	}
-	for i := 0; i < 3; i++ {
-		if err := a.store.commitWAL(a.id, a.rec, a.wal); err == nil {
-			break
-		}
-		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
-	}
 	rounds := a.cancelRounds
-	a.wal = nil
+	a.gen++ // Fence any subsequent data or emits from the stuck worker.
 	a.cancelRounds = 0
 	a.sendNow = false
 	a.clearPending()
 	a.rec.Status = "orphaned"
 	a.rec.UpdatedAt = time.Now().UnixMilli()
-	_ = a.store.saveSessionSync(a.rec)
+	if err := a.store.commitWAL(a.id, a.rec, a.wal); err != nil {
+		a.storageError(err)
+		a.finishOK = false
+		a.setState(statePersist)
+		return
+	}
+	a.wal = nil
 	trace("actor.quarantine", map[string]any{"sid": a.id, "gen": a.gen, "rounds": rounds})
 	a.setState(stateOrphaned)
 	a.pingChange()
@@ -1285,21 +1385,49 @@ func (a *sessionActor) quarantine() {
 }
 
 func (a *sessionActor) doPassivate() {
-	a.clearPending()
-	if a.cancel != nil {
-		a.cancel()
-		a.cancel = nil
+	if err := a.store.commitWAL(a.id, a.rec, a.wal); err != nil {
+		a.storageError(err)
+		return
 	}
-	for i := 0; i < 3; i++ {
-		if err := a.store.commitWAL(a.id, a.rec, a.wal); err == nil {
-			break
-		}
-		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
-	}
-	a.wal = nil
+	a.persistErr, a.wal = nil, nil
 }
 
-func (a *sessionActor) doShutdown() { a.doPassivate() }
+func (a *sessionActor) doShutdown() {
+	a.closing = true
+	if a.cancel != nil {
+		a.cancel()
+	}
+	a.clearPending()
+	// Keep processing worker mail while it unwinds; its terminal event is
+	// sent before workerDone closes. Never commit an unfinished snapshot.
+	if a.workerDone != nil {
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+		for {
+			select {
+			case env := <-a.inbox:
+				a.handleData(env)
+			case <-a.workerDone:
+				for len(a.inbox) > 0 {
+					a.handleData(<-a.inbox)
+				}
+				if a.state != stateIdle && a.state != statePersist && a.state != stateOrphaned {
+					a.finishTurn(false)
+				}
+				a.doPassivate()
+				return
+			case <-deadline.C:
+				// Preserve the open turn for replay; no new incarnation runs
+				// until this actor exits and rejects late mail by lifetime.
+				if a.wal != nil {
+					_ = a.wal.close()
+				}
+				return
+			}
+		}
+	}
+	a.doPassivate()
+}
 
 // instantTitle is the provisional sidebar title from the prompt's own first
 // 6 content words (v1 startPrompt parity); the LLM title replaces it later.

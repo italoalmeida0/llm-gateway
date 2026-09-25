@@ -58,7 +58,7 @@ func newWSHarness(t *testing.T) *wsHarness {
 		return res.Inbox, res.Control, true
 	}
 	h.admin = &sessionAdmin{dataDir: dir, route: h.sup.route, cfg: cfg, emit: emit, onEvent: notify, bg: h.bg}
-	h.admin.purge = h.admin.purgeSession
+	h.admin.purge = h.sup.purge
 	h.projects.emit = emit
 	h.projects.hostID = func() string { return "h" }
 	h.projects.purgeSession = h.admin.purgeSession

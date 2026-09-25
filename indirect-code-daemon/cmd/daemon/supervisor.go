@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/filetrack"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // Session lifecycle TTLs (plan §6).
@@ -100,9 +100,15 @@ type sessionSupervisor struct {
 	inbox   chan Envelope
 	control chan any
 
-	mu       sync.Mutex // guards residents ONLY; never held during I/O or actor calls
-	resident map[string]*residentEntry
-	flights  flightGroup
+	mu           sync.Mutex // guards residents ONLY; never held during I/O or actor calls
+	resident     map[string]*residentEntry
+	flights      flightGroup
+	evictMu      sync.Mutex
+	maxResidents int
+	memoryBudget int64
+	stopping     bool
+	deleted      map[string]bool
+	epochs       map[string]int
 
 	emitFn   func(any)
 	notifyFn func(string)
@@ -111,16 +117,18 @@ type sessionSupervisor struct {
 func newSessionSupervisor(dataDir string, cfg *configCell, ws *wsActor, bg *bgSupervisor) *sessionSupervisor {
 	return &sessionSupervisor{
 		dataDir: dataDir, cfg: cfg, ws: ws, bg: bg,
-		inbox:   make(chan Envelope, inboxCap),
-		control: make(chan any, controlCap),
-		resident: map[string]*residentEntry{},
+		inbox:        make(chan Envelope, inboxCap),
+		control:      make(chan any, controlCap),
+		maxResidents: maxResidentActors, memoryBudget: sessionMemoryBudget,
+		resident: map[string]*residentEntry{}, deleted: map[string]bool{}, epochs: map[string]int{},
 	}
 }
 
 type residentEntry struct {
-	handle   *sessionHandle
-	idleTTL  time.Duration
-	epoch    int
+	closing     chan struct{}
+	handle      *sessionHandle
+	idleTTL     time.Duration
+	epoch       int
 	staleRounds int
 	// workerAlive tracks whether the actor's turn goroutine was observed
 	// running (via workerDone channel). A reap that would orphan a live
@@ -209,7 +217,29 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 		return spawnResult{Error: "invalid session id"}
 	}
 	s.mu.Lock()
+	if s.stopping || s.deleted[id] {
+		s.mu.Unlock()
+		return spawnResult{Error: "session unavailable"}
+	}
 	if ent, ok := s.resident[id]; ok {
+		if ent.closing != nil {
+			closing := ent.closing
+			s.mu.Unlock()
+			select {
+			case <-closing:
+				return s.route(id, forRead)
+			case <-time.After(replyTimeout):
+				return spawnResult{Error: "session is closing"}
+			}
+		}
+		select {
+		case <-ent.handle.done:
+			delete(s.resident, id)
+			s.mu.Unlock()
+			return s.route(id, forRead)
+		default:
+		}
+
 		if !forRead && ent.idleTTL == idleCacheTTL {
 			ent.idleTTL = postTurnTTL // promoted to active use
 		}
@@ -227,6 +257,16 @@ func (s *sessionSupervisor) route(id string, forRead bool) spawnResult {
 // routeCold performs the cold spawn (disk I/O + actor start). At most one
 // routeCold per id runs at a time (flightGroup); losers share the winner.
 func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
+	s.mu.Lock()
+	if s.stopping || s.deleted[id] {
+		s.mu.Unlock()
+		return spawnResult{Error: "session unavailable"}
+	}
+	if ent := s.resident[id]; ent != nil {
+		s.mu.Unlock()
+		return s.route(id, forRead)
+	}
+	s.mu.Unlock()
 	// NOTE (F1): this disk I/O runs WITHOUT s.mu held (map ops above and
 	// below are lock-only, microsecond-scale). route() blocks its CALLER
 	// during load, but never the supervisor loop — route is invoked from
@@ -243,10 +283,8 @@ func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 	// Epoch first: the incarnation number must exist before any worker
 	// can be spawned (resume path below stamps it on the snapshot).
 	s.mu.Lock()
-	prevEpoch := 0
-	if prev, ok := s.resident[id]; ok {
-		prevEpoch = prev.epoch
-	}
+	s.epochs[id]++
+	prevEpoch := s.epochs[id] - 1
 	s.mu.Unlock()
 	act := newSessionActor(id, rec, st, s.emit, s.bg, s.onEvent)
 	act.epoch = prevEpoch + 1
@@ -277,17 +315,12 @@ func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 		}
 		rec.TurnSeq = max(rec.TurnSeq, resumeHeader.TurnIndex)
 		act.resumeSnap = newResumeSnapshot(rec, resumeHeader)
-		// A restart never bypasses the 15-min timeout: an already-expired
-		// deadline is cleared (the resumed worker re-arms on next block);
-		// a future one is kept and enforced by the worker hooks.
-		if rec.ApprovalDeadlineUnix > 0 && rec.ApprovalDeadlineUnix <= time.Now().UnixMilli() {
-			rec.ApprovalDeadlineUnix = 0
-		}
+		// enterAwait reuses this deadline, including already-expired waits.
+		// Clearing it here would silently grant a fresh timeout on restart.
 	}
 	if act.done == nil {
 		act.done = make(chan struct{})
 	}
-	go act.run()
 	resumed := false
 	if act.resumeSnap != nil {
 		snap := act.resumeSnap
@@ -307,7 +340,7 @@ func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 		// values (env/snap); runTurnWorker never touches the actor.
 		env := workerEnv{
 			cfg: act.cfgRef(), store: act.store, emit: act.emit, inbox: act.inbox,
-			actorID: act.id, bg: act.bg,
+			actorID: act.id, bg: act.bg, done: act.done,
 			hostID:   func() string { return act.cfgRef().load().HostID },
 			brainDir: func(sid string) string { return act.store.ensureBrainDir(sid) },
 		}
@@ -331,21 +364,22 @@ func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 		ttl = idleCacheTTL
 	}
 	s.mu.Lock()
-	// Lost race: someone spawned while we loaded — keep the first winner.
-	// (The loser already consumed an epoch number; gaps are fine, reuse is not.)
-	if ent, ok := s.resident[id]; ok {
+	if s.stopping || s.deleted[id] {
 		s.mu.Unlock()
-		act.control <- shutdownMsg{}
-		<-act.done
-		if !forRead && ent.idleTTL == idleCacheTTL {
-			ent.idleTTL = postTurnTTL
+		if act.cancel != nil {
+			act.cancel()
 		}
-		return spawnResult{Inbox: ent.handle.inbox, Control: ent.handle.control, Done: ent.handle.done}
+		if act.wal != nil {
+			_ = act.wal.close()
+		}
+		close(act.done)
+		return spawnResult{Error: "session unavailable"}
 	}
+	go act.run()
 	s.resident[id] = &residentEntry{handle: h, idleTTL: ttl, epoch: h.epoch}
 	n := len(s.resident)
 	s.mu.Unlock()
-	if n > maxResidentActors {
+	if n > s.maxResidents {
 		go s.evictIdle(false)
 	}
 	trace("sup.route", map[string]any{"sid": id, "forRead": forRead, "resumed": resumed})
@@ -367,6 +401,8 @@ func (s *sessionSupervisor) onEvent(collection string) {
 // evictIdle passivates idle residents past TTL (or all idle when force).
 // Memory budget: over budget evicts oldest-idle first regardless of TTL.
 func (s *sessionSupervisor) evictIdle(force bool) {
+	s.evictMu.Lock()
+	defer s.evictMu.Unlock()
 	type cand struct {
 		id         string
 		lastActive int64
@@ -410,38 +446,24 @@ func (s *sessionSupervisor) evictIdle(force bool) {
 		}
 	}
 decided:
-	overBudget := totalBytes > sessionMemoryBudget
 	s.mu.Lock()
 	ttls := map[string]time.Duration{}
+	count := len(s.resident)
 	for id, ent := range s.resident {
 		ttls[id] = ent.idleTTL
 	}
 	s.mu.Unlock()
+	sort.Slice(cands, func(i, j int) bool { return cands[i].lastActive < cands[j].lastActive })
 	var evict []string
-	if overBudget {
-		// Oldest-idle first until under budget (bubble: simple sort).
-		for i := 0; i < len(cands); i++ {
-			for j := i + 1; j < len(cands); j++ {
-				if cands[j].lastActive < cands[i].lastActive {
-					cands[i], cands[j] = cands[j], cands[i]
-				}
-			}
-		}
-		for _, c := range cands {
-			if totalBytes <= sessionMemoryBudget {
-				break
-			}
-			evict = append(evict, c.id)
-			totalBytes -= c.bytes
-		}
-	}
 	for _, c := range cands {
 		ttl, ok := ttls[c.id]
 		if !ok {
-			continue // passivated by a concurrent round
+			continue
 		}
-		if force || now-c.lastActive > int64(ttl/time.Millisecond) {
+		if force || now-c.lastActive > int64(ttl/time.Millisecond) || totalBytes > s.memoryBudget || count > s.maxResidents {
 			evict = append(evict, c.id)
+			totalBytes -= c.bytes
+			count--
 		}
 	}
 	trace("sup.evict", map[string]any{"n": len(evict), "force": force})
@@ -455,10 +477,13 @@ decided:
 func (s *sessionSupervisor) passivate(id string) {
 	s.mu.Lock()
 	ent, ok := s.resident[id]
-	if !ok {
+	if !ok || ent.closing != nil {
 		s.mu.Unlock()
 		return
 	}
+	closing := make(chan struct{})
+	ent.closing = closing
+	defer func() { s.mu.Lock(); ent.closing = nil; close(closing); s.mu.Unlock() }()
 	// F2: do NOT delete-then-send. The entry stays mapped while the actor
 	// drains; a concurrent route() hits the SAME handle (no double spawn,
 	// no dual WAL writer). Removal happens after done closes.
@@ -466,11 +491,21 @@ func (s *sessionSupervisor) passivate(id string) {
 	s.mu.Unlock()
 	// Blocking send with watchdog timeout (a `default`-swallowed passivate
 	// would orphan a live actor with an open WAL).
+	reply := make(chan bool, 1)
 	select {
-	case handle.control <- passivateMsg{}:
+	case handle.control <- passivateMsg{Reply: reply}:
 	case <-time.After(5 * time.Second):
 		fmt.Printf("[WARN] passivate %s: control lane stuck\n", id)
 		return // stays mapped; watchdog judges liveness, route reuses it
+	}
+	select {
+	case ok := <-reply:
+		if !ok {
+			return
+		}
+	case <-handle.done:
+	case <-time.After(5 * time.Second):
+		return
 	}
 	select {
 	case <-handle.done:
@@ -498,10 +533,14 @@ func (s *sessionSupervisor) ping(id string) *watchdogReport {
 	reply := make(chan any, 1)
 	select {
 	case ent.handle.control <- watchdogPingMsg{Reply: reply}:
+	case <-ent.handle.done:
+		return nil
 	case <-time.After(5 * time.Second):
 		return nil
 	}
 	select {
+	case <-ent.handle.done:
+		return nil
 	case r := <-reply:
 		if rep, ok := r.(watchdogReport); ok {
 			return &rep
@@ -582,7 +621,7 @@ judged:
 		// a healthy stream heartbeats every event, so 2 missed rounds
 		// means wedged, regardless of the configured cadence.
 		stale := now-rep.LastProgress > int64((2*tuneWatchEvery)/time.Millisecond)
-		if !stale {
+		if !stale && rep.State != stateCancel {
 			s.mu.Lock()
 			if ent, ok := s.resident[id]; ok {
 				ent.staleRounds = 0
@@ -593,7 +632,7 @@ judged:
 		switch rep.State {
 		case stateAwaitAppr, stateAwaitQ:
 			// Waiting on a human: normal. The §8 timer bounds it.
-		case stateRunning:
+		case stateRunning, stateCancel:
 			s.mu.Lock()
 			ent, ok := s.resident[id]
 			if ok {
@@ -614,7 +653,7 @@ judged:
 			if ent.staleRounds >= maxCancelRounds {
 				reason = "watchdog_quarantine"
 				trace("watchdog.quarantine", map[string]any{"sid": id, "rounds": ent.staleRounds})
-			fmt.Printf("[WARN] watchdog: session %s stuck %d rounds, quarantining\n", id, ent.staleRounds)
+				fmt.Printf("[WARN] watchdog: session %s stuck %d rounds, quarantining\n", id, ent.staleRounds)
 			}
 			select {
 			case ent.handle.control <- cancelTurnMsg{Reason: reason}:
@@ -627,6 +666,7 @@ judged:
 // shutdownAll commits every resident in parallel with a deadline, then returns.
 func (s *sessionSupervisor) shutdownAll() {
 	s.mu.Lock()
+	s.stopping = true
 	ids := make([]string, 0, len(s.resident))
 	for id := range s.resident {
 		ids = append(ids, id)
@@ -691,7 +731,7 @@ func turnResumeCandidate(rec *SessionRecord, st *diskStore, id string) (*walHead
 			break
 		}
 	}
-	if !hasMessages && header.Prompt == "" && len(header.AttachmentIDs) == 0 {
+	if !hasMessages && header.Prompt == "" && len(header.AttachmentIDs) == 0 && header.PromptMeta["operation"] != "compact" {
 		_ = os.Remove(st.walPath(id))
 		return nil, nil
 	}
@@ -706,21 +746,122 @@ func turnResumeCandidate(rec *SessionRecord, st *diskStore, id string) (*walHead
 // turn. gen is assigned at spawn (act.gen+1); the sentinel is gone —
 // callers must set gen before use (route() does).
 func newResumeSnapshot(rec *SessionRecord, header *walHeader) *workerSnapshot {
+	opened := false
+	for _, msg := range rec.Messages {
+		if msg.TurnIndex == header.TurnIndex {
+			opened = true
+			break
+		}
+	}
 	return &workerSnapshot{
 		// gen assigned at spawn (route sets act.gen+1).
 		jailed:      rec.Jailed,
 		turnIndex:   header.TurnIndex,
 		model:       rec.Model,
 		options:     normalizedOptions(rec.Options),
-		messages:    append([]provider.Message(nil), rec.Messages...),
+		messages:    cloneMessages(rec.Messages),
 		usage:       rec.Usage,
-		compaction:  rec.Compaction,
-		context:     rec.Context,
+		compaction:  cloneJSON(rec.Compaction),
+		context:     cloneJSON(rec.Context),
 		attachments: append([]AttachmentRef(nil), rec.Attachments...),
 		cwd:         rec.CWD,
 		prompt:      header.Prompt,
-		attachIDs:   append([]string(nil), header.AttachmentIDs...),
-		incoming:    append([]filetrack.TrackedFile(nil), header.Incoming...),
-		resume:      true,
+		promptMeta:  cloneJSON(header.PromptMeta),
+		compact:     header.PromptMeta["operation"] == "compact",
+		lastDate:    rec.LastDate, lastMode: rec.LastMode,
+		attachIDs: append([]string(nil), header.AttachmentIDs...),
+		incoming:  append([]filetrack.TrackedFile(nil), header.Incoming...),
+		resume:    opened,
 	}
+}
+
+// Merge cold metadata with owner-provided summaries. Do not read stale disk
+// projections for residents whose current turn is still in the WAL.
+func (s *sessionSupervisor) mirrorSummaries() ([]map[string]any, error) {
+	byID := map[string]map[string]any{}
+	for _, summary := range listSessionSummaries(s.dataDir) {
+		byID[summary.ID] = sessionListItem(summary)
+	}
+	s.mu.Lock()
+	handles := map[string]*sessionHandle{}
+	for id, ent := range s.resident {
+		handles[id] = ent.handle
+	}
+	s.mu.Unlock()
+	type result struct {
+		id   string
+		item map[string]any
+		err  bool
+	}
+	results := make(chan result, len(handles))
+	for id, h := range handles {
+		go func() {
+			reply := make(chan any, 1)
+			v, ok := replyWithTimeout(h.inbox, Envelope{Payload: readReqMsg{What: "summary", Reply: reply}, Reply: reply})
+			if r, valid := v.(readResult); ok && valid {
+				item, valid := r.Payload.(map[string]any)
+				results <- result{id, item, !valid}
+				return
+			}
+			results <- result{id: id, err: true}
+		}()
+	}
+	for range handles {
+		r := <-results
+		if r.err {
+			return nil, fmt.Errorf("session %s is busy; retry mirror pull", r.id)
+		}
+		byID[r.id] = r.item
+	}
+	out := make([]map[string]any, 0, len(byID))
+	for _, item := range byID {
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+// purge fences cold loads before stopping the owner. No recovery worker is
+// started merely to delete a cold session, and no late writer can resurrect it.
+func (s *sessionSupervisor) purge(id string) error {
+	if !validSessionID(id) {
+		return fmt.Errorf("invalid session id")
+	}
+	s.mu.Lock()
+	s.deleted[id] = true
+	s.mu.Unlock()
+	// Wait for an in-progress cold load to observe the deletion fence.
+	s.flights.do(id, func() spawnResult { return spawnResult{Error: "deleted"} })
+	s.mu.Lock()
+	ent := s.resident[id]
+	s.mu.Unlock()
+	if ent != nil {
+		select {
+		case ent.handle.control <- shutdownMsg{}:
+		case <-ent.handle.done:
+		case <-time.After(replyTimeout):
+			return fmt.Errorf("session is busy; deletion was not completed")
+		}
+		select {
+		case <-ent.handle.done:
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("session shutdown timed out; deletion was not completed")
+		}
+	}
+	st := s.disk()
+	for _, path := range []string{st.sessionFile(id), filepath.Join(st.sessionsDir(), id+".json"), st.walPath(id)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	for _, path := range []string{filepath.Join(st.sessionsDir(), id), st.brainDir(id)} {
+		if path != "" {
+			if err := os.RemoveAll(path); err != nil {
+				return err
+			}
+		}
+	}
+	s.mu.Lock()
+	delete(s.resident, id)
+	s.mu.Unlock()
+	return nil
 }

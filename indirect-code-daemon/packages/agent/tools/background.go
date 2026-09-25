@@ -37,4 +37,18 @@ func ClipLabel(s string) string {
 // and a deliver function the tool calls exactly once when the process
 // finishes (or is killed). Nil hook = legacy behavior: Execute blocks
 // until the command ends.
-type SlowHook func(kind, label string, stop func()) (jobID string, logPath string, stream func(chunk string), deliver func(result string, isError bool))
+// BackgroundProcess carries the actual child identity and directly inherited
+// output files. No daemon-owned pipe is required for output after a restart.
+type BackgroundProcess struct {
+	// PID is the actual child pid. Pre-exec fork constraint: the pid can
+	// only be known after Start returns (the kernel assigns it during the
+	// fork/exec), so no caller may register or write a pidfile before
+	// Start succeeds — a job registered earlier could only carry a guessed
+	// identity. Registration always happens at/after the Slow() hook call.
+	PID        int
+	LogPath    string
+	StderrPath string
+	Stop       func()
+}
+
+type SlowHook func(kind, label string, process BackgroundProcess) (jobID string, logPath string, stream func(chunk string), deliver func(result string, isError bool))

@@ -45,7 +45,7 @@ render(() => {
   Object.assign(api, { m, host, setHost, doc, setDoc, setOnline });
   return (
     <RemoteCodeProvider
-      host={{} as any}
+      host={{ activeHost: () => ({ status: "online" }) } as any}
       session={{} as any}
       transcript={{} as any}
       turnChanges={{} as any}
@@ -53,7 +53,35 @@ render(() => {
       queue={{ queues: () => ({}), queueOf: () => [] } as any}
       background={{ jobs: () => [], sessionJobs: () => [], running: () => [], output: () => ({}), clock: () => 0 } as any}
       modal={m as any}
-      ui={{ appNotice: () => null } as any}
+      ui={{
+        appNotice: () => null,
+        verboseChat: () => false,
+        setVerboseChat: () => {},
+        hideToolMessages: () => false,
+        setHideToolMessages: () => {},
+        convWidth: () => "default",
+        setConvWidth: () => {},
+        turnNotify: {
+          notifyOn: () => false,
+          setEnabled: () => {},
+          soundOn: () => false,
+          setSound: () => {},
+          permission: () => "default",
+          testNotify: () => {},
+        },
+        pushSub: {
+          supported: () => false,
+          state: () => "off",
+          sync: async () => {},
+        },
+        daemonUpdate: {
+          info: () => null,
+          toggle: () => {},
+          checkNow: () => {},
+          applying: () => false,
+          apply: () => {},
+        },
+      } as any}
     >
       <SettingsModal />
     </RemoteCodeProvider>

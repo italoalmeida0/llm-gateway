@@ -142,7 +142,7 @@ function kill9(pid: number) {
     try { execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" }); } catch {}
     return;
   }
-  try { kill9(pid); } catch {}
+  try { process.kill(pid, "SIGKILL"); } catch {}
 }
 
 function launchDaemon(root: string) {

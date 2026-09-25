@@ -64,6 +64,7 @@ type metaLine struct {
 	Context     *SessionContext       `json:"context,omitempty"`
 	Model       string                `json:"model"`
 	Status      string                `json:"status"`
+	Jailed      bool                  `json:"jailed,omitempty"`
 	Pinned      bool                  `json:"pinned,omitempty"`
 	CreatedAt   int64                 `json:"createdAt"`
 	UpdatedAt   int64                 `json:"updatedAt"`
@@ -78,7 +79,6 @@ type metaLine struct {
 	// bypasses the timeout (plan §8). Zero = no pending decision.
 	ApprovalDeadlineUnix int64 `json:"approvalDeadlineUnix,omitempty"`
 }
-
 
 // validSessionID refuses traversal.
 func validSessionID(id string) bool {
@@ -137,7 +137,7 @@ func splitRecord(rec *SessionRecord) ([]turnLine, metaLine) {
 		Options: rec.Options, ID: rec.ID, CWD: rec.CWD,
 		Title: rec.Title, TitleSource: rec.TitleSource,
 		Usage: rec.Usage, Context: rec.Context, Model: rec.Model,
-		Status: rec.Status, Pinned: rec.Pinned,
+		Status: rec.Status, Pinned: rec.Pinned, Jailed: rec.Jailed,
 		CreatedAt: rec.CreatedAt, UpdatedAt: rec.UpdatedAt,
 		Attachments: rec.Attachments, LastDate: rec.LastDate, LastMode: rec.LastMode,
 		Compaction: rec.Compaction, TurnSeq: rec.TurnSeq, Queue: rec.Queue,
@@ -359,7 +359,7 @@ func assembleRecord(lines []turnLine, meta metaLine) *SessionRecord {
 		Title: meta.Title, TitleSource: meta.TitleSource,
 		LastDate: meta.LastDate, LastMode: meta.LastMode,
 		Usage: meta.Usage, Context: meta.Context, Model: meta.Model,
-		Status: meta.Status, Pinned: meta.Pinned,
+		Status: meta.Status, Pinned: meta.Pinned, Jailed: meta.Jailed,
 		CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt,
 		Attachments: meta.Attachments, Compaction: meta.Compaction,
 		TurnSeq: meta.TurnSeq, Queue: meta.Queue,

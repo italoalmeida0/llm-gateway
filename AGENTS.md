@@ -348,6 +348,18 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 
 ## Commands
 
+- CI: `.github/workflows/ci.yml` runs on `dev`/`main` pushes and PRs — gateway
+  gates (lint/typecheck/test/SPA build) on Linux plus the full Go suite on
+  **Linux, macOS and Windows** (the daemon/launcher ship per-platform) and the
+  complete race detector on Linux. The release workflow reuses this matrix as
+  its gate (`workflow_call`).
+- Release by tag (replaces the manual `bun run release <version>`): push a tag
+  `ind-vX.Y.Z` (Indirect Code) or `vX.Y.Z` (gateway) —
+  `.github/workflows/release.yml` runs the full CI matrix, builds every
+  daemon/launcher platform, verifies `SHA256SUMS.txt`/`versions.json`, creates
+  the GitHub Release with the artifacts, and commits `indirect-code-daemon/dist/`
+  back to `main` so the VPS listener serves `<gateway>/r/`. Run it manually with
+  `dry_run=true` to build+verify without publishing.
 - After implementation changes, always leave fresh local builds available for
   the user to test: `bun run build` (SPA into `dist/` + every daemon platform),
   `bun run build:web` for the SPA alone, `bun run build:daemon` for a

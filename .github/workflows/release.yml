@@ -1,0 +1,139 @@
+name: Release
+
+# Tag-driven release (replaces the manual `bun run release <version>` flow).
+#
+# Trigger: push a tag
+#   - `ind-vX.Y.Z`  Indirect Code (daemon/launcher) release
+#   - `vX.Y.Z`      gateway release (same binary set, gateway versioning)
+# or run manually with dry_run=true to build+verify WITHOUT publishing.
+#
+# Flow: full CI matrix -> build every daemon/launcher platform ->
+# verify checksums/manifests -> GitHub Release with the artifacts ->
+# commit the refreshed indirect-code-daemon/dist/ back to main (the VPS
+# auto-deploy listener serves it at <gateway>/r/, exactly what
+# `bun run release` used to do by hand).
+on:
+  push:
+    tags: ["v*", "ind-v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build + verify only (no GitHub Release, no artifact commit)"
+        type: boolean
+        default: true
+      version:
+        description: "Version to stamp (defaults to versions.json/package.json)"
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    name: Full CI gate
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Build + publish
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: indirect-code-daemon/go.mod
+          cache-dependency-path: indirect-code-daemon/go.sum
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          else
+            # ind-v1.2.3 / v1.2.3 -> 1.2.3
+            V="${GITHUB_REF_NAME#ind-}"
+            V="${V#v}"
+          fi
+          if [ -z "$V" ]; then
+            V="$(node -p "require('./package.json').version")"
+          fi
+          if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "invalid version: $V" >&2
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $V"
+
+      - name: Build daemon + launcher (all platforms)
+        run: bun ./scripts/build-indirect-all.ts "${{ steps.ver.outputs.version }}"
+
+      - name: Verify checksums and manifests
+        run: |
+          set -euo pipefail
+          cd indirect-code-daemon/dist
+          sha256sum -c SHA256SUMS.txt
+          python3 - <<'EOF'
+          import json, re
+          v = json.load(open("versions.json"))
+          sums = {n: h for h, n in re.findall(r"^([0-9a-f]{64})  (.+)$", open("SHA256SUMS.txt").read(), re.M)}
+          for blk in ("daemon", "launcher"):
+              for n, h in v[blk]["sums"].items():
+                  assert sums.get(n) == h, f"versions.json mismatch for {n}"
+          print("versions.json consistent with SHA256SUMS.txt:", v["daemon"]["version"])
+          EOF
+
+      - name: Build web dashboard (stages dist/r/)
+        run: |
+          bun install --frozen-lockfile
+          bun run build:web
+
+      - name: Create GitHub Release
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+          TITLE="Indirect Code v${{ steps.ver.outputs.version }}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — uploading assets only"
+            gh release upload "$GITHUB_REF_NAME" indirect-code-daemon/dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$TITLE" \
+              --generate-notes \
+              indirect-code-daemon/dist/*
+          fi
+
+      - name: Publish artifacts to main (gateway mirror flow)
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+          # The VPS auto-deploy listener detects the push and serves the
+          # binaries at <gateway>/r/ (same as the old `bun run release`).
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B release-publish "origin/${{ github.event.repository.default_branch }}"
+          git pull --rebase origin "${{ github.event.repository.default_branch }}" || true
+          git add indirect-code-daemon/dist package.json
+          if git diff --cached --quiet; then
+            echo "No artifact changes to publish"
+          else
+            git commit -m "Release v${{ steps.ver.outputs.version }} artifacts"
+            git push origin HEAD:"${{ github.event.repository.default_branch }}"
+          fi
+
+      - name: Dry-run summary
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          echo "Dry run complete — artifacts built and verified, nothing published."
+          ls -la indirect-code-daemon/dist/

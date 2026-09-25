@@ -40,11 +40,44 @@ type liveTracker struct {
 	toolProgress      map[string]string
 	thinkingStartedAt int64
 	turnSeq           int
+	dirty             bool // overlay changed since last snapshot (V2-004)
+}
+
+// liveSnapshot is the compact client-restore overlay for a streaming turn
+// (V2-004): enough to rebuild the live UI after a reconnect without
+// replaying deltas. Transient — never persisted.
+type liveSnapshot struct {
+	ToolStarts        map[string]int64  `json:"toolStarts,omitempty"`
+	ToolProgress      map[string]string `json:"toolProgress,omitempty"`
+	ThinkingStartedAt int64             `json:"thinkingStartedAt,omitempty"`
+}
+
+// snapshot copies the overlay when it changed since the last call.
+func (t *liveTracker) snapshot() *liveSnapshot {
+	if !t.dirty {
+		return nil
+	}
+	t.dirty = false
+	s := &liveSnapshot{ThinkingStartedAt: t.thinkingStartedAt}
+	if len(t.toolStarts) > 0 {
+		s.ToolStarts = make(map[string]int64, len(t.toolStarts))
+		for k, v := range t.toolStarts {
+			s.ToolStarts[k] = v
+		}
+	}
+	if len(t.toolProgress) > 0 {
+		s.ToolProgress = make(map[string]string, len(t.toolProgress))
+		for k, v := range t.toolProgress {
+			s.ToolProgress[k] = v
+		}
+	}
+	return s
 }
 
 func (t *liveTracker) track(event core.AgentEvent) {
 	if _, ok := event.(core.EvAssistantStart); ok {
 		t.thinkingStartedAt = 0
+		t.dirty = true
 		t.live = &liveAssistant{Role: "assistant", TurnIndex: t.turnSeq, Streaming: true, Content: []liveBlock{}}
 		return
 	}
@@ -55,12 +88,17 @@ func (t *liveTracker) track(event core.AgentEvent) {
 			t.toolStarts = map[string]int64{}
 		}
 		t.toolStarts[e.ID] = e.StartedAt
+		t.dirty = true
 	case core.EvReasoningDelta:
 		if t.thinkingStartedAt == 0 {
 			t.thinkingStartedAt = time.Now().UnixMilli()
+			t.dirty = true
 		}
 	case core.EvTextDelta, core.EvToolUseStart, core.EvToolCall, core.EvAssistantMessage, core.EvTurnEnd, core.EvRetry:
-		t.thinkingStartedAt = 0
+		if t.thinkingStartedAt != 0 {
+			t.thinkingStartedAt = 0
+			t.dirty = true
+		}
 	case core.EvToolProgress:
 		if t.toolProgress == nil {
 			t.toolProgress = map[string]string{}
@@ -70,9 +108,11 @@ func (t *liveTracker) track(event core.AgentEvent) {
 			text = text[len(text)-64*1024:]
 		}
 		t.toolProgress[e.ID] = text
+		t.dirty = true
 	case core.EvToolResult:
 		delete(t.toolProgress, e.ID)
 		delete(t.toolStarts, e.ID)
+		t.dirty = true
 	}
 	if t.live == nil {
 		return

@@ -11,7 +11,7 @@ import (
 )
 
 // traceSink is the dev-only append-everything JSONL log
-// (docs/logging-plan.md). Prod stays clean: trace() is a single atomic
+//. Prod stays clean: trace() is a single atomic
 // check (traceEnabled is set once at startup) and compiled calls are
 // cheap string builds that never hit disk when disabled.
 type traceSink struct {

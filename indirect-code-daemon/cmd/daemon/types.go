@@ -90,7 +90,7 @@ type ModelSelection struct {
 // SessionOptions are per-session agent behavior flags.
 // v2: Skills wiring removed, but the field stays in the WIRE envelope
 // (always []) because the frontend and the frozen WS protocol expect it
-// (see docs/actor-migration-plan.md §1.1).
+//.
 type SessionOptions struct {
 	Effort string   `json:"effort"`
 	Mode   string   `json:"mode"`

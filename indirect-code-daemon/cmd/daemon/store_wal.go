@@ -85,7 +85,7 @@ type walEvent struct {
 	Attachments []AttachmentRef         `json:"attachments,omitempty"`
 	UpdatedAt   int64                   `json:"updatedAt,omitempty"`
 	// ApprovalDeadlineUnix persists the 15-min decision deadline inside the
-	// WAL (plan §8): a respawn recomputes the remainder instead of
+	// WAL: a respawn recomputes the remainder instead of
 	// restarting the timer.
 	ApprovalDeadlineUnix int64  `json:"approvalDeadlineUnix,omitempty"`
 	ClearApprovalDeadline bool `json:"clearApprovalDeadline,omitempty"`

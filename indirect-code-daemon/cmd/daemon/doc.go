@@ -12,8 +12,10 @@
 //
 // Rules: no lock spans two actors. State belongs to exactly one goroutine;
 // everyone else talks to it through bounded mailboxes (data lane) plus a
-// small always-accepted control lane. A watchdog kill is handled exactly
-// like a process crash: respawn + replay disk/WAL, never half-state.
+// small priority control lane — senders wait for room or answer busy, and
+// an accepted cancellation is never silently lost (V2-006). A watchdog
+// kill is handled exactly like a process crash: respawn + replay
+// disk/WAL, never half-state.
 // BG jobs are NEVER re-run after a kill — logs and state are preserved,
 // live processes are re-adopted via pidfile.
 //

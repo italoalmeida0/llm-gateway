@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
@@ -32,6 +33,12 @@ type wsServer struct {
 	admin    *sessionAdmin
 	ws       *wsActor
 	root     *root
+	// resyncFlush single-flights the V2-002 gap-recovery flusher.
+	resyncFlush atomic.Bool
+	// lanes dispatch per-session command lanes + the host lane (V2-006).
+	lanesMu  sync.Mutex
+	lanes    map[string]*dispatchLane
+	hostLane *dispatchLane
 	// updates is the brutal-update protocol host (check/apply/toggle);
 	// nil in tests that never boot the update flow.
 	updates *DaemonServer
@@ -47,11 +54,45 @@ type convertOutcome struct {
 }
 
 func newWSServer(dataDir string, cfg *configCell, sessions *sessionSupervisor, bg *bgSupervisor, projects *projectsActor, admin *sessionAdmin, ws *wsActor) *wsServer {
-	return &wsServer{
+	s := &wsServer{
 		dataDir: dataDir, configDir: dataDir, cfg: cfg, sessions: sessions, bg: bg,
 		projects: projects, admin: admin, ws: ws,
 		debounce: map[string]*time.Timer{},
+		lanes:    map[string]*dispatchLane{},
+		hostLane: &dispatchLane{},
 	}
+	// V2-002: when outbox room appears (the writer caught up), flush any
+	// sessions whose event stream had gaps so the client gets an explicit
+	// resync instead of a silent hole.
+	ws.onSpace = s.scheduleResyncFlush
+	return s
+}
+
+// scheduleResyncFlush runs the resync flusher single-flight, OFF the ws
+// writer goroutine (session snapshots round-trip actors and must never
+// stall the socket writer).
+func (s *wsServer) scheduleResyncFlush() {
+	if !s.resyncFlush.CompareAndSwap(false, true) {
+		return // a flusher is already running; it drains until empty
+	}
+	go func() {
+		defer s.resyncFlush.Store(false)
+		for {
+			sids := s.ws.takeResyncs()
+			if len(sids) == 0 {
+				return
+			}
+			for _, sid := range sids {
+				ev, _ := s.buildSessionData(sid, "")
+				if ev == nil {
+					continue // gone: nothing to resync
+				}
+				ev["resync"] = true
+				// A drop here re-marks the session for the next round.
+				s.emit(ev)
+			}
+		}
+	}()
 }
 
 func (s *wsServer) host() string {
@@ -62,6 +103,39 @@ func (s *wsServer) host() string {
 }
 
 func (s *wsServer) emit(ev any) { s.ws.emit(ev) }
+
+// buildSessionData assembles the full client snapshot for one session:
+// the persistent record PLUS the actor-owned transient overlay (V2-004)
+// — the outstanding decision and the live turn state. Shared by
+// get_session and the V2-002 resync flushes (one snapshot contract).
+// Returns (nil, errMsg) when the session cannot be read right now.
+func (s *wsServer) buildSessionData(sid, requestID string) (map[string]any, string) {
+	res := s.sessions.route(sid, true)
+	if res.Error != "" {
+		return nil, "Session not found"
+	}
+	rr := make(chan any, 1)
+	select {
+	case res.Inbox <- Envelope{Payload: readReqMsg{What: "session", Reply: rr}}:
+	case <-time.After(replyTimeout):
+		return nil, "Session busy"
+	}
+	select {
+	case r := <-rr:
+		if rd, ok := r.(readResult); ok && rd.Error == "" {
+			if rec, ok := rd.Payload.(*SessionRecord); ok {
+				p := sessionPayloadPaged(rec, 0)
+				for k, v := range rd.Extra {
+					p[k] = v
+				}
+				return map[string]any{"type": "session_data", "requestId": requestID, "hostId": s.host(), "session": p}, ""
+			}
+		}
+		return nil, "Session not found"
+	case <-time.After(replyTimeout):
+		return nil, "Session busy"
+	}
+}
 
 func (s *wsServer) error(sessionID, requestID, msg string) {
 	s.emit(map[string]any{"type": "error", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "message": msg})
@@ -89,6 +163,82 @@ func (s *wsServer) notifyChange(collection string) {
 // dispatch routes one inbound WS message. No global lock: parse the
 // envelope, then hand to the owning actor (the Phase-0 fix, by construction).
 func (s *wsServer) dispatch(raw []byte) {
+	// V2-006: admission only — never block the socket reader on an actor
+	// round-trip. Session commands run in order on their session's lane;
+	// host-level commands have their own lane so one busy session cannot
+	// delay unrelated work. Saturation answers with an explicit busy
+	// error instead of queueing unboundedly.
+	var base struct {
+		Type      string `json:"type"`
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(raw, &base); err != nil {
+		return
+	}
+	if base.SessionID == "" {
+		s.hostLane.push(raw, s.handleRaw, func() {
+			s.emit(map[string]any{"type": "error", "hostId": s.host(), "message": "Host busy"})
+		})
+		return
+	}
+	sid := base.SessionID
+	s.lanesMu.Lock()
+	l := s.lanes[sid]
+	if l == nil {
+		l = &dispatchLane{}
+		s.lanes[sid] = l
+	}
+	s.lanesMu.Unlock()
+	l.push(raw, s.handleRaw, func() {
+		s.error(sid, "", "Session busy")
+	})
+}
+
+// dispatchLane is one in-order command lane (V2-006). A single worker
+// drains it at a time: dependent commands to the same session keep their
+// order, while unrelated lanes advance independently. Bounded: overflow
+// is refused with an explicit error, and the worker goroutine lives only
+// while the lane has work.
+type dispatchLane struct {
+	mu      sync.Mutex
+	queue   [][]byte
+	running bool
+}
+
+func (l *dispatchLane) push(raw []byte, run func([]byte), onBusy func()) {
+	l.mu.Lock()
+	if len(l.queue) >= tuneDispatchQueue {
+		l.mu.Unlock()
+		onBusy()
+		return
+	}
+	l.queue = append(l.queue, raw)
+	if l.running {
+		l.mu.Unlock()
+		return
+	}
+	l.running = true
+	l.mu.Unlock()
+	go l.drain(run)
+}
+
+func (l *dispatchLane) drain(run func([]byte)) {
+	for {
+		l.mu.Lock()
+		if len(l.queue) == 0 {
+			l.running = false
+			l.mu.Unlock()
+			return
+		}
+		raw := l.queue[0]
+		l.queue = l.queue[1:]
+		l.mu.Unlock()
+		run(raw)
+	}
+}
+
+// handleRaw runs one admitted command on its lane's worker goroutine.
+func (s *wsServer) handleRaw(raw []byte) {
 	var base struct {
 		Type      string `json:"type"`
 		HostID    string `json:"hostId"`
@@ -127,9 +277,13 @@ func (s *wsServer) dispatch(raw []byte) {
 		}
 		_ = json.Unmarshal(raw, &req)
 		if res := s.sessions.route(req.SessionID, false); res.Error == "" {
+			// The control lane carries cancellation: an admitted cancel is
+			// NEVER silently dropped (V2-006) — wait for room and answer
+			// busy only when the actor is wedged.
 			select {
 			case res.Control <- cancelTurnMsg{Reason: "user"}:
-			default:
+			case <-time.After(replyTimeout):
+				s.error(req.SessionID, "", "Session busy")
 			}
 		}
 
@@ -139,30 +293,12 @@ func (s *wsServer) dispatch(raw []byte) {
 			RequestID string `json:"requestId"`
 		}
 		_ = json.Unmarshal(raw, &req)
-		res := s.sessions.route(req.SessionID, true)
-		if res.Error != "" {
-			s.error(req.SessionID, req.RequestID, "Session not found")
+		ev, errMsg := s.buildSessionData(req.SessionID, req.RequestID)
+		if ev == nil {
+			s.error(req.SessionID, req.RequestID, errMsg)
 			return
 		}
-		rr := make(chan any, 1)
-		select {
-		case res.Inbox <- Envelope{Payload: readReqMsg{What: "session", Reply: rr}}:
-		case <-time.After(replyTimeout):
-			s.error(req.SessionID, req.RequestID, "Session busy")
-			return
-		}
-		select {
-		case r := <-rr:
-			if rd, ok := r.(readResult); ok && rd.Error == "" {
-				if rec, ok := rd.Payload.(*SessionRecord); ok {
-					s.emit(map[string]any{"type": "session_data", "requestId": req.RequestID, "hostId": s.host(), "session": sessionPayloadPaged(rec, 0)})
-					return
-				}
-			}
-			s.error(req.SessionID, req.RequestID, "Session not found")
-		case <-time.After(replyTimeout):
-			s.error(req.SessionID, req.RequestID, "Session busy")
-		}
+		s.emit(ev)
 
 	case "get_history":
 		var req struct {
@@ -562,7 +698,7 @@ func (s *wsServer) dispatch(raw []byte) {
 		s.onSearchFiles(req.RequestID, req.SessionID, req.ProjectID, req.Query)
 
 	case "search":
-		// Removed in v2 (plan §2): frontend keeps the UI inert.
+		// Removed in v2: frontend keeps the UI inert.
 		var req struct {
 			Query string `json:"query"`
 		}

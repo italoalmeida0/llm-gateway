@@ -18,7 +18,7 @@ import (
 
 var _ = core.StripLeadingSystemPrompt
 
-// Turn timeout: 15 min per approval/question request (plan §8).
+// Turn timeout: 15 min per approval/question request.
 // Overridable via ICD_AWAIT_TIMEOUT (see tuning.go).
 var awaitTimeout = tuneAwaitTimeout
 
@@ -39,6 +39,9 @@ type pendingAsk struct {
 	kind     string // "approval" | "question"
 	timer    *time.Timer
 	deadline int64 // unix milli, persisted in rec.ApprovalDeadlineUnix
+	// approval resume data (V2-004: enough to re-render the original
+	// request after a reconnect — correlation id, tool, arguments).
+	args json.RawMessage
 	// question resume data
 	recommended [][]string
 	notice      string
@@ -74,6 +77,9 @@ type sessionActor struct {
 	closing        bool
 	pendingContext []provider.Message
 	pending        *pendingAsk
+	// live is the worker's streaming overlay (V2-004), actor-owned so a
+	// reconnect snapshot can restore it.
+	live *liveSnapshot
 
 	// pendingBalloon holds the finished file-changes balloon until the
 	// finalizer appends it with the true message count.
@@ -104,6 +110,8 @@ type sessionActor struct {
 	resumeSnap *workerSnapshot
 
 	lastProgress  int64 // unix milli, for watchdog
+	waitOp        string // expected blocking op (V2-001), e.g. "provider", "tool"
+	waitUntil     int64  // unix milli; > now = declared wait in effect
 	residentBytes int64
 
 	// startWorker runs the turn. Production: defaultStartWorker (agent loop).
@@ -371,6 +379,22 @@ func (a *sessionActor) handleData(env Envelope) {
 		if m.gen == a.gen {
 			a.touch()
 		}
+	case workerWaitMsg:
+		// V2-001: declare/clear an expected blocking window. Stamped with
+		// the turn generation — a stale worker cannot extend a new turn.
+		if m.gen == a.gen {
+			if m.until > time.Now().UnixMilli() {
+				a.waitOp, a.waitUntil = m.op, m.until
+			} else {
+				a.waitOp, a.waitUntil = "", 0
+			}
+		}
+	case workerLiveMsg:
+		// V2-004: the live turn overlay (tool starts/progress, thinking) is
+		// actor-owned so a reconnect snapshot can restore it.
+		if m.gen == a.gen {
+			a.live = m.live
+		}
 	case workerFinishedMsg:
 		a.onWorkerFinished(m)
 	}
@@ -384,7 +408,7 @@ func (a *sessionActor) handleControl(msg any) bool {
 	case watchdogPingMsg:
 		depth := len(a.inbox)
 		a.residentBytes = estimateResidentBytes(a.rec)
-		m.Reply <- watchdogReport{Alive: true, LastProgress: a.lastProgress, State: a.state, QueueDepth: depth, ResidentBytes: a.residentBytes}
+		m.Reply <- watchdogReport{Alive: true, LastProgress: a.lastProgress, State: a.state, QueueDepth: depth, ResidentBytes: a.residentBytes, WaitOp: a.waitOp, WaitUntil: a.waitUntil}
 	case passivateMsg:
 		ok := a.state == stateIdle && a.persistErr == nil
 		if ok {
@@ -664,6 +688,25 @@ type workerHeartbeatMsg struct {
 	gen int
 }
 
+// workerWaitMsg declares an EXPECTED blocking wait (provider request incl.
+// retry backoff, foreground tool execution) with its own deadline (V2-001).
+// While a declared wait is live the watchdog must not infer failure from
+// missing progress events; past the deadline the normal stale rule applies.
+// until <= now clears the declaration (operation finished).
+type workerWaitMsg struct {
+	gen   int
+	op    string
+	until int64 // unix milli
+}
+
+// workerLiveMsg carries the compact live turn overlay (V2-004) from the
+// worker to the actor so reconnect snapshots can restore tool progress,
+// tool start times and thinking time without replaying deltas.
+type workerLiveMsg struct {
+	gen  int
+	live *liveSnapshot
+}
+
 // workerFinishedMsg is sent by the worker when it exits.
 type workerFinishedMsg struct {
 	gen       int
@@ -687,6 +730,8 @@ func msgType(p any) string { return fmt.Sprintf("%T", p) }
 
 func (a *sessionActor) finishTurn(ok bool) {
 	a.clearPending()
+	a.waitOp, a.waitUntil = "", 0 // the turn's waits end with the turn
+	a.live = nil                  // the turn's overlay ends with the turn
 	if a.cancel != nil {
 		a.cancel = nil
 	}
@@ -744,6 +789,7 @@ func (a *sessionActor) finishTurn(ok bool) {
 
 func (a *sessionActor) doCancel(reason string) {
 	trace("actor.cancel", map[string]any{"sid": a.id, "reason": reason, "state": a.state, "gen": a.gen})
+	a.waitOp, a.waitUntil = "", 0 // cancellation ends any declared wait
 	if a.state == stateIdle || a.state == statePersist {
 		return
 	}
@@ -800,7 +846,7 @@ func (a *sessionActor) doCancel(reason string) {
 func (a *sessionActor) enterAwait(kind, id string, recommended [][]string) {
 	now := time.Now().UnixMilli()
 	deadline := now + int64(awaitTimeout/time.Millisecond)
-	// Respawn clamp (plan §8): a persisted deadline from before the crash
+	// Respawn clamp: a persisted deadline from before the crash
 	// wins over a fresh 15-min window — a restart never extends the wait.
 	if a.rec.ApprovalDeadlineUnix > 0 && a.rec.ApprovalDeadlineUnix < deadline {
 		deadline = a.rec.ApprovalDeadlineUnix
@@ -1044,7 +1090,7 @@ func (a *sessionActor) onFork(m forkReqMsg) {
 }
 
 func (a *sessionActor) onRead(m readReqMsg) {
-	// Served from actor RAM (plan §6/§7.2). Payloads are COPIES: the
+	// Served from actor RAM. Payloads are COPIES: the
 	// caller reads off-goroutine, so handing out the live *SessionRecord
 	// (or its backing array) is a data race. Copies are cheap next to the
 	// disk/network work around them.
@@ -1053,7 +1099,7 @@ func (a *sessionActor) onRead(m readReqMsg) {
 		meta := recordMeta(a.rec)
 		m.Reply <- readResult{Payload: sessionListItem(summaryFromMeta(meta))}
 	case "session", "data":
-		m.Reply <- readResult{Payload: cloneRecord(a.rec)}
+		m.Reply <- readResult{Payload: cloneRecord(a.rec), Extra: a.clientOverlay()}
 	case "history":
 		msgs := a.rec.Messages
 		if m.Limit > 0 && len(msgs) > m.Limit {
@@ -1068,6 +1114,38 @@ func (a *sessionActor) onRead(m readReqMsg) {
 	default:
 		m.Reply <- readResult{Error: "unknown read"}
 	}
+}
+
+// clientOverlay is the actor-owned transient client state (V2-004): the
+// outstanding human decision (if any) + the live turn overlay. Built in
+// the actor's own loop, so it is ordered consistently with the stream
+// events surrounding it. Never persisted.
+func (a *sessionActor) clientOverlay() map[string]any {
+	extra := map[string]any{}
+	if p := a.pending; p != nil {
+		switch p.kind {
+		case "approval":
+			extra["pendingApproval"] = map[string]any{
+				"callId": p.id, "tool": p.tool, "args": p.args, "deadline": p.deadline,
+			}
+		case "question":
+			if p.question != nil {
+				extra["question"] = map[string]any{"id": p.id, "questions": p.question.Questions}
+			}
+		}
+	}
+	if l := a.live; l != nil {
+		if len(l.ToolStarts) > 0 {
+			extra["toolStarts"] = l.ToolStarts
+		}
+		if len(l.ToolProgress) > 0 {
+			extra["toolProgress"] = l.ToolProgress
+		}
+		if l.ThinkingStartedAt != 0 {
+			extra["thinkingStartedAt"] = l.ThinkingStartedAt
+		}
+	}
+	return extra
 }
 
 // onWALAppend applies one worker event to the in-memory record + WAL.
@@ -1206,6 +1284,7 @@ func (a *sessionActor) onWorkerApprovalReq(m workerApprovalReqMsg) {
 	trace("actor.wait", map[string]any{"sid": a.id, "kind": "approval", "id": m.id, "tool": m.tool})
 	a.enterAwait("approval", m.id, nil)
 	a.pending.tool = m.tool
+	a.pending.args = m.args
 	a.emit(map[string]any{"type": "tool_approval_request", "sessionId": a.id, "callId": m.id, "tool": m.tool, "args": m.args})
 }
 
@@ -1262,6 +1341,13 @@ func (a *sessionActor) wakeQuestion(id string, answers [][]string) {
 // v1 semantics: late-result into the live turn when running, otherwise a
 // wake-up turn on the idle session carrying the notice as its prompt.
 func (a *sessionActor) onBgNotice(m bgNoticeMsg) {
+	// V2-003: idempotent by transcript identity — a redelivered notice
+	// must not append twice or start a second wake-up turn. The ack lets
+	// the BG supervisor retire the pending delivery.
+	if a.noticeDelivered(m.JobID) {
+		a.ackNotice(m.JobID)
+		return
+	}
 	a.touch()
 	a.emit(map[string]any{"type": "bg_notice", "sessionId": a.id, "jobId": m.JobID, "text": noticePreview(m.Text), "finished": m.Finished})
 	if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
@@ -1270,17 +1356,45 @@ func (a *sessionActor) onBgNotice(m bgNoticeMsg) {
 		a.pendingContext = append(a.pendingContext, msg)
 		a.saveOrAppend(walMsgEvent(msg))
 		a.pingChange()
+		a.ackNotice(m.JobID)
 		return
 	}
 	if a.state != stateIdle {
-		return
+		return // transient (cancelling/orphaned): keep the notice pending
 	}
 	// Idle: wake-up turn. At most one per session: if a fresh user turn won
 	// the race between our state check and startTurn, startTurn refuses
-	// (state != idle) and we fold the notice as late-result instead.
+	// (state != idle) and the notice stays pending for the retry — the
+	// background_delivery identity keeps redelivery idempotent.
 	// The notice text is the turn prompt with background_delivery meta, so
 	// the model sees exactly what v1 delivered via runAgentTurnWithMeta.
-	a.startTurnWithMeta(m.Text, nil, "", map[string]string{"background_delivery": m.JobID})
+	if err := a.startTurnWithMeta(m.Text, nil, "", map[string]string{"background_delivery": m.JobID}); err == nil {
+		a.ackNotice(m.JobID)
+	}
+}
+
+// noticeDelivered reports whether this job's notice already landed in the
+// transcript (its background_delivery identity, V2-003).
+func (a *sessionActor) noticeDelivered(jobID string) bool {
+	for _, msg := range a.rec.Messages {
+		if msg.Meta["background_delivery"] == jobID {
+			return true
+		}
+	}
+	return false
+}
+
+// ackNotice retires the BG supervisor's pending delivery once the notice
+// is safe in the transcript. A full BG inbox just delays retirement —
+// redelivery stays idempotent.
+func (a *sessionActor) ackNotice(jobID string) {
+	if a.bg == nil {
+		return
+	}
+	select {
+	case a.bg.inbox <- Envelope{Payload: bgAckMsg{JobID: jobID}}:
+	default:
+	}
 }
 
 func noticePreview(text string) string {

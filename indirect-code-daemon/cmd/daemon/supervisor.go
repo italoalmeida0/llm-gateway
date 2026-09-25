@@ -13,7 +13,7 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/filetrack"
 )
 
-// Session lifecycle TTLs (plan §6).
+// Session lifecycle TTLs.
 // Session TTLs: single source of truth is tuning.go (F4).
 var (
 	// idleCacheTTL keeps a never-used (passively loaded) session in RAM.
@@ -26,7 +26,7 @@ var (
 // ignored context before the actor quarantines itself.
 const maxCancelRounds = 4
 
-// Memory budget for resident sessions (plan §6.1). Single source of truth:
+// Memory budget for resident sessions. Single source of truth:
 // tuning.go (F4); vars because env overrides resolve at startup, not const.
 var (
 	sessionMemoryBudget = tuneMemBudget
@@ -551,7 +551,7 @@ func (s *sessionSupervisor) ping(id string) *watchdogReport {
 	}
 }
 
-// watchdogRound implements the 3-level policy (plan §5.5): no reply → reap
+// watchdogRound implements the 3-level policy: no reply → reap
 // (next route respawns from disk/WAL); alive+stale+awaiting → normal;
 // alive+stale+running → cancel (repeatedly, never reap: a live worker
 // goroutine sharing the WAL must not be orphaned — see stale-running
@@ -617,10 +617,14 @@ judged:
 			s.mu.Unlock()
 			continue
 		}
-		// Stale threshold scales with the watch interval (default 2x15s):
-		// a healthy stream heartbeats every event, so 2 missed rounds
-		// means wedged, regardless of the configured cadence.
-		stale := now-rep.LastProgress > int64((2*tuneWatchEvery)/time.Millisecond)
+		// V2-001: a DECLARED wait (provider request, foreground tool, retry
+		// backoff) is expected silence — the operation's own deadline bounds
+		// it; missing progress only means wedged when no wait is live. The
+		// stale threshold scales with the watch interval (default 2x15s): a
+		// healthy stream heartbeats every event, so 2 missed rounds outside
+		// a declared wait means wedged, regardless of the configured cadence.
+		waitLive := rep.WaitUntil > now
+		stale := !waitLive && now-rep.LastProgress > int64((2*tuneWatchEvery)/time.Millisecond)
 		if !stale && rep.State != stateCancel {
 			s.mu.Lock()
 			if ent, ok := s.resident[id]; ok {

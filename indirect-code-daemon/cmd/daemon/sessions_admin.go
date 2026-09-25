@@ -104,6 +104,12 @@ func (a *sessionAdmin) purgeSession(id string) {
 			}
 		case <-time.After(replyTimeout):
 		}
+		// V2-003: the deleted session's pending notices die with it —
+		// a late delivery must never resurrect the session.
+		select {
+		case a.bg.inbox <- Envelope{Payload: bgDropNoticesMsg{SessionID: id}}:
+		case <-time.After(replyTimeout):
+		}
 	}
 	if a.purge == nil {
 		return

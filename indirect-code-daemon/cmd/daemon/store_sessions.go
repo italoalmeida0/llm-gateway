@@ -76,7 +76,7 @@ type metaLine struct {
 	Queue       []QueuedMessage       `json:"queue,omitempty"`
 	// ApprovalDeadlineUnix bounds a pending approval/question (15-min timer).
 	// Persisted so a respawn recomputes the remainder — a restart never
-	// bypasses the timeout (plan §8). Zero = no pending decision.
+	// bypasses the timeout. Zero = no pending decision.
 	ApprovalDeadlineUnix int64 `json:"approvalDeadlineUnix,omitempty"`
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ func (j *bgJob) closeDone() {
 }
 
 // bgPidfile is written per job so a supervisor (re)start can re-adopt live
-// processes (plan §5.3). Jobs are NEVER re-run: re-adoption only.
+// processes. Jobs are NEVER re-run: re-adoption only.
 type bgPidfile struct {
 	JobID      string `json:"jobId"`
 	PID        int    `json:"pid"`
@@ -156,7 +157,21 @@ type bgSupervisor struct {
 
 	jobs        map[string]*bgJob
 	subscribers map[chan struct{}]string
-	done        chan struct{}
+	// notices tracks completion/cancellation delivery INDEPENDENTLY of
+	// job completion (V2-003): a notice is retained, retried and only
+	// dropped once the session acknowledges folding it into its
+	// transcript. Keyed by job id — redelivery is idempotent.
+	notices map[string]*pendingNotice
+	done    chan struct{}
+}
+
+// pendingNotice is one undelivered/unacknowledged session notice.
+type pendingNotice struct {
+	JobID     string `json:"jobId"`
+	SessionID string `json:"sessionId"`
+	Text      string `json:"text"`
+	Finished  bool   `json:"finished"`
+	Attempts  int    `json:"attempts"`
 }
 
 func newBGSupervisor(dataDir string) *bgSupervisor {
@@ -165,7 +180,9 @@ func newBGSupervisor(dataDir string) *bgSupervisor {
 		inbox:       make(chan Envelope, inboxCap),
 		control:     make(chan any, controlCap),
 		jobs:        map[string]*bgJob{},
-		subscribers: map[chan struct{}]string{}, done: make(chan struct{}),
+		subscribers: map[chan struct{}]string{},
+		notices:     map[string]*pendingNotice{},
+		done:        make(chan struct{}),
 	}
 }
 
@@ -184,10 +201,17 @@ func (b *bgSupervisor) run(wg *sync.WaitGroup) {
 		}
 	}()
 	b.readopt()
+	b.loadNotices()
+	retry := time.NewTicker(bgNoticeRetryEvery)
+	defer retry.Stop()
 	for {
 		select {
 		case env := <-b.inbox:
 			b.handle(env)
+		case <-retry.C:
+			// V2-003: independent, non-blocking redelivery of retained
+			// notices — a busy session never blocks listing/cancel/finish.
+			b.flushNotices()
 		case msg := <-b.control:
 			switch msg.(type) {
 			case shutdownMsg:
@@ -203,6 +227,10 @@ func (b *bgSupervisor) handle(env Envelope) {
 	switch m := env.Payload.(type) {
 	case bgRegisterMsg:
 		b.onRegister(m)
+	case bgAckMsg:
+		b.onAck(m)
+	case bgDropNoticesMsg:
+		b.dropNoticesFor(m.SessionID)
 	case bgFinishMsg:
 		b.onFinish(m.JobID, m.Status, m.Result)
 	case bgCancelMsg:
@@ -314,7 +342,7 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 	return true
 }
 
-// ---- sleep/wake (plan §4: push, no polling) ----
+// ---- sleep/wake (push, no polling) ----
 
 type bgUnsubscribeMsg struct{ ch chan struct{} }
 
@@ -484,13 +512,6 @@ func (b *bgSupervisor) cancelJob(callerSessionID, jobID string) (tools.BgCancelO
 
 func (b *bgSupervisor) deliver(j *bgJob, finished bool) {
 	trace("bg.deliver", map[string]any{"job": j.ID, "sid": j.SessionID, "finished": finished})
-	if b.session == nil {
-		return
-	}
-	inbox, _, ok := b.session(j.SessionID)
-	if !ok {
-		return
-	}
 	var text string
 	if finished {
 		state := "finished"
@@ -521,9 +542,105 @@ func (b *bgSupervisor) deliver(j *bgJob, finished bool) {
 		sb.WriteString("Do not wait for it — continue your work another way.</system-reminder>")
 		text = sb.String()
 	}
+	// V2-003: delivery is tracked independently of job completion. The
+	// notice is retained (and persisted) until the session acknowledges
+	// folding it into its transcript; failed sends are retried by the
+	// run() ticker. Keyed by job id: redelivery is idempotent.
+	n := b.retainNotice(j.ID, j.SessionID, text, finished)
+	b.tryNotice(n)
+}
+
+// ---- pending notice delivery (V2-003) ----
+
+func (b *bgSupervisor) noticePath(jobID string) string {
+	return filepath.Join(b.bgDir(), jobID+".notice.json")
+}
+
+// retainNotice records (idempotently) a notice awaiting delivery + ack.
+func (b *bgSupervisor) retainNotice(jobID, sessionID, text string, finished bool) *pendingNotice {
+	if n, ok := b.notices[jobID]; ok {
+		return n
+	}
+	n := &pendingNotice{JobID: jobID, SessionID: sessionID, Text: text, Finished: finished}
+	b.notices[jobID] = n
+	if raw, err := json.Marshal(n); err == nil {
+		_ = os.MkdirAll(b.bgDir(), 0o700)
+		_ = os.WriteFile(b.noticePath(jobID), raw, 0o600)
+	}
+	return n
+}
+
+// tryNotice attempts one non-blocking delivery. The notice STAYS pending
+// until the session acks it — a successful send is not the ack.
+func (b *bgSupervisor) tryNotice(n *pendingNotice) {
+	if b.session == nil {
+		return
+	}
+	inbox, _, ok := b.session(n.SessionID)
+	if !ok {
+		return
+	}
+	n.Attempts++
 	select {
-	case inbox <- Envelope{SessionID: j.SessionID, Payload: bgNoticeMsg{JobID: j.ID, Text: text, Finished: finished}}:
+	case inbox <- Envelope{SessionID: n.SessionID, Payload: bgNoticeMsg{JobID: n.JobID, Text: n.Text, Finished: n.Finished}}:
 	default:
+	}
+}
+
+// flushNotices retries every retained notice (non-blocking: one busy
+// session can never stall the BG supervisor).
+func (b *bgSupervisor) flushNotices() {
+	for _, n := range b.notices {
+		b.tryNotice(n)
+	}
+}
+
+// onAck retires a notice the session has folded into its transcript.
+func (b *bgSupervisor) onAck(m bgAckMsg) {
+	if _, ok := b.notices[m.JobID]; !ok {
+		return
+	}
+	delete(b.notices, m.JobID)
+	_ = os.Remove(b.noticePath(m.JobID))
+	trace("bg.notice.acked", map[string]any{"job": m.JobID})
+}
+
+// dropNoticesFor terminates pending delivery for a deleted session —
+// deletion must never be undone by a late notice (no resurrection).
+func (b *bgSupervisor) dropNoticesFor(sessionID string) {
+	for id, n := range b.notices {
+		if n.SessionID == sessionID {
+			delete(b.notices, id)
+			_ = os.Remove(b.noticePath(id))
+		}
+	}
+}
+
+// loadNotices recovers unacknowledged notices after a restart (V2-003:
+// terminal metadata is retained on disk — never the already-deleted
+// pidfile). The original process is NOT re-run.
+func (b *bgSupervisor) loadNotices() {
+	entries, err := os.ReadDir(b.bgDir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".notice.json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(b.bgDir(), e.Name()))
+		if err != nil {
+			continue
+		}
+		var n pendingNotice
+		if json.Unmarshal(raw, &n) != nil || n.JobID == "" {
+			_ = os.Remove(filepath.Join(b.bgDir(), e.Name()))
+			continue
+		}
+		if _, exists := b.notices[n.JobID]; !exists {
+			notice := n
+			b.notices[n.JobID] = &notice
+		}
 	}
 }
 

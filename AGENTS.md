@@ -216,7 +216,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   read — collapsed means gone), leaving only the `Working` status row plus the
   chevron. Never available in a new conversation
   (`draftMode`) or behind a blocked workspace — the chevron is hidden there.
-  - **Daemon project** (`indirect-code-daemon/`, Go 1.25: `cmd/daemon` +
+  - **Daemon project** (`indirect-code-daemon/`, Go 1.26: `cmd/daemon` +
     `packages/agent|core|provider|…`; external deps are gorilla/websocket,
     sergi/go-diff, x/image, x/net — keep both projects' dep lists minimal).
     ONE multi-call binary (the old `cmd/launcher` is merged into `cmd/daemon`):
@@ -229,22 +229,26 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
     `indirect-code-<goos>-<goarch>`; `versions.json` has ONE `daemon` field
     carrying those assets (there is no separate launcher concept anywhere
     in the protocol) — version skew is impossible by construction.
-    The bg registry is **memory-only**: a restart drops running jobs (only
-    their `.log` files survive, still readable). Background tasks (bash/python
-    only): a command outliving `AutoBackgroundAfter` (10s) detaches — the
-    tool returns a placeholder naming the brain `.log`, output streams there
+    V1→V2 migration is manual (automatic V1 upgrades are out of scope by
+    owner decision); release validation runs the shared
+    `scripts/verify-release-dist.ts` in CI AND release.
+    The bg registry recovers across restarts: running jobs are re-adopted
+    from their pidfiles (never re-run — logs and state are preserved), and
+    completion/cancellation notices are retained on disk
+    (`bg/<job>.notice.json`) and redelivered until the session
+    acknowledges folding them into its transcript (the
+    `background_delivery` identity makes redelivery idempotent — exactly
+    one wake-up turn, ever). Background tasks (bash/python only): a
+    command outliving `AutoBackgroundAfter` (10s) detaches — the tool
+    returns a placeholder naming the brain `.log`, output streams there
     (append, never deleted); finish/error delivers a completion notice
     (system-reminder, NEVER with result text — the model reads the `.log`);
     the model's `bg_cancel` stays silent (its caller learns from the tool
     result) while a dashboard Stop delivers a cancellation notice; `sleep`
-    wakes early on any job transition. A restart orphans running jobs
-    (registry gone, processes keep running detached): the resumed turn gets
-    one restart notice per uninformed placeholder (`findRestartOrphans` —
-    skips delivered, live and tool-cancelled jobs), never a re-run. The
-    frontend folds terminal snapshots into the originating row client-side
-    (`detached` mark — the server never sends it, so
-    `normalizeSessionMessages` carries folds across snapshots and the page
-    re-requests `bg_list` on session open).
+    wakes early on any job transition. The frontend folds terminal
+    snapshots into the originating row client-side (`detached` mark — the
+    server never sends it, so `normalizeSessionMessages` carries folds
+    across snapshots and the page re-requests `bg_list` on session open).
 - **Animations**: `usal` (see `web/src/motion.ts` — config once, `once:true`
   + `forwards:true`; helpers `usal()`/`usalItems()`/`CountUp`). USAL observes
   DOM mutations, no manual restarts needed. **Never put `data-usal` on
@@ -490,9 +494,11 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   on expand) — declare row-model helpers ABOVE the memos. tsc/eslint/`bun test`
   cannot catch this; only the browser does (the bg-e2e script asserts zero
   page errors for exactly this reason).
-- Daemon restarts drop the bg registry (memory-only): detached rows stay
-  unfolded with no snapshot to fold from — only the `.log` files survive
-  (still readable via the path in the placeholder).
+- BG jobs survive daemon restarts via pidfile re-adoption (never re-run);
+  unacknowledged completion notices are retained on disk and retried until
+  the session folds them into its transcript. Session deletion drops
+  pending notices — a late delivery must never resurrect a deleted
+  session.
 
 ## Testing philosophy
 

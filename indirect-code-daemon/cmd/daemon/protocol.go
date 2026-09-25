@@ -67,6 +67,18 @@ type questionResponseMsg struct {
 	Answers [][]string
 }
 
+// bgAckMsg acknowledges that a background notice was folded into the
+// session transcript (V2-003) — the pending delivery may be retired.
+type bgAckMsg struct {
+	JobID string
+}
+
+// bgDropNoticesMsg terminates pending notice delivery for a deleted
+// session (V2-003): deletion is never undone by a late notice.
+type bgDropNoticesMsg struct {
+	SessionID string
+}
+
 // bgJobFinishedMsg is forwarded by the bg supervisor when a job of this
 // session terminates. Folded into the transcript; wakes a sleeping worker.
 type bgJobFinishedMsg struct {
@@ -111,7 +123,8 @@ type readReqMsg struct {
 // tickFlushMsg flushes the WAL buffer (periodic self-timer).
 type tickFlushMsg struct{}
 
-// ---- control lane (control, always accepted) ----
+// ---- control lane (control, priority: senders wait or answer busy,
+// cancellations are never silently dropped) ----
 
 // cancelTurnMsg aborts the running turn. Discards awaiting* state.
 type cancelTurnMsg struct {
@@ -151,15 +164,23 @@ type forkResult struct {
 type readResult struct {
 	Error   string
 	Payload any
+	// Extra carries the actor-owned transient client overlay (V2-004):
+	// the outstanding decision (if any) + live turn state, answered from
+	// the actor's own loop so it is ordered with surrounding stream events.
+	Extra map[string]any
 }
 
 // watchdogReport is the session actor's liveness answer.
 type watchdogReport struct {
 	Alive         bool
-	LastProgress  int64 // unix milli of last useful message
+	LastProgress  int64  // unix milli of last useful message
 	State         string
 	QueueDepth    int
 	ResidentBytes int64
+	// V2-001: expected blocking wait in effect — WaitUntil > now means the
+	// watchdog must not judge this worker by missing progress events.
+	WaitOp    string
+	WaitUntil int64 // unix milli
 }
 
 // ---- results shared with the supervisor ----

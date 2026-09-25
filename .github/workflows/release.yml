@@ -82,20 +82,10 @@ jobs:
       - name: Build multi-call app (all platforms)
         run: bun ./scripts/build-indirect-all.ts "${{ steps.ver.outputs.version }}"
 
-      - name: Verify checksums and manifests
+      - name: Verify release artifacts (shared validator)
         run: |
           set -euo pipefail
-          cd indirect-code-daemon/dist
-          sha256sum -c SHA256SUMS.txt
-          python3 - <<'EOF'
-          import json, re
-          v = json.load(open("versions.json"))
-          sums = {n: h for h, n in re.findall(r"^([0-9a-f]{64})  (.+)$", open("SHA256SUMS.txt").read(), re.M)}
-          for blk in ("daemon", "launcher"):
-              for n, h in v[blk]["sums"].items():
-                  assert sums.get(n) == h, f"versions.json mismatch for {n}"
-          print("versions.json consistent with SHA256SUMS.txt:", v["daemon"]["version"])
-          EOF
+          bun scripts/verify-release-dist.ts indirect-code-daemon/dist "${{ steps.ver.outputs.version }}"
 
       - name: Build web dashboard (stages dist/r/)
         run: |

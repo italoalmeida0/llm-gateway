@@ -316,6 +316,22 @@ func (w *turnBridge) heartbeat() {
 	}
 }
 
+// declareWait publishes an expected blocking window to the actor (V2-001):
+// the watchdog must not treat silence INSIDE a declared operation (provider
+// request incl. retry backoff, foreground tool execution) as failure — the
+// operation's own deadline bounds it. A zero until clears the declaration
+// (operation finished). Stamped with the turn generation.
+func (w *turnBridge) declareWait(op string, until time.Time) {
+	var ms int64
+	if !until.IsZero() {
+		ms = until.UnixMilli()
+	}
+	select {
+	case w.env.inbox <- w.stamp(workerWaitMsg{gen: w.snap.gen, op: op, until: ms}):
+	case <-w.env.done:
+	}
+}
+
 // recordView builds a minimal record for payload helpers (workspace-gated
 // error path only).
 func (w *turnBridge) recordView() *SessionRecord {
@@ -325,6 +341,10 @@ func (w *turnBridge) recordView() *SessionRecord {
 // ---- agent hooks (all run on the worker goroutine) ----
 
 func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
+	// V2-001: the provider request (first-token delay, streaming gaps,
+	// retry backoff) is a declared wait with its own deadline — silence
+	// inside it must not be judged as a wedged worker.
+	w.declareWait("provider", time.Now().Add(tuneWaitProvider))
 	// Refresh model/options/system/tools from the actor (round-trip with
 	// timeout). Stale gen or cancelled ctx aborts the request.
 	type refresh struct {
@@ -684,6 +704,18 @@ func (w *turnBridge) autoCompact(cctx context.Context, esink func(core.AgentEven
 
 func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 	w.live.track(ev)
+	// V2-004: ship the compact live overlay to the actor when it changes
+	// (tool starts/progress, thinking) so reconnect snapshots can restore
+	// it. Non-blocking; a full inbox keeps the overlay pending for the
+	// next change instead of stalling the stream.
+	if s := w.live.snapshot(); s != nil {
+		select {
+		case w.env.inbox <- w.stamp(workerLiveMsg{gen: w.snap.gen, live: s}):
+		case <-w.env.done:
+		default:
+			w.live.dirty = true
+		}
+	}
 	// Heartbeat: every stream/tool event proves the worker is alive, so a
 	// long healthy stream never looks stale to the watchdog. Non-blocking:
 	// a full inbox means the actor is back-pressured, not dead.
@@ -695,6 +727,7 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 	case core.EvUserMessage:
 		payload["event"] = map[string]any{"type": "user_message", "message": sanitizeMessagesForFrontend([]provider.Message{e.Message})[0]}
 	case core.EvAssistantMessage:
+		w.declareWait("", time.Time{}) // response arrived: provider wait over
 		payload["event"] = map[string]any{"type": "assistant_message", "message": e.Message}
 	case core.EvAssistantStart:
 		payload["event"] = map[string]any{"type": "assistant_start"}
@@ -713,6 +746,7 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 	case core.EvToolCall:
 		payload["event"] = map[string]any{"type": "tool_call", "id": e.ID, "name": e.Name, "args": e.Args}
 	case core.EvToolResult:
+		w.declareWait("", time.Time{}) // tool finished: declared wait over
 		var sb strings.Builder
 		for _, c := range e.Result.Content {
 			if tb, ok := c.(provider.TextBlock); ok {
@@ -732,6 +766,9 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 		}
 		payload["event"] = event
 	case core.EvToolExecutionStart:
+		// V2-001: foreground tool execution is a declared wait (bounded by
+		// its own deadline; long commands detach to the BG supervisor).
+		w.declareWait("tool", time.Now().Add(tuneWaitTool))
 		payload["event"] = map[string]any{"type": "tool_execution_start", "id": e.ID, "startedAt": e.StartedAt}
 	case core.EvUsage:
 		// Same recover-guard as onUsage: counting must never kill a turn.

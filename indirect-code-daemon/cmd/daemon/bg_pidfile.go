@@ -12,7 +12,7 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 )
 
-// pidfile recovery (plan §5.3): on (re)start the supervisor scans pidfiles.
+// pidfile recovery: on (re)start the supervisor scans pidfiles.
 // A live pid is re-adopted (new waiter, keeps running); a dead pid is
 // finalized from the .log tail as orphaned. Jobs are NEVER re-run.
 

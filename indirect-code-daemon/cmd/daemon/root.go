@@ -15,7 +15,7 @@ type root struct {
 
 	cfg configCell
 
-	// health is the root watchdog state (plan §5.4): last ping round over
+	// health is the root watchdog state: last ping round over
 	// the infra actors. Served on the health endpoint (see health.go).
 	healthMu   sync.Mutex
 	healthLast map[string]infraHealth
@@ -91,7 +91,7 @@ func (r *root) bootActors() {
 	r.server.configDir = r.configPathDir()
 	r.server.onRemoteKill = r.shutdown
 
-	// Root watchdog (plan §5.4): ping infra actors, remember the round.
+	// Root watchdog: ping infra actors, remember the round.
 	go r.watchdogLoop()
 
 	for _, child := range []interface{ run(*sync.WaitGroup) }{
@@ -117,7 +117,7 @@ type infraHealth struct {
 // watchdogLoop pings bg/projects/ws every 30s. A silent actor is logged;
 // recovery is restart-scoped (a wedged infra actor cannot self-heal, and
 // the process manager owns full restarts). Sessions have their own
-// supervisor watchdog; this covers the infra the plan §5.4 requires.
+// supervisor watchdog; this covers the infra actors.
 func (r *root) watchdogLoop() {
 	tick := time.NewTicker(30 * time.Second)
 	defer tick.Stop()

@@ -355,7 +355,22 @@ func (l *link) setConn(conn *websocket.Conn) {
 		err := c.WriteJSON(msg)
 		_ = c.SetWriteDeadline(time.Time{})
 		return err
+	}, OnWriteError: func(error) {
+		// V2-002: a socket that fails writes is dead — drop it now so the
+		// client reconnects and resyncs instead of listening to a half-dead
+		// connection. The actor loop keeps running.
+		l.dropConn()
 	}}
+}
+
+// dropConn invalidates the current connection (write error path, V2-002).
+func (l *link) dropConn() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.conn != nil {
+		_ = l.conn.Close()
+		l.conn = nil
+	}
 }
 
 func (l *link) clearConn(conn *websocket.Conn) {

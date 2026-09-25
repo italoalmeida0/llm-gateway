@@ -156,6 +156,11 @@ jobs:
       - name: Build release artifacts (all targets)
         run: bun run build:daemon:all
 
+      # Same validator the release workflow runs (V2-005): single-artifact
+      # manifest, six platform assets, checksums, stamped version.
+      - name: Verify release artifacts (shared validator)
+        run: bun scripts/verify-release-dist.ts indirect-code-daemon/dist
+
       # 3) PROVE the linux artifacts are glibc-free: execute the shipped
       #    binaries on a bare Alpine (musl only, no glibc package installed —
       #    a glibc-linked binary cannot even exec there) and statically assert

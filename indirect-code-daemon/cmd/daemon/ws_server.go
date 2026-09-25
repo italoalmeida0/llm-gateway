@@ -203,7 +203,10 @@ func (s *wsServer) dispatch(raw []byte) {
 	if err := json.Unmarshal(raw, &base); err != nil {
 		return
 	}
-	if base.SessionID == "" {
+	if base.SessionID == "" || base.Type == "cancel" {
+		// Host lane: host-level commands plus CANCELLATION — a cancel must
+		// never queue behind the very command it exists to stop (V2-006);
+		// its work is a control-lane send, which cannot block on the session.
 		s.hostLane.push(raw, s.handleRaw, func() {
 			s.emit(map[string]any{"type": "error", "hostId": s.host(), "message": "Host busy"})
 		})
@@ -217,6 +220,22 @@ func (s *wsServer) dispatch(raw []byte) {
 		s.lanes[sid] = l
 	}
 	s.lanesMu.Unlock()
+	// configure_session has a host-state half (rememberSelection, read
+	// back by `pull config`): enqueue that half on the host lane AT
+	// ADMISSION so later host reads are ordered after it (read-after-write
+	// across lanes). The actor half rides the session lane below.
+	if base.Type == "configure_session" {
+		s.hostLane.pushFn(func() {
+			var req struct {
+				Model   string         `json:"model"`
+				Options SessionOptions `json:"options"`
+			}
+			_ = json.Unmarshal(raw, &req)
+			s.rememberSelection(req.Model, req.Options)
+		}, func() {
+			s.emit(map[string]any{"type": "error", "hostId": s.host(), "message": "Host busy"})
+		})
+	}
 	l.push(raw, s.handleRaw, func() {
 		s.error(sid, "", "Session busy")
 	})
@@ -229,28 +248,32 @@ func (s *wsServer) dispatch(raw []byte) {
 // while the lane has work.
 type dispatchLane struct {
 	mu      sync.Mutex
-	queue   [][]byte
+	queue   []func()
 	running bool
 }
 
 func (l *dispatchLane) push(raw []byte, run func([]byte), onBusy func()) {
+	l.pushFn(func() { run(raw) }, onBusy)
+}
+
+func (l *dispatchLane) pushFn(fn func(), onBusy func()) {
 	l.mu.Lock()
 	if len(l.queue) >= tuneDispatchQueue {
 		l.mu.Unlock()
 		onBusy()
 		return
 	}
-	l.queue = append(l.queue, raw)
+	l.queue = append(l.queue, fn)
 	if l.running {
 		l.mu.Unlock()
 		return
 	}
 	l.running = true
 	l.mu.Unlock()
-	go l.drain(run)
+	go l.drain()
 }
 
-func (l *dispatchLane) drain(run func([]byte)) {
+func (l *dispatchLane) drain() {
 	for {
 		l.mu.Lock()
 		if len(l.queue) == 0 {
@@ -258,10 +281,10 @@ func (l *dispatchLane) drain(run func([]byte)) {
 			l.mu.Unlock()
 			return
 		}
-		raw := l.queue[0]
+		fn := l.queue[0]
 		l.queue = l.queue[1:]
 		l.mu.Unlock()
-		run(raw)
+		fn()
 	}
 }
 
@@ -478,9 +501,8 @@ func (s *wsServer) handleRaw(raw []byte) {
 			case <-time.After(replyTimeout):
 			}
 		}
-		// v1 parity: every explicit choice also becomes the default for new
-		// sessions (persisted in config.json, read back via pull config).
-		s.rememberSelection(req.Model, req.Options)
+		// The host half (rememberSelection — read back via `pull config`)
+		// runs on the host lane at admission time (V2-006, see dispatch).
 
 	case "queue_add":
 		var req struct {

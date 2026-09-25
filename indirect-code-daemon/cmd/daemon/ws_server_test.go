@@ -78,6 +78,9 @@ func newWSHarness(t *testing.T) *wsHarness {
 		h.sup.control <- shutdownMsg{}
 		h.wg.Wait()
 	})
+	// Runs FIRST (LIFO): admitted dispatch commands must complete before
+	// the shutdown sequence tears their sessions' storage down.
+	t.Cleanup(h.server.waitForLanes)
 	return h
 }
 

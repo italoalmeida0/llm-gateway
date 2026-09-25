@@ -68,6 +68,34 @@ func newWSServer(dataDir string, cfg *configCell, sessions *sessionSupervisor, b
 	return s
 }
 
+// waitForLanes blocks until every dispatch lane is idle and no resync
+// flusher is running (V2-006). Admitted commands must finish before their
+// sessions' storage goes away (shutdown, test cleanup).
+func (s *wsServer) waitForLanes() {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		s.lanesMu.Lock()
+		lanes := make([]*dispatchLane, 0, len(s.lanes)+1)
+		for _, l := range s.lanes {
+			lanes = append(lanes, l)
+		}
+		lanes = append(lanes, s.hostLane)
+		s.lanesMu.Unlock()
+		busy := s.resyncFlush.Load()
+		for _, l := range lanes {
+			l.mu.Lock()
+			if l.running || len(l.queue) > 0 {
+				busy = true
+			}
+			l.mu.Unlock()
+		}
+		if !busy || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // scheduleResyncFlush runs the resync flusher single-flight, OFF the ws
 // writer goroutine (session snapshots round-trip actors and must never
 // stall the socket writer).

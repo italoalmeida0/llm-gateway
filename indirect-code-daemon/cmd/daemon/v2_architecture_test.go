@@ -161,6 +161,7 @@ func v2SnapshotWorld(t *testing.T, a *sessionActor) (<-chan any, func() map[stri
 	server := newWSServer(a.store.dataDir, a.supCfg, sup, nil, nil, nil, ws)
 	go a.run()
 	t.Cleanup(func() { a.control <- shutdownMsg{}; <-a.done })
+	t.Cleanup(server.waitForLanes) // admitted commands finish before teardown
 	return ws.outbound, func() map[string]any {
 		raw, _ := json.Marshal(map[string]any{"type": "get_session", "sessionId": a.id})
 		server.dispatch(raw)
@@ -515,6 +516,7 @@ func TestV2BusySessionDoesNotBlockHostCommands(t *testing.T) {
 	ws := newWSActor()
 	server := newWSServer(a.store.dataDir, a.supCfg, sup, nil, nil, nil, ws)
 	t.Cleanup(releaseIt)
+	t.Cleanup(server.waitForLanes)
 
 	get, _ := json.Marshal(map[string]any{"type": "get_session", "sessionId": a.id, "requestId": "r1"})
 	server.dispatch(get)
@@ -556,6 +558,7 @@ func TestV2SessionLanePreservesOrder(t *testing.T) {
 	server := newWSServer(a.store.dataDir, a.supCfg, sup, nil, nil, nil, ws)
 	go a.run()
 	t.Cleanup(func() { a.control <- shutdownMsg{}; <-a.done })
+	t.Cleanup(server.waitForLanes)
 
 	for i := 0; i < 3; i++ {
 		raw, _ := json.Marshal(map[string]any{"type": "get_session", "sessionId": a.id, "requestId": fmt.Sprintf("r%d", i)})
@@ -597,6 +600,7 @@ func TestV2DispatchSaturationAnswersBusy(t *testing.T) {
 	sup.resident[a.id] = &residentEntry{handle: &sessionHandle{inbox: a.inbox, control: a.control, done: a.done}}
 	ws := newWSActor()
 	server := newWSServer(a.store.dataDir, a.supCfg, sup, nil, nil, nil, ws)
+	t.Cleanup(server.waitForLanes)
 
 	// One command holds the lane worker (blocked on the stalled actor);
 	// the rest fill the queue; further commands must be refused loudly.

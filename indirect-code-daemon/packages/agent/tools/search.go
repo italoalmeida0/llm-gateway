@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/ignore"
@@ -133,6 +135,8 @@ func (t *SearchTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		return core.ToolResult{}, fmt.Errorf("search: path not found: %s", scope)
 	}
 
+	include, exclude := compileGlobFilter(a.Include, true), compileGlobFilter(a.Exclude, false)
+
 	// Collect candidate files.
 	var files []string
 	if !st.IsDir() {
@@ -167,10 +171,10 @@ func (t *SearchTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 			if respectIgnore && gi != nil && gi.Match(slash(rel), false) {
 				return nil
 			}
-			if !matchAnyGlob(a.Include, rel, true) {
+			if !include(rel) {
 				return nil
 			}
-			if matchAnyGlob(a.Exclude, rel, false) {
+			if exclude(rel) {
 				return nil
 			}
 			if info, err := d.Info(); err == nil && info.Size() > maxBytes {
@@ -195,10 +199,17 @@ func (t *SearchTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 outer:
 	for _, f := range files {
 		if ctx.Err() != nil {
-			break
+			return core.ToolResult{}, ctx.Err()
+		}
+		if err := t.Sandbox.CheckReadPath(f); err != nil {
+			continue
+		}
+		info, err := os.Stat(f)
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxBytes {
+			continue
 		}
 		rel, _ := filepath.Rel(t.CWD, f)
-		data, err := os.ReadFile(f)
+		data, err := readSearchFile(f, maxBytes)
 		if err != nil {
 			continue
 		}
@@ -207,6 +218,9 @@ outer:
 		}
 		lines := strings.Split(string(data), "\n")
 		for i, ln := range lines {
+			if ctx.Err() != nil {
+				return core.ToolResult{}, ctx.Err()
+			}
 			if a.Count {
 				if n := len(re.FindAllStringIndex(ln, -1)); n > 0 {
 					if counts[slash(rel)] == 0 {
@@ -275,8 +289,8 @@ outer:
 			total += counts[f]
 		}
 		fmt.Fprintf(&b, "%d match%s in %d file%s\n", total, plural(total), len(countOrder), filePlural(len(countOrder)))
-		for _, f := range countOrder {
-			if len(countOrder) > maxResults {
+		for i, f := range countOrder {
+			if i >= maxResults {
 				truncated = true
 				break
 			}
@@ -289,9 +303,9 @@ outer:
 			fmt.Fprintf(&b, "(capped at %d — narrow `path` or `include`)", maxResults)
 		}
 		return core.ToolResult{
-			Content: []provider.Content{provider.TextBlock{Text: b.String()}},
-		},
-		nil
+				Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+			},
+			nil
 	}
 	if a.FilesOnly {
 		fmt.Fprintf(&b, "%d file%s\n", len(filesOnly), plural(len(filesOnly)))
@@ -305,9 +319,9 @@ outer:
 			fmt.Fprintf(&b, "(capped at %d — narrow `path` or `include`)", maxResults)
 		}
 		return core.ToolResult{
-			Content: []provider.Content{provider.TextBlock{Text: b.String()}},
-		},
-		nil
+				Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+			},
+			nil
 	}
 
 	var nb strings.Builder
@@ -335,7 +349,11 @@ func slash(p string) string { return filepath.ToSlash(p) }
 func trimLine(s string) string {
 	s = strings.TrimRight(s, "\r")
 	if len(s) > 300 {
-		return s[:300] + "…"
+		end := 300
+		for end > 0 && !utf8.RuneStart(s[end]) {
+			end--
+		}
+		return s[:end] + "…"
 	}
 	return s
 }
@@ -354,42 +372,61 @@ func filePlural(n int) string {
 	return "s"
 }
 
-// matchAnyGlob reports whether rel matches any of the glob patterns.
-// Empty list + allowEmpty=true means "match everything".
-func matchAnyGlob(patterns []string, rel string, allowEmpty bool) bool {
-	if len(patterns) == 0 {
-		return allowEmpty
+// compileGlobFilter compiles once per tool call, not once per visited file.
+// Slash-separated patterns share glob's semantics on every OS.
+func compileGlobFilter(patterns []string, allowEmpty bool) func(string) bool {
+	type pattern struct {
+		re       *regexp.Regexp
+		hasSlash bool
+		prefix   string
 	}
-	relSlash := slash(rel)
-	base := slash(filepath.Base(rel))
+	var compiled []pattern
 	for _, pat := range patterns {
-		pat = strings.TrimSpace(pat)
-		if pat == "" {
+		re, hasSlash, err := compileGlob(pat)
+		if err != nil {
 			continue
 		}
-		// Try full-path match, basename match, and doublestar-ish suffix.
-		if ok, _ := filepath.Match(pat, relSlash); ok {
-			return true
+		prefix := ""
+		normalized := filepath.ToSlash(strings.TrimSpace(pat))
+		if strings.HasSuffix(normalized, "/**") {
+			prefix = strings.TrimSuffix(normalized, "/**")
 		}
-		if ok, _ := filepath.Match(pat, base); ok {
-			return true
-		}
-		if strings.HasPrefix(pat, "**/") {
-			if ok, _ := filepath.Match(strings.TrimPrefix(pat, "**/"), base); ok {
-				return true
-			}
-			if ok, _ := filepath.Match(strings.TrimPrefix(pat, "**/"), relSlash); ok {
-				return true
-			}
-		}
-		if strings.HasSuffix(pat, "/**") {
-			prefix := strings.TrimSuffix(pat, "/**")
-			if relSlash == prefix || strings.HasPrefix(relSlash, prefix+"/") {
-				return true
-			}
-		}
+		compiled = append(compiled, pattern{re, hasSlash, prefix})
 	}
-	return false
+	return func(rel string) bool {
+		if len(patterns) == 0 {
+			return allowEmpty
+		}
+		relSlash, base := slash(rel), slash(filepath.Base(rel))
+		for _, pat := range compiled {
+			target := base
+			if pat.hasSlash {
+				target = relSlash
+			}
+			if pat.re.MatchString(target) || (pat.prefix != "" && relSlash == pat.prefix) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// Bound reads even if a file grows between Stat and Open.
+func readSearchFile(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit))
+	if err != nil {
+		return nil, err
+	}
+	var extra [1]byte
+	if n, err := f.Read(extra[:]); n != 0 || err != io.EOF {
+		return nil, fmt.Errorf("search: file exceeds size limit or cannot be read")
+	}
+	return data, nil
 }
 
 // isText skips binary files (NUL byte in the first 8KB).

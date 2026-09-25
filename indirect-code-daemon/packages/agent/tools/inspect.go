@@ -106,6 +106,8 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 		exclude = lowerGlobs(a.Exclude)
 	}
 
+	includeMatch, excludeMatch := compileGlobFilter(include, true), compileGlobFilter(exclude, false)
+
 	st, err := os.Stat(abs)
 	if err != nil {
 		return core.ToolResult{}, fmt.Errorf("inspect: path not found: %s", scope)
@@ -168,16 +170,15 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 		if a.CaseInsensitive {
 			matchTarget = strings.ToLower(relSlash)
 		}
-		if !matchAnyGlob(include, matchTarget, true) {
-			if d.IsDir() {
-				// Still descend: children may match.
-			} else {
-				return nil
-			}
-		} else if matchAnyGlob(exclude, matchTarget, false) {
+		// Exclusions apply even when a directory itself misses include;
+		// include controls emitted rows, while traversal can reach matching children.
+		if excludeMatch(matchTarget) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if !includeMatch(matchTarget) {
 			return nil
 		}
 		curDepth := strings.Count(filepath.Clean(p), string(os.PathSeparator)) - rootDepth
@@ -309,25 +310,28 @@ func humanBytes(n int64) string {
 	}
 }
 
-// gitStatusMap runs `git status --porcelain` once and maps paths to flags.
+// gitStatusMap runs `git status --porcelain -z` once and maps paths to flags.
 // Returns nil when not a repo or git is missing (no error — flags just empty).
 func gitStatusMap(cwd string) map[string]string {
-	out, err := runGit(cwd, "status", "--porcelain=v1", "--untracked-files=normal")
+	out, err := runGit(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=normal")
 	if err != nil {
 		return nil
 	}
 	m := map[string]string{}
-	for _, ln := range strings.Split(out, "\n") {
+	entries := strings.Split(out, "\x00")
+	for i := 0; i < len(entries); i++ {
+		ln := entries[i]
 		if len(ln) < 4 {
 			continue
 		}
-		xy := strings.TrimSpace(ln[:2])
-		path := strings.TrimSpace(ln[3:])
-		// Renames look like "old -> new"; flag the new path.
-		if i := strings.Index(path, " -> "); i >= 0 {
-			path = path[i+4:]
+		xy := ln[:2]
+		path := ln[3:]
+		// With -z, renamed/copied entries list destination then source;
+		// names are raw bytes, never quoted or split on embedded newlines.
+		if strings.ContainsAny(xy, "RC") {
+			i++
 		}
-		path = strings.Trim(path, `"`)
+
 		flag := "M"
 		switch {
 		case strings.Contains(xy, "A"):

@@ -7,13 +7,15 @@ Reference: `tmp/unish`, cloned at `82da4f40f8f9100325a7593e40013757ca1ed7aa` (ig
 
 - [x] Read the existing hardening decisions and inspect each failed CI job.
 - [x] Clone unish and inspect its platform implementations and CI.
-- [ ] Build the daemon before gateway integration tests in clean CI checkouts.
-- [ ] Fix process liveness and slot discovery on macOS; test actual child processes.
-- [ ] Replace Windows PowerShell process identity probes with native APIs.
-- [ ] Repair and resume torn WAL files on Windows without losing valid events.
-- [ ] Provision pinned unish in CI and exercise the real shell/tool boundary on every OS.
-- [ ] Audit relevant unish builtins and document useful reuse and remaining limits.
-- [ ] Run local gateway, daemon, race, and unish validation.
+- [x] Build the daemon before gateway integration tests in clean CI checkouts.
+- [x] Fix process liveness and slot discovery on macOS; test actual child processes.
+- [x] Replace Windows PowerShell process identity probes with native APIs.
+- [x] Repair and resume torn WAL files on Windows without losing valid events.
+- [x] Provision pinned unish in CI and exercise the real shell/tool boundary on every OS.
+- [x] Audit relevant unish builtins; keep that repository unchanged per user clarification.
+- [ ] Validate Python UTF-8 stdin/stdout/stderr and files on all platforms.
+- [ ] Fix demonstrated search/inspect filter, output cap, and Unicode issues.
+- [x] Run local gateway, daemon, race, and unish validation.
 - [ ] Run GitHub CI for both repositories; fix failures and record final run links.
 - [ ] Refresh local and committed build artifacts and write the final assessment.
 
@@ -38,4 +40,26 @@ deployment is part of this task.
 
 ## Validation and assessment
 
-Pending implementation and native CI results.
+First fix revision: `0001c23`; [CI run 36138483090](https://github.com/italoalmeida0/llm-gateway/actions/runs/36138483090).
+Windows, Linux, gateway, and Linux race jobs passed. macOS found a fixture race:
+stdout was observed before the child reached the separate stderr write. The test
+now waits for both outputs with its existing deadline.
+
+Local first pass: 382 Bun tests, lint, typecheck, full Go suite and race detector
+passed. The real unish tool boundary passed (quoted Unicode paths, arrays,
+stderr/exit code, 128 KiB line preservation, external-child cancellation).
+
+unish reference validation: [run 36137889326](https://github.com/italoalmeida0/unish/actions/runs/36137889326)
+passed Linux/macOS/Windows plus parity at `ab0be91` (only asset changes since the
+reviewed source pin). Local parity: 372 cases, zero failures, nine documented
+expected differences. No files or tests were changed in the unish repository.
+
+The user clarified that unish is a reference for this daemon's tool behavior,
+not a request to extend unish's internal tests or implementation. Further work
+stays in the gateway repository.
+
+Second pass in progress: Python defaults to UTF-8 while preserving an explicit
+PYTHONIOENCODING override; search preserves capped count rows, enforces explicit
+file size limits, propagates cancellation, and avoids splitting UTF-8 output;
+search/inspect share precompiled recursive glob semantics; inspect honors
+exclusions during traversal and parses raw NUL-delimited Git filenames.

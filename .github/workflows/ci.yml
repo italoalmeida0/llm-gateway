@@ -73,6 +73,10 @@ jobs:
           go-version-file: indirect-code-daemon/go.mod
           cache-dependency-path: indirect-code-daemon/go.sum
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       # Source pin makes shell behavior reproducible and avoids release API limits.
       - uses: actions/checkout@v4
         with:

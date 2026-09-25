@@ -29,6 +29,36 @@ func TestInspectDir(t *testing.T) {
 	}
 }
 
+func TestInspectNestedFiltersAndUnicodeGitStatus(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := runGit(dir, "init"); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"src/deep", "src/generated/nested"} {
+		if err := os.MkdirAll(filepath.Join(dir, filepath.FromSlash(sub)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(sub), "ação arquivo.ts"), []byte("text"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Stage files so porcelain reports individual Unicode paths, not a directory.
+	if _, err := runGit(dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	tool := &InspectTool{CWD: dir}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"depth": 5, "include": []string{"src/**/*.ts"}, "exclude": []string{"src/generated/**"},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := toolResultText(t, res)
+	if !strings.Contains(got, "(1 entries)") || !strings.Contains(got, "[A] ação arquivo.ts") || strings.Contains(got, "generated") {
+		t.Fatalf("filters or raw Git filenames lost: %s", got)
+	}
+}
+
 func TestInspectSingleFile(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("a\nb\n"), 0o644)

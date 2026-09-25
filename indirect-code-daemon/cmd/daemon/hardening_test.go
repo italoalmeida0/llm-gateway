@@ -82,11 +82,18 @@ func TestBackgroundSurvivesDaemonExitAndCanBeStopped(t *testing.T) {
 			deadline := time.Now().Add(3 * time.Second)
 			for {
 				after, err := os.Stat(pf.LogPath)
-				if err == nil && after.Size() > before.Size() {
+				stderrReady := true
+				if kind == "python" {
+					data, readErr := os.ReadFile(pf.StderrPath)
+					stderrReady = readErr == nil && strings.Contains(string(data), "stderr-alive")
+				}
+				// stdout and stderr are separate writes; observing one does not
+				// establish that the child has executed the next instruction.
+				if err == nil && after.Size() > before.Size() && stderrReady {
 					break
 				}
 				if time.Now().After(deadline) {
-					t.Fatal("output stopped when daemon exited")
+					t.Fatal("stdout/stderr stopped when daemon exited")
 				}
 				time.Sleep(20 * time.Millisecond)
 			}

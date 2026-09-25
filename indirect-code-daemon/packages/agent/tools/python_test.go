@@ -168,3 +168,46 @@ func toolResultText(t *testing.T, res core.ToolResult) string {
 	}
 	return tb.Text
 }
+
+func TestPythonUnicodeIO(t *testing.T) {
+	if _, err := PythonAvailable(); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal(err)
+		}
+		t.Skip(err)
+	}
+	dir := filepath.Join(t.TempDir(), "workspace ação")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Force a non-UTF-8 host locale on Unix too. Windows stdio uses its
+	// legacy code page when redirected unless explicitly configured.
+	t.Setenv("LANG", "C")
+	t.Setenv("LC_ALL", "C")
+	tool := &PythonTool{CWD: dir, Sandbox: NewSandbox(dir)}
+	code := "import sys, pathlib\ns = sys.stdin.read()\np = pathlib.Path('ação.txt')\np.write_text(s)\nprint(p.read_text())\nprint(s, file=sys.stderr)\nassert sys.flags.utf8_mode == 1\n"
+	for _, scriptMode := range []bool{false, true} {
+		args := map[string]any{"code": code, "stdin": "ação 日本語 🚀"}
+		if scriptMode {
+			if err := os.WriteFile(filepath.Join(dir, "ação.py"), []byte(code), 0600); err != nil {
+				t.Fatal(err)
+			}
+			delete(args, "code")
+			args["script"] = "ação.py"
+		}
+		res, err := tool.Execute(context.Background(), mustJSON(t, args), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := toolResultText(t, res)
+		if strings.Count(got, "ação 日本語 🚀") != 2 || !strings.Contains(got, "[exit 0]") {
+			t.Fatalf("Unicode stdin/file/stdout/stderr roundtrip: %s", got)
+		}
+	}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"code": "import sys; print(sys.stdout.encoding)", "env": map[string]string{"PYTHONIOENCODING": "ascii"},
+	}), nil)
+	if err != nil || !strings.Contains(toolResultText(t, res), "ascii") {
+		t.Fatal("explicit encoding override lost")
+	}
+}

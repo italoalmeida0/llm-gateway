@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestSearchAlwaysRegex(t *testing.T) {
@@ -32,6 +33,53 @@ func TestSearchAlwaysRegex(t *testing.T) {
 	}
 	if got := toolResultText(t, res); !strings.Contains(got, "a.ts:2:") {
 		t.Fatalf("expected literal hit, got:\n%s", got)
+	}
+}
+
+func TestSearchCountCapRetainsRows(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("hit hit\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tool := &SearchTool{CWD: dir}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "hit", "count": true, "maxResults": 2}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := toolResultText(t, res)
+	if !strings.Contains(got, "6 matches in 3 files") || !strings.Contains(got, "a.txt: 2 matches") || !strings.Contains(got, "b.txt: 2 matches") || strings.Contains(got, "c.txt:") {
+		t.Fatalf("capped count discarded rows: %s", got)
+	}
+}
+
+func TestSearchNestedGlobUnicodeAndFileLimit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src", "deep", "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "src", "deep", "nested", "ação.ts")
+	if err := os.WriteFile(path, []byte("hit"+strings.Repeat("x", 296)+"🚀\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tool := &SearchTool{CWD: dir}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "hit", "include": []string{"src/**/*.ts"}}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := toolResultText(t, res)
+	if !strings.Contains(got, "src/deep/nested/ação.ts") || !utf8.ValidString(got) {
+		t.Fatalf("glob/Unicode failure: %s", got)
+	}
+	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "hit", "path": path, "maxFileBytes": 10}), nil)
+	if err != nil || !strings.Contains(toolResultText(t, res), "no matches") {
+		t.Fatal("explicit file bypasses size limit")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := tool.Execute(ctx, mustJSON(t, map[string]any{"pattern": "hit", "path": path}), nil); err != context.Canceled {
+		t.Fatalf("cancelled search returned %v", err)
 	}
 }
 

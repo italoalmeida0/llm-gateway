@@ -424,10 +424,11 @@ func quoteForLog(code string) string {
 
 // pythonEnv builds a hardened environment: system PATH/HOME/LANG plus
 // PYTHONDONTWRITEBYTECODE=1 (never litter __pycache__ in the workspace),
-// PYTHONUNBUFFERED=1 (streaming-friendly), and user extras after validation.
+// PYTHONUNBUFFERED=1 (streaming-friendly), UTF-8 for files and captured stdio,
+// and user extras after validation. Explicit PYTHONIOENCODING still wins.
 func pythonEnv(extra map[string]string) []string {
 	keep := []string{"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"}
-	env := []string{"PYTHONDONTWRITEBYTECODE=1", "PYTHONUNBUFFERED=1"}
+	env := []string{"PYTHONDONTWRITEBYTECODE=1", "PYTHONUNBUFFERED=1", "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8"}
 	for _, k := range keep {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)

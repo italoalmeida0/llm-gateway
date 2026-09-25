@@ -87,6 +87,26 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   then keeps the hot path on the last-good candidate. Full ModelInfo
   `/v1/models` compat (codex strict struct) is
   patched in the proxy models path.
+- **DSML tool-call recovery** (`server/proxy/dsml.ts`): DeepSeek V4/V4.1 wrap
+  tool calls in DSML (`<｜DSML｜tool_calls><｜DSML｜invoke name="…"><｜DSML｜parameter
+  name="…" string="true">…` — the bar is full-width ｜ U+FF5C) and serving
+  stacks that skip the server-side conversion leak the markup into assistant
+  CONTENT instead of tool_calls. The gateway recovers it at the response edge
+  on every path: streams (inside `IRStreamTranslator` — the marker tail is
+  held until the block closes or the stream ends, never partially emitted),
+  translated buffered bodies (post-`decodeResponseToIR`) and same-protocol raw
+  bodies (`patchRawResponseDsml` — bytes untouched unless a recovery rewrote
+  them). Conservative by design: only when the request declared tools (and
+  tool_choice ≠ none), a candidate must CLOSE (`</｜DSML｜invoke>`) before it
+  commits, the name must match a declared tool (the missing-invoke-open
+  variant reconstructs it ONLY when exactly one declared tool fits the
+  recovered parameter names and its required args), rejected/incomplete
+  candidates restore byte-verbatim, and the documented long-context
+  corruptions — wrappers misspelled as `toolcalls`/`tool`/`calls`, missing
+  start wrapper, ASCII `|DSML|` pipes — are tolerated while orphan closing
+  tails (bare `</｜DSML｜…>` debris) are absorbed, never leaked. Recovered args
+  get harness hygiene (optional nulls dropped, JSON-in-a-string unwrapped);
+  native tool_calls stay byte-faithful.
 - **Usage accounting** (`server/usage.ts`): buffered writes (flush 1s/100 events),
   `usage_daily` aggregates (plus `usage_model_daily` — per key/date/model rollup
   and `usage_model_provider_daily` (migration 011) — the SAME rollup one

@@ -120,6 +120,15 @@ func TestProtocolToleratesUnknownAndGarbage(t *testing.T) {
 
 // ---- full lifecycle with a REAL command ----
 
+// portable picks a POSIX/cmd command pair so the runner core is proven
+// on every platform (the Windows lane runs cmd.exe, not sh).
+func portable(sh, win string) string {
+	if runtime.GOOS == "windows" {
+		return win
+	}
+	return sh
+}
+
 func runSpec(t *testing.T, root, jobID, command string) Spec {
 	t.Helper()
 	started := NowMs()
@@ -138,7 +147,7 @@ func runSpec(t *testing.T, root, jobID, command string) Spec {
 
 func TestRunHappyPathStateCopyAndExitCode(t *testing.T) {
 	root := t.TempDir()
-	spec := runSpec(t, root, "j1", "printf 'hello\\nworld\\n'; exit 3")
+	spec := runSpec(t, root, "j1", portable("printf 'hello\\nworld\\n'; exit 3", "echo hello & echo world & exit /b 3"))
 	code := Run(spec)
 	if code != 3 {
 		t.Fatalf("exit code: got %d want 3", code)
@@ -151,7 +160,7 @@ func TestRunHappyPathStateCopyAndExitCode(t *testing.T) {
 		t.Fatalf("state: %+v", st)
 	}
 	out, _ := os.ReadFile(spec.OutPath)
-	if !strings.Contains(string(out), "hello\nworld") {
+	if !strings.Contains(string(out), "hello") || !strings.Contains(string(out), "world") {
 		t.Fatalf("out log: %q", out)
 	}
 	brain, _ := os.ReadFile(spec.BrainPath)
@@ -168,7 +177,7 @@ func TestRunImmediateStartNeverWaitsForAParent(t *testing.T) {
 	// D1: nobody connects at all — the command must still run to
 	// completion and land its outcome in files.
 	root := t.TempDir()
-	spec := runSpec(t, root, "j2", "printf 'ran anyway\\n'")
+	spec := runSpec(t, root, "j2", portable("printf 'ran anyway\\n'", "echo ran anyway"))
 	if code := Run(spec); code != 0 {
 		t.Fatalf("exit code %d", code)
 	}
@@ -182,7 +191,7 @@ func TestRunImmediateStartNeverWaitsForAParent(t *testing.T) {
 
 func TestRunKillVerbKillsAndRecordsKilled(t *testing.T) {
 	root := t.TempDir()
-	spec := runSpec(t, root, "j3", "printf 'start\\n'; sleep 30")
+	spec := runSpec(t, root, "j3", portable("printf 'start\\n'; sleep 30", "echo start & ping -n 30 127.0.0.1 >nul"))
 	done := make(chan int, 1)
 	go func() { done <- Run(spec) }()
 
@@ -227,7 +236,7 @@ func TestRunKillVerbKillsAndRecordsKilled(t *testing.T) {
 
 func TestRunProtoMismatchFallsBackToFileOnly(t *testing.T) {
 	root := t.TempDir()
-	spec := runSpec(t, root, "j4", "printf 'file mode\\n'")
+	spec := runSpec(t, root, "j4", portable("printf 'file mode\\n'", "echo file mode"))
 	done := make(chan int, 1)
 	go func() { done <- Run(spec) }()
 

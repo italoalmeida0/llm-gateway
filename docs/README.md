@@ -6,8 +6,9 @@ The [review probes](review-probes/README.md) preserve executable reproductions
 without adding known failures to the normal test suite.
 
 The reviewed source is `dev` at `7f2c8c0`, compared with V1 at `origin/main`
-`e5a4b07`. Findings were checked on 2026-09-25. Documentation records the review. All seven items were resolved in the
-V2 hardening change-set — per-item evidence lives in the review.
+`e5a4b07`. Findings were checked on 2026-09-25. All seven items were resolved
+in the V2 hardening change-set (`59fae80`, `922bf0e`, `fc72343`) — per-item
+evidence and the remaining release-process gates live in the review.
 
 | ID | Priority | Work item | Status |
 | --- | --- | --- | --- |
@@ -24,6 +25,6 @@ upgrades, legacy launcher download aliases, and a bridge release are not release
 requirements. Keep the single application binary. This decision does not disable
 the V2 updater or remove the need to validate V2 release artifacts.
 
-When resolving an item, update its status here and in the review with the fixing
-commit and relevant test results. Keep the original evidence so the reason for
-the change remains understandable.
+Statuses link to the fixing commits and the relevant test results in the
+review. The original evidence is kept so the reason for each change stays
+understandable.

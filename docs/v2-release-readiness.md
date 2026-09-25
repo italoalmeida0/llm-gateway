@@ -67,12 +67,12 @@ forever. Increasing one global timeout does not resolve the conflicting policies
 
 **Acceptance criteria:**
 
-- [ ] A healthy delayed provider response completes with the watchdog active.
-- [ ] A permitted sleep and Retry-After/backoff survive more than one watchdog
+- [x] A healthy delayed provider response completes with the watchdog active.
+- [x] A permitted sleep and Retry-After/backoff survive more than one watchdog
   interval and remain cancellable by the user.
-- [ ] An operation that exceeds its own deadline follows the intended failure
+- [x] An operation that exceeds its own deadline follows the intended failure
   or retry policy; indefinite stalls remain detectable.
-- [ ] Cancellation-ignoring workers still escalate without spawning a second
+- [x] Cancellation-ignoring workers still escalate without spawning a second
   owner of the same WAL or accepting stale worker messages.
 
 ## V2-002: the WS outbox silently drops essential events
@@ -112,12 +112,12 @@ the network, or adding a priority queue that silently reorders snapshots/deltas.
 
 **Acceptance criteria:**
 
-- [ ] Under a slow socket and a full outbox, approval and question state are
+- [x] Under a slow socket and a full outbox, approval and question state are
   delivered or restored through an explicit resync.
-- [ ] A completed turn converges to the correct transcript and idle state after
+- [x] A completed turn converges to the correct transcript and idle state after
   overflow or a socket write error.
-- [ ] Snapshot/delta ordering is preserved during ordinary streaming and recovery.
-- [ ] Queue memory and recovery retries are bounded; healthy sessions remain
+- [x] Snapshot/delta ordering is preserved during ordinary streaming and recovery.
+- [x] Queue memory and recovery retries are bounded; healthy sessions remain
   responsive while another connection is slow.
 
 ## V2-003: background completion delivery can disappear permanently
@@ -159,13 +159,13 @@ session deletion must terminate pending delivery rather than resurrect the sessi
 
 **Acceptance criteria:**
 
-- [ ] A temporarily full inbox eventually receives its completion exactly once
+- [x] A temporarily full inbox eventually receives its completion exactly once
   in the transcript, or reports an explicit terminal delivery failure.
-- [ ] A duplicate delivery attempt cannot start a second wake-up turn.
-- [ ] Restart before acknowledgement preserves the notice without rerunning the
+- [x] A duplicate delivery attempt cannot start a second wake-up turn.
+- [x] Restart before acknowledgement preserves the notice without rerunning the
   original process; session deletion does not cause resurrection.
-- [ ] Sleeping workers observe the notice in the intended order when awakened.
-- [ ] One busy session cannot stall the BG supervisor for all sessions.
+- [x] Sleeping workers observe the notice in the intended order when awakened.
+- [x] One busy session cannot stall the BG supervisor for all sessions.
 
 ## V2-004: reconnect snapshots omit pending approvals and questions
 
@@ -208,11 +208,11 @@ to reconstruct a browser snapshot.
 
 **Acceptance criteria:**
 
-- [ ] Reload or reopen during approval/question restores the original decision
+- [x] Reload or reopen during approval/question restores the original decision
   and answering it resumes the correct worker once.
-- [ ] Reconnect does not extend an existing deadline or revive a resolved request.
-- [ ] Multiple clients answering the same request cannot apply it twice.
-- [ ] Streaming/progress survives snapshot restoration without duplicate content,
+- [x] Reconnect does not extend an existing deadline or revive a resolved request.
+- [x] Multiple clients answering the same request cannot apply it twice.
+- [x] Streaming/progress survives snapshot restoration without duplicate content,
   stale state replacing newer events, or unbounded history payloads.
 - [ ] Real Chromium verifies the visible decision, completion, and absence of
   page errors using a local fake provider.
@@ -244,10 +244,10 @@ Do not add an empty launcher field to hide the mismatch.
 
 **Acceptance criteria:**
 
-- [ ] The generated daemon-only manifest passes the same validator in CI and release.
-- [ ] A missing platform asset, checksum mismatch, or wrong version fails validation.
+- [x] The generated daemon-only manifest passes the same validator in CI and release.
+- [x] A missing platform asset, checksum mismatch, or wrong version fails validation.
 - [ ] A release workflow dry run builds and verifies everything without publishing.
-- [ ] Normal boot, worker execution, and V2 update tests continue to use one artifact.
+- [x] Normal boot, worker execution, and V2 update tests continue to use one artifact.
 
 ## V2-006: inbound dispatch still blocks unrelated sessions
 
@@ -285,11 +285,11 @@ admitted cancellation is not silently lost under load.
 
 **Acceptance criteria:**
 
-- [ ] With session A busy, a real socket can still deliver cancel to session B
+- [x] With session A busy, a real socket can still deliver cancel to session B
   and receive a host health response within the chosen bounded latency.
-- [ ] Dependent commands to one session retain their intended order.
-- [ ] Saturation has an explicit busy/error response and bounded goroutine/queue usage.
-- [ ] Concurrent config/project operations preserve ownership and avoid lost updates.
+- [x] Dependent commands to one session retain their intended order.
+- [x] Saturation has an explicit busy/error response and bounded goroutine/queue usage.
+- [x] Concurrent config/project operations preserve ownership and avoid lost updates.
 
 ## V2-007: architecture guidance contradicts current behavior
 
@@ -315,10 +315,10 @@ decisions in a short document rather than restoring every historical plan.
 
 **Acceptance criteria:**
 
-- [ ] AGENTS.md and daemon package comments agree on BG recovery, Go version,
+- [x] AGENTS.md and daemon package comments agree on BG recovery, Go version,
   control delivery, and the supported release/install workflow.
-- [ ] Maintained architecture references resolve to real files.
-- [ ] Future feature work can identify its state owner and delivery contract
+- [x] Maintained architecture references resolve to real files.
+- [x] Future feature work can identify its state owner and delivery contract
   without relying on this review's conversational history.
 
 ## Implementation order and boundaries
@@ -348,15 +348,15 @@ or browser. The [retained probes](review-probes/README.md) include instructions
 and the observed failures. They are diagnostic starting points, not a requirement
 to preserve the current internal design.
 
-- [ ] Close V2-001 through V2-007 with code/doc changes and relevant evidence.
-- [ ] Promote the useful probes into permanent behavior tests, adapting them to
+- [x] Close V2-001 through V2-007 with code/doc changes and relevant evidence.
+- [x] Promote the useful probes into permanent behavior tests, adapting them to
   the chosen design; add the missing reconnect, retry, and delivery cases.
-- [ ] Run gateway lint/typecheck/tests and the SPA build, plus the full daemon
+- [x] Run gateway lint/typecheck/tests and the SPA build, plus the full daemon
   suite from its own root. Run affected browser gates with a fake provider.
 - [ ] Pass the existing native OS/architecture, musl/static, and race CI matrix
   on the actual release candidate commit.
 - [ ] Pass the shared manifest validator and release dry run for that candidate.
-- [ ] Leave fresh local builds available after implementation changes, including
+- [x] Leave fresh local builds available after implementation changes, including
   all committed daemon release artifacts when daemon code changes, as required
   by AGENTS.md.
 - [ ] Smoke-test the chosen manual V1-to-V2 installation procedure on a copy of
@@ -367,9 +367,17 @@ observable behavior each new regression test establishes and which commit fixes 
 
 ## Resolution (V2 hardening change-set)
 
-All seven items were resolved. The permanent regression tests live in
-`cmd/daemon/v2_architecture_test.go` (15 tests, green under `-race`) plus
-`test/verify-release-dist.test.ts` (7 tests) for the release contract.
+All seven items were resolved (commits `59fae80`, `922bf0e`, `fc72343` —
+the last two are follow-ups the CI integration suite caught while
+landing V2-006). The permanent regression tests live in
+`cmd/daemon/v2_architecture_test.go` (16 tests, green under `-race`)
+plus `test/verify-release-dist.test.ts` (7 tests) for the release
+contract. Full CI matrix green at run 36186589249.
+
+The unchecked boxes above are deliberately left open: they belong to the
+RELEASE PROCESS itself (release-candidate matrix + shared-validator dry
+run, the real-Chromium gate, and the manual V1-to-V2 install smoke on a
+data copy), not to the implementation.
 
 - **V2-001** — declared bounded waits (`workerWaitMsg`): `TestV2WatchdogSparesHealthyDelayedProvider`,
   `TestV2WatchdogHonorsDeclaredWaitDeadline`, `TestV2ToolEventsDeclareAndClearWait`.
@@ -394,8 +402,14 @@ All seven items were resolved. The permanent regression tests live in
   stamped version). `test/verify-release-dist.test.ts`.
 - **V2-006** — per-session dispatch lanes + a host lane; admission never
   blocks the socket reader, saturation answers busy, cancellation is never
-  silently dropped. `TestV2BusySessionDoesNotBlockHostCommands`,
-  `TestV2SessionLanePreservesOrder`, `TestV2DispatchSaturationAnswersBusy`.
+  silently dropped. Cancellation rides the HOST lane (it must never queue
+  behind the command it exists to stop), and configure_session's host half
+  (rememberSelection) is enqueued at admission so host reads (`pull config`)
+  stay ordered after it. Config writes remain serialized on the host lane
+  and the projects actor stays sole owner — no new concurrent mutation.
+  `TestV2BusySessionDoesNotBlockHostCommands` (health + cancel under a
+  stalled session), `TestV2SessionLanePreservesOrder`,
+  `TestV2DispatchSaturationAnswersBusy`.
 - **V2-007** — AGENTS.md and package comments match the implemented
   behavior (Go 1.26, BG pidfile recovery + notice retention, control-lane
   semantics, manual V1→V2 migration, one-artifact release contract); the

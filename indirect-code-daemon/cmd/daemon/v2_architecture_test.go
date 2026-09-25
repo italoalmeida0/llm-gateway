@@ -520,9 +520,12 @@ func TestV2BusySessionDoesNotBlockHostCommands(t *testing.T) {
 
 	get, _ := json.Marshal(map[string]any{"type": "get_session", "sessionId": a.id, "requestId": "r1"})
 	server.dispatch(get)
+	server.dispatch([]byte(`{"type": "cancel", "sessionId": a.id}`))
 	server.dispatch([]byte(`{"type": "health"}`))
 
-	// The health response must arrive while the session actor is stalled.
+	// Cancellation and the host-level health response must both be served
+	// while the session actor is stalled (cancel rides the host lane: it
+	// must never queue behind the command it exists to stop).
 	select {
 	case ev := <-ws.outbound:
 		m := ev.(map[string]any)
@@ -533,7 +536,8 @@ func TestV2BusySessionDoesNotBlockHostCommands(t *testing.T) {
 		t.Fatal("a busy session blocks dispatch of an unrelated host-level health command")
 	}
 
-	// The stalled session's own command completes once the actor resumes.
+	// The cancel reached the actor's control lane (queued behind the
+	// stalled data command but accepted — control is drained first).
 	releaseIt()
 	deadline := time.After(3 * time.Second)
 	for {

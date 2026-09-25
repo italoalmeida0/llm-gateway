@@ -42,11 +42,14 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # Explicit: v6+ persists creds to a separate file and this job pushes
+          # back to main — never rely on the default here.
+          persist-credentials: true
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: indirect-code-daemon/go.mod
           cache-dependency-path: indirect-code-daemon/go.sum

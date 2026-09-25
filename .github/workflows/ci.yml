@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -39,7 +39,7 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: indirect-code-daemon/go.mod
           cache-dependency-path: indirect-code-daemon/go.sum
@@ -66,19 +66,19 @@ jobs:
         working-directory: indirect-code-daemon
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: indirect-code-daemon/go.mod
           cache-dependency-path: indirect-code-daemon/go.sum
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       # Source pin makes shell behavior reproducible and avoids release API limits.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: italoalmeida0/unish
           ref: 82da4f40f8f9100325a7593e40013757ca1ed7aa
@@ -114,9 +114,9 @@ jobs:
       run:
         working-directory: indirect-code-daemon
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: indirect-code-daemon/go.mod
           cache-dependency-path: indirect-code-daemon/go.sum

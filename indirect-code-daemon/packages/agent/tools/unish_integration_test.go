@@ -23,6 +23,10 @@ func TestUnishExternalChild(t *testing.T) {
 	}
 }
 
+// Tool-boundary cases run with the pinned unish as a portable executor
+// (one shell on every OS). UNSH SEMANTICS (quoting, arrays, pipelines…)
+// are tested in the unish repo — never here; only daemon contracts
+// (output capture, exit status, bounded output, process-tree cancel).
 // CI builds a pinned unish on every OS. Local runs opt in with the same binary.
 func TestUnishToolBoundary(t *testing.T) {
 	bin := os.Getenv("UNISH_TEST_BINARY")
@@ -38,8 +42,6 @@ func TestUnishToolBoundary(t *testing.T) {
 		name, command, want string
 		failed              bool
 	}{
-		{"quoted paths and pipeline", `mkdir 'space dir'; printf 'alpha\nbeta\n' > 'space dir/ação.txt'; cat 'space dir/ação.txt' | grep beta`, "beta\n", false},
-		{"bash arrays", `items=(one two); [[ ${#items[@]} -eq 2 ]] && printf '%s\n' "${items[1]}"`, "two\n", false},
 		{"stderr and exit status", `printf 'diagnostic\n' >&2; exit 7`, "diagnostic\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

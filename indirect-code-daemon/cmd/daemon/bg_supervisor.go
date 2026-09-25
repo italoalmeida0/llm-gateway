@@ -88,8 +88,11 @@ type bgRegisterMsg struct {
 	StderrPath string
 	LogPath    string
 	PID        int
-	Stop       func()
-	Reply      chan any
+	// JobID adopts the runner's pre-generated identity when set
+	// (crash-only tasks exist from spawn in runners/<jobId>.state.json).
+	JobID string
+	Stop  func()
+	Reply chan any
 }
 
 type bgRegisterResult struct {
@@ -202,12 +205,17 @@ func (b *bgSupervisor) run(wg *sync.WaitGroup) {
 	}()
 	b.readopt()
 	b.loadNotices()
+	b.adoptRunners()
 	retry := time.NewTicker(bgNoticeRetryEvery)
+	gc := time.NewTicker(time.Hour) // F8: hourly runner GC + boot
 	defer retry.Stop()
+	defer gc.Stop()
 	for {
 		select {
 		case env := <-b.inbox:
 			b.handle(env)
+		case <-gc.C:
+			b.gcRunners(time.Now().UnixMilli())
 		case <-retry.C:
 			// V2-003: independent, non-blocking redelivery of retained
 			// notices — a busy session never blocks listing/cancel/finish.
@@ -258,8 +266,12 @@ func (b *bgSupervisor) handle(env Envelope) {
 
 func (b *bgSupervisor) onRegister(m bgRegisterMsg) {
 	jobCtx, cancel := context.WithCancel(context.Background())
+	jobID := m.JobID
+	if jobID == "" {
+		jobID = "bg_" + randomID8()
+	}
 	j := &bgJob{
-		ID:        "bg_" + randomID8(),
+		ID:        jobID,
 		Kind:      m.Kind,
 		SessionID: m.SessionID,
 		Label:     truncateBgLabel(m.Label),

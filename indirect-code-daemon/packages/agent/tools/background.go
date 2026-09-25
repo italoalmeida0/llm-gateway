@@ -45,10 +45,17 @@ type BackgroundProcess struct {
 	// fork/exec), so no caller may register or write a pidfile before
 	// Start succeeds — a job registered earlier could only carry a guessed
 	// identity. Registration always happens at/after the Slow() hook call.
-	PID        int
-	LogPath    string
-	StderrPath string
-	Stop       func()
+	PID     int
+	LogPath string
+	// JobID is the runner-assigned identity (crash-only tasks): the job
+	// exists from spawn in runners/<jobId>.state.json, so the registry
+	// reuses this id instead of generating one. "" = legacy direct path.
+	JobID string
+	// BrainLog is the final log destination (the runner COPIES the live
+	// log there at terminal; == LogPath on the direct path).
+	BrainLog    string
+	StderrPath  string
+	Stop        func()
 }
 
 type SlowHook func(kind, label string, process BackgroundProcess) (jobID string, logPath string, stream func(chunk string), deliver func(result string, isError bool))

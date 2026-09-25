@@ -232,13 +232,21 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
     V1→V2 migration is manual (automatic V1 upgrades are out of scope by
     owner decision); release validation runs the shared
     `scripts/verify-release-dist.ts` in CI AND release.
-    The bg registry recovers across restarts: running jobs are re-adopted
-    from their pidfiles (never re-run — logs and state are preserved), and
-    completion/cancellation notices are retained on disk
-    (`bg/<job>.notice.json`) and redelivered until the session
-    acknowledges folding them into its transcript (the
-    `background_delivery` identity makes redelivery idempotent — exactly
-    one wake-up turn, ever). Background tasks (bash/python only): a
+    Background tasks are CRASH-ONLY (`packages/runner`,
+    `docs/runner-protocol.md` + `docs/runner-plan.md`): every command
+    (bash AND python) runs through a self-copied `--runner` instance that
+    starts IMMEDIATELY (never waiting for a parent), appends live output
+    to `runners/out/<sessionId>__<jobId>__<startedAt>.log` (GC-exempt —
+    the filename is the identity) and COPIES it to `brain/` at any
+    terminal transition (copy, never move). The state file
+    (`runners/<job>.state.json`: pid, status, exit code, IPC transport)
+    is the recovery contract; the IPC (loopback TCP + token, 5 frozen
+    verbs) is an optimization only. The registry adopts live runners at
+    boot (orphans — unlinkable AND old — are SIGKILLed and cleaned),
+    folds terminal states into the retained-notice chain (redelivered
+    until the session acks them; the `background_delivery` identity makes
+    redelivery idempotent — exactly one wake-up turn, ever), and GCs
+    hourly. Background tasks (bash/python only): a
     command outliving `AutoBackgroundAfter` (10s) detaches — the tool
     returns a placeholder naming the brain `.log`, output streams there
     (append, never deleted); finish/error delivers a completion notice

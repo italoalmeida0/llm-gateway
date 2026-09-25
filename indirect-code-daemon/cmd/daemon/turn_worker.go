@@ -173,11 +173,18 @@ func (w *turnBridge) run() error {
 	}
 	w.live = &liveTracker{turnSeq: w.snap.turnIndex}
 
+	// Every command runs through the crash-only runner (decided D6).
+	// Tests and headless workers without a store keep the direct path.
+	var runnerStart tools.Starter
+	if w.env.store != nil {
+		runnerStart = runnerStarter(w.env.store.rootDir(), w.env.actorID, brainDir)
+	}
+
 	baseTools := []core.Tool{
 		&tools.ReadTool{CWD: w.sessionCWD, Sandbox: sb, Changes: w.tfc.tracker, BrainDir: brainDir, Convert: w.requestConvert},
 		&tools.WriteTool{CWD: w.sessionCWD, Sandbox: sb, Changes: w.tfc.tracker, BrainDir: brainDir},
 		&tools.EditTool{CWD: w.sessionCWD, Sandbox: sb, Changes: w.tfc.tracker, BrainDir: brainDir},
-		&tools.BashTool{CWD: w.sessionCWD, Sandbox: sb, Slow: w.slowHook(), LogDir: brainDir},
+		&tools.BashTool{CWD: w.sessionCWD, Sandbox: sb, Slow: w.slowHook(), LogDir: brainDir, Starter: runnerStart},
 		&tools.GlobTool{CWD: w.sessionCWD, Sandbox: sb},
 		&tools.SearchTool{CWD: w.sessionCWD, Sandbox: sb},
 		&tools.InspectTool{CWD: w.sessionCWD, Sandbox: sb},
@@ -185,7 +192,7 @@ func (w *turnBridge) run() error {
 		&tools.FetchURLTool{CWD: w.sessionCWD, Sandbox: sb},
 	}
 	if _, err := tools.PythonAvailable(); err == nil {
-		baseTools = append(baseTools, &tools.PythonTool{CWD: w.sessionCWD, Sandbox: sb, Slow: w.slowHook(), LogDir: brainDir})
+		baseTools = append(baseTools, &tools.PythonTool{CWD: w.sessionCWD, Sandbox: sb, Slow: w.slowHook(), LogDir: brainDir, Starter: runnerStart})
 	}
 	bgCancelTool := &tools.BgCancelTool{Host: w, SessionID: w.env.actorID}
 	sleepTool := &tools.SleepTool{Host: w, SessionID: w.env.actorID}
@@ -562,7 +569,7 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 		logPath := process.LogPath
 		reply := make(chan any, 1)
 		select {
-		case w.env.bg.inbox <- Envelope{Payload: bgRegisterMsg{Kind: kind, SessionID: w.env.actorID, Label: label, LogPath: logPath, StderrPath: process.StderrPath, PID: process.PID, Stop: process.Stop, Reply: reply}}:
+		case w.env.bg.inbox <- Envelope{Payload: bgRegisterMsg{Kind: kind, SessionID: w.env.actorID, Label: label, LogPath: logPath, StderrPath: process.StderrPath, PID: process.PID, JobID: process.JobID, Stop: process.Stop, Reply: reply}}:
 		case <-w.ctx.Done():
 			if process.Stop != nil {
 				process.Stop()

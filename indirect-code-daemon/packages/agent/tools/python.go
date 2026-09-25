@@ -101,6 +101,9 @@ type PythonArgs struct {
 // is deliberately NO timeout parameter: like bash, a run still going after
 // AutoBackgroundAfter detaches into a background job.
 type PythonTool struct {
+	// Starter launches the script. Nil = direct local process; the
+	// daemon injects the runner-backed starter (crash-only tasks).
+	Starter Starter
 	CWD     string
 	Sandbox *Sandbox
 	// Slow detaches long-running executions into a background job. Nil =
@@ -202,62 +205,52 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	// returns the placeholder long before the script ends, and cancelling
 	// here would kill every detached run the moment the tool call returns.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(bgCtx, argv[0], argv[1:]...)
-	cmd.Dir = dir
-	cmd.Env = pythonEnv(a.Env)
-	if a.Stdin != "" {
-		cmd.Stdin = strings.NewReader(a.Stdin)
-	}
-	setProcessGroup(cmd)
-	var stdout, stderr bytes.Buffer
-	outLog, err := newProcessLog(t.LogDir, "bg_python_stdout_*.log")
-	if err != nil {
-		bgCancel()
-		return core.ToolResult{}, err
-	}
-	errLog, err := newProcessLog(t.LogDir, "bg_python_stderr_*.log")
-	if err != nil {
-		outLog.close(true)
-		bgCancel()
-		return core.ToolResult{}, err
-	}
-	cmd.Stdout, cmd.Stderr = outLog.file, errLog.file
 	start := time.Now()
-	if err := cmd.Start(); err != nil {
-		outLog.close(true)
-		errLog.close(true)
+	proc, err := startWith(bgCtx, t.Starter, ExecSpec{
+		Kind: "python", Command: label,
+		Argv: argv, CWD: dir, Env: pythonEnv(a.Env), Stdin: a.Stdin,
+		LogDir: t.LogDir, SplitStderr: true,
+	})
+	if err != nil {
 		bgCancel()
 		return core.ToolResult{}, err
 	}
-	exited := make(chan struct{})
+	exited := proc.Exited
+	var stdout, stderr bytes.Buffer
 	detached := make(chan struct{})
 	var stream func(string)
-	pump := func(log *processLog, target *bytes.Buffer) {
-		w := &cappedWriter{W: target, Max: 256 * 1024}
-		log.pump(exited, func(chunk []byte) {
-			_, _ = w.Write(chunk)
-			select {
-			case <-detached:
-				if stream != nil {
-					stream(string(chunk))
+	var pumpWG sync.WaitGroup
+	pump := func(pumpFn func(<-chan struct{}, func([]byte)), target *bytes.Buffer) {
+		if pumpFn == nil {
+			return // merged log (runner): one pump feeds everything
+		}
+		pumpWG.Add(1)
+		go func() {
+			defer pumpWG.Done()
+			w := &cappedWriter{W: target, Max: 256 * 1024}
+			pumpFn(exited, func(chunk []byte) {
+				_, _ = w.Write(chunk)
+				select {
+				case <-detached:
+					if stream != nil {
+						stream(string(chunk))
+					}
+				default:
 				}
-			default:
-			}
-		})
+			})
+		}()
 	}
-	go pump(outLog, &stdout)
-	go pump(errLog, &stderr)
+	pump(proc.Pump, &stdout)
+	pump(proc.PumpErr, &stderr)
 	type pyOutcome struct{ runErr error }
 	doneCh := make(chan pyOutcome, 1)
 	go func() {
-		err := cmd.Wait()
-		close(exited)
-		<-outLog.finished
-		<-errLog.finished
+		err := proc.Wait()
+		pumpWG.Wait()
 		doneCh <- pyOutcome{runErr: err}
 	}()
-	stop := func() { bgCancel(); killProcessGroup(cmd) }
-	cleanup := func(remove bool) { outLog.close(remove); errLog.close(remove); bgCancel() }
+	stop := func() { bgCancel(); proc.Stop() }
+	cleanup := func(remove bool) { proc.Cleanup(remove); bgCancel() }
 	select {
 	case out := <-doneCh:
 		cleanup(true)
@@ -275,10 +268,10 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		cleanup(true)
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	}
-	jobID, logPath, sink, deliver := t.Slow("python", label, BackgroundProcess{PID: cmd.Process.Pid, LogPath: outLog.file.Name(), StderrPath: errLog.file.Name(), Stop: stop})
+	jobID, logPath, sink, deliver := t.Slow("python", label, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, StderrPath: proc.ErrLogPath, Stop: stop})
 	if jobID == "" {
 		stop(); <-doneCh; cleanup(false)
-		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", outLog.file.Name())
+		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", proc.LogPath)
 	}
 	stream = sink
 	close(detached)

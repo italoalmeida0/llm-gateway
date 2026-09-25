@@ -25,6 +25,9 @@ import (
 type BashTool struct {
 	CWD     string
 	Sandbox *Sandbox
+	// Starter launches the command. Nil = direct local process; the
+	// daemon injects the runner-backed starter (crash-only tasks).
+	Starter Starter
 	// Slow detaches long-running commands into a background job. Nil =
 	// legacy behavior (block until the command ends).
 	Slow   SlowHook
@@ -76,23 +79,20 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	// the moment the tool call returns. The context is released by
 	// runCancel in the watcher/cancel paths once the process is done.
 	runCtx, runCancel := context.WithCancel(context.Background())
-	cmd := newShellCmd(runCtx, a.Command)
-	cmd.Dir = cwd
-	cmd.Env = os.Environ()
-	setProcessGroup(cmd)
-
-	log, err := newProcessLog(t.LogDir, "bg_bash_*.log")
+	sh := currentShell()
+	proc, err := startWith(runCtx, t.Starter, ExecSpec{
+		Kind:    "bash",
+		Command: a.Command,
+		Argv:    []string{sh.path, sh.flag, a.Command},
+		CWD:     cwd,
+		Env:     os.Environ(),
+		LogDir:  t.LogDir,
+	})
 	if err != nil {
-		runCancel()
-		return core.ToolResult{}, err
-	}
-	cmd.Stdout, cmd.Stderr = log.file, log.file
-	if err := cmd.Start(); err != nil {
-		log.close(true)
 		runCancel()
 		return core.ToolResult{}, fmt.Errorf("start: %w", err)
 	}
-	processExited := make(chan struct{})
+	processExited := proc.Exited
 
 	output := newOutputAccumulator(defaultMaxLines, defaultMaxBytes)
 	// Head buffer for the frontend's terminal-log display.
@@ -120,15 +120,15 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 				<-done
 			default:
 				runCancel()
-				killProcessGroup(cmd)
+				proc.Stop()
 			}
 		case <-runCtx.Done():
-			// bg_cancel post-detach (or stop path): kill the group.
+			// bg_cancel post-detach (or stop path): kill the tree.
 			select {
 			case <-detached:
 				<-done
 			default:
-				killProcessGroup(cmd)
+				proc.Stop()
 			}
 		case <-done:
 		case <-detached:
@@ -149,7 +149,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	}
 	go func() {
 		defer close(done)
-		log.pump(processExited, func(chunk []byte) {
+		proc.Pump(processExited, func(chunk []byte) {
 			output.append(chunk)
 			if room := defaultMaxBytes - head.Len(); room > 0 {
 				head.Write(chunk[:min(room, len(chunk))])
@@ -159,11 +159,11 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	}()
 
 	waitCh := make(chan error, 1)
-	go func() { err := cmd.Wait(); close(processExited); waitCh <- err }()
+	go func() { waitCh <- proc.Wait() }()
 
 	// Fast path: the command finished before the auto-background threshold.
 	finishSync := func(waitErr error) (core.ToolResult, error) {
-		defer log.close(true)
+		defer proc.Cleanup(true)
 		runErr := runCtx.Err()
 		runCancel()
 		return finishBashCommand(a, cwd, start, output, &head, waitErr, ctx.Err(), runErr, progress)
@@ -187,21 +187,21 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		return finishSync(waitErr)
 	}
 	// From here the job owns the process lifetime.
-	jobID, logPath, stream, deliver := t.Slow("bash", a.Command, BackgroundProcess{PID: cmd.Process.Pid, LogPath: log.file.Name(), Stop: func() {
+	jobID, logPath, stream, deliver := t.Slow("bash", a.Command, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, Stop: func() {
 		runCancel()
-		killProcessGroup(cmd)
+		proc.Stop()
 	}})
 	if jobID == "" {
-		runCancel(); killProcessGroup(cmd)
-		<-waitCh; <-done; log.close(false)
-		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", log.file.Name())
+		runCancel(); proc.Stop()
+		<-waitCh; <-done; proc.Cleanup(false)
+		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", proc.LogPath)
 	}
 	streamSink = stream
 	close(detached)
 	go func() {
 		waitErr := <-waitCh
 		<-done
-		log.close(false)
+		proc.Cleanup(false)
 		runErr := runCtx.Err()
 		runCancel()
 		res, err := finishBashCommand(a, cwd, start, output, &head, waitErr, nil, runErr, nil)

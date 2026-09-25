@@ -49,6 +49,16 @@ type link struct {
 // (--worker / the update handoff flags / --slot). Everything else is
 // boot. No legacy shapes: an invocation that mixes roles fails loudly.
 func main() {
+	// Runner role first: it is spec-driven (stdin) and flag-agnostic.
+	for _, a := range os.Args[1:] {
+		if a == "--" {
+			break
+		}
+		if a == "--runner" {
+			runnerMain()
+			return
+		}
+	}
 	if workerMode(os.Args[1:]) {
 		daemonMain()
 		return

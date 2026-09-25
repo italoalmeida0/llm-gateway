@@ -1497,7 +1497,7 @@ if (path === "/api/admin/stats" && req.method === "GET") {
     // Hour windows need sub-day granularity -> usage_events (selective range,
     // <1ms with planner stats). Day/all windows read the usage_model_daily
     // rollup instead of grouping millions of raw events (3330ms -> ~30ms at
-    // 10y scale; see docs/performance).
+    // 10y scale).
     const perModel =
       hours !== null
         ? db

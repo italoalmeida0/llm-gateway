@@ -169,7 +169,7 @@ const MIGRATIONS: Migration[] = [
       -- Per-model daily rollup, fed by the same flush that writes usage_daily.
       -- The per-model dashboard queries (admin stats + /api/usage/by-model)
       -- used to GROUP BY over raw usage_events, which grows linearly (~3330ms
-      -- at 3.65M events / 10y in the growth sim — see docs/performance). The
+      -- at 3.65M events / 10y in the growth sim). The
       -- rollup answers the same questions in ~30ms/~4ms at that scale.
       -- The one-time backfill below costs ~4s per GB of existing history.
       CREATE TABLE usage_model_daily (
@@ -601,8 +601,8 @@ export function migrate(): void {
   }
   // Give the query planner table statistics. Without ANALYZE data, SQLite
   // picks bad plans once usage_events grows (measured: the admin 24h per-user
-  // aggregate went 287ms -> 0.5ms at 3.65M rows only because of this; see
-  // docs/performance). Incremental: cheap no-op once stats exist.
+  // aggregate went 287ms -> 0.5ms at 3.65M rows only because of this).
+  // Incremental: cheap no-op once stats exist.
   db.exec("PRAGMA optimize");
 }
 

@@ -141,7 +141,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   built in (10min TTL, 400MB cap). The wasm owns ALL cache state; the
   gateway keeps no fingerprint, no Map, no LRU of its own.
   Nonzero upstream figures are NEVER overridden.
-  Scaling evidence: `docs/performance` (10y sim). `PRAGMA optimize` runs at the
+  `PRAGMA optimize` runs at the
   end of `migrate()` — without planner stats, hour-window aggregates on big
   `usage_events` degrade into full index scans.
 - **Model registry & routing** (`server/models.ts`, migration `007_models`):
@@ -353,8 +353,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
    Relay events share one ordered, lossless batch (`relayInbox.ts`); never
    let status/snapshot events overtake buffered deltas. USAL's global DOM
    observer is suspended on `/code` because that workspace has no USAL
-   entrances. See `docs/performance/indirect-streaming.md`.
-   Bun-native or hand-rolled beats a new dep.
+   entrances. Bun-native or hand-rolled beats a new dep.
 
 ## Commands
 
@@ -400,7 +399,7 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   scale audit (20 users × 500 reqs/day, 10M/100M/500K tokens, 50 audit rows per
   user-day): seeds `days` of history, times every dashboard query + the flush
   write path before/after migration-013 indexes, optional live HTTP pass;
-  writes a markdown report (see docs/performance/results)
+  writes a markdown report
 - `bun run fake-upstream` — fake provider for manual testing (:3399, key `sk-fake-secret`)
 - `PLAYWRIGHT_MODULE=… CHROMIUM_PATH=… bun scripts/test-indirect-turn-ui.ts`
   (also `test-indirect-composer-ui.ts`, `test-indirect-settings-ui.ts`,

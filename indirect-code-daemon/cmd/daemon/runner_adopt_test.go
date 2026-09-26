@@ -256,9 +256,9 @@ func TestRunnerDoneWithoutParentIsRecoveredFromState(t *testing.T) {
 		st, err := runner.ReadState(runner.StatePath(root, proc.JobID))
 		return err == nil && st.Terminal()
 	})
-	if !fileHas(proc.BrainLog, "quick") {
-		t.Fatal("terminal copy to brain missing")
-	}
+	// The terminal COPY follows the state write (the state is the durable
+	// outcome, the copy is its companion) — wait for it.
+	waitFor(t, 5*time.Second, func() bool { return fileHas(proc.BrainLog, "quick") })
 
 	// A later parent folds it into the notice chain.
 	inbox := make(chan Envelope, 8)

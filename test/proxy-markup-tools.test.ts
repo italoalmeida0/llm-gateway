@@ -25,13 +25,15 @@ const { flushUsage } = await import("../server/usage");
 const { invalidateModelCache } = await import("../server/models");
 const { toolHintsFromRequest } = await import("../server/proxy/dsml");
 const {
+  extractMarkupToolCalls,
   isXiaomiModel,
-  extractXiaomiToolCalls,
-  applyXiaomiRequestAdaptation,
-  buildXiaomiToolInstruction,
-  XiaomiStreamExtractor,
-  xiaomiRecoverer,
-} = await import("../server/proxy/xiaomi");
+  applyMarkupRequestAdaptation,
+  buildWorkaroundToolInstruction,
+  buildMarkupInstruction,
+  MarkupStreamExtractor,
+  markupRecoverer,
+} = await import("../server/proxy/markup-tools");
+const { resolveToolCallMode, defaultToolCallModeFor } = await import("../server/tool-call-mode");
 
 // --- fixtures --------------------------------------------------------------
 
@@ -91,9 +93,99 @@ describe("Xiaomi detection", () => {
   });
 });
 
+describe("tool-call mode resolution", () => {
+  test("an explicit row mode wins over id auto-detection", () => {
+    expect(resolveToolCallMode("native", "xiaomi/mimo")).toBe("native");
+    expect(resolveToolCallMode("fallback", "gpt-5")).toBe("fallback");
+    expect(resolveToolCallMode("workaround", "gpt-5")).toBe("workaround");
+  });
+  test("with no row, a xiaomi id auto-selects workaround; others default to fallback", () => {
+    expect(resolveToolCallMode(undefined, "gpt-5", "xiaomi/mimo")).toBe("workaround");
+    expect(resolveToolCallMode(null, "gpt-5")).toBe("fallback");
+  });
+  test("defaultToolCallModeFor: xiaomi -> workaround, others -> fallback", () => {
+    expect(defaultToolCallModeFor("xiaomi/mimo")).toBe("workaround");
+    expect(defaultToolCallModeFor("MiniMax-M2")).toBe("fallback");
+  });
+});
+
+describe("markup modes accept every dialect", () => {
+  const minimax =
+    '<minimax:tool_call>\n<invoke name="exec_bash">\n<parameter name="cmd">ls -la</parameter>\n</invoke>\n</minimax:tool_call>';
+  const hermes = '<tool_call>{"name":"exec_bash","arguments":{"cmd":"ls -la","timeout":30}}</tool_call>';
+
+  test("xiaomi dialect", () => {
+    const r = extractMarkupToolCalls(CANONICAL, HINTS, "fallback");
+    expect(r.calls[0].input).toEqual({ cmd: "ls -la", timeout: 30 });
+  });
+  test("minimax dialect (invoke name=)", () => {
+    const r = extractMarkupToolCalls(minimax, HINTS, "fallback");
+    expect(r.calls.length).toBe(1);
+    expect(r.calls[0].name).toBe("exec_bash");
+    expect(r.calls[0].input).toEqual({ cmd: "ls -la" });
+    expect(r.text).toBe("");
+  });
+  test("hermes dialect (JSON body)", () => {
+    const r = extractMarkupToolCalls(hermes, HINTS, "fallback");
+    expect(r.calls.length).toBe(1);
+    expect(r.calls[0].name).toBe("exec_bash");
+    expect(r.calls[0].input).toEqual({ cmd: "ls -la", timeout: 30 });
+  });
+  test("hermes with arguments as a JSON string", () => {
+    const r = extractMarkupToolCalls('<tool_call>{"name":"read_file","arguments":"{\\"path\\":\\"/x\\"}"}</tool_call>', HINTS, "fallback");
+    expect(r.calls[0].input).toEqual({ path: "/x" });
+  });
+  test("workaround accepts the other dialects too (only the instruction differs)", () => {
+    expect(extractMarkupToolCalls(minimax, HINTS, "workaround").calls.length).toBe(1);
+    expect(extractMarkupToolCalls(hermes, HINTS, "workaround").calls.length).toBe(1);
+  });
+  test("native mode is inert", () => {
+    const r = extractMarkupToolCalls(CANONICAL, HINTS, "native");
+    expect(r.changed).toBe(false);
+    expect(r.text).toBe(CANONICAL);
+  });
+  test("workaround instruction teaches all three formats", () => {
+    const s = buildWorkaroundToolInstruction([{ name: "exec_bash", description: "Run", parameters: { type: "object" } }]);
+    expect(s).toContain("<function=tool_name_here>");
+    expect(s).toContain("<minimax:tool_call>");
+    expect(s).toContain('"name": "tool_name_here"');
+    expect(s).toContain("exec_bash");
+    expect(s).toContain("Native function calling is DISABLED");
+  });
+  test("fallback instruction is empty (passive)", () => {
+    expect(buildMarkupInstruction("fallback", [{ name: "x" }])).toBe("");
+    expect(buildMarkupInstruction("native", [{ name: "x" }])).toBe("");
+  });
+  test("streaming recovers a minimax call split at every boundary", () => {
+    const src = `Checking. ${minimax} done`;
+    for (let i = 0; i <= src.length; i++) {
+      const ex = new MarkupStreamExtractor(HINTS, "fallback");
+      const emits = [...ex.feed(src.slice(0, i)), ...ex.feed(src.slice(i)), ...ex.flush()];
+      const calls = emits.filter((e) => "call" in e) as any[];
+      expect(calls.length).toBe(1);
+      expect(JSON.parse(calls[0].call.argsJson)).toEqual({ cmd: "ls -la" });
+    }
+  });
+
+  test("disable() releases the held tail as text and stops recovery", () => {
+    const ex = new MarkupStreamExtractor(HINTS, "fallback");
+    // Feed a partial marker so the tail is held, then a native call arrives.
+    const first = ex.feed("Checking. <tool_call><function=exec_bash>");
+    expect(first.some((e) => "call" in e)).toBe(false);
+    const released = ex.disable();
+    expect(released.map((e) => ("text" in e ? e.text : "CALL")).join("")).toContain("<tool_call>");
+    expect(ex.active).toBe(false);
+    // Later markup passes through untouched (never recovered).
+    const after = [...ex.feed(CANONICAL), ...ex.flush()];
+    expect(after.some((e) => "call" in e)).toBe(false);
+    expect(after.map((e) => ("text" in e ? e.text : "")).join("")).toContain("<tool_call>");
+    expect(ex.committed).toBe(0);
+  });
+});
+
 describe("Xiaomi XML extraction (buffered)", () => {
   test("canonical block becomes a native call with typed params", () => {
-    const r = extractXiaomiToolCalls(`Checking.\n${CANONICAL}\n`, HINTS);
+    const r = extractMarkupToolCalls(`Checking.\n${CANONICAL}\n`, HINTS, "workaround");
     expect(r.changed).toBe(true);
     expect(r.calls.length).toBe(1);
     expect(r.calls[0].name).toBe("exec_bash");
@@ -104,19 +196,19 @@ describe("Xiaomi XML extraction (buffered)", () => {
 
   test("multiple blocks become multiple calls", () => {
     const two = `${CANONICAL}\n<tool_call>\n<function=read_file>\n<parameter=path>/etc/hosts</parameter>\n</function>\n</tool_call>`;
-    const r = extractXiaomiToolCalls(two, HINTS);
+    const r = extractMarkupToolCalls(two, HINTS, "workaround");
     expect(r.calls.map((c) => c.name)).toEqual(["exec_bash", "read_file"]);
     expect(r.calls[1].input).toEqual({ path: "/etc/hosts" });
   });
 
   test("non-JSON parameter values stay strings", () => {
-    const r = extractXiaomiToolCalls("<tool_call><function=exec_bash><parameter=cmd>echo hi</parameter></function></tool_call>", HINTS);
+    const r = extractMarkupToolCalls("<tool_call><function=exec_bash><parameter=cmd>echo hi</parameter></function></tool_call>", HINTS, "workaround");
     expect(r.calls[0].input).toEqual({ cmd: "echo hi" });
   });
 
   test("an undeclared function name restores the block verbatim", () => {
     const src = "<tool_call><function=rm_rf><parameter=path>/</parameter></function></tool_call>";
-    const r = extractXiaomiToolCalls(src, HINTS);
+    const r = extractMarkupToolCalls(src, HINTS, "workaround");
     expect(r.changed).toBe(false);
     expect(r.text).toBe(src);
     expect(r.calls.length).toBe(0);
@@ -124,13 +216,13 @@ describe("Xiaomi XML extraction (buffered)", () => {
 
   test("an unclosed wrapper is not recovered (conservative)", () => {
     const src = "<tool_call><function=exec_bash><parameter=cmd>ls</parameter></function>";
-    const r = extractXiaomiToolCalls(src, HINTS);
+    const r = extractMarkupToolCalls(src, HINTS, "workaround");
     expect(r.changed).toBe(false);
     expect(r.text).toBe(src);
   });
 
   test("no hints disables recovery entirely", () => {
-    const r = extractXiaomiToolCalls(CANONICAL, []);
+    const r = extractMarkupToolCalls(CANONICAL, [], "workaround");
     expect(r.changed).toBe(false);
     expect(r.text).toBe(CANONICAL);
   });
@@ -140,7 +232,7 @@ describe("Xiaomi XML extraction (buffered)", () => {
       `<tool_call><function=exec_bash><parameter=cmd>ls</parameter>` +
       `<tool_call><function=read_file><parameter=path>/x</parameter></function></tool_call>` +
       `</function></tool_call>`;
-    const r = extractXiaomiToolCalls(src, HINTS);
+    const r = extractMarkupToolCalls(src, HINTS, "workaround");
     expect(r.calls.length).toBe(1);
     expect(r.calls[0].name).toBe("exec_bash");
     expect(r.calls[0].input).toEqual({ cmd: "ls" });
@@ -154,7 +246,7 @@ describe("Xiaomi XML extraction (buffered)", () => {
       `<parameter=path>example.tsx</parameter>` +
       `<parameter=content>${content}</parameter>` +
       `</function></tool_call>`;
-    const r = extractXiaomiToolCalls(src, HINTS_WRITE);
+    const r = extractMarkupToolCalls(src, HINTS_WRITE, "workaround");
     expect(r.calls.length).toBe(1);
     expect(r.calls[0].name).toBe("write_file");
     expect(r.calls[0].input).toEqual({ path: "example.tsx", content });
@@ -166,7 +258,7 @@ describe("Xiaomi XML extraction (buffered)", () => {
       `<tool_call><function=write_file>` +
       `<parameter=path>x</parameter><parameter=content>${content}</parameter></function></tool_call>`;
     for (let i = 0; i <= src.length; i++) {
-      const ex = new XiaomiStreamExtractor(HINTS_WRITE);
+      const ex = new MarkupStreamExtractor(HINTS_WRITE, "workaround");
       const emits = [...ex.feed(src.slice(0, i)), ...ex.feed(src.slice(i)), ...ex.flush()];
       const calls = emits.filter((e) => "call" in e) as any[];
       expect(calls.length).toBe(1);
@@ -176,27 +268,27 @@ describe("Xiaomi XML extraction (buffered)", () => {
 
   test("function/parameter names are matched case-insensitively", () => {
     const src = "<TOOL_CALL><FUNCTION=Exec_Bash><PARAMETER=CMD>ls</PARAMETER></FUNCTION></TOOL_CALL>";
-    const r = extractXiaomiToolCalls(src, HINTS);
+    const r = extractMarkupToolCalls(src, HINTS, "workaround");
     expect(r.calls.length).toBe(1);
     expect(r.calls[0].name).toBe("exec_bash");
     expect(r.calls[0].input).toEqual({ cmd: "ls" });
   });
 
   test("quoted and unquoted attribute forms are both accepted", () => {
-    expect(extractXiaomiToolCalls('<tool_call><function="exec_bash"><parameter="cmd">ls</parameter></function></tool_call>', HINTS).calls[0].input).toEqual({ cmd: "ls" });
-    expect(extractXiaomiToolCalls("<tool_call><function=exec_bash><parameter=cmd>ls</parameter></function></tool_call>", HINTS).calls[0].input).toEqual({ cmd: "ls" });
+    expect(extractMarkupToolCalls('<tool_call><function="exec_bash"><parameter="cmd">ls</parameter></function></tool_call>', HINTS, "workaround").calls[0].input).toEqual({ cmd: "ls" });
+    expect(extractMarkupToolCalls("<tool_call><function=exec_bash><parameter=cmd>ls</parameter></function></tool_call>", HINTS, "workaround").calls[0].input).toEqual({ cmd: "ls" });
   });
 
   test("a parameter name is canonicalized to the declared casing", () => {
     const src = "<tool_call><function=exec_bash><parameter=CMD>ls</parameter></function></tool_call>";
-    expect(extractXiaomiToolCalls(src, HINTS).calls[0].input).toEqual({ cmd: "ls" });
+    expect(extractMarkupToolCalls(src, HINTS, "workaround").calls[0].input).toEqual({ cmd: "ls" });
   });
 });
 
 describe("Xiaomi XML extraction (streaming)", () => {
   test("split at every boundary yields the same result as one shot", () => {
     const src = `Checking. ${CANONICAL} done`;
-    const oneShot = new XiaomiStreamExtractor(HINTS);
+    const oneShot = new MarkupStreamExtractor(HINTS, "workaround");
     const expectedText = oneShot
       .feed(src)
       .concat(oneShot.flush())
@@ -204,7 +296,7 @@ describe("Xiaomi XML extraction (streaming)", () => {
       .join("");
     const expectedCalls = oneShot.committed;
     for (let i = 0; i <= src.length; i++) {
-      const ex = new XiaomiStreamExtractor(HINTS);
+      const ex = new MarkupStreamExtractor(HINTS, "workaround");
       const emits = [...ex.feed(src.slice(0, i)), ...ex.feed(src.slice(i)), ...ex.flush()];
       const text = emits.map((e) => ("text" in e ? e.text : "")).join("");
       const calls = emits.filter((e) => "call" in e);
@@ -215,7 +307,7 @@ describe("Xiaomi XML extraction (streaming)", () => {
   });
 
   test("an unclosed block at end of stream restores verbatim", () => {
-    const ex = new XiaomiStreamExtractor(HINTS);
+    const ex = new MarkupStreamExtractor(HINTS, "workaround");
     const src = `<tool_call><function=exec_bash><parameter=cmd>ls`;
     const emits = [...ex.feed(src), ...ex.flush()];
     expect(emits.map((e) => ("text" in e ? e.text : "")).join("")).toBe(src);
@@ -223,7 +315,7 @@ describe("Xiaomi XML extraction (streaming)", () => {
   });
 
   test("recovered calls carry their own index", () => {
-    const ex = new XiaomiStreamExtractor(HINTS);
+    const ex = new MarkupStreamExtractor(HINTS, "workaround");
     const two = `${CANONICAL}<tool_call><function=read_file><parameter=path>/x</parameter></function></tool_call>`;
     const emits = [...ex.feed(two), ...ex.flush()].filter((e) => "call" in e);
     expect(emits.map((e: any) => e.call.index)).toEqual([0, 1]);
@@ -238,7 +330,7 @@ describe("Xiaomi request adaptation", () => {
       tool_choice: "auto",
       messages: [{ role: "user", content: "run ls" }],
     };
-    const out = applyXiaomiRequestAdaptation(body, "openai");
+    const out = applyMarkupRequestAdaptation(body, "openai", "workaround");
     expect("tools" in out).toBe(false);
     expect("tool_choice" in out).toBe(false);
     const msgs = out.messages as any[];
@@ -259,9 +351,9 @@ describe("Xiaomi request adaptation", () => {
         { role: "tool", tool_call_id: "call_1", content: "ok" },
       ],
     };
-    const out = applyXiaomiRequestAdaptation(body, "openai");
+    const out = applyMarkupRequestAdaptation(body, "openai", "workaround");
     const msgs = out.messages as any[];
-    expect(msgs[msgs.length - 1]).toEqual({ role: "user", content: buildXiaomiToolInstruction([{ name: "exec_bash", description: "Run a shell command", parameters: TOOLS[0].function.parameters }, { name: "read_file", description: "Read a file", parameters: TOOLS[1].function.parameters }]) });
+    expect(msgs[msgs.length - 1]).toEqual({ role: "user", content: buildWorkaroundToolInstruction([{ name: "exec_bash", description: "Run a shell command", parameters: TOOLS[0].function.parameters }, { name: "read_file", description: "Read a file", parameters: TOOLS[1].function.parameters }]) });
   });
 
   test("chat: assistant tool-call turn without reasoning gets a placeholder", () => {
@@ -272,7 +364,7 @@ describe("Xiaomi request adaptation", () => {
         { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "exec_bash", arguments: "{}" } }] },
       ],
     };
-    const out = applyXiaomiRequestAdaptation(body, "openai");
+    const out = applyMarkupRequestAdaptation(body, "openai", "workaround");
     const asst = (out.messages as any[])[0];
     expect(typeof asst.reasoning_content).toBe("string");
     expect(asst.reasoning_content.length).toBeGreaterThan(0);
@@ -289,7 +381,7 @@ describe("Xiaomi request adaptation", () => {
         },
       ],
     };
-    const out = applyXiaomiRequestAdaptation(body, "openai");
+    const out = applyMarkupRequestAdaptation(body, "openai", "workaround");
     const asst = (out.messages as any[])[0];
     expect(asst.reasoning_content).toBe("I should list files.");
     expect(asst.content).toBe("Here goes.");
@@ -303,7 +395,7 @@ describe("Xiaomi request adaptation", () => {
         { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
       ],
     };
-    const out = applyXiaomiRequestAdaptation(body, "anthropic");
+    const out = applyMarkupRequestAdaptation(body, "anthropic", "workaround");
     expect("tools" in out).toBe(false);
     const msgs = out.messages as any[];
     expect(msgs.length).toBe(1);
@@ -320,30 +412,30 @@ describe("Xiaomi request adaptation", () => {
       tools: [{ type: "function", name: "exec_bash", parameters: { type: "object" } }],
       input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
     };
-    const out = applyXiaomiRequestAdaptation(body, "responses");
+    const out = applyMarkupRequestAdaptation(body, "responses", "workaround");
     expect("tools" in out).toBe(false);
     const input = out.input as any[];
     expect(input[input.length - 1]).toEqual({
       type: "message",
       role: "user",
-      content: [{ type: "input_text", text: buildXiaomiToolInstruction([{ name: "exec_bash", description: undefined, parameters: { type: "object" } }]) }],
+      content: [{ type: "input_text", text: buildWorkaroundToolInstruction([{ name: "exec_bash", description: undefined, parameters: { type: "object" } }]) }],
     });
   });
 
   test("hosted (non-function) tools are not expressible and are ignored", () => {
     const body = { model: "mimo", tools: [{ type: "web_search" }], messages: [] };
-    const out = applyXiaomiRequestAdaptation(body, "openai");
+    const out = applyMarkupRequestAdaptation(body, "openai", "workaround");
     expect(out).toBe(body);
   });
 
   test("no tools = same object (nothing to adapt)", () => {
     const body = { model: "mimo", messages: [{ role: "user", content: "hi" }] };
-    expect(applyXiaomiRequestAdaptation(body, "openai")).toBe(body);
+    expect(applyMarkupRequestAdaptation(body, "openai", "workaround")).toBe(body);
   });
 
   test("tool_choice:none forbids calls and leaves the body untouched", () => {
     const body = { model: "mimo", tools: TOOLS, tool_choice: "none", messages: [] };
-    expect(applyXiaomiRequestAdaptation(body, "openai")).toBe(body);
+    expect(applyMarkupRequestAdaptation(body, "openai", "workaround")).toBe(body);
   });
 });
 
@@ -357,7 +449,7 @@ describe("Xiaomi recoverer (raw buffered body)", () => {
         },
       ],
     });
-    const patched = xiaomiRecoverer(HINTS).patchRaw("openai", body);
+    const patched = markupRecoverer("workaround", HINTS).patchRaw("openai", body);
     expect(patched).not.toBeNull();
     const j = JSON.parse(patched!);
     const msg = j.choices[0].message;
@@ -371,8 +463,46 @@ describe("Xiaomi recoverer (raw buffered body)", () => {
   });
 
   test("a body with no marker is untouched (null)", () => {
-    expect(xiaomiRecoverer(HINTS).patchRaw("openai", JSON.stringify({ choices: [{ message: { content: "plain" } }] }))).toBeNull();
-    expect(xiaomiRecoverer(HINTS).patchRaw("openai", "not json")).toBeNull();
+    expect(markupRecoverer("workaround", HINTS).patchRaw("openai", JSON.stringify({ choices: [{ message: { content: "plain" } }] }))).toBeNull();
+    expect(markupRecoverer("workaround", HINTS).patchRaw("openai", "not json")).toBeNull();
+  });
+
+  test("anti-duplicate: a native tool_call suppresses markup recovery (openai)", () => {
+    const body = JSON.stringify({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: `Also here: ${CANONICAL}`,
+            tool_calls: [{ id: "call_n", type: "function", function: { name: "exec_bash", arguments: "{\"cmd\":\"native\"}" } }],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    });
+    const patched = markupRecoverer("workaround", HINTS).patchRaw("openai", body);
+    expect(patched).toBeNull(); // nothing changed: markup left as content
+  });
+
+  test("anti-duplicate: a native tool_use suppresses markup recovery (anthropic)", () => {
+    const body = JSON.stringify({
+      content: [
+        { type: "text", text: `Also here: ${CANONICAL}` },
+        { type: "tool_use", id: "toolu_n", name: "exec_bash", input: { cmd: "native" } },
+      ],
+      stop_reason: "tool_use",
+    });
+    expect(markupRecoverer("workaround", HINTS).patchRaw("anthropic", body)).toBeNull();
+  });
+
+  test("anti-duplicate: a native function_call suppresses markup recovery (responses)", () => {
+    const body = JSON.stringify({
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: `Also here: ${CANONICAL}` }] },
+        { type: "function_call", id: "fc_n", call_id: "fc_n", name: "exec_bash", arguments: "{\"cmd\":\"native\"}" },
+      ],
+    });
+    expect(markupRecoverer("workaround", HINTS).patchRaw("responses", body)).toBeNull();
   });
 
   test("anthropic body: text block recovered into a tool_use block", () => {
@@ -380,7 +510,7 @@ describe("Xiaomi recoverer (raw buffered body)", () => {
       content: [{ type: "text", text: `Checking.\n${CANONICAL}` }],
       stop_reason: "end_turn",
     });
-    const patched = xiaomiRecoverer(HINTS).patchRaw("anthropic", body);
+    const patched = markupRecoverer("workaround", HINTS).patchRaw("anthropic", body);
     expect(patched).not.toBeNull();
     const j = JSON.parse(patched!);
     expect(j.stop_reason).toBe("tool_use");
@@ -394,7 +524,7 @@ describe("Xiaomi recoverer (raw buffered body)", () => {
     const body = JSON.stringify({
       output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: `Checking.\n${CANONICAL}` }] }],
     });
-    const patched = xiaomiRecoverer(HINTS).patchRaw("responses", body);
+    const patched = markupRecoverer("workaround", HINTS).patchRaw("responses", body);
     expect(patched).not.toBeNull();
     const j = JSON.parse(patched!);
     const fc = j.output.find((b: any) => b.type === "function_call");
@@ -422,11 +552,23 @@ globalThis.fetch = (async (input: any, init: any) => {
   const raw = typeof init?.body === "string" ? init.body : "";
   lastUpstreamBody = raw ? JSON.parse(raw) : null;
   const reqBody = lastUpstreamBody ?? {};
+  // A model id containing "dup" simulates a model that emits BOTH a native
+  // tool_calls delta AND markup content (the anti-duplicate guard case).
+  const dup = typeof reqBody.model === "string" && reqBody.model.includes("dup");
   if (reqBody.stream) {
     const enc = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`;
     const mid = Math.floor(CANONICAL.length / 2);
     const s = new ReadableStream<string>({
       start(c) {
+        if (dup) {
+          c.enqueue(enc({ id: "chatcmpl-xm", model: reqBody.model, choices: [{ index: 0, delta: { role: "assistant", content: "Checking. " + CANONICAL.slice(0, mid) } }] }));
+          c.enqueue(enc({ id: "chatcmpl-xm", model: reqBody.model, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_native", type: "function", function: { name: "exec_bash", arguments: "{\"cmd\":\"native\"}" } }] } }] }));
+          c.enqueue(enc({ id: "chatcmpl-xm", model: reqBody.model, choices: [{ index: 0, delta: { content: CANONICAL.slice(mid) } }] }));
+          c.enqueue(enc({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 40, completion_tokens: 10 } }));
+          c.enqueue("data: [DONE]\n\n");
+          c.close();
+          return;
+        }
         c.enqueue(enc({ id: "chatcmpl-xm", model: reqBody.model, choices: [{ index: 0, delta: { role: "assistant", content: "Checking. " + CANONICAL.slice(0, mid) } }] }));
         c.enqueue(enc({ id: "chatcmpl-xm", model: reqBody.model, choices: [{ index: 0, delta: { content: CANONICAL.slice(mid) } }] }));
         c.enqueue(enc({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 40, completion_tokens: 10 } }));
@@ -436,6 +578,24 @@ globalThis.fetch = (async (input: any, init: any) => {
     });
     return new Response(s.pipeThrough(new TextEncoderStream()), {
       headers: { "Content-Type": "text/event-stream" },
+    });
+  }
+  if (dup) {
+    return Response.json({
+      id: "chatcmpl-xm",
+      model: reqBody.model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: `Also here: ${CANONICAL}`,
+            tool_calls: [{ id: "call_native", type: "function", function: { name: "exec_bash", arguments: "{\"cmd\":\"native\"}" } }],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+      usage: { prompt_tokens: 40, completion_tokens: 10 },
     });
   }
   return Response.json({
@@ -651,7 +811,7 @@ describe("Xiaomi adaptation through handleProxy", () => {
     expect(lastUpstreamBody.messages.length).toBe(1);
   });
 
-  test("a non-Xiaomi model keeps native tools and DSML recovery", async () => {
+  test("a non-Xiaomi model defaults to fallback: native tools kept, markup still recovered", async () => {
     const { req, url } = chatReq({
       model: "deepseek-v4",
       tools: TOOLS,
@@ -659,11 +819,116 @@ describe("Xiaomi adaptation through handleProxy", () => {
     });
     const res = await handleProxy(req, url, undefined);
     expect(res.status).toBe(200);
-    // Native tools passed through untouched for a non-Xiaomi target.
+    // Fallback is PASSIVE: native tools pass through untouched.
     expect(Array.isArray(lastUpstreamBody.tools)).toBe(true);
+    // ...but the xiaomi-dialect markup in the response is still recovered.
     const j = await res.json();
-    // Xiaomi XML is NOT recovered for a non-Xiaomi target.
-    expect(j.choices[0].finish_reason).toBe("stop");
-    expect(j.choices[0].message.content).toContain("<tool_call>");
+    expect(j.choices[0].finish_reason).toBe("tool_calls");
+    expect(j.choices[0].message.tool_calls?.[0]?.function.name).toBe("exec_bash");
+    expect(j.choices[0].message.content).not.toContain("tool_call");
+  });
+
+  test("router mode: an explicit 'native' row disables markup recovery", async () => {
+    const mid = `native-model-${RUN}`;
+    db.prepare(
+      `INSERT INTO models (id, provider_id, upstream_model, name, description, enabled,
+         input_modalities, output_modalities, sampling_params, features,
+         tool_call_mode, source, created_at, updated_at)
+       VALUES (?, ?, ?, '', '', 1, '["text"]', '["text"]', '[]', '[]', 'native', 'manual', ?, ?)`,
+    ).run(mid, PID, mid, now, now);
+    db.prepare(
+      "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES (?, ?, ?, 0, 1, ?)",
+    ).run(mid, PID, mid, now);
+    db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'router') ON CONFLICT(key) DO UPDATE SET value='router'").run();
+    invalidateModelCache();
+    try {
+      const { req, url } = chatReq({ model: mid, tools: TOOLS, messages: [{ role: "user", content: "run ls" }] });
+      const res = await handleProxy(req, url, undefined);
+      expect(res.status).toBe(200);
+      // Native mode: tools forwarded, markup left as content.
+      expect(Array.isArray(lastUpstreamBody.tools)).toBe(true);
+      const j = await res.json();
+      expect(j.choices[0].finish_reason).toBe("stop");
+      expect(j.choices[0].message.content).toContain("<tool_call>");
+    } finally {
+      db.prepare("DELETE FROM models WHERE id = ?").run(mid);
+      db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'passthrough') ON CONFLICT(key) DO UPDATE SET value='passthrough'").run();
+      invalidateModelCache();
+    }
+  });
+
+  test("router mode: an explicit 'workaround' row drives the adaptation (non-xiaomi id)", async () => {
+    const mid = `workaround-model-${RUN}`;
+    db.prepare(
+      `INSERT INTO models (id, provider_id, upstream_model, name, description, enabled,
+         input_modalities, output_modalities, sampling_params, features,
+         tool_call_mode, source, created_at, updated_at)
+       VALUES (?, ?, ?, '', '', 1, '["text"]', '["text"]', '[]', '[]', 'workaround', 'manual', ?, ?)`,
+    ).run(mid, PID, mid, now, now);
+    db.prepare(
+      "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES (?, ?, ?, 0, 1, ?)",
+    ).run(mid, PID, mid, now);
+    db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'router') ON CONFLICT(key) DO UPDATE SET value='router'").run();
+    invalidateModelCache();
+    try {
+      const { req, url } = chatReq({
+        model: mid,
+        tools: TOOLS,
+        messages: [{ role: "user", content: "run ls" }],
+      });
+      const res = await handleProxy(req, url, undefined);
+      expect(res.status).toBe(200);
+      // Workaround instruction strips tools and teaches every dialect.
+      expect(lastUpstreamBody.tools).toBeUndefined();
+      const instr = lastUpstreamBody.messages[lastUpstreamBody.messages.length - 1].content;
+      expect(instr).toContain("<minimax:tool_call>");
+      expect(instr).toContain("Format C");
+      // The xiaomi-dialect XML response is still recovered.
+      const j = await res.json();
+      expect(j.choices[0].message.tool_calls?.[0]?.function.name).toBe("exec_bash");
+    } finally {
+      db.prepare("DELETE FROM models WHERE id = ?").run(mid);
+      db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'passthrough') ON CONFLICT(key) DO UPDATE SET value='passthrough'").run();
+      invalidateModelCache();
+    }
+  });
+
+  test("anti-duplicate (buffered): native tool_calls win, markup stays content", async () => {
+    const { req, url } = chatReq({
+      model: "deepseek-dup", // fallback mode (native tools kept)
+      tools: TOOLS,
+      messages: [{ role: "user", content: "run ls" }],
+    });
+    const res = await handleProxy(req, url, undefined);
+    expect(res.status).toBe(200);
+    const j = await res.json();
+    const msg = j.choices[0].message;
+    // Exactly ONE call — the native one; the markup is NOT recovered.
+    expect(msg.tool_calls.length).toBe(1);
+    expect(msg.tool_calls[0].id).toBe("call_native");
+    expect(msg.content).toContain("<tool_call>");
+  });
+
+  test("anti-duplicate (stream): native tool_calls delta suppresses markup recovery", async () => {
+    const { req, url } = chatReq({
+      model: "deepseek-dup",
+      tools: TOOLS,
+      stream: true,
+      messages: [{ role: "user", content: "run ls" }],
+    });
+    const res = await handleProxy(req, url, undefined);
+    expect(res.status).toBe(200);
+    const sse = await res.text();
+    const frames = sse
+      .split("\n")
+      .filter((l) => l.startsWith("data: ") && l !== "data: [DONE]")
+      .map((l) => JSON.parse(l.slice(6)));
+    const toolFrames = frames.flatMap((f: any) => f.choices?.[0]?.delta?.tool_calls ?? []);
+    // Only the native call (id call_native) — no recovered duplicate.
+    expect(toolFrames.length).toBe(1);
+    expect(toolFrames[0].id).toBe("call_native");
+    // The markup that arrived after the native delta is plain content.
+    const content = frames.map((f: any) => f.choices?.[0]?.delta?.content ?? "").join("");
+    expect(content).toContain("<tool_call>");
   });
 });

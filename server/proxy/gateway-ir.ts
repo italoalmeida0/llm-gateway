@@ -2111,6 +2111,12 @@ export class IRStreamTranslator {
     const out: IRStreamDelta[] = [];
     for (const d of deltas) {
       const content: IRStreamDelta = {};
+      // Anti-duplicate guard: a native tool-use delta means the model called a
+      // tool natively — release any held marker tail as plain text and stop
+      // recovering markup for the rest of this message.
+      if (d.toolUse && this.recover.active) {
+        for (const e of this.recover.disable()) out.push(...IRStreamTranslator.emitToDeltas(e));
+      }
       if (d.text && !d.thinking && this.recover.active) {
         for (const e of this.recover.feed(d.text)) out.push(...IRStreamTranslator.emitToDeltas(e));
       } else if (d.text) {

@@ -1,33 +1,30 @@
 /**
- * Xiaomi MiMo tool-call adaptation.
+ * Markup tool-call adaptation.
  *
- * MiMo's native function calling is unreliable through OpenAI-compatible
- * serving stacks: tool calls come back as an XML envelope in assistant
- * CONTENT (or are dropped entirely), and multi-turn tool conversations are
- * rejected unless the assistant's `reasoning_content` is replayed. The
- * proven workaround (originally a standalone proxy) is:
+ * Some upstreams serve models whose native function calling is unreliable
+ * through OpenAI-compatible stacks: calls come back as MARKUP in assistant
+ * content (or are dropped), and multi-turn tool conversations may be
+ * rejected unless the assistant's reasoning is replayed. The gateway can
+ * recover that markup at the response edge — the same three-edge wiring
+ * (stream / translated buffered / same-protocol raw) as the DSML recoverer,
+ * behind the shared ToolRecoverer contract (recovery.ts).
  *
- *   1. REQUEST: drop the native `tools`/`tool_choice` and deliver the tool
- *      schema as an in-band `<system_instruction>` XML block in a NEW user
- *      message (protocol-specific: chat `role:user` string, Anthropic
- *      `role:user` text block, Responses `input` `input_text` message);
- *   2. RESPONSE: recover the model's XML tool calls
+ * The strategy is chosen per model (tool_call_mode, see tool-call-mode.ts):
  *
- *        <tool_call>
- *          <function=exec_bash>
- *            <parameter=cmd>ls -la</parameter>
- *          </function>
- *        </tool_call>
+ *   - `fallback` (default) — PASSIVE: native `tools` are forwarded, but
+ *     markup found in the response is recovered from every supported dialect
+ *     (xiaomi XML, MiniMax `<invoke>`, Hermes/Qwen JSON);
+ *   - `workaround` — ACTIVE: native `tools` are stripped and the schema is
+ *     re-delivered as an in-band instruction teaching the supported formats.
  *
- *      into native `tool_calls` (all three protocols), stripping the markup;
- *   3. REASONING: round-trip `reasoning_content` through a think block in
- *      content so a content-only client can replay it (chat only — the
- *      other protocols carry reasoning natively).
+ * Native `tool_calls` are ALWAYS accepted as a fallback: the workaround
+ * instruction states native calling is disabled (to discourage it), but a
+ * model that emits native calls anyway is never broken — recovery only ADDS
+ * calls found in content, it never removes native ones.
  *
- * Recovery is conservative, mirroring the DSML recoverer (dsml.ts): a
- * candidate must CLOSE (`</tool_call>`), the function name must match a
- * declared tool, and unmatched blocks are restored byte-verbatim. Active
- * only when the request declared tools.
+ * Recovery is conservative: a candidate must CLOSE, the function name must
+ * match a declared tool, unmatched blocks restore byte-verbatim. Active only
+ * when the request declared tools (tool_choice ≠ none).
  */
 
 import {
@@ -45,46 +42,52 @@ import type {
   StreamRecoverer,
   ToolRecoverer,
 } from "./recovery";
+import type { ToolCallMode } from "../tool-call-mode";
 
 const asRecord = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
 const asArr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
-/** Detection is deliberately model-id based: any id containing "xiaomi"
- *  (e.g. `xiaomi/mimo-v2.5-pro`, `xiaomi-mimo`) gets the adaptation, so a
- *  MiMo served through a third-party gateway is covered too. */
+/** Detection by model id: any id containing "xiaomi" gets the workaround by
+ *  default (mirrors defaultToolCallModeFor, kept for direct callers). */
 export function isXiaomiModel(model: unknown): boolean {
   return typeof model === "string" && /xiaomi/i.test(model);
 }
-
 // ---------------------------------------------------------------------------
-// XML dialect parsing (buffered)
+// markup dialects
 // ---------------------------------------------------------------------------
 
-/** Block open/close (`<tool_call>` … `</tool_call>`), tolerant of `-`/`_`
- *  and a plural `s`. */
-const XIAOMI_MARKER = /<\s*tool[_-]?calls?\s*>/i;
+/** The markup dialects `smart` mode understands. */
+export type MarkupDialect = "xiaomi" | "minimax" | "hermes";
+
 /**
- * One scanner over every structural tag, so nesting can be tracked by
- * DEPTH: a tag appearing inside a parameter VALUE is literal text (a model
- * writing a file whose content happens to contain the markup), never a
- * separate call and never a premature terminator.
+ * One scanner over every structural tag, so nesting can be tracked by DEPTH:
+ * a tag appearing inside a parameter VALUE is literal text (a model writing
+ * a file whose content happens to contain the markup), never a separate call
+ * and never a premature terminator.
  *
- *   1 block close · 2 block open · 3 function close · 4 function open (5 name)
- *   · 6 parameter close · 7 parameter open (8 name)
+ * Group map (checked with `m[k] !== undefined`):
+ *   1 block close · 2 block open · 3 function close
+ *   4 function open (5 name) · 6 invoke open (7 name)
+ *   8 parameter close · 9 parameter open (10 name) · 11 parameter name= (12)
  */
 const TAG_RE = new RegExp(
   [
-    String.raw`(<\s*\/\s*tool[_-]?calls?\s*>)`,
-    String.raw`(<\s*tool[_-]?calls?\s*>)`,
-    String.raw`(<\s*\/\s*function\s*>)`,
+    String.raw`(<\s*\/\s*(?:minimax\s*:\s*)?tool[_-]?calls?\s*>)`,
+    String.raw`(<\s*(?:minimax\s*:\s*)?tool[_-]?calls?\s*>)`,
+    String.raw`(<\s*\/\s*(?:function|invoke)\s*>)`,
     String.raw`(<\s*function\s*=\s*["']?\s*([^>\s"']+)\s*["']?\s*>)`,
+    String.raw`(<\s*invoke\s+name\s*=\s*["']?\s*([^>\s"']+)\s*["']?\s*>)`,
     String.raw`(<\s*\/\s*parameter\s*>)`,
     String.raw`(<\s*parameter\s*=\s*["']?\s*([^>\s"']+)\s*["']?\s*[^>]*>)`,
+    String.raw`(<\s*parameter\s+name\s*=\s*["']?\s*([^>\s"']+)\s*["']?\s*[^>]*>)`,
   ].join("|"),
   "gi",
 );
+
+/** Any markup wrapper open (`<tool_call>` or `<minimax:tool_call>`). */
+const MARKER = /<\s*(?:minimax\s*:\s*)?tool[_-]?calls?\s*>/i;
 
 let callSeq = 0;
 function newCallId(): string {
@@ -92,9 +95,9 @@ function newCallId(): string {
   return `call_${Date.now().toString(36)}${callSeq.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** tmp/proxy.ts parity: JSON when the raw text parses, otherwise the raw
- *  string (so `<parameter=cmd>ls -la</parameter>` stays a string). */
-function parseXiaomiValue(raw: string): unknown {
+/** JSON when the raw text parses, otherwise the raw string (so
+ *  `<parameter=cmd>ls -la</parameter>` stays a string). */
+function parseValue(raw: string): unknown {
   if (!raw) return "";
   try {
     return JSON.parse(raw);
@@ -103,35 +106,40 @@ function parseXiaomiValue(raw: string): unknown {
   }
 }
 
-interface XiaomiBlock {
+interface MarkupBlock {
   start: number;
   end: number;
   name: string | null;
+  /** Which tag supplied the name: `function=` (xiaomi) or `invoke name=`
+   *  (minimax). Gates dialect acceptance. */
+  nameKind: "function" | "invoke" | null;
   params: Array<{ key: string; value: string }>;
+  /** Raw inner text, for the JSON (hermes) dialect. */
+  inner: string;
 }
 
 /**
- * Single depth-aware scan of every structural tag. A `<tool_call>`/`<function>`
- * /`<parameter>` appearing INSIDE a parameter value is literal data (a model
- * writing a file whose content contains the markup) — it neither opens a
- * nested call nor terminates the enclosing one. Nested parameters are
- * tracked by depth so a balanced pair inside a value stays in the value.
+ * Single depth-aware scan of every structural tag. A wrapper/function/
+ * parameter tag appearing INSIDE a parameter value is literal data — it
+ * neither opens a nested call nor terminates the enclosing one. A spurious
+ * call/function nested inside the outermost block (outside any value) is
+ * ignored entirely, so its params never join the outer call.
  *
- * Returns only COMPLETE blocks (a block whose `</tool_call>` was seen); an
- * unclosed block is never returned, so it restores verbatim.
+ * Returns only COMPLETE blocks (a block whose close was seen); an unclosed
+ * block is never returned, so it restores verbatim.
  */
-function scanBlocks(text: string): XiaomiBlock[] {
+function scanBlocks(text: string): MarkupBlock[] {
   const re = new RegExp(TAG_RE.source, "gi");
-  const out: XiaomiBlock[] = [];
+  const out: MarkupBlock[] = [];
   let blockDepth = 0;
   let blockStart = -1;
+  let innerStart = -1;
   let name: string | null = null;
+  let nameKind: "function" | "invoke" | null = null;
   let params: Array<{ key: string; value: string }> = [];
   let paramDepth = 0;
   let paramKey: string | null = null;
   let paramValStart = 0;
-  // A spurious call/function nested inside the outermost block (outside any
-  // parameter value): ignored entirely — its params never join the outer call.
   let skipDepth = 0;
 
   const commitParam = (endIdx: number) => {
@@ -143,60 +151,56 @@ function scanBlocks(text: string): XiaomiBlock[] {
   for (let m = re.exec(text); m; m = re.exec(text)) {
     const inParam = paramDepth > 0;
     if (m[1] !== undefined) {
-      // </tool_call> — literal inside a value; a nested close unwinds the
-      // skip region; otherwise it closes the outermost block.
       if (inParam) continue;
       if (skipDepth > 0) skipDepth--;
       else if (blockDepth === 1) {
-        out.push({ start: blockStart, end: m.index + m[0].length, name, params });
+        out.push({ start: blockStart, end: m.index + m[0].length, name, nameKind, params, inner: text.slice(innerStart, m.index) });
         blockDepth = 0;
         name = null;
+        nameKind = null;
         params = [];
       }
       continue;
     }
     if (m[2] !== undefined) {
-      // <tool_call> — literal inside a value; a nested open starts a skip
-      // region; otherwise it opens the outermost block.
       if (inParam) continue;
       if (blockDepth === 0) {
         blockStart = m.index;
+        innerStart = m.index + m[0].length;
         blockDepth = 1;
         name = null;
+        nameKind = null;
         params = [];
       } else skipDepth++;
       continue;
     }
     if (m[3] !== undefined) {
-      // </function> — literal inside a value; unwinds a skip region.
       if (!inParam && skipDepth > 0) skipDepth--;
       continue;
     }
-    if (m[4] !== undefined) {
-      // <function=NAME> — literal inside a value; a second sibling function
-      // (or one inside a skip region) is ignored; the first one wins.
+    if (m[4] !== undefined || m[6] !== undefined) {
+      // <function=NAME> (xiaomi) or <invoke name="NAME"> (minimax)
       if (inParam) continue;
       if (skipDepth > 0) skipDepth++;
-      else if (blockDepth === 1 && name === null) name = (m[5] ?? "").trim();
-      else if (blockDepth === 1) skipDepth++;
+      else if (blockDepth === 1 && name === null) {
+        name = (m[5] ?? m[7] ?? "").trim();
+        nameKind = m[4] !== undefined ? "function" : "invoke";
+      } else if (blockDepth === 1) skipDepth++;
       continue;
     }
-    if (m[6] !== undefined) {
-      // </parameter> — closes the innermost open parameter.
+    if (m[8] !== undefined) {
       if (paramDepth > 1) paramDepth--;
       else if (paramDepth === 1) commitParam(m.index);
       continue;
     }
-    if (m[7] !== undefined) {
-      // <parameter=KEY> — literal inside a value (tracked by depth); ignored
-      // in a skip region.
+    if (m[9] !== undefined || m[11] !== undefined) {
       if (inParam) {
         paramDepth++;
         continue;
       }
       if (skipDepth > 0 || blockDepth === 0) continue;
       paramDepth = 1;
-      paramKey = (m[8] ?? "").trim();
+      paramKey = (m[10] ?? m[12] ?? "").trim();
       paramValStart = m.index + m[0].length;
       continue;
     }
@@ -204,30 +208,81 @@ function scanBlocks(text: string): XiaomiBlock[] {
   return out;
 }
 
+/** Parse the JSON (hermes) dialect: `<tool_call>{"name":…,"arguments":…}`. */
+function parseHermesInner(inner: string): { name: string; input: Record<string, unknown> } | null {
+  const s = inner.trim();
+  if (!s.startsWith("{")) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(s);
+  } catch {
+    return null;
+  }
+  const rec = asRecord(obj);
+  const name = typeof rec.name === "string" ? rec.name.trim() : "";
+  if (!name) return null;
+  const args = rec.arguments ?? rec.parameters ?? rec.input;
+  let input: Record<string, unknown>;
+  if (typeof args === "string") {
+    try {
+      input = asRecord(JSON.parse(args));
+    } catch {
+      input = {};
+    }
+  } else {
+    input = asRecord(args);
+  }
+  return { name, input };
+}
+
+function dialectsFor(mode: ToolCallMode): MarkupDialect[] {
+  // Both markup modes accept every dialect; only the INSTRUCTION differs
+  // (workaround teaches the formats, fallback just listens).
+  void mode;
+  return ["xiaomi", "minimax", "hermes"];
+}
+
 /**
- * Recover Xiaomi XML tool calls from assistant content. Matched blocks are
+ * Recover markup tool calls from assistant content. Matched blocks are
  * removed (markup stripped) and become calls; a block whose function name is
- * not a declared tool (or that has no `<function=…>` at all) is restored
- * byte-verbatim. Only the OUTERMOST block commits — a call written inside
- * another is ignored, never emitted as a second overlapping call — while a
- * tag nested inside a parameter VALUE is preserved as literal text.
+ * not a declared tool (or that parses to no call at all) is restored
+ * byte-verbatim. Only the OUTERMOST block commits, and a tag nested inside a
+ * parameter VALUE stays literal text.
  */
-export function extractXiaomiToolCalls(text: string, hints: DsmlToolHint[]): DsmlExtractResult {
-  if (!hints.length || !XIAOMI_MARKER.test(text)) return { text, calls: [], changed: false };
+export function extractMarkupToolCalls(
+  text: string,
+  hints: DsmlToolHint[],
+  mode: ToolCallMode,
+): DsmlExtractResult {
+  if (!hints.length || mode === "native" || !MARKER.test(text)) return { text, calls: [], changed: false };
+  const dialects = dialectsFor(mode);
   const calls: DsmlRecoveredCall[] = [];
   const segments: string[] = [];
   let pos = 0;
   let changed = false;
   for (const block of scanBlocks(text)) {
-    const hint = block.name !== null ? findHint(hints, block.name) : undefined;
-    if (!hint) continue; // restore verbatim (stays in the kept text)
-    segments.push(text.slice(pos, block.start));
-    const input: Record<string, unknown> = {};
-    for (const p of block.params) {
-      const key = p.key.trim();
-      if (!key) continue;
-      input[canonicalKey(hint, key)] = parseXiaomiValue(p.value.trim());
+    // Resolve the call: a named function (xiaomi/minimax) or a JSON body
+    // (hermes).
+    let name = block.name;
+    let input: Record<string, unknown> | null = null;
+    if (name === null && dialects.includes("hermes")) {
+      const h = parseHermesInner(block.inner);
+      if (h) {
+        name = h.name;
+        input = h.input;
+      }
     }
+    const hint = name !== null ? findHint(hints, name) : undefined;
+    if (!hint) continue; // restore verbatim (stays in the kept text)
+    if (input === null) {
+      input = {};
+      for (const p of block.params) {
+        const key = p.key.trim();
+        if (!key) continue;
+        input[canonicalKey(hint, key)] = parseValue(p.value.trim());
+      }
+    }
+    segments.push(text.slice(pos, block.start));
     calls.push({ id: newCallId(), name: hint.name, input: sanitizeArgs(input, hint) });
     changed = true;
     pos = block.end;
@@ -239,17 +294,17 @@ export function extractXiaomiToolCalls(text: string, hints: DsmlToolHint[]): Dsm
 }
 
 // ---------------------------------------------------------------------------
-// XML dialect parsing (streaming)
+// streaming
 // ---------------------------------------------------------------------------
 
 /** Hard cap on the held marker tail (bounded memory). */
 const MAX_HOLD = 512 * 1024;
 
-const OPEN_TAGS = ["tool_call", "tool-call", "tool_calls", "tool-calls", "toolcall", "toolcalls"];
+const OPEN_TAGS = ["tool_call", "tool-call", "tool_calls", "tool-calls", "toolcall", "toolcalls", "minimax:tool_call", "minimax:tool-call"];
 
-/** Longest suffix that could still grow into a `<tool_call…` open tag. */
+/** Longest suffix that could still grow into a wrapper open tag. */
 function partialOpenLen(s: string): number {
-  const max = Math.min(s.length, 16);
+  const max = Math.min(s.length, 20);
   for (let k = max; k >= 1; k--) {
     const cand = s.slice(s.length - k);
     if (cand[0] !== "<") continue;
@@ -260,8 +315,8 @@ function partialOpenLen(s: string): number {
 }
 
 /** End offset of the matching close of the FIRST open block, param-aware so
- *  a block tag inside a parameter value is literal (never a terminator), and
- *  skip-aware so a nested call does not close the outer block early. */
+ *  a wrapper tag inside a parameter value is literal, and skip-aware so a
+ *  nested call does not close the outer block early. */
 function findCloseCut(s: string): number {
   const re = new RegExp(TAG_RE.source, "gi");
   let blockDepth = 0;
@@ -279,11 +334,11 @@ function findCloseCut(s: string): number {
       else skipDepth++;
     } else if (m[3] !== undefined) {
       if (!inParam && skipDepth > 0) skipDepth--;
-    } else if (m[4] !== undefined) {
+    } else if (m[4] !== undefined || m[6] !== undefined) {
       if (!inParam && blockDepth === 1) skipDepth++;
-    } else if (m[6] !== undefined) {
+    } else if (m[8] !== undefined) {
       if (paramDepth > 0) paramDepth--;
-    } else if (m[7] !== undefined) {
+    } else if (m[9] !== undefined || m[11] !== undefined) {
       if (inParam) paramDepth++;
       else if (skipDepth === 0 && blockDepth === 1) paramDepth = 1;
     }
@@ -293,21 +348,25 @@ function findCloseCut(s: string): number {
 
 /**
  * Stream-side recovery: text streams through immediately; from the first
- * `<tool_call` the tail is held until the block closes (or the stream ends)
+ * wrapper open the tail is held until the block closes (or the stream ends)
  * so a candidate commits or restores as a whole — partial markup is never
  * emitted to the client.
  */
-export class XiaomiStreamExtractor implements StreamRecoverer {
+export class MarkupStreamExtractor implements StreamRecoverer {
   private hold = "";
   private scanTail = "";
   private holding = false;
+  private disabled = false;
   private nextIndex = 0;
   committed = 0;
 
-  constructor(private hints: DsmlToolHint[]) {}
+  constructor(
+    private hints: DsmlToolHint[],
+    private mode: ToolCallMode,
+  ) {}
 
   get active(): boolean {
-    return this.hints.length > 0;
+    return this.hints.length > 0 && this.mode !== "native" && !this.disabled;
   }
 
   feed(text: string): StreamEmit[] {
@@ -315,7 +374,7 @@ export class XiaomiStreamExtractor implements StreamRecoverer {
     const out: StreamEmit[] = [];
     if (!this.holding) {
       const s = this.scanTail + text;
-      const m = XIAOMI_MARKER.exec(s);
+      const m = MARKER.exec(s);
       if (!m) {
         const k = partialOpenLen(s);
         this.scanTail = k > 0 ? s.slice(s.length - k) : "";
@@ -342,15 +401,26 @@ export class XiaomiStreamExtractor implements StreamRecoverer {
     this.hold = "";
     this.holding = false;
     if (!s) return [];
-    if (!this.active) return [{ text: s }];
-    return this.emit(extractXiaomiToolCalls(s, this.hints));
+    if (!this.active || this.disabled) return [{ text: s }];
+    return this.emit(extractMarkupToolCalls(s, this.hints, this.mode));
+  }
+
+  /** A native tool_calls delta arrived: release the held tail as plain text
+   *  and never recover markup again for this message. */
+  disable(): StreamEmit[] {
+    this.disabled = true;
+    const s = this.scanTail + this.hold;
+    this.scanTail = "";
+    this.hold = "";
+    this.holding = false;
+    return s ? [{ text: s }] : [];
   }
 
   private drain(): StreamEmit[] {
     const out: StreamEmit[] = [];
     for (;;) {
       if (this.hold.length > MAX_HOLD) {
-        const r = extractXiaomiToolCalls(this.hold, this.hints);
+        const r = extractMarkupToolCalls(this.hold, this.hints, this.mode);
         this.hold = "";
         this.holding = false;
         out.push(...this.emit(r));
@@ -360,11 +430,9 @@ export class XiaomiStreamExtractor implements StreamRecoverer {
       if (cut <= 0) break;
       const blob = this.hold.slice(0, cut);
       this.hold = this.hold.slice(cut);
-      out.push(...this.emit(extractXiaomiToolCalls(blob, this.hints)));
+      out.push(...this.emit(extractMarkupToolCalls(blob, this.hints, this.mode)));
     }
-    // No complete block pending: release everything except a possible
-    // partial open tag so trailing prose streams promptly.
-    if (!XIAOMI_MARKER.test(this.hold)) {
+    if (!MARKER.test(this.hold)) {
       const k = partialOpenLen(this.hold);
       const vis = k > 0 ? this.hold.slice(0, this.hold.length - k) : this.hold;
       this.hold = k > 0 ? this.hold.slice(this.hold.length - k) : "";
@@ -389,15 +457,15 @@ export class XiaomiStreamExtractor implements StreamRecoverer {
 // reasoning round-trip (chat only, request side)
 // ---------------------------------------------------------------------------
 
-// The proven proxy embedded reasoning as a markdown think block in `content`
+// A legacy proxy embedded reasoning as a markdown think block in `content`
 // because its client only read `content`. The gateway delivers the NATIVE
 // `reasoning_content` field (the IR round-trips it for every model family),
 // so nothing is injected on the response side. Only the REVERSE direction is
 // kept: a client that still replays the block in history gets it moved back
 // into `reasoning_content` (a no-op for clients that never emit it).
 const THINK_RE = /---\n###### Think Start \{([\s\S]*?)###### \} Think End\n---/;
-/** MiMo rejects assistant tool-call turns without reasoning; replay a
- *  placeholder when the client never captured any (tmp/proxy.ts parity). */
+/** Some models reject assistant tool-call turns without reasoning; replay a
+ *  placeholder when the client never captured any. */
 const THINK_FALLBACK = "Thinking process: deciding to call tools to process the user request.";
 
 // ---------------------------------------------------------------------------
@@ -416,7 +484,7 @@ function toolsFromBody(body: Record<string, unknown>, via: RecoverProto): ToolDe
     const t = asRecord(raw);
     if (via !== "anthropic") {
       // Responses/chat tool lists may carry hosted tools (web_search, …):
-      // only functions are expressible in the XML instruction.
+      // only functions are expressible in the markup instruction.
       if (typeof t.type === "string" && t.type !== "function") continue;
       const fn = asRecord(t.function);
       const src = fn.name !== undefined ? fn : t;
@@ -438,7 +506,44 @@ function toolsFromBody(body: Record<string, unknown>, via: RecoverProto): ToolDe
   return out;
 }
 
-/** The exact `<system_instruction>` block the proven proxy sends. */
+function toolList(tools: ToolDef[]): string {
+  let s = "Available Tools:\n";
+  for (const t of tools) {
+    s += `- Name: ${t.name}\n`;
+    s += `  Description: ${t.description ?? ""}\n`;
+    s += `  Parameters: ${JSON.stringify(t.parameters ?? {})}\n\n`;
+  }
+  return s;
+}
+
+/**
+ * `workaround` instruction: native calling is disabled, and ANY of the
+ * supported markup formats is accepted (the gateway parses all of them).
+ * One example per dialect; the model picks whichever it was trained on.
+ */
+export function buildWorkaroundToolInstruction(tools: ToolDef[]): string {
+  let s = "\n\n<system_instruction>\n";
+  s += "Native function calling is DISABLED. To call a tool, emit the call as text using ONE of the supported formats below. Do not mix formats in a single call.\n\n";
+  s += "Format A:\n";
+  s += "<tool_call>\n";
+  s += "<function=tool_name_here>\n";
+  s += "<parameter=param_name_1>value goes here</parameter>\n";
+  s += "</function>\n";
+  s += "</tool_call>\n\n";
+  s += "Format B:\n";
+  s += "<minimax:tool_call>\n";
+  s += '<invoke name="tool_name_here">\n';
+  s += '<parameter name="param_name_1">value goes here</parameter>\n';
+  s += "</invoke>\n";
+  s += "</minimax:tool_call>\n\n";
+  s += "Format C:\n";
+  s += '<tool_call>{"name": "tool_name_here", "arguments": {"param_name_1": "value goes here"}}</tool_call>\n\n';
+  s += toolList(tools);
+  s += "</system_instruction>";
+  return s;
+}
+
+/** The single-format Xiaomi/MiMo instruction (kept for reference and tests). */
 export function buildXiaomiToolInstruction(tools: ToolDef[]): string {
   let s = "\n\n<system_instruction>\n";
   s += "Native function calling is DISABLED. To call a tool, you MUST use the following exact XML format. Do not deviate.\n\n";
@@ -449,28 +554,30 @@ export function buildXiaomiToolInstruction(tools: ToolDef[]): string {
   s += "<parameter=param_name_2>another value</parameter>\n";
   s += "</function>\n";
   s += "</tool_call>\n\n";
-  s += "Available Tools:\n";
-  for (const t of tools) {
-    s += `- Name: ${t.name}\n`;
-    s += `  Description: ${t.description ?? ""}\n`;
-    s += `  Parameters: ${JSON.stringify(t.parameters ?? {})}\n\n`;
-  }
+  s += toolList(tools);
   s += "</system_instruction>";
   return s;
 }
 
+/** Build the in-band instruction for a mode (empty for passive modes). */
+export function buildMarkupInstruction(mode: ToolCallMode, tools: ToolDef[]): string {
+  return mode === "workaround" ? buildWorkaroundToolInstruction(tools) : "";
+}
+
 /**
- * Rewrite an attempt body for a Xiaomi target: strip native tools and inject
- * the XML instruction as a NEW user message, protocol-shaped so it never
+ * Rewrite an attempt body for a WORKAROUND target: strip native tools and
+ * inject the instruction as a NEW user message, protocol-shaped so it never
  * breaks an in-flight tool result (Anthropic tool_result blocks stay in
  * their user message; chat/responses keep their own tool message and get a
- * separate user turn after it). Returns the same object when the body
- * declares no tools (nothing to adapt).
+ * separate user turn after it). Returns the same object for passive modes
+ * (`native`/`fallback`) and when the body declares no tools.
  */
-export function applyXiaomiRequestAdaptation(
+export function applyMarkupRequestAdaptation(
   body: Record<string, unknown>,
   via: RecoverProto,
+  mode: ToolCallMode,
 ): Record<string, unknown> {
+  if (mode !== "workaround") return body;
   // `tool_choice: "none"` means the caller forbids tool calls: leave the
   // request exactly as-is (mirrors toolHintsFromRequest).
   const choice = body.tool_choice;
@@ -478,7 +585,7 @@ export function applyXiaomiRequestAdaptation(
   const tools = toolsFromBody(body, via);
   if (!tools.length) return body;
   const out: Record<string, unknown> = { ...body };
-  const instruction = buildXiaomiToolInstruction(tools);
+  const instruction = buildMarkupInstruction(mode, tools);
   delete out.tools;
   delete out.tool_choice;
   delete out.functions;
@@ -516,7 +623,7 @@ export function applyXiaomiRequestAdaptation(
   for (const msg of messages) {
     if (msg.role !== "assistant") continue;
     // Think-block round-trip: reasoning embedded in content goes back to
-    // the `reasoning_content` field MiMo expects on tool-call turns.
+    // the `reasoning_content` field some models expect on tool-call turns.
     if (typeof msg.content === "string") {
       const m = THINK_RE.exec(msg.content);
       if (m) {
@@ -539,28 +646,16 @@ export function applyXiaomiRequestAdaptation(
 // recoverer factory
 // ---------------------------------------------------------------------------
 
-/**
- * Patch a raw buffered body: Xiaomi XML recovery across the three protocols.
- * Returns null when nothing changed — untouched bodies keep their exact
- * bytes. Native `reasoning_content` is left alone (the client reads it).
- */
-function patchXiaomiRaw(
-  proto: RecoverProto,
-  respText: string,
-  hints: DsmlToolHint[],
-  extract: (text: string) => DsmlExtractResult,
-): string | null {
-  if (!hints.length) return null;
-  return patchRawResponseDsml(proto, respText, hints, extract, XIAOMI_MARKER);
-}
-
-/** The Xiaomi dialect as a ToolRecoverer (see recovery.ts). */
-export function xiaomiRecoverer(hints: DsmlToolHint[]): ToolRecoverer {
-  const extract = (text: string): DsmlExtractResult => extractXiaomiToolCalls(text, hints);
+/** The markup dialect as a ToolRecoverer (see recovery.ts). */
+export function markupRecoverer(mode: ToolCallMode, hints: DsmlToolHint[]): ToolRecoverer {
+  const extract = (text: string): DsmlExtractResult => extractMarkupToolCalls(text, hints, mode);
   return {
-    active: hints.length > 0,
+    active: hints.length > 0 && mode !== "native",
     extract,
-    patchRaw: (proto, respText) => patchXiaomiRaw(proto, respText, hints, extract),
-    stream: () => new XiaomiStreamExtractor(hints),
+    patchRaw: (proto: RecoverProto, respText: string): string | null => {
+      if (!hints.length || mode === "native") return null;
+      return patchRawResponseDsml(proto, respText, hints, extract, MARKER);
+    },
+    stream: () => new MarkupStreamExtractor(hints, mode),
   };
 }

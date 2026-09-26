@@ -32,11 +32,11 @@ import {
 import { normalizeAttemptBody } from "./target-profile";
 import { dsmlRecoverer, toolHintsFromRequest } from "./dsml";
 import {
-  applyXiaomiRequestAdaptation,
-  isXiaomiModel,
-  xiaomiRecoverer,
-} from "./xiaomi";
-import type { ToolRecoverer } from "./recovery";
+  applyMarkupRequestAdaptation,
+  markupRecoverer,
+} from "./markup-tools";
+import { isWorkaroundMode, isMarkupMode, resolveToolCallMode } from "../tool-call-mode";
+import { combineRecoverers, type ToolRecoverer } from "./recovery";
 import {
   decodeToIR,
   encodeIR,
@@ -1081,6 +1081,15 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // capability URL.
       const via = cand.via;
       const upstreamProto = via;
+      // Per-model tool-call strategy (tool_call_mode): 'native' forwards the
+      // tools array; 'xiaomi'/'smart' strip it and recover markup calls at
+      // the response edge (see server/proxy/markup-tools.ts). The registry
+      // row wins; unregistered targets fall back to id auto-detection.
+      const toolCallMode = resolveToolCallMode(
+        snap.models.get(routedPublicModel ?? String((bodyJson as any)?.model ?? ""))?.tool_call_mode,
+        cand.upstreamModel,
+        (bodyJson as any)?.model,
+      );
       // Trailing "/" would produce "//chat/completions" — new rows are
       // stripped at write time, this covers legacy rows still carrying one.
       const base = (
@@ -1199,17 +1208,15 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
           // Non-JSON bodies go upstream untouched.
         }
       }
-      // Xiaomi MiMo adaptation (model id containing "xiaomi"): native
-      // function calling is unreliable there, so the tool schema is moved
-      // into an in-band XML instruction and the model's XML tool calls are
-      // recovered at the response edge (see server/proxy/xiaomi.ts).
-      const xiaomiTarget =
-        isXiaomiModel(cand.upstreamModel) || isXiaomiModel((bodyJson as any)?.model);
-      if (xiaomiTarget && req.method === "POST" && bodyJson) {
+      // Markup tool-call adaptation (tool_call_mode 'xiaomi'/'smart'): native
+      // function calling is unreliable for these targets, so the tool schema
+      // is moved into an in-band instruction and the model's markup tool
+      // calls are recovered at the response edge.
+      if (isWorkaroundMode(toolCallMode) && req.method === "POST" && bodyJson) {
         try {
           const parsed = JSON.parse(attemptBody) as Record<string, unknown>;
           if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            const adapted = applyXiaomiRequestAdaptation(parsed, via);
+            const adapted = applyMarkupRequestAdaptation(parsed, via, toolCallMode);
             if (adapted !== parsed) attemptBody = JSON.stringify(adapted);
           }
         } catch {
@@ -1349,9 +1356,12 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       const contentType = upstream.headers.get("content-type") || "";
       const isSse = contentType.includes("text/event-stream");
       const clientHeaders = buildClientHeaders(upstream.headers, requestId, req, { attemptsMade });
-      // Response-edge tool-call recovery for THIS candidate's dialect: Xiaomi
-      // XML for a MiMo target, DSML otherwise (see server/proxy/recovery.ts).
-      const recovery: ToolRecoverer = xiaomiTarget ? xiaomiRecoverer(dsmlTools) : dsmlRecoverer(dsmlTools);
+      // Response-edge tool-call recovery for THIS candidate: `native` is
+      // fully off; every markup mode accepts DSML (the DeepSeek safety net)
+      // PLUS the markup dialects, composed via combineRecoverers.
+      const recovery: ToolRecoverer = isMarkupMode(toolCallMode)
+        ? combineRecoverers(dsmlRecoverer(dsmlTools), markupRecoverer(toolCallMode, dsmlTools))
+        : combineRecoverers();
 
       // ---- streaming relay ----
       if (isSse && upstream.body) {
@@ -1547,16 +1557,20 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         try {
           const irr = decodeResponseToIR(cand.via as IRProto, respText, modelName);
           // Tool-call recovery (markup leaking into content): recovered
-          // calls join the IR tool uses, the markup is stripped.
-          const recovered = recovery.extract(irr.text);
-          if (recovered.changed) {
-            irr.text = recovered.text;
-            if (recovered.calls.length) {
-              irr.toolUses = [
-                ...irr.toolUses,
-                ...recovered.calls.map((c) => ({ id: c.id, name: c.name, input: c.input })),
-              ];
-              if (irr.finish === "stop") irr.finish = "tool_calls";
+          // calls join the IR tool uses, the markup is stripped. Anti-
+          // duplicate guard: a native tool use already carries the call, so
+          // markup in the same message stays content.
+          if (irr.toolUses.length === 0) {
+            const recovered = recovery.extract(irr.text);
+            if (recovered.changed) {
+              irr.text = recovered.text;
+              if (recovered.calls.length) {
+                irr.toolUses = [
+                  ...irr.toolUses,
+                  ...recovered.calls.map((c) => ({ id: c.id, name: c.name, input: c.input })),
+                ];
+                if (irr.finish === "stop") irr.finish = "tool_calls";
+              }
             }
           }
           converted = encodeResponseFromIR(proto as IRProto, irr, modelName);

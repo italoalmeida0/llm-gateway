@@ -25,6 +25,7 @@ import { kvSnapshotCached } from "../tokens";
 import { gridPage, parseGridQuery, parseCursor, buildGridWhere, type ColSpec } from "../gridql";
 import { queryKeys } from "../keys";
 import { normalizePricing, pricingColumns } from "../pricing";
+import { TOOL_CALL_MODES, defaultToolCallModeFor, type ToolCallMode } from "../tool-call-mode";
 
 /**
  * /api/admin/* — everything requires role=admin. Every mutation is audited.
@@ -270,6 +271,10 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
   const mol = intOpt("maxOutputLength", 1e10);
   const pricing = pricingOpt();
   const efforts = arrOpt("reasoningEfforts");
+  const tcm = strOpt("toolCallMode", 16);
+  if (tcm !== undefined && !TOOL_CALL_MODES.includes(tcm as ToolCallMode)) {
+    throw new ApiError(400, "toolCallMode must be one of native, fallback, workaround");
+  }
 
   return {
     upstream_model: strOpt("upstreamModel", 256) ?? existing?.upstream_model,
@@ -293,6 +298,8 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
     pricing_input_cache: pricing === undefined ? (existing?.pricing_input_cache ?? null) : pricing?.inputCache ?? null,
     pricing_input_cache_write: pricing === undefined ? (existing?.pricing_input_cache_write ?? null) : pricing?.inputCacheWrite ?? null,
     pricing_output: pricing === undefined ? (existing?.pricing_output ?? null) : pricing?.output ?? null,
+    tool_call_mode:
+      tcm === undefined ? (existing?.tool_call_mode ?? "fallback") : (tcm as ToolCallMode),
   };
 }
 
@@ -987,6 +994,10 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
     const f = modelFields(body);
     const upstreamModel =
       targets?.[0]?.upstreamModel ?? f.upstream_model ?? id;
+    // Default the strategy by id when the admin did not pick one: a MiMo
+    // model gets the workaround, everything else stays native.
+    const toolCallMode =
+      "toolCallMode" in body ? f.tool_call_mode : defaultToolCallModeFor(id);
     const now = Date.now();
     const chain = targets ?? [{ providerId, upstreamModel, enabled: f.enabled === 1 }];
     db.transaction(() => {
@@ -996,13 +1007,14 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
              max_output_length, input_modalities, output_modalities,
              sampling_params, features, reasoning_efforts, pricing,
              pricing_input, pricing_input_cache, pricing_input_cache_write, pricing_output,
-             source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
+             tool_call_mode, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
       ).run(
         id, providerId, upstreamModel, f.name, f.description, f.enabled, f.context_length,
         f.max_output_length, f.input_modalities, f.output_modalities,
         f.sampling_params, f.features, f.reasoning_efforts, f.pricing,
         f.pricing_input, f.pricing_input_cache, f.pricing_input_cache_write, f.pricing_output,
+        toolCallMode,
         now, now,
       );
       const ins = db.prepare(
@@ -1141,7 +1153,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
               input_modalities = ?, output_modalities = ?, sampling_params = ?,
               features = ?, reasoning_efforts = ?, pricing = ?, pricing_input = ?,
               pricing_input_cache = ?, pricing_input_cache_write = ?, pricing_output = ?,
-              updated_at = ?
+              tool_call_mode = ?, updated_at = ?
            WHERE id = ?`,
         ).run(
           targets ? existing.provider_id : providerId,
@@ -1150,7 +1162,7 @@ export async function handleAdminRoute(path: string, req: Request, url: URL): Pr
           f.enabled, f.context_length, f.max_output_length,
           f.input_modalities, f.output_modalities, f.sampling_params, f.features,
           f.reasoning_efforts, f.pricing, f.pricing_input, f.pricing_input_cache,
-          f.pricing_input_cache_write, f.pricing_output, Date.now(), modelId,
+          f.pricing_input_cache_write, f.pricing_output, f.tool_call_mode, Date.now(), modelId,
         );
         if (targets) {
           replaceModelTargets(modelId, targets);

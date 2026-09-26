@@ -11,6 +11,7 @@ import { decryptSecret } from "./crypto";
 import { GATEWAY_SECRET } from "./config";
 import { keyUsable } from "./failover";
 import { normalizePricing, pricingColumns } from "./pricing";
+import { defaultToolCallModeFor, normalizeToolCallMode } from "./tool-call-mode";
 
 /**
  * Model registry & routing.
@@ -166,8 +167,8 @@ const insertModel = db.prepare(
       max_output_length, input_modalities, output_modalities,
        sampling_params, features, reasoning_efforts, pricing,
        pricing_input, pricing_input_cache, pricing_input_cache_write, pricing_output,
-       source, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)`,
+       tool_call_mode, source, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)`,
 );
 
 /** A freshly imported model gets its provider as the priority-0 target. */
@@ -289,6 +290,7 @@ export async function syncProviderModels(
           prices.inputCache,
           prices.inputCacheWrite,
           prices.output,
+          defaultToolCallModeFor(m.id),
           now,
           now,
         );
@@ -397,6 +399,7 @@ export function publicModelAdmin(
     samplingParams: jsonArr(m.sampling_params),
     features: jsonArr(m.features),
     reasoningEfforts: m.reasoning_efforts ? jsonArr(m.reasoning_efforts) : null,
+    toolCallMode: normalizeToolCallMode(m.tool_call_mode),
     pricing: modelPricing(m),
     pricingInput: m.pricing_input ?? null,
     pricingInputCache: m.pricing_input_cache ?? null,

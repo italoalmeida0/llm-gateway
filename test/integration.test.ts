@@ -1578,6 +1578,46 @@ describe("model registry & routing mode", () => {
     ).toBe(400);
   });
 
+  test("model tool_call_mode: default by id, explicit override, validation", async () => {
+    // A xiaomi id defaults to the active workaround; anything else is fallback.
+    const xm = await api("/api/admin/models", {
+      token: adminToken,
+      body: { id: "xiaomi/mimo-tcm", providerId, upstreamModel: "fake-llm-1" },
+    });
+    expect(xm.status).toBe(200);
+    expect(xm.json.model.toolCallMode).toBe("workaround");
+
+    const plain = await api("/api/admin/models", {
+      token: adminToken,
+      body: { id: "plain-tcm", providerId, upstreamModel: "fake-llm-1" },
+    });
+    expect(plain.status).toBe(200);
+    expect(plain.json.model.toolCallMode).toBe("fallback");
+
+    // Explicit native on a non-xiaomi id, then flip to workaround via PATCH.
+    const nat = await api("/api/admin/models", {
+      token: adminToken,
+      body: { id: "native-tcm", providerId, upstreamModel: "fake-llm-1", toolCallMode: "native" },
+    });
+    expect(nat.status).toBe(200);
+    expect(nat.json.model.toolCallMode).toBe("native");
+    const patch = await api("/api/admin/models/native-tcm", {
+      token: adminToken, method: "PATCH", body: { toolCallMode: "workaround" },
+    });
+    expect(patch.status).toBe(200);
+    expect(patch.json.model.toolCallMode).toBe("workaround");
+
+    // Invalid value is rejected.
+    expect(
+      (await api("/api/admin/models", { token: adminToken, body: { id: "bad-tcm", providerId, toolCallMode: "nope" } })).status,
+    ).toBe(400);
+
+    // Cleanup: these rows would otherwise pollute later registry counts.
+    for (const id of ["xiaomi/mimo-tcm", "plain-tcm", "native-tcm", "bad-tcm"]) {
+      await api(`/api/admin/models/${encodeURIComponent(id)}`, { token: adminToken, method: "DELETE" });
+    }
+  });
+
   test("model pricing round-trips scientific notation unchanged", async () => {
     const c = await api("/api/admin/models", {
       token: adminToken,

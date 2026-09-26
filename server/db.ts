@@ -583,6 +583,20 @@ const MIGRATIONS: Migration[] = [
       ).run(Date.now());
     },
   },
+  {
+    name: "021_model_tool_call_mode",
+    // Per-model tool-call strategy. 'native' = everything off; 'fallback'
+    // (default) = native tools forwarded but markup calls recovered from
+    // every dialect; 'workaround' = strip tools + inject the in-band
+    // instruction (see server/proxy/markup-tools.ts). Existing models whose
+    // id contains "xiaomi" are backfilled to 'workaround' so the behaviour
+    // they already had (id-based auto-detection) becomes an explicit,
+    // editable setting; everything else starts at 'fallback'.
+    up: `
+      ALTER TABLE models ADD COLUMN tool_call_mode TEXT NOT NULL DEFAULT 'fallback';
+      UPDATE models SET tool_call_mode = 'workaround' WHERE lower(id) LIKE '%xiaomi%';
+    `,
+  },
 ];
 
 export function migrate(): void {
@@ -699,6 +713,8 @@ export interface ModelRow {
   sampling_params: string;
   features: string;
   reasoning_efforts: string | null;
+  /** Tool-call strategy: 'native' | 'smart' | 'xiaomi' (migration 021). */
+  tool_call_mode: string;
   pricing: string | null;
   pricing_input: number | null;
   pricing_input_cache: number | null;

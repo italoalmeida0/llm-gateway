@@ -272,6 +272,9 @@ export interface SyncPreview {
 
 export type RoutingMode = "passthrough" | "router";
 
+/** Per-model tool-call strategy (see server/tool-call-mode.ts). */
+export type ToolCallMode = "native" | "fallback" | "workaround";
+
 /** Admin view of a registered model (camelCase mirror of the models table). */
 export interface ModelDto {
   id: string;
@@ -288,6 +291,7 @@ export interface ModelDto {
   samplingParams: string[];
   features: string[];
   reasoningEfforts: string[] | null;
+  toolCallMode: ToolCallMode;
   pricing: Record<string, number> | null;
   pricingInput: number | null;
   pricingInputCache: number | null;

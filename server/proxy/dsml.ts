@@ -618,6 +618,7 @@ export class DsmlStreamExtractor {
   private hold = "";
   private scanTail = "";
   private holding = false;
+  private disabled = false;
   private nextIndex = 0;
   /** Committed tool calls so far (the translator upgrades `stop` to
    *  `tool_calls` on the terminal frame when this is > 0). */
@@ -626,7 +627,7 @@ export class DsmlStreamExtractor {
   constructor(private hints: DsmlToolHint[]) {}
 
   get active(): boolean {
-    return this.hints.length > 0;
+    return this.hints.length > 0 && !this.disabled;
   }
 
   feed(text: string): DsmlEmit[] {
@@ -663,6 +664,17 @@ export class DsmlStreamExtractor {
     if (!s) return [];
     if (!this.active) return [{ text: s }];
     return this.emit(extractDsmlToolCalls(s, this.hints));
+  }
+
+  /** A native tool_calls delta arrived: release the held tail as plain text
+   *  and never recover markup again for this message. */
+  disable(): DsmlEmit[] {
+    this.disabled = true;
+    const s = this.scanTail + this.hold;
+    this.scanTail = "";
+    this.hold = "";
+    this.holding = false;
+    return s ? [{ text: s }] : [];
   }
 
   private drain(): DsmlEmit[] {
@@ -741,18 +753,24 @@ export function patchRawResponseDsml(
       const choice = asRecord(ch);
       const msg = asRecord(choice.message);
       const calls: DsmlRecoveredCall[] = [];
+      // Anti-duplicate guard: the model already emitted native tool_calls,
+      // so markup in the SAME message is not a second call — leave it as
+      // content (recovery only ADDS; it must not double a real call).
+      const hasNative = asArr(msg.tool_calls).length > 0;
       if (typeof msg.content === "string") {
-        msg.content = patchStr(msg.content, calls);
+        if (!hasNative) msg.content = patchStr(msg.content, calls);
       } else if (Array.isArray(msg.content)) {
-        msg.content = asArr(msg.content)
-          .map((part) => {
-            const pr = asRecord(part);
-            if (typeof pr.text !== "string") return part;
-            const t = patchStr(pr.text, calls);
-            if (t === pr.text) return part;
-            return t === "" ? null : { ...pr, text: t };
-          })
-          .filter((part): part is Record<string, unknown> => part !== null);
+        if (!hasNative) {
+          msg.content = asArr(msg.content)
+            .map((part) => {
+              const pr = asRecord(part);
+              if (typeof pr.text !== "string") return part;
+              const t = patchStr(pr.text, calls);
+              if (t === pr.text) return part;
+              return t === "" ? null : { ...pr, text: t };
+            })
+            .filter((part): part is Record<string, unknown> => part !== null);
+        }
       }
       if (calls.length) {
         msg.tool_calls = [
@@ -766,9 +784,11 @@ export function patchRawResponseDsml(
   } else if (proto === "anthropic") {
     const calls: DsmlRecoveredCall[] = [];
     const out: unknown[] = [];
+    // Anti-duplicate guard: a native tool_use block already carries the call.
+    const hasNative = asArr(root.content).some((b) => asRecord(b).type === "tool_use");
     for (const b of asArr(root.content)) {
       const block = asRecord(b);
-      if (block.type === "text" && typeof block.text === "string") {
+      if (!hasNative && block.type === "text" && typeof block.text === "string") {
         const t = patchStr(block.text, calls);
         if (t !== block.text) {
           if (t !== "") out.push({ ...block, text: t });
@@ -785,9 +805,11 @@ export function patchRawResponseDsml(
   } else {
     const calls: DsmlRecoveredCall[] = [];
     const out: unknown[] = [];
+    // Anti-duplicate guard: a native function_call item already carries it.
+    const hasNative = asArr(root.output).some((it) => asRecord(it).type === "function_call");
     for (const item of asArr(root.output)) {
       const r = asRecord(item);
-      if (r.type === "message") {
+      if (!hasNative && r.type === "message") {
         let touched = false;
         const parts = asArr(r.content).map((p) => {
           const pr = asRecord(p);
@@ -802,7 +824,7 @@ export function patchRawResponseDsml(
       }
       out.push(item);
     }
-    if (typeof root.output_text === "string") root.output_text = patchStr(root.output_text, calls);
+    if (!hasNative && typeof root.output_text === "string") root.output_text = patchStr(root.output_text, calls);
     if (calls.length) {
       for (const c of calls) {
         out.push({ type: "function_call", id: c.id, call_id: c.id, name: c.name, arguments: JSON.stringify(c.input), status: "completed" });

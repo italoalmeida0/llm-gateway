@@ -126,10 +126,20 @@ func Run(spec Spec) int {
 	// 5. Wiring: output broadcaster + connection manager + signals.
 	bc := newBroadcaster(out)
 	go bc.run()
-	// killFn is a fast TERM REQUEST; the guaranteed reap (escalation +
-	// ppid sweep) happens synchronously in step 6 once the command exits,
-	// so a TERM-resistant descendant can never outlive the runner.
-	serve := &server{spec: spec, token: token, bc: bc, killFn: func() { requestTerminate(st.CmdPgid) }}
+	// Arm escalation independently of Wait: the command leader itself may
+	// ignore TERM. Cancellation and normal completion share one reaper,
+	// which is joined before the terminal record is published.
+	var reapOnce sync.Once
+	reaped := make(chan struct{})
+	startReap := func() {
+		reapOnce.Do(func() {
+			go func() {
+				defer close(reaped)
+				reapCommandTree(st.CmdPgid)
+			}()
+		})
+	}
+	serve := &server{spec: spec, token: token, bc: bc, killFn: startReap}
 	if ln != nil {
 		go serve.serve(ln)
 	}
@@ -140,7 +150,7 @@ func Run(spec Spec) int {
 	go func() {
 		if _, ok := <-sigc; ok {
 			serve.markKilled("signal")
-			requestTerminate(st.CmdPgid)
+			startReap()
 		}
 	}()
 
@@ -179,7 +189,8 @@ func Run(spec Spec) int {
 	// OWN the whole tree before finishing (V2R-002): a TERM-resistant
 	// descendant must not outlive the runner that claimed the task ended.
 	// Escalation (TERM → grace → KILL + ppid sweep) is synchronous here.
-	reapCommandTree(st.CmdPgid)
+	startReap()
+	<-reaped
 	// Let the tail catch the last bytes before the copy.
 	bc.drain()
 

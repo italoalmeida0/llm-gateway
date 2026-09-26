@@ -349,6 +349,18 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 	if !ok || j.Status != BgStatusRunning {
 		return false
 	}
+	// Persist the delivery decision before stopping or dropping recovery
+	// metadata. A failed write must not turn a silent cancel into a wake-up.
+	if j.Runner {
+		disp := runner.DispBackground
+		if by == "assistant" {
+			disp = runner.DispSuppressed
+		}
+		if err := runner.WriteDisposition(b.rootDir(), j.ID, disp); err != nil {
+			trace("bg.cancel.persist_failed", map[string]any{"job": j.ID, "error": err.Error()})
+			return false
+		}
+	}
 	if j.stop != nil {
 		j.stop()
 	}
@@ -366,16 +378,6 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 	}
 	_ = os.Remove(b.pidPath(jobID))
 	trace("bg.cancel", map[string]any{"job": j.ID, "sid": j.SessionID, "by": by})
-	// V2R-001: record the durable disposition. An assistant cancel is
-	// SILENT (its caller learns from the tool result); a user/dashboard
-	// cancel notifies. Recovery must replay exactly this.
-	if j.Runner {
-		if by == "assistant" {
-			_ = runner.WriteDisposition(b.rootDir(), j.ID, runner.DispSuppressed)
-		} else {
-			_ = runner.WriteDisposition(b.rootDir(), j.ID, runner.DispBackground)
-		}
-	}
 	b.broadcast()
 	if by == "user" {
 		b.deliver(j, false)

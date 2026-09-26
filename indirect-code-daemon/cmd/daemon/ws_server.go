@@ -101,7 +101,7 @@ func (s *wsServer) waitForLanes() {
 // stall the socket writer).
 func (s *wsServer) scheduleResyncFlush() {
 	if !s.resyncFlush.CompareAndSwap(false, true) {
-		return // a flusher is already running; it drains until empty
+		return // the writer's retry tick will pick up remaining marks
 	}
 	go func() {
 		defer s.resyncFlush.Store(false)
@@ -110,9 +110,12 @@ func (s *wsServer) scheduleResyncFlush() {
 		// top-level sessionId) and waits for the NEXT onSpace signal —
 		// looping here would spin forever against a full queue.
 		for _, sid := range s.ws.takeResyncs() {
-			ev, _ := s.buildSessionData(sid, "")
+			ev, errMsg := s.buildSessionData(sid, "")
 			if ev == nil {
-				continue // gone: nothing to resync
+				if errMsg != "Session not found" {
+					s.ws.markResync(sid)
+				}
+				continue
 			}
 			ev["resync"] = true
 			ev["sessionId"] = sid
@@ -138,7 +141,13 @@ func (s *wsServer) emit(ev any) { s.ws.emit(ev) }
 func (s *wsServer) buildSessionData(sid, requestID string) (map[string]any, string) {
 	res := s.sessions.route(sid, true)
 	if res.Error != "" {
-		return nil, "Session not found"
+		if !validSessionID(sid) || res.Error == "session unavailable" || res.Error == "deleted" {
+			return nil, "Session not found"
+		}
+		if _, err := os.Stat(newDiskStore(s.dataDir).sessionFile(sid)); os.IsNotExist(err) {
+			return nil, "Session not found"
+		}
+		return nil, "Session busy"
 	}
 	rr := make(chan any, 1)
 	select {
@@ -157,7 +166,7 @@ func (s *wsServer) buildSessionData(sid, requestID string) (map[string]any, stri
 				return map[string]any{"type": "session_data", "requestId": requestID, "hostId": s.host(), "session": p}, ""
 			}
 		}
-		return nil, "Session not found"
+		return nil, "Session busy"
 	case <-time.After(replyTimeout):
 		return nil, "Session busy"
 	}

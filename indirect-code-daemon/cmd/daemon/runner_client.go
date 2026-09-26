@@ -122,14 +122,7 @@ func startRunner(root, sessionID, brainDir string, spec tools.ExecSpec) (*tools.
 			return waitErr
 		},
 		Stop: func() {
-			// Fast path: IPC kill (the runner reaps its own tree).
-			_ = killRunnerIPC(root, jobID)
-			// Guarantee: TERM the runner (its handler records the terminal
-			// state and reaps), AND reap the command's group from the
-			// durable identity so a runner that dies mid-cancel still
-			// cannot leave the command running (V2R-002).
-			_ = terminatePid(cmd.Process.Pid)
-			reapCommandFromState(root, jobID)
+			stopRunner(root, jobID, cmd.Process.Pid)
 		},
 		Pump:    tools.TailLog(outPath),
 		Cleanup: func(bool) {},
@@ -138,6 +131,15 @@ func startRunner(root, sessionID, brainDir string, spec tools.ExecSpec) (*tools.
 		},
 	}
 	return proc, nil
+}
+
+// Both newly launched and adopted jobs use the same cancellation fallback.
+// Reaping runs outside the supervisor mailbox; the runner records completion
+// only after its own reaper has finished.
+func stopRunner(root, jobID string, pid int) {
+	_ = killRunnerIPC(root, jobID)
+	_ = terminatePid(pid)
+	go reapCommandFromState(root, jobID)
 }
 
 // killRunnerIPC is the fast-path cancellation over the runner socket

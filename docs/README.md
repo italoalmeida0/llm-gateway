@@ -1,10 +1,10 @@
 # V2 release preparation
 
-Start with the [runner follow-up review](v2-runner-follow-up.md), checked on
-2026-09-26 at `796d726`. It records ten open findings after the new runner
-architecture, with evidence, proposed fixes, and acceptance criteria. Eight
-findings have diagnostic reproductions; two are identified by code inspection.
-The current assessment is **fix before release**.
+Start with the [implemented recovery fixes](v2-runner-follow-up.md#implemented-recovery-fixes),
+following the verification of `4958354`. The six failing reproductions across
+V2R-001, V2R-002, V2R-007, V2R-008, and V2R-010 now pass and have permanent
+regression coverage. The section records the exact changes, validation, and
+remaining release-validation limits. Earlier sections preserve the review history.
 
 The [original review](v2-release-readiness.md) compared `dev` at `7f2c8c0`
 with V1 at `origin/main` `e5a4b07` on 2026-09-25. The subsequent hardening

@@ -20,14 +20,21 @@ func reapStoredCommand(st *runner.State) {
 	if pgid <= 0 {
 		return
 	}
+	if syscall.Kill(-pgid, 0) != nil {
+		return
+	}
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	proctable.KillTree(pgid, int(syscall.SIGTERM))
-	time.AfterFunc(3*time.Second, func() {
-		// Unconditional: reparented survivors are only reachable via the
-		// process group, not a ppid walk.
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		proctable.KillTree(pgid, int(syscall.SIGKILL))
-	})
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(-pgid, 0) != nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	// Reparented survivors are reachable through the group, not a ppid walk.
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	proctable.KillTree(pgid, int(syscall.SIGKILL))
 }
 
 // reapCommandFromState kills the command's group read from the runner's

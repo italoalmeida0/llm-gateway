@@ -12,12 +12,11 @@ are useful improvements. The main remaining problem is inconsistent ownership:
 process state, background registration, and delivery state sometimes disagree.
 These are bounded fixes; another rewrite or an external queue is unnecessary.
 
-**Status (2026-09-26): all ten findings resolved.** Each fix is a permanent
-regression test promoted from the diagnostic probes
-(`cmd/daemon/runner_regression_test.go`,
-`packages/runner/runner_state_regression_test.go`,
-`packages/provider/sse_regression_test.go`). See
-[Resolution](#resolution) at the end.
+**Current working-tree status:** the six failing reproductions from the
+[verification of `4958354`](#verification-at-4958354) have been fixed and
+promoted to permanent tests. See [Implemented recovery fixes](#implemented-recovery-fixes)
+for changes and validation. Statements about open findings in the historical
+sections below describe the reviewed commits, not these subsequent fixes.
 
 ## What improved
 
@@ -376,8 +375,10 @@ contract; restart must also preserve the meaning of completed and cancelled work
 
 ## Resolution
 
-All ten findings were fixed and the probes promoted to permanent tests
-(renamed `TestRegression*`). Summary of the chosen design:
+The implementation change-set addressed all ten findings and promoted the
+original probes to permanent tests (renamed `TestRegression*`). The following
+describes its intended fixes; the subsequent verification identifies incomplete
+paths. Summary of the chosen design:
 
 - **V2R-001 execution disposition** — a durable sidecar
   (`runners/<jobId>.disposition`) records how an outcome is consumed:
@@ -416,3 +417,188 @@ All ten findings were fixed and the probes promoted to permanent tests
 Remaining release-process gates (unchanged): full native CI on the
 candidate, the release artifact dry run, the browser smoke, and the manual
 V1-to-V2 install on a data copy.
+
+## Verification at 4958354
+
+Verified `4958354a0cb7cfbf610d08e9bdefb0ad5807814e` on 2026-09-26.
+The working tree was clean at the start. This verification changes only
+documentation and diagnostic probe sources; it does not apply implementation fixes.
+
+**Passed:** all nine jobs in
+[CI run 36213788089](https://github.com/italoalmeida0/llm-gateway/actions/runs/36213788089),
+the local full Go suite (`go test ./... -count=1 -timeout 240s`, eleven
+packages), and the ten promoted `TestRegression*` tests under `-race` across
+the daemon, runner, and provider packages. These confirm meaningful progress.
+
+**Still failing:** six new diagnostic cases covering the remaining acceptance
+paths of the existing findings. They ran on Linux under `-race`; the failures
+are behavioral assertions, not new race-detector reports. Instructions and
+source are in [the verification probes](review-probes/README.md#verification-at-4958354).
+
+| Finding | Verified status | What changed / what remains |
+| --- | --- | --- |
+| V2R-001 | Partial | Initial foreground/silent-cancel cases pass; cancellation after adoption is replayed on the next boot |
+| V2R-002 | Partial | Original kill probes pass; adopted runners still have broken crash and TERM-resistant cancellation paths |
+| V2R-003 | Primary defect fixed | New runner registrations skip legacy recovery; exit 7 becomes an error instead of orphaned |
+| V2R-004 | Primary defect fixed | Heartbeat is stopped/joined; the original race probe passes |
+| V2R-005 | Primary defect fixed | LF and CRLF parity restored; the comment also claims bare-CR support, which was not established |
+| V2R-006 | Primary defect fixed | Python stdin reaches the real runner-backed command |
+| V2R-007 | Partial | Repeated outbox overflow retains the mark; a transient snapshot timeout still discards it |
+| V2R-008 | Partial | First failed save is not acknowledged; the second delivery acknowledges the unsaved RAM identity |
+| V2R-009 | Primary defect fixed by inspection | Copy is staged and atomically renamed; interrupted/concurrent publication was not fault-injected |
+| V2R-010 | Partial | Live adoption has a tail and ordinary completion uses the brain path; terminal recovery still advertises the inaccessible live path |
+
+“Primary defect fixed” is scoped to the evidence above, not a claim that every
+acceptance scenario or release-process gate has been exercised.
+
+### V2R-001: adopted jobs lose their runner classification
+
+**Reproduction:** start a background job, let a new supervisor adopt it, cancel
+it as the assistant, wait for exit, then reconcile from another supervisor.
+A completion notice is created and the disposition is still `background`.
+
+**Cause:** `runner_adopt.go:134` constructs `bgJob` without `Runner: true`.
+`bg_supervisor.go:onCancel` writes `suppressed` only for a job with that flag.
+The promoted cancellation test covers a job created by `onRegister`, which sets
+the flag; it does not cover the constructor used after restart.
+
+**Required fix:** preserve the runner classification on every adoption path and
+make cancellation disposition persistent before removing recovery information
+or reporting completion. Treat disposition-write failures explicitly. Add the
+cancel-after-adoption-and-restart case to the permanent suite.
+
+### V2R-002: adoption still has two incomplete process cleanup paths
+
+**Reproduction A:** adopt a live runner, SIGKILL the runner, and allow its watcher
+to publish terminal failure. Its command remains alive even after waiting beyond
+the three-second cleanup grace period.
+
+**Cause:** `runner_adopt.go:232` handles runner death without calling
+`reapStoredCommand`; that helper was added only to startup reconciliation.
+This is the same lifecycle event encountered after the startup scan.
+
+**Reproduction B:** adopt a runner whose command leader ignores TERM, then Stop
+the job. The registry accepts cancellation, but the command is still running
+four seconds later.
+
+**Cause:** the adopted job's `stop` at `runner_adopt.go:147` sends IPC kill and
+TERM, but lacks the stored-command fallback present in `startRunner`.
+Inside the runner, `requestTerminate` sends TERM; the KILL escalation in
+`reapCommandTree` is reached only after `cmd.Wait()` returns
+(`packages/runner/run.go:176`). A TERM-resistant leader prevents that return.
+
+**Required fix:** share process cleanup across initial execution, adoption,
+startup reconciliation, and watcher-detected death. Arm escalation when
+cancellation is requested, independently of `cmd.Wait`. Perform waiting/cleanup
+outside the supervisor's mailbox loop, then publish the confirmed terminal
+transition. Preserve command/process generation checks: numeric PID/PGID alone
+is still the persisted identity, so the earlier PID-reuse concern also remains.
+
+### V2R-007: a busy snapshot is still treated as a missing session
+
+**Reproduction:** mark a resident session for repair, make it unable to answer
+the snapshot within `replyTimeout`, and wait for the flusher to finish. The
+pending repair set is empty, even though the session still exists.
+
+**Cause:** `ws_server.go:112` removes the pending marks before reading.
+`buildSessionData` returns `Session busy`, but its error is ignored and the
+`ev == nil` branch discards the repair as if the session were gone.
+
+**Required fix:** distinguish a deleted session from a transient read failure,
+retain the latter's mark, and arrange another bounded retry even if the outbox
+has become idle. Keep the new one-pass behavior to avoid busy looping.
+The partial-text/reasoning/tool-arguments limitation recorded in V2R-007 also
+remains by inspection: `liveSnapshot` was not expanded in this change-set.
+
+### V2R-008: the retry acknowledges the failed first fold
+
+**Reproduction:** force session persistence to fail and deliver the same notice
+twice while storage still fails. The first delivery correctly emits no ack;
+the second emits `bgAckMsg` without a successful save.
+
+**Cause:** `session_actor.go:1355` appends the delivery identity to RAM before
+the failed write. On retry, `noticeDelivered` finds that identity and the early
+branch at line 1347 acknowledges it. Returning early after `saveOrAppend` fixed
+only the first delivery, not the retry that the retained-notice system performs.
+
+**Required fix:** distinguish a pending RAM fold from a durable delivery ID.
+Retry persistence before acknowledging; do not duplicate the transcript or
+start another model turn. Extend the regression test through the second
+delivery, storage recovery, and restart.
+
+### V2R-010: terminal-at-boot notifications still use the wrong log path
+
+**Reproduction:** complete a background runner while its completion has not
+been delivered, then reconcile from a new supervisor. The brain copy exists
+and the session's sandbox permits it, but the retained notice names
+`runners/out/...`; checking that advertised path in the jailed session fails.
+
+**Cause:** ordinary completion now calls `bgJob.noticePath()`, but boot-time
+terminal recovery calls `runnerNoticeText`, which still formats `st.LogPath`
+at `runner_adopt.go:324`. The two delivery paths disagree.
+
+**Required fix:** use a shared final-log resolver for ordinary completion and
+recovered terminal states, after copy/repair succeeds. Verify the exact path
+advertised by the retained notice through the session's file-tool permissions.
+Keep original logs intact. The adopted tail and IPC output changes still need
+the complete browser/replay/slow-reader acceptance cases from V2R-010.
+
+These five findings remain release work. They are incomplete paths within the
+previous review's scope, not a request to redesign the architecture or restore
+removed features.
+
+## Implemented recovery fixes
+
+Applied after `17a1e54` (the implementation base is unchanged from `4958354`;
+`17a1e54` condenses repository instructions). The six failing verification
+cases are now permanent, passing tests in `cmd/daemon/runner_recovery_test.go`
+and `runner_recovery_posix_test.go`.
+
+- **Silent cancellation after adoption:** adopted jobs retain `Runner: true`.
+  Cancellation persists its disposition before stopping the job or removing
+  recovery metadata, and refuses success if that write fails. Sidecar writes
+  use a unique temporary file, sync, and rename.
+- **Runner death and resistant cancellation after adoption:** new and adopted
+  jobs use the same Stop fallback. The watcher reaps the stored command before
+  publishing failure, just as startup reconciliation does. Inside the runner,
+  cancellation starts escalation independently of `cmd.Wait`, and completion
+  joins that reaper before publishing the terminal record. The POSIX fallback
+  now finishes escalation instead of leaving a delayed timer after returning;
+  Stop invokes it outside the supervisor mailbox. Watchers stop when their
+  supervisor shuts down.
+- **Snapshot timeouts:** transient read failures retain the resync mark.
+  A bounded retry tick owned by the socket writer retries pending repairs even
+  when no more outbound traffic arrives. One flusher runs at a time, and the
+  timer stops with its owner.
+- **Repeated failed notice persistence:** a failed save rolls back the tentative
+  RAM delivery identity. Worker context is only queued after successful
+  persistence, so retries cannot acknowledge or feed an unsaved notice.
+- **Recovered terminal log paths:** recovery repairs the brain copy and formats
+  the completion notice with that readable path. Watcher-detected crashes also
+  repair their partial output copy; the original live log remains intact.
+
+The promoted tests were extended through storage recovery (exactly one persisted
+message and one pending context entry) and actual snapshot delivery after an idle
+socket retry. Additional tests cover disposition-write failure and IPC cancellation
+of a TERM-resistant command leader with only the runner active, so the daemon's
+fallback cannot conceal a broken runner escalation path. There are eight new
+permanent tests in total. Signal-specific cases run on POSIX; storage, resync,
+and terminal-log cases are portable.
+
+Validation completed locally:
+
+- `go test -race ./... -count=1 -timeout 300s`: all eleven Go packages passed.
+- `go vet ./...`: passed.
+- `bun run lint` and `bun run typecheck`: passed.
+- `bun test`: 389 tests passed, zero failures.
+- `bun run build:daemon` and `bun run build`: local daemon, SPA, and all six
+  daemon platform artifacts regenerated.
+- `bun scripts/verify-release-dist.ts indirect-code-daemon/dist`: all six
+  platform assets, manifest, and checksums verified.
+
+The tracked release artifacts and local builds are refreshed without changing
+the release version or publishing a release. Cross-compilation is not native
+Windows/macOS execution. Native CI on the resulting commit, a real-browser/model
+smoke, and a manual V1-to-V2 install on a data copy remain release gates. This
+change closes the six reproduced defects; it does not claim that every broader
+acceptance scenario discussed in the historical review has been exercised.

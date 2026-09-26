@@ -1353,13 +1353,14 @@ func (a *sessionActor) onBgNotice(m bgNoticeMsg) {
 	if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
 		msg := provider.Message{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: m.Text}}, TurnIndex: a.rec.TurnSeq, Meta: map[string]string{"background_delivery": m.JobID}}
 		a.rec.Messages = append(a.rec.Messages, msg)
-		a.pendingContext = append(a.pendingContext, msg)
-		// V2R-008: ack ONLY when the fold is durable. If persistence
-		// failed, the notice stays pending and the retry re-folds it
-		// (idempotent by background_delivery) once storage recovers.
+		// Publish the identity and worker context only after persistence.
+		// Roll back the tentative RAM fold on failure so redelivery cannot
+		// mistake it for a durable delivery and acknowledge it.
 		if err := a.saveOrAppend(walMsgEvent(msg)); err != nil {
+			a.rec.Messages = a.rec.Messages[:len(a.rec.Messages)-1]
 			return
 		}
+		a.pendingContext = append(a.pendingContext, msg)
 		a.pingChange()
 		a.ackNotice(m.JobID)
 		return

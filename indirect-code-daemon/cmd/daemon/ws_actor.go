@@ -3,6 +3,7 @@ package main
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // wsActor is the single socket writer. Everyone sends outbound events; the
@@ -76,12 +77,22 @@ func (w *wsActor) emit(ev any) bool {
 	default:
 		w.dropped.Add(1)
 		if sid := sidOf(ev); sid != "" {
-			w.mu.Lock()
-			w.resync[sid] = true
-			w.mu.Unlock()
+			w.markResync(sid)
 		}
 		return false
 	}
+}
+
+func (w *wsActor) markResync(sid string) {
+	w.mu.Lock()
+	w.resync[sid] = true
+	w.mu.Unlock()
+}
+
+func (w *wsActor) hasResyncs() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.resync) != 0
 }
 
 // takeResyncs claims the sessions currently marked for resync.
@@ -101,8 +112,16 @@ func (w *wsActor) takeResyncs() []string {
 
 func (w *wsActor) run(wg *sync.WaitGroup) {
 	defer wg.Done()
+	// A snapshot can time out after the last outbound event has drained.
+	// Retry pending repairs without depending on another socket write.
+	retry := time.NewTicker(250 * time.Millisecond)
+	defer retry.Stop()
 	for {
 		select {
+		case <-retry.C:
+			if w.onSpace != nil && len(w.outbound) < cap(w.outbound) && w.hasResyncs() {
+				w.onSpace()
+			}
 		case ev := <-w.outbound:
 			if w.send != nil {
 				if err := w.send(ev); err != nil {

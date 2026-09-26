@@ -1,7 +1,9 @@
 # V2 review reproductions
 
 The first section preserves the original review. For the current source, use
-the [runner follow-up probes](#runner-follow-up-at-796d726) below.
+the permanent `TestRecovery*` tests described under
+[recovery fixes](#recovery-fixes). The saved probes preserve the historical
+failures and can also be run against the fixed tree.
 
 [v2_architecture_test.go.txt](v2_architecture_test.go.txt) preserves the five
 diagnostic probes used in the review of `7f2c8c0`. The `.txt` suffix keeps these
@@ -155,3 +157,80 @@ the supervisor restart probe models the replacement supervisor without killing
 the test process. Add a separate-process daemon SIGKILL test for the final
 recovery gate. After changing the design, adapt the fixtures while preserving
 their user-visible guarantees.
+
+## Verification at 4958354
+
+The ten original runner follow-up probes, promoted as `TestRegression*`, pass
+on `4958354`, including with the race detector. To check those fixes from the
+daemon root:
+
+```sh
+go test -race ./cmd/daemon ./packages/runner ./packages/provider -run '^TestRegression' -count=1 -v -timeout 150s
+```
+
+[runner_verification_4958354_test.go.txt](runner_verification_4958354_test.go.txt)
+contains six additional acceptance-path reproductions. They fail on `4958354`
+and support the [verification report](../v2-runner-follow-up.md#verification-at-4958354).
+Use Linux, Go, and Python 3. The shell/process tests run real temporary runner
+subprocesses and clean up their own process groups. No live service or model is
+used. Run from the repository root:
+
+```sh
+python3 - <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+
+root = Path.cwd()
+source = root / "docs/review-probes/runner_verification_4958354_test.go.txt"
+target = root / "indirect-code-daemon/cmd/daemon/runner_verification_test.go"
+assert source.is_file(), "Run from the repository root"
+assert not target.exists(), "Choose an unused overlay target"
+with tempfile.TemporaryDirectory(prefix="llmgw-runner-verification-") as directory:
+    overlay = Path(directory) / "overlay.json"
+    overlay.write_text(json.dumps({"Replace": {str(target): str(source)}}))
+    result = subprocess.run([
+        "go", "test", "-race", "-overlay", str(overlay), "./cmd/daemon",
+        "-run", "^TestVerify4958354", "-count=1", "-v", "-timeout", "90s",
+    ], cwd=root / "indirect-code-daemon")
+    raise SystemExit(result.returncode)
+PY
+```
+
+| Suffix after `TestVerify4958354` | Expected failure at 4958354 | Finding |
+| --- | --- | --- |
+| `AdoptedAssistantCancelStaysSilent` | Adopted job retains `background` disposition after assistant cancel | V2R-001 |
+| `RunnerDeathAfterAdoptionReapsCommand` | Watcher reports failure while the command keeps executing | V2R-002 |
+| `AdoptedStopEscalatesResistantLeader` | Adopted Stop never escalates against a TERM-resistant leader | V2R-002 |
+| `ResyncRetainedWhenSnapshotBusy` | Snapshot timeout discards the recovery mark | V2R-007 |
+| `NoticeRetryStillRequiresPersistence` | Second delivery acknowledges the unsaved RAM identity | V2R-008 |
+| `TerminalRecoveryUsesReadableBrainLog` | Recovered notice advertises a path denied by the session sandbox | V2R-010 |
+
+These are behavioral failures under `-race`, not additional race-detector
+reports. The adoption tests exercise a replacement supervisor against actual
+runner processes; they do not replace the final separate-process daemon crash
+and browser gates.
+
+## Recovery fixes
+
+The six verification cases now pass and live in
+`indirect-code-daemon/cmd/daemon/runner_recovery_test.go` and
+`runner_recovery_posix_test.go`, named `TestRecovery*`. The persistence test also
+checks successful retry and disk reload without duplication; the resync test
+checks automatic delivery after the actor recovers, without other socket traffic.
+An additional cancellation-persistence test verifies that a failed disposition
+write does not stop a job or report a successful silent cancel.
+
+`packages/runner/cancel_posix_test.go` verifies IPC kill escalation with a
+TERM-resistant command leader, without the daemon's fallback. Run from the
+daemon root:
+
+```sh
+go test -race ./cmd/daemon ./packages/runner ./packages/provider -run '^(TestRecovery|TestRegression|TestKillVerbEscalatesBeforeCommandWaitReturns)' -count=1 -v -timeout 150s
+```
+
+The full Go race suite has also passed after these changes. The original `.txt`
+files remain historical diagnostic fixtures, not the source of the permanent
+tests. See [the implementation record](../v2-runner-follow-up.md#implemented-recovery-fixes)
+for validation and remaining release gates.

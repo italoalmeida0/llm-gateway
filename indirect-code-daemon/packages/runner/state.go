@@ -163,11 +163,23 @@ func WriteDisposition(root, jobID, disp string) error {
 		return err
 	}
 	path := DispositionPath(root, jobID)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(disp+"\n"), 0o600); err != nil {
+	f, err := os.CreateTemp(RunnersDir(root), ".disposition-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(disp + "\n"); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 // ReadDisposition returns the recorded disposition ("" when absent, which

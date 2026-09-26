@@ -117,6 +117,7 @@ func (b *bgSupervisor) adoptRunners() {
 			end := now
 			st.Status, st.ExitCode, st.EndedAt = runner.StatusKilled, &code, &end
 			_ = runner.WriteState(root, st)
+			repairTerminalCopy(st)
 			// V2R-001: a dead runner still honours the disposition — a
 			// suppressed (assistant) cancel or an inline foreground return
 			// must NOT become a wake-up just because the runner died before
@@ -139,12 +140,13 @@ func (b *bgSupervisor) adoptOne(st *runner.State) {
 		ID: st.JobID, Kind: st.Kind, SessionID: st.SessionID,
 		Label:     truncateBgLabel(st.Label),
 		PID:       st.PID, Identity: "runner",
+		Runner:    true,
 		Status:    BgStatusRunning,
 		StartedAt: st.StartedAt,
 		LogPath:   st.LogPath, BrainLog: st.BrainPath, StderrPath: "",
 		done:   make(chan struct{}),
 		cancel: func() { _ = terminatePid(st.PID) },
-		stop:   func() { _ = killRunnerIPC(b.rootDir(), st.JobID); _ = terminatePid(st.PID) },
+		stop:   func() { stopRunner(b.rootDir(), st.JobID, st.PID) },
 	}
 	if b.jobs == nil {
 		b.jobs = map[string]*bgJob{}
@@ -216,12 +218,18 @@ func (b *bgSupervisor) tailAdoptedOutput(st *runner.State) {
 func (b *bgSupervisor) watchAdopted(jobID string, st *runner.State) {
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
-	for range tick.C {
+	for {
+		select {
+		case <-b.done:
+			return
+		case <-tick.C:
+		}
 		cur, err := runner.ReadState(runner.StatePath(b.rootDir(), jobID))
 		if err != nil {
 			return // state gone (GC or explicit clean)
 		}
 		if cur.Terminal() {
+			repairTerminalCopy(cur)
 			status := BgStatusDone
 			if cur.Status != runner.StatusDone || (cur.ExitCode != nil && *cur.ExitCode != 0) {
 				status = BgStatusError
@@ -232,10 +240,12 @@ func (b *bgSupervisor) watchAdopted(jobID string, st *runner.State) {
 		if !pidAlive(pidString(cur.PID)) {
 			// F6 mid-watch: crash, not a silent hang. The state records
 			// the failure before the notice leaves.
+			reapStoredCommand(cur)
 			code := -1
 			end := time.Now().UnixMilli()
 			cur.Status, cur.ExitCode, cur.EndedAt = runner.StatusKilled, &code, &end
 			_ = runner.WriteState(b.rootDir(), cur)
+			repairTerminalCopy(cur)
 			b.finishAdopted(jobID, BgStatusError, runnerNoticeText(cur))
 			return
 		}
@@ -321,7 +331,11 @@ func runnerNoticeText(st *runner.State) string {
 	} else if code != 0 {
 		status = fmt.Sprintf("failed (exit %d)", code)
 	}
-	return fmt.Sprintf("[Background %s task %s] %s. Full output: %s", st.Kind, st.JobID, status, st.LogPath)
+	path := st.BrainPath
+	if path == "" {
+		path = st.LogPath
+	}
+	return fmt.Sprintf("[Background %s task %s] %s. Full output: %s", st.Kind, st.JobID, status, path)
 }
 
 // gcRunners (F8): dead terminal states age out; dead generation binaries

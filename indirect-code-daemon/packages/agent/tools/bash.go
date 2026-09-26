@@ -641,6 +641,15 @@ func probeShellPath(path, flag string) bool {
 	return strings.Contains(string(out), "shell-probe-ok")
 }
 
+// ShellForTests returns the shell the daemon would use (path, flag): the
+// pinned override when set, else the process resolution. Tests use it so
+// they exercise the REAL terminal path (unish on Windows, no cmd
+// fallback) instead of a substitute.
+func ShellForTests() (string, string) {
+	s := currentShell()
+	return s.path, s.flag
+}
+
 // ShellDescription reports the shell used to run commands (e.g.
 // "/bin/bash -c", "<dataDir>/bin/unish -c"). Surfaced in the system
 // prompt so the model writes compatible commands on the first try.

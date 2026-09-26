@@ -85,9 +85,16 @@ func spawnTestRunner(t *testing.T, root, dataDir, command string) *tools.Proc {
 		t.Fatal(err)
 	}
 	_ = bin
+	// Resolve the shell EXACTLY like the daemon does (unish on Windows —
+	// downloaded on demand, no cmd fallback; bash/sh on unix). The test
+	// must exercise the real terminal path, not a substitute.
+	shell, flag := tools.ShellForTests()
+	if shell == "" {
+		t.Skip("no usable shell on this host")
+	}
 	proc, err := startRunner(root, "sess1", filepath.Join(dataDir, "brain", "sess1"), tools.ExecSpec{
 		Kind: "bash", Command: command,
-		Argv: []string{"/bin/sh", "-c", command},
+		Argv: []string{shell, flag, command},
 		Env:  os.Environ(),
 	})
 	if err != nil {

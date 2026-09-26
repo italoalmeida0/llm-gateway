@@ -873,6 +873,23 @@ export default function AdminModelsPage() {
           </ModalSection>
 
           <ModalSection
+            title="Tool Calling"
+            subtitle="How the gateway handles tool calls for this model."
+          >
+            <Select
+              label="Tool calling mode"
+              value={fToolCallMode()}
+              onChange={(v) => setFToolCallMode(v as ToolCallMode)}
+              options={[
+                { value: "native", label: "Native only" },
+                { value: "fallback", label: "Fallback (default)" },
+                { value: "workaround", label: "Workaround (markup)" },
+              ]}
+              hint="Native only: native tools, no markup recovery. Fallback: native tools kept, but markup tool calls are recovered from every format. Workaround: strips tools and teaches an in-band markup format (auto for xiaomi models)."
+            />
+          </ModalSection>
+
+          <ModalSection
             title="Advanced Metadata & Pricing"
             subtitle="Parameters advertised to clients querying GET /v1/models."
           >
@@ -980,17 +997,6 @@ export default function AdminModelsPage() {
                       class="w-full rounded-lg border border-line bg-ink-950/70 px-3 py-2 text-xs text-ink-100 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none transition-colors"
                     />
                   </ModalField>
-                  <Select
-                    label="Tool calling"
-                    value={fToolCallMode()}
-                    onChange={(v) => setFToolCallMode(v as ToolCallMode)}
-                    options={[
-                      { value: "native", label: "Native only" },
-                      { value: "fallback", label: "Fallback (default)" },
-                      { value: "workaround", label: "Workaround (markup)" },
-                    ]}
-                    hint="Native only: native tools, no markup recovery. Fallback: native tools kept, but markup tool calls are recovered from every format. Workaround: strips tools and teaches an in-band markup format (auto for xiaomi models)."
-                  />
                   <div>
                     <div class="text-xs font-medium text-ink-300 mb-2">Pricing (per token, USD strings)</div>
                     <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">

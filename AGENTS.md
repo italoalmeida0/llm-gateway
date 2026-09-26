@@ -270,6 +270,11 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
 - **Write code and files in English.** Code, comments, commit messages, PR
   descriptions, docs, and user-facing strings must be in English. Chat
   conversation with the user may be in any language — match the user's language.
+- **NEVER add AI attribution to anything.** No `Co-Authored-By: Claude`
+  (or any assistant) trailers, no "generated with AI" notes, no assistant
+  signatures anywhere — commits, PRs, docs or code. The owner authors
+  this project and every commit stands on its own. Never add such
+  trailers out of habit; the user has explicitly forbidden them.
 
 - **Never log or serialize secrets**: upstream provider keys (AES-encrypted at rest),
   plaintext gateway keys (SHA-256 hash is the lookup key; an AES-encrypted copy

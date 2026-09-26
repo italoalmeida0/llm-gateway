@@ -3,29 +3,18 @@
 package main
 
 import (
-	"context"
-	"os/exec"
-	"strconv"
-	"time"
-
-	"llm-gateway/indirect-code-daemon/packages/proctable"
+	"llm-gateway/indirect-code-daemon/packages/processutil"
 	"llm-gateway/indirect-code-daemon/packages/runner"
 )
 
-// reapStoredCommand kills the command's tree from the durable state
-// (V2R-002) on Windows (taskkill /T /F + ppid sweep).
+// The runner's non-inherited Job Object handle owns the whole tree. Its
+// death closes that handle and terminates every member. Only the recorded
+// bootstrap may still need a direct cleanup signal; never invoke taskkill
+// against a numeric PID that can be reused between verification and launch.
 func reapStoredCommand(st *runner.State) {
-	pid := st.CmdPID
-	if pid <= 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid), "/T", "/F").Run()
-	proctable.KillTree(pid, 9)
+	_ = processutil.SignalIdentity(st.CmdPID, st.CommandIdentity, 9)
 }
 
-// reapCommandFromState reads the runner state and reaps its command tree.
 func reapCommandFromState(root, jobID string) {
 	st, err := runner.ReadState(runner.StatePath(root, jobID))
 	if err != nil {

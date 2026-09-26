@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"time"
 
+	"llm-gateway/indirect-code-daemon/internal/durable"
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
+	"llm-gateway/indirect-code-daemon/packages/processutil"
 	"llm-gateway/indirect-code-daemon/packages/runner"
 )
 
@@ -80,7 +82,30 @@ func startRunner(root, sessionID, brainDir string, spec tools.ExecSpec) (*tools.
 	if err != nil {
 		return nil, err
 	}
-	jobID := randomID8()
+	jobID := spec.JobID
+	if jobID == "" {
+		jobID = randomID8()
+	}
+	if jobID != sanitizeID(jobID) {
+		return nil, fmt.Errorf("invalid job identity")
+	}
+	claim, err := os.OpenFile(filepath.Join(runner.RunnersDir(root), jobID+".launch"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("execution launch already claimed or unavailable: %w", err)
+	}
+	_, err = claim.WriteString("claimed\n")
+	if err == nil {
+		err = claim.Sync()
+	}
+	if cerr := claim.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = durable.SyncDir(runner.RunnersDir(root))
+	}
+	if err != nil {
+		return nil, err
+	}
 	startedAt := time.Now().UnixMilli()
 	outPath := filepath.Join(runner.OutDir(root), runner.OutName(sessionID, jobID, startedAt))
 	brainPath := filepath.Join(brainDir, fmt.Sprintf("bg_%s__%s.log", sanitizeID(spec.Kind), sanitizeID(jobID)))
@@ -89,7 +114,7 @@ func startRunner(root, sessionID, brainDir string, spec tools.ExecSpec) (*tools.
 		JobID: jobID, SessionID: sessionID, Kind: spec.Kind, Label: spec.Command,
 		Path: spec.Argv[0], Args: spec.Argv[1:], Env: spec.Env, CWD: spec.CWD,
 		Stdin: spec.Stdin,
-		Root: root, RunnerVersion: daemonVersion,
+		Root:  root, RunnerVersion: daemonVersion,
 		OutPath: outPath, BrainPath: brainPath,
 	}
 	raw, err := json.Marshal(rs)
@@ -111,6 +136,9 @@ func startRunner(root, sessionID, brainDir string, spec tools.ExecSpec) (*tools.
 		waitErr = cmd.Wait() // reaped ONCE (cmd.Wait is not re-callable)
 		close(exited)
 	}()
+	// Capture birth identity while we still own the child, including the
+	// window before its first state file becomes visible.
+	runnerIdentity, _ := processutil.Identity(cmd.Process.Pid)
 	proc := &tools.Proc{
 		PID:      cmd.Process.Pid,
 		JobID:    jobID,
@@ -122,12 +150,12 @@ func startRunner(root, sessionID, brainDir string, spec tools.ExecSpec) (*tools.
 			return waitErr
 		},
 		Stop: func() {
-			stopRunner(root, jobID, cmd.Process.Pid)
+			stopRunner(root, jobID, cmd.Process.Pid, runnerIdentity)
 		},
 		Pump:    tools.TailLog(outPath),
 		Cleanup: func(bool) {},
-		Disposition: func(jid, disp string) {
-			_ = runner.WriteDisposition(root, jid, disp)
+		Disposition: func(jid, disp string) error {
+			return runner.WriteDisposition(root, jid, disp)
 		},
 	}
 	return proc, nil
@@ -136,9 +164,28 @@ func startRunner(root, sessionID, brainDir string, spec tools.ExecSpec) (*tools.
 // Both newly launched and adopted jobs use the same cancellation fallback.
 // Reaping runs outside the supervisor mailbox; the runner records completion
 // only after its own reaper has finished.
-func stopRunner(root, jobID string, pid int) {
-	_ = killRunnerIPC(root, jobID)
-	_ = terminatePid(pid)
+func stopRunner(root, jobID string, pid int, capturedIdentity ...string) {
+	identity := ""
+	if len(capturedIdentity) > 0 {
+		identity = capturedIdentity[0]
+	}
+	if st, err := runner.ReadState(runner.StatePath(root, jobID)); err == nil && st.PID == pid {
+		identity = st.ProcessIdentity
+	}
+	if killRunnerIPC(root, jobID) == nil {
+		// Give the owning runner time to reap and publish. Windows process
+		// signals are hard termination, so immediately signalling would destroy
+		// the graceful completion evidence even after a successful IPC request.
+		go func() {
+			time.Sleep(10 * time.Second)
+			if processutil.Matches(pid, identity) {
+				_ = processutil.SignalIdentity(pid, identity, 9)
+				reapCommandFromState(root, jobID)
+			}
+		}()
+		return
+	}
+	_ = processutil.SignalIdentity(pid, identity, 15)
 	go reapCommandFromState(root, jobID)
 }
 

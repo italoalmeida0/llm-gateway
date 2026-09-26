@@ -180,6 +180,11 @@ func (r *root) watchdogLoop() {
 			}
 		}()
 		round["ws"] = wsH
+		healthy := r.sessionSup.watchdogHealthy()
+		for _, h := range round {
+			healthy = healthy && h.Alive
+		}
+		reportParentHealth(healthy)
 		r.healthMu.Lock()
 		r.healthLast = round
 		r.healthAt = time.Now().UnixMilli()

@@ -6,6 +6,7 @@ import (
 	"syscall"
 	"time"
 
+	"llm-gateway/indirect-code-daemon/packages/processutil"
 	"llm-gateway/indirect-code-daemon/packages/proctable"
 	"llm-gateway/indirect-code-daemon/packages/runner"
 )
@@ -13,6 +14,9 @@ import (
 // reapStoredCommand kills the command's group from the durable state
 // (V2R-002): used when the runner died without reaping its own tree.
 func reapStoredCommand(st *runner.State) {
+	if !processutil.Matches(st.CmdPID, st.CommandIdentity) {
+		return
+	}
 	pgid := st.CmdPgid
 	if pgid <= 0 {
 		pgid = st.CmdPID

@@ -134,7 +134,7 @@ func HydrateMessageObject(rawMessage []byte) (provider.Message, error) {
 // real bug), we scrub on read: any unmatched tool_use gets a stub
 // tool_result injected as a RoleTool message so the next outbound
 // request passes the provider's validity check. The stub reads
-// "tool call was aborted; no result recorded." so the model can see
+// "Tool outcome is unknown: execution may have occurred before interruption. Verify its effects or execution log before repeating a mutating action." so the model can see
 // what happened and decide whether to retry.
 func repairToolUseResultPairs(msgs []provider.Message) []provider.Message {
 	if len(msgs) == 0 {
@@ -174,7 +174,7 @@ func repairToolUseResultPairs(msgs []provider.Message) []provider.Message {
 			}
 			stubs = append(stubs, provider.ToolResultBlock{
 				CallID:  id,
-				Content: []provider.Content{provider.TextBlock{Text: "tool call was aborted; no result recorded."}},
+				Content: []provider.Content{provider.TextBlock{Text: "Tool outcome is unknown: execution may have occurred before interruption. Verify its effects or execution log before repeating a mutating action."}},
 				IsError: true,
 			})
 		}

@@ -589,7 +589,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			}
 			if ctx.Err() != nil || !a.canRetryError(err, attempt) {
 				break
-		}
+			}
 			if !a.PersistentTurns {
 				a.dropLastAssistantMessage()
 			}
@@ -1137,7 +1137,7 @@ func (a *Agent) runOneTool(ctx context.Context, tc provider.ToolCallBlock, sink 
 				}
 			}
 		}()
-		out, err := tool.Execute(ctx, args, func(text string) {
+		out, err := tool.Execute(WithToolCallID(ctx, tc.ID), args, func(text string) {
 			sink(EvToolProgress{ID: tc.ID, Text: text})
 		})
 		if err != nil {

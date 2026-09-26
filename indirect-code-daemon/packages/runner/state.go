@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"llm-gateway/indirect-code-daemon/internal/durable"
 )
 
 // Transport is the optional IPC endpoint (absent = file-only mode).
@@ -21,27 +23,31 @@ type Transport struct {
 // the schema only grows. `status: done|killed` with ExitCode set IS the
 // completion record and also the retained notice source.
 type State struct {
-	V             int       `json:"v"`
-	Proto         int       `json:"proto"`
-	RunnerVersion string    `json:"runnerVersion"`
-	JobID         string    `json:"jobId"`
-	SessionID     string    `json:"sessionId"`
-	Kind          string    `json:"kind"`
-	Label         string    `json:"label"`
-	PID           int       `json:"pid"`
+	V               int    `json:"v"`
+	Proto           int    `json:"proto"`
+	RunnerVersion   string `json:"runnerVersion"`
+	JobID           string `json:"jobId"`
+	SessionID       string `json:"sessionId"`
+	Kind            string `json:"kind"`
+	Label           string `json:"label"`
+	PID             int    `json:"pid"`
+	ProcessIdentity string `json:"processIdentity,omitempty"`
+	CommandIdentity string `json:"commandIdentity,omitempty"`
 	// CmdPID/CmdPgid are the COMMAND's identity (V2R-002): the runner owns
 	// the command's lifetime, and this durable identity lets a supervisor
 	// reap the command's group after the runner itself is gone.
-	CmdPID  int `json:"cmdPid,omitempty"`
-	CmdPgid int `json:"cmdPgid,omitempty"`
-	StartedAt     int64     `json:"startedAt"`
-	LogPath       string    `json:"logPath"`
-	BrainPath     string    `json:"brainPath"`
-	Transport     Transport `json:"transport"`
-	Status        string    `json:"status"`
-	ExitCode      *int      `json:"exitCode"`
-	EndedAt       *int64    `json:"endedAt"`
-	HeartbeatAt   int64     `json:"heartbeatAt"`
+	CmdPID         int       `json:"cmdPid,omitempty"`
+	CmdPgid        int       `json:"cmdPgid,omitempty"`
+	StartedAt      int64     `json:"startedAt"`
+	LogPath        string    `json:"logPath"`
+	BrainPath      string    `json:"brainPath"`
+	Transport      Transport `json:"transport"`
+	Status         string    `json:"status"`
+	ExitCode       *int      `json:"exitCode"`
+	EndedAt        *int64    `json:"endedAt"`
+	OutputReady    bool      `json:"outputReady,omitempty"`
+	OutcomeUnknown bool      `json:"outcomeUnknown,omitempty"`
+	HeartbeatAt    int64     `json:"heartbeatAt"`
 }
 
 // Terminal reports whether the task reached a final state.
@@ -75,27 +81,7 @@ func WriteState(root string, st *State) error {
 	if err != nil {
 		return err
 	}
-	path := StatePath(root, st.JobID)
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(raw); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
+	return durable.Write(StatePath(root, st.JobID), raw)
 }
 
 // ReadState parses one state file. Unknown fields are ignored (rule 1).
@@ -114,25 +100,37 @@ func ReadState(path string) (*State, error) {
 	return &st, nil
 }
 
-// LoadStates reads every state file under <root>/runners. Unreadable
-// entries are skipped (GC owns them), never fatal.
+// LoadStates is the compatibility view. Recovery uses ScanStates to expose
+// unreadable records rather than silently declaring them absent.
 func LoadStates(root string) []*State {
+	states, _ := ScanStates(root)
+	return states
+}
+
+// ScanStates returns valid records and the filenames needing operator review.
+// Invalid records remain on disk; no untrusted contents are logged.
+func ScanStates(root string) ([]*State, []string) {
 	entries, err := os.ReadDir(RunnersDir(root))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, []string{"runners"}
 	}
 	var out []*State
+	var invalid []string
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".state.json") {
 			continue
 		}
 		st, err := ReadState(filepath.Join(RunnersDir(root), e.Name()))
-		if err != nil {
+		if err != nil || e.Name() != filepath.Base(StatePath(root, st.JobID)) {
+			invalid = append(invalid, e.Name())
 			continue
 		}
 		out = append(out, st)
 	}
-	return out
+	return out, invalid
 }
 
 // Touch records a heartbeat timestamp (best-effort, throttled by caller).
@@ -162,24 +160,7 @@ func WriteDisposition(root, jobID, disp string) error {
 	if err := os.MkdirAll(RunnersDir(root), 0o700); err != nil {
 		return err
 	}
-	path := DispositionPath(root, jobID)
-	f, err := os.CreateTemp(RunnersDir(root), ".disposition-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.WriteString(disp + "\n"); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), path)
+	return durable.Write(DispositionPath(root, jobID), []byte(disp+"\n"))
 }
 
 // ReadDisposition returns the recorded disposition ("" when absent, which

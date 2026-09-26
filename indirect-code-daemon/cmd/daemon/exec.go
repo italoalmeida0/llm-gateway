@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -28,7 +29,14 @@ func execDaemon(daemonPath, dataDir string, daemonArgs []string) (int, error) {
 		"--data-dir", dataDir,
 	}
 	args = append(args, daemonArgs...)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 1, fmt.Errorf("worker health listener: %w", err)
+	}
+	defer ln.Close()
+	token := randomID8() + randomID8()
 	cmd := exec.Command(daemonPath, args...)
+	cmd.Env = append(os.Environ(), "LLMGW_PARENT_HEALTH_ADDRESS="+ln.Addr().String(), "LLMGW_PARENT_HEALTH_TOKEN="+token)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// Own process group (Unix): signals to the boot role don't implicitly
 	// hit the child — we forward explicitly below, exactly once.
@@ -44,6 +52,7 @@ func execDaemon(daemonPath, dataDir string, daemonArgs []string) (int, error) {
 	defer signal.Stop(sigCh)
 	done := make(chan struct{})
 	defer close(done)
+	go watchWorkerHealth(ln, token, cmd, done, workerHealthDeadline)
 	go func() {
 		for {
 			select {
@@ -54,7 +63,7 @@ func execDaemon(daemonPath, dataDir string, daemonArgs []string) (int, error) {
 			}
 		}
 	}()
-	err := cmd.Wait()
+	err = cmd.Wait()
 	if raw, readErr := os.ReadFile(requestPath); readErr == nil && strings.TrimSpace(string(raw)) == strconv.Itoa(cmd.Process.Pid) {
 		_ = os.Remove(requestPath)
 		return 0, errUpdateHandoff

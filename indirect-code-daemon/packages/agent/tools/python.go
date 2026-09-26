@@ -204,10 +204,11 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	// (bg_cancel); there is deliberately NO defer bgCancel(): Execute
 	// returns the placeholder long before the script ends, and cancelling
 	// here would kill every detached run the moment the tool call returns.
-	bgCtx, bgCancel := context.WithCancel(context.Background())
+	bgCtx, bgCancel := context.WithCancel(context.WithoutCancel(ctx))
 	start := time.Now()
 	proc, err := startWith(bgCtx, t.Starter, ExecSpec{
-		Kind: "python", Command: label,
+		JobID: core.ExecutionID(ctx),
+		Kind:  "python", Command: label,
 		Argv: argv, CWD: dir, Env: pythonEnv(a.Env), Stdin: a.Stdin,
 		LogDir: t.LogDir, SplitStderr: true,
 	})
@@ -251,39 +252,56 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	}()
 	stop := func() { bgCancel(); proc.Stop() }
 	cleanup := func(remove bool) { proc.Cleanup(remove); bgCancel() }
-	markInline := func() {
+	markInline := func() error {
 		// V2R-001: returned inline — a restart must not invent a wake-up.
 		if proc.Disposition != nil && proc.JobID != "" {
-			proc.Disposition(proc.JobID, DispInline)
+			return proc.Disposition(proc.JobID, DispInline)
 		}
+		return nil
 	}
 	select {
 	case out := <-doneCh:
-		markInline()
+		inlineErr := markInline()
 		cleanup(true)
+		if inlineErr != nil {
+			return core.ToolResult{}, fmt.Errorf("could not persist inline outcome; inspect %s: %w", proc.LogPath, inlineErr)
+		}
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	case <-ctx.Done():
 		// Turn cancelled before the threshold: kill and keep legacy shape.
 		stop()
 		out := <-doneCh
-		markInline()
+		inlineErr := markInline()
 		cleanup(true)
+		if inlineErr != nil {
+			return core.ToolResult{}, fmt.Errorf("could not persist inline outcome; inspect %s: %w", proc.LogPath, inlineErr)
+		}
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	case <-time.After(AutoBackgroundAfter):
 	}
 	if t.Slow == nil {
 		out := <-doneCh
-		markInline()
+		inlineErr := markInline()
 		cleanup(true)
+		if inlineErr != nil {
+			return core.ToolResult{}, fmt.Errorf("could not persist inline outcome; inspect %s: %w", proc.LogPath, inlineErr)
+		}
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	}
 	jobID, logPath, sink, deliver := t.Slow("python", label, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, StderrPath: proc.ErrLogPath, Stop: stop})
 	// V2R-001: detached into a real background job — notify on terminal.
 	if proc.Disposition != nil && proc.JobID != "" {
-		proc.Disposition(proc.JobID, DispBackground)
+		if err := proc.Disposition(proc.JobID, DispBackground); err != nil {
+			stop()
+			<-doneCh
+			cleanup(false)
+			return core.ToolResult{}, fmt.Errorf("could not persist background disposition; process stopped, inspect %s: %w", proc.LogPath, err)
+		}
 	}
 	if jobID == "" {
-		stop(); <-doneCh; cleanup(false)
+		stop()
+		<-doneCh
+		cleanup(false)
 		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", proc.LogPath)
 	}
 	stream = sink

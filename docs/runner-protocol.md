@@ -70,20 +70,25 @@ atomically (tmp+rename) on transitions. Readers ignore unknown fields.
 }
 ```
 
-- `pid` makes "is this alive" a file-only question.
+- `pid` plus `processIdentity` identifies the runner incarnation; PID alone
+  never authorizes adoption or signalling. `cmdPid`, `cmdPgid`, and
+  `commandIdentity` identify the gated command bootstrap.
 - `status: done|killed` + `exitCode` IS the completion record and the
   retained-notice source.
 - The out filename is the identity (parseable after state cleanup).
 
 ### Terminal transition (any outcome: finished / killed / cleaned)
 
-1. Write `status` + `exitCode` + `endedAt` to the state (atomic).
+1. Join command-tree cleanup, sync the source log, then write `status` +
+   `exitCode` + `endedAt` to the state (atomic, checked publication).
 2. **COPY** the out log to `brainPath` (copy, never move — the out
    original stays, GC-exempt).
    Crash-window invariant: dying BETWEEN 1 and 2 (or mid-copy) is safe —
    the parent's reconciliation HEALS the copy from the out log whenever a
    terminal state has a missing or truncated brain copy.
-3. Send `done` if a parent is connected (fast path only).
+3. Persist `outputReady: true`, then send `done` if a parent is connected
+   (fast path only). Publication failures retry without re-execution; exhausted
+   retries exit the wrapper with 75, which is not the command exit code.
 4. Exit immediately. Self-clean: the last runner of a generation removes
    its own version binary when a newer one exists.
 
@@ -94,7 +99,8 @@ atomically (tmp+rename) on transitions. Readers ignore unknown fields.
 - `running` + pid alive + old AND unlinkable → orphan: SIGKILL the tree,
   clean the state (F5b — recovery is tried first: the state's
   ids/timestamps correlate to the session transcript/WAL).
-- `running` + pid dead → explicit terminal failure (never a silent hang).
+- `running` + runner incarnation gone → `outcomeUnknown: true` and explicit
+  interrupted outcome. Verify external effects before repeating the command.
 - `done`/`killed` → fed to the retained-notice chain (idempotent via the
   transcript's `background_delivery` identity — exactly one wake-up
   turn, ever).
@@ -106,3 +112,21 @@ atomically (tmp+rename) on transitions. Readers ignore unknown fields.
 Output history (the log), kill fallback (pid + process group), liveness
 fallback (pidalive), completion (state file), delivery acks (offsets +
 files). Any of those keeps working if this protocol vanishes.
+
+## Crash recovery additions
+
+The multicall binary's internal `--runner-command` role waits on a private pipe.
+The runner establishes command ownership and publishes birth identity before
+releasing user code. EOF before release exits without executing the payload.
+Windows assigns the bootstrap to a runner-owned kill-on-close Job Object before
+release; replacing the daemon does not close that independent runner handle.
+
+Execution receipts live under `<root>/executions/<session>/<scope>/`; exclusive
+`<jobId>.launch` files prevent relaunch of the same execution. A receipt can link
+a foreground runner before a background placeholder reaches the transcript.
+Receipts and launch claims are conservatively retained, independently of terminal
+state GC. Unverifiable process identities are traced, never blindly killed.
+
+See [crash recovery contracts](daemon-crash-only-hardening.md#implementation-on-dev)
+for exact behavior, test coverage, storage failure handling, and POSIX containment
+and power-loss limits. These additions do not change the manual V1 migration.

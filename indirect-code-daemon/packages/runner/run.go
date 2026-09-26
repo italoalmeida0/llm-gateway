@@ -3,6 +3,7 @@ package runner
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"llm-gateway/indirect-code-daemon/internal/durable"
+	"llm-gateway/indirect-code-daemon/packages/processutil"
 )
 
 // flushBound is the output flush cadence (decided D4): the log is the
@@ -49,7 +53,44 @@ func BinaryPath(root, version string) string {
 // Run owns one command from start to terminal state. It NEVER waits for
 // a parent (decided D1): the command starts immediately; the socket only
 // accelerates delivery. Returns the process exit code.
-func Run(spec Spec) int {
+func Run(spec Spec) int { return runWith(spec, runOptions{}) }
+
+// Instance-scoped seams let tests fail publication without global races or
+// production environment-variable fault switches.
+type runOptions struct {
+	writeState func(string, *State) error
+	copyLog    func(Spec) error
+	attempts   int
+	retryDelay time.Duration
+	barrier    func(string)
+}
+
+func runWith(spec Spec, opts runOptions) int {
+	if opts.writeState == nil {
+		opts.writeState = WriteState
+	}
+	if opts.copyLog == nil {
+		opts.copyLog = copyAtTerminal
+	}
+	if opts.attempts == 0 {
+		opts.attempts = 6
+	}
+	if opts.retryDelay == 0 {
+		opts.retryDelay = 200 * time.Millisecond
+	}
+	publish := func(fn func() error) error {
+		var err error
+		for i := 0; i < opts.attempts; i++ {
+			if err = fn(); err == nil {
+				return nil
+			}
+			if i+1 < opts.attempts {
+				time.Sleep(opts.retryDelay * time.Duration(i+1))
+			}
+		}
+		return err
+	}
+
 	if err := spec.Validate(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
@@ -77,48 +118,80 @@ func Run(spec Spec) int {
 	}
 	defer out.Close()
 
+	identity, err := processutil.Identity(os.Getpid())
+	if err != nil {
+		return 75
+	}
+
 	// 2. State file IMMEDIATELY (durability never waits).
 	st := &State{
 		V: 1, Proto: ProtoVersion, RunnerVersion: spec.RunnerVersion,
 		JobID: spec.JobID, SessionID: spec.SessionID, Kind: spec.Kind,
-		Label: spec.Label, PID: os.Getpid(), StartedAt: startedAt,
+		Label: spec.Label, PID: os.Getpid(), ProcessIdentity: identity, StartedAt: startedAt,
 		LogPath: spec.OutPath, BrainPath: spec.BrainPath,
 		Status: StatusRunning, HeartbeatAt: startedAt,
 	}
-	if err := WriteState(spec.Root, st); err != nil {
+	if err := opts.writeState(spec.Root, st); err != nil {
 		fmt.Fprintln(os.Stderr, "runner: state:", err)
 		return 2
 	}
 
-	// 3. Start the COMMAND at once, own process group, output into the
-	//    out file directly (the file is the buffer; the runner only
-	//    observes it — killing anyone can never SIGPIPE the command).
-	cmd := exec.Command(spec.Path, spec.Args...)
-	cmd.Dir = spec.CWD
-	cmd.Env = utf8Env(spec.Env)
-	if spec.Stdin != "" {
-		cmd.Stdin = strings.NewReader(spec.Stdin)
+	// 3. Start only the trusted bootstrap, blocked on a private pipe.
+	exe, err := os.Executable()
+	if err != nil {
+		return 75
 	}
-	cmd.Stdout, cmd.Stderr = out, out
+	gateRead, gateWrite, err := os.Pipe()
+	if err != nil {
+		return 75
+	}
+	defer gateRead.Close()
+	defer gateWrite.Close()
+	cmd := exec.Command(exe, "--runner-command")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = gateRead, out, out
 	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
-		code := 127
-		st.Status, st.ExitCode = StatusDone, &code
-		end := NowMs()
-		st.EndedAt = &end
-		_ = WriteState(spec.Root, st)
-		copyAtTerminal(spec)
-		return code
+		return 75
 	}
-
-	// Record the command's durable identity immediately (V2R-002): even a
-	// SIGKILL of the runner leaves the parent a way to reap the command.
-	stMuEarly := &sync.Mutex{}
-	stMuEarly.Lock()
-	st.CmdPID = cmd.Process.Pid
-	st.CmdPgid = processGroupOf(cmd.Process.Pid)
-	_ = WriteState(spec.Root, st)
-	stMuEarly.Unlock()
+	_ = gateRead.Close()
+	killCommand, closeOwnership, err := ownCommand(cmd)
+	if err != nil {
+		_ = gateWrite.Close()
+		_ = cmd.Wait()
+		return 75
+	}
+	defer closeOwnership()
+	abortLaunch := func() int {
+		_ = gateWrite.Close()
+		killCommand()
+		_ = cmd.Wait()
+		return 75
+	}
+	if opts.barrier != nil {
+		opts.barrier("bootstrap-created")
+	}
+	st.CmdPID, st.CmdPgid = cmd.Process.Pid, processGroupOf(cmd.Process.Pid)
+	st.CommandIdentity, err = processutil.Identity(st.CmdPID)
+	if err != nil {
+		return abortLaunch()
+	}
+	if err := opts.writeState(spec.Root, st); err != nil {
+		return abortLaunch()
+	}
+	if opts.barrier != nil {
+		opts.barrier("ownership-published")
+	}
+	encoder := json.NewEncoder(gateWrite)
+	if err := encoder.Encode(spec); err != nil {
+		return abortLaunch()
+	}
+	if err := encoder.Encode(true); err != nil {
+		return abortLaunch()
+	}
+	_ = gateWrite.Close()
+	if opts.barrier != nil {
+		opts.barrier("payload-released")
+	}
 
 	// 4. IPC: optional optimization. Bind failure = file-only mode.
 	ln, token := listenLoopback()
@@ -126,22 +199,31 @@ func Run(spec Spec) int {
 		host, port, _ := net.SplitHostPort(ln.Addr().String())
 		p, _ := strconv.Atoi(port)
 		st.Transport = Transport{Type: "tcp", Host: host, Port: p, Token: token}
-		_ = WriteState(spec.Root, st)
+		if err := opts.writeState(spec.Root, st); err != nil {
+			_ = ln.Close()
+			ln = nil
+			st.Transport = Transport{}
+		}
+	}
+	if ln != nil {
+		defer ln.Close()
 	}
 
 	// 5. Wiring: output broadcaster + connection manager + signals.
 	bc := newBroadcaster(out)
 	go bc.run()
+	defer bc.kill()
 	// Arm escalation independently of Wait: the command leader itself may
 	// ignore TERM. Cancellation and normal completion share one reaper,
 	// which is joined before the terminal record is published.
 	var reapOnce sync.Once
+	var reapErr error
 	reaped := make(chan struct{})
 	startReap := func() {
 		reapOnce.Do(func() {
 			go func() {
 				defer close(reaped)
-				reapCommandTree(st.CmdPgid)
+				reapErr = killCommand()
 			}()
 		})
 	}
@@ -179,7 +261,7 @@ func Run(spec Spec) int {
 			case <-hb.C:
 				stMu.Lock()
 				st.Touch()
-				_ = WriteState(spec.Root, st)
+				_ = opts.writeState(spec.Root, st)
 				stMu.Unlock()
 			}
 		}
@@ -199,10 +281,20 @@ func Run(spec Spec) int {
 	// Escalation (TERM → grace → KILL + ppid sweep) is synchronous here.
 	startReap()
 	<-reaped
+	if reapErr != nil {
+		stopHeartbeat()
+		return 75
+	}
 	// Let the tail catch the last bytes before the copy.
 	bc.drain()
 
-	// 7. Terminal transition (any outcome): state FIRST, then COPY.
+	// 7. Flush the source before committing any terminal outcome.
+	if err := publish(out.Sync); err != nil {
+		stopHeartbeat()
+		return 75
+	}
+
+	// Terminal transition (any outcome): state FIRST, then COPY.
 	// Quiesce the heartbeat before publishing the terminal record.
 	stopHeartbeat()
 	end := NowMs()
@@ -216,13 +308,25 @@ func Run(spec Spec) int {
 		st.Status = StatusDone
 	}
 	st.ExitCode, st.EndedAt = &code, &end
-	err = WriteState(spec.Root, st)
 	stMu.Unlock()
-	if err != nil {
-		// Never silently announce durable completion on a failed publish.
-		fmt.Fprintln(os.Stderr, "runner: terminal state write:", err)
+	if opts.barrier != nil {
+		opts.barrier("before-terminal-publication")
 	}
-	copyAtTerminal(spec)
+	if err := publish(func() error { return opts.writeState(spec.Root, st) }); err != nil {
+		fmt.Fprintln(os.Stderr, "runner: completion persistence failed; outcome requires recovery")
+		return 75
+	}
+	if err := publish(func() error { return opts.copyLog(spec) }); err != nil {
+		fmt.Fprintln(os.Stderr, "runner: output publication failed; source log retained")
+		return 75
+	}
+	st.OutputReady = true
+	if err := publish(func() error { return opts.writeState(spec.Root, st) }); err != nil {
+		return 75
+	}
+	if opts.barrier != nil {
+		opts.barrier("after-terminal-publication")
+	}
 	serve.sendDone(code, end)
 
 	// 8. Self-clean (D3): last of my generation + newer binary present.
@@ -232,23 +336,8 @@ func Run(spec Spec) int {
 
 // copyAtTerminal COPIES the live out log to the brain location (D8:
 // copy, never move — the out original stays, GC-exempt).
-func copyAtTerminal(spec Spec) {
-	if err := os.MkdirAll(filepath.Dir(spec.BrainPath), 0o700); err != nil {
-		return
-	}
-	src, err := os.Open(spec.OutPath)
-	if err != nil {
-		return
-	}
-	defer src.Close()
-	dst, err := os.OpenFile(spec.BrainPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return
-	}
-	if _, err := io.Copy(dst, src); err == nil {
-		_ = dst.Sync()
-	}
-	_ = dst.Close()
+func copyAtTerminal(spec Spec) error {
+	return durable.Copy(spec.OutPath, spec.BrainPath)
 }
 
 // maybeSelfClean removes this generation's runner binary when it is the
@@ -257,11 +346,15 @@ func maybeSelfClean(spec Spec) {
 	if spec.RunnerVersion == "" {
 		return
 	}
-	for _, other := range LoadStates(spec.Root) {
+	states, invalid := ScanStates(spec.Root)
+	if len(invalid) != 0 {
+		return
+	} // preserve binaries while ownership is uncertain
+	for _, other := range states {
 		if other.JobID == spec.JobID || other.RunnerVersion != spec.RunnerVersion || other.Terminal() {
 			continue
 		}
-		if processAlive(other.PID) {
+		if processutil.Matches(other.PID, other.ProcessIdentity) || (other.ProcessIdentity == "" && processAlive(other.PID)) {
 			return // a sibling of my generation still runs
 		}
 	}

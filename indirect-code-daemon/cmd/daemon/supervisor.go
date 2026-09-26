@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/filetrack"
@@ -92,10 +93,12 @@ func (g *flightGroup) do(id string, fn func() spawnResult) spawnResult {
 }
 
 type sessionSupervisor struct {
-	dataDir string
-	cfg     *configCell
-	ws      *wsActor
-	bg      *bgSupervisor
+	watchdogAt   atomic.Int64
+	unresponsive atomic.Bool
+	dataDir      string
+	cfg          *configCell
+	ws           *wsActor
+	bg           *bgSupervisor
 
 	inbox   chan Envelope
 	control chan any
@@ -583,6 +586,8 @@ func (s *sessionSupervisor) watchdogRound() {
 		}
 	}
 judged:
+	s.watchdogAt.Store(time.Now().UnixMilli())
+	s.unresponsive.Store(len(collected) != len(ids))
 	trace("sup.watchdog", map[string]any{"n": len(collected)})
 	for _, r := range collected {
 		id, rep := r.id, r.rep
@@ -613,6 +618,9 @@ judged:
 			s.mu.Lock()
 			if ent2, ok := s.resident[id]; ok && ent2.handle == ent.handle {
 				ent2.staleRounds++
+				if ent2.staleRounds >= maxCancelRounds {
+					s.unresponsive.Store(true)
+				}
 			}
 			s.mu.Unlock()
 			continue
@@ -868,4 +876,11 @@ func (s *sessionSupervisor) purge(id string) error {
 	delete(s.resident, id)
 	s.mu.Unlock()
 	return nil
+}
+
+// The first watchdog round gets the boot grace; stale rounds cannot make the
+// external monitor mistake a wedged session supervisor for a healthy worker.
+func (s *sessionSupervisor) watchdogHealthy() bool {
+	at := s.watchdogAt.Load()
+	return !s.unresponsive.Load() && (at != 0 && time.Since(time.UnixMilli(at)) < workerHealthDeadline/2)
 }

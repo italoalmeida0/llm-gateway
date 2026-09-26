@@ -52,13 +52,14 @@ const (
 // tracker seed) plus the turn identity needed to detect a
 // commit-window crash.
 type walHeader struct {
-	TurnIndex     int                     `json:"turnIndex"`
-	StartedAt     int64                   `json:"startedAt"`
-	Model         string                  `json:"model,omitempty"`
-	PromptMeta    map[string]string       `json:"promptMeta,omitempty"`
-	Prompt        string                  `json:"prompt,omitempty"`
-	AttachmentIDs []string                `json:"attachmentIds,omitempty"`
-	Incoming      []filetrack.TrackedFile `json:"incoming,omitempty"`
+	ExecutionScope string                  `json:"executionScope,omitempty"`
+	TurnIndex      int                     `json:"turnIndex"`
+	StartedAt      int64                   `json:"startedAt"`
+	Model          string                  `json:"model,omitempty"`
+	PromptMeta     map[string]string       `json:"promptMeta,omitempty"`
+	Prompt         string                  `json:"prompt,omitempty"`
+	AttachmentIDs  []string                `json:"attachmentIds,omitempty"`
+	Incoming       []filetrack.TrackedFile `json:"incoming,omitempty"`
 }
 
 // walEvent is one JSONL line. Only the fields for its Type are set.
@@ -87,13 +88,13 @@ type walEvent struct {
 	// ApprovalDeadlineUnix persists the 15-min decision deadline inside the
 	// WAL: a respawn recomputes the remainder instead of
 	// restarting the timer.
-	ApprovalDeadlineUnix int64  `json:"approvalDeadlineUnix,omitempty"`
-	ClearApprovalDeadline bool `json:"clearApprovalDeadline,omitempty"`
-	Pinned               *bool  `json:"pinned,omitempty"`
-	Jailed               *bool  `json:"jailed,omitempty"`
-	TodosOpen            *bool  `json:"todosOpen,omitempty"`
-	LastDate             string `json:"lastDate,omitempty"`
-	LastMode             string `json:"lastMode,omitempty"`
+	ApprovalDeadlineUnix  int64  `json:"approvalDeadlineUnix,omitempty"`
+	ClearApprovalDeadline bool   `json:"clearApprovalDeadline,omitempty"`
+	Pinned                *bool  `json:"pinned,omitempty"`
+	Jailed                *bool  `json:"jailed,omitempty"`
+	TodosOpen             *bool  `json:"todosOpen,omitempty"`
+	LastDate              string `json:"lastDate,omitempty"`
+	LastMode              string `json:"lastMode,omitempty"`
 }
 
 // walWriter is the buffered append handle for one running turn.
@@ -132,6 +133,9 @@ func (s *diskStore) ensureBrainDir(sessionID string) string {
 
 // openWAL creates (or truncates) the WAL and writes the header line.
 func (s *diskStore) openWAL(sessionID string, h *walHeader) (*walWriter, error) {
+	if h.ExecutionScope == "" {
+		h.ExecutionScope = randomID8() + randomID8()
+	}
 	p := s.walPath(sessionID)
 	if p == "" {
 		return nil, fmt.Errorf("invalid session id")
@@ -152,6 +156,10 @@ func (s *diskStore) openWAL(sessionID string, h *walHeader) (*walWriter, error) 
 	if err := ww.flush(); err != nil {
 		f.Close()
 		_ = os.Remove(p)
+		return nil, err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
 		return nil, err
 	}
 	return ww, nil
@@ -447,7 +455,9 @@ func applyWALEvent(rec *SessionRecord, ev *walEvent) error {
 		if ev.UpdatedAt > 0 {
 			rec.UpdatedAt = ev.UpdatedAt
 		}
-		if ev.ClearApprovalDeadline { rec.ApprovalDeadlineUnix = 0 }
+		if ev.ClearApprovalDeadline {
+			rec.ApprovalDeadlineUnix = 0
+		}
 		if ev.ApprovalDeadlineUnix > 0 {
 			rec.ApprovalDeadlineUnix = ev.ApprovalDeadlineUnix
 		}

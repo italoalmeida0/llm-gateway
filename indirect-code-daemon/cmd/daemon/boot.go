@@ -159,7 +159,11 @@ func bootMain() {
 	crashes := 0
 	fmt.Println("Ready — listening for turns.")
 	for {
+		started := time.Now()
 		code, err := execDaemon(daemonPath, daemonDataDir, daemonArgs)
+		if time.Since(started) >= 10*time.Minute {
+			crashes = 0
+		}
 		if errors.Is(err, errUpdateHandoff) {
 			return
 		}

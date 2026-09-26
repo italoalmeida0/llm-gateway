@@ -1,5 +1,11 @@
 # V2 release preparation
 
+See [Daemon crash recovery: contracts, implementation, and validation](daemon-crash-only-hardening.md)
+for the five architectural hardening changes, their executable regression tests,
+primary-source examples, and explicit platform/durability limits. The document
+also preserves the original design checklist; proposed experiments are kept
+separate from tests that actually exist.
+
 Start with the [implemented recovery fixes](v2-runner-follow-up.md#implemented-recovery-fixes),
 following the verification of `4958354`. The six failing reproductions across
 V2R-001, V2R-002, V2R-007, V2R-008, and V2R-010 now pass and have permanent

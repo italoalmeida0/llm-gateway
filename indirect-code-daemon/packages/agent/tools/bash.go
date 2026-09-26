@@ -78,9 +78,10 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	// still running, and cancelling here would kill every detached job
 	// the moment the tool call returns. The context is released by
 	// runCancel in the watcher/cancel paths once the process is done.
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(context.WithoutCancel(ctx))
 	sh := currentShell()
 	proc, err := startWith(runCtx, t.Starter, ExecSpec{
+		JobID:   core.ExecutionID(ctx),
 		Kind:    "bash",
 		Command: a.Command,
 		Argv:    []string{sh.path, sh.flag, a.Command},
@@ -169,7 +170,9 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		// V2R-001: returned inline to the agent — the outcome is consumed
 		// here, so a restart must NOT invent a background wake-up.
 		if proc.Disposition != nil && proc.JobID != "" {
-			proc.Disposition(proc.JobID, DispInline)
+			if err := proc.Disposition(proc.JobID, DispInline); err != nil {
+				return core.ToolResult{}, fmt.Errorf("could not persist inline outcome; inspect %s: %w", proc.LogPath, err)
+			}
 		}
 		return finishBashCommand(a, cwd, start, output, &head, waitErr, ctx.Err(), runErr, progress)
 	}
@@ -199,11 +202,21 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	// V2R-001: this task detached into a real background job — its terminal
 	// outcome must reach the session (notify).
 	if proc.Disposition != nil && proc.JobID != "" {
-		proc.Disposition(proc.JobID, DispBackground)
+		if err := proc.Disposition(proc.JobID, DispBackground); err != nil {
+			runCancel()
+			proc.Stop()
+			<-waitCh
+			<-done
+			proc.Cleanup(false)
+			return core.ToolResult{}, fmt.Errorf("could not persist background disposition; process stopped, inspect %s: %w", proc.LogPath, err)
+		}
 	}
 	if jobID == "" {
-		runCancel(); proc.Stop()
-		<-waitCh; <-done; proc.Cleanup(false)
+		runCancel()
+		proc.Stop()
+		<-waitCh
+		<-done
+		proc.Cleanup(false)
 		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", proc.LogPath)
 	}
 	streamSink = stream

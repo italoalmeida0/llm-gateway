@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"llm-gateway/indirect-code-daemon/packages/runner"
 	"net"
 	"net/http"
 	"net/url"
@@ -45,6 +46,7 @@ type link struct {
 //   - boot (default)  — bootMain(): checkup/migrate/verify, then
 //     self-spawns the worker and supervises it. No downloads at boot.
 //   - worker          — daemonMain(): the daemon itself.
+//
 // Routing is explicit: the worker role is selected by its own flags
 // (--worker / the update handoff flags / --slot). Everything else is
 // boot. No legacy shapes: an invocation that mixes roles fails loudly.
@@ -53,6 +55,9 @@ func main() {
 	for _, a := range os.Args[1:] {
 		if a == "--" {
 			break
+		}
+		if a == "--runner-command" {
+			os.Exit(runner.CommandMain())
 		}
 		if a == "--runner" {
 			runnerMain()
@@ -79,6 +84,7 @@ func workerMode(args []string) bool {
 }
 
 func daemonMain() {
+	captureParentHealth()
 	var (
 		connectFlag = flag.String("connect", "", "Pairing connect URL (e.g. https://.../api/indirect-code/connect/<token>)")
 		nameFlag    = flag.String("name", "", "Host display name")
@@ -168,6 +174,8 @@ func daemonMain() {
 		fmt.Println("and paste the connection URL below:")
 		fmt.Print("\nConnection URL: ")
 		var pairURL string
+		// A declared, bounded setup wait is not a stalled actor.
+		sendParentHealth(workerHealthReport{PairingWait: true})
 		scanner := bufio.NewScanner(os.Stdin)
 		if scanner.Scan() {
 			pairURL = strings.TrimSpace(scanner.Text())

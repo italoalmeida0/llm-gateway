@@ -202,6 +202,19 @@ func (w *turnBridge) run() error {
 	markPlanTool := &tools.MarkPlanAsReadyToExecuteTool{}
 	w.reg = core.NewRegistry(append(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool), bgCancelTool, sleepTool)...)
 
+	if w.env.store != nil {
+		header, err := w.env.store.readWALHeader(w.env.actorID)
+		if err != nil || header == nil {
+			return fmt.Errorf("execution recovery record unavailable")
+		}
+		scope := executionHash(fmt.Sprintf("%s:%d:%d:%s", w.env.actorID, header.TurnIndex, header.StartedAt, header.ExecutionScope))
+		for _, name := range []string{"bash", "python", "write", "edit"} {
+			if tool, ok := w.reg[name]; ok {
+				w.reg[name] = &recordedTool{Tool: tool, root: w.env.store.rootDir(), sid: w.env.actorID, scope: scope, cwd: w.sessionCWD}
+			}
+		}
+	}
+
 	initTools := core.Registry{}
 	for name, tool := range w.reg {
 		initTools[name] = tool
@@ -592,7 +605,9 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 			return "", "", func(string) {}, func(string, bool) {}
 		}
 		if reg.Error != "" || reg.JobID == "" {
-			if process.Stop != nil { process.Stop() }
+			if process.Stop != nil {
+				process.Stop()
+			}
 			return "", "", func(string) {}, func(string, bool) {}
 		}
 		id := reg.JobID

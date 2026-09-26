@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"llm-gateway/indirect-code-daemon/internal/durable"
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
+	"llm-gateway/indirect-code-daemon/packages/processutil"
 	"llm-gateway/indirect-code-daemon/packages/provider"
 	"llm-gateway/indirect-code-daemon/packages/runner"
 )
@@ -30,33 +30,18 @@ var orphanAfterMs = int64(3 * tools.AutoBackgroundAfter / time.Millisecond)
 // write and the brain copy (and a torn mid-copy): the out log is the
 // source of truth, so a missing or truncated brain copy is re-COPIED
 // (copy semantics preserved — the out original always survives).
-func repairTerminalCopy(st *runner.State) {
+func repairTerminalCopy(st *runner.State) error {
 	if st.LogPath == "" || st.BrainPath == "" {
-		return
+		return fmt.Errorf("missing output path")
 	}
 	src, err := os.Stat(st.LogPath)
 	if err != nil {
-		return
+		return err
 	}
-	if dst, err := os.Stat(st.BrainPath); err == nil && dst.Size() >= src.Size() {
-		return // copy already complete
+	if dst, err := os.Stat(st.BrainPath); err == nil && !dst.IsDir() && dst.Size() == src.Size() && st.OutputReady {
+		return nil
 	}
-	in, err := os.Open(st.LogPath)
-	if err != nil {
-		return
-	}
-	defer in.Close()
-	if err := os.MkdirAll(filepath.Dir(st.BrainPath), 0o700); err != nil {
-		return
-	}
-	out, err := os.OpenFile(st.BrainPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return
-	}
-	if _, err := io.Copy(out, in); err == nil {
-		_ = out.Sync()
-	}
-	_ = out.Close()
+	return durable.Copy(st.LogPath, st.BrainPath)
 }
 
 // rootDir resolves <root> from the supervisor's data dir (the slot).
@@ -66,13 +51,20 @@ func (b *bgSupervisor) rootDir() string { return newDiskStore(b.dataDir).rootDir
 func (b *bgSupervisor) adoptRunners() {
 	root := b.rootDir()
 	now := time.Now().UnixMilli()
-	for _, st := range runner.LoadStates(root) {
+	states, invalid := runner.ScanStates(root)
+	for _, name := range invalid {
+		trace("runner.state.invalid", map[string]any{"file": name})
+	}
+	for _, st := range states {
 		switch {
 		case st.Terminal():
 			// Outcome already recorded: repair the terminal copy if the
 			// crash landed between the state write and the copy (or
 			// mid-copy).
-			repairTerminalCopy(st)
+			if err := repairTerminalCopy(st); err != nil {
+				trace("runner.output.pending", map[string]any{"job": st.JobID})
+				continue
+			}
 			// V2R-001: only a task that was a real BACKGROUND job notifies.
 			// An inline (foreground) outcome was already consumed by the
 			// agent, and a suppressed (assistant) cancel is silent — a
@@ -83,7 +75,10 @@ func (b *bgSupervisor) adoptRunners() {
 			default:
 				// inline / suppressed / absent: silent.
 			}
-		case pidAlive(pidString(st.PID)):
+		case pidAlive(pidString(st.PID)) && !processutil.Matches(st.PID, st.ProcessIdentity):
+			trace("runner.identity.unverified", map[string]any{"job": st.JobID})
+			continue
+		case processutil.Matches(st.PID, st.ProcessIdentity):
 			if b.orphaned(st, now) {
 				// F5b: the session has moved past this job (or is gone):
 				// blunt and clean — kill the group and clean the state.
@@ -91,7 +86,7 @@ func (b *bgSupervisor) adoptRunners() {
 				// Orphans are killed UNCONDITIONALLY (V2R-002/F5b): a
 				// graceful signal is not guaranteed to be honored, and the
 				// command's tree must die with the runner.
-				_ = forceKillPid(st.PID)
+				_ = processutil.SignalIdentity(st.PID, st.ProcessIdentity, 9)
 				reapStoredCommand(st)
 				// Wait for death BEFORE cleaning: the dying runner
 				// rewrites its own state (graceful SIGTERM) and must not
@@ -99,6 +94,10 @@ func (b *bgSupervisor) adoptRunners() {
 				deadline := time.Now().Add(5 * time.Second)
 				for time.Now().Before(deadline) && pidAlive(pidString(st.PID)) {
 					time.Sleep(50 * time.Millisecond)
+				}
+				if processutil.Matches(st.PID, st.ProcessIdentity) {
+					trace("runner.orphan.stop_pending", map[string]any{"job": st.JobID})
+					continue
 				}
 				_ = os.Remove(runner.StatePath(root, st.JobID))
 			} else {
@@ -116,8 +115,14 @@ func (b *bgSupervisor) adoptRunners() {
 			code := -1
 			end := now
 			st.Status, st.ExitCode, st.EndedAt = runner.StatusKilled, &code, &end
-			_ = runner.WriteState(root, st)
-			repairTerminalCopy(st)
+			st.OutcomeUnknown = true
+			if err := runner.WriteState(root, st); err != nil {
+				continue
+			}
+			if err := repairTerminalCopy(st); err != nil {
+				trace("runner.output.pending", map[string]any{"job": st.JobID})
+				continue
+			}
 			// V2R-001: a dead runner still honours the disposition — a
 			// suppressed (assistant) cancel or an inline foreground return
 			// must NOT become a wake-up just because the runner died before
@@ -138,15 +143,14 @@ func (b *bgSupervisor) adoptOne(st *runner.State) {
 	}
 	j := &bgJob{
 		ID: st.JobID, Kind: st.Kind, SessionID: st.SessionID,
-		Label:     truncateBgLabel(st.Label),
-		PID:       st.PID, Identity: "runner",
+		Label: truncateBgLabel(st.Label),
+		PID:   st.PID, Identity: st.ProcessIdentity,
 		Runner:    true,
 		Status:    BgStatusRunning,
 		StartedAt: st.StartedAt,
 		LogPath:   st.LogPath, BrainLog: st.BrainPath, StderrPath: "",
-		done:   make(chan struct{}),
-		cancel: func() { _ = terminatePid(st.PID) },
-		stop:   func() { stopRunner(b.rootDir(), st.JobID, st.PID) },
+		done: make(chan struct{}),
+		stop: func() { stopRunner(b.rootDir(), st.JobID, st.PID) },
 	}
 	if b.jobs == nil {
 		b.jobs = map[string]*bgJob{}
@@ -229,12 +233,18 @@ func (b *bgSupervisor) watchAdopted(jobID string, st *runner.State) {
 			return // state gone (GC or explicit clean)
 		}
 		if cur.Terminal() {
-			repairTerminalCopy(cur)
+			if err := repairTerminalCopy(cur); err != nil {
+				continue
+			}
 			status := BgStatusDone
 			if cur.Status != runner.StatusDone || (cur.ExitCode != nil && *cur.ExitCode != 0) {
 				status = BgStatusError
 			}
 			b.finishAdopted(jobID, status, runnerNoticeText(cur))
+			return
+		}
+		if pidAlive(pidString(cur.PID)) && !processutil.Matches(cur.PID, cur.ProcessIdentity) {
+			trace("runner.identity.unverified", map[string]any{"job": cur.JobID})
 			return
 		}
 		if !pidAlive(pidString(cur.PID)) {
@@ -244,8 +254,13 @@ func (b *bgSupervisor) watchAdopted(jobID string, st *runner.State) {
 			code := -1
 			end := time.Now().UnixMilli()
 			cur.Status, cur.ExitCode, cur.EndedAt = runner.StatusKilled, &code, &end
-			_ = runner.WriteState(b.rootDir(), cur)
-			repairTerminalCopy(cur)
+			cur.OutcomeUnknown = true
+			if err := runner.WriteState(b.rootDir(), cur); err != nil {
+				continue
+			}
+			if err := repairTerminalCopy(cur); err != nil {
+				continue
+			}
 			b.finishAdopted(jobID, BgStatusError, runnerNoticeText(cur))
 			return
 		}
@@ -279,6 +294,15 @@ func (b *bgSupervisor) orphaned(st *runner.State, now int64) bool {
 	rec := b.loadRecordForAdoption(st.SessionID)
 	if rec != nil && sessionKnowsJob(rec, st.JobID) {
 		return false // link exists: adopt
+	}
+	// The execution receipt precedes launch and links foreground work even
+	// when the daemon died before saving the transcript placeholder.
+	if rec != nil {
+		if path := executionReceiptPath(b.rootDir(), st.SessionID, st.JobID); path != "" {
+			if _, err := os.Stat(path); err == nil {
+				return false
+			}
+		}
 	}
 	// No link YET is not an orphan: the placeholder row appears at the
 	// 10s mark, and a record that failed to load once may simply not
@@ -331,6 +355,9 @@ func runnerNoticeText(st *runner.State) string {
 	} else if code != 0 {
 		status = fmt.Sprintf("failed (exit %d)", code)
 	}
+	if st.OutcomeUnknown {
+		status = "interrupted; command outcome unknown; verify effects before repeating"
+	}
 	path := st.BrainPath
 	if path == "" {
 		path = st.LogPath
@@ -344,7 +371,11 @@ func (b *bgSupervisor) gcRunners(now int64) {
 	root := b.rootDir()
 	const stateRetentionMs = int64(7 * 24 * time.Hour / time.Millisecond)
 	aliveVersions := map[string]bool{}
-	for _, st := range runner.LoadStates(root) {
+	states, invalid := runner.ScanStates(root)
+	if len(invalid) != 0 {
+		return
+	} // uncertain ownership must retain recovery artifacts
+	for _, st := range states {
 		if !st.Terminal() {
 			aliveVersions[st.RunnerVersion] = true
 			continue

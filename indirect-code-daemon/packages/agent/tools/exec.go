@@ -131,10 +131,32 @@ func startWith(ctx context.Context, st Starter, spec ExecSpec) (*Proc, error) {
 // like processLog.pump does for a file this process owns.
 func TailLog(path string) func(<-chan struct{}, func([]byte)) {
 	return func(exited <-chan struct{}, consume func([]byte)) {
-		f, err := os.Open(path)
-		if err != nil {
-			return
+		// The runner creates its out file shortly AFTER spawn (its own
+		// boot): wait for the file to appear — the file is the contract,
+		// so the tailer is late-arrival tolerant and bounded.
+		var f *os.File
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			var err error
+			f, err = os.Open(path)
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				return
+			}
+			select {
+			case <-exited:
+				// One last attempt after exit (the file exists by then).
+				if f2, err2 := os.Open(path); err2 == nil {
+					f = f2
+					goto opened
+				}
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
 		}
+	opened:
 		defer f.Close()
 		tick := time.NewTicker(20 * time.Millisecond)
 		defer tick.Stop()

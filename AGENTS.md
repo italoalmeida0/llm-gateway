@@ -276,6 +276,69 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   — do not reintroduce runtime icon CDNs.
 - Static legal pages: `web/public/*.html` copied into `dist/`.
 
+## The daemon is an actor system (OTP-shaped, on purpose)
+
+The Indirect Code daemon was not written as an Erlang clone, but the
+constraints pushed it into the same shape — and that shape is now a
+**design contract**, not an accident. Read this before touching
+`cmd/daemon`; the parallel is the quickest way to understand why the
+code looks the way it does.
+
+| OTP | Here |
+| --- | --- |
+| process + mailbox | `sessionActor` (one goroutine, `inbox` + `control`) |
+| `gen_server` loop | `handleData` / `handleControl` |
+| supervision tree | `root` → `sessionSup` / `bgSup` / `ws` / `projects` |
+| restart intensity | `cancelRounds` → `quarantine` (a stuck worker is not respawned forever) |
+| monitor / link | `epoch` + `gen` guards (a stale worker's mail is dropped) |
+| `trap_exit` / priority signal | the always-drained `control` lane |
+| "let it crash" | crash-only: WAL replay + respawn, never half-state |
+| `sys` / `dbg` | `trace()` |
+| ports / distributed node | the runner (separate OS process + IPC) |
+
+### Invariants that MUST hold (breaking one is a bug, not a style choice)
+
+1. **State belongs to exactly one goroutine.** No lock spans two actors.
+   If two actors need the same data, one owns it and the other asks
+   through a mailbox — never a shared field.
+2. **Watchdog kill == process crash.** Any actor may be killed at any
+   instant and must recover by replaying disk/WAL — never assume a clean
+   shutdown, never keep half-state.
+3. **Mailboxes are bounded; backpressure is explicit.** A full inbox
+   answers "busy" (or drops with a counter); it never blocks the sender
+   indefinitely and never grows without bound.
+4. **The control lane is drained first and never silently drops an
+   accepted cancellation.**
+5. **Every restart is observable.** A respawn, a quarantine, a dropped
+   message and a stale-worker rejection all leave a `trace()` — silent
+   recovery is indistinguishable from a hang.
+
+### Deliberate divergences from OTP (do not "fix" these)
+
+- Go goroutines share one heap and have no preemptive scheduler, so there
+  is no per-actor GC and no CPU-time watchdog: liveness is judged by
+  **progress** (`lastProgress` + declared waits, V2-001) and memory by an
+  explicit resident budget — not by Erlang's per-process accounting.
+- No hot code loading: upgrades are the **brutal slot swap** (SIGKILL +
+  slot copy + `--update` handoff). That is our code-upgrade mechanism.
+- Links/monitors are **manual** (`epoch`/`gen`) rather than first-class —
+  this is the most error-prone corner, which is why stale-worker tests
+  exist.
+
+### Still worth stealing from OTP (only if a real need appears)
+
+- Declarative restart strategies (`one_for_one` / `rest_for_one` /
+  `one_for_all`) — today the root tree is hand-wired.
+- Restart **intensity per time window** (max restarts / N seconds); we
+  have `maxCancelRounds` but not a window.
+- A name registry (`register`/`whereis`) for infra actors instead of raw
+  channel plumbing.
+
+**The trap to avoid:** building a mini-OTP in Go — ceremony without the
+benefits (no preemption, no isolated GC, no hot load). The value is in the
+invariants above, not the vocabulary. Keep the invariants; skip the
+ceremony.
+
 ## Hard rules
 
 - **Write code and files in English.** Code, comments, commit messages, PR

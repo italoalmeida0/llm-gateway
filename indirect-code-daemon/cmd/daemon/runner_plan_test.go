@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,15 +39,6 @@ func bashJSON(t *testing.T, command string) json.RawMessage {
 	return raw
 }
 
-// portable picks a POSIX/cmd command pair so the seam is proven on every
-// platform (mirrors the runner package's own tests).
-func portable(sh, win string) string {
-	if runtime.GOOS == "windows" {
-		return win
-	}
-	return sh
-}
-
 // Closing the remaining plan scenarios (docs/runner-plan.md T4/T8/T9):
 // update crossing, slow parent, and the 10s agent-foreground window
 // THROUGH the runner-backed starter (the production seam).
@@ -57,7 +47,6 @@ func portable(sh, win string) string {
 // completion under the newer world and its binary is cleaned afterwards
 // (no rollback copies, decided D3), while the new binary survives.
 func TestRunnerUpdateCrossingCleansOldGeneration(t *testing.T) {
-	posixOnly(t)
 	root, _ := runnerTestRoot(t)
 	// Stage a NEWER generation binary (as an update would leave behind).
 	newer := runner.BinaryPath(root, "v2")
@@ -67,9 +56,13 @@ func TestRunnerUpdateCrossingCleansOldGeneration(t *testing.T) {
 	}
 
 	started := runner.NowMs()
+	shell, flag := tools.ShellForTests()
+	if shell == "" {
+		t.Skip("no usable shell on this host")
+	}
 	spec := runner.Spec{
 		JobID: "gen1", SessionID: "sess1", Kind: "bash", Label: "t",
-		Path: "/bin/sh", Args: []string{"-c", portable("/bin/echo crossing-done", "echo crossing-done")},
+		Path: shell, Args: []string{flag, "echo crossing-done"},
 		Env:  os.Environ(),
 		Root: root, RunnerVersion: "v1",
 		OutPath:   filepath.Join(runner.OutDir(root), runner.OutName("sess1", "gen1", started)),
@@ -99,13 +92,9 @@ func TestRunnerUpdateCrossingCleansOldGeneration(t *testing.T) {
 // the socket is an optimization; the log is the buffer. The command
 // completes in time and the out log is byte-complete.
 func TestRunnerSlowParentNeverBlocksTheTask(t *testing.T) {
-	posixOnly(t)
 	root, dataDir := runnerTestRoot(t)
 	// Big output + a slow reader: if sends blocked, this would hang.
-	cmd := portable(
-		"i=0; while [ $i -lt 2000 ]; do /bin/echo line-$i; i=$((i+1)); done",
-		`for /L %i in (1,1,2000) do @echo line-%i`,
-	)
+	cmd := "i=0; while [ $i -lt 2000 ]; do echo line-$i; i=$((i+1)); done"
 	proc := spawnTestRunner(t, root, dataDir, cmd)
 
 	// Connect and then STOP reading (the runner keeps producing).
@@ -145,7 +134,6 @@ func TestRunnerSlowParentNeverBlocksTheTask(t *testing.T) {
 // command returns inline (no background notice); a long one detaches at
 // AutoBackgroundAfter with a placeholder naming the log.
 func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
-	posixOnly(t)
 	app, err := buildRealApp()
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +157,7 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 			return "", "", nil, nil
 		},
 	}
-	res, err := short.Execute(context.Background(), bashJSON(t, portable("/bin/echo inline-ok", "echo inline-ok")), nil)
+	res, err := short.Execute(context.Background(), bashJSON(t, "echo inline-ok"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +178,7 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 			return "bg_" + "t9", p.BrainLog, func(string) {}, func(string, bool) {}
 		},
 	}
-	res, err = long.Execute(context.Background(), bashJSON(t, portable("/bin/echo early; sleep 2", "echo early & ping -n 3 127.0.0.1 >nul")), nil)
+	res, err = long.Execute(context.Background(), bashJSON(t, "echo early; sleep 2"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +210,6 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 // outcome, so the parent's reconciliation must HEAL the copy from the
 // out log (source of truth) and still fold exactly one notice.
 func TestRunnerTerminalCopyHealedAfterCrashWindows(t *testing.T) {
-	posixOnly(t)
 	root, dataDir := runnerTestRoot(t)
 	code := 0
 

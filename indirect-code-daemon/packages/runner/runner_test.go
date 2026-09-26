@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -120,25 +121,35 @@ func TestProtocolToleratesUnknownAndGarbage(t *testing.T) {
 
 // ---- full lifecycle with a REAL command ----
 
-// portable picks a POSIX/cmd command pair so the runner core is proven
-// on every platform (the Windows lane runs cmd.exe, not sh).
-func portable(sh, win string) string {
+// testShell resolves the shell the daemon would use: unish on Windows
+// (the daemon downloads/pins it — there is NO cmd fallback) and sh on
+// unix. The runner is generic; the shell arrives in the Spec, so the test
+// supplies the real one. Commands are bash-compatible (unish runs them
+// everywhere).
+func testShell(t *testing.T) (string, []string) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
-		return win
+		// CI puts the built unish on PATH (UNISH_TEST_BINARY).
+		for _, cand := range []string{os.Getenv("UNISH_TEST_BINARY"), "unish"} {
+			if cand == "" {
+				continue
+			}
+			if p, err := exec.LookPath(cand); err == nil {
+				return p, []string{"-c"}
+			}
+		}
+		t.Skip("unish not available on Windows (no cmd fallback by design)")
 	}
-	return sh
+	return "/bin/sh", []string{"-c"}
 }
 
 func runSpec(t *testing.T, root, jobID, command string) Spec {
 	t.Helper()
 	started := NowMs()
-	shell, args := "/bin/sh", []string{"-c", command}
-	if runtime.GOOS == "windows" {
-		shell, args = "cmd", []string{"/c", command}
-	}
+	shell, shellArgs := testShell(t)
 	return Spec{
 		JobID: jobID, SessionID: "s1", Kind: "bash", Label: "t",
-		Path: shell, Args: args, Env: os.Environ(),
+		Path: shell, Args: append(shellArgs, command), Env: os.Environ(),
 		Root: root, RunnerVersion: "vtest",
 		OutPath:   filepath.Join(OutDir(root), OutName("s1", jobID, started)),
 		BrainPath: filepath.Join(root, "brain", "s1", jobID+".log"),
@@ -147,7 +158,7 @@ func runSpec(t *testing.T, root, jobID, command string) Spec {
 
 func TestRunHappyPathStateCopyAndExitCode(t *testing.T) {
 	root := t.TempDir()
-	spec := runSpec(t, root, "j1", portable("printf 'hello\\nworld\\n'; exit 3", "echo hello & echo world & exit /b 3"))
+	spec := runSpec(t, root, "j1", "printf 'hello\\nworld\\n'; exit 3")
 	code := Run(spec)
 	if code != 3 {
 		t.Fatalf("exit code: got %d want 3", code)
@@ -177,7 +188,7 @@ func TestRunImmediateStartNeverWaitsForAParent(t *testing.T) {
 	// D1: nobody connects at all — the command must still run to
 	// completion and land its outcome in files.
 	root := t.TempDir()
-	spec := runSpec(t, root, "j2", portable("printf 'ran anyway\\n'", "echo ran anyway"))
+	spec := runSpec(t, root, "j2", "printf 'ran anyway\\n'")
 	if code := Run(spec); code != 0 {
 		t.Fatalf("exit code %d", code)
 	}
@@ -191,7 +202,7 @@ func TestRunImmediateStartNeverWaitsForAParent(t *testing.T) {
 
 func TestRunKillVerbKillsAndRecordsKilled(t *testing.T) {
 	root := t.TempDir()
-	spec := runSpec(t, root, "j3", portable("printf 'start\\n'; sleep 30", "echo start & ping -n 30 127.0.0.1 >nul"))
+	spec := runSpec(t, root, "j3", "printf 'start\\n'; sleep 30")
 	done := make(chan int, 1)
 	go func() { done <- Run(spec) }()
 
@@ -236,7 +247,7 @@ func TestRunKillVerbKillsAndRecordsKilled(t *testing.T) {
 
 func TestRunProtoMismatchFallsBackToFileOnly(t *testing.T) {
 	root := t.TempDir()
-	spec := runSpec(t, root, "j4", portable("printf 'file mode\\n'", "echo file mode"))
+	spec := runSpec(t, root, "j4", "printf 'file mode\\n'")
 	done := make(chan int, 1)
 	go func() { done <- Run(spec) }()
 
@@ -306,14 +317,12 @@ func TestMaybeSelfCleanRemovesOnlyDeadGenerations(t *testing.T) {
 // generic path behind Python's -c payload. Uses `cat` so it runs wherever
 // a POSIX shell exists (the Python-specific test skips without python).
 func TestRunFeedsStdin(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX cat scenario")
-	}
 	root := t.TempDir()
 	started := NowMs()
+	shell, shellArgs := testShell(t)
 	spec := Spec{
 		JobID: "stdin1", SessionID: "s1", Kind: "bash", Label: "t",
-		Path: "/bin/sh", Args: []string{"-c", "cat"}, Env: os.Environ(),
+		Path: shell, Args: append(shellArgs, "cat"), Env: os.Environ(),
 		Stdin: "ping-from-stdin",
 		Root:  root, RunnerVersion: "vtest",
 		OutPath:   filepath.Join(OutDir(root), OutName("s1", "stdin1", started)),

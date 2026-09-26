@@ -113,9 +113,8 @@ func spawnTestRunner(t *testing.T, root, dataDir, command string) *tools.Proc {
 // live runner, the output is complete and the completion is delivered
 // exactly once (idempotent through the transcript identity).
 func TestRunnerSurvivesParentDeathAndIsAdopted(t *testing.T) {
-	posixOnly(t)
 	root, dataDir := runnerTestRoot(t)
-	proc := spawnTestRunner(t, root, dataDir, "/bin/echo one; sleep 2; /bin/echo two")
+	proc := spawnTestRunner(t, root, dataDir, "echo one; sleep 2; echo two")
 
 	// Parent #1 registers the job the way slowHook does.
 	inbox1 := make(chan Envelope, 8)
@@ -195,9 +194,8 @@ func TestRunnerSurvivesParentDeathAndIsAdopted(t *testing.T) {
 // T3: the RUNNER dies — the parent reports an explicit failure, never a
 // silent hang, and the log survives.
 func TestRunnerDeathIsAnExplicitFailure(t *testing.T) {
-	posixOnly(t)
 	root, dataDir := runnerTestRoot(t)
-	proc := spawnTestRunner(t, root, dataDir, "/bin/echo partial; sleep 30")
+	proc := spawnTestRunner(t, root, dataDir, "echo partial; sleep 30")
 	seedSession(t, dataDir, "sess1", proc.JobID)
 	waitFor(t, 3*time.Second, func() bool { return fileHas(proc.LogPath, "partial") })
 
@@ -258,9 +256,8 @@ func TestRunnerKillTakesTheTreeDown(t *testing.T) {
 // T7: done with no parent around — the state carries the outcome and a
 // later boot delivers it exactly once (transcript identity dedupes).
 func TestRunnerDoneWithoutParentIsRecoveredFromState(t *testing.T) {
-	posixOnly(t)
 	root, dataDir := runnerTestRoot(t)
-	proc := spawnTestRunner(t, root, dataDir, "/bin/echo quick")
+	proc := spawnTestRunner(t, root, dataDir, "echo quick")
 	seedSession(t, dataDir, "sess1", proc.JobID)
 	// A real background job records its disposition at detach (V2R-001);
 	// absent means inline (silent), so a notifying test must set it.
@@ -295,7 +292,6 @@ func TestRunnerDoneWithoutParentIsRecoveredFromState(t *testing.T) {
 // T10: orphan policy — a runner the session cannot know is SIGKILLed
 // and cleaned; one the session knows is adopted.
 func TestRunnerOrphanPolicy(t *testing.T) {
-	posixOnly(t)
 	old := orphanAfterMs
 	orphanAfterMs = 0 // no freshness exemption in this test
 	defer func() { orphanAfterMs = old }()

@@ -88,7 +88,11 @@ func (b *bgSupervisor) adoptRunners() {
 				// F5b: the session has moved past this job (or is gone):
 				// blunt and clean — kill the group and clean the state.
 				trace("runner.orphan", map[string]any{"job": st.JobID, "sid": st.SessionID})
-				_ = terminatePid(st.PID)
+				// Orphans are killed UNCONDITIONALLY (V2R-002/F5b): a
+				// graceful signal is not guaranteed to be honored, and the
+				// command's tree must die with the runner.
+				_ = forceKillPid(st.PID)
+				reapStoredCommand(st)
 				// Wait for death BEFORE cleaning: the dying runner
 				// rewrites its own state (graceful SIGTERM) and must not
 				// resurrect a cleaned record.

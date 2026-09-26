@@ -58,3 +58,12 @@ func terminateParentWait(pid string, grace time.Duration) error {
 	}
 	return fmt.Errorf("pid %d refuses to die", n)
 }
+
+// forceKillPid kills a pid unconditionally (SIGKILL). Used where a
+// graceful signal is not guaranteed to be honored (orphan cleanup).
+func forceKillPid(n int) error {
+	if n <= 0 {
+		return nil
+	}
+	return syscall.Kill(n, syscall.SIGKILL)
+}

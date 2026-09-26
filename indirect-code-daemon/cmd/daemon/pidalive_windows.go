@@ -63,3 +63,18 @@ func terminateParentWait(pid string, grace time.Duration) error {
 	}
 	return fmt.Errorf("pid %s refuses to die", pid)
 }
+
+// forceKillPid kills a pid and its tree unconditionally (taskkill /F /T).
+// A console runner ignores the graceful WM_CLOSE terminatePid sends, so
+// orphan cleanup must force.
+func forceKillPid(n int) error {
+	if n <= 0 {
+		return nil
+	}
+	if out, err := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(n)).CombinedOutput(); err != nil {
+		if pidAlive(strconv.Itoa(n)) {
+			return fmt.Errorf("taskkill /F: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}

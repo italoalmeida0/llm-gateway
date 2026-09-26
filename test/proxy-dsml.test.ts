@@ -226,6 +226,39 @@ describe("DSML buffered extraction", () => {
     expect(r.calls.length).toBe(1);
     expect(r.calls[0].input).toEqual({ items: [1, 2], flag: true });
   });
+
+  test("unquoted attribute values are accepted", () => {
+    const src =
+      `<${B}DSML${B}invoke name=exec_bash>` +
+      `<${B}DSML${B}parameter name=cmd string=true>ls</${B}DSML${B}parameter>` +
+      `</${B}DSML${B}invoke>`;
+    const r = extractDsmlToolCalls(src, HINTS);
+    expect(r.calls.length).toBe(1);
+    expect(r.calls[0].name).toBe("exec_bash");
+    expect(r.calls[0].input).toEqual({ cmd: "ls" });
+  });
+
+  test("the name=\"X\" typo (`=\"X\"`) still resolves the tool", () => {
+    const src =
+      `<${B}DSML${B}invoke ="exec_bash">` +
+      `<${B}DSML${B}parameter ="cmd" string="true">ls</${B}DSML${B}parameter>` +
+      `</${B}DSML${B}invoke>`;
+    const r = extractDsmlToolCalls(src, HINTS);
+    expect(r.calls.length).toBe(1);
+    expect(r.calls[0].name).toBe("exec_bash");
+    expect(r.calls[0].input).toEqual({ cmd: "ls" });
+  });
+
+  test("tool and parameter names are matched case-insensitively", () => {
+    const src =
+      `<${B}DSML${B}invoke name="Exec_Bash">` +
+      `<${B}DSML${B}parameter name="CMD" string="true">ls</${B}DSML${B}parameter>` +
+      `</${B}DSML${B}invoke>`;
+    const r = extractDsmlToolCalls(src, HINTS);
+    expect(r.calls.length).toBe(1);
+    expect(r.calls[0].name).toBe("exec_bash");
+    expect(r.calls[0].input).toEqual({ cmd: "ls" });
+  });
 });
 
 // --- part 2: stream extractor (split boundaries) ---------------------------

@@ -30,7 +30,13 @@ import {
   stickySet,
 } from "../failover";
 import { normalizeAttemptBody } from "./target-profile";
-import { extractDsmlToolCalls, patchRawResponseDsml, toolHintsFromRequest } from "./dsml";
+import { dsmlRecoverer, toolHintsFromRequest } from "./dsml";
+import {
+  applyXiaomiRequestAdaptation,
+  isXiaomiModel,
+  xiaomiRecoverer,
+} from "./xiaomi";
+import type { ToolRecoverer } from "./recovery";
 import {
   decodeToIR,
   encodeIR,
@@ -1193,6 +1199,23 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
           // Non-JSON bodies go upstream untouched.
         }
       }
+      // Xiaomi MiMo adaptation (model id containing "xiaomi"): native
+      // function calling is unreliable there, so the tool schema is moved
+      // into an in-band XML instruction and the model's XML tool calls are
+      // recovered at the response edge (see server/proxy/xiaomi.ts).
+      const xiaomiTarget =
+        isXiaomiModel(cand.upstreamModel) || isXiaomiModel((bodyJson as any)?.model);
+      if (xiaomiTarget && req.method === "POST" && bodyJson) {
+        try {
+          const parsed = JSON.parse(attemptBody) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const adapted = applyXiaomiRequestAdaptation(parsed, via);
+            if (adapted !== parsed) attemptBody = JSON.stringify(adapted);
+          }
+        } catch {
+          // Non-JSON bodies go upstream untouched.
+        }
+      }
 
       const upstreamUrl = `${base}${upstreamPath}`;
       const controller = new AbortController();
@@ -1326,6 +1349,9 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       const contentType = upstream.headers.get("content-type") || "";
       const isSse = contentType.includes("text/event-stream");
       const clientHeaders = buildClientHeaders(upstream.headers, requestId, req, { attemptsMade });
+      // Response-edge tool-call recovery for THIS candidate's dialect: Xiaomi
+      // XML for a MiMo target, DSML otherwise (see server/proxy/recovery.ts).
+      const recovery: ToolRecoverer = xiaomiTarget ? xiaomiRecoverer(dsmlTools) : dsmlRecoverer(dsmlTools);
 
       // ---- streaming relay ----
       if (isSse && upstream.body) {
@@ -1340,7 +1366,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // Usage comes from the translator (terminal chunk), with the
         // request-body estimate as the input fallback.
         const modelName = routedPublicModel ?? String((bodyJson as any)?.model ?? "");
-        const translator = new IRStreamTranslator(cand.via as IRProto, proto as IRProto, modelName, dsmlTools);
+        const translator = new IRStreamTranslator(cand.via as IRProto, proto as IRProto, modelName, recovery.stream());
         let counted = false;
         // The finalized usage, once known — queued into the stream tail as
         // a terminal `: x-gateway-usage` comment (see pull() below).
@@ -1520,9 +1546,9 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         let translatedUsage: UsageResult;
         try {
           const irr = decodeResponseToIR(cand.via as IRProto, respText, modelName);
-          // DSML tool-call recovery (DeepSeek V4 markup leaking into content):
-          // recovered calls join the IR tool uses, the markup is stripped.
-          const recovered = extractDsmlToolCalls(irr.text, dsmlTools);
+          // Tool-call recovery (markup leaking into content): recovered
+          // calls join the IR tool uses, the markup is stripped.
+          const recovered = recovery.extract(irr.text);
           if (recovered.changed) {
             irr.text = recovered.text;
             if (recovered.calls.length) {
@@ -1553,9 +1579,9 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         setUsageHeader(h, translatedUsage!);
         return new Response(converted, { status: upstream.status, headers: h });
       }
-      // Same-protocol pass-through: bytes stay untouched unless DSML
+      // Same-protocol pass-through: bytes stay untouched unless tool-call
       // recovery actually rewrote the body (then it is re-serialized).
-      const patched = patchRawResponseDsml(cand.via as IRProto, respText, dsmlTools);
+      const patched = recovery.patchRaw(cand.via as IRProto, respText);
       return new Response(patched ?? respText, { status: upstream.status, headers: clientHeaders });
     }
 

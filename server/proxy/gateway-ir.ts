@@ -21,7 +21,8 @@
 export type IRRole = "system" | "user" | "assistant" | "tool";
 
 import { countTextTokens, estimateThinkingTokens } from "../tokens";
-import { DsmlStreamExtractor, type DsmlEmit, type DsmlToolHint } from "./dsml";
+import { dsmlRecoverer, type DsmlToolHint } from "./dsml";
+import type { StreamEmit, StreamRecoverer } from "./recovery";
 
 /** Canonical content block. `text` is shared; media/tool blocks are typed. */
 export type IRBlock =
@@ -2064,14 +2065,18 @@ export class IRStreamTranslator {
   /** Opaque thinking payloads (thought_signature / encrypted blobs): billed
    *  output the upstream never itemizes — estimated via btdby4. */
   private opaqueThinking: string[] = [];
-  /** DSML tool-call recovery (DeepSeek V4 markup leaking into content). */
-  private dsml: DsmlStreamExtractor;
+  /** Tool-call recovery (markup leaking into content): the dialect is
+   *  chosen by the TARGET (DSML for DeepSeek V4, Xiaomi XML for MiMo) and
+   *  passed in as a ready StreamRecoverer; bare hints select DSML. */
+  private recover: StreamRecoverer;
 
   constructor(
     private upstream: Proto,
     client: Proto,
     private fallbackModel: string,
-    dsmlTools?: DsmlToolHint[],
+    /** Declared-tool hints (DSML dialect) OR a prepared recoverer for the
+     *  attempt's target dialect. */
+    dsmlTools?: DsmlToolHint[] | StreamRecoverer,
   ) {
     this.writer =
       client === "anthropic"
@@ -2085,12 +2090,12 @@ export class IRStreamTranslator {
         : upstream === "responses"
           ? responsesStreamParser
           : (_ev, data) => chatStreamParser(data);
-    this.dsml = new DsmlStreamExtractor(dsmlTools ?? []);
+    this.recover = Array.isArray(dsmlTools) ? dsmlRecoverer(dsmlTools).stream() : (dsmlTools ?? dsmlRecoverer([]).stream());
   }
 
   /** Map one DSML emit to IR deltas (a recovered call streams as one
    *  combined tool_use delta — the writers handle id+name+args together). */
-  private static emitToDeltas(e: DsmlEmit): IRStreamDelta[] {
+  private static emitToDeltas(e: StreamEmit): IRStreamDelta[] {
     if ("call" in e) {
       return [{ toolUse: { id: e.call.id, name: e.call.name, inputDelta: e.call.argsJson, index: e.call.index } }];
     }
@@ -2106,8 +2111,8 @@ export class IRStreamTranslator {
     const out: IRStreamDelta[] = [];
     for (const d of deltas) {
       const content: IRStreamDelta = {};
-      if (d.text && !d.thinking && this.dsml.active) {
-        for (const e of this.dsml.feed(d.text)) out.push(...IRStreamTranslator.emitToDeltas(e));
+      if (d.text && !d.thinking && this.recover.active) {
+        for (const e of this.recover.feed(d.text)) out.push(...IRStreamTranslator.emitToDeltas(e));
       } else if (d.text) {
         content.text = d.text;
       }
@@ -2116,8 +2121,8 @@ export class IRStreamTranslator {
       if (d.usage) content.usage = d.usage;
       if (content.text || content.thinking || content.toolUse || content.usage) out.push(content);
       if (d.finish) {
-        for (const e of this.dsml.flush()) out.push(...IRStreamTranslator.emitToDeltas(e));
-        out.push({ finish: d.finish === "stop" && this.dsml.committed > 0 ? "tool_calls" : d.finish });
+        for (const e of this.recover.flush()) out.push(...IRStreamTranslator.emitToDeltas(e));
+        out.push({ finish: d.finish === "stop" && this.recover.committed > 0 ? "tool_calls" : d.finish });
       }
     }
     return out;
@@ -2126,8 +2131,8 @@ export class IRStreamTranslator {
   /** Terminal sequence: flush the held DSML tail first, then the finish. */
   private terminal(finish: "stop" | "length" | "tool_calls"): IRStreamDelta[] {
     const out: IRStreamDelta[] = [];
-    for (const e of this.dsml.flush()) out.push(...IRStreamTranslator.emitToDeltas(e));
-    out.push({ finish: finish === "stop" && this.dsml.committed > 0 ? "tool_calls" : finish });
+    for (const e of this.recover.flush()) out.push(...IRStreamTranslator.emitToDeltas(e));
+    out.push({ finish: finish === "stop" && this.recover.committed > 0 ? "tool_calls" : finish });
     return out;
   }
 

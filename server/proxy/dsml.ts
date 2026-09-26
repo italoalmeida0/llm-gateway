@@ -42,6 +42,13 @@
  * holds at most the marker tail (see MAX_HOLD) so memory stays bounded.
  */
 
+import type {
+  RecoverProto,
+  RecoverResult,
+  StreamRecoverer,
+  ToolRecoverer,
+} from "./recovery";
+
 // ---------------------------------------------------------------------------
 // request-side tool hints
 // ---------------------------------------------------------------------------
@@ -145,15 +152,52 @@ const isInvokeClose = (t: TagTok) => t.closing && INVOKE_NAMES.has(t.name);
 /** An invoke open is `invoke`, or a `call`/`function` tag carrying the tool
  *  name attribute (a bare `<｜DSML｜calls>` is the WRAPPER variant). */
 const isInvokeOpen = (t: TagTok) =>
-  !t.closing && (t.name === "invoke" || (INVOKE_NAMES.has(t.name) && attrValue(t.attrs, "name") !== null));
+  !t.closing && (t.name === "invoke" || (INVOKE_NAMES.has(t.name) && invokeNameAttr(t.attrs) !== null));
 /** Everything that is not invoke/param brackets the block (tool_calls,
  *  toolcalls, tool, tools, calls, and unknown names). */
 const isWrapperClose = (t: TagTok) => t.closing && !INVOKE_NAMES.has(t.name) && !PARAM_NAMES.has(t.name);
 
 function attrValue(attrs: string, key: string): string | null {
-  const m = new RegExp(`\\b${key}\\s*=\\s*("([^"]*)"|'([^']*)')`, "i").exec(attrs);
+  // Quoted values are canonical, but models also emit unquoted ones
+  // (`name=cmd`, `name = cmd`) — accept those too, never a trailing `>`.
+  const m = new RegExp(`\\b${key}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>"'/]+))`, "i").exec(attrs);
   if (!m) return null;
-  return m[2] ?? m[3] ?? "";
+  return m[1] ?? m[2] ?? m[3] ?? "";
+}
+
+/** Bare `=VALUE` attribute (the `name="X"` typo'd as `="X"`). */
+function bareAttr(attrs: string): string | null {
+  const m = /^\s*=\s*(?:"([^"]*)"|'([^']*)'|([^>\s"']+))/.exec(attrs);
+  return m ? (m[1] ?? m[2] ?? m[3] ?? "") : null;
+}
+
+/** Tool name of an invoke/call/function tag: `name=`, `tool=`, `function=`,
+ *  or the bare `="X"` confusion. */
+function invokeNameAttr(attrs: string): string | null {
+  const n = attrValue(attrs, "name") ?? attrValue(attrs, "tool") ?? attrValue(attrs, "function");
+  return n !== null ? n : bareAttr(attrs);
+}
+
+/** Parameter name: `name=`, `key=`, `param=`, or the bare `="X"` confusion. */
+function paramNameAttr(attrs: string): string | null {
+  const n = attrValue(attrs, "name") ?? attrValue(attrs, "key") ?? attrValue(attrs, "param");
+  return n !== null ? n : bareAttr(attrs);
+}
+
+/** Case-insensitive tool lookup: models routinely re-case a declared name
+ *  (`Exec_Bash` for `exec_bash`). */
+export function findHint(hints: DsmlToolHint[], name: string): DsmlToolHint | undefined {
+  const n = name.trim().toLowerCase();
+  return hints.find((h) => h.name.toLowerCase() === n);
+}
+
+/** Map a recovered parameter name back onto the DECLARED casing so the
+ *  emitted arguments always match the tool schema. */
+export function canonicalKey(hint: DsmlToolHint, name: string): string {
+  const n = name.trim().toLowerCase();
+  for (const k of hint.props.keys()) if (k.toLowerCase() === n) return k;
+  for (const k of hint.required) if (k.toLowerCase() === n) return k;
+  return name.trim();
 }
 
 function findTag(pieces: Piece[], from: number, to: number, pred: (t: TagTok) => boolean): number {
@@ -197,7 +241,7 @@ function paramValue(raw: string, attrs: string): unknown {
  * `null` for optional keys (omit instead) and JSON-in-a-string for typed
  * values (unwrap and coerce against the declared schema).
  */
-function sanitizeArgs(input: Record<string, unknown>, hint: DsmlToolHint): Record<string, unknown> {
+export function sanitizeArgs(input: Record<string, unknown>, hint: DsmlToolHint): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(input)) {
     const type = hint.props.get(k) ?? "";
@@ -263,7 +307,7 @@ interface RangeResult {
 
 /** Build a call from one invoke candidate; null = reject (restore verbatim). */
 function buildInvokeCall(t: TagTok, inner: Piece[], src: string, hints: DsmlToolHint[]): DsmlRecoveredCall | null {
-  const nameAttr = attrValue(t.attrs, "name") ?? attrValue(t.attrs, "tool") ?? attrValue(t.attrs, "function");
+  const nameAttr = invokeNameAttr(t.attrs);
   const params: Array<{ name: string; value: unknown }> = [];
   let i = 0;
   while (i < inner.length) {
@@ -276,7 +320,7 @@ function buildInvokeCall(t: TagTok, inner: Piece[], src: string, hints: DsmlTool
     }
     const tt = p.tag;
     if (!tt.closing && isParamTag(tt)) {
-      const name = attrValue(tt.attrs, "name");
+      const name = paramNameAttr(tt.attrs);
       if (name === null) return null;
       let value: unknown;
       if (tt.selfClosing) {
@@ -305,23 +349,23 @@ function assembleCall(
 ): DsmlRecoveredCall | null {
   let hint: DsmlToolHint | undefined;
   if (nameAttr !== null) {
-    const n = nameAttr.trim();
-    hint = hints.find((h) => h.name === n);
+    hint = findHint(hints, nameAttr);
     if (!hint) return null; // undeclared name -> conservative restore
   } else {
     // Missing invoke open: reconstruct the name ONLY when exactly one
     // declared tool fits the recovered parameter names.
-    const names = new Set(params.map((p) => p.name));
+    const names = new Set(params.map((p) => p.name.toLowerCase()));
     if (names.size === 0) return null;
-    const fits = hints.filter(
-      (h) =>
-        [...names].every((n) => h.props.has(n)) && [...h.required].every((r) => names.has(r)),
-    );
+    const fits = hints.filter((h) => {
+      const props = new Set([...h.props.keys()].map((k) => k.toLowerCase()));
+      const req = new Set([...h.required].map((k) => k.toLowerCase()));
+      return [...names].every((n) => props.has(n)) && [...req].every((r) => names.has(r));
+    });
     if (fits.length !== 1) return null;
     hint = fits[0];
   }
   const input: Record<string, unknown> = {};
-  for (const p of params) input[p.name] = p.value;
+  for (const p of params) input[canonicalKey(hint, p.name)] = p.value;
   return { id: newCallId(), name: hint.name, input: sanitizeArgs(input, hint) };
 }
 
@@ -347,7 +391,7 @@ function parseOrphanRun(
       continue;
     }
     if (!t.closing && isParamTag(t)) {
-      const name = attrValue(t.attrs, "name");
+      const name = paramNameAttr(t.attrs);
       if (name === null) {
         bad = true;
         break;
@@ -574,6 +618,7 @@ export class DsmlStreamExtractor {
   private hold = "";
   private scanTail = "";
   private holding = false;
+  private disabled = false;
   private nextIndex = 0;
   /** Committed tool calls so far (the translator upgrades `stop` to
    *  `tool_calls` on the terminal frame when this is > 0). */
@@ -582,7 +627,7 @@ export class DsmlStreamExtractor {
   constructor(private hints: DsmlToolHint[]) {}
 
   get active(): boolean {
-    return this.hints.length > 0;
+    return this.hints.length > 0 && !this.disabled;
   }
 
   feed(text: string): DsmlEmit[] {
@@ -619,6 +664,17 @@ export class DsmlStreamExtractor {
     if (!s) return [];
     if (!this.active) return [{ text: s }];
     return this.emit(extractDsmlToolCalls(s, this.hints));
+  }
+
+  /** A native tool_calls delta arrived: release the held tail as plain text
+   *  and never recover markup again for this message. */
+  disable(): DsmlEmit[] {
+    this.disabled = true;
+    const s = this.scanTail + this.hold;
+    this.scanTail = "";
+    this.hold = "";
+    this.holding = false;
+    return s ? [{ text: s }] : [];
   }
 
   private drain(): DsmlEmit[] {
@@ -666,8 +722,14 @@ export function patchRawResponseDsml(
   proto: "openai" | "anthropic" | "responses",
   respText: string,
   hints: DsmlToolHint[],
+  /** Dialect-specific extractor; defaults to the DSML one. The Xiaomi
+   *  recoverer reuses this whole body-patching routine with its own
+   *  extractor so the three-protocol plumbing lives in exactly one place. */
+  extract: (text: string) => DsmlExtractResult = (t) => extractDsmlToolCalls(t, hints),
+  /** Cheap "does this body carry the dialect's marker at all?" probe. */
+  marker: RegExp = MSTART,
 ): string | null {
-  if (!hints.length || !MSTART.test(respText)) return null;
+  if (!hints.length || !marker.test(respText)) return null;
   let j: unknown;
   try {
     j = JSON.parse(respText);
@@ -679,7 +741,7 @@ export function patchRawResponseDsml(
 
   let changed = false;
   const patchStr = (s: string, calls: DsmlRecoveredCall[]): string => {
-    const r = extractDsmlToolCalls(s, hints);
+    const r = extract(s);
     if (!r.changed) return s;
     changed = true;
     calls.push(...r.calls);
@@ -691,18 +753,24 @@ export function patchRawResponseDsml(
       const choice = asRecord(ch);
       const msg = asRecord(choice.message);
       const calls: DsmlRecoveredCall[] = [];
+      // Anti-duplicate guard: the model already emitted native tool_calls,
+      // so markup in the SAME message is not a second call — leave it as
+      // content (recovery only ADDS; it must not double a real call).
+      const hasNative = asArr(msg.tool_calls).length > 0;
       if (typeof msg.content === "string") {
-        msg.content = patchStr(msg.content, calls);
+        if (!hasNative) msg.content = patchStr(msg.content, calls);
       } else if (Array.isArray(msg.content)) {
-        msg.content = asArr(msg.content)
-          .map((part) => {
-            const pr = asRecord(part);
-            if (typeof pr.text !== "string") return part;
-            const t = patchStr(pr.text, calls);
-            if (t === pr.text) return part;
-            return t === "" ? null : { ...pr, text: t };
-          })
-          .filter((part): part is Record<string, unknown> => part !== null);
+        if (!hasNative) {
+          msg.content = asArr(msg.content)
+            .map((part) => {
+              const pr = asRecord(part);
+              if (typeof pr.text !== "string") return part;
+              const t = patchStr(pr.text, calls);
+              if (t === pr.text) return part;
+              return t === "" ? null : { ...pr, text: t };
+            })
+            .filter((part): part is Record<string, unknown> => part !== null);
+        }
       }
       if (calls.length) {
         msg.tool_calls = [
@@ -716,9 +784,11 @@ export function patchRawResponseDsml(
   } else if (proto === "anthropic") {
     const calls: DsmlRecoveredCall[] = [];
     const out: unknown[] = [];
+    // Anti-duplicate guard: a native tool_use block already carries the call.
+    const hasNative = asArr(root.content).some((b) => asRecord(b).type === "tool_use");
     for (const b of asArr(root.content)) {
       const block = asRecord(b);
-      if (block.type === "text" && typeof block.text === "string") {
+      if (!hasNative && block.type === "text" && typeof block.text === "string") {
         const t = patchStr(block.text, calls);
         if (t !== block.text) {
           if (t !== "") out.push({ ...block, text: t });
@@ -735,9 +805,11 @@ export function patchRawResponseDsml(
   } else {
     const calls: DsmlRecoveredCall[] = [];
     const out: unknown[] = [];
+    // Anti-duplicate guard: a native function_call item already carries it.
+    const hasNative = asArr(root.output).some((it) => asRecord(it).type === "function_call");
     for (const item of asArr(root.output)) {
       const r = asRecord(item);
-      if (r.type === "message") {
+      if (!hasNative && r.type === "message") {
         let touched = false;
         const parts = asArr(r.content).map((p) => {
           const pr = asRecord(p);
@@ -752,7 +824,7 @@ export function patchRawResponseDsml(
       }
       out.push(item);
     }
-    if (typeof root.output_text === "string") root.output_text = patchStr(root.output_text, calls);
+    if (!hasNative && typeof root.output_text === "string") root.output_text = patchStr(root.output_text, calls);
     if (calls.length) {
       for (const c of calls) {
         out.push({ type: "function_call", id: c.id, call_id: c.id, name: c.name, arguments: JSON.stringify(c.input), status: "completed" });
@@ -762,4 +834,19 @@ export function patchRawResponseDsml(
   }
 
   return changed ? JSON.stringify(root) : null;
+}
+
+/**
+ * The DSML dialect as a ToolRecoverer: existing exports wrapped behind the
+ * shared recovery contract (see recovery.ts) so the proxy edge can pick a
+ * dialect per target without branching at every call site.
+ */
+export function dsmlRecoverer(hints: DsmlToolHint[]): ToolRecoverer {
+  return {
+    active: hints.length > 0,
+    extract: (text): RecoverResult => extractDsmlToolCalls(text, hints),
+    patchRaw: (proto: RecoverProto, respText: string): string | null =>
+      patchRawResponseDsml(proto, respText, hints),
+    stream: (): StreamRecoverer => new DsmlStreamExtractor(hints),
+  };
 }

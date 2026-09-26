@@ -226,6 +226,39 @@ describe("DSML buffered extraction", () => {
     expect(r.calls.length).toBe(1);
     expect(r.calls[0].input).toEqual({ items: [1, 2], flag: true });
   });
+
+  test("unquoted attribute values are accepted", () => {
+    const src =
+      `<${B}DSML${B}invoke name=exec_bash>` +
+      `<${B}DSML${B}parameter name=cmd string=true>ls</${B}DSML${B}parameter>` +
+      `</${B}DSML${B}invoke>`;
+    const r = extractDsmlToolCalls(src, HINTS);
+    expect(r.calls.length).toBe(1);
+    expect(r.calls[0].name).toBe("exec_bash");
+    expect(r.calls[0].input).toEqual({ cmd: "ls" });
+  });
+
+  test("the name=\"X\" typo (`=\"X\"`) still resolves the tool", () => {
+    const src =
+      `<${B}DSML${B}invoke ="exec_bash">` +
+      `<${B}DSML${B}parameter ="cmd" string="true">ls</${B}DSML${B}parameter>` +
+      `</${B}DSML${B}invoke>`;
+    const r = extractDsmlToolCalls(src, HINTS);
+    expect(r.calls.length).toBe(1);
+    expect(r.calls[0].name).toBe("exec_bash");
+    expect(r.calls[0].input).toEqual({ cmd: "ls" });
+  });
+
+  test("tool and parameter names are matched case-insensitively", () => {
+    const src =
+      `<${B}DSML${B}invoke name="Exec_Bash">` +
+      `<${B}DSML${B}parameter name="CMD" string="true">ls</${B}DSML${B}parameter>` +
+      `</${B}DSML${B}invoke>`;
+    const r = extractDsmlToolCalls(src, HINTS);
+    expect(r.calls.length).toBe(1);
+    expect(r.calls[0].name).toBe("exec_bash");
+    expect(r.calls[0].input).toEqual({ cmd: "ls" });
+  });
 });
 
 // --- part 2: stream extractor (split boundaries) ---------------------------
@@ -558,5 +591,34 @@ describe("DSML recovery through handleProxy", () => {
     expect(toolUse.name).toBe("exec_bash");
     expect(toolUse.input).toEqual({ cmd: "ls -la && npm run dev", timeout: 30 });
     expect(JSON.stringify(j.content)).not.toContain("DSML");
+  });
+
+  test("router mode 'native' disables DSML recovery too", async () => {
+    const mid = `deepseek-native-${RUN}`;
+    db.prepare(
+      `INSERT INTO models (id, provider_id, upstream_model, name, description, enabled,
+         input_modalities, output_modalities, sampling_params, features,
+         tool_call_mode, source, created_at, updated_at)
+       VALUES (?, ?, ?, '', '', 1, '["text"]', '["text"]', '[]', '[]', 'native', 'manual', ?, ?)`,
+    ).run(mid, PID, mid, now, now);
+    db.prepare(
+      "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES (?, ?, ?, 0, 1, ?)",
+    ).run(mid, PID, mid, now);
+    db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'router') ON CONFLICT(key) DO UPDATE SET value='router'").run();
+    invalidateModelCache();
+    try {
+      const { req, url } = chatReq({ model: mid, tools: TOOLS, messages: [{ role: "user", content: "run ls" }] });
+      const res = await handleProxy(req, url, undefined);
+      expect(res.status).toBe(200);
+      const j = await res.json();
+      // native = fully off: the DSML markup survives as content.
+      expect(j.choices[0].finish_reason).toBe("stop");
+      expect(j.choices[0].message.content).toContain("DSML");
+      expect(j.choices[0].message.tool_calls).toBeUndefined();
+    } finally {
+      db.prepare("DELETE FROM models WHERE id = ?").run(mid);
+      db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'passthrough') ON CONFLICT(key) DO UPDATE SET value='passthrough'").run();
+      invalidateModelCache();
+    }
   });
 });

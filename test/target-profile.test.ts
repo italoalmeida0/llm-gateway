@@ -33,9 +33,9 @@ describe("target-profile (universal IR pass)", () => {
 
   test("reasoning_effort is stripped when the target does not take it", () => {
     const body = { model: "m", reasoning_effort: "low", messages: [] };
-    const out = normalizeForTarget(body, PROFILE) as any;
+    const out = normalizeForTarget(body, PROFILE, "gpt-4o-mini") as any;
     expect(out.reasoning_effort).toBeUndefined();
-    const kept = normalizeForTarget(body, DEFAULT_PROFILE) as any;
+    const kept = normalizeForTarget(body, DEFAULT_PROFILE, "gpt-5.6-luna") as any;
     expect(kept.reasoning_effort).toBe("low");
   });
 
@@ -96,7 +96,7 @@ describe("compactToolIds (strict 64-char tool id cap)", () => {
     expect(normalizeForTarget(body, DEFAULT_PROFILE)).toBe(body);
   });
 
-  test("both limit keys present: legacy is dropped (mutually exclusive upstream)", () => {
+  test("both limit keys present: modern value wins under the target's accepted key", () => {
     const out = applyOutputLimitKey(
       { model: "m", max_tokens: 400, max_completion_tokens: 400, messages: [] },
       "max_completion_tokens",
@@ -107,7 +107,8 @@ describe("compactToolIds (strict 64-char tool id cap)", () => {
       { model: "m", max_tokens: 400, max_completion_tokens: 400, messages: [] },
       "max_tokens",
     ) as any;
-    expect("max_tokens" in out2).toBe(false);
+    expect(out2.max_tokens).toBe(400);
+    expect("max_completion_tokens" in out2).toBe(false);
   });
 
   test("long tool ids compact, short ones survive (all three layouts)", () => {
@@ -159,6 +160,13 @@ describe("compactToolIds (strict 64-char tool id cap)", () => {
     expect((normalizeForTarget(body, DEFAULT_PROFILE, "gpt-4o-mini") as any).reasoning).toBeUndefined();
     expect((normalizeForTarget(body, DEFAULT_PROFILE, "gpt-5.6-luna") as any).reasoning).toEqual({ effort: "low" });
     expect((normalizeForTarget(body, DEFAULT_PROFILE, "muse-spark-1.3-contributor") as any).reasoning).toEqual({ effort: "low" });
+  });
+
+  test("reasoning_effort is stripped for non-reasoning targets even under the default profile (live 2026-09-26: gpt-4o-mini 400s it)", () => {
+    const body = { model: "m", reasoning_effort: "low", messages: [] };
+    expect((normalizeForTarget(body, DEFAULT_PROFILE, "gpt-4o-mini") as any).reasoning_effort).toBeUndefined();
+    expect((normalizeForTarget(body, DEFAULT_PROFILE, "gpt-5.6-luna") as any).reasoning_effort).toBe("low");
+    expect((normalizeForTarget(body, DEFAULT_PROFILE, "muse-spark-1.3-contributor") as any).reasoning_effort).toBe("low");
   });
 
   test("glm/z-ai targets FORWARD reasoning_effort (A/B: effort helps them answer)", () => {
@@ -334,4 +342,14 @@ describe("passthrough affinity (right provider first)", () => {
     expect(scoreAffinity(snap, "models/gemini-3.8-flash", "openai")).toBe("p5"); // gem
     expect(scoreAffinity(snap, "claude-haiku-4-5", "anthropic")).toBe("p6"); // ant native
   });
+});
+
+test("affinity follows provider URLs after an admin renames the provider", async () => {
+  const { scoreAffinities } = await import("../server/models");
+  const provider = (id: string, name: string, url: string) => ({ row: { id, name, openai_base_url: url }, keys: [{ id: `key-${id}`, status: "active" }] });
+  const snap: any = { targets: new Map(), providers: new Map([
+    ["other", provider("other", "syn", "https://openrouter.ai/api/v1")],
+    ["synthetic", provider("synthetic", "My renamed provider", "https://api.synthetic.new/v1")],
+  ]) };
+  expect(scoreAffinities(snap, "hf:org/model", "openai")).toEqual(["synthetic", "other"]);
 });

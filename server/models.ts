@@ -10,7 +10,9 @@ import {
 import { decryptSecret } from "./crypto";
 import { GATEWAY_SECRET } from "./config";
 import { keyUsable } from "./failover";
+import { apiFamilyForBaseUrl } from "./proxy/target-profile";
 import { normalizePricing, pricingColumns } from "./pricing";
+import { defaultToolCallModeFor, normalizeToolCallMode } from "./tool-call-mode";
 
 /**
  * Model registry & routing.
@@ -166,8 +168,8 @@ const insertModel = db.prepare(
       max_output_length, input_modalities, output_modalities,
        sampling_params, features, reasoning_efforts, pricing,
        pricing_input, pricing_input_cache, pricing_input_cache_write, pricing_output,
-       source, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)`,
+       tool_call_mode, source, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)`,
 );
 
 /** A freshly imported model gets its provider as the priority-0 target. */
@@ -289,6 +291,7 @@ export async function syncProviderModels(
           prices.inputCache,
           prices.inputCacheWrite,
           prices.output,
+          defaultToolCallModeFor(m.id),
           now,
           now,
         );
@@ -397,6 +400,7 @@ export function publicModelAdmin(
     samplingParams: jsonArr(m.sampling_params),
     features: jsonArr(m.features),
     reasoningEfforts: m.reasoning_efforts ? jsonArr(m.reasoning_efforts) : null,
+    toolCallMode: normalizeToolCallMode(m.tool_call_mode),
     pricing: modelPricing(m),
     pricingInput: m.pricing_input ?? null,
     pricingInputCache: m.pricing_input_cache ?? null,
@@ -676,10 +680,10 @@ export function resolveModelRoute(snap: RouterSnapshot, proto: Proto, model: str
   for (const t of enabledTargets) {
     const provider = snap.providers.get(t.provider_id);
     if (!provider) continue;
-    const via = candidateUsable(provider, proto);
-    if (!via) continue;
-    for (const key of usableKeys(provider)) {
-      candidates.push({ provider, key, upstreamModel: t.upstream_model, translated: via !== proto, via });
+    for (const via of egressPreference(proto).filter((p) => providerHasCapability(provider.row, p))) {
+      for (const key of usableKeys(provider)) {
+        candidates.push({ provider, key, upstreamModel: t.upstream_model, translated: via !== proto, via });
+      }
     }
   }
   if (candidates.length === 0) {
@@ -747,8 +751,14 @@ function scoreAffinityRanked(snap: RouterSnapshot, modelId: string, proto?: Prot
   if (id.includes("/")) guesses.push("or");
   const ranked: string[] = [];
   for (const guess of guesses) {
-    const p = byName.get(guess);
-    if (p && candidateUsable(p, proto ?? "openai") !== null && !ranked.includes(p.row.id)) ranked.push(p.row.id);
+    const family = { syn: "synthetic", meta: "meta", or: "openrouter", xai: "xai", oai: "openai", gem: "google", ant: "anthropic" }[guess];
+    const matches = [...snap.providers.values()].filter((p) =>
+      [p.row.openai_base_url, p.row.anthropic_base_url, p.row.responses_base_url].some((url) => apiFamilyForBaseUrl(url) === family));
+    // Legacy names remain a fallback for custom endpoints of unknown family.
+    if (!matches.length && byName.has(guess)) matches.push(byName.get(guess)!);
+    for (const p of matches) {
+      if (usableKeys(p).length && candidateUsable(p, proto ?? "openai") !== null && !ranked.includes(p.row.id)) ranked.push(p.row.id);
+    }
   }
   return ranked;
 }
@@ -777,8 +787,10 @@ export function passthroughCandidates(snap: RouterSnapshot, proto: Proto, modelI
   scored.sort((a, b) => a.rank - b.rank || a.order - b.order);
   const out: RouteCandidate[] = [];
   for (const sc of scored) {
-    for (const key of usableKeys(sc.provider)) {
-      out.push({ provider: sc.provider, key, upstreamModel: "", translated: sc.via !== proto, via: sc.via });
+    for (const via of egressPreference(proto).filter((p) => providerHasCapability(sc.provider.row, p))) {
+      for (const key of usableKeys(sc.provider)) {
+        out.push({ provider: sc.provider, key, upstreamModel: "", translated: via !== proto, via });
+      }
     }
   }
   return out;

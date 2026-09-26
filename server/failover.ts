@@ -71,7 +71,7 @@ export function classifyHttpError(status: number, bodyPeek: string): FailClass |
     if (/retry[- ]?(?:in|after)|retrydelay|rate[- ]?limits/i.test(hint)) return "rate_limit";
     return BILLING_RE.test(hint) ? "billing" : "rate_limit";
   }
-  if (status === 400) return BILLING_RE.test(hint) ? "billing" : null;
+  if (status === 400) return BILLING_RE.test(hint) ? "billing" : MODEL_NOT_FOUND_RE.test(hint) ? "model_not_found" : null;
   if (status === 404) {
     if (BILLING_RE.test(hint)) return "billing";
     if (MODEL_NOT_FOUND_RE.test(hint)) return "model_not_found";

@@ -30,7 +30,14 @@ import {
   stickySet,
 } from "../failover";
 import { normalizeAttemptBody } from "./target-profile";
-import { extractDsmlToolCalls, patchRawResponseDsml, toolHintsFromRequest } from "./dsml";
+import { dsmlRecoverer, toolHintsFromRequest } from "./dsml";
+import {
+  applyMarkupRequestAdaptation,
+  markupRecoverer,
+} from "./markup-tools";
+import { ownRecoverer } from "./own-tools";
+import { isInstructionMode, isMarkupMode, resolveToolCallMode } from "../tool-call-mode";
+import { combineRecoverers, type ToolRecoverer } from "./recovery";
 import {
   decodeToIR,
   encodeIR,
@@ -943,6 +950,18 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         }
       }
     }
+    // Embeddings and legacy completions have no conversational IR mapping.
+    // Keep their operation and native wire format throughout failover.
+    if (route.upstreamPath === "/embeddings" || route.upstreamPath === "/completions") {
+      candidates = candidates.filter((c) => c.via === "openai");
+    }
+    // Provider-managed Responses state cannot be reconstructed in chat or
+    // messages. Keep native candidates instead of letting an untranslatable
+    // alternate capability terminate failover before another native provider.
+    if (proto === "responses" && bodyJson?.previous_response_id !== undefined) {
+      candidates = candidates.filter((c) => c.via === "responses");
+    }
+    let requestIR: Awaited<ReturnType<typeof decodeToIR>> | undefined;
     // How many candidates were actually attempted — reported back so the
     // client can see failover happened (`x-gateway-attempts`).
     let attemptsMade = 0;
@@ -1075,6 +1094,15 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // capability URL.
       const via = cand.via;
       const upstreamProto = via;
+      // Per-model tool-call strategy (tool_call_mode): 'native' forwards the
+      // tools array; 'xiaomi'/'smart' strip it and recover markup calls at
+      // the response edge (see server/proxy/markup-tools.ts). The registry
+      // row wins; unregistered targets fall back to id auto-detection.
+      const toolCallMode = resolveToolCallMode(
+        snap.models.get(routedPublicModel ?? String((bodyJson as any)?.model ?? ""))?.tool_call_mode,
+        cand.upstreamModel,
+        (bodyJson as any)?.model,
+      );
       // Trailing "/" would produce "//chat/completions" — new rows are
       // stripped at write time, this covers legacy rows still carrying one.
       const base = (
@@ -1133,17 +1161,11 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // attempts instead carry the IR-converted body.
       let attemptBody = bodyText;
       if (cand.translated && bodyJson) {
-        const withModel =
-          cand.upstreamModel && (bodyJson as any).model !== cand.upstreamModel
-            ? { ...bodyJson, model: cand.upstreamModel }
-            : bodyJson;
-        // All translated requests go through the gateway IR: decode the
-        // ingress protocol once, encode to the attempt's egress protocol.
-        // Same-protocol attempts are translated too (dialects differ).
+        // Decode lazily once; native requests retain fields not represented
+        // by the cross-protocol IR. Every attempt still gets target profiling.
         try {
-          const req43 = withModel as Record<string, unknown>;
-          const ir = await decodeToIR(proto as IRProto, req43);
-          attemptBody = JSON.stringify(encodeIR(via as IRProto, ir, cand.upstreamModel));
+          requestIR ??= await decodeToIR(proto as IRProto, bodyJson);
+          attemptBody = JSON.stringify(encodeIR(via as IRProto, requestIR, cand.upstreamModel));
         } catch (e) {
           // Client-caused conversion failure (bad image URL, missing
           // tool_call_id): fail fast as 400 with no failover.
@@ -1188,6 +1210,21 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
               upstreamModel: cand.upstreamModel || (parsed as any).model,
             });
             if (normalized !== parsed) attemptBody = JSON.stringify(normalized);
+          }
+        } catch {
+          // Non-JSON bodies go upstream untouched.
+        }
+      }
+      // Markup tool-call adaptation (tool_call_mode 'xiaomi'/'smart'): native
+      // function calling is unreliable for these targets, so the tool schema
+      // is moved into an in-band instruction and the model's markup tool
+      // calls are recovered at the response edge.
+      if (isInstructionMode(toolCallMode) && req.method === "POST" && bodyJson) {
+        try {
+          const parsed = JSON.parse(attemptBody) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const adapted = applyMarkupRequestAdaptation(parsed, via, toolCallMode);
+            if (adapted !== parsed) attemptBody = JSON.stringify(adapted);
           }
         } catch {
           // Non-JSON bodies go upstream untouched.
@@ -1326,6 +1363,15 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       const contentType = upstream.headers.get("content-type") || "";
       const isSse = contentType.includes("text/event-stream");
       const clientHeaders = buildClientHeaders(upstream.headers, requestId, req, { attemptsMade });
+      // Response-edge tool-call recovery for THIS candidate: `native` is
+      // fully off; every markup mode accepts DSML (the DeepSeek safety net)
+      // PLUS the markup dialects, and `own` additionally accepts the fenced
+      // JSON dialect — composed via combineRecoverers.
+      const recovery: ToolRecoverer = !isMarkupMode(toolCallMode)
+        ? combineRecoverers()
+        : toolCallMode === "own"
+          ? combineRecoverers(dsmlRecoverer(dsmlTools), markupRecoverer(toolCallMode, dsmlTools), ownRecoverer(dsmlTools))
+          : combineRecoverers(dsmlRecoverer(dsmlTools), markupRecoverer(toolCallMode, dsmlTools));
 
       // ---- streaming relay ----
       if (isSse && upstream.body) {
@@ -1340,7 +1386,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         // Usage comes from the translator (terminal chunk), with the
         // request-body estimate as the input fallback.
         const modelName = routedPublicModel ?? String((bodyJson as any)?.model ?? "");
-        const translator = new IRStreamTranslator(cand.via as IRProto, proto as IRProto, modelName, dsmlTools);
+        const translator = new IRStreamTranslator(cand.via as IRProto, proto as IRProto, modelName, recovery.stream());
         let counted = false;
         // The finalized usage, once known — queued into the stream tail as
         // a terminal `: x-gateway-usage` comment (see pull() below).
@@ -1352,7 +1398,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
           const u = translator.result();
           if (u.estimated && bodyJson) u.inTok = estimateBodyTokens(bodyJson, proto);
           finalUsage = u;
-          record(u, status, Math.round(performance.now() - started), true, cand);
+          record(u, translator.failed && status === 200 ? 502 : status, Math.round(performance.now() - started), true, cand);
         };
         const usageComment = (): Uint8Array | null => {
           if (!finalUsage || usageTailSent) return null;
@@ -1380,6 +1426,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
         const cleanup = () => {
           resetIdle(true);
+          translator.dispose();
           req.signal.removeEventListener("abort", onClientAbortStream);
           release();
         };
@@ -1450,6 +1497,11 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
                 }
               }
             } catch {
+              if (!req.signal.aborted) {
+                try {
+                  for (const piece of translator.fail("Upstream stream interrupted")) sink.enqueue(piece);
+                } catch { /* A closed downstream must still release the slot and spool. */ }
+              }
               finalize(req.signal.aborted ? 499 : 502);
               cleanup();
               closeSink(sink);
@@ -1520,17 +1572,21 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         let translatedUsage: UsageResult;
         try {
           const irr = decodeResponseToIR(cand.via as IRProto, respText, modelName);
-          // DSML tool-call recovery (DeepSeek V4 markup leaking into content):
-          // recovered calls join the IR tool uses, the markup is stripped.
-          const recovered = extractDsmlToolCalls(irr.text, dsmlTools);
-          if (recovered.changed) {
-            irr.text = recovered.text;
-            if (recovered.calls.length) {
-              irr.toolUses = [
-                ...irr.toolUses,
-                ...recovered.calls.map((c) => ({ id: c.id, name: c.name, input: c.input })),
-              ];
-              if (irr.finish === "stop") irr.finish = "tool_calls";
+          // Tool-call recovery (markup leaking into content): recovered
+          // calls join the IR tool uses, the markup is stripped. Anti-
+          // duplicate guard: a native tool use already carries the call, so
+          // markup in the same message stays content.
+          if (irr.toolUses.length === 0) {
+            const recovered = recovery.extract(irr.text);
+            if (recovered.changed) {
+              irr.text = recovered.text;
+              if (recovered.calls.length) {
+                irr.toolUses = [
+                  ...irr.toolUses,
+                  ...recovered.calls.map((c) => ({ id: c.id, name: c.name, input: c.input })),
+                ];
+                if (irr.finish === "stop") irr.finish = "tool_calls";
+              }
             }
           }
           converted = encodeResponseFromIR(proto as IRProto, irr, modelName);
@@ -1553,9 +1609,9 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         setUsageHeader(h, translatedUsage!);
         return new Response(converted, { status: upstream.status, headers: h });
       }
-      // Same-protocol pass-through: bytes stay untouched unless DSML
+      // Same-protocol pass-through: bytes stay untouched unless tool-call
       // recovery actually rewrote the body (then it is re-serialized).
-      const patched = patchRawResponseDsml(cand.via as IRProto, respText, dsmlTools);
+      const patched = recovery.patchRaw(cand.via as IRProto, respText);
       return new Response(patched ?? respText, { status: upstream.status, headers: clientHeaders });
     }
 

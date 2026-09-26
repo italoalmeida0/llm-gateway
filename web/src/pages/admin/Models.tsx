@@ -1,6 +1,6 @@
 import { createSignal, For, Show, createResource, createMemo, createEffect } from "solid-js";
 
-import { api, type ModelDto, type ProviderDto, type RoutingMode, type SyncOutcome } from "../../api";
+import { api, type ModelDto, type ProviderDto, type RoutingMode, type SyncOutcome, type ToolCallMode } from "../../api";
 import { PageTitle } from "../../index";
 import { usalItems } from "../../motion";
 import { attachSortable } from "../../sortable";
@@ -235,6 +235,7 @@ export default function AdminModelsPage() {
   const [fSampling, setFSampling] = createSignal("");
   const [fFeatures, setFFeatures] = createSignal("");
   const [fEfforts, setFEfforts] = createSignal("");
+  const [fToolCallMode, setFToolCallMode] = createSignal<ToolCallMode>("fallback");
   const [fPricing, setFPricing] = createSignal<Record<string, string>>({});
 
   const providerOptions = createMemo(() =>
@@ -291,6 +292,7 @@ export default function AdminModelsPage() {
       setFInMod(m.inputModalities.join(", ")); setFOutMod(m.outputModalities.join(", "));
       setFSampling(m.samplingParams.join(", ")); setFFeatures(m.features.join(", "));
       setFEfforts((m.reasoningEfforts ?? []).join(", "));
+      setFToolCallMode(m.toolCallMode ?? "fallback");
       setFPricing(
         Object.fromEntries(
           Object.entries(m.pricing ?? {}).map(([key, value]) => [key, perTokenInput(Number(value))]),
@@ -328,6 +330,7 @@ export default function AdminModelsPage() {
         samplingParams: csv(fSampling()),
         features: csv(fFeatures()),
         reasoningEfforts: csv(fEfforts()),
+        toolCallMode: fToolCallMode(),
         pricing: Object.keys(pricing).length ? pricing : null,
         // Ordered failover chain; "" upstream = defaults to the public id.
         targets: fTargets().map((t) => ({
@@ -867,6 +870,24 @@ export default function AdminModelsPage() {
                 <span>+ Add another fallback target</span>
               </button>
             </div>
+          </ModalSection>
+
+          <ModalSection
+            title="Tool Calling"
+            subtitle="How the gateway handles tool calls for this model."
+          >
+            <Select
+              label="Tool calling mode"
+              value={fToolCallMode()}
+              onChange={(v) => setFToolCallMode(v as ToolCallMode)}
+              options={[
+                { value: "native", label: "Native only" },
+                { value: "fallback", label: "Fallback (default)" },
+                { value: "workaround", label: "Workaround (XML)" },
+                { value: "own", label: "Own workaround (fenced JSON)" },
+              ]}
+              hint="Native only: native tools, no markup recovery. Fallback: native tools kept, but markup tool calls are recovered from every format. Workaround: strips tools and teaches the xiaomi XML format. Own workaround: strips tools and teaches a fenced tool_call JSON block — use when the provider rewrites the XML format (e.g. OpenAI)."
+            />
           </ModalSection>
 
           <ModalSection

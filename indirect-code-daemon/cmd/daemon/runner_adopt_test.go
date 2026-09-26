@@ -197,6 +197,11 @@ func TestRunnerDeathIsAnExplicitFailure(t *testing.T) {
 	root, dataDir := runnerTestRoot(t)
 	proc := spawnTestRunner(t, root, dataDir, "echo partial; sleep 30")
 	seedSession(t, dataDir, "sess1", proc.JobID)
+	// A real background job records its disposition at detach (V2R-001);
+	// absent = inline (silent), so a notifying test must set it.
+	if err := runner.WriteDisposition(root, proc.JobID, runner.DispBackground); err != nil {
+		t.Fatal(err)
+	}
 	waitFor(t, 3*time.Second, func() bool { return fileHas(proc.LogPath, "partial") })
 
 	// HARD-kill the runner itself: no signal handler, no terminal

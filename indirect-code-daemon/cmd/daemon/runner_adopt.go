@@ -117,7 +117,13 @@ func (b *bgSupervisor) adoptRunners() {
 			end := now
 			st.Status, st.ExitCode, st.EndedAt = runner.StatusKilled, &code, &end
 			_ = runner.WriteState(root, st)
-			b.retainNotice(st.JobID, st.SessionID, runnerNoticeText(st), true)
+			// V2R-001: a dead runner still honours the disposition — a
+			// suppressed (assistant) cancel or an inline foreground return
+			// must NOT become a wake-up just because the runner died before
+			// writing its terminal state (the cancel race).
+			if runner.ReadDisposition(root, st.JobID) == runner.DispBackground {
+				b.retainNotice(st.JobID, st.SessionID, runnerNoticeText(st), true)
+			}
 		}
 	}
 	b.gcRunners(now)

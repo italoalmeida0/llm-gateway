@@ -60,7 +60,9 @@ var buildRealApp = sync.OnceValues(func() (string, error) {
 		return "", err
 	}
 	out := filepath.Join(dir, "indirect-code")
-	cmd := exec.Command("go", "build", "-o", out, ".")
+	// -buildvcs=false: test builds must not depend on git metadata
+	// (the musl container's git ownership makes the stamp step fail).
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, ".")
 	if outb, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build app: %v: %s", err, outb)
 	}

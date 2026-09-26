@@ -17,19 +17,29 @@ import (
 // grouping (taskkill /T targets the whole tree).
 func setProcessGroup(cmd *exec.Cmd) {}
 
-// killProcessGroup kills the whole tree: taskkill /T is the primary
-// mechanism; the proctable sweep catches anything it missed (Job
-// objects aside, the ppid walk is the guarantee).
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil {
+// processGroupOf on Windows is just the pid (no POSIX groups).
+func processGroupOf(pid int) int { return pid }
+
+// requestTerminate is the fast cancel request (best-effort tree kill).
+func requestTerminate(pid int) {
+	if pid <= 0 {
 		return
 	}
-	pid := cmd.Process.Pid
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid), "/T", "/F").Run()
+}
+
+// reapCommandTree is the guaranteed reap: taskkill /T /F plus the ppid
+// sweep, synchronous.
+func reapCommandTree(pid int) {
+	if pid <= 0 {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid), "/T", "/F").Run()
 	proctable.KillTree(pid, 9)
-	_ = cmd.Process.Kill()
 }
 
 // exitCodeOf maps a wait error to a code (Windows has no POSIX signal

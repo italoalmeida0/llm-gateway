@@ -1,5 +1,8 @@
 # V2 review reproductions
 
+The first section preserves the original review. For the current source, use
+the [runner follow-up probes](#runner-follow-up-at-796d726) below.
+
 [v2_architecture_test.go.txt](v2_architecture_test.go.txt) preserves the five
 diagnostic probes used in the review of `7f2c8c0`. The `.txt` suffix keeps these
 known-failing tests out of ordinary builds and test discovery. They use existing
@@ -79,3 +82,76 @@ are covered by the permanent tests instead.
 | `TestV2ArchitectureBGCompletionDelivery` | Superseded — the contract is EVENTUAL delivery, retried until ack (`TestV2BGCompletionRetriedUntilAck`, `TestV2BGNoticeFoldedExactlyOnce`) |
 | `TestV2ArchitectureDispatchIsolation` | PASSES (V2-006: per-session dispatch lanes) |
 | `TestV2ArchitectureReconnectApproval` | PASSES (V2-004: snapshots restore pending decisions) |
+
+## Runner follow-up at 796d726
+
+These probes support [the 2026-09-26 follow-up](../v2-runner-follow-up.md).
+They assert the desired behavior and intentionally fail on the reviewed commit:
+
+- [runner_review_test.go.txt](runner_review_test.go.txt): eight daemon probes
+  using real runner subprocesses, the supervisor, actor, and filesystem.
+- [runner_state_review_test.go.txt](runner_state_review_test.go.txt): a command
+  crossing the real heartbeat interval, checked with the race detector.
+- [sse_review_test.go.txt](sse_review_test.go.txt): LF passes; CRLF fails in the
+  current SSE adapter. Both pass with `sse.go` from `7f2c8c0`.
+
+Run on **Linux**, from the repository root, with Go and Python 3 available.
+The process probes use POSIX shells/signals and clean up their own command
+groups. They do not contact a model or use the daemon's real data directory.
+The test helper builds a temporary application binary. No implementation files
+are edited; the temporary overlay only adds diagnostic test files.
+
+```sh
+python3 - <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+
+root = Path.cwd()
+daemon = root / "indirect-code-daemon"
+sources = {
+    "cmd/daemon/runner_rereview_test.go": "runner_review_test.go.txt",
+    "packages/runner/runner_state_rereview_test.go": "runner_state_review_test.go.txt",
+    "packages/provider/sse_rereview_test.go": "sse_review_test.go.txt",
+}
+replacements = {}
+for target, source in sources.items():
+    target_path = daemon / target
+    source_path = root / "docs/review-probes" / source
+    assert source_path.is_file(), "Run from the repository root"
+    assert not target_path.exists(), "Choose an unused overlay target"
+    replacements[str(target_path)] = str(source_path)
+
+with tempfile.TemporaryDirectory(prefix="llmgw-runner-review-") as directory:
+    overlay = Path(directory) / "overlay.json"
+    overlay.write_text(json.dumps({"Replace": replacements}))
+    result = subprocess.run([
+        "go", "test", "-race", "-overlay", str(overlay),
+        "./cmd/daemon", "./packages/runner", "./packages/provider",
+        "-run", "^TestRereview", "-count=1", "-v", "-timeout", "90s",
+    ], cwd=daemon)
+    raise SystemExit(result.returncode)
+PY
+```
+
+Expected evidence at `796d726`:
+
+| Probe suffix after `TestRereview` | Expected failure | Finding |
+| --- | --- | --- |
+| `RunnerForegroundNotReplayed` | Consumed inline command gains a background notice on restart | V2R-001 |
+| `RunnerAssistantCancelNotReplayed` | Silent assistant cancellation gains a notice on restart | V2R-001 |
+| `RunnerKillEscalatesAfterLeaderExits` | TERM-resistant descendant survives the runner | V2R-002 |
+| `RunnerHardKillDoesNotLeaveCommandRunning` | State says killed while the command still runs | V2R-002 |
+| `RunnerRecoveryKeepsExitStatus` | State has exit 7; registry reports orphaned/unknown | V2R-003 |
+| `HeartbeatAndTerminalState` | Race in state mutation/serialization after the first heartbeat | V2R-004 |
+| `SSELineEndings/CRLF` | Two events become one payload containing CR bytes | V2R-005 |
+| `RunnerPythonStdin` | Expected `got:ping`, received `got:` | V2R-006 |
+| `WSResyncSurvivesAnotherFullQueue` | Lost repair snapshot leaves no pending repair | V2R-007 |
+| `NoticeDoesNotAckFailedPersistence` | Failed session save still emits an acknowledgement | V2R-008 |
+
+These are focused reproductions, not the full acceptance suite. In particular,
+the supervisor restart probe models the replacement supervisor without killing
+the test process. Add a separate-process daemon SIGKILL test for the final
+recovery gate. After changing the design, adapt the fixtures while preserving
+their user-visible guarantees.

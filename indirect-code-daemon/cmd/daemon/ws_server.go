@@ -105,20 +105,18 @@ func (s *wsServer) scheduleResyncFlush() {
 	}
 	go func() {
 		defer s.resyncFlush.Store(false)
-		for {
-			sids := s.ws.takeResyncs()
-			if len(sids) == 0 {
-				return
+		// ONE pass per trigger (V2R-007): a resync dropped because the
+		// outbox is still full re-marks its session (the event carries a
+		// top-level sessionId) and waits for the NEXT onSpace signal —
+		// looping here would spin forever against a full queue.
+		for _, sid := range s.ws.takeResyncs() {
+			ev, _ := s.buildSessionData(sid, "")
+			if ev == nil {
+				continue // gone: nothing to resync
 			}
-			for _, sid := range sids {
-				ev, _ := s.buildSessionData(sid, "")
-				if ev == nil {
-					continue // gone: nothing to resync
-				}
-				ev["resync"] = true
-				// A drop here re-marks the session for the next round.
-				s.emit(ev)
-			}
+			ev["resync"] = true
+			ev["sessionId"] = sid
+			s.emit(ev)
 		}
 	}()
 }

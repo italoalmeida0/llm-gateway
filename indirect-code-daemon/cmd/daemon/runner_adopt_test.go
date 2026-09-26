@@ -255,6 +255,11 @@ func TestRunnerDoneWithoutParentIsRecoveredFromState(t *testing.T) {
 	root, dataDir := runnerTestRoot(t)
 	proc := spawnTestRunner(t, root, dataDir, "/bin/echo quick")
 	seedSession(t, dataDir, "sess1", proc.JobID)
+	// A real background job records its disposition at detach (V2R-001);
+	// absent means inline (silent), so a notifying test must set it.
+	if err := runner.WriteDisposition(root, proc.JobID, runner.DispBackground); err != nil {
+		t.Fatal(err)
+	}
 
 	// No parent: the runner writes the outcome and exits (D5).
 	waitFor(t, 5*time.Second, func() bool {

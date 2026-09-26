@@ -20,7 +20,7 @@ func (b *bgSupervisor) writePidfile(j *bgJob) error {
 	if err := os.MkdirAll(b.bgDir(), 0o700); err != nil {
 		return err
 	}
-	pf := bgPidfile{JobID: j.ID, PID: j.PID, Identity: j.Identity, SessionID: j.SessionID, Kind: j.Kind, Label: j.Label, LogPath: j.LogPath, StderrPath: j.StderrPath, StartedAt: j.StartedAt}
+	pf := bgPidfile{JobID: j.ID, PID: j.PID, Identity: j.Identity, Runner: j.Runner, SessionID: j.SessionID, Kind: j.Kind, Label: j.Label, LogPath: j.LogPath, StderrPath: j.StderrPath, StartedAt: j.StartedAt}
 	data, err := json.Marshal(pf)
 	if err != nil { return err }
 	return writeAtomicFile(b.pidPath(j.ID), append(data, '\n'))
@@ -41,6 +41,13 @@ func (b *bgSupervisor) readopt() {
 		}
 		var pf bgPidfile
 		if err := json.Unmarshal(data, &pf); err != nil || pf.JobID == "" {
+			continue
+		}
+		// V2R-003: runner-backed jobs recover ONLY through their runner
+		// state file (adoptRunners). A stale/leftover pidfile must not
+		// re-adopt them as legacy jobs and mislabel their exit status.
+		if pf.Runner {
+			_ = os.Remove(b.pidPath(pf.JobID))
 			continue
 		}
 		if b.jobs == nil {

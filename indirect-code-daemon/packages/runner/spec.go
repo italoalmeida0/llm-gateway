@@ -39,6 +39,9 @@ type Spec struct {
 	Args      []string `json:"args"`  // argv after the binary (exec semantics)
 	Env       []string `json:"env"`   // full environment
 	CWD       string   `json:"cwd"`
+	// Stdin is the inline payload fed to the command (python's -c input).
+	// Kept OUT of the durable state/log: it is launch data, not metadata.
+	Stdin string `json:"stdin,omitempty"`
 
 	Root          string `json:"root"`          // <root> holding runners/ + brain/
 	RunnerVersion string `json:"runnerVersion"` // the runner binary's version (GC key)

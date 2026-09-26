@@ -1,0 +1,15 @@
+package runner
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestRereviewHeartbeatAndTerminalState(t *testing.T) {
+	root := t.TempDir()
+	spec := Spec{JobID: "race", SessionID: "s", Kind: "bash", Path: "/bin/sh", Args: []string{"-c", "sleep 10.2"}, Env: os.Environ(), Root: root, RunnerVersion: "test", OutPath: filepath.Join(root, "out.log"), BrainPath: filepath.Join(root, "brain.log")}
+	if code := Run(spec); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+}

@@ -49,12 +49,26 @@ type Proc struct {
 	Pump     func(<-chan struct{}, func([]byte)) // tails the log into consume
 	PumpErr  func(<-chan struct{}, func([]byte)) // separate stderr log (nil = merged)
 	Cleanup  func(removeLog bool)
+	// Disposition records the execution disposition durably (V2R-001).
+	// Nil on the direct path.
+	Disposition Disposition
 }
 
 // Starter launches a command. Nil on the tools = the direct local
 // starter (tests/standalone). The daemon injects the runner-backed
 // starter (crash-only tasks: state file + runners/out/ + IPC).
 type Starter func(ctx context.Context, spec ExecSpec) (*Proc, error)
+
+// Disposition records how a task's outcome is consumed (V2R-001) so a
+// restart never invents a wake-up. Nil = no-op (direct path). Best-effort.
+type Disposition func(jobID, disp string)
+
+// Disposition values (mirror packages/runner).
+const (
+	DispBackground = "background"
+	DispInline     = "inline"
+	DispSuppressed = "suppressed"
+)
 
 // startDirect is today's behavior: a local process whose output lands in
 // a temp file under LogDir; the pump only observes the file (killing the

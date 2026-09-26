@@ -43,8 +43,23 @@ func ensureRunnerBinary(root string) (string, error) {
 	if err := os.MkdirAll(runner.RunnersDir(root), 0o700); err != nil {
 		return "", err
 	}
-	if err := copyFileContents(exe, path, 0o755); err != nil {
+	// Publish ATOMICALLY (V2R-009): copy to a unique temp in the same dir,
+	// fsync, then rename. A concurrent first command or an interrupted copy
+	// can never observe a partial file as "ready" (the stat check above
+	// accepts any nonempty file).
+	tmp, err := os.CreateTemp(runner.RunnersDir(root), ".stage-runner-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	tmp.Close()
+	if err := copyFileContents(exe, tmpName, 0o755); err != nil {
+		os.Remove(tmpName)
 		return "", fmt.Errorf("stage runner: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return "", fmt.Errorf("publish runner: %w", err)
 	}
 	return path, nil
 }
@@ -73,6 +88,7 @@ func startRunner(root, sessionID, brainDir string, spec tools.ExecSpec) (*tools.
 	rs := runner.Spec{
 		JobID: jobID, SessionID: sessionID, Kind: spec.Kind, Label: spec.Command,
 		Path: spec.Argv[0], Args: spec.Argv[1:], Env: spec.Env, CWD: spec.CWD,
+		Stdin: spec.Stdin,
 		Root: root, RunnerVersion: daemonVersion,
 		OutPath: outPath, BrainPath: brainPath,
 	}
@@ -106,14 +122,20 @@ func startRunner(root, sessionID, brainDir string, spec tools.ExecSpec) (*tools.
 			return waitErr
 		},
 		Stop: func() {
-			// Fast path: IPC kill (the runner then cleans its own tree).
-			// Guarantee: a TERM to the runner (its signal handler kills
-			// the command group and records the terminal state).
+			// Fast path: IPC kill (the runner reaps its own tree).
 			_ = killRunnerIPC(root, jobID)
+			// Guarantee: TERM the runner (its handler records the terminal
+			// state and reaps), AND reap the command's group from the
+			// durable identity so a runner that dies mid-cancel still
+			// cannot leave the command running (V2R-002).
 			_ = terminatePid(cmd.Process.Pid)
+			reapCommandFromState(root, jobID)
 		},
 		Pump:    tools.TailLog(outPath),
 		Cleanup: func(bool) {},
+		Disposition: func(jid, disp string) {
+			_ = runner.WriteDisposition(root, jid, disp)
+		},
 	}
 	return proc, nil
 }

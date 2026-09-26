@@ -1,0 +1,219 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"llm-gateway/indirect-code-daemon/packages/agent/tools"
+	"llm-gateway/indirect-code-daemon/packages/runner"
+)
+
+func TestRereviewRunnerPythonStdin(t *testing.T) {
+	root, dataDir := runnerTestRoot(t)
+	app, err := buildRealApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := runnerSourceOverride
+	runnerSourceOverride = app
+	defer func() { runnerSourceOverride = old }()
+	tool := &tools.PythonTool{CWD: t.TempDir(), Starter: runnerStarter(root, "sess1", filepath.Join(dataDir, "brain", "sess1"))}
+	raw, _ := json.Marshal(map[string]string{"code": "import sys; print('got:' + sys.stdin.read())", "stdin": "ping"})
+	result, err := tool.Execute(context.Background(), raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resultText(result), "got:ping") {
+		t.Fatalf("runner discarded Python stdin: %q", resultText(result))
+	}
+}
+
+func TestRereviewRunnerForegroundNotReplayed(t *testing.T) {
+	root, dataDir := runnerTestRoot(t)
+	proc := spawnTestRunner(t, root, dataDir, "echo inline-ok")
+	if err := proc.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	rec := newTestRecord("sess1")
+	if err := newDiskStore(dataDir).saveSessionSync(rec); err != nil {
+		t.Fatal(err)
+	}
+	b := newBGSupervisor(dataDir)
+	b.adoptRunners()
+	if n := b.notices[proc.JobID]; n != nil {
+		t.Fatalf("already-returned foreground command generated a background wake-up on restart: %s", n.Text)
+	}
+}
+
+func TestRereviewRunnerAssistantCancelNotReplayed(t *testing.T) {
+	root, dataDir := runnerTestRoot(t)
+	proc := spawnTestRunner(t, root, dataDir, "echo ready; sleep 30")
+	t.Cleanup(proc.Stop)
+	seedSession(t, dataDir, "sess1", proc.JobID)
+	waitFor(t, 3*time.Second, func() bool { return fileHas(proc.LogPath, "ready") })
+	b := newBGSupervisor(dataDir)
+	reply := make(chan any, 1)
+	b.onRegister(bgRegisterMsg{Kind: "bash", SessionID: "sess1", JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, Stop: proc.Stop, Reply: reply})
+	<-reply
+	if !b.onCancel(proc.JobID, "assistant") {
+		t.Fatal("cancel refused")
+	}
+	<-proc.Exited
+	next := newBGSupervisor(dataDir)
+	next.adoptRunners()
+	if n := next.notices[proc.JobID]; n != nil {
+		t.Fatalf("silent assistant cancellation became a wake-up on restart: %s", n.Text)
+	}
+}
+
+func TestRereviewRunnerRecoveryKeepsExitStatus(t *testing.T) {
+	root, dataDir := runnerTestRoot(t)
+	proc := spawnTestRunner(t, root, dataDir, "echo ready; sleep 1; exit 7")
+	t.Cleanup(proc.Stop)
+	seedSession(t, dataDir, "sess1", proc.JobID)
+	first := newBGSupervisor(dataDir)
+	reply := make(chan any, 1)
+	first.onRegister(bgRegisterMsg{Kind: "bash", SessionID: "sess1", JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, Stop: proc.Stop, Reply: reply})
+	<-reply
+	inbox := make(chan Envelope, 64)
+	next := startBG(t, dataDir, func(string) (chan Envelope, chan any, bool) { return inbox, nil, true })
+	var row map[string]any
+	waitFor(t, 7*time.Second, func() bool {
+		for _, j := range listJobs(next) {
+			if j["id"] == proc.JobID && j["status"] != BgStatusRunning {
+				row = j
+				return true
+			}
+		}
+		return false
+	})
+	st, err := runner.ReadState(runner.StatePath(root, proc.JobID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ExitCode == nil || *st.ExitCode != 7 {
+		t.Fatal("fixture did not exit 7")
+	}
+	if row["status"] != BgStatusError {
+		t.Fatalf("durable runner exit=7, recovered registry status=%v result=%v", row["status"], row["result"])
+	}
+}
+
+func TestRereviewRunnerKillEscalatesAfterLeaderExits(t *testing.T) {
+	root, dataDir := runnerTestRoot(t)
+	marker := filepath.Join(root, "child.pid")
+	command := fmt.Sprintf("sh -c 'trap \"\" TERM; echo $$ > %s; while :; do sleep 1; done' & wait", marker)
+	proc := spawnTestRunner(t, root, dataDir, command)
+	waitFor(t, 3*time.Second, func() bool { raw, _ := os.ReadFile(marker); return len(raw) > 0 })
+	raw, _ := os.ReadFile(marker)
+	child, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgid, err := syscall.Getpgid(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Kill(-pgid, syscall.SIGKILL)
+	defer proc.Stop()
+	proc.Stop()
+	select {
+	case <-proc.Exited:
+	case <-time.After(6 * time.Second):
+		t.Fatal("runner did not exit")
+	}
+	time.Sleep(3500 * time.Millisecond)
+	if pidAlive(strconv.Itoa(child)) {
+		t.Fatalf("TERM-resistant child %d still runs after runner exit and 3s escalation window", child)
+	}
+}
+
+func TestRereviewWSResyncSurvivesAnotherFullQueue(t *testing.T) {
+	a := reviewActor(t)
+	ws := newWSActor()
+	sup := newSessionSupervisor(a.store.dataDir, a.supCfg, nil, nil)
+	sup.resident[a.id] = &residentEntry{handle: &sessionHandle{inbox: a.inbox, control: a.control, done: a.done}}
+	server := newWSServer(a.store.dataDir, a.supCfg, sup, nil, nil, nil, ws)
+	go a.run()
+	defer func() { a.control <- shutdownMsg{}; <-a.done }()
+	for i := 0; i < cap(ws.outbound); i++ {
+		ws.emit(map[string]any{"type": "filler"})
+	}
+	ws.emit(map[string]any{"type": "tool_approval_request", "sessionId": a.id})
+	server.scheduleResyncFlush()
+	waitFor(t, 3*time.Second, func() bool { return ws.dropped.Load() >= 2 && !server.resyncFlush.Load() })
+	if len(ws.takeResyncs()) != 1 {
+		t.Fatal("resync snapshot overflowed, but its session was removed from the repair set permanently")
+	}
+}
+
+func TestRereviewNoticeDoesNotAckFailedPersistence(t *testing.T) {
+	a := reviewActor(t)
+	a.state, a.rec.Status = stateRunning, "running"
+	a.bg = newBGSupervisor(a.store.dataDir)
+	path := a.store.sessionFile(a.id)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a.onBgNotice(bgNoticeMsg{JobID: "not-durable", Text: "completed", Finished: true})
+	if a.persistErr == nil {
+		t.Fatal("fixture failed to inject a persistence error")
+	}
+	select {
+	case env := <-a.bg.inbox:
+		if ack, ok := env.Payload.(bgAckMsg); ok && ack.JobID == "not-durable" {
+			t.Fatalf("notice acknowledged despite failed persistence: %v", a.persistErr)
+		}
+	default:
+	}
+}
+
+func TestRereviewRunnerHardKillDoesNotLeaveCommandRunning(t *testing.T) {
+	root, dataDir := runnerTestRoot(t)
+	marker := filepath.Join(root, "command.pid")
+	command := fmt.Sprintf("echo $$ > %s; echo ready; while :; do sleep 1; done", marker)
+	proc := spawnTestRunner(t, root, dataDir, command)
+	waitFor(t, 3*time.Second, func() bool { return fileHas(proc.LogPath, "ready") })
+	raw, _ := os.ReadFile(marker)
+	child, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgid, err := syscall.Getpgid(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Kill(-pgid, syscall.SIGKILL)
+	seedSession(t, dataDir, "sess1", proc.JobID)
+	p, err := os.FindProcess(proc.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	<-proc.Exited
+	b := newBGSupervisor(dataDir)
+	b.adoptRunners()
+	st, err := runner.ReadState(runner.StatePath(root, proc.JobID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Terminal() {
+		t.Fatal("fixture did not reach the recovered terminal state")
+	}
+	if pidAlive(strconv.Itoa(child)) {
+		t.Fatalf("runner marked %s with exit %d, but command %d is still executing", st.Status, *st.ExitCode, child)
+	}
+}

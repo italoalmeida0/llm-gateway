@@ -1,5 +1,11 @@
 # V2 release readiness review
 
+**Follow-up on 2026-09-26:** the [runner review at `796d726`](v2-runner-follow-up.md)
+supersedes this document's release assessment. It reopens V2-002 and the
+durability edge of V2-003, qualifies stream recovery beyond V2-004's restored
+decisions, and records new runner/protocol regressions. The resolution section
+below remains the history of the first hardening changes, not a release sign-off.
+
 Reviewed on 2026-09-25: `dev` at `7f2c8c0` against V1 at `origin/main` `e5a4b07`.
 The local `main` already contained part of the rewrite, so it was not used as the
 V1 baseline. Most changes are in the Indirect Code daemon; the gateway proxy is

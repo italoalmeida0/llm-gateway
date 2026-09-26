@@ -61,7 +61,10 @@ func Run(spec Spec) int {
 		fmt.Fprintln(os.Stderr, "runner: out dir:", err)
 		return 2
 	}
-	out, err := os.OpenFile(spec.OutPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	// O_RDWR (not O_WRONLY): the broadcaster READS the same file handle to
+	// fan output to connected parents (V2R-010) — a write-only handle made
+	// every ReadAt fail, so no `out` frames ever flowed.
+	out, err := os.OpenFile(spec.OutPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "runner: out file:", err)
 		return 2
@@ -87,6 +90,9 @@ func Run(spec Spec) int {
 	cmd := exec.Command(spec.Path, spec.Args...)
 	cmd.Dir = spec.CWD
 	cmd.Env = utf8Env(spec.Env)
+	if spec.Stdin != "" {
+		cmd.Stdin = strings.NewReader(spec.Stdin)
+	}
 	cmd.Stdout, cmd.Stderr = out, out
 	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
@@ -98,6 +104,15 @@ func Run(spec Spec) int {
 		copyAtTerminal(spec)
 		return code
 	}
+
+	// Record the command's durable identity immediately (V2R-002): even a
+	// SIGKILL of the runner leaves the parent a way to reap the command.
+	stMuEarly := &sync.Mutex{}
+	stMuEarly.Lock()
+	st.CmdPID = cmd.Process.Pid
+	st.CmdPgid = processGroupOf(cmd.Process.Pid)
+	_ = WriteState(spec.Root, st)
+	stMuEarly.Unlock()
 
 	// 4. IPC: optional optimization. Bind failure = file-only mode.
 	ln, token := listenLoopback()
@@ -111,7 +126,10 @@ func Run(spec Spec) int {
 	// 5. Wiring: output broadcaster + connection manager + signals.
 	bc := newBroadcaster(out)
 	go bc.run()
-	serve := &server{spec: spec, token: token, bc: bc, killFn: func() { killProcessGroup(cmd) }}
+	// killFn is a fast TERM REQUEST; the guaranteed reap (escalation +
+	// ppid sweep) happens synchronously in step 6 once the command exits,
+	// so a TERM-resistant descendant can never outlive the runner.
+	serve := &server{spec: spec, token: token, bc: bc, killFn: func() { requestTerminate(st.CmdPgid) }}
 	if ln != nil {
 		go serve.serve(ln)
 	}
@@ -122,39 +140,69 @@ func Run(spec Spec) int {
 	go func() {
 		if _, ok := <-sigc; ok {
 			serve.markKilled("signal")
-			killProcessGroup(cmd)
+			requestTerminate(st.CmdPgid)
 		}
 	}()
 
-	// Heartbeat bookkeeping.
+	// Heartbeat bookkeeping (V2R-004): ONE owner for state mutation +
+	// serialization (stMu), and the heartbeat is STOPPED + JOINED before
+	// the terminal write so a running-state write can never race or
+	// regress the final record.
+	stMu := &sync.Mutex{}
+	hbStop := make(chan struct{})
+	hbDone := make(chan struct{})
 	hb := time.NewTicker(stateWriteEvery)
-	defer hb.Stop()
 	go func() {
-		for range hb.C {
-			st.Touch()
-			_ = WriteState(spec.Root, st)
+		defer close(hbDone)
+		for {
+			select {
+			case <-hbStop:
+				return
+			case <-hb.C:
+				stMu.Lock()
+				st.Touch()
+				_ = WriteState(spec.Root, st)
+				stMu.Unlock()
+			}
 		}
 	}()
+	stopHeartbeat := func() {
+		hb.Stop()
+		close(hbStop)
+		<-hbDone
+	}
 
 	// 6. Wait for the command — the one true terminal.
 	waitErr := cmd.Wait()
 	// Canonical codes (Tier 4): 128+signal on POSIX signal deaths.
 	code := exitCodeOf(waitErr)
+	// OWN the whole tree before finishing (V2R-002): a TERM-resistant
+	// descendant must not outlive the runner that claimed the task ended.
+	// Escalation (TERM → grace → KILL + ppid sweep) is synchronous here.
+	reapCommandTree(st.CmdPgid)
 	// Let the tail catch the last bytes before the copy.
 	bc.drain()
 
 	// 7. Terminal transition (any outcome): state FIRST, then COPY.
+	// Quiesce the heartbeat before publishing the terminal record.
+	stopHeartbeat()
 	end := NowMs()
 	if serve.wasKilled() && code == 0 {
 		code = 137 // killed: report it honestly even if the shell said 0
 	}
+	stMu.Lock()
 	if serve.wasKilled() {
 		st.Status = StatusKilled
 	} else {
 		st.Status = StatusDone
 	}
 	st.ExitCode, st.EndedAt = &code, &end
-	_ = WriteState(spec.Root, st)
+	err = WriteState(spec.Root, st)
+	stMu.Unlock()
+	if err != nil {
+		// Never silently announce durable completion on a failed publish.
+		fmt.Fprintln(os.Stderr, "runner: terminal state write:", err)
+	}
 	copyAtTerminal(spec)
 	serve.sendDone(code, end)
 

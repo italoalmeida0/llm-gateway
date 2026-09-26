@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/agent/tools"
+	"llm-gateway/indirect-code-daemon/packages/runner"
 )
 
 // Background job kinds + statuses (same wire values as v1).
@@ -43,12 +44,19 @@ type bgJob struct {
 	Label      string
 	PID        int
 	Identity   string
-	Status     string
+	// Runner marks a crash-only runner-backed job (V2R-003): its durable
+	// state file under runners/ is the SOLE recovery authority, so the
+	// legacy pidfile path must never re-adopt or finalize it.
+	Runner   bool
+	Status   string
 	StartedAt  int64
 	EndedAt    int64
 	Result     string
 	StderrPath string
 	LogPath    string
+	// BrainLog is the readable final log (the notice points here); empty
+	// on the direct path, where LogPath is already readable.
+	BrainLog string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -59,6 +67,15 @@ type bgJob struct {
 
 	lastFinish int64 // unix milli of terminal transition (freshness)
 	finishName string
+}
+
+// noticePath is the readable log the completion notice points at: the
+// brain copy when the runner produced one, else the live path (V2R-010).
+func (j *bgJob) noticePath() string {
+	if j.BrainLog != "" {
+		return j.BrainLog
+	}
+	return j.LogPath
 }
 
 func (j *bgJob) closeDone() {
@@ -74,6 +91,7 @@ type bgPidfile struct {
 	Kind       string `json:"kind"`
 	Label      string `json:"label"`
 	Identity   string `json:"identity,omitempty"`
+	Runner     bool   `json:"runner,omitempty"`
 	StderrPath string `json:"stderrPath,omitempty"`
 	LogPath    string `json:"logPath"`
 	StartedAt  int64  `json:"startedAt"`
@@ -91,8 +109,12 @@ type bgRegisterMsg struct {
 	// JobID adopts the runner's pre-generated identity when set
 	// (crash-only tasks exist from spawn in runners/<jobId>.state.json).
 	JobID string
-	Stop  func()
-	Reply chan any
+	// BrainLog is the readable final log destination (the runner copies
+	// there at terminal). The completion notice points HERE so a jailed
+	// session can read it (V2R-010); the live tail keeps using LogPath.
+	BrainLog string
+	Stop     func()
+	Reply    chan any
 }
 
 type bgRegisterResult struct {
@@ -276,9 +298,10 @@ func (b *bgSupervisor) onRegister(m bgRegisterMsg) {
 		SessionID: m.SessionID,
 		Label:     truncateBgLabel(m.Label),
 		PID:       m.PID, Identity: tools.ProcessIdentity(m.PID),
+		Runner:    m.JobID != "",
 		Status:    BgStatusRunning,
 		StartedAt: time.Now().UnixMilli(),
-		LogPath:   m.LogPath, StderrPath: m.StderrPath,
+		LogPath:   m.LogPath, StderrPath: m.StderrPath, BrainLog: m.BrainLog,
 		ctx:    jobCtx,
 		cancel: cancel,
 		stop:   m.Stop,
@@ -343,6 +366,16 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 	}
 	_ = os.Remove(b.pidPath(jobID))
 	trace("bg.cancel", map[string]any{"job": j.ID, "sid": j.SessionID, "by": by})
+	// V2R-001: record the durable disposition. An assistant cancel is
+	// SILENT (its caller learns from the tool result); a user/dashboard
+	// cancel notifies. Recovery must replay exactly this.
+	if j.Runner {
+		if by == "assistant" {
+			_ = runner.WriteDisposition(b.rootDir(), j.ID, runner.DispSuppressed)
+		} else {
+			_ = runner.WriteDisposition(b.rootDir(), j.ID, runner.DispBackground)
+		}
+	}
 	b.broadcast()
 	if by == "user" {
 		b.deliver(j, false)
@@ -536,8 +569,8 @@ func (b *bgSupervisor) deliver(j *bgJob, finished bool) {
 		var sb strings.Builder
 		sb.WriteString("<system-reminder>\n")
 		fmt.Fprintf(&sb, "Background task %s %s.\n", j.Label, state)
-		if j.LogPath != "" {
-			fmt.Fprintf(&sb, "The output is NOT included here — read the full log at: %s\n", j.LogPath)
+		if p := j.noticePath(); p != "" {
+			fmt.Fprintf(&sb, "The output is NOT included here — read the full log at: %s\n", p)
 		}
 		if j.StderrPath != "" {
 			fmt.Fprintf(&sb, "Standard error is in: %s\n", j.StderrPath)
@@ -548,8 +581,8 @@ func (b *bgSupervisor) deliver(j *bgJob, finished bool) {
 		var sb strings.Builder
 		sb.WriteString("<system-reminder>\n")
 		fmt.Fprintf(&sb, "Background task %s was cancelled by the user.\n", j.Label)
-		if j.LogPath != "" {
-			fmt.Fprintf(&sb, "Partial output (if any) is in the .log at: %s\n", j.LogPath)
+		if p := j.noticePath(); p != "" {
+			fmt.Fprintf(&sb, "Partial output (if any) is in the .log at: %s\n", p)
 		}
 		sb.WriteString("Do not wait for it — continue your work another way.</system-reminder>")
 		text = sb.String()

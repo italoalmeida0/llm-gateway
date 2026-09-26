@@ -252,12 +252,23 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
     terminal transition (copy, never move). The state file
     (`runners/<job>.state.json`: pid, status, exit code, IPC transport)
     is the recovery contract; the IPC (loopback TCP + token, 5 frozen
-    verbs) is an optimization only. The registry adopts live runners at
-    boot (orphans — unlinkable AND old — are SIGKILLed and cleaned),
-    folds terminal states into the retained-notice chain (redelivered
-    until the session acks them; the `background_delivery` identity makes
-    redelivery idempotent — exactly one wake-up turn, ever), and GCs
-    hourly. Background tasks (bash/python only): a
+    verbs) is an optimization only. The runner OWNS the command's
+    lifetime: it records the command's pid/pgid in the state immediately,
+    cancels with a fast TERM request and reaps the whole tree (TERM →
+    grace → KILL + ppid sweep) before the terminal record — so a
+    hard-killed runner never leaves the command running (the parent reaps
+    from the durable identity too). A durable execution DISPOSITION
+    (`runners/<jobId>.disposition`: `background` / `inline` / `suppressed`;
+    absent = inline) records how an outcome is consumed, so recovery never
+    invents a wake-up: only `background` notifies, an inline foreground
+    return and a silent assistant cancel stay silent. Runner jobs recover
+    ONLY through their state file (legacy pidfiles are skipped for them);
+    the registry adopts live runners at boot (orphans — unlinkable AND old
+    — are SIGKILLed and cleaned), resumes an output tail for adopted jobs,
+    folds terminal `background` states into the retained-notice chain
+    (redelivered until the session acks a DURABLE transcript fold; the
+    `background_delivery` identity makes redelivery idempotent — exactly
+    one wake-up turn, ever), and GCs hourly. Background tasks (bash/python only): a
     command outliving `AutoBackgroundAfter` (10s) detaches — the tool
     returns a placeholder naming the brain `.log`, output streams there
     (append, never deleted); finish/error delivers a completion notice

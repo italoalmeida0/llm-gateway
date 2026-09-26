@@ -166,6 +166,11 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		defer proc.Cleanup(true)
 		runErr := runCtx.Err()
 		runCancel()
+		// V2R-001: returned inline to the agent — the outcome is consumed
+		// here, so a restart must NOT invent a background wake-up.
+		if proc.Disposition != nil && proc.JobID != "" {
+			proc.Disposition(proc.JobID, DispInline)
+		}
 		return finishBashCommand(a, cwd, start, output, &head, waitErr, ctx.Err(), runErr, progress)
 	}
 	select {
@@ -191,6 +196,11 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		runCancel()
 		proc.Stop()
 	}})
+	// V2R-001: this task detached into a real background job — its terminal
+	// outcome must reach the session (notify).
+	if proc.Disposition != nil && proc.JobID != "" {
+		proc.Disposition(proc.JobID, DispBackground)
+	}
 	if jobID == "" {
 		runCancel(); proc.Stop()
 		<-waitCh; <-done; proc.Cleanup(false)

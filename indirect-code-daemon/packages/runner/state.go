@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -28,6 +29,11 @@ type State struct {
 	Kind          string    `json:"kind"`
 	Label         string    `json:"label"`
 	PID           int       `json:"pid"`
+	// CmdPID/CmdPgid are the COMMAND's identity (V2R-002): the runner owns
+	// the command's lifetime, and this durable identity lets a supervisor
+	// reap the command's group after the runner itself is gone.
+	CmdPID  int `json:"cmdPid,omitempty"`
+	CmdPgid int `json:"cmdPgid,omitempty"`
 	StartedAt     int64     `json:"startedAt"`
 	LogPath       string    `json:"logPath"`
 	BrainPath     string    `json:"brainPath"`
@@ -131,3 +137,45 @@ func LoadStates(root string) []*State {
 
 // Touch records a heartbeat timestamp (best-effort, throttled by caller).
 func (s *State) Touch() { s.HeartbeatAt = time.Now().UnixMilli() }
+
+// Execution disposition (V2R-001): the durable record of HOW a task's
+// outcome was consumed, so recovery never invents a wake-up. Absent file
+// = "inline" (a foreground command that returned to the agent directly —
+// silent). A sidecar keeps this race-free against the runner's own state
+// writes.
+const (
+	DispBackground = "background" // registered as a background job: notify on terminal
+	DispInline     = "inline"     // returned inline to the agent: silent
+	DispSuppressed = "suppressed" // cancelled silently (assistant): silent
+)
+
+// DispositionPath is <root>/runners/<jobId>.disposition.
+func DispositionPath(root, jobID string) string {
+	return filepath.Join(RunnersDir(root), sanitize(jobID)+".disposition")
+}
+
+// WriteDisposition records the disposition durably (atomic tmp+rename).
+func WriteDisposition(root, jobID, disp string) error {
+	if jobID == "" {
+		return nil
+	}
+	if err := os.MkdirAll(RunnersDir(root), 0o700); err != nil {
+		return err
+	}
+	path := DispositionPath(root, jobID)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(disp+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// ReadDisposition returns the recorded disposition ("" when absent, which
+// callers treat as DispInline).
+func ReadDisposition(root, jobID string) string {
+	raw, err := os.ReadFile(DispositionPath(root, jobID))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}

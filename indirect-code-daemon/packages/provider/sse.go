@@ -38,7 +38,12 @@ func readSSE(r io.Reader, out chan<- sseEvent) {
 	}
 
 	for sc.Scan() {
-		line := sc.Text()
+		// SSE is a text protocol: normalize CRLF/CR line endings HERE,
+		// in the SSE adapter (the shared linereader stays byte-transparent
+		// for GNU-style tools). Without this a CRLF stream never yields an
+		// empty boundary line ("\r" != ""), so events merge until EOF and
+		// the CR leaks into names/data.
+		line := strings.TrimSuffix(sc.Text(), "\r")
 		if line == "" {
 			flush()
 			continue

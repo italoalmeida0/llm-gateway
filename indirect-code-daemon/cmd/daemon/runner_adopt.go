@@ -71,10 +71,18 @@ func (b *bgSupervisor) adoptRunners() {
 		case st.Terminal():
 			// Outcome already recorded: repair the terminal copy if the
 			// crash landed between the state write and the copy (or
-			// mid-copy), then hand it to the notice chain (idempotent by
-			// background_delivery) and let GC age it out.
+			// mid-copy).
 			repairTerminalCopy(st)
-			b.retainNotice(st.JobID, st.SessionID, runnerNoticeText(st), true)
+			// V2R-001: only a task that was a real BACKGROUND job notifies.
+			// An inline (foreground) outcome was already consumed by the
+			// agent, and a suppressed (assistant) cancel is silent — a
+			// restart must never invent a wake-up for either.
+			switch runner.ReadDisposition(root, st.JobID) {
+			case runner.DispBackground:
+				b.retainNotice(st.JobID, st.SessionID, runnerNoticeText(st), true)
+			default:
+				// inline / suppressed / absent: silent.
+			}
 		case pidAlive(pidString(st.PID)):
 			if b.orphaned(st, now) {
 				// F5b: the session has moved past this job (or is gone):
@@ -96,8 +104,11 @@ func (b *bgSupervisor) adoptRunners() {
 				b.adoptOne(st)
 			}
 		default:
-			// F6: the runner itself died. Report an explicit terminal
-			// failure — never a silent hang. The log survives.
+			// F6: the runner itself died. The runner owned the command's
+			// lifetime (V2R-002), so the parent must reap the command's
+			// group from the durable identity — a hard-killed runner must
+			// never leave the command running while the state says killed.
+			reapStoredCommand(st)
 			code := -1
 			end := now
 			st.Status, st.ExitCode, st.EndedAt = runner.StatusKilled, &code, &end
@@ -120,7 +131,7 @@ func (b *bgSupervisor) adoptOne(st *runner.State) {
 		PID:       st.PID, Identity: "runner",
 		Status:    BgStatusRunning,
 		StartedAt: st.StartedAt,
-		LogPath:   st.LogPath, StderrPath: "",
+		LogPath:   st.LogPath, BrainLog: st.BrainPath, StderrPath: "",
 		done:   make(chan struct{}),
 		cancel: func() { _ = terminatePid(st.PID) },
 		stop:   func() { _ = killRunnerIPC(b.rootDir(), st.JobID); _ = terminatePid(st.PID) },
@@ -131,7 +142,61 @@ func (b *bgSupervisor) adoptOne(st *runner.State) {
 	b.jobs[j.ID] = j
 	trace("runner.adopt", map[string]any{"job": j.ID, "sid": j.SessionID})
 	b.broadcast()
+	// V2R-010: resume OUTPUT delivery for the adopted job — a bounded file
+	// tail from the current end of the out log streams subsequent bytes to
+	// the session (bg_output), exactly like a live job. The file is the
+	// contract; the socket remains optional.
+	go b.tailAdoptedOutput(st)
 	go b.watchAdopted(st.JobID, st)
+}
+
+// tailAdoptedOutput streams new bytes of an adopted runner's out log to
+// the session until the file stops growing (the job ended). Bounded: it
+// reads incrementally and stops on the job's done channel.
+func (b *bgSupervisor) tailAdoptedOutput(st *runner.State) {
+	if st.LogPath == "" || b.emit == nil {
+		return // headless harness: no outbound surface
+	}
+	// Start at the CURRENT end: the pre-restart output is already in the
+	// log the client can read; only NEW bytes are streamed (no duplicate
+	// replay). The reader is late-arrival tolerant.
+	var offset int64
+	if fi, err := os.Stat(st.LogPath); err == nil {
+		offset = fi.Size()
+	}
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	buf := make([]byte, 32*1024)
+	for {
+		select {
+		case <-b.done:
+			return
+		case <-tick.C:
+		}
+		if b.emit == nil {
+			return
+		}
+		f, err := os.Open(st.LogPath)
+		if err != nil {
+			return
+		}
+		n, _ := f.ReadAt(buf, offset)
+		if n > 0 {
+			offset += int64(n)
+			b.emit(map[string]any{"type": "bg_output", "sessionId": st.SessionID, "jobId": st.JobID, "text": string(buf[:n])})
+		}
+		_ = f.Close()
+		if !pidAlive(pidString(st.PID)) {
+			// One last read to catch the final bytes, then stop.
+			if f, err := os.Open(st.LogPath); err == nil {
+				if n, _ := f.ReadAt(buf, offset); n > 0 {
+					b.emit(map[string]any{"type": "bg_output", "sessionId": st.SessionID, "jobId": st.JobID, "text": string(buf[:n])})
+				}
+				_ = f.Close()
+			}
+			return
+		}
+	}
 }
 
 // watchAdopted folds an adopted runner's completion into the registry by

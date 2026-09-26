@@ -1,0 +1,26 @@
+package provider
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestRereviewSSELineEndings(t *testing.T) {
+	for _, ending := range []struct{ name, sep string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
+		t.Run(ending.name, func(t *testing.T) {
+			stream := strings.Join([]string{"event: message", "data: {\"text\":\"hello\"}", "", "data: [DONE]", "", ""}, ending.sep)
+			out := make(chan sseEvent, 8)
+			readSSE(strings.NewReader(stream), out)
+			var events []sseEvent
+			for ev := range out {
+				events = append(events, ev)
+			}
+			if len(events) != 2 {
+				t.Fatalf("want two separate SSE events, got %#v", events)
+			}
+			if events[0].Event != "message" || events[0].Data != `{"text":"hello"}` || events[1].Data != "[DONE]" {
+				t.Fatalf("line endings leaked into SSE fields: %#v", events)
+			}
+		})
+	}
+}

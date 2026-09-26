@@ -1354,7 +1354,12 @@ func (a *sessionActor) onBgNotice(m bgNoticeMsg) {
 		msg := provider.Message{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: m.Text}}, TurnIndex: a.rec.TurnSeq, Meta: map[string]string{"background_delivery": m.JobID}}
 		a.rec.Messages = append(a.rec.Messages, msg)
 		a.pendingContext = append(a.pendingContext, msg)
-		a.saveOrAppend(walMsgEvent(msg))
+		// V2R-008: ack ONLY when the fold is durable. If persistence
+		// failed, the notice stays pending and the retry re-folds it
+		// (idempotent by background_delivery) once storage recovers.
+		if err := a.saveOrAppend(walMsgEvent(msg)); err != nil {
+			return
+		}
 		a.pingChange()
 		a.ackNotice(m.JobID)
 		return

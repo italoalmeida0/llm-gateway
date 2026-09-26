@@ -569,7 +569,7 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 		logPath := process.LogPath
 		reply := make(chan any, 1)
 		select {
-		case w.env.bg.inbox <- Envelope{Payload: bgRegisterMsg{Kind: kind, SessionID: w.env.actorID, Label: label, LogPath: logPath, StderrPath: process.StderrPath, PID: process.PID, JobID: process.JobID, Stop: process.Stop, Reply: reply}}:
+		case w.env.bg.inbox <- Envelope{Payload: bgRegisterMsg{Kind: kind, SessionID: w.env.actorID, Label: label, LogPath: logPath, BrainLog: process.BrainLog, StderrPath: process.StderrPath, PID: process.PID, JobID: process.JobID, Stop: process.Stop, Reply: reply}}:
 		case <-w.ctx.Done():
 			if process.Stop != nil {
 				process.Stop()

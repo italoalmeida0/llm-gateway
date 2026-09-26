@@ -251,24 +251,37 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	}()
 	stop := func() { bgCancel(); proc.Stop() }
 	cleanup := func(remove bool) { proc.Cleanup(remove); bgCancel() }
+	markInline := func() {
+		// V2R-001: returned inline — a restart must not invent a wake-up.
+		if proc.Disposition != nil && proc.JobID != "" {
+			proc.Disposition(proc.JobID, DispInline)
+		}
+	}
 	select {
 	case out := <-doneCh:
+		markInline()
 		cleanup(true)
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	case <-ctx.Done():
 		// Turn cancelled before the threshold: kill and keep legacy shape.
 		stop()
 		out := <-doneCh
+		markInline()
 		cleanup(true)
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	case <-time.After(AutoBackgroundAfter):
 	}
 	if t.Slow == nil {
 		out := <-doneCh
+		markInline()
 		cleanup(true)
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	}
 	jobID, logPath, sink, deliver := t.Slow("python", label, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, StderrPath: proc.ErrLogPath, Stop: stop})
+	// V2R-001: detached into a real background job — notify on terminal.
+	if proc.Disposition != nil && proc.JobID != "" {
+		proc.Disposition(proc.JobID, DispBackground)
+	}
 	if jobID == "" {
 		stop(); <-doneCh; cleanup(false)
 		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", proc.LogPath)

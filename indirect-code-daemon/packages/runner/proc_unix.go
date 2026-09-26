@@ -18,21 +18,58 @@ func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// killProcessGroup is GNU timeout's escalation (TERM → grace window →
-// KILL) plus a proctable sweep: the group signal covers the normal tree,
-// the ppid-walk sweep covers escapes (setsid'd children live OUTSIDE the
-// group but never outside the tree).
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil {
+// processGroupOf returns the pgid of pid (falls back to the pid itself,
+// which is the group leader under Setpgid).
+func processGroupOf(pid int) int {
+	if pgid, err := syscall.Getpgid(pid); err == nil {
+		return pgid
+	}
+	return pid
+}
+
+// requestTerminate is the FAST cancel request: TERM the command's group
+// and tree. The guaranteed reap (KILL escalation + ppid sweep) is done
+// synchronously by reapCommandTree once the command exits.
+func requestTerminate(pgid int) {
+	if pgid <= 0 {
 		return
 	}
-	pid := cmd.Process.Pid
-	pgid := pid
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	time.AfterFunc(killGrace, func() {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		proctable.KillTree(pid, int(syscall.SIGKILL))
-	})
+	proctable.KillTree(pgid, int(syscall.SIGTERM))
+}
+
+// reapCommandTree is GNU timeout's escalation, SYNCHRONOUS: TERM, a grace
+// window, then KILL the group + a ppid-walk sweep (setsid'd descendants
+// live outside the group but never outside the tree). Returns once the
+// tree is gone (or the deadline passes).
+func reapCommandTree(pgid int) {
+	if pgid <= 0 {
+		return
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	proctable.KillTree(pgid, int(syscall.SIGTERM))
+	deadline := time.Now().Add(killGrace)
+	for time.Now().Before(deadline) {
+		if !treeAlive(pgid) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	proctable.KillTree(pgid, int(syscall.SIGKILL))
+}
+
+// treeAlive reports whether the group leader or any descendant is alive.
+func treeAlive(pgid int) bool {
+	if processAlive(pgid) {
+		return true
+	}
+	for _, d := range proctable.Descendants(pgid) {
+		if processAlive(d) {
+			return true
+		}
+	}
+	return false
 }
 
 // processAlive is the pid liveness probe used by orphan/GC decisions.

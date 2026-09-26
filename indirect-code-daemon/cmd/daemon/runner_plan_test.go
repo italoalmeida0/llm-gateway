@@ -237,6 +237,7 @@ func TestRunnerTerminalCopyHealedAfterCrashWindows(t *testing.T) {
 		Status: runner.StatusDone, ExitCode: &code, EndedAt: &end1,
 		LogPath: out1, BrainPath: brain1,
 	})
+	_ = runner.WriteDisposition(root, "w1", runner.DispBackground)
 
 	// W2: done state + a TORN mid-copy (truncated brain file).
 	out2 := filepath.Join(runner.OutDir(root), runner.OutName("sess1", "w2", 2))
@@ -250,6 +251,7 @@ func TestRunnerTerminalCopyHealedAfterCrashWindows(t *testing.T) {
 		Status: runner.StatusDone, ExitCode: &code, EndedAt: &end2,
 		LogPath: out2, BrainPath: brain2,
 	})
+	_ = runner.WriteDisposition(root, "w2", runner.DispBackground)
 
 	// A parent boots and reconciles: both copies must be healed.
 	inbox := make(chan Envelope, 8)

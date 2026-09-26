@@ -19,6 +19,10 @@ import (
 
 // flushBound is the output flush cadence (decided D4): the log is the
 // buffer — memory is bounded by one chunk, never by output size.
+// killGrace is the TERM → KILL escalation window (GNU timeout's
+// --kill-after semantics).
+var killGrace = 3 * time.Second
+
 const (
 	flushEvery  = time.Second
 	flushMaxLen = 64 * 1024
@@ -82,7 +86,7 @@ func Run(spec Spec) int {
 	//    observes it — killing anyone can never SIGPIPE the command).
 	cmd := exec.Command(spec.Path, spec.Args...)
 	cmd.Dir = spec.CWD
-	cmd.Env = spec.Env
+	cmd.Env = utf8Env(spec.Env)
 	cmd.Stdout, cmd.Stderr = out, out
 	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
@@ -134,13 +138,8 @@ func Run(spec Spec) int {
 
 	// 6. Wait for the command — the one true terminal.
 	waitErr := cmd.Wait()
-	code := 0
-	if waitErr != nil {
-		code = 1
-		if ee, ok := waitErr.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		}
-	}
+	// Canonical codes (Tier 4): 128+signal on POSIX signal deaths.
+	code := exitCodeOf(waitErr)
 	// Let the tail catch the last bytes before the copy.
 	bc.drain()
 

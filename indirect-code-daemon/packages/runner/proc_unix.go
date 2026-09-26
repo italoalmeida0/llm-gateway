@@ -3,10 +3,13 @@
 package runner
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
+
+	"llm-gateway/indirect-code-daemon/packages/proctable"
 )
 
 // setProcessGroup puts the command in its own process group so the kill
@@ -15,15 +18,20 @@ func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// killProcessGroup TERMs the group and SIGKILLs it shortly after.
+// killProcessGroup is GNU timeout's escalation (TERM → grace window →
+// KILL) plus a proctable sweep: the group signal covers the normal tree,
+// the ppid-walk sweep covers escapes (setsid'd children live OUTSIDE the
+// group but never outside the tree).
 func killProcessGroup(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return
 	}
-	pgid := cmd.Process.Pid
+	pid := cmd.Process.Pid
+	pgid := pid
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	time.AfterFunc(3*time.Second, func() {
+	time.AfterFunc(killGrace, func() {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		proctable.KillTree(pid, int(syscall.SIGKILL))
 	})
 }
 
@@ -37,4 +45,20 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return p.Signal(syscall.Signal(0)) == nil
+}
+
+// exitCodeOf maps a wait error to the canonical code: 128+signal for
+// signal deaths (GNU convention), the process code otherwise.
+func exitCodeOf(waitErr error) int {
+	if waitErr == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if !errors.As(waitErr, &ee) {
+		return 1
+	}
+	if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal()) // GNU convention
+	}
+	return ee.ExitCode()
 }

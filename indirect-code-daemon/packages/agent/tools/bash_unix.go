@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"llm-gateway/indirect-code-daemon/packages/proctable"
 )
 
 // isExecutableFile reports whether path can be executed (unix exec bits).
@@ -23,14 +25,18 @@ func setProcessGroup(cmd *exec.Cmd) {
 }
 
 // killProcessGroup sends SIGTERM then SIGKILL to the entire process
-// group so backgrounded children (cmd &) are also cleaned up.
+// group so backgrounded children (cmd &) are also cleaned up — plus a
+// ppid-walk sweep: setsid'd children live OUTSIDE the process group but
+// never outside the tree (packages/proctable).
 func killProcessGroup(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return
 	}
-	pgid := cmd.Process.Pid
+	pid := cmd.Process.Pid
+	pgid := pid
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	time.AfterFunc(3*time.Second, func() {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		proctable.KillTree(pid, int(syscall.SIGKILL))
 	})
 }

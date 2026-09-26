@@ -1,9 +1,10 @@
 package provider
 
 import (
-	"bufio"
 	"io"
 	"strings"
+
+	"llm-gateway/indirect-code-daemon/packages/linereader"
 )
 
 // sseEvent is one parsed event from a text/event-stream.
@@ -22,8 +23,10 @@ const gatewayUsageCommentPrefix = "x-gateway-usage"
 
 func readSSE(r io.Reader, out chan<- sseEvent) {
 	defer close(out)
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	// linereader (GNU-correct): bufio.Scanner silently DROPS lines over
+	// its token cap (a 1.3MB minified line once broke grep in the wild);
+	// SSE data: payloads hit the same ceiling.
+	sc := linereader.New(r)
 
 	var ev sseEvent
 	flush := func() {

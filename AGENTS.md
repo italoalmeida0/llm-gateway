@@ -219,6 +219,15 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   - **Daemon project** (`indirect-code-daemon/`, Go 1.26: `cmd/daemon` +
     `packages/agent|core|provider|…`; external deps are gorilla/websocket,
     sergi/go-diff, x/image, x/net — keep both projects' dep lists minimal).
+    Cross-platform gems extracted from the owner's unish project live in
+    `packages/proctable` (process table: /proc, darwin kern.proc.all ABI,
+    Windows snapshot — powers `KillTree`, which reaches setsid'd children
+    that group kills miss) and `packages/linereader` (GNU-correct line
+    reader, no token cap — replaces bufio.Scanner where inputs are
+    unbounded, e.g. SSE data). Kills use GNU timeout's escalation
+    (TERM → grace → KILL + tree sweep); POSIX signal deaths report
+    128+signal. Windows children get UTF-8 env/stdio defaults (the
+    UnicodeEncodeError class).
     ONE multi-call binary (the old `cmd/launcher` is merged into `cmd/daemon`):
     the default role is boot (checkup/migrate/verify → self-spawns the worker
     and supervises it — NO downloads at boot), `--worker` runs the daemon

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -290,6 +291,8 @@ func TestV2SnapshotRestoresLiveOverlay(t *testing.T) {
 // carries the outstanding decision (the promoted review probe asserts
 // the chosen contract: delivered OR restored via explicit resync).
 func TestV2BackpressureResyncRestoresDecision(t *testing.T) {
+	leakBase := runtime.NumGoroutine()
+	t.Cleanup(func() { assertNoLeakedGoroutines(t, leakBase) })
 	a := reviewActor(t)
 	a.state, a.gen, a.rec.Status = stateRunning, 1, "running"
 	a.rec.Options = SessionOptions{Access: "ask", Mode: "build"}
@@ -554,6 +557,8 @@ func TestV2BusySessionDoesNotBlockHostCommands(t *testing.T) {
 
 // V2-006: dependent commands to one session keep their order.
 func TestV2SessionLanePreservesOrder(t *testing.T) {
+	leakBase := runtime.NumGoroutine()
+	t.Cleanup(func() { assertNoLeakedGoroutines(t, leakBase) })
 	a := reviewActor(t)
 	a.state, a.gen, a.rec.Status = stateRunning, 1, "running"
 	ws := newWSActor()
@@ -657,4 +662,19 @@ func TestV2BGNoticeDroppedOnSessionDeletion(t *testing.T) {
 		}
 	default:
 	}
+}
+
+// assertNoLeakedGoroutines (Tier 5 convention, from unish's zombie
+// tests): dispatch lanes and resync flushers must NEVER outlive their
+// owner. Bounded settle, then compare against the baseline.
+func assertNoLeakedGoroutines(t *testing.T, baseline int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= baseline {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Errorf("goroutines leaked: baseline=%d now=%d", baseline, runtime.NumGoroutine())
 }

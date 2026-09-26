@@ -218,7 +218,9 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
   (`draftMode`) or behind a blocked workspace — the chevron is hidden there.
   - **Daemon project** (`indirect-code-daemon/`, Go 1.26: `cmd/daemon` +
     `packages/agent|core|provider|…`; external deps are gorilla/websocket,
-    sergi/go-diff, x/image, x/net — keep both projects' dep lists minimal).
+    sergi/go-diff, x/image, x/net, x/sys (darwin-only: typed KinfoProc for
+    the process table — no magic offsets, no cgo) — keep both projects'
+    dep lists minimal).
     Cross-platform gems extracted from the owner's unish project live in
     `packages/proctable` (process table: /proc, darwin kern.proc.all ABI,
     Windows snapshot — powers `KillTree`, which reaches setsid'd children

@@ -273,7 +273,7 @@ export interface SyncPreview {
 export type RoutingMode = "passthrough" | "router";
 
 /** Per-model tool-call strategy (see server/tool-call-mode.ts). */
-export type ToolCallMode = "native" | "fallback" | "workaround";
+export type ToolCallMode = "native" | "fallback" | "workaround" | "own";
 
 /** Admin view of a registered model (camelCase mirror of the models table). */
 export interface ModelDto {

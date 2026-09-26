@@ -883,9 +883,10 @@ export default function AdminModelsPage() {
               options={[
                 { value: "native", label: "Native only" },
                 { value: "fallback", label: "Fallback (default)" },
-                { value: "workaround", label: "Workaround (markup)" },
+                { value: "workaround", label: "Workaround (XML)" },
+                { value: "own", label: "Own workaround (fenced JSON)" },
               ]}
-              hint="Native only: native tools, no markup recovery. Fallback: native tools kept, but markup tool calls are recovered from every format. Workaround: strips tools and teaches an in-band markup format (auto for xiaomi models)."
+              hint="Native only: native tools, no markup recovery. Fallback: native tools kept, but markup tool calls are recovered from every format. Workaround: strips tools and teaches the xiaomi XML format. Own workaround: strips tools and teaches a fenced tool_call JSON block — use when the provider rewrites the XML format (e.g. OpenAI)."
             />
           </ModalSection>
 

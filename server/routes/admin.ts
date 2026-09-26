@@ -273,7 +273,7 @@ function modelFields(body: Record<string, unknown>, existing?: ModelRow) {
   const efforts = arrOpt("reasoningEfforts");
   const tcm = strOpt("toolCallMode", 16);
   if (tcm !== undefined && !TOOL_CALL_MODES.includes(tcm as ToolCallMode)) {
-    throw new ApiError(400, "toolCallMode must be one of native, fallback, workaround");
+    throw new ApiError(400, "toolCallMode must be one of native, fallback, workaround, own");
   }
 
   return {

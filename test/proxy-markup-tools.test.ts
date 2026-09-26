@@ -98,6 +98,7 @@ describe("tool-call mode resolution", () => {
     expect(resolveToolCallMode("native", "xiaomi/mimo")).toBe("native");
     expect(resolveToolCallMode("fallback", "gpt-5")).toBe("fallback");
     expect(resolveToolCallMode("workaround", "gpt-5")).toBe("workaround");
+    expect(resolveToolCallMode("own", "gpt-5")).toBe("own");
   });
   test("with no row, a xiaomi id auto-selects workaround; others default to fallback", () => {
     expect(resolveToolCallMode(undefined, "gpt-5", "xiaomi/mimo")).toBe("workaround");
@@ -556,6 +557,18 @@ globalThis.fetch = (async (input: any, init: any) => {
   // A model id containing "dup" simulates a model that emits BOTH a native
   // tool_calls delta AND markup content (the anti-duplicate guard case).
   const dup = typeof reqBody.model === "string" && reqBody.model.includes("dup");
+  // A model id containing "ownmdl" simulates a model answering in the fenced
+  // JSON dialect (own mode).
+  const own = typeof reqBody.model === "string" && reqBody.model.includes("ownmdl");
+  const ownBody = 'Sure.\n```tool_call\n{"name": "exec_bash", "arguments": {"cmd": "ls -la", "timeout": 30}}\n```\n';
+  if (own) {
+    return Response.json({
+      id: "chatcmpl-own",
+      model: reqBody.model,
+      choices: [{ index: 0, message: { role: "assistant", content: ownBody }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 40, completion_tokens: 10 },
+    });
+  }
   if (reqBody.stream) {
     const enc = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`;
     const mid = Math.floor(CANONICAL.length / 2);
@@ -889,6 +902,40 @@ describe("Xiaomi adaptation through handleProxy", () => {
       // The xiaomi-dialect XML response is still recovered.
       const j = await res.json();
       expect(j.choices[0].message.tool_calls?.[0]?.function.name).toBe("exec_bash");
+    } finally {
+      db.prepare("DELETE FROM models WHERE id = ?").run(mid);
+      db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'passthrough') ON CONFLICT(key) DO UPDATE SET value='passthrough'").run();
+      invalidateModelCache();
+    }
+  });
+
+  test("router mode: an explicit 'own' row teaches the fenced JSON format and recovers it", async () => {
+    const mid = `ownmdl-${RUN}`;
+    db.prepare(
+      `INSERT INTO models (id, provider_id, upstream_model, name, description, enabled,
+         input_modalities, output_modalities, sampling_params, features,
+         tool_call_mode, source, created_at, updated_at)
+       VALUES (?, ?, ?, '', '', 1, '["text"]', '["text"]', '[]', '[]', 'own', 'manual', ?, ?)`,
+    ).run(mid, PID, mid, now, now);
+    db.prepare(
+      "INSERT INTO model_targets (model_id, provider_id, upstream_model, priority, enabled, created_at) VALUES (?, ?, ?, 0, 1, ?)",
+    ).run(mid, PID, mid, now);
+    db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'router') ON CONFLICT(key) DO UPDATE SET value='router'").run();
+    invalidateModelCache();
+    try {
+      const { req, url } = chatReq({ model: mid, tools: TOOLS, messages: [{ role: "user", content: "run ls" }] });
+      const res = await handleProxy(req, url, undefined);
+      expect(res.status).toBe(200);
+      // Own instruction strips tools and teaches the fenced JSON block.
+      expect(lastUpstreamBody.tools).toBeUndefined();
+      const instr = lastUpstreamBody.messages[lastUpstreamBody.messages.length - 1].content;
+      expect(instr).toContain("```tool_call");
+      expect(instr).toContain('{"name": "tool_name_here", "arguments": {"param_name_1": "value goes here"}}');
+      // The fenced-JSON response is recovered into a native tool call.
+      const j = await res.json();
+      expect(j.choices[0].message.tool_calls?.[0]?.function.name).toBe("exec_bash");
+      expect(JSON.parse(j.choices[0].message.tool_calls[0].function.arguments)).toEqual({ cmd: "ls -la", timeout: 30 });
+      expect(j.choices[0].message.content).toBe("Sure.");
     } finally {
       db.prepare("DELETE FROM models WHERE id = ?").run(mid);
       db.prepare("INSERT INTO settings (key, value) VALUES ('routing_mode', 'passthrough') ON CONFLICT(key) DO UPDATE SET value='passthrough'").run();

@@ -1612,8 +1612,16 @@ describe("model registry & routing mode", () => {
       (await api("/api/admin/models", { token: adminToken, body: { id: "bad-tcm", providerId, toolCallMode: "nope" } })).status,
     ).toBe(400);
 
+    // 'own' is accepted.
+    const own = await api("/api/admin/models", {
+      token: adminToken,
+      body: { id: "own-tcm", providerId, upstreamModel: "fake-llm-1", toolCallMode: "own" },
+    });
+    expect(own.status).toBe(200);
+    expect(own.json.model.toolCallMode).toBe("own");
+
     // Cleanup: these rows would otherwise pollute later registry counts.
-    for (const id of ["xiaomi/mimo-tcm", "plain-tcm", "native-tcm", "bad-tcm"]) {
+    for (const id of ["xiaomi/mimo-tcm", "plain-tcm", "native-tcm", "bad-tcm", "own-tcm"]) {
       await api(`/api/admin/models/${encodeURIComponent(id)}`, { token: adminToken, method: "DELETE" });
     }
   });

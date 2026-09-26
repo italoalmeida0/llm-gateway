@@ -35,7 +35,8 @@ import {
   applyMarkupRequestAdaptation,
   markupRecoverer,
 } from "./markup-tools";
-import { isWorkaroundMode, isMarkupMode, resolveToolCallMode } from "../tool-call-mode";
+import { ownRecoverer } from "./own-tools";
+import { isInstructionMode, isMarkupMode, resolveToolCallMode } from "../tool-call-mode";
 import { combineRecoverers, type ToolRecoverer } from "./recovery";
 import {
   decodeToIR,
@@ -1212,7 +1213,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // function calling is unreliable for these targets, so the tool schema
       // is moved into an in-band instruction and the model's markup tool
       // calls are recovered at the response edge.
-      if (isWorkaroundMode(toolCallMode) && req.method === "POST" && bodyJson) {
+      if (isInstructionMode(toolCallMode) && req.method === "POST" && bodyJson) {
         try {
           const parsed = JSON.parse(attemptBody) as Record<string, unknown>;
           if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -1358,10 +1359,13 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       const clientHeaders = buildClientHeaders(upstream.headers, requestId, req, { attemptsMade });
       // Response-edge tool-call recovery for THIS candidate: `native` is
       // fully off; every markup mode accepts DSML (the DeepSeek safety net)
-      // PLUS the markup dialects, composed via combineRecoverers.
-      const recovery: ToolRecoverer = isMarkupMode(toolCallMode)
-        ? combineRecoverers(dsmlRecoverer(dsmlTools), markupRecoverer(toolCallMode, dsmlTools))
-        : combineRecoverers();
+      // PLUS the markup dialects, and `own` additionally accepts the fenced
+      // JSON dialect — composed via combineRecoverers.
+      const recovery: ToolRecoverer = !isMarkupMode(toolCallMode)
+        ? combineRecoverers()
+        : toolCallMode === "own"
+          ? combineRecoverers(dsmlRecoverer(dsmlTools), markupRecoverer(toolCallMode, dsmlTools), ownRecoverer(dsmlTools))
+          : combineRecoverers(dsmlRecoverer(dsmlTools), markupRecoverer(toolCallMode, dsmlTools));
 
       // ---- streaming relay ----
       if (isSse && upstream.body) {

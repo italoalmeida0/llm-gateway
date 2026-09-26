@@ -43,6 +43,8 @@ import type {
   ToolRecoverer,
 } from "./recovery";
 import type { ToolCallMode } from "../tool-call-mode";
+import { isInstructionMode } from "../tool-call-mode";
+import { buildOwnToolInstruction } from "./own-tools";
 
 const asRecord = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -542,7 +544,9 @@ export const buildXiaomiToolInstruction = buildWorkaroundToolInstruction;
 
 /** Build the in-band instruction for a mode (empty for passive modes). */
 export function buildMarkupInstruction(mode: ToolCallMode, tools: ToolDef[]): string {
-  return mode === "workaround" ? buildWorkaroundToolInstruction(tools) : "";
+  if (mode === "own") return buildOwnToolInstruction(tools);
+  if (mode === "workaround") return buildWorkaroundToolInstruction(tools);
+  return "";
 }
 
 /**
@@ -558,7 +562,7 @@ export function applyMarkupRequestAdaptation(
   via: RecoverProto,
   mode: ToolCallMode,
 ): Record<string, unknown> {
-  if (mode !== "workaround") return body;
+  if (!isInstructionMode(mode)) return body;
   // `tool_choice: "none"` means the caller forbids tool calls: leave the
   // request exactly as-is (mirrors toolHintsFromRequest).
   const choice = body.tool_choice;

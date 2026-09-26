@@ -330,6 +330,11 @@ SIGKILL things.
 - **T9 foreground window**: commands under 10s return inline (no
   background notice); over 10s detach exactly like today's
   `AutoBackgroundAfter`.
+- **T12 crash windows at the terminal transition**: the runner records
+  `done` and dies BEFORE the copy (W1) or MID-copy (W2) — the least
+  likely, most dangerous instants. Reconciliation heals the copy from
+  the out log and folds exactly one notice per outcome. (T3 uses a hard
+  SIGKILL too — no terminal transition at all.)
 - **T11 out→brain copy semantics (D8)**: live output lands only in
   `runners/out/`; on finish AND on kill the `brain/` log appears as a
   COPY (byte-identical, the out original still exists); `out/` survives

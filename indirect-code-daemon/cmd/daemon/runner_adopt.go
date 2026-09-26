@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,6 +26,39 @@ import (
 // placeholder row yet, so it is never judged orphaned.
 var orphanAfterMs = int64(3 * tools.AutoBackgroundAfter / time.Millisecond)
 
+// repairTerminalCopy heals the crash windows between the terminal state
+// write and the brain copy (and a torn mid-copy): the out log is the
+// source of truth, so a missing or truncated brain copy is re-COPIED
+// (copy semantics preserved — the out original always survives).
+func repairTerminalCopy(st *runner.State) {
+	if st.LogPath == "" || st.BrainPath == "" {
+		return
+	}
+	src, err := os.Stat(st.LogPath)
+	if err != nil {
+		return
+	}
+	if dst, err := os.Stat(st.BrainPath); err == nil && dst.Size() >= src.Size() {
+		return // copy already complete
+	}
+	in, err := os.Open(st.LogPath)
+	if err != nil {
+		return
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(st.BrainPath), 0o700); err != nil {
+		return
+	}
+	out, err := os.OpenFile(st.BrainPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return
+	}
+	if _, err := io.Copy(out, in); err == nil {
+		_ = out.Sync()
+	}
+	_ = out.Close()
+}
+
 // rootDir resolves <root> from the supervisor's data dir (the slot).
 func (b *bgSupervisor) rootDir() string { return newDiskStore(b.dataDir).rootDir() }
 
@@ -34,8 +69,11 @@ func (b *bgSupervisor) adoptRunners() {
 	for _, st := range runner.LoadStates(root) {
 		switch {
 		case st.Terminal():
-			// Outcome already recorded: hand it to the notice chain
-			// (idempotent by background_delivery) and let GC age it out.
+			// Outcome already recorded: repair the terminal copy if the
+			// crash landed between the state write and the copy (or
+			// mid-copy), then hand it to the notice chain (idempotent by
+			// background_delivery) and let GC age it out.
+			repairTerminalCopy(st)
 			b.retainNotice(st.JobID, st.SessionID, runnerNoticeText(st), true)
 		case pidAlive(pidString(st.PID)):
 			if b.orphaned(st, now) {

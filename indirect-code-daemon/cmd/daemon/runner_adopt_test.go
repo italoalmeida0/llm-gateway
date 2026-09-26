@@ -194,8 +194,13 @@ func TestRunnerDeathIsAnExplicitFailure(t *testing.T) {
 	seedSession(t, dataDir, "sess1", proc.JobID)
 	waitFor(t, 3*time.Second, func() bool { return fileHas(proc.LogPath, "partial") })
 
-	// Kill the runner itself (SIGKILL — no terminal transition possible).
-	if err := terminatePid(proc.PID); err != nil {
+	// HARD-kill the runner itself: no signal handler, no terminal
+	// transition, no copy — exactly the crash window the F6 path covers.
+	killed, err := os.FindProcess(proc.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := killed.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(200 * time.Millisecond)

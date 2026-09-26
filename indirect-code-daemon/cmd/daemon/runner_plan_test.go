@@ -215,3 +215,62 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 	p.Stop()
 }
 
+
+// T12: crash windows AT the terminal transition. The runner records
+// `done` and dies BEFORE the brain copy (W1) or MID-copy (W2) — the two
+// most dangerous, most unlikely instants. The state file is the durable
+// outcome, so the parent's reconciliation must HEAL the copy from the
+// out log (source of truth) and still fold exactly one notice.
+func TestRunnerTerminalCopyHealedAfterCrashWindows(t *testing.T) {
+	posixOnly(t)
+	root, dataDir := runnerTestRoot(t)
+	code := 0
+
+	// W1: done state exists, crash before ANY copy.
+	out1 := filepath.Join(runner.OutDir(root), runner.OutName("sess1", "w1", 1))
+	_ = os.MkdirAll(filepath.Dir(out1), 0o700)
+	_ = os.WriteFile(out1, []byte("full outcome w1\n"), 0o600)
+	brain1 := filepath.Join(dataDir, "brain", "sess1", "w1.log")
+	end1 := runner.NowMs()
+	_ = runner.WriteState(root, &runner.State{
+		JobID: "w1", SessionID: "sess1", Kind: "bash", Label: "t",
+		Status: runner.StatusDone, ExitCode: &code, EndedAt: &end1,
+		LogPath: out1, BrainPath: brain1,
+	})
+
+	// W2: done state + a TORN mid-copy (truncated brain file).
+	out2 := filepath.Join(runner.OutDir(root), runner.OutName("sess1", "w2", 2))
+	_ = os.WriteFile(out2, []byte("complete tail w2\n"), 0o600)
+	brain2 := filepath.Join(dataDir, "brain", "sess1", "w2.log")
+	_ = os.MkdirAll(filepath.Dir(brain2), 0o700)
+	_ = os.WriteFile(brain2, []byte("com"), 0o600) // torn: crash mid-copy
+	end2 := runner.NowMs()
+	_ = runner.WriteState(root, &runner.State{
+		JobID: "w2", SessionID: "sess1", Kind: "bash", Label: "t",
+		Status: runner.StatusDone, ExitCode: &code, EndedAt: &end2,
+		LogPath: out2, BrainPath: brain2,
+	})
+
+	// A parent boots and reconciles: both copies must be healed.
+	inbox := make(chan Envelope, 8)
+	startBG(t, dataDir, func(string) (chan Envelope, chan any, bool) { return inbox, nil, true })
+	waitFor(t, 5*time.Second, func() bool {
+		return fileHas(brain1, "full outcome w1") && fileHas(brain2, "complete tail w2")
+	})
+	// Copy semantics survive the heal: the out originals are intact.
+	if !fileHas(out1, "full outcome w1") || !fileHas(out2, "complete tail w2") {
+		t.Fatal("healing must never consume the out original")
+	}
+	// And both outcomes fold into the notice chain (exactly once each).
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case env := <-inbox:
+			if n, ok := env.Payload.(bgNoticeMsg); ok {
+				seen[n.JobID] = true
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("notice chain incomplete after the crash windows: %v", seen)
+		}
+	}
+}

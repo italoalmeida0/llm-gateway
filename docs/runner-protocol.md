@@ -80,6 +80,9 @@ atomically (tmp+rename) on transitions. Readers ignore unknown fields.
 1. Write `status` + `exitCode` + `endedAt` to the state (atomic).
 2. **COPY** the out log to `brainPath` (copy, never move — the out
    original stays, GC-exempt).
+   Crash-window invariant: dying BETWEEN 1 and 2 (or mid-copy) is safe —
+   the parent's reconciliation HEALS the copy from the out log whenever a
+   terminal state has a missing or truncated brain copy.
 3. Send `done` if a parent is connected (fast path only).
 4. Exit immediately. Self-clean: the last runner of a generation removes
    its own version binary when a newer one exists.

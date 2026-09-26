@@ -54,6 +54,12 @@ func Run(spec Spec) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
+	// Capture termination before starting a child. A stop can arrive while
+	// its durable identity or IPC endpoint is still being published; the
+	// default TERM action would kill the runner and strand that child.
+	sigc := make(chan os.Signal, 2)
+	signal.Notify(sigc, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigc)
 	startedAt := NowMs()
 
 	// 1. Live log first (D8): runners/out/<identity>.log, GC-exempt.
@@ -145,12 +151,14 @@ func Run(spec Spec) int {
 	}
 
 	// Terminal signals become graceful kills (state + copy survive).
-	sigc := make(chan os.Signal, 2)
-	signal.Notify(sigc, syscall.SIGTERM, syscall.SIGINT)
+	signalsDone := make(chan struct{})
+	defer close(signalsDone)
 	go func() {
-		if _, ok := <-sigc; ok {
+		select {
+		case <-sigc:
 			serve.markKilled("signal")
 			startReap()
+		case <-signalsDone:
 		}
 	}()
 

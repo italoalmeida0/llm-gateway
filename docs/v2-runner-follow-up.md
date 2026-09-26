@@ -602,3 +602,41 @@ Windows/macOS execution. Native CI on the resulting commit, a real-browser/model
 smoke, and a manual V1-to-V2 install on a data copy remain release gates. This
 change closes the six reproduced defects; it does not claim that every broader
 acceptance scenario discussed in the historical review has been exercised.
+
+### GitHub CI follow-up
+
+The [first run on dev](https://github.com/italoalmeida0/llm-gateway/actions/runs/36233318184)
+tested implementation commit `5e0348a`: eight of nine jobs passed, including
+all six native platforms, the gateway, and the race detector. Alpine exposed
+an insufficient deadline in `TestRecoveryRunnerDeathAfterAdoptionReapsCommand`.
+The test allowed five seconds, exactly the sum of the two-second watcher tick
+and the three-second reap grace, leaving no time for scheduling or recording
+the terminal state. Container zombie groups can consume the full grace.
+
+The failure was reproduced locally in `golang:1.26-alpine`. The test now allows
+eight seconds for detection and completion, and checks process death within one
+second of the terminal record instead of sleeping through another 3.5-second
+grace. It passed in the same Alpine container after this change. Production
+timeouts and cancellation behavior are unchanged by this test correction.
+
+The same job also exposed an early-cancellation race in
+`TestRegressionRunnerKillEscalatesAfterLeaderExits`: the runner installed its
+TERM handler only after starting the command and publishing its PID/group and
+IPC endpoint. A Stop in that window could kill the runner before it recorded
+the child's identity, leaving the fallback without a process group to reap.
+The runner now captures TERM/INT before spawning any command, queues an early
+signal until its reaper is ready, and releases the signal subscription and
+waiting goroutine on return.
+
+This race was reproduced by adding a temporary 500ms delay between command
+startup and identity publication inside the Alpine test container: the existing
+regression failed before the fix and passed three consecutive times afterward.
+That fault-injection delay is not included in the source or shipped builds.
+After both corrections, the full local Go race suite passed again, as did
+`go vet ./...` and the full Go suite inside Alpine. Local and all six platform
+daemon builds were refreshed and passed the release-artifact validator.
+
+The corrections are sent directly to `dev` and trigger the entire matrix again.
+The completion gate is nine successful jobs on the updated commit; the failed
+run above is retained as evidence, not counted as a pass. Current executions
+are available in the [dev CI history](https://github.com/italoalmeida0/llm-gateway/actions/workflows/ci.yml?query=branch%3Adev).

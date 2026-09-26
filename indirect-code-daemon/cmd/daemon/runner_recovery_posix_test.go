@@ -78,14 +78,16 @@ func TestRecoveryRunnerDeathAfterAdoptionReapsCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-proc.Exited
-	waitFor(t, 5*time.Second, func() bool {
+	// Detection can take one 2s watcher tick, followed by the full 3s
+	// reap grace (including zombie groups under a container's PID 1).
+	// Allow scheduling and state-write time beyond those two deadlines.
+	waitFor(t, 8*time.Second, func() bool {
 		st, err := runner.ReadState(runner.StatePath(root, proc.JobID))
 		return err == nil && st.Terminal()
 	})
-	time.Sleep(3500 * time.Millisecond)
-	if tools.ProcessIdentity(state.CmdPID) != "" {
-		t.Fatal("watchAdopted published terminal failure but the command still runs after the kill grace period")
-	}
+	// Completion already includes the reap grace; only allow signal delivery
+	// here, rather than granting another full cancellation window.
+	waitFor(t, time.Second, func() bool { return tools.ProcessIdentity(state.CmdPID) == "" })
 }
 
 func TestRecoveryAdoptedStopEscalatesResistantLeader(t *testing.T) {

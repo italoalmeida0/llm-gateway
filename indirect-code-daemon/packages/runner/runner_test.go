@@ -301,3 +301,38 @@ func TestMaybeSelfCleanRemovesOnlyDeadGenerations(t *testing.T) {
 		t.Fatal("the newer binary must survive")
 	}
 }
+
+// The runner must feed the spec's stdin to the command (V2R-006) — the
+// generic path behind Python's -c payload. Uses `cat` so it runs wherever
+// a POSIX shell exists (the Python-specific test skips without python).
+func TestRunFeedsStdin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX cat scenario")
+	}
+	root := t.TempDir()
+	started := NowMs()
+	spec := Spec{
+		JobID: "stdin1", SessionID: "s1", Kind: "bash", Label: "t",
+		Path: "/bin/sh", Args: []string{"-c", "cat"}, Env: os.Environ(),
+		Stdin: "ping-from-stdin",
+		Root:  root, RunnerVersion: "vtest",
+		OutPath:   filepath.Join(OutDir(root), OutName("s1", "stdin1", started)),
+		BrainPath: filepath.Join(root, "brain", "s1", "stdin1.log"),
+	}
+	if code := Run(spec); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !fileHas(spec.BrainPath, "ping-from-stdin") {
+		t.Fatalf("runner discarded stdin: %q", readFile(spec.BrainPath))
+	}
+}
+
+func fileHas(path, needle string) bool {
+	raw, err := os.ReadFile(path)
+	return err == nil && strings.Contains(string(raw), needle)
+}
+
+func readFile(path string) string {
+	raw, _ := os.ReadFile(path)
+	return string(raw)
+}

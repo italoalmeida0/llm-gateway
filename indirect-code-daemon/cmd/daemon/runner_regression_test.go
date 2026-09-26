@@ -17,6 +17,9 @@ import (
 )
 
 func TestRegressionRunnerPythonStdin(t *testing.T) {
+	if _, err := tools.PythonAvailable(); err != nil {
+		t.Skip("python tool unavailable on this host")
+	}
 	root, dataDir := runnerTestRoot(t)
 	app, err := buildRealApp()
 	if err != nil {

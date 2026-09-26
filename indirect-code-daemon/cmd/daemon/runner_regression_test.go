@@ -38,7 +38,7 @@ func TestRegressionRunnerPythonStdin(t *testing.T) {
 
 func TestRegressionRunnerForegroundNotReplayed(t *testing.T) {
 	root, dataDir := runnerTestRoot(t)
-	proc := spawnTestRunner(t, root, dataDir, "echo inline-ok")
+	proc := spawnTestRunner(t, root, dataDir, portable("/bin/echo inline-ok", "echo inline-ok"))
 	if err := proc.Wait(); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestRegressionRunnerForegroundNotReplayed(t *testing.T) {
 
 func TestRegressionRunnerAssistantCancelNotReplayed(t *testing.T) {
 	root, dataDir := runnerTestRoot(t)
-	proc := spawnTestRunner(t, root, dataDir, "echo ready; sleep 30")
+	proc := spawnTestRunner(t, root, dataDir, portable("/bin/echo ready; sleep 30", "echo ready & ping -n 30 127.0.0.1 >nul"))
 	t.Cleanup(proc.Stop)
 	seedSession(t, dataDir, "sess1", proc.JobID)
 	waitFor(t, 3*time.Second, func() bool { return fileHas(proc.LogPath, "ready") })
@@ -76,7 +76,7 @@ func TestRegressionRunnerAssistantCancelNotReplayed(t *testing.T) {
 
 func TestRegressionRunnerRecoveryKeepsExitStatus(t *testing.T) {
 	root, dataDir := runnerTestRoot(t)
-	proc := spawnTestRunner(t, root, dataDir, "echo ready; sleep 1; exit 7")
+	proc := spawnTestRunner(t, root, dataDir, portable("/bin/echo ready; sleep 1; exit 7", "echo ready & ping -n 2 127.0.0.1 >nul & exit /b 7"))
 	t.Cleanup(proc.Stop)
 	seedSession(t, dataDir, "sess1", proc.JobID)
 	first := newBGSupervisor(dataDir)

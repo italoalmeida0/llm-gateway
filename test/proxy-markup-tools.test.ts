@@ -144,13 +144,14 @@ describe("markup modes accept every dialect", () => {
     expect(r.changed).toBe(false);
     expect(r.text).toBe(CANONICAL);
   });
-  test("workaround instruction teaches all three formats", () => {
+  test("workaround instruction teaches only the xiaomi format", () => {
     const s = buildWorkaroundToolInstruction([{ name: "exec_bash", description: "Run", parameters: { type: "object" } }]);
     expect(s).toContain("<function=tool_name_here>");
-    expect(s).toContain("<minimax:tool_call>");
-    expect(s).toContain('"name": "tool_name_here"');
     expect(s).toContain("exec_bash");
     expect(s).toContain("Native function calling is DISABLED");
+    // Single format only — no minimax/hermes examples (they made models flail).
+    expect(s).not.toContain("<minimax:tool_call>");
+    expect(s).not.toContain('"name": "tool_name_here"');
   });
   test("fallback instruction is empty (passive)", () => {
     expect(buildMarkupInstruction("fallback", [{ name: "x" }])).toBe("");
@@ -881,8 +882,10 @@ describe("Xiaomi adaptation through handleProxy", () => {
       // Workaround instruction strips tools and teaches every dialect.
       expect(lastUpstreamBody.tools).toBeUndefined();
       const instr = lastUpstreamBody.messages[lastUpstreamBody.messages.length - 1].content;
-      expect(instr).toContain("<minimax:tool_call>");
-      expect(instr).toContain("Format C");
+      expect(instr).toContain("<function=tool_name_here>");
+      // Response recovery still accepts every dialect, but the instruction
+      // teaches only the xiaomi format.
+      expect(instr).not.toContain("<minimax:tool_call>");
       // The xiaomi-dialect XML response is still recovered.
       const j = await res.json();
       expect(j.choices[0].message.tool_calls?.[0]?.function.name).toBe("exec_bash");

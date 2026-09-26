@@ -517,34 +517,12 @@ function toolList(tools: ToolDef[]): string {
 }
 
 /**
- * `workaround` instruction: native calling is disabled, and ANY of the
- * supported markup formats is accepted (the gateway parses all of them).
- * One example per dialect; the model picks whichever it was trained on.
+ * `workaround` instruction: native calling is disabled and the model is
+ * taught the SINGLE simplest format (the xiaomi `<function=>` XML). The
+ * response edge still ACCEPTS every dialect — teaching only one keeps the
+ * prompt short and the model focused (multiple examples made it flail).
  */
 export function buildWorkaroundToolInstruction(tools: ToolDef[]): string {
-  let s = "\n\n<system_instruction>\n";
-  s += "Native function calling is DISABLED. To call a tool, emit the call as text using ONE of the supported formats below. Do not mix formats in a single call.\n\n";
-  s += "Format A:\n";
-  s += "<tool_call>\n";
-  s += "<function=tool_name_here>\n";
-  s += "<parameter=param_name_1>value goes here</parameter>\n";
-  s += "</function>\n";
-  s += "</tool_call>\n\n";
-  s += "Format B:\n";
-  s += "<minimax:tool_call>\n";
-  s += '<invoke name="tool_name_here">\n';
-  s += '<parameter name="param_name_1">value goes here</parameter>\n';
-  s += "</invoke>\n";
-  s += "</minimax:tool_call>\n\n";
-  s += "Format C:\n";
-  s += '<tool_call>{"name": "tool_name_here", "arguments": {"param_name_1": "value goes here"}}</tool_call>\n\n';
-  s += toolList(tools);
-  s += "</system_instruction>";
-  return s;
-}
-
-/** The single-format Xiaomi/MiMo instruction (kept for reference and tests). */
-export function buildXiaomiToolInstruction(tools: ToolDef[]): string {
   let s = "\n\n<system_instruction>\n";
   s += "Native function calling is DISABLED. To call a tool, you MUST use the following exact XML format. Do not deviate.\n\n";
   s += "Format Example:\n";
@@ -558,6 +536,9 @@ export function buildXiaomiToolInstruction(tools: ToolDef[]): string {
   s += "</system_instruction>";
   return s;
 }
+
+/** Alias kept for callers/tests that referenced the Xiaomi-specific name. */
+export const buildXiaomiToolInstruction = buildWorkaroundToolInstruction;
 
 /** Build the in-band instruction for a mode (empty for passive modes). */
 export function buildMarkupInstruction(mode: ToolCallMode, tools: ToolDef[]): string {

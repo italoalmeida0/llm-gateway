@@ -950,6 +950,18 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
         }
       }
     }
+    // Embeddings and legacy completions have no conversational IR mapping.
+    // Keep their operation and native wire format throughout failover.
+    if (route.upstreamPath === "/embeddings" || route.upstreamPath === "/completions") {
+      candidates = candidates.filter((c) => c.via === "openai");
+    }
+    // Provider-managed Responses state cannot be reconstructed in chat or
+    // messages. Keep native candidates instead of letting an untranslatable
+    // alternate capability terminate failover before another native provider.
+    if (proto === "responses" && bodyJson?.previous_response_id !== undefined) {
+      candidates = candidates.filter((c) => c.via === "responses");
+    }
+    let requestIR: Awaited<ReturnType<typeof decodeToIR>> | undefined;
     // How many candidates were actually attempted — reported back so the
     // client can see failover happened (`x-gateway-attempts`).
     let attemptsMade = 0;
@@ -1149,17 +1161,11 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
       // attempts instead carry the IR-converted body.
       let attemptBody = bodyText;
       if (cand.translated && bodyJson) {
-        const withModel =
-          cand.upstreamModel && (bodyJson as any).model !== cand.upstreamModel
-            ? { ...bodyJson, model: cand.upstreamModel }
-            : bodyJson;
-        // All translated requests go through the gateway IR: decode the
-        // ingress protocol once, encode to the attempt's egress protocol.
-        // Same-protocol attempts are translated too (dialects differ).
+        // Decode lazily once; native requests retain fields not represented
+        // by the cross-protocol IR. Every attempt still gets target profiling.
         try {
-          const req43 = withModel as Record<string, unknown>;
-          const ir = await decodeToIR(proto as IRProto, req43);
-          attemptBody = JSON.stringify(encodeIR(via as IRProto, ir, cand.upstreamModel));
+          requestIR ??= await decodeToIR(proto as IRProto, bodyJson);
+          attemptBody = JSON.stringify(encodeIR(via as IRProto, requestIR, cand.upstreamModel));
         } catch (e) {
           // Client-caused conversion failure (bad image URL, missing
           // tool_call_id): fail fast as 400 with no failover.
@@ -1392,7 +1398,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
           const u = translator.result();
           if (u.estimated && bodyJson) u.inTok = estimateBodyTokens(bodyJson, proto);
           finalUsage = u;
-          record(u, status, Math.round(performance.now() - started), true, cand);
+          record(u, translator.failed && status === 200 ? 502 : status, Math.round(performance.now() - started), true, cand);
         };
         const usageComment = (): Uint8Array | null => {
           if (!finalUsage || usageTailSent) return null;
@@ -1420,6 +1426,7 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
 
         const cleanup = () => {
           resetIdle(true);
+          translator.dispose();
           req.signal.removeEventListener("abort", onClientAbortStream);
           release();
         };
@@ -1490,6 +1497,11 @@ export async function handleProxy(req: Request, url: URL, server: any): Promise<
                 }
               }
             } catch {
+              if (!req.signal.aborted) {
+                try {
+                  for (const piece of translator.fail("Upstream stream interrupted")) sink.enqueue(piece);
+                } catch { /* A closed downstream must still release the slot and spool. */ }
+              }
               finalize(req.signal.aborted ? 499 : 502);
               cleanup();
               closeSink(sink);

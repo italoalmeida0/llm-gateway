@@ -2,10 +2,9 @@
  * Gateway IR — the hub of the hub-and-spoke protocol translation.
  *
  * Architecture: every client protocol (openai/chat, anthropic, responses)
- * DECODEs once into this canonical form; every upstream attempt ENCODEs
- * from it to the attempt's egress protocol — INCLUDING same-protocol
- * attempts (dialects still differ: max_tokens vs max_completion_tokens,
- * thought_signature, id formats, ...). Adding protocol N+1 means writing
+ * DECODEs lazily once when cross-protocol translation is needed; translated
+ * attempts ENCODE from that shared IR. Native requests preserve opaque fields
+ * and receive only target-profile normalization (limit keys, ids, ...). Adding protocol N+1 means writing
  * ONE decoder + ONE encoder (+ response/stream/error hooks), never N new
  * pairwise bridges. Translators are pure/sync over JSON; streaming uses the
  * per-egress incremental writers below; async work (image fetch) lives only
@@ -20,6 +19,8 @@
 
 export type IRRole = "system" | "user" | "assistant" | "tool";
 
+import { StreamText } from "./stream-text";
+import { isReasoningTarget } from "./target-profile";
 import { countTextTokens, estimateThinkingTokens } from "../tokens";
 import { dsmlRecoverer, type DsmlToolHint } from "./dsml";
 import type { StreamEmit, StreamRecoverer } from "./recovery";
@@ -222,7 +223,7 @@ export async function decodeChatToIR(body: Record<string, unknown>): Promise<Gat
   for (const raw of asArr(body.messages)) {
     const m = asRecord(raw);
     const role = m.role;
-    if (role === "system") {
+    if (role === "system" || role === "developer") {
       const t = typeof m.content === "string" ? m.content : asArr(m.content).map(openAIPartToText).filter(Boolean).join("\n");
       if (t) systemParts.push(t);
       continue;
@@ -777,8 +778,14 @@ export function encodeIRToChat(ir: GatewayRequest, model: string): Record<string
   // says effort=low (chat `reasoning_effort`, Anthropic `thinking`,
   // Responses `reasoning.effort`) must have it honored on EVERY egress so
   // translated attempts don't 400/length where the native one succeeds.
-  // Unknown to the client: default low so any->any translations terminate.
-  out.reasoning_effort = ir.params.reasoningEffort ?? "low";
+  // Emit only when the client asked or the target is a reasoning family:
+  // strict non-reasoning models (gpt-4o-mini class) 400 unknown params
+  // (live 2026-09-26: anthropic->chat translation to gpt-4o-mini failed
+  // with "Unrecognized request argument supplied: reasoning_effort").
+  // normalizeForTarget strips any remainder for non-reasoning targets.
+  if (ir.params.reasoningEffort !== undefined || isReasoningTarget(model)) {
+    out.reasoning_effort = ir.params.reasoningEffort ?? "low";
+  }
   if (out.stream === true) out.stream_options = { include_usage: true };
   return out;
 }
@@ -875,7 +882,17 @@ export function encodeIRToAnthropic(ir: GatewayRequest, model: string): Record<s
   if (ir.params.temperature !== undefined) out.temperature = ir.params.temperature;
   if (ir.params.topP !== undefined) out.top_p = ir.params.topP;
   if (ir.params.stopSequences?.length) out.stop_sequences = ir.params.stopSequences;
-  if (ir.params.reasoningEffort !== undefined) out.thinking = { type: "enabled", budget_tokens: 10000 };
+  // Manual thinking needs at least 1024 tokens, strictly below max_tokens.
+  // Only enable it for known capable Claude families; small output budgets
+  // and forced tool choice cannot support manual thinking.
+  const effort = ir.params.reasoningEffort;
+  const supportsThinking = /claude.*(?:3[.-]7|(?:sonnet|opus|haiku)[.-]4|4[.-](?:sonnet|opus))/.test(model.toLowerCase());
+  const budget = Math.min(({ low: 1024, medium: 4096, high: 8192, max: 10000 } as Record<string, number>)[effort ?? ""] ?? 1024, Number(out.max_tokens) - 1);
+  if (supportsThinking && effort && !["none", "minimal"].includes(effort) && budget >= 1024 && !["required", "named"].includes(ir.toolChoice.mode)) {
+    out.thinking = { type: "enabled", budget_tokens: budget };
+    delete out.temperature;
+    delete out.top_p;
+  }
   return out;
 }
 
@@ -1061,6 +1078,7 @@ export interface IRResponse {
   usageEstimated: boolean;
   /** Raw request-body size (chars) — reserved for future input guards. */
   requestChars?: number;
+  error?: { type: string; message: string };
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {
@@ -1309,7 +1327,8 @@ function decodeResponsesResponseToIR(text: string, fallbackModel: string): IRRes
     text: outText,
     toolUses,
     thinking,
-    finish: toolUses.length ? "tool_calls" : String((j as any).incomplete_details?.reason ?? "") === "max_output_tokens" ? "length" : "stop",
+    finish: j.status === "incomplete" ? "length" : toolUses.length ? "tool_calls" : "stop",
+    ...(j.status === "failed" ? { error: { type: String(asRecord(j.error).code ?? "api_error"), message: String(asRecord(j.error).message ?? "Upstream response failed") } } : {}),
     inTok: Math.max(0, input - cached),
     cacheTok: Math.max(0, cached),
     outTok: finalOut,
@@ -1348,6 +1367,7 @@ function estimateBufferedOutTok(
 /** Encode an IRResponse as the client's protocol (buffered JSON body). */
 export function encodeResponseFromIR(proto: Proto, r: IRResponse, fallbackModel: string): string {
   const model = r.model || fallbackModel;
+  if (r.error && proto !== "responses") return envelopeErrorIR(proto, 502, r.error.message, r.error.type);
   if (proto === "anthropic") {
     const content: Record<string, unknown>[] = [];
     for (const t of r.thinking) {
@@ -1400,7 +1420,9 @@ export function encodeResponseFromIR(proto: Proto, r: IRResponse, fallbackModel:
       object: "response",
       created_at: Date.now() / 1000,
       model,
-      status: "completed",
+      status: r.error ? "failed" : r.finish === "length" || r.finish === "content_filter" ? "incomplete" : "completed",
+      error: r.error ? { code: r.error.type, message: r.error.message } : null,
+      incomplete_details: r.finish === "length" || r.finish === "content_filter" ? { reason: r.finish === "length" ? "max_output_tokens" : "content_filter" } : null,
       output,
       usage: {
         input_tokens: r.inTok + r.cacheTok,
@@ -1537,6 +1559,7 @@ export interface IRStreamDelta {
   toolUse?: { id: string; name: string; inputDelta: string; thoughtSignature?: string; index?: number };
   usage?: { inTok: number; cacheTok: number; outTok: number; cacheCreation?: number; reasonTok?: number };
   finish?: "stop" | "length" | "tool_calls";
+  error?: { type: string; message: string };
 }
 
 /** Parse one upstream SSE line (post-`data:`/event-stripped payload) into IR deltas. */
@@ -1546,6 +1569,7 @@ export type IRStreamParser = (data: string) => IRStreamDelta[];
 export interface IRStreamWriter {
   feed(deltas: IRStreamDelta[]): Uint8Array[];
   flush(): Uint8Array[];
+  dispose?(): void;
 }
 
 const te = new TextEncoder();
@@ -1630,16 +1654,17 @@ function anthropicStreamParser(event: string, data: string): IRStreamDelta[] {
   try {
     const j = JSON.parse(data) as any;
     if (event === "content_block_delta") {
+      if (j.delta?.type === "thinking_delta") return [{ text: j.delta.thinking, thinking: true }];
       if (j.delta?.type === "text_delta" && typeof j.delta.text === "string") return [{ text: j.delta.text }];
       if (j.delta?.type === "input_json_delta" && typeof j.delta.partial_json === "string") {
-        return [{ toolUse: { id: "", name: "", inputDelta: j.delta.partial_json } }];
+        return [{ toolUse: { id: "", name: "", inputDelta: j.delta.partial_json, index: j.index } }];
       }
       return [];
     }
     if (event === "content_block_start") {
       const b = j.content_block ?? {};
       if (b.type === "tool_use") {
-        return [{ toolUse: { id: String(b.id ?? ""), name: String(b.name ?? ""), inputDelta: "" } }];
+        return [{ toolUse: { id: String(b.id ?? ""), name: String(b.name ?? ""), inputDelta: "", index: j.index } }];
       }
       return [];
     }
@@ -1694,48 +1719,50 @@ function anthropicStreamParser(event: string, data: string): IRStreamDelta[] {
   }
 }
 
-function responsesStreamParser(event: string, data: string): IRStreamDelta[] {
-  try {
+function responsesStreamParser(): (event: string, data: string) => IRStreamDelta[] {
+  const calls = new Map<string, { id: string; name: string; index: number; chars: number; announced: boolean }>();
+  return (event, data) => {
     const j = JSON.parse(data) as any;
     if (event === "response.output_text.delta" && typeof j.delta === "string") return [{ text: j.delta }];
-    if ((event === "response.function_call_arguments.delta" || event === "response.function_call_arguments.done") && typeof (j.delta ?? j.arguments) === "string") {
-      const s: string = j.delta ?? j.arguments;
-      return [{ toolUse: { id: String(j.item_id ?? j.call_id ?? ""), name: String(j.name ?? ""), inputDelta: s } }];
-    }
-    if (event === "response.output_item.done" && j.item?.type === "function_call") {
-      return [
-        {
-          toolUse: {
-            id: String(j.item.call_id ?? j.item.id ?? ""),
-            name: String(j.item.name ?? ""),
-            inputDelta: typeof j.item.arguments === "string" ? j.item.arguments : "",
-          },
-        },
-      ];
-    }
-    if (event === "response.completed") {
-      const u = j.response?.usage;
-      if (u) {
-        const input = Number(u.input_tokens ?? 0) || 0;
-        const cached = Number(u.input_tokens_details?.cached_tokens ?? 0) || 0;
-        const output = Number(u.output_tokens ?? 0) || 0;
-        const reasonTok = Math.max(0, Number(u.output_tokens_details?.reasoning_tokens ?? 0) || 0);
-        return [
-          { finish: "stop", usage: {
-            inTok: Math.max(0, input - cached),
-            cacheTok: Math.max(0, cached),
-            outTok: Math.max(0, output - reasonTok),
-            reasonTok,
-          } },
-        ];
+    if (event === "response.reasoning_summary_text.delta" && typeof j.delta === "string") return [{ text: j.delta, thinking: true }];
+    const item = j.item;
+    const isItem = (event === "response.output_item.added" || event === "response.output_item.done") && item?.type === "function_call";
+    const isArgs = event === "response.function_call_arguments.delta" || event === "response.function_call_arguments.done";
+    if (isItem || isArgs) {
+      const key = String(item?.id ?? j.item_id ?? item?.call_id ?? j.call_id ?? j.output_index ?? "");
+      let call = calls.get(key);
+      if (!call) {
+        call = { id: String(item?.call_id ?? j.call_id ?? key), name: String(item?.name ?? j.name ?? ""), index: j.output_index ?? calls.size, chars: 0, announced: false };
+        calls.set(key, call);
       }
-      return [{ finish: "stop" }];
+      if (item?.call_id) call.id = item.call_id;
+      if (item?.name || j.name) call.name = item?.name ?? j.name;
+      const snapshot = String(item?.arguments ?? j.arguments ?? "");
+      // Done events contain the full arguments, not another delta. Only a
+      // previously unseen suffix can be emitted (also covers snapshot-only APIs).
+      const delta = event.endsWith(".delta") ? String(j.delta ?? "") : snapshot.slice(call.chars);
+      call.chars += delta.length;
+      if (!delta && event !== "response.output_item.added") return [];
+      const announce = !call.announced;
+      call.announced = true;
+      return [{ toolUse: { id: announce ? call.id : "", name: announce ? call.name : "", index: call.index, inputDelta: delta } }];
     }
-    if (event === "response.incomplete" || event === "response.failed") return [{ finish: "length" }];
+    if (event === "response.failed") {
+      const e = j.response?.error ?? {};
+      return [{ error: { type: String(e.code ?? "api_error"), message: String(e.message ?? "Upstream response failed") } }];
+    }
+    if (event === "response.completed" || event === "response.incomplete") {
+      const u = j.response?.usage;
+      const finish = event === "response.incomplete" ? "length" : calls.size ? "tool_calls" : "stop";
+      if (!u) return [{ finish }];
+      const input = Number(u.input_tokens ?? 0) || 0;
+      const cached = Number(u.input_tokens_details?.cached_tokens ?? 0) || 0;
+      const output = Number(u.output_tokens ?? 0) || 0;
+      const reasonTok = Math.max(0, Number(u.output_tokens_details?.reasoning_tokens ?? 0) || 0);
+      return [{ finish, usage: { inTok: Math.max(0, input - cached), cacheTok: cached, outTok: Math.max(0, output - reasonTok), reasonTok } }];
+    }
     return [];
-  } catch {
-    return [];
-  }
+  };
 }
 
 class ChatStreamWriter implements IRStreamWriter {
@@ -1757,6 +1784,10 @@ class ChatStreamWriter implements IRStreamWriter {
       out.push(sseBytes(`data: ${JSON.stringify({ id: this.id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: this.model, choices: [{ index: 0, delta: { role: "assistant" } }] })}\n\n`));
     }
     for (const d of deltas) {
+      if (d.error) {
+        out.push(sseBytes(`data: ${JSON.stringify({ error: d.error })}\n\n`));
+        continue;
+      }
       if (d.finish) {
         const fr = d.finish === "tool_calls" ? "tool_calls" : d.finish === "length" ? "length" : "stop";
         // Usage may ride on the finish delta itself (Responses combined
@@ -1777,7 +1808,7 @@ class ChatStreamWriter implements IRStreamWriter {
           this.sentRole = true;
           out.push(sseBytes(`data: ${JSON.stringify({ id: this.id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: this.model, choices: [{ index: 0, delta: { role: "assistant" } }] })}\n\n`));
         }
-        out.push(sseBytes(`data: ${JSON.stringify({ id: this.id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: this.model, choices: [{ index: 0, delta: { content: d.text } }] })}\n\n`));
+        out.push(sseBytes(`data: ${JSON.stringify({ id: this.id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: this.model, choices: [{ index: 0, delta: d.thinking ? { reasoning_content: d.text } : { content: d.text } }] })}\n\n`));
       }
       if (d.toolUse && (d.toolUse.id || d.toolUse.name || d.toolUse.inputDelta)) {
         if (!this.sentRole) {
@@ -1803,7 +1834,7 @@ class ChatStreamWriter implements IRStreamWriter {
         }
         out.push(
           sseBytes(
-            `data: ${JSON.stringify({ id: this.id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: this.model, choices: [{ index: 0, delta: { tool_calls: [{ index: idx, id: t.id || undefined, type: "function", function: { name: t.name || undefined, arguments: t.inputDelta } }] } }] })}\n\n`,
+            `data: ${JSON.stringify({ id: this.id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: this.model, choices: [{ index: 0, delta: { tool_calls: [{ index: idx, id: t.id || undefined, type: "function", ...(t.thoughtSignature ? { extra_content: { google: { thought_signature: t.thoughtSignature } } } : {}), function: { name: t.name || undefined, arguments: t.inputDelta } }] } }] })}\n\n`,
           ),
         );
       }
@@ -1834,98 +1865,67 @@ class ChatStreamWriter implements IRStreamWriter {
 }
 
 class AnthropicStreamWriter implements IRStreamWriter {
-  private msgId = `msg_${Date.now().toString(36)}`;
-  private headerSent = false;
-  private headerQueue: Uint8Array[] = [];
-  private textIndex = -1;
-  private toolIndex = -1;
-  private nextIndex = 0;
-  private usage = { inTok: 0, cacheTok: 0, outTok: 0 };
-  /** Input usage seen before the header went out (Anthropic message_start
-   *  arrives as the first upstream event — it must ride message_start). */
-  private pendingInputUsage: { inTok: number; cacheTok: number; cacheCreation: number } | null = null;
+  private id = `msg_${crypto.randomUUID()}`;
+  private started = false;
+  private next = 0;
+  private texts = new Map<boolean, number>();
+  private calls = new Map<string, number>();
+  private open = new Set<number>();
+  private lastCall = "";
+  private usage = { inTok: 0, cacheTok: 0, outTok: 0, cacheCreation: 0 };
   constructor(private model: string) {}
   feed(deltas: IRStreamDelta[]): Uint8Array[] {
     const out: Uint8Array[] = [];
-    const ev = (event: string, o: unknown) => sseBytes(`event: ${event}\ndata: ${JSON.stringify(o)}\n\n`);
-    const emitHeader = () => {
-      // Usage known at header time (e.g. Anthropic message_start input +
-      // cache counters) rides the message_start usage — native shape parity.
-      const pending = this.pendingInputUsage;
-      this.pendingInputUsage = null;
-      out.push(ev("message_start", { type: "message_start", message: { id: this.msgId, type: "message", role: "assistant", content: [], model: this.model, stop_reason: null, stop_sequence: null, usage: pending ? { input_tokens: pending.inTok, output_tokens: 0, cache_read_input_tokens: pending.cacheTok || undefined, cache_creation_input_tokens: pending.cacheCreation || undefined } : { input_tokens: 0, output_tokens: 0 } } }));
-      out.push(ev("ping", { type: "ping" }));
-    };
-    // Stash input usage BEFORE the header decision so message_start itself
-    // (which arrives as a usage delta) rides the header natively.
-    for (const d of deltas) {
-      if (d.usage && (d.usage.inTok > 0 || d.usage.cacheTok > 0)) {
-        this.pendingInputUsage = {
-          inTok: Math.max(this.pendingInputUsage?.inTok ?? 0, d.usage.inTok),
-          cacheTok: Math.max(this.pendingInputUsage?.cacheTok ?? 0, d.usage.cacheTok - (d.usage.cacheCreation ?? 0)),
-          cacheCreation: Math.max(this.pendingInputUsage?.cacheCreation ?? 0, d.usage.cacheCreation ?? 0),
-        };
-      }
+    const ev = (type: string, fields: Record<string, unknown>) => out.push(sseBytes(`event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`));
+    for (const d of deltas) if (d.usage) {
+      for (const key of ["inTok", "cacheTok", "outTok", "cacheCreation"] as const) this.usage[key] = Math.max(this.usage[key], d.usage[key] ?? 0);
     }
-    // Emit message_start + ping on the FIRST upstream chunk even when it
-    // carries no IR deltas (reasoning-only prefixes): clients/proxies treat
-    // the first byte as stream liveness (header timeouts, TTFB budgets).
-    if (!this.headerSent) {
-      this.headerSent = true;
-      emitHeader();
+    if (!this.started) {
+      this.started = true;
+      ev("message_start", { message: { id: this.id, type: "message", role: "assistant", content: [], model: this.model, stop_reason: null, stop_sequence: null, usage: { input_tokens: this.usage.inTok, output_tokens: 0, cache_read_input_tokens: this.usage.cacheTok - this.usage.cacheCreation, cache_creation_input_tokens: this.usage.cacheCreation } } });
+      ev("ping", {});
     }
     for (const d of deltas) {
       if (d.text) {
-        if (this.textIndex === -1) {
-          this.textIndex = this.nextIndex++;
-          out.push(ev("content_block_start", { type: "content_block_start", index: this.textIndex, content_block: { type: "text", text: "" } }));
+        const thinking = d.thinking === true;
+        let index = this.texts.get(thinking);
+        if (index === undefined) {
+          index = this.next++;
+          this.texts.set(thinking, index);
+          this.open.add(index);
+          ev("content_block_start", { index, content_block: thinking ? { type: "thinking", thinking: "" } : { type: "text", text: "" } });
         }
-        out.push(ev("content_block_delta", { type: "content_block_delta", index: this.textIndex, delta: { type: "text_delta", text: d.text } }));
+        ev("content_block_delta", { index, delta: thinking ? { type: "thinking_delta", thinking: d.text } : { type: "text_delta", text: d.text } });
       }
-      if (d.toolUse && (d.toolUse.id || d.toolUse.name)) {
-        this.toolIndex = this.nextIndex++;
-        // Google thought_signature rides a redacted_thinking block AHEAD of
-        // the tool_use block (native Anthropic shape for Gemini upstreams).
-        if (d.toolUse.thoughtSignature) {
-          const sigIndex = this.nextIndex++;
-          out.push(ev("content_block_start", { type: "content_block_start", index: sigIndex, content_block: { type: "redacted_thinking", data: d.toolUse.thoughtSignature } }));
-          out.push(ev("content_block_stop", { type: "content_block_stop", index: sigIndex }));
+      if (d.toolUse) {
+        const t = d.toolUse;
+        const key = t.index !== undefined ? `index:${t.index}` : t.id || t.name || this.lastCall;
+        this.lastCall = key;
+        let index = this.calls.get(key);
+        if (index === undefined) {
+          if (t.thoughtSignature) {
+            const signatureIndex = this.next++;
+            ev("content_block_start", { index: signatureIndex, content_block: { type: "redacted_thinking", data: t.thoughtSignature } });
+            ev("content_block_stop", { index: signatureIndex });
+          }
+          index = this.next++;
+          this.calls.set(key, index);
+          this.open.add(index);
+          ev("content_block_start", { index, content_block: { type: "tool_use", id: t.id, name: t.name, input: {} } });
         }
-        out.push(ev("content_block_start", { type: "content_block_start", index: this.toolIndex, content_block: { type: "tool_use", id: d.toolUse.id, name: d.toolUse.name, input: {} } }));
-        // A combined delta (id/name + args in one frame) still owes its
-        // JSON — the block start alone would silently drop the arguments.
-        if (d.toolUse.inputDelta) {
-          out.push(ev("content_block_delta", { type: "content_block_delta", index: this.toolIndex, delta: { type: "input_json_delta", partial_json: d.toolUse.inputDelta } }));
-        }
-      } else if (d.toolUse && d.toolUse.inputDelta) {
-        if (this.toolIndex === -1) {
-          this.toolIndex = this.nextIndex++;
-          out.push(ev("content_block_start", { type: "content_block_start", index: this.toolIndex, content_block: { type: "tool_use", id: "", name: "", input: {} } }));
-        }
-        out.push(ev("content_block_delta", { type: "content_block_delta", index: this.toolIndex, delta: { type: "input_json_delta", partial_json: d.toolUse.inputDelta } }));
+        if (t.inputDelta) ev("content_block_delta", { index, delta: { type: "input_json_delta", partial_json: t.inputDelta } });
       }
-      if (d.usage) {
-        this.usage = { inTok: Math.max(this.usage.inTok, d.usage.inTok), cacheTok: Math.max(this.usage.cacheTok, d.usage.cacheTok), outTok: Math.max(this.usage.outTok, d.usage.outTok) };
-      }
+      if (d.error) { ev("error", { error: d.error }); continue; }
       if (d.finish) {
-        if (this.textIndex !== -1) out.push(ev("content_block_stop", { type: "content_block_stop", index: this.textIndex }));
-        if (this.toolIndex !== -1) out.push(ev("content_block_stop", { type: "content_block_stop", index: this.toolIndex }));
-        // A stream that emitted tool_use blocks ends with stop_reason tool_use
-        // even when the upstream finish frame says plain "stop" (Google style:
-        // tool_calls and finish_reason travel in separate chunks).
-        const stopReason = d.finish === "tool_calls" || (d.finish === "stop" && this.toolIndex !== -1) ? "tool_use" : d.finish === "length" ? "max_tokens" : "end_turn";
-        out.push(ev("message_delta", { type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: this.usage.outTok || undefined } }));
-        out.push(ev("message_stop", { type: "message_stop" }));
+        for (const index of this.open) ev("content_block_stop", { index });
+        this.open.clear();
+        ev("message_delta", { delta: { stop_reason: d.finish === "length" ? "max_tokens" : d.finish === "tool_calls" || this.calls.size ? "tool_use" : "end_turn", stop_sequence: null }, usage: { input_tokens: this.usage.inTok, cache_read_input_tokens: this.usage.cacheTok - this.usage.cacheCreation, cache_creation_input_tokens: this.usage.cacheCreation, output_tokens: this.usage.outTok } });
+        ev("message_stop", {});
       }
     }
     return out;
   }
-  flush(): Uint8Array[] {
-    return [];
-  }
-  getUsage(): { inTok: number; cacheTok: number; outTok: number } {
-    return this.usage;
-  }
+  flush(): Uint8Array[] { return []; }
   setInputUsage(inTok: number, cacheTok: number): void {
     this.usage.inTok = Math.max(this.usage.inTok, inTok);
     this.usage.cacheTok = Math.max(this.usage.cacheTok, cacheTok);
@@ -1933,92 +1933,86 @@ class AnthropicStreamWriter implements IRStreamWriter {
 }
 
 class ResponsesStreamWriter implements IRStreamWriter {
-  private respId = `resp_${Date.now().toString(36)}`;
-  private created = false;
-  private msgAdded = false;
+  private id = `resp_${crypto.randomUUID()}`;
+  private started = false;
   private seq = 0;
-  private model: string;
-  private accText = "";
-  private fnName = "";
-  private fnCallId = "";
-  private fnArgs = "";
-  private fnAnnounced = false;
-  private usage = { inTok: 0, cacheTok: 0, outTok: 0 };
-  private reasonTok = 0;
-  constructor(model: string) {
-    this.model = model;
-  }
-  private createdEvent(): Uint8Array {
-    const full = { id: this.respId, object: "response", created_at: Date.now() / 1000, model: this.model, status: "in_progress", output: [], usage: null };
-    return sseBytes(`event: response.created\ndata: ${JSON.stringify({ type: "response.created", sequence_number: this.seq++, response: full })}\n\n`);
-  }
+  private items: Array<{ index: number; id: string; kind: "text" | "thinking" | "tool"; name?: string; callId?: string; text: StreamText }> = [];
+  private texts = new Map<boolean, number>();
+  private calls = new Map<string, number>();
+  private lastCall = "";
+  private usage = { inTok: 0, cacheTok: 0, outTok: 0, reasonTok: 0 };
+  constructor(private model: string) {}
   feed(deltas: IRStreamDelta[]): Uint8Array[] {
     const out: Uint8Array[] = [];
-    // First-byte liveness: response.created on the first upstream chunk
-    // even when it carries no IR deltas (reasoning-only prefixes).
-    if (!this.created && deltas.length === 0) {
-      this.created = true;
-      out.push(this.createdEvent());
+    const ev = (type: string, fields: Record<string, unknown>) => out.push(sseBytes(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: this.seq++, ...fields })}\n\n`));
+    const base = { id: this.id, object: "response", created_at: Math.floor(Date.now() / 1000), model: this.model };
+    if (!this.started) {
+      this.started = true;
+      ev("response.created", { response: { ...base, status: "in_progress", output: [], usage: null } });
     }
+    const snapshot = (item: typeof this.items[number], status: string, text: string) => item.kind === "tool"
+      ? { type: "function_call", id: item.id, call_id: item.callId, name: item.name, arguments: text, status }
+      : item.kind === "thinking" ? { type: "reasoning", id: item.id, summary: text ? [{ type: "summary_text", text }] : [] }
+      : { type: "message", id: item.id, role: "assistant", status, content: text ? [{ type: "output_text", text, annotations: [] }] : [] };
     for (const d of deltas) {
-      if (!this.created) {
-        this.created = true;
-        out.push(this.createdEvent());
-      }
+      if (d.usage) for (const key of ["inTok", "cacheTok", "outTok", "reasonTok"] as const) this.usage[key] = Math.max(this.usage[key], d.usage[key] ?? 0);
       if (d.text) {
-        if (!this.msgAdded) {
-          this.msgAdded = true;
-          out.push(sseBytes(`event: response.output_item.added\ndata: ${JSON.stringify({ type: "response.output_item.added", sequence_number: this.seq++, output_index: 0, item: { type: "message", id: "msg_0", role: "assistant", status: "in_progress", content: [] } })}\n\n`));
-          out.push(sseBytes(`event: response.content_part.added\ndata: ${JSON.stringify({ type: "response.content_part.added", sequence_number: this.seq++, item_id: "msg_0", output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } })}\n\n`));
+        const thinking = d.thinking === true;
+        let index = this.texts.get(thinking);
+        if (index === undefined) {
+          index = this.items.length;
+          this.texts.set(thinking, index);
+          const item = { index, id: `${thinking ? "rs" : "msg"}_${index}`, kind: thinking ? "thinking" as const : "text" as const, text: new StreamText() };
+          this.items.push(item);
+          ev("response.output_item.added", { output_index: index, item: snapshot(item, "in_progress", "") });
+          ev(thinking ? "response.reasoning_summary_part.added" : "response.content_part.added", { item_id: item.id, output_index: index, ...(thinking ? { summary_index: 0 } : { content_index: 0 }), part: thinking ? { type: "summary_text", text: "" } : { type: "output_text", text: "", annotations: [] } });
         }
-        this.accText += d.text;
-        out.push(sseBytes(`event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", sequence_number: this.seq++, item_id: "msg_0", output_index: 0, content_index: 0, delta: d.text })}\n\n`));
+        const item = this.items[index];
+        item.text.append(d.text);
+        ev(thinking ? "response.reasoning_summary_text.delta" : "response.output_text.delta", { item_id: item.id, output_index: index, ...(thinking ? { summary_index: 0 } : { content_index: 0 }), delta: d.text });
       }
-      if (d.toolUse && (d.toolUse.id || d.toolUse.name || d.toolUse.inputDelta)) {
-        if (d.toolUse.id) this.fnCallId = d.toolUse.id;
-        if (d.toolUse.name) this.fnName = d.toolUse.name;
-        const hadArgs = !!d.toolUse.inputDelta;
-        if (d.toolUse.inputDelta) this.fnArgs += d.toolUse.inputDelta;
-        if (!this.fnAnnounced && (this.fnName || this.fnCallId)) {
-          this.fnAnnounced = true;
-          out.push(sseBytes(`event: response.output_item.added\ndata: ${JSON.stringify({ type: "response.output_item.added", sequence_number: this.seq++, output_index: 1, item: { type: "function_call", id: this.fnCallId, call_id: this.fnCallId, name: this.fnName, arguments: "", status: "in_progress" } })}\n\n`));
-          // Combined delta: the args ride the SAME frame — stream them
-          // right after the item add instead of only in the terminal.
-          if (hadArgs) {
-            out.push(sseBytes(`event: response.function_call_arguments.delta\ndata: ${JSON.stringify({ type: "response.function_call_arguments.delta", sequence_number: this.seq++, item_id: this.fnCallId, output_index: 1, delta: d.toolUse.inputDelta })}\n\n`));
+      if (d.toolUse) {
+        const t = d.toolUse;
+        const key = t.index !== undefined ? `index:${t.index}` : t.id || t.name || this.lastCall;
+        this.lastCall = key;
+        let index = this.calls.get(key);
+        if (index === undefined) {
+          index = this.items.length;
+          this.calls.set(key, index);
+          const item = { index, id: `fc_${index}`, kind: "tool" as const, callId: t.id, name: t.name, text: new StreamText() };
+          this.items.push(item);
+          ev("response.output_item.added", { output_index: index, item: snapshot(item, "in_progress", "") });
+        }
+        const item = this.items[index];
+        if (t.id) item.callId = t.id;
+        if (t.name) item.name = t.name;
+        item.text.append(t.inputDelta);
+        if (t.inputDelta) ev("response.function_call_arguments.delta", { item_id: item.id, output_index: index, delta: t.inputDelta });
+      }
+      if (d.finish || d.error) {
+        const status = d.error ? "failed" : d.finish === "length" ? "incomplete" : "completed";
+        const output = this.items.map((item) => {
+          const text = item.text.text();
+          const full = snapshot(item, status === "completed" ? "completed" : "incomplete", text);
+          if (!d.error) {
+            if (item.kind === "tool") ev("response.function_call_arguments.done", { item_id: item.id, output_index: item.index, name: item.name, arguments: text });
+            else {
+              const thinking = item.kind === "thinking";
+              ev(thinking ? "response.reasoning_summary_text.done" : "response.output_text.done", { item_id: item.id, output_index: item.index, ...(thinking ? { summary_index: 0 } : { content_index: 0 }), text });
+              ev(thinking ? "response.reasoning_summary_part.done" : "response.content_part.done", { item_id: item.id, output_index: item.index, ...(thinking ? { summary_index: 0 } : { content_index: 0 }), part: thinking ? { type: "summary_text", text } : { type: "output_text", text, annotations: [] } });
+            }
+            ev("response.output_item.done", { output_index: item.index, item: full });
           }
-        } else if (hadArgs) {
-          out.push(sseBytes(`event: response.function_call_arguments.delta\ndata: ${JSON.stringify({ type: "response.function_call_arguments.delta", sequence_number: this.seq++, item_id: this.fnCallId, output_index: 1, delta: d.toolUse.inputDelta })}\n\n`));
-        }
-      }
-      if (d.usage) {
-        this.usage = { inTok: Math.max(this.usage.inTok, d.usage.inTok), cacheTok: Math.max(this.usage.cacheTok, d.usage.cacheTok), outTok: Math.max(this.usage.outTok, d.usage.outTok) };
-        this.reasonTok = Math.max(this.reasonTok, d.usage.reasonTok ?? 0);
-      }
-      if (d.finish) {
-        const full = {
-          id: this.respId,
-          object: "response",
-          created_at: Date.now() / 1000,
-          model: this.model,
-          status: "completed",
-          output: [
-            ...(this.accText ? [{ type: "message", id: "msg_0", role: "assistant", status: "completed", content: [{ type: "output_text", text: this.accText, annotations: [] }] }] : []),
-            ...(this.fnAnnounced ? [{ type: "function_call", id: this.fnCallId, call_id: this.fnCallId, name: this.fnName, arguments: this.fnArgs, status: "completed" }] : []),
-          ],
-          usage: { input_tokens: this.usage.inTok + this.usage.cacheTok, input_tokens_details: { cached_tokens: this.usage.cacheTok }, output_tokens: this.usage.outTok, output_tokens_details: { reasoning_tokens: this.reasonTok }, total_tokens: this.usage.inTok + this.usage.cacheTok + this.usage.outTok },
-        };
-        out.push(sseBytes(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", sequence_number: this.seq++, response: full })}\n\n`));
+          return full;
+        });
+        ev(`response.${status}`, { response: { ...base, status, output, error: d.error ? { code: d.error.type, message: d.error.message } : null, incomplete_details: status === "incomplete" ? { reason: "max_output_tokens" } : null, usage: { input_tokens: this.usage.inTok + this.usage.cacheTok, input_tokens_details: { cached_tokens: this.usage.cacheTok }, output_tokens: this.usage.outTok, output_tokens_details: { reasoning_tokens: this.usage.reasonTok }, total_tokens: this.usage.inTok + this.usage.cacheTok + this.usage.outTok } } });
+        this.dispose();
       }
     }
     return out;
   }
-  flush(): Uint8Array[] {
-    return [];
-  }
-  getUsage(): { inTok: number; cacheTok: number; outTok: number } {
-    return this.usage;
-  }
+  flush(): Uint8Array[] { return []; }
+  dispose(): void { for (const item of this.items) item.text.dispose(); }
 }
 
 /**
@@ -2031,6 +2025,7 @@ export class IRStreamTranslator {
   private pending = "";
   private decoder = new TextDecoder();
   private done = false;
+  failed = false;
   private sawFinish = false;
   /** A bare finish frame arrived but usage may still ride the NEXT chunk
    *  (canonical OpenAI pattern: finish chunk THEN usage-only chunk THEN
@@ -2088,7 +2083,7 @@ export class IRStreamTranslator {
       upstream === "anthropic"
         ? anthropicStreamParser
         : upstream === "responses"
-          ? responsesStreamParser
+          ? responsesStreamParser()
           : (_ev, data) => chatStreamParser(data);
     this.recover = Array.isArray(dsmlTools) ? dsmlRecoverer(dsmlTools).stream() : (dsmlTools ?? dsmlRecoverer([]).stream());
   }
@@ -2109,7 +2104,9 @@ export class IRStreamTranslator {
    */
   private expand(deltas: IRStreamDelta[]): IRStreamDelta[] {
     const out: IRStreamDelta[] = [];
-    for (const d of deltas) {
+    // Apply usage/content before emitting any terminal event in this frame.
+    const ordered = [...deltas.filter((d) => !d.finish && !d.error), ...deltas.filter((d) => d.finish || d.error)];
+    for (const d of ordered) {
       const content: IRStreamDelta = {};
       // Anti-duplicate guard: a native tool-use delta means the model called a
       // tool natively — release any held marker tail as plain text and stop
@@ -2126,6 +2123,7 @@ export class IRStreamTranslator {
       if (d.toolUse) content.toolUse = d.toolUse;
       if (d.usage) content.usage = d.usage;
       if (content.text || content.thinking || content.toolUse || content.usage) out.push(content);
+      if (d.error) out.push({ error: d.error });
       if (d.finish) {
         for (const e of this.recover.flush()) out.push(...IRStreamTranslator.emitToDeltas(e));
         out.push({ finish: d.finish === "stop" && this.recover.committed > 0 ? "tool_calls" : d.finish });
@@ -2182,7 +2180,10 @@ export class IRStreamTranslator {
       }
       let deltas: IRStreamDelta[];
       try {
-        deltas = this.parser(this.currentEvent, data);
+        const eventBody = JSON.parse(data);
+        deltas = eventBody.error || eventBody.type === "error"
+          ? [{ error: { type: String(eventBody.error?.type ?? eventBody.error?.code ?? eventBody.code ?? "api_error"), message: String(eventBody.error?.message ?? eventBody.message ?? "Upstream stream failed") } }]
+          : this.parser(this.currentEvent, data);
       } catch {
         deltas = [];
       }
@@ -2202,14 +2203,10 @@ export class IRStreamTranslator {
       if (this.pendingFinish !== null) {
         const pf = this.pendingFinish;
         this.pendingFinish = null;
-        // Usage arrived after the bare finish: merge into one terminal delta
-        // so the writer emits a single finish+usage chunk (legacy parity).
-        const ui = deltas.findIndex((d) => d.usage && !d.finish);
-        if (ui !== -1) {
-          deltas[ui] = { ...deltas[ui], finish: pf };
-        } else if (!deltas.some((d) => d.finish)) {
-          deltas.push({ finish: pf });
-        }
+        // The usage-only Chat parser's synthetic stop cannot overwrite a
+        // real length/tool_calls finish received in the preceding frame.
+        deltas = deltas.map((d) => d.finish ? { ...d, finish: pf } : d);
+        if (!deltas.some((d) => d.finish || d.error)) deltas.push({ finish: pf });
       }
       if (!deltas.length) continue;
       const expanded = this.expand(deltas);
@@ -2269,7 +2266,8 @@ export class IRStreamTranslator {
       // liveness frames (role/message_start/response.created) so TTFB
       // timeouts never fire on reasoning-only prefixes.
       for (const b of this.writer.feed(expanded)) out.push(b);
-      if (expanded.some((d) => d.finish)) {
+      if (expanded.some((d) => d.error)) this.failed = true;
+      if (expanded.some((d) => d.finish || d.error)) {
         this.sawFinish = true;
         this.done = true;
       }
@@ -2289,14 +2287,21 @@ export class IRStreamTranslator {
       this.sawFinish = true;
     }
     if (!this.sawFinish) {
-      // Upstream closed the SSE stream without a terminal frame (stub
-      // upstreams, cut connections): synthesize finish so the writer emits
-      // the same terminal sequence as on a clean finish (legacy parity).
-      for (const b of this.writer.feed(this.terminal("stop"))) out.push(b);
+      this.failed = true;
+      for (const b of this.writer.feed([{ error: { type: "api_error", message: "Upstream stream ended before its terminal event" } }])) out.push(b);
     }
     for (const b of this.writer.flush()) out.push(b);
     return out;
   }
+
+  fail(message: string): Uint8Array[] {
+    if (this.done) return [];
+    this.failed = true;
+    this.done = true;
+    return this.writer.feed([{ error: { type: "api_error", message } }]);
+  }
+
+  dispose(): void { this.writer.dispose?.(); }
 
   setModel(m: string): void {
     if (m && !this.model) this.model = m;

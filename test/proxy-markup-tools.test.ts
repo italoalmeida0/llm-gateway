@@ -930,7 +930,7 @@ describe("Xiaomi adaptation through handleProxy", () => {
       expect(lastUpstreamBody.tools).toBeUndefined();
       const instr = lastUpstreamBody.messages[lastUpstreamBody.messages.length - 1].content;
       expect(instr).toContain("```tool_call");
-      expect(instr).toContain('{"name": "tool_name_here", "arguments": {"param_name_1": "value goes here"}}');
+      expect(instr).toContain('{"name": "tool_name_here", "parameters": {"param_name_1": "value goes here"}}');
       // The fenced-JSON response is recovered into a native tool call.
       const j = await res.json();
       expect(j.choices[0].message.tool_calls?.[0]?.function.name).toBe("exec_bash");

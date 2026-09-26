@@ -41,13 +41,26 @@ export const MAX_TOOL_ID_LENGTH = 64;
 export function compactToolIds(body: Record<string, unknown>): Record<string, unknown> {
   const map = new Map<string, string>();
   let seq = 0;
+  // Reserve existing ids before allocating replacements, including results
+  // that precede their calls in the input.
+  const reserved = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) { for (const item of value) visit(item); return; }
+    for (const [key, child] of Object.entries(value)) {
+      if (["id", "call_id", "tool_call_id", "tool_use_id"].includes(key) && typeof child === "string") reserved.add(child);
+      else visit(child);
+    }
+  };
+  visit(body);
   const short = (id: unknown): unknown => {
     if (typeof id !== "string") return id;
     const known = map.get(id);
     if (known) return known;
     if (id.length <= MAX_TOOL_ID_LENGTH) return id;
-    seq += 1;
+    do { seq += 1; } while (reserved.has(`tc${seq}`));
     const replacement = `tc${seq}`;
+    reserved.add(replacement);
     map.set(id, replacement);
     return replacement;
   };
@@ -227,7 +240,9 @@ export function applyOutputLimitKey(
   const modern = body.max_completion_tokens;
   if (typeof modern === "number" && typeof legacy === "number") {
     const { max_tokens: _drop, ...rest } = body;
-    return rest;
+    if (key === "max_completion_tokens") return rest;
+    const { max_completion_tokens: _modern, ...withoutLimits } = rest;
+    return { ...withoutLimits, max_tokens: modern };
   }
   if (key === "max_completion_tokens") {
     if (typeof legacy === "number" && typeof modern !== "number") {
@@ -282,10 +297,20 @@ export function normalizeForTarget(
   body: Record<string, unknown>,
   profile: TargetProfile,
   upstreamModel?: string,
+  via: WireProto = "openai",
 ): Record<string, unknown> {
-  let out = applyOutputLimitKey(body, profile.outputLimitKey);
+  let out = via === "openai" ? applyOutputLimitKey(body, profile.outputLimitKey) : body;
   if (!profile.forwardReasoningEffort && "reasoning_effort" in out) {
     const { reasoning_effort: _drop, ...rest } = out;
+    out = rest;
+  }
+  // `reasoning_effort` is rejected by strict non-reasoning models
+  // (gpt-4o-mini class: 400 "Unrecognized request argument supplied" —
+  // live 2026-09-26 on an anthropic->chat translation). Mirror the
+  // `reasoning` rule below: only reasoning families keep it, whether it
+  // came from the client or the IR default.
+  if (via === "openai" && "reasoning_effort" in out && !isReasoningTarget(upstreamModel ?? "")) {
+    const { reasoning_effort: _dropEffort, ...rest } = out;
     out = rest;
   }
   // Responses `reasoning: {effort}` is rejected by non-reasoning models
@@ -313,7 +338,7 @@ export function normalizeForTarget(
 
 /** Convenience: derive the profile and normalize in one call. */
 export function normalizeAttemptBody(body: Record<string, unknown>, src: ProfileSource): Record<string, unknown> {
-  return normalizeForTarget(body, profileForTarget(src), src.upstreamModel ?? undefined);
+  return normalizeForTarget(body, profileForTarget(src), src.upstreamModel ?? undefined, src.via);
 }
 
 /** Which upstream API family serves this attempt, derived from the

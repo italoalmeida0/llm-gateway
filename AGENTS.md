@@ -72,10 +72,12 @@ their own gateway keys, budgets and dashboards. Think simplified self-hosted Lit
     (sanitized + `x-gateway-attempts`), or 503 only when no attempt could
     reach an upstream at all (every lane circuit-broken).
 - **Protocol translation is hub-and-spoke** (`server/proxy/gateway-ir.ts`):
-  every ingress protocol (chat/anthropic/responses) decodes ONCE into the
-  gateway IR; every attempt (incl. same-protocol — dialects still differ)
-  encodes IR→egress in order ingress-protocol → chat → anthropic →
-  responses. Streams go through `IRStreamTranslator` (one SSE parser +
+  cross-protocol requests decode lazily ONCE into the gateway IR and reuse
+  it across attempts. Native requests retain opaque fields and receive only
+  target-profile normalization. Each target tries its available capabilities
+  in order ingress-protocol → chat → anthropic → responses, with keys in
+  priority order per capability. Embeddings/legacy completions stay native;
+  provider-managed Responses state never crosses protocols. Streams go through `IRStreamTranslator` (one SSE parser +
   writer per protocol); errors re-envelope via the IR. Protocol N+1 = one
   decoder + one encoder + one SSE parser/writer, never N×N bridges (the old
   `anthropic-bridge.ts`/`responses-bridge.ts` are deleted). Per-target quirks

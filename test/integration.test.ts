@@ -2364,6 +2364,77 @@ describe("upstream failover", () => {
   });
 });
 
+describe("IR routing regressions over HTTP", () => {
+  test("model errors, alternate capabilities, operation isolation and one-time image decoding", async () => {
+    let mode = "model-error";
+    const seen: Array<{ path: string; body: any }> = [];
+    let images = 0;
+    const upstream = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+      const pathname = new URL(req.url).pathname;
+      if (pathname.endsWith("/models")) return Response.json({ data: [] });
+      if (pathname === "/image") { images++; return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } }); }
+      const body: any = await req.json();
+      seen.push({ path: pathname, body });
+      if (mode === "model-error" && pathname.startsWith("/a/")) return Response.json({ error: { message: "No endpoints found for this model" } }, { status: 400 });
+      if (mode === "capability" && pathname.endsWith("/responses")) return Response.json({ error: { message: "model not found" } }, { status: 404 });
+      if (mode === "image" && pathname.startsWith("/a/")) return Response.json({ error: { message: "model not found" } }, { status: 404 });
+      if (pathname.endsWith("/embeddings")) return Response.json({ object: "list", data: [{ object: "embedding", index: 0, embedding: [0.25] }], model: body.model, usage: { prompt_tokens: 2 } });
+      return Response.json({ id: "chatcmpl-audit", model: body.model, choices: [{ index: 0, message: { role: "assistant", content: "OK" }, finish_reason: "stop" }], usage: { prompt_tokens: 2, completion_tokens: 1 } });
+    } });
+    const base = `http://127.0.0.1:${upstream.port}`;
+    const ids: string[] = [];
+    const model = "audit-routing-regression";
+    try {
+      for (const lane of ["a", "b"]) {
+        const result = await api("/api/admin/providers", { token: adminToken, body: { name: `audit-${lane}`, openaiBaseUrl: `${base}/${lane}/v1`, apiKey: "audit-fixture-only" } });
+        expect(result.status).toBe(200);
+        ids.push(result.json.provider.id);
+      }
+      expect((await api("/api/admin/models", { token: adminToken, body: { id: model, targets: ids.map((id) => ({ providerId: id, upstreamModel: "native-id" })) } })).status).toBe(200);
+      expect((await api("/api/admin/settings", { token: adminToken, method: "PATCH", body: { routingMode: "router" } })).status).toBe(200);
+      const first = await llm("/v1/chat/completions", gatewayKey, { model, messages: [{ role: "user", content: "hi" }] });
+      expect(first.status).toBe(200); await first.text();
+      expect(first.headers.get("x-gateway-attempts")).toBe("2");
+      expect(seen.map((s) => s.path)).toEqual(["/a/v1/chat/completions", "/b/v1/chat/completions"]);
+
+      expect((await api(`/api/admin/models/${model}/targets`, { token: adminToken, method: "PUT", body: { targets: [{ providerId: ids[0], upstreamModel: "native-id" }] } })).status).toBe(200);
+      expect((await api(`/api/admin/providers/${ids[0]}`, { token: adminToken, method: "PATCH", body: { responsesBaseUrl: `${base}/a/v1`, anthropicBaseUrl: `${base}/a/v1` } })).status).toBe(200);
+      mode = "capability"; seen.length = 0;
+      const fallback = await llm("/v1/responses", gatewayKey, { model, input: "hi" });
+      expect(fallback.status).toBe(200); await fallback.text();
+      expect(seen.map((s) => s.path)).toEqual(["/a/v1/responses", "/a/v1/chat/completions"]);
+
+      mode = "embeddings"; seen.length = 0;
+      const embedding = await llm("/v1/embeddings", gatewayKey, { model, input: "keep this input" });
+      expect(embedding.status).toBe(200);
+      expect((await embedding.json()).data[0].embedding).toEqual([0.25]);
+      expect(seen.map((s) => s.path)).toEqual(["/a/v1/embeddings"]);
+      expect(seen[0].body.input).toBe("keep this input");
+      expect((await api(`/api/admin/providers/${ids[0]}`, { token: adminToken, method: "PATCH", body: { openaiBaseUrl: null } })).status).toBe(200);
+      for (const operation of ["embeddings", "completions"]) {
+        seen.length = 0;
+        const unsupported = await llm(`/v1/${operation}`, gatewayKey, { model, input: "hi", prompt: "hi" });
+        expect(unsupported.status).toBe(503); await unsupported.text();
+        expect(seen).toHaveLength(0);
+      }
+
+      mode = "image"; seen.length = 0;
+      expect((await api(`/api/admin/providers/${ids[0]}`, { token: adminToken, method: "PATCH", body: { openaiBaseUrl: `${base}/a/v1`, anthropicBaseUrl: null, responsesBaseUrl: null } })).status).toBe(200);
+      expect((await api(`/api/admin/models/${model}/targets`, { token: adminToken, method: "PUT", body: { targets: ids.map((id) => ({ providerId: id, upstreamModel: "native-id" })) } })).status).toBe(200);
+      const image = await llm("/v1/responses", gatewayKey, { model, input: [{ role: "user", content: [{ type: "input_text", text: "look" }, { type: "input_image", image_url: `${base}/image` }] }] });
+      expect(image.status).toBe(200); await image.text();
+      expect(images).toBe(1);
+      expect(seen.map((s) => s.path)).toEqual(["/a/v1/chat/completions", "/b/v1/chat/completions"]);
+      expect(seen[1].body.messages[0].content[1].image_url.url).toBe("data:image/png;base64,AQID");
+    } finally {
+      await api(`/api/admin/models/${model}`, { token: adminToken, method: "DELETE" });
+      for (const id of ids) await api(`/api/admin/providers/${id}`, { token: adminToken, method: "DELETE" });
+      await api("/api/admin/settings", { token: adminToken, method: "PATCH", body: { routingMode: "passthrough" } });
+      upstream.stop(true);
+    }
+  });
+});
+
 /**
  * Zero-usage inference — its own suite on dedicated ports (4470/4471).
  *

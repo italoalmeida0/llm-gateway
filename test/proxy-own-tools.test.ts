@@ -190,7 +190,7 @@ describe("own workaround: raw body + instruction", () => {
       { name: "exec_bash", description: "Run a shell command", parameters: { type: "object" } },
     ]);
     expect(s).toContain("```tool_call\n");
-    expect(s).toContain('{"name": "tool_name_here", "arguments": {"param_name_1": "value goes here"}}');
+    expect(s).toContain('{"name": "tool_name_here", "parameters": {"param_name_1": "value goes here"}}');
     expect(s).toContain("The opening line must be exactly: ```tool_call");
     expect(s).toContain("The closing line must be exactly: ```");
     expect(s).toContain('"name": "exec_bash"');

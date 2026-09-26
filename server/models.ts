@@ -10,6 +10,7 @@ import {
 import { decryptSecret } from "./crypto";
 import { GATEWAY_SECRET } from "./config";
 import { keyUsable } from "./failover";
+import { apiFamilyForBaseUrl } from "./proxy/target-profile";
 import { normalizePricing, pricingColumns } from "./pricing";
 import { defaultToolCallModeFor, normalizeToolCallMode } from "./tool-call-mode";
 
@@ -679,10 +680,10 @@ export function resolveModelRoute(snap: RouterSnapshot, proto: Proto, model: str
   for (const t of enabledTargets) {
     const provider = snap.providers.get(t.provider_id);
     if (!provider) continue;
-    const via = candidateUsable(provider, proto);
-    if (!via) continue;
-    for (const key of usableKeys(provider)) {
-      candidates.push({ provider, key, upstreamModel: t.upstream_model, translated: via !== proto, via });
+    for (const via of egressPreference(proto).filter((p) => providerHasCapability(provider.row, p))) {
+      for (const key of usableKeys(provider)) {
+        candidates.push({ provider, key, upstreamModel: t.upstream_model, translated: via !== proto, via });
+      }
     }
   }
   if (candidates.length === 0) {
@@ -750,8 +751,14 @@ function scoreAffinityRanked(snap: RouterSnapshot, modelId: string, proto?: Prot
   if (id.includes("/")) guesses.push("or");
   const ranked: string[] = [];
   for (const guess of guesses) {
-    const p = byName.get(guess);
-    if (p && candidateUsable(p, proto ?? "openai") !== null && !ranked.includes(p.row.id)) ranked.push(p.row.id);
+    const family = { syn: "synthetic", meta: "meta", or: "openrouter", xai: "xai", oai: "openai", gem: "google", ant: "anthropic" }[guess];
+    const matches = [...snap.providers.values()].filter((p) =>
+      [p.row.openai_base_url, p.row.anthropic_base_url, p.row.responses_base_url].some((url) => apiFamilyForBaseUrl(url) === family));
+    // Legacy names remain a fallback for custom endpoints of unknown family.
+    if (!matches.length && byName.has(guess)) matches.push(byName.get(guess)!);
+    for (const p of matches) {
+      if (usableKeys(p).length && candidateUsable(p, proto ?? "openai") !== null && !ranked.includes(p.row.id)) ranked.push(p.row.id);
+    }
   }
   return ranked;
 }
@@ -780,8 +787,10 @@ export function passthroughCandidates(snap: RouterSnapshot, proto: Proto, modelI
   scored.sort((a, b) => a.rank - b.rank || a.order - b.order);
   const out: RouteCandidate[] = [];
   for (const sc of scored) {
-    for (const key of usableKeys(sc.provider)) {
-      out.push({ provider: sc.provider, key, upstreamModel: "", translated: sc.via !== proto, via: sc.via });
+    for (const via of egressPreference(proto).filter((p) => providerHasCapability(sc.provider.row, p))) {
+      for (const key of usableKeys(sc.provider)) {
+        out.push({ provider: sc.provider, key, upstreamModel: "", translated: via !== proto, via });
+      }
     }
   }
   return out;

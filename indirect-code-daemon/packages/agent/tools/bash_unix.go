@@ -36,6 +36,9 @@ func killProcessGroup(cmd *exec.Cmd) {
 	pgid := pid
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	time.AfterFunc(3*time.Second, func() {
+		// Unconditional escalation: a member that outlived the leader is
+		// reparented to init, so a ppid walk alone would miss it — the
+		// group KILL reaches it.
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		proctable.KillTree(pid, int(syscall.SIGKILL))
 	})

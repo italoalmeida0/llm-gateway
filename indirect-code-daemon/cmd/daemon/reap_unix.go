@@ -23,6 +23,8 @@ func reapStoredCommand(st *runner.State) {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	proctable.KillTree(pgid, int(syscall.SIGTERM))
 	time.AfterFunc(3*time.Second, func() {
+		// Unconditional: reparented survivors are only reachable via the
+		// process group, not a ppid walk.
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		proctable.KillTree(pgid, int(syscall.SIGKILL))
 	})

@@ -39,37 +39,36 @@ func requestTerminate(pgid int) {
 }
 
 // reapCommandTree is GNU timeout's escalation, SYNCHRONOUS: TERM, a grace
-// window, then KILL the group + a ppid-walk sweep (setsid'd descendants
-// live outside the group but never outside the tree). Returns once the
-// tree is gone (or the deadline passes).
+// window, then KILL the group + a ppid-walk sweep. Returns once the tree
+// is gone (or the deadline passes). The group probe is essential: once the
+// leader exits, a surviving member is REPARENTED to init, so a ppid walk
+// from the leader finds nothing while the process is still in the group.
 func reapCommandTree(pgid int) {
 	if pgid <= 0 {
 		return
+	}
+	if !groupAlive(pgid) {
+		return // fast path: the whole group is already gone
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	proctable.KillTree(pgid, int(syscall.SIGTERM))
 	deadline := time.Now().Add(killGrace)
 	for time.Now().Before(deadline) {
-		if !treeAlive(pgid) {
+		if !groupAlive(pgid) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	// Grace expired: KILL unconditionally, then sweep the tree for any
+	// setsid'd escape (outside the group, still in the ppid tree).
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	proctable.KillTree(pgid, int(syscall.SIGKILL))
 }
 
-// treeAlive reports whether the group leader or any descendant is alive.
-func treeAlive(pgid int) bool {
-	if processAlive(pgid) {
-		return true
-	}
-	for _, d := range proctable.Descendants(pgid) {
-		if processAlive(d) {
-			return true
-		}
-	}
-	return false
+// groupAlive reports whether ANY process remains in the group (kill(-pgid,
+// 0) succeeds while the group is non-empty, regardless of reparenting).
+func groupAlive(pgid int) bool {
+	return syscall.Kill(-pgid, 0) == nil
 }
 
 // processAlive is the pid liveness probe used by orphan/GC decisions.

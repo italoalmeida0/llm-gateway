@@ -88,6 +88,16 @@ func TestRecoveryRunnerDeathAfterAdoptionReapsCommand(t *testing.T) {
 	// Completion already includes the reap grace; only allow signal delivery
 	// here, rather than granting another full cancellation window.
 	waitFor(t, time.Second, func() bool { return tools.ProcessIdentity(state.CmdPID) == "" })
+	// The state file precedes the final log copy and registry notification.
+	// Wait for that complete recovery before cleanup removes the directory.
+	waitFor(t, 3*time.Second, func() bool {
+		for _, row := range listJobs(b) {
+			if row["id"] == proc.JobID && row["status"] == BgStatusError {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func TestRecoveryAdoptedStopEscalatesResistantLeader(t *testing.T) {

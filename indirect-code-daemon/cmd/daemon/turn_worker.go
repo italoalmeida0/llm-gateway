@@ -790,7 +790,14 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 	case core.EvToolExecutionStart:
 		// V2-001: foreground tool execution is a declared wait (bounded by
 		// its own deadline; long commands detach to the BG supervisor).
-		w.declareWait("tool", time.Now().Add(tuneWaitTool))
+		wait := tuneWaitTool
+		if e.Name == "sleep" {
+			var args tools.SleepArgs
+			if json.Unmarshal(e.Args, &args) == nil {
+				wait = max(wait, time.Duration(min(max(args.Seconds, 1), 3600)*float64(time.Second))+2*tuneWatchEvery)
+			}
+		}
+		w.declareWait("tool", time.Now().Add(wait))
 		payload["event"] = map[string]any{"type": "tool_execution_start", "id": e.ID, "startedAt": e.StartedAt}
 	case core.EvUsage:
 		// Same recover-guard as onUsage: counting must never kill a turn.
@@ -815,6 +822,7 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 		evMap["cumulative"] = w.agent.Cost()
 		payload["event"] = evMap
 	case core.EvRetry:
+		w.declareWait("retry", time.Now().Add(e.Delay+2*tuneWatchEvery))
 		errText := ""
 		if e.Err != nil {
 			errText = e.Err.Error()

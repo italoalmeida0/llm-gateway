@@ -1,12 +1,43 @@
 package main
 
 import (
+	"crypto/sha256"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
 )
+
+// The downloaded updater runs from the very slot it is asked to stage into.
+// Exercise a real executing image: Linux rejects truncation with ETXTBSY and
+// Windows rejects writes to its mapped executable.
+func TestStageAlreadyRunningSlotApp(t *testing.T) {
+	if slot := os.Getenv("INDIRECT_TEST_STAGE_SELF"); slot != "" {
+		if _, err := stageAppTo(slot); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	slot := t.TempDir()
+	path, err := stageAppTo(slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(path, "-test.run=^TestStageAlreadyRunningSlotApp$")
+	cmd.Env = append(os.Environ(), "INDIRECT_TEST_STAGE_SELF="+slot)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("self staging failed: %v\n%s", err, out)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || sha256.Sum256(before) != sha256.Sum256(after) {
+		t.Fatal("running image changed")
+	}
+}
 
 // TestWorkerModeRouting locks the multi-call contract (main.go): which
 // invocations run the worker role vs the boot role. Mis-routing here is

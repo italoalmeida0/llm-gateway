@@ -116,6 +116,38 @@ try {
  await page.waitForTimeout(100);
  assert(await answer.isVisible(),"turn end hid the answer being read while unpinned");
  assert.equal(await page.locator('#actual [data-turn-final]').count(),0,"turn end moved the answer while unpinned");
+ await page.evaluate(async()=>{
+  const {t}=(window as any).transcriptTest;
+  t.resetForSession();
+  t.applySnapshot("other",{status:"running",messages:[],transcript:{stream:"tools",seq:0}});
+  let seq=0;
+  const send=(event:any)=>t.handleAgentEvent("other",event,{stream:"tools",seq:++seq});
+  const raw:any[]=[];
+  for(let i=0;i<12;i++) {
+   const id=`step-${i}`, tool=`call-${i}`;
+   send({type:"assistant_start",messageId:id,index:raw.length,turnIndex:1});
+   send({type:"tool_use_start",messageId:id,id:tool,name:"bash"});
+   send({type:"tool_use_args",messageId:id,id:tool,delta:'{"command":"echo test"}'});
+   await new Promise(requestAnimationFrame);
+   const msg={id,role:"assistant",turnIndex:1,content:[{summary:"completed thought"},{text:`Step ${i}`},{id:tool,name:"bash",arguments:{command:"echo test"}}]};
+   send({type:"assistant_message",messageId:id,index:raw.length,message:msg}); raw.push(msg);
+   send({type:"tool_call",messageId:id,id:tool,name:"bash",args:{command:"echo test"}});
+   send({type:"turn_end",messageId:id,stop:"tool_use"});
+   send({type:"tool_result",messageId:id,id:tool,content:"test"});
+   raw.push({id:`result-${i}`,role:"tool",turnIndex:1,content:[{call_id:tool,content:[{text:"test"}]}]});
+   await new Promise(requestAnimationFrame);
+  }
+  await t.applySessionContent("other",raw,undefined,undefined,{transcript:{stream:"tools",seq},pendingToolResults:[{call_id:"call-outside-this-page",content:[{text:"stale result"}]}]});
+  t.handleStatusEvent({sessionId:"other",status:"idle",transcript:{stream:"tools",seq:++seq}});
+  (window as any).toolProjection={messages:t.messages(),blocks:JSON.parse(JSON.stringify(t.renderBlocks()))};
+ });
+ await page.waitForTimeout(100);
+ const ghosts=await page.evaluate(()=>{
+  const {t}=(window as any).transcriptTest;
+  return t.renderBlocks().flatMap((b:any)=>b.kind==="series"?b.units.filter((u:any)=>!u.call?.toolName).map((u:any)=>JSON.parse(JSON.stringify(u))):[]);
+ });
+ assert.deepEqual(ghosts,[],"snapshot left result-only ghost tools");
+ assert.equal(await page.locator('#actual').getByText("tool",{exact:true}).count(),0,"rendered unnamed tool rows");
  assert.deepEqual(errors,[]);
  console.log("PASS: stable DOM identity, replayed tool results, async snapshot ordering, unpinned scroll anchor, stale history rejection, discard/index reuse, session isolation, unpinned turn-end disclosures");
 } finally {await browser.close();server.stop(true);}

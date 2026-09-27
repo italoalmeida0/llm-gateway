@@ -276,7 +276,7 @@ func (s *diskStore) writeSessionFile(id string, lines []turnLine, meta metaLine)
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, s.sessionFile(id)); err != nil {
+	if err := replaceFile(tmpName, s.sessionFile(id)); err != nil {
 		return err
 	}
 	if df, err := os.Open(dir); err == nil {
@@ -652,7 +652,7 @@ func (s *diskStore) rewriteTailAppend(path string, tailSize int64, tl turnLine, 
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceFile(tmpName, path); err != nil {
 		return err
 	}
 	if df, err := os.Open(dir); err == nil {
@@ -726,7 +726,7 @@ func (s *diskStore) rewriteMetaOnly(id string, meta metaLine) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceFile(tmpName, path); err != nil {
 		return err
 	}
 	if df, err := os.Open(dir); err == nil {
@@ -819,7 +819,7 @@ func commitTmpFile(tmp *os.File, tmpName, path string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceFile(tmpName, path); err != nil {
 		return err
 	}
 	if df, err := os.Open(filepath.Dir(path)); err == nil {

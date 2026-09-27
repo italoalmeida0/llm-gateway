@@ -121,6 +121,19 @@ func (t *transcriptState) track(ev map[string]any, rec *SessionRecord) {
 	id, _ := ev["id"].(string)
 	str := func(key string) string { v, _ := ev[key].(string); return v }
 	if typ == "tool_result" {
+		// Persistent tools commit to WAL before emitting their display event.
+		// Such results already belong to the snapshot; retaining them here
+		// leaks old results into later pages without their original calls.
+		for i := len(rec.Messages) - 1; i >= 0; i-- {
+			for _, block := range rec.Messages[i].Content {
+				if result, ok := block.(provider.ToolResultBlock); ok && result.CallID == id {
+					return
+				}
+			}
+			if rec.Messages[i].ID == t.activeID {
+				break
+			}
+		}
 		r := provider.ToolResultBlock{CallID: id, Content: []provider.Content{provider.TextBlock{Text: str("content")}}, Details: ev["details"]}
 		r.IsError, _ = ev["isError"].(bool)
 		r.StartedAt, _ = ev["startedAt"].(int64)

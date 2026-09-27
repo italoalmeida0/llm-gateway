@@ -1,8 +1,7 @@
 import type { DaemonCommand } from "../daemon-protocol";
-import { createEffect, createMemo, createSignal, type Setter } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, type Setter } from "solid-js";
 import { REASONING_LEVELS, SLASH_COMMANDS } from "../constants";
 import { formatEffort, normalizeEffort } from "../utils/format";
-import type { ChatMessage } from "../types";
 import { sanitizeUserText } from "../live";
 import { createMentions } from "./useMentions";
 import { slashCommand } from "../utils/composerTokens";
@@ -41,8 +40,6 @@ export function createComposer(opts: {
   onClearConversation: () => void;
   /** No session: the page creates one in the active project. */
   onBeginConversation: () => void;
-  /** Turn running: the page queues the message instead of sending. */
-  onQueueMessage: (text: string, attachmentIds: string[], model: string, yolo: boolean) => void;
   isCreatingSession: () => boolean;
 }) {
   const [inputPrompt, setInputPromptValue] = createSignal("");
@@ -73,13 +70,32 @@ export function createComposer(opts: {
   const { pendingAttachments, uploadOneAttachment } = attachments;
   const [sending, setSending] = createSignal(false);
   let submissionEpoch = 0;
+  let promptReply: {id:string; resolve:(queued: boolean)=>void; reject:(error:Error)=>void} | null = null;
+  function notePromptReply(requestId: string | undefined, error?: string, queued = false) {
+    if (!promptReply || promptReply.id !== requestId) return false;
+    const reply = promptReply;
+    promptReply = null;
+    if (error) reply.reject(new Error(error)); else reply.resolve(queued);
+    return true;
+  }
+  onCleanup(() => {
+    promptReply?.reject(new Error("Conversation closed before prompt confirmation"));
+    promptReply = null;
+  });
+
   function clearAttachments() {
     submissionEpoch++;
+    promptReply?.reject(new Error("Conversation changed before prompt confirmation"));
+    promptReply = null;
     attachments.clearAttachments();
   }
 
   createEffect(() => {
-    if (!opts.isOpen() || !opts.isHostOnline()) attachments.cancelUploads();
+    if (!opts.isOpen() || !opts.isHostOnline()) {
+      attachments.cancelUploads();
+      promptReply?.reject(new Error("Connection lost before prompt confirmation. Check the conversation before sending again."));
+      promptReply = null;
+    }
   });
 
   // Composer menus (addBtn anchor lives on the page, as before —
@@ -295,47 +311,36 @@ export function createComposer(opts: {
       const model = opts.getModel();
       const options = opts.getOptions();
       const cleanText = sanitizeUserText(text);
-      // A turn started while composing or uploading: queue instead of
-      // sending. The daemon promotes the head when the turn completes.
-      if (opts.isSessionRunning()) {
-        clearAttachments();
-        if (inputPrompt().trim() === text) setInputPrompt("");
-        opts.onQueueMessage(cleanText, attachmentIds, model, options.access === "full");
-        return;
-      }
-      const displayText = cleanText;
-      const userMsg: ChatMessage = {
-        id: `user_${Date.now()}`,
-        role: "user",
-        blocks: [{ type: "text", text: displayText }],
-        time: Date.now(),
-        attachments: pending.map((a, i) => ({
-          id: attachmentIds[i],
-          name: a.name,
-          mime: a.mime,
-          size: a.size,
-        })),
-        isTurnStart: true,
-      };
-      opts.t.pushUserMessage(userMsg);
-      if (inputPrompt().trim() === text) setInputPrompt("");
-      // Preserve any new text or attachments entered while the upload was in flight.
-      for (const p of pending) attachments.removePendingAttachment(p.key);
-      try {
-        localStorage.removeItem(`llmgw-draft:${opts.getHostId()}:${sid}`);
-      } catch {}
-      opts.t.beginTurn();
-      opts.t.scrollToBottom(true);
-
-      opts.send({
-        type: "prompt",
-        sessionId: sid,
-        text: cleanText,
-        model,
-        yolo: options.access === "full",
-        options,
-        attachmentIds,
+      // Keep the draft until the daemon acknowledges admission. Session
+      // status and the user bubble come exclusively from daemon events.
+      // The actor also decides whether to queue: browser status may lag
+      // behind Stop or the final session-file commit.
+      const requestId = crypto.randomUUID();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const accepted = new Promise<boolean>((resolve, reject) => {
+        promptReply = {id:requestId, resolve, reject};
+        timer = setTimeout(() => notePromptReply(requestId, "Prompt confirmation timed out. Check the conversation before sending again."), 15000);
       });
+      opts.t.transcriptScroll.pin();
+      let queued = false;
+      try {
+        opts.send({type:"prompt",requestId,sessionId:sid,text:cleanText,model,
+          yolo:options.access === "full",options,attachmentIds});
+        queued = await accepted;
+      } finally {
+        clearTimeout(timer);
+        if (promptReply?.id === requestId) promptReply = null;
+      }
+      if (epoch !== submissionEpoch || opts.isDisposed() || opts.getHostId() !== hostId || opts.getSessionId() !== sid) return;
+      if (queued) opts.toast("Queued — sends after agent finishes", "ok");
+      if (inputPrompt().trim() === text) setInputPrompt("");
+      for (const p of pending) attachments.removePendingAttachment(p.key);
+    } catch (error) {
+      if (!opts.isDisposed() && opts.getHostId() === hostId && opts.getSessionId() === sid) {
+        opts.toast(error instanceof Error ? error.message : "Could not send message", "err");
+        opts.t.fetchSession(sid);
+      }
+
     } finally {
       setSending(false);
     }
@@ -355,7 +360,7 @@ export function createComposer(opts: {
     slashMatches,
     pickSlash,
     dismissSlash: () => setSlashDismissed(inputPrompt()),
-    sendPrompt,
+    sendPrompt, notePromptReply,
   };
 }
 

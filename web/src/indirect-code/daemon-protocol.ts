@@ -35,7 +35,7 @@ export type DaemonCommand = CommandBase &
   | { type: "get_history"; sessionId: string; beforeTurn: number; requestId?: string }
   | { type: "pull"; collection: string }
   | { type: "configure_session"; sessionId: string; model: string; options: Omit<SessionChoice, "model"> }
-  | { type: "prompt"; sessionId: string; text: string; model: string; yolo: boolean; options: Omit<SessionChoice, "model">; attachmentIds: string[] }
+  | { type: "prompt"; sessionId: string; requestId?: string; text: string; model: string; yolo: boolean; options: Omit<SessionChoice, "model">; attachmentIds: string[] }
   | { type: "queue_add"; sessionId: string; text: string; model: string; yolo: boolean; attachmentIds: string[] }
   | { type: "queue_update"; sessionId: string; queueId: string; text: string; attachmentIds: string[] }
   | { type: "queue_remove"; sessionId: string; queueId: string }
@@ -131,6 +131,7 @@ export interface BgJobWire {
 export type DaemonEvent = EventBase &
   (
     | { type: "relay_connected" }
+    | { type: "prompt_accepted"; sessionId: string; requestId: string; queued?: boolean }
     | { type: "host_status"; status?: string }
     | { type: "change"; collection: string }
     | { type: "config_updated"; requestId?: string; success?: boolean; error?: string; revision?: string }

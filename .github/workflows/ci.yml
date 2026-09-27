@@ -63,6 +63,10 @@ jobs:
           bun add --cwd "$RUNNER_TEMP/transcript-browser" playwright@1.63.0
           bun "$RUNNER_TEMP/transcript-browser/node_modules/playwright/cli.js" install --with-deps chromium
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-transcript-ui.ts
+          PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-composer-ui.ts
+
+      - name: Daemon protocol and turn lifecycle
+        run: bun scripts/test-indirect-daemon-protocol.ts
 
   daemon:
     name: Daemon (${{ matrix.name }})
@@ -132,6 +136,22 @@ jobs:
 
       - name: Tests
         run: go test ./... -count=1 -timeout 900s
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Real executable update and rollback
+        working-directory: .
+        run: |
+          bun scripts/test-indirect-handoff-e2e.ts
+          bun scripts/test-indirect-handoff-e2e.ts --rollback
+
+      - name: Native Stop and follow-up protocol
+        working-directory: .
+        run: |
+          go build -C indirect-code-daemon -o bin/protocol-fixture.exe ./cmd/daemon
+          DAEMON_BINARY="indirect-code-daemon/bin/protocol-fixture.exe" bun scripts/test-indirect-daemon-protocol.ts
 
   daemon-musl:
     name: Daemon (linux amd64 musl + glibc-free proof)

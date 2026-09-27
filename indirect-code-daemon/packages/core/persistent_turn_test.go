@@ -24,27 +24,25 @@ func terminalEvents(stop provider.StopReason, content ...provider.Content) <-cha
 	return ch
 }
 
-func TestPersistentTurnIgnoresNudgeCapsUntilExplicitStop(t *testing.T) {
+func TestPersistentTurnRespectsConsecutiveNudgeBudget(t *testing.T) {
 	for _, text := range []string{"", "Still working"} {
 		t.Run(text, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 			calls := 0
 			c := persistentClient{stream: func(context.Context, provider.Request) (<-chan provider.Event, error) {
 				calls++
-				if calls == 8 {
-					cancel()
-				}
 				return terminalEvents(provider.StopEnd, provider.TextBlock{Text: text}), nil
 			}}
 			a := NewAgent(c, "m", "", NewRegistry(&dummyTool{name: "mark_task_as_complete"}))
 			a.PersistentTurns = true
-			a.RetrySchedule = []time.Duration{0}
-			if err := a.Prompt(ctx, "work", nil, nil); !errors.Is(err, context.Canceled) {
-				t.Fatalf("want explicit cancellation, got %v", err)
+			if err := a.Prompt(context.Background(), "work", nil, nil); err != nil {
+				t.Fatal(err)
 			}
-			if calls != 8 {
-				t.Fatalf("ended after %d calls without completion", calls)
+			limit := maxCompletionNudges
+			if text == "" {
+				limit = maxContinueNudges
+			}
+			if calls != limit+1 {
+				t.Fatalf("calls=%d, expected %d nudges then stop", calls, limit)
 			}
 		})
 	}
@@ -55,9 +53,8 @@ func TestPersistentTurnRetriesRequestDeadlineAndCompaction(t *testing.T) {
 	c := persistentClient{stream: func(context.Context, provider.Request) (<-chan provider.Event, error) {
 		calls++
 		if calls == 1 {
-			// Transient network timeout (NOT context.DeadlineExceeded —
-		// that means the caller gave up and must stop, not retry).
-			return nil, errors.New("i/o timeout reading response")
+			// Only the request expired; the parent turn is still live.
+			return nil, context.DeadlineExceeded
 		}
 		return terminalEvents(provider.StopEnd, provider.TextBlock{Text: "Recovered"}), nil
 	}}
@@ -76,6 +73,27 @@ func TestPersistentTurnRetriesRequestDeadlineAndCompaction(t *testing.T) {
 	}
 	if calls != 2 || compacts != 2 {
 		t.Fatalf("calls=%d compactions=%d", calls, compacts)
+	}
+}
+
+func TestPersistentRequestFailureDoesNotCancelTheParentTurn(t *testing.T) {
+	for _, failure := range []error{context.Canceled, context.DeadlineExceeded, errors.New("anthropic: http 401: unauthorized")} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			calls := 0
+			client := persistentClient{stream: func(context.Context, provider.Request) (<-chan provider.Event, error) {
+				calls++
+				if calls == 1 {
+					return nil, failure
+				}
+				return terminalEvents(provider.StopEnd, provider.TextBlock{Text: "Recovered"}), nil
+			}}
+			a := NewAgent(client, "m", "", Registry{})
+			a.PersistentTurns = true
+			a.RetrySchedule = []time.Duration{0}
+			if err := a.Prompt(context.Background(), "continue", nil, nil); err != nil || calls != 2 {
+				t.Fatalf("request failure ended the turn: calls=%d err=%v", calls, err)
+			}
+		})
 	}
 }
 

@@ -428,6 +428,15 @@ export function mergeTranscriptTail(prev: ChatMessage[], tail: ChatMessage[], fi
 }
 
 /** Turn transition when becoming idle (turn end without endedAt). */
+export function normalizeTurnActivity(turn: any, previous: TurnActivity | null = null, fallback?: string): TurnActivity | null {
+  if (!turn || !Number.isFinite(turn.startedAt)) return null;
+  const status = turn.status === "done"
+    ? (previous?.startedAt === turn.startedAt && previous?.status === "cancelled" ? "cancelled" : "completed")
+    : turn.status || fallback;
+  if (!["running", "cancelling", "cancelled", "completed", "failed"].includes(status)) return null;
+  return { ...turn, status };
+}
+
 export function finishTurn(turn: TurnActivity | null): TurnActivity | null {
   return turn && !turn.endedAt
     ? {

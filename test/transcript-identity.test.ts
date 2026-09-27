@@ -36,6 +36,14 @@ test("assistant completion replay retains an already delivered tool result", () 
 
 import { createTranscriptOrder } from "../web/src/indirect-code/transcript/order";
 import { mergeTranscriptTail } from "../web/src/indirect-code/transcript/updaters";
+import { normalizeTurnActivity } from "../web/src/indirect-code/transcript/updaters";
+
+test("turn activity tolerates released status shapes without undefined labels",()=>{
+ expect(normalizeTurnActivity({startedAt:10},null,"running")?.status).toBe("running");
+ expect(normalizeTurnActivity({startedAt:10,endedAt:20,status:"done"})?.status).toBe("completed");
+ expect(normalizeTurnActivity({startedAt:10,endedAt:20,status:"done"},{startedAt:10,status:"cancelled"})?.status).toBe("cancelled");
+ expect(normalizeTurnActivity({startedAt:10,status:"unknown"})).toBeNull();
+});
 
 test("a tail snapshot replaces retried rows while preserving older pages",()=>{
  const prev=[assistant("history",1),assistant("discarded",8),assistant("current",9)];

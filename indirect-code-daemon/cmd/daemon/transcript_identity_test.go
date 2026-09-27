@@ -91,3 +91,36 @@ func TestTranscriptRetryBeforeNewStreamKeepsCommittedAssistant(t *testing.T) {
 		t.Fatal("retry targeted an already committed response")
 	}
 }
+
+func TestTranscriptCommittedResultsNeverLeakIntoLaterPages(t *testing.T) {
+	a := reviewActor(t)
+	a.rec.Messages = []provider.Message{{ID: "assistant", Role: provider.RoleAssistant, Content: []provider.Content{provider.ToolCallBlock{ID: "call", Name: "bash"}}}}
+	a.transcript.activeID = "assistant"
+	result := provider.Message{ID: "result", Role: provider.RoleTool, Content: []provider.Content{provider.ToolResultBlock{CallID: "call"}}}
+	// The real core writes each result BEFORE emitting EvToolResult.
+	a.rec.Messages = append(a.rec.Messages, result)
+	a.transcriptCommitted(result)
+	a.emit(map[string]any{"type": "agent_event", "event": map[string]any{"type": "tool_result", "id": "call", "content": "done"}})
+	if a.clientOverlay()["pendingToolResults"] != nil {
+		t.Fatal("committed result leaked into future tail snapshots as an orphan tool")
+	}
+}
+
+func TestFinishedTurnPersistsItsActualOutcome(t *testing.T) {
+	for _, status := range []string{"completed", "cancelled", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			a := reviewActor(t)
+			a.state = stateRunning
+			a.rec.Turn = &TurnActivity{StartedAt: 10, Status: "running"}
+			event := workerFinishedMsg{gen: a.gen, cancelled: status == "cancelled"}
+			if status == "failed" {
+				event.err = "startup failed"
+			}
+			a.onWorkerFinished(event)
+			restored, err := a.store.loadSession(a.id)
+			if err != nil || restored.Turn.Status != status || restored.Turn.EndedAt == 0 {
+				t.Fatalf("outcome lost after reload: %+v %v", restored, err)
+			}
+		})
+	}
+}

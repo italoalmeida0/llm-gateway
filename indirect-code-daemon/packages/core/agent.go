@@ -178,13 +178,10 @@ type Agent struct {
 	// session only. Hosts set it before each turn; zero leaves
 	// messages unstamped (readers derive boundaries).
 	TurnIndex int
-	// PersistentTurns keeps daemon tasks alive across TRANSIENT
-	// provider/compaction errors (429/5xx/network) and requires a
-	// successful completion signal in modes that expose one.
-	// Non-retryable errors (400/auth/misconfiguration — see
-	// isRetryableUpstream) still fail fast: retrying them forever hangs
-	// the turn until the user notices (caught on Windows: fork turns
-	// spun on 'unsupported protocol scheme' instead of failing).
+	// PersistentTurns keeps daemon tasks alive across provider/compaction
+	// failures and per-request deadlines. The parent context owns Stop.
+	// Completion tools or exhausted consecutive nudge budgets end a task;
+	// failed requests retry with backoff without spending the nudge budget.
 	PersistentTurns bool
 
 	// OnUsage, if set, fires after every turn's usage row arrives,
@@ -518,10 +515,9 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		// Preparation is cached across steps and user messages. Only an
 		// explicit prompt/model/session change invokes BeforeStart again.
 		if err := a.prepareStart(ctx); err != nil {
-			// PersistentTurns retries TRANSIENT errors only: a broken
-			// setup (bad key, bad params, no gateway) fails fast instead
-			// of spinning the backoff schedule forever.
-			if a.PersistentTurns && ctx.Err() == nil && isRetryableUpstream(err) {
+			// Configuration may be repaired while the same task is waiting.
+			// A failed request does not impersonate an explicit Stop.
+			if a.PersistentTurns && ctx.Err() == nil {
 				delay := a.retryDelay(preparationAttempt)
 				preparationAttempt++
 				sink(EvRetry{Attempt: preparationAttempt, Delay: delay, Err: err})
@@ -543,8 +539,8 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		a.mu.Unlock()
 		if autoCompact != nil {
 			if err := autoCompact(ctx, sink); err != nil {
-				// Same transient-only rule as preparation above.
-				if a.PersistentTurns && ctx.Err() == nil && isRetryableUpstream(err) {
+				// Keep the task recoverable while compaction retries.
+				if a.PersistentTurns && ctx.Err() == nil {
 					delay := a.retryDelay(preparationAttempt)
 					preparationAttempt++
 					sink(EvRetry{Attempt: preparationAttempt, Delay: delay, Err: err})
@@ -610,6 +606,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			// Real progress: the model asked for more work, so the
 			// empty-response nudge budget renews from here.
 			nudges = 0
+			completionNudges = 0
 			for _, c := range assistantMsg.Content {
 				if tc, ok := c.(provider.ToolCallBlock); ok {
 					if !a.PersistentTurns && (tc.Name == "mark_task_as_complete" || tc.Name == "mark_plan_as_ready_to_execute") {
@@ -658,13 +655,8 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		// append a hidden user nudge and ask the model again, so the
 		// turn only completes on real output. Capped per turn; cancelled
 		// and aborted turns still end immediately.
-		if trimmedText == "" && !completedInTurn && (nudges < maxContinueNudges || a.PersistentTurns) {
+		if trimmedText == "" && !completedInTurn && nudges < maxContinueNudges {
 			nudges++
-			if a.PersistentTurns && nudges > maxContinueNudges {
-				if err := sleepRetry(ctx, a.retryDelay(nudges-maxContinueNudges-1)); err != nil {
-					return err
-				}
-			}
 			nudge := provider.Message{
 				Role:    provider.RoleUser,
 				Content: []provider.Content{provider.TextBlock{Text: ContinueNudgeText}},
@@ -683,7 +675,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		// When the model returns visible text without calling any tools:
 		// check if a completion tool is configured in the registry and has not yet been called in this turn.
 		// If so, prompt the model to either mark completion or continue working.
-		if trimmedText != "" && !completedInTurn && (completionNudges < maxCompletionNudges || a.PersistentTurns) {
+		if trimmedText != "" && !completedInTurn && completionNudges < maxCompletionNudges {
 			completionNudgeText := ""
 			a.mu.Lock()
 			tools := a.Tools
@@ -696,11 +688,6 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 
 			if completionNudgeText != "" {
 				completionNudges++
-				if a.PersistentTurns && completionNudges > maxCompletionNudges {
-					if err := sleepRetry(ctx, a.retryDelay(completionNudges-maxCompletionNudges-1)); err != nil {
-						return err
-					}
-				}
 				nudge := provider.Message{
 					Role:    provider.RoleUser,
 					Content: []provider.Content{provider.TextBlock{Text: completionNudgeText}},
@@ -730,6 +717,11 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 func (a *Agent) canRetryError(err error, _ int) bool {
 	if err == nil {
 		return false
+	}
+	// The caller checks the TURN context before retrying. An individual
+	// request deadline/cancellation is not an explicit stop of that turn.
+	if a.PersistentTurns {
+		return true
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -1131,7 +1123,7 @@ func (a *Agent) runOneTool(ctx context.Context, tc provider.ToolCallBlock, sink 
 
 	// Recover panics so a buggy tool does not crash the agent.
 	started := time.Now()
-	sink(EvToolExecutionStart{ID: tc.ID, StartedAt: started.UnixMilli()})
+	sink(EvToolExecutionStart{ID: tc.ID, StartedAt: started.UnixMilli(), Name: tc.Name, Args: args})
 	var res ToolResult
 	func() {
 		defer func() {

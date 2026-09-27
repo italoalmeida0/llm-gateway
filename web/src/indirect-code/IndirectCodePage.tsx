@@ -364,10 +364,6 @@ export default function IndirectCodePage() {
     },
     onClearConversation: () => startNewConversation(),
     onBeginConversation: () => beginConversationWith(),
-    onQueueMessage: (text, attachmentIds, model, yolo) => {
-      queue.addToQueue(text, attachmentIds, model, yolo);
-      notice.toast("Queued — sends after agent finishes", "ok");
-    },
     isCreatingSession: () => creatingSession(),
   });
 
@@ -963,7 +959,12 @@ export default function IndirectCodePage() {
         break;
       }
 
+      case "prompt_accepted": {
+        composer.notePromptReply(msg.requestId, undefined, msg.queued);
+        break;
+      }
       case "error": {
+        if (composer.notePromptReply(msg.requestId, msg.message || "Could not send message")) break;
         if (msg.requestId === creationRequestId) { setCreatingSession(false); }
         if (projects.isFolderRequest(msg.requestId)) { projects.setFolderLoading(false); projects.setFolderError(msg.message || "Could not browse folders"); break; }
         if (projects.isProjectCreation(msg.requestId) && projects.showNewProjectModal()) { projects.setFolderError(msg.message || "Could not create project"); break; }

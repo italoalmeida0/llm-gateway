@@ -54,8 +54,30 @@ func stageAppTo(slotDir string) (string, error) {
 		return "", err
 	}
 	local := filepath.Join(binDir, slotBinName())
-	if err := copyFileContents(exe, local, 0o755); err != nil {
+	source, err := os.Stat(exe)
+	if err != nil {
+		return "", err
+	}
+	if target, err := os.Stat(local); err == nil && os.SameFile(source, target) {
+		// --update already runs the verified image in the destination slot.
+		// Never truncate an executing image (ETXTBSY / Windows sharing lock).
+		return local, nil
+	}
+	tmp, err := os.CreateTemp(binDir, ".stage-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return "", err
+	}
+	defer os.Remove(tmpName)
+	if err := copyFileContents(exe, tmpName, 0o755); err != nil {
 		return "", fmt.Errorf("stage app: %w", err)
+	}
+	if err := os.Rename(tmpName, local); err != nil {
+		return "", fmt.Errorf("install staged app: %w", err)
 	}
 	return local, nil
 }

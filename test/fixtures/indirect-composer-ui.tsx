@@ -15,7 +15,10 @@ render(() => {
   const [sid, setSid] = createSignal("session-a"),
     [host, setHost] = createSignal("host-a"),
     [online, setOnline] = createSignal(true);
-  const send = (command: any) => api.commands.push(command),
+  const send = (command: any) => {
+    api.commands.push(command);
+    if (command.type === "prompt" && command.requestId && api.autoAccept !== false) queueMicrotask(() => c.notePromptReply(command.requestId));
+  },
     toast = (message: string) => api.notices.push(message);
   const opts = {
     send,
@@ -58,7 +61,6 @@ render(() => {
     },
     onClearConversation: () => setSid(""),
     onBeginConversation: () => {},
-    onQueueMessage: () => {},
     isCreatingSession: () => false,
   });
   const mirror = createMirror({send, isOpen: () => false, getHostId: host});

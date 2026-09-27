@@ -1,5 +1,9 @@
 # V2 release preparation
 
+See [V2.0.1 runtime regressions](v2-runtime-regressions.md) for update self-copy,
+tool overlays, turn outcomes, sleep/watchdog waits, Windows file replacement,
+and acknowledged prompt submission.
+
 See [Transcript identity, ordering, and reading position](transcript-consistency.md)
 for message IDs, snapshot/event reconciliation, unpinned reading behavior, and
 the daemon, reducer, and Chromium regression tests.

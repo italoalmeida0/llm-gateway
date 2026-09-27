@@ -95,6 +95,8 @@ type EvToolProgress struct {
 type EvToolExecutionStart struct {
 	ID        string
 	StartedAt int64
+	Name      string
+	Args      json.RawMessage
 }
 
 func (EvToolExecutionStart) Type() string { return "tool_execution_start" }

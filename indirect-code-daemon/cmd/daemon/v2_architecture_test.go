@@ -144,6 +144,17 @@ func TestV2ToolEventsDeclareAndClearWait(t *testing.T) {
 		t.Fatalf("wait must be stamped with the turn generation: %+v", waits[0])
 	}
 
+	w.handleEvent(core.EvToolExecutionStart{ID: "sleep", Name: "sleep", Args: json.RawMessage(`{"seconds":360}`), StartedAt: time.Now().UnixMilli()})
+	waits = drain()
+	if len(waits) != 1 || waits[0].until < time.Now().Add(6*time.Minute).UnixMilli() {
+		t.Fatalf("six-minute sleep inherited a shorter watchdog budget: %+v", waits)
+	}
+	w.handleEvent(core.EvRetry{Attempt: 1, Delay: 30 * time.Minute})
+	waits = drain()
+	if len(waits) != 1 || waits[0].op != "retry" || waits[0].until < time.Now().Add(30*time.Minute).UnixMilli() {
+		t.Fatalf("retry backoff unprotected from watchdog: %+v", waits)
+	}
+
 	w.handleEvent(core.EvToolResult{ID: "t1"})
 	waits = drain()
 	if len(waits) != 1 || waits[0].until != 0 {
@@ -383,7 +394,6 @@ func TestV2SocketWriteErrorInvalidatesConnection(t *testing.T) {
 		t.Fatal("socket write error did not invalidate the connection")
 	}
 }
-
 
 // V2-003: a completion notice is retained and redelivered until the
 // session acknowledges folding it into its transcript — a full inbox at

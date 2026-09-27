@@ -206,6 +206,7 @@ func (s *wsServer) dispatch(raw []byte) {
 	var base struct {
 		Type      string `json:"type"`
 		SessionID string `json:"sessionId"`
+		RequestID string `json:"requestId"`
 	}
 	if err := json.Unmarshal(raw, &base); err != nil {
 		return
@@ -244,7 +245,7 @@ func (s *wsServer) dispatch(raw []byte) {
 		})
 	}
 	l.push(raw, s.handleRaw, func() {
-		s.error(sid, "", "Session busy")
+		s.error(sid, base.RequestID, "Session busy")
 	})
 }
 
@@ -319,6 +320,7 @@ func (s *wsServer) handleRaw(raw []byte) {
 
 	case "prompt":
 		var req struct {
+			RequestID     string          `json:"requestId"`
 			Options       *SessionOptions `json:"options"`
 			SessionID     string          `json:"sessionId"`
 			Text          string          `json:"text"`
@@ -327,7 +329,7 @@ func (s *wsServer) handleRaw(raw []byte) {
 			AttachmentIDs []string        `json:"attachmentIds"`
 		}
 		_ = json.Unmarshal(raw, &req)
-		s.onPrompt(req.SessionID, req.Text, req.AttachmentIDs, req.Model, req.YOLO, req.Options)
+		s.onPrompt(req.SessionID, req.Text, req.AttachmentIDs, req.Model, req.YOLO, req.Options, req.RequestID)
 
 	case "cancel":
 		var req struct {
@@ -845,11 +847,11 @@ func (s *wsServer) handleRaw(raw []byte) {
 
 // ---- command implementations ----
 
-func (s *wsServer) onPrompt(sessionID, text string, attachmentIDs []string, model string, yolo bool, options *SessionOptions) {
+func (s *wsServer) onPrompt(sessionID, text string, attachmentIDs []string, model string, yolo bool, options *SessionOptions, requestID string) {
 	text = core.SanitizeUserText(text)
 	res := s.sessions.route(sessionID, false)
 	if res.Error != "" {
-		s.error(sessionID, "", "Session not found")
+		s.error(sessionID, requestID, "Session not found")
 		return
 	}
 	// Slash commands are worker-side concerns in v2 (compact/clear/jail):
@@ -863,16 +865,20 @@ func (s *wsServer) onPrompt(sessionID, text string, attachmentIDs []string, mode
 	select {
 	case res.Inbox <- Envelope{SessionID: sessionID, Payload: userPromptMsg{Text: text, AttachmentIDs: attachmentIDs, Model: model, YOLO: yolo, Options: options, Reply: reply}}:
 	case <-time.After(replyTimeout):
-		s.error(sessionID, "", "Session busy")
+		s.error(sessionID, requestID, "Session busy")
 		return
 	}
 	select {
 	case r := <-reply:
-		if pr, ok := r.(promptResult); ok && pr.Error != "" {
-			s.error(sessionID, "", pr.Error)
+		if pr, ok := r.(promptResult); ok {
+			if pr.Error != "" {
+				s.error(sessionID, requestID, pr.Error)
+			} else if requestID != "" {
+				s.emit(map[string]any{"type": "prompt_accepted", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "queued": pr.Queued})
+			}
 		}
 	case <-time.After(replyTimeout):
-		s.error(sessionID, "", "Session busy")
+		s.error(sessionID, requestID, "Prompt confirmation timed out; reload the session before retrying")
 	}
 }
 

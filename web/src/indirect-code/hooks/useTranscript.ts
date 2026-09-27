@@ -7,7 +7,7 @@ import { clearToolScrolls } from "../utils/scrollMemory";
 import { createTranscriptScroll } from "../scroll";
 import { createRenderBlockBuilder, latestShortTurnMessage } from "../transcript";
 import { elapsedLabel, messageText } from "../utils/format";
-import { prettyArgs } from "../utils/wire";import {
+import { prettyArgs, parseContentBlocks } from "../utils/wire";import {
   appendReasoningDelta as reduceReasoningDelta,
   appendTextDelta as reduceTextDelta,
   appendToolArgsDelta as reduceToolArgs,
@@ -18,6 +18,7 @@ import { prettyArgs } from "../utils/wire";import {
   mergeAssistantMessage,
   mergeUsage,
   normalizeSessionMessages,
+  normalizeTurnActivity,
   mergeTranscriptTail,
   orderedMessages,
   preserveBackgroundFolds,
@@ -532,7 +533,13 @@ export function createTranscript(opts: {
     const version = ++snapshotVersion;
     const host = opts.getHostId();
     if (overlay?.liveMessage) rawMsgs=[...rawMsgs,overlay.liveMessage];
-    if (overlay?.pendingToolResults?.length) rawMsgs=[...rawMsgs,{role:"tool",content:overlay.pendingToolResults}];
+    if (overlay?.pendingToolResults?.length) {
+      // A transient result can only decorate a call in this snapshot. Older
+      // daemons retained committed results beyond the page containing the call.
+      const calls = new Set(rawMsgs.flatMap(m => parseContentBlocks(m).filter(b => b.type === "tool_call").map(b => b.toolId)));
+      const pending = overlay.pendingToolResults.filter((r: any) => calls.has(r.call_id || r.tool_use_id || r.id));
+      if (pending.length) rawMsgs=[...rawMsgs,{role:"tool",content:pending}];
+    }
     pendingSnapshot = null;
     const paged = history && typeof history.oldestTurn === "number";
     const base = paged && typeof history.firstIndex === "number" ? history.firstIndex : 0;
@@ -590,7 +597,7 @@ export function createTranscript(opts: {
     if (r.workspace) setWorkspaceSnapshot(r.workspace);
     setSessionStatus(r.status === "running" ? "running" : "idle");
     setSessionCompaction(r.compaction ?? null);
-    setTurnActivity(r.turn || null);
+    setTurnActivity(previous => normalizeTurnActivity(r.turn, previous));
     setTurnClock(Date.now());
     if (r.history && typeof r.history.oldestTurn === "number") {
       setHistoryCursor({
@@ -951,7 +958,7 @@ export function createTranscript(opts: {
     // get the same truth via the sessions change ping.
     if (msg.sessionId === opts.getSessionId()) {
       setSessionStatus(msg.status === "running" ? "running" : "idle");
-      if (msg.turn) setTurnActivity(msg.turn);
+      if (msg.turn) setTurnActivity(previous => normalizeTurnActivity(msg.turn, previous, msg.status));
       if (msg.status === "idle") {
         showQuestion(null);
         setTurnActivity((turn) => finishTurn(turn));

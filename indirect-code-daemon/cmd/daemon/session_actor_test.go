@@ -52,6 +52,22 @@ func TestPromptStartsTurn(t *testing.T) {
 	}
 }
 
+func TestPromptDuringCancellationIsExplicitlyRejected(t *testing.T) {
+	a := reviewActor(t)
+	a.state, a.rec.Status = stateRunning, "running"
+	a.workerDone = make(chan struct{}) // keep teardown in flight
+	a.doCancel("user")
+	reply := make(chan any, 1)
+	a.onUserPrompt(userPromptMsg{Text: "follow-up after Stop", Reply: reply})
+	result := (<-reply).(promptResult)
+	if result.Accepted || result.Queued || result.Error == "" {
+		t.Fatalf("stopping actor must explicitly reject the send: %+v", result)
+	}
+	if len(a.rec.Queue) != 0 || a.rec.TurnSeq != 0 {
+		t.Fatal("rejected follow-up was silently queued or started")
+	}
+}
+
 func TestPromptQueuesWhileRunning(t *testing.T) {
 	// Block the worker so the turn stays running.
 	release := make(chan struct{})

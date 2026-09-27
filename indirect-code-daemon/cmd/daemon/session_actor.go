@@ -476,32 +476,32 @@ func (a *sessionActor) onUserPrompt(m userPromptMsg) {
 			m.Reply <- promptResult{Error: "queue_full"}
 			return
 		}
+		if err := validateAttachmentIDs(a.rec, m.AttachmentIDs); err != nil {
+			m.Reply <- promptResult{Error: err.Error()}
+			return
+		}
+		previous := a.rec.Queue
 		a.rec.Queue = append(a.rec.Queue, QueuedMessage{ID: randomID8(), Text: m.Text, AttachmentIDs: m.AttachmentIDs, Model: m.Model, YOLO: m.YOLO, CreatedAt: time.Now().UnixMilli()})
 		if err := a.saveOrAppend(walEvent{Type: walTypeQueue, Queue: a.rec.Queue}); err != nil {
+			a.rec.Queue = previous
 			m.Reply <- promptResult{Error: err.Error()}
 			return
 		}
 		a.pingChange()
+		a.emit(map[string]any{"type": "session_queue", "hostId": a.hostID(), "sessionId": a.id, "queue": queuePayload(a.rec.Queue)})
 		m.Reply <- promptResult{Accepted: true, Queued: true}
 		return
 	}
 	if a.state != stateIdle {
-		m.Reply <- promptResult{Error: "busy"}
+		m.Reply <- promptResult{Error: "The previous turn is still stopping. Your message was not sent; retry when it finishes."}
 		return
 	}
 	if err := validateAttachmentIDs(a.rec, m.AttachmentIDs); err != nil {
 		m.Reply <- promptResult{Error: err.Error()}
 		return
 	}
-	if m.Model != "" {
-		a.rec.Model = m.Model
-		a.saveOrAppend(walEvent{Type: walTypeModel, Model: m.Model})
-	}
-	if m.Options != nil {
-		a.rec.Options = normalizedOptions(*m.Options)
-		opts := a.rec.Options
-		a.saveOrAppend(walEvent{Type: walTypeOptions, Options: &opts})
-	}
+	// startTurn persists model/options with the accepted WAL header. Do not
+	// perform redundant session replacements before admitting the prompt.
 	// Instant provisional title (v1 startPrompt parity): sidebar feedback
 	// before the LLM title lands.
 	if t := instantTitle(m.Text); t != "" && (a.rec.Title == "" || a.rec.Title == "New conversation") {
@@ -667,7 +667,7 @@ func (a *sessionActor) startTurnWithMeta(prompt string, attachmentIDs []string, 
 	hostID := a.hostID()
 	a.emit(map[string]any{
 		"type": "session_status", "hostId": hostID, "sessionId": a.id,
-		"status": "running", "turn": map[string]any{"startedAt": a.rec.Turn.StartedAt},
+		"status": "running", "turn": map[string]any{"startedAt": a.rec.Turn.StartedAt, "status": "running"},
 	})
 	return nil
 }
@@ -725,6 +725,16 @@ func (a *sessionActor) onWorkerFinished(m workerFinishedMsg) {
 		return // quarantined: the stuck worker's late exit changes nothing
 	}
 	a.cancelRounds = 0
+	if a.rec.Turn != nil {
+		switch {
+		case m.cancelled:
+			a.rec.Turn.Status = "cancelled"
+		case m.err != "":
+			a.rec.Turn.Status = "failed"
+		default:
+			a.rec.Turn.Status = "completed"
+		}
+	}
 	a.finishTurn(!m.cancelled && m.err == "")
 }
 
@@ -739,8 +749,16 @@ func (a *sessionActor) finishTurn(ok bool) {
 		a.cancel = nil
 	}
 	if a.rec.Turn != nil {
-		a.rec.Turn.Status = "done"
-		a.rec.Turn.EndedAt = time.Now().UnixMilli()
+		if a.rec.Turn.Status == "running" || a.rec.Turn.Status == "cancelling" {
+			if ok {
+				a.rec.Turn.Status = "completed"
+			} else {
+				a.rec.Turn.Status = "cancelled"
+			}
+		}
+		if a.rec.Turn.EndedAt == 0 {
+			a.rec.Turn.EndedAt = time.Now().UnixMilli()
+		}
 	}
 	if a.pendingBalloon != nil {
 		b := *a.pendingBalloon

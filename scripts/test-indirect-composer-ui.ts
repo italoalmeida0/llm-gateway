@@ -35,6 +35,68 @@ try {
   page.on("pageerror", (error: Error) => errors.push(String(error)));
   await page.goto(server.url.toString());
   await page.waitForFunction(() => (window as any).composerUI.c);
+  // A failed admission must never create a running turn or lose the draft.
+  await page.evaluate(() => {
+    const a=(window as any).composerUI;
+    a.autoAccept=false;
+    a.c.setInputPrompt("keep this rejected draft");
+    a.pendingSend=a.c.sendPrompt();
+  });
+  await page.waitForFunction(()=>(window as any).composerUI.commands.some((c:any)=>c.type==="prompt"));
+  assert(await page.evaluate(()=>{
+    const a=(window as any).composerUI;
+    return a.t.sessionStatus()==="idle" && a.t.messages().length===0 && a.c.inputPrompt()==="keep this rejected draft" && a.c.sending();
+  }),"unconfirmed send fabricated a running turn");
+  await page.evaluate(async()=>{
+    const a=(window as any).composerUI;
+    const req=a.commands.find((c:any)=>c.type==="prompt");
+    a.c.notePromptReply(req.requestId,"Session file is temporarily busy");
+    await a.pendingSend;
+  });
+  assert(await page.evaluate(()=>{
+    const a=(window as any).composerUI;
+    return a.t.sessionStatus()==="idle" && !a.c.sending() && a.c.inputPrompt()==="keep this rejected draft";
+  }),"rejection lost the draft or left the turn running");
+  // Stop and completion can leave browser status behind the actor. Every
+  // send still needs admission; it must not disappear into queue_add.
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.commands.length = 0;
+    a.t.setSessionStatus("running");
+    a.t.cancelCurrentTurn();
+    a.c.setInputPrompt("follow-up after Stop");
+    a.pendingSend = a.c.sendPrompt();
+  });
+  await page.waitForFunction(() => (window as any).composerUI.commands.some((c: any) => c.type === "prompt"));
+  assert(await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    return !a.commands.some((c: any) => c.type === "queue_add") && a.c.inputPrompt() === "follow-up after Stop";
+  }), "stale running status bypassed prompt admission");
+  await page.evaluate(async () => {
+    const a = (window as any).composerUI;
+    const req = a.commands.find((c: any) => c.type === "prompt");
+    a.c.notePromptReply(req.requestId, "The previous turn is still stopping");
+    await a.pendingSend;
+    a.t.setSessionStatus("idle");
+  });
+  assert.equal(await page.locator("#rc-composer").inputValue(), "follow-up after Stop");
+  await page.evaluate(() => {
+    const a = (window as any).composerUI;
+    a.commands.length = 0;
+    a.pendingSend = a.c.sendPrompt();
+  });
+  await page.waitForFunction(() => (window as any).composerUI.commands.some((c: any) => c.type === "prompt"));
+  await page.evaluate(async () => {
+    const a = (window as any).composerUI;
+    const req = a.commands.find((c: any) => c.type === "prompt");
+    a.c.notePromptReply(req.requestId);
+    await a.pendingSend;
+  });
+  assert.equal(await page.locator("#rc-composer").inputValue(), "");
+  await page.evaluate(()=>{
+    const a=(window as any).composerUI;
+    a.autoAccept=true; a.commands.length=0; a.notices.length=0; a.c.setInputPrompt("");
+  });
   // Explicit writes after a session switch must survive the deferred restore.
   await page.evaluate(() => {
     const a = (window as any).composerUI;

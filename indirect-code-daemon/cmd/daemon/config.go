@@ -46,7 +46,7 @@ func writeAtomicFile(path string, data []byte) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err = os.Rename(file.Name(), path); err != nil {
+	if err = replaceFile(file.Name(), path); err != nil {
 		return err
 	}
 	if dir, err := os.Open(filepath.Dir(path)); err == nil {

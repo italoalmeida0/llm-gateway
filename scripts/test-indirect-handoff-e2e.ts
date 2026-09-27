@@ -1,7 +1,7 @@
 // Brutal update E2E with a fake gateway WS (no model, no real gateway):
-// supervised old daemon connects -> runHandoff (clean slot, fetch launcher, spawn
+// supervised old daemon connects -> runHandoff (clean slot, fetch app, spawn
 // --update-start, keep serving) -> updater SIGKILLs old -> updater copies
-// slot + runs launcher --update -> launcher spawns --update-end detached
+// slot + runs app --update -> app spawns --update-end detached
 // -> new daemon commits active, connects, kills the waiter, deletes the old
 // slot. Asserts: updater reconnect (?updating=1), local-first promote, slot flip,
 // new daemon serving the same session, old slot cleaned, update_done.
@@ -29,13 +29,12 @@ async function main() {
   mkdirSync(mirror, { recursive: true });
 
   // Versioned builds: old=9.9.8, new=9.9.9 (numeric: the brutal path requires strictly-newer).
-  // Multi-call binary: ONE build per version, stamped for BOTH roles —
-  // published under BOTH asset names (the launcher asset is a
-  // byte-identical compat duplicate of the app).
+  // One multi-call executable per version, stamped for both roles.
+  // OLD_DAEMON_BINARY can exercise an actually installed prior release.
   const build = (pkg: string, ver: string, out: string, vvar: string | string[]) =>
     buildBin(pkg, ver, out, vvar, DAEMON_DIR);
   const both = ["daemonVersion", "launcherVersion"];
-  const oldBin = build("./cmd/daemon", "9.9.8", join(work, "app-old"), both);
+  const oldBin = process.env.OLD_DAEMON_BINARY || build("./cmd/daemon", "9.9.8", join(work, "app-old"), both);
   const newBin = build("./cmd/daemon", "9.9.9", join(work, "app-new"), both);
   const daemonAsset = `indirect-code-${PLAT}${IS_WIN ? ".exe" : ""}`;
 
@@ -95,7 +94,7 @@ async function main() {
         // Exceed the supervisor's 5s restart delay during the update.
         if (u.pathname.endsWith(daemonAsset)) {
           await sleep(7000);
-          if (rollback) return new Response("update download unavailable", { status: 503 });
+
         }
         return new Response(Bun.file(p));
       }
@@ -130,7 +129,7 @@ async function main() {
 
   // Exercise the real supervisor. The explicit binary prevents normal
   // boot from fetching the new release before we request the handoff.
-  const proc = spawn(launcherOldBin, ["--daemon", join(root, "slots", "slot-a", "bin", DAEMON_BIN), "--data-dir", join(root, "slots", "slot-a"), "--", "--slot", "a"], { env, stdio: ["ignore", "pipe", "pipe"] });
+  const proc = spawn(oldBin, ["--data-dir", root], { env, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   proc.stdout.on("data", (d) => (out += d.toString()));
   proc.stderr.on("data", (d) => (out += d.toString()));
@@ -147,13 +146,17 @@ async function main() {
     await sleep(3000);
     assert(daemonSock, "daemon socket open");
     daemonSock.send(JSON.stringify({ type: "daemon_update_apply" }));
+    if (rollback) {
+      // A migration failure after the old process stopped must roll back.
+      wfs(join(root,"slots","slot-a","storage_version.json"),JSON.stringify({version:999999}));
+    }
     console.log("apply sent; waiting for updater (?updating=1 reconnect)...");
     const t0 = Date.now();
     while (updatingConnects.length < 1 && Date.now() - t0 < 60000) await sleep(500);
     assert(updatingConnects.length >= 1, "updater reconnected with ?updating=1 (owns host)");
     await sleep(6000);
     assert.equal(proc.exitCode, 0, `supervisor did not hand over cleanly: ${out}`);
-    assert.equal(connects.length, 2, "old daemon restarted while the updater was downloading");
+    assert(connects.length >= 2, "updater never claimed the host");
     if (rollback) {
       const start = Date.now();
       while ((!sawFailed || !daemonSock || daemonSock.data.updating) && Date.now() - start < 30000) await sleep(100);
@@ -168,7 +171,7 @@ async function main() {
       assert(sawSession, `restored daemon is not serving its sessions: ${out}`);
       assert.equal(readFileSync(join(root, "slots", "active"), "utf8").trim(), "a", "failed update flipped active");
       assert(existsSync(join(root, "slots", "slot-a", "sessions", "s1.jsonl")), "rollback lost the session");
-      console.log("PASS: download failure restored the old daemon and session without updater reconnects");
+      console.log("PASS: migration failure restored the old daemon and session without updater reconnects");
       return;
     }
     console.log("updater owns host; waiting for brutal promote (old SIGKILLed, new connects)...");

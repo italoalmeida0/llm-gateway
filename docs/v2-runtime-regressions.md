@@ -31,6 +31,8 @@ runtime defects to ship; the following regressions now have executable coverage.
   and verify the consecutive nudge limits.
 - Windows tests hold a real session handle without delete sharing while saving,
   then release it; a persistent read-only replacement must preserve the old file.
+  The same bounded rename retry is shared with runner state publication:
+  polling a state file must not abort launch or disable IPC due to a brief lock.
   `TestStopThenPromptDuringWindowsSessionLock` holds that lock across cancellation,
   verifies explicit rejection without queue/turn mutation and retained WAL, then
   releases it and verifies a fresh prompt survives disk reload.
@@ -54,3 +56,8 @@ do not simulate every antivirus, filesystem, or external provider. A permanent
 disk failure still surfaces an error; it must not be hidden or reported as a
 successful durable commit. Publishing a new version remains a separate release
 step after the final commit passes CI.
+
+Deploy the frontend and daemon changes together. Older daemons do not emit
+`prompt_accepted`; the updated composer will retain the draft and report a
+confirmation timeout rather than invent acceptance. Check the conversation
+before retrying an ambiguous send during an upgrade.

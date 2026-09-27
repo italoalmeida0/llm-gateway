@@ -93,15 +93,36 @@ func TestRunnerUpdateCrossingCleansOldGeneration(t *testing.T) {
 // completes in time and the out log is byte-complete.
 func TestRunnerSlowParentNeverBlocksTheTask(t *testing.T) {
 	root, dataDir := runnerTestRoot(t)
-	// Big output + a slow reader: if sends blocked, this would hang.
-	cmd := "i=0; while [ $i -lt 2000 ]; do echo line-$i; i=$((i+1)); done"
+	// Hold output until the slow reader has completed its handshake. The
+	// original small command could finish before the test ever connected.
+	release := filepath.Join(root, "release-output")
+	quotedRelease := "'" + strings.ReplaceAll(filepath.ToSlash(release), "'", "'\"'\"'") + "'"
+	cmd := "while [ ! -f " + quotedRelease + " ]; do sleep 0.01; done; payload=" + strings.Repeat("x", 1024) + "; i=0; while [ $i -lt 2000 ]; do echo line-$i-$payload; i=$((i+1)); done"
 	proc := spawnTestRunner(t, root, dataDir, cmd)
+	t.Cleanup(func() {
+		select {
+		case <-proc.Exited:
+			return
+		default:
+			proc.Stop()
+		}
+		select {
+		case <-proc.Exited:
+		case <-time.After(12 * time.Second):
+			t.Error("runner did not stop during test cleanup")
+		}
+	})
 
-	// Connect and then STOP reading (the runner keeps producing).
+	// Connect before allowing output, then STOP reading.
 	var st *runner.State
 	waitFor(t, 5*time.Second, func() bool {
 		var err error
 		st, err = runner.ReadState(runner.StatePath(root, proc.JobID))
+		select {
+		case <-proc.Exited:
+			t.Fatalf("runner exited before publishing IPC: state=%+v, read=%v, exit=%v", st, err, proc.Wait())
+		default:
+		}
 		return err == nil && st.Transport.Port != 0
 	})
 	raw, err := net.Dial("tcp", net.JoinHostPort(st.Transport.Host, strconv.Itoa(st.Transport.Port)))
@@ -109,11 +130,24 @@ func TestRunnerSlowParentNeverBlocksTheTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
+	if tcp, ok := raw.(*net.TCPConn); ok {
+		if err := tcp.SetReadBuffer(1024); err != nil {
+			t.Fatal(err)
+		}
+	}
 	c := runner.NewConn(raw)
 	if err := c.Send(runner.Hello{Type: runner.VerbHello, Proto: runner.ProtoVersion, Token: st.Transport.Token}); err != nil {
 		t.Fatal(err)
 	}
-	// …and never read a single byte back.
+	_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.Recv(); err != nil {
+		t.Fatal("runner handshake:", err)
+	}
+	_ = raw.SetReadDeadline(time.Time{})
+	if err := os.WriteFile(release, []byte("ready"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Never read output; the tiny receive window forces socket backpressure.
 
 	done := make(chan error, 1)
 	go func() { done <- proc.Wait() }()
@@ -206,7 +240,6 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 	// Stop cleans the tree.
 	p.Stop()
 }
-
 
 // T12: crash windows AT the terminal transition. The runner records
 // `done` and dies BEFORE the brain copy (W1) or MID-copy (W2) — the two

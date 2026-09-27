@@ -33,7 +33,7 @@ func Replace(path string, src io.Reader, mode os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(f.Name(), path); err != nil {
+	if err := Rename(f.Name(), path); err != nil {
 		return err
 	}
 	return SyncDir(dir)

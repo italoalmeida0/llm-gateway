@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+	"llm-gateway/indirect-code-daemon/internal/durable"
 )
 
 // Exercise the exact cancellation boundary with a session file held open by
@@ -117,7 +118,7 @@ func TestReplaceFilePermanentFailureKeepsOriginal(t *testing.T) {
 	os.WriteFile(src, []byte("new"), 0600)
 	os.WriteFile(dst, []byte("old"), 0400)
 	t.Cleanup(func() { os.Chmod(dst, 0600) })
-	if err := replaceFile(src, dst); err == nil {
+	if err := durable.Rename(src, dst); err == nil {
 		t.Fatal("expected read-only destination failure")
 	}
 	got, _ := os.ReadFile(dst)

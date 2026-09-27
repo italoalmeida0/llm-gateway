@@ -1,4 +1,4 @@
-package main
+package durable
 
 import (
 	"errors"
@@ -10,8 +10,8 @@ import (
 
 // Readers and scanners can briefly deny replacement on Windows. Retry the
 // atomic rename, never remove the destination or rewrite it in place. A real
-// persistent failure still reaches the actor's WAL-preserving retry state.
-func replaceFile(src, dst string) error {
+// persistent failure still reaches the caller's recovery path.
+func Rename(src, dst string) error {
 	deadline := time.Now().Add(time.Second)
 	for delay := 5 * time.Millisecond; ; delay = min(delay*2, 100*time.Millisecond) {
 		err := os.Rename(src, dst)

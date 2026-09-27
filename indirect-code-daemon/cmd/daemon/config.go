@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"llm-gateway/indirect-code-daemon/internal/durable"
 )
 
 // configRevision hashes editor-owned fields. v2: settings only
@@ -46,7 +48,7 @@ func writeAtomicFile(path string, data []byte) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err = replaceFile(file.Name(), path); err != nil {
+	if err = durable.Rename(file.Name(), path); err != nil {
 		return err
 	}
 	if dir, err := os.Open(filepath.Dir(path)); err == nil {

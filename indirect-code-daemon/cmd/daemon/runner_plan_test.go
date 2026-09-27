@@ -145,7 +145,10 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 	brainDir := filepath.Join(dataDir, "brain", "sess1")
 
 	oldWindow := tools.AutoBackgroundAfter
-	tools.AutoBackgroundAfter = 300 * time.Millisecond // same knob, smaller
+	// Keep the real foreground budget: process startup and durable fsyncs
+	// can exceed 300ms on a loaded native/race CI host. This assertion is
+	// about inline behavior within the production window, not startup speed.
+	tools.AutoBackgroundAfter = 10 * time.Second
 	defer func() { tools.AutoBackgroundAfter = oldWindow }()
 
 	// SHORT: returns inline, no Slow() registration.
@@ -165,7 +168,8 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 		t.Fatalf("inline output missing: %q", resultText(res))
 	}
 
-	// LONG: detaches at the window with the placeholder + registry id.
+	// LONG: shorten only this window so the detach case stays fast.
+	tools.AutoBackgroundAfter = 300 * time.Millisecond
 	var mu sync.Mutex
 	var registered tools.BackgroundProcess
 	long := &tools.BashTool{

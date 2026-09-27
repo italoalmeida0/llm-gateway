@@ -26,7 +26,7 @@ type EvUserMessage struct {
 
 func (EvUserMessage) Type() string { return "user_message" }
 
-type EvAssistantStart struct{}
+type EvAssistantStart struct{ ID string }
 
 func (EvAssistantStart) Type() string { return "assistant_start" }
 

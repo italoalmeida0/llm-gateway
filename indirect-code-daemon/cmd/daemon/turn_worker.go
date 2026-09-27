@@ -171,7 +171,7 @@ func (w *turnBridge) run() error {
 	if len(w.snap.incoming) > 0 {
 		w.tfc.tracker = filetrack.RestoreTurnTracker(dropBrainTracked(w.snap.incoming, brainDir))
 	}
-	w.live = &liveTracker{turnSeq: w.snap.turnIndex}
+	w.live = &liveTracker{}
 
 	// Every command runs through the crash-only runner (decided D6).
 	// Tests and headless workers without a store keep the direct path.
@@ -752,7 +752,7 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 		w.declareWait("", time.Time{}) // response arrived: provider wait over
 		payload["event"] = map[string]any{"type": "assistant_message", "message": e.Message}
 	case core.EvAssistantStart:
-		payload["event"] = map[string]any{"type": "assistant_start"}
+		payload["event"] = map[string]any{"type": "assistant_start", "messageId": e.ID}
 	case core.EvTextDelta:
 		payload["event"] = map[string]any{"type": "text_delta", "delta": e.Delta}
 	case core.EvReasoningDelta:

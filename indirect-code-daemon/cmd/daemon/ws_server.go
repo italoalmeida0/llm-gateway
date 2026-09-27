@@ -362,6 +362,7 @@ func (s *wsServer) handleRaw(raw []byte) {
 		var req struct {
 			SessionID  string `json:"sessionId"`
 			BeforeTurn int    `json:"beforeTurn"`
+			RequestID  string `json:"requestId"`
 		}
 		_ = json.Unmarshal(raw, &req)
 		if req.SessionID == "" || req.BeforeTurn <= 0 {
@@ -384,7 +385,7 @@ func (s *wsServer) handleRaw(raw []byte) {
 				if block, ok := rd.Payload.(historyBlock); ok {
 					atts := block.Attachments
 					s.emit(map[string]any{
-						"type": "session_content", "hostId": s.host(), "sessionId": req.SessionID, "page": true,
+						"type": "session_content", "hostId": s.host(), "sessionId": req.SessionID, "page": true, "requestId": req.RequestID,
 						"messages":     sanitizeMessagesForFrontend(block.Messages, atts),
 						"fileBalloons": fileBalloonPayloads(block.Balloons),
 						"history": map[string]any{

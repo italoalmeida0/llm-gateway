@@ -393,6 +393,7 @@ func assembleRecord(lines []turnLine, meta metaLine) *SessionRecord {
 			rec.TurnSeq = lines[n-1].Turn
 		}
 	}
+	ensureTranscriptIDs(rec)
 	return rec
 }
 

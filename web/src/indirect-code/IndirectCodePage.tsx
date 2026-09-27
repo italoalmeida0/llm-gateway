@@ -823,9 +823,10 @@ export default function IndirectCodePage() {
           queue.noteQueue(sid, r.queue);
         }
         if (sid && sid === activeSessionId()) {
-          transcript.applySnapshot(sid, r);
-          turnChanges.applySnapshot(r);
-          options.reconcileServerSelection(sid, r.model, r.options, gatewayModels().map((m) => m.id), gatewayModels()[0]?.id || "");
+          transcript.applySnapshot(sid, r, () => {
+            turnChanges.applySnapshot(r);
+            options.reconcileServerSelection(sid, r.model, r.options, gatewayModels().map((m) => m.id), gatewayModels()[0]?.id || "");
+          });
         }
         break;
       }
@@ -833,21 +834,21 @@ export default function IndirectCodePage() {
       case "session_truncated": {
         // Authoritative tail cut after edit/regenerate (daemon broadcast).
         const keep = typeof msg.keepIndex === "number" ? msg.keepIndex : -1;
-        transcript.handleTruncated(msg.sessionId, keep);
-        if (msg.sessionId === activeSessionId() && keep >= 0) turnChanges.dropAbove(keep);
+        transcript.handleTruncated(msg.sessionId, keep, msg.transcript, () => turnChanges.dropAbove(keep));
         break;
       }
       case "session_content": {
         if (msg.sessionId !== activeSessionId()) break;
         if ((msg as any).page) {
-          transcript.noteHistoryPage(msg.messages || [], (msg as any).history);
-          if ((msg as any).fileBalloons) turnChanges.noteHistoryBalloons((msg as any).fileBalloons);
+          transcript.noteHistoryPage(msg.messages || [], (msg as any).history, (msg as any).requestId, () => {
+            if ((msg as any).fileBalloons) turnChanges.noteHistoryBalloons((msg as any).fileBalloons);
+          });
           break;
         }
         // Tail events (end-of-turn tail, edit/slash/truncate tail,
         // single-message notice) carry the same history cursor as
-        // session_data: merge by id + seal, never replace the list.
-        transcript.applySessionContent(msg.sessionId, msg.messages || [], msg.compaction, (msg as any).history);
+        // session_data: replace the authoritative tail and retain older pages.
+        transcript.applySessionContent(msg.sessionId, msg.messages || [], msg.compaction, (msg as any).history, msg);
         break;
       }
 
@@ -910,17 +911,16 @@ export default function IndirectCodePage() {
       case "session_compacted": {
         const sid = msg.sessionId;
         if (sid !== activeSessionId()) break;
+        transcript.applySessionContent(sid, msg.messages || [], msg.compaction, (msg as any).history, {...msg, applyMetadata: () => {
         transcript.setSessionContexts((prev) => ({ ...prev, [sid]: msg.context ?? null }));
-        if (msg.usage) {
-          transcript.applyUsage(sid, msg.usage, null);
-        }
-        transcript.applySessionContent(sid, msg.messages || [], msg.compaction, (msg as any).history);
+        if (msg.usage) transcript.applyUsage(sid, msg.usage, null);
         notice.toast(
           msg.auto
             ? "Context auto-compacted — older turns summarized, recent context preserved"
             : "Transcript compacted successfully",
           "ok",
         );
+        }});
         break;
       }
 
@@ -959,7 +959,7 @@ export default function IndirectCodePage() {
           pendingDiscardReloadSid = null;
           reloadSessionFromDaemon(sid);
         }
-        transcript.handleAgentEvent(msg.sessionId, msg.event);
+        transcript.handleAgentEvent(msg.sessionId, msg.event, msg.transcript);
         break;
       }
 

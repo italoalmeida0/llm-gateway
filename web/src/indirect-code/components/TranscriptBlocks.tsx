@@ -20,6 +20,7 @@ import { ToolQuestionBodies } from "./tool/ToolQuestionBodies";
 export interface TranscriptRenderCtx {
   renderBlocks: () => RenderBlock[];
   sessionStatus: () => string;
+  isPinned?: () => boolean;
   messages: () => ChatMessage[];
   thinkingStart: () => number | null;
   thinkingElapsed: () => number;
@@ -57,7 +58,7 @@ function renderThinkingRow(
   running: () => boolean,
 ) {
   const key = `${entry.msg.id}:think:${entry.nth}`;
-  const { open, toggle } = createDisclosure(() => `${running()}:${live()}`, openByDefault);
+  const { open, toggle } = createDisclosure(() => `${running()}:${live()}`, openByDefault, ctx.isPinned);
   const label = () =>
     live()
       ? `Thinking ${formatDurationSecs(ctx.thinkingElapsed())}`
@@ -112,9 +113,10 @@ function renderTextRow(
   hidden: () => boolean,
   streaming: () => boolean,
   running: () => boolean,
+  isPinned?: () => boolean,
 ) {
   const key = `${entry.msg.id}:text:${entry.nth}`;
-  const { open, toggle } = createDisclosure(() => `${running()}:${streaming()}`, openByDefault);
+  const { open, toggle } = createDisclosure(() => `${running()}:${streaming()}`, openByDefault, isPinned);
   const preview = () =>
     (entry.block.text || "").replace(/\s+/g, " ").trim().slice(0, 80);
   return (
@@ -153,6 +155,7 @@ function renderTextRow(
 function renderTurnAggregate(
   ctx: TranscriptRenderCtx,
   series: RenderBlockSeries,
+  featured: () => boolean,
 ) {
   // NOTE: ctx.renderBlocks() is the FULL list (sealed blocks + live
   // tail; the <For> in TranscriptView slices by seal); the running turn
@@ -162,10 +165,9 @@ function renderTurnAggregate(
     texts: series.entries.filter((e) => e.kind === "text").length,
     thoughts: series.entries.filter((e) => e.kind === "thinking").length,
   }));
-  const { open, toggle } = createDisclosure(() => String(running()), running);
+  const { open, toggle } = createDisclosure(() => String(running()), running, ctx.isPinned);
   /** The featured final renders below once idle; inside the card its rows
    * stay mounted with display:none so Solid keeps DOM identity. */
-  const featured = () => series.finalMsgId != null && !running();
   const lastTurnId = () => series.extras.at(-1)?.id ?? series.msg.id;
   /** Live tail: the turn's latest call, or any call with live progress
    * (parallel in-flight). Only the tail spins/auto-opens; when a new
@@ -265,7 +267,7 @@ function renderTurnAggregate(
               if (entry.kind === "text") {
                 const content = () => (entry.block.text || "").trim() !== "";
                 const streaming = () => running() && tail() && entry.msg.streaming === true;
-                return renderTextRow(entry, () => streaming() && content(), () => textHidden(entry, ei()), streaming, running);
+                return renderTextRow(entry, () => streaming() && content(), () => textHidden(entry, ei()), streaming, running, ctx.isPinned);
               }
               return renderImageBlock(ctx, entry.block);
             }}
@@ -278,11 +280,16 @@ function renderTurnAggregate(
 
 /** The same carrier can acquire reasoning/tools after its first text delta. */
 export function AssistantTurnContent(props: { ctx: TranscriptRenderCtx; block: RenderBlock; finished: boolean }) {
+  // Moving the final text out of the aggregate also changes reading position.
+  const featured = createMemo<boolean>((previous) => {
+    if (!props.finished) return false;
+    return previous !== undefined && props.ctx.isPinned?.() === false ? previous : true;
+  });
   return <Show when={props.block.kind === "series" ? props.block : undefined}
     fallback={renderSingleAssistant(props.ctx, props.block.msg)}>
     {(series) => <>
-      {renderTurnAggregate(props.ctx, series())}
-      <Show when={props.finished && series().finalMsgId != null}>
+      {renderTurnAggregate(props.ctx, series(), featured)}
+      <Show when={featured() && series().finalMsgId != null}>
         <div class="w-full mt-2.5" data-turn-final>{renderFinalMsg(props.ctx, series())}</div>
       </Show>
     </>}
@@ -388,7 +395,7 @@ function renderToolSegs(ctx: TranscriptRenderCtx, msgId: string, units: () => To
           const active = () => running() && seg.units.some(isPending);
           // Sub-groups open while they hold live work; a finished group
           // (and its rows) falls back to closed on its own.
-          const { open, toggle } = createDisclosure(() => `${running()}:${active()}`, active);
+          const { open, toggle } = createDisclosure(() => `${running()}:${active()}`, active, ctx.isPinned);
           return (
             <div class="w-full" data-toolseg={segKey(seg)} style={{ "overflow-anchor": "none" }}>
               <Show when={seg.units.length > 1}><button

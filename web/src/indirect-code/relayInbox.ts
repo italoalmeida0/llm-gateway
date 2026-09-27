@@ -22,6 +22,7 @@ export function createRelayInbox(opts: {
       const type = next?.event?.type;
       const field = type === "tool_progress" ? "text" : "delta";
       if (next?.type === "agent_event" && prev?.type === "agent_event" &&
+          !next.transcript && !prev.transcript &&
           next.hostId === prev.hostId && next.sessionId === prev.sessionId &&
           ["text_delta", "reasoning_delta", "tool_use_args", "tool_progress"].includes(type) &&
           prev.event?.type === type && prev.event.id === next.event.id &&

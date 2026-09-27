@@ -130,6 +130,7 @@ func RepairOrphanedToolResults(msgs []Message) []Message {
 
 // Message is a single turn in the conversation.
 type Message struct {
+	ID             string            `json:"id,omitempty"`
 	Role           Role              `json:"role"`
 	Content        []Content         `json:"content"`
 	Time           time.Time         `json:"time"`

@@ -325,8 +325,8 @@ func (a *sessionActor) onSlashReply(m slashReplyMsg) {
 	a.touch()
 	a.rec.TurnSeq++
 	turn := a.rec.TurnSeq
-	userMsg := provider.Message{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: m.Command}}, TurnIndex: turn}
-	asstMsg := provider.Message{Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: m.Reply}}, TurnIndex: turn}
+	userMsg := provider.Message{ID: provider.NewMessageID(), Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: m.Command}}, TurnIndex: turn}
+	asstMsg := provider.Message{ID: provider.NewMessageID(), Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: m.Reply}}, TurnIndex: turn}
 	a.rec.Messages = append(a.rec.Messages, userMsg, asstMsg)
 	a.rec.UpdatedAt = time.Now().UnixMilli()
 	// Mirror saveOrAppend's rule (plus stateCancel, where the worker is

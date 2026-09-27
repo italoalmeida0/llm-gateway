@@ -25,21 +25,19 @@ type liveBlock struct {
 }
 
 type liveAssistant struct {
+	ID        string      `json:"id"`
 	TurnIndex int         `json:"turnIndex"`
 	Streaming bool        `json:"streaming"`
 	Role      string      `json:"role"`
 	Content   []liveBlock `json:"content"`
 }
 
-// liveTracker accumulates the in-progress assistant response on the WORKER
-// side (no actor involvement). The actor keeps the latest snapshot for
-// reconnect payloads.
+// liveTracker tracks worker activity metadata. Transcript text is projected
+// by the actor together with its ordered transport cursor.
 type liveTracker struct {
-	live              *liveAssistant
 	toolStarts        map[string]int64
 	toolProgress      map[string]string
 	thinkingStartedAt int64
-	turnSeq           int
 	dirty             bool // overlay changed since last snapshot (V2-004)
 }
 
@@ -78,7 +76,6 @@ func (t *liveTracker) track(event core.AgentEvent) {
 	if _, ok := event.(core.EvAssistantStart); ok {
 		t.thinkingStartedAt = 0
 		t.dirty = true
-		t.live = &liveAssistant{Role: "assistant", TurnIndex: t.turnSeq, Streaming: true, Content: []liveBlock{}}
 		return
 	}
 	switch e := event.(type) {
@@ -113,43 +110,6 @@ func (t *liveTracker) track(event core.AgentEvent) {
 		delete(t.toolProgress, e.ID)
 		delete(t.toolStarts, e.ID)
 		t.dirty = true
-	}
-	if t.live == nil {
-		return
-	}
-	blocks := &t.live.Content
-	switch e := event.(type) {
-	case core.EvTurnEnd, core.EvRetry:
-		t.live = nil
-	case core.EvTextDelta:
-		if len(*blocks) == 0 || (*blocks)[len(*blocks)-1].Text == "" {
-			*blocks = append(*blocks, liveBlock{})
-		}
-		(*blocks)[len(*blocks)-1].Text += e.Delta
-	case core.EvReasoningDelta:
-		for i := range *blocks {
-			if (*blocks)[i].Summary != "" {
-				(*blocks)[i].Summary += e.Delta
-				return
-			}
-		}
-		*blocks = append(*blocks, liveBlock{Summary: e.Delta})
-	case core.EvToolUseStart:
-		*blocks = append(*blocks, liveBlock{ID: e.ID, Name: e.Name})
-	case core.EvToolUseArgs:
-		for i := range *blocks {
-			if (*blocks)[i].ID == e.ID {
-				(*blocks)[i].Arguments += e.Delta
-				return
-			}
-		}
-	case core.EvToolCall:
-		for i := range *blocks {
-			if (*blocks)[i].ID == e.ID {
-				(*blocks)[i].Arguments = string(e.Args)
-				return
-			}
-		}
 	}
 }
 

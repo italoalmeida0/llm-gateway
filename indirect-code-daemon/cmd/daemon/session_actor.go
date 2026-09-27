@@ -53,12 +53,13 @@ type pendingAsk struct {
 // The turn itself runs in worker (daughter goroutine); all state changes
 // come back as mailbox messages.
 type sessionActor struct {
-	id      string
-	store   *diskStore
-	wsSend  func(any)
-	bg      *bgSupervisor
-	supCfg  *configCell             // supervisor-owned config; worker reads via load()
-	onEvent func(collection string) // change ping fan-out (notifyChange)
+	transcript transcriptState
+	id         string
+	store      *diskStore
+	wsSend     func(any)
+	bg         *bgSupervisor
+	supCfg     *configCell             // supervisor-owned config; worker reads via load()
+	onEvent    func(collection string) // change ping fan-out (notifyChange)
 
 	inbox   chan Envelope
 	control chan any
@@ -109,7 +110,7 @@ type sessionActor struct {
 	// same turn index (v1 resumeAgentTurn parity).
 	resumeSnap *workerSnapshot
 
-	lastProgress  int64 // unix milli, for watchdog
+	lastProgress  int64  // unix milli, for watchdog
 	waitOp        string // expected blocking op (V2-001), e.g. "provider", "tool"
 	waitUntil     int64  // unix milli; > now = declared wait in effect
 	residentBytes int64
@@ -121,6 +122,7 @@ type sessionActor struct {
 }
 
 func newSessionActor(id string, rec *SessionRecord, store *diskStore, wsSend func(any), bg *bgSupervisor, onEvent func(string)) *sessionActor {
+	ensureTranscriptIDs(rec)
 	cfg := new(configCell)
 	cfg.store(&DaemonConfig{})
 	var jailed bool
@@ -442,6 +444,7 @@ func (a *sessionActor) hostID() string {
 }
 
 func (a *sessionActor) emit(ev any) {
+	a.prepareTranscriptEvent(ev)
 	if a.wsSend != nil {
 		a.wsSend(ev)
 	}
@@ -882,7 +885,9 @@ func (a *sessionActor) clearPending() {
 	a.pending = nil
 	if a.rec.ApprovalDeadlineUnix != 0 {
 		a.rec.ApprovalDeadlineUnix = 0
-		if a.wal != nil { a.saveOrAppend(walEvent{Type: walTypeMeta, ClearApprovalDeadline: true}) }
+		if a.wal != nil {
+			a.saveOrAppend(walEvent{Type: walTypeMeta, ClearApprovalDeadline: true})
+		}
 	}
 }
 
@@ -1090,6 +1095,7 @@ func (a *sessionActor) onFork(m forkReqMsg) {
 }
 
 func (a *sessionActor) onRead(m readReqMsg) {
+	ensureTranscriptIDs(a.rec)
 	// Served from actor RAM. Payloads are COPIES: the
 	// caller reads off-goroutine, so handing out the live *SessionRecord
 	// (or its backing array) is a data race. Copies are cheap next to the
@@ -1121,7 +1127,7 @@ func (a *sessionActor) onRead(m readReqMsg) {
 // the actor's own loop, so it is ordered consistently with the stream
 // events surrounding it. Never persisted.
 func (a *sessionActor) clientOverlay() map[string]any {
-	extra := map[string]any{}
+	extra := a.transcriptOverlay()
 	if p := a.pending; p != nil {
 		switch p.kind {
 		case "approval":
@@ -1176,6 +1182,7 @@ func (a *sessionActor) onWALAppend(m walAppendMsg) {
 			// plain Unmarshal yields nil Content and drops the text).
 			if msg, err := core.HydrateMessageObject(ev.Msg); err == nil {
 				a.rec.Messages = append(a.rec.Messages, msg)
+				a.transcriptCommitted(msg)
 			} else {
 				fmt.Printf("[WARN] session %s: bad WAL msg: %v\n", a.id, err)
 			}
@@ -1351,7 +1358,7 @@ func (a *sessionActor) onBgNotice(m bgNoticeMsg) {
 	a.touch()
 	a.emit(map[string]any{"type": "bg_notice", "sessionId": a.id, "jobId": m.JobID, "text": noticePreview(m.Text), "finished": m.Finished})
 	if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
-		msg := provider.Message{Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: m.Text}}, TurnIndex: a.rec.TurnSeq, Meta: map[string]string{"background_delivery": m.JobID}}
+		msg := provider.Message{ID: provider.NewMessageID(), Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: m.Text}}, TurnIndex: a.rec.TurnSeq, Meta: map[string]string{"background_delivery": m.JobID}}
 		a.rec.Messages = append(a.rec.Messages, msg)
 		// Publish the identity and worker context only after persistence.
 		// Roll back the tentative RAM fold on failure so redelivery cannot

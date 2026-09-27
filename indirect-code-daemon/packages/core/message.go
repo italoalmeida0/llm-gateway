@@ -17,6 +17,7 @@ import (
 // Content blocks) from the raw JSON object of a persisted message.
 func HydrateMessageObject(rawMessage []byte) (provider.Message, error) {
 	var row struct {
+		ID             string            `json:"id,omitempty"`
 		Role           provider.Role     `json:"role"`
 		Content        []json.RawMessage `json:"content"`
 		Time           time.Time         `json:"time"`
@@ -27,7 +28,7 @@ func HydrateMessageObject(rawMessage []byte) (provider.Message, error) {
 	if err := json.Unmarshal(rawMessage, &row); err != nil {
 		return provider.Message{}, err
 	}
-	msg := provider.Message{Role: row.Role, Time: row.Time, Meta: row.Meta, AddedToolNames: row.AddedToolNames, TurnIndex: row.TurnIndex}
+	msg := provider.Message{ID: row.ID, Role: row.Role, Time: row.Time, Meta: row.Meta, AddedToolNames: row.AddedToolNames, TurnIndex: row.TurnIndex}
 	for _, raw := range row.Content {
 		var head struct {
 			Text             string `json:"text"`

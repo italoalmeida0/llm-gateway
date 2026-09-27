@@ -46,6 +46,7 @@ export function TranscriptView() {
   const renderCtx = (): TranscriptRenderCtx => ({
     renderBlocks: t.renderBlocks,
     sessionStatus: t.sessionStatus,
+    isPinned: t.transcriptScroll.isPinned,
     messages: t.messages,
     thinkingStart: t.thinkingStart,
     thinkingElapsed: t.thinkingElapsed,
@@ -159,6 +160,7 @@ export function TranscriptView() {
             </div>
           </Show>
           <div
+            data-transcript-id={block.id || block.msg.id}
             class={`group/msg flex flex-col w-full ${ui.convWidthClass()} mx-auto ${
               msg.role === "user" && !isEditing() ? "items-end" : "items-start"
             }`}

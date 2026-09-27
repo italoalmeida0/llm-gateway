@@ -33,7 +33,7 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
     if (b.type !== "tool_result" || !b.toolId || (b.toolDetails as any)?.detached) return b;
     if (!(b.toolDetails as any)?.background_job_id) return b;
     const folded = prevFolded.get(b.toolId);
-    if (!folded || !(folded.toolDetails as any)?.detached) return b;
+    if (!folded || !(folded.toolDetails as any)?.detached || (folded.toolDetails as any).background_job_id !== (b.toolDetails as any).background_job_id) return b;
     return {
       ...b,
       toolResult: folded.toolResult,
@@ -43,10 +43,11 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
     };
   };
   let carrier: ChatMessage | null = null;
+  const callCarriers = new Map<string, ChatMessage>();
   const ensureCarrier = (srcIdx: number, wire: any): ChatMessage => {
     if (!carrier || carrier.role !== "assistant") {
       carrier = {
-        id: `tools_${srcIdx}`,
+        id: typeof wire?.id === "string" ? `tools_${wire.id}` : `tools_${srcIdx}`,
         role: "assistant",
         blocks: [],
         time: Date.now(),
@@ -67,24 +68,29 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
       // Newest thoughts first: the turn's last reasoning stays at the top.
       reason.reverse();
       const msg: ChatMessage = {
-        id: byIndex.get(at(idx))?.id ?? `msg_${at(idx)}`,
+        id: typeof m.id === "string" && m.id ? m.id : byIndex.get(at(idx))?.id ?? `msg_${at(idx)}`,
         role,
         streaming: m.streaming === true,
         blocks: [...reason, ...rest.map(carryFold)],
         thinkingDuration: Number(m.meta?.thinking_ms) > 0 ? Math.max(1, Math.ceil(Number(m.meta.thinking_ms) / 1000)) : undefined,
         turnDurationMs: Number(m.meta?.turn_ms) > 0 ? Number(m.meta.turn_ms) : undefined,
-        time: Date.now(),
+        time: Date.parse(m.time) || byIndex.get(at(idx))?.time || 0,
         srcIdx: at(idx),
         turnIndex: typeof m.turnIndex === "number" ? m.turnIndex : undefined,
       };
       out.push(msg);
       carrier = msg;
+      for (const b of msg.blocks) if (b.type === "tool_call" && b.toolId) callCarriers.set(b.toolId,msg);
       return;
     }
     // user / tool envelope: split tool results away from real content.
     const rest: ContentBlock[] = [];
     for (const b of blocks) {
-      if (b.type === "tool_result") ensureCarrier(at(idx), m).blocks.push(carryFold(b));
+      if (b.type === "tool_result") {
+        const owner=(b.toolId && callCarriers.get(b.toolId)) || ensureCarrier(at(idx),m);
+        const existing=owner.blocks.findIndex(x=>x.type==="tool_result" && x.toolId===b.toolId);
+        if(existing>=0) owner.blocks[existing]=carryFold(b); else owner.blocks.push(carryFold(b));
+      }
       else rest.push(b);
     }
     if (role === "tool" || rest.length === 0) {
@@ -100,11 +106,11 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
     }
     const isStart = m.isTurnStart !== undefined ? Boolean(m.isTurnStart) : !m.midTurn;
     const msg: ChatMessage = {
-      id: byIndex.get(at(idx))?.id ?? `msg_${at(idx)}`,
+      id: typeof m.id === "string" && m.id ? m.id : byIndex.get(at(idx))?.id ?? `msg_${at(idx)}`,
       role: "user",
       attachments: parseMessageAttachments(m),
       blocks: typeof m.meta?.user_text === "string" ? [{ type: "text", text: m.meta.user_text }] : rest,
-      time: Date.now(),
+      time: Date.parse(m.time) || byIndex.get(at(idx))?.time || 0,
       srcIdx: at(idx),
       isTurnStart: isStart,
       midTurn: Boolean(m.midTurn),
@@ -142,7 +148,8 @@ export function mergeUsage(
 }
 
 /** Appends a text delta to the last text block of the active assistant. */
-export function appendTextDelta(prev: ChatMessage[], delta: string): ChatMessage[] {
+export function appendTextDelta(prev: ChatMessage[], delta: string, messageId?: string): ChatMessage[] {
+  if (messageId) return updateMessage(prev, messageId, m => appendTextDelta([m], delta)[0]);
   const last = prev[prev.length - 1];
   if (last && last.role === "assistant") {
     const blocks = [...last.blocks];
@@ -173,7 +180,8 @@ export function appendTextDelta(prev: ChatMessage[], delta: string): ChatMessage
 /** Appends a reasoning delta to the active assistant's thinking panel
  * (merges into the existing panel, which stays on top; new panel goes in front
  * so the live view matches the normalized refresh). */
-export function appendReasoningDelta(prev: ChatMessage[], delta: string): ChatMessage[] {
+export function appendReasoningDelta(prev: ChatMessage[], delta: string, messageId?: string): ChatMessage[] {
+  if (messageId) return updateMessage(prev, messageId, m => appendReasoningDelta([m], delta)[0]);
   const last = prev[prev.length - 1];
   if (last && last.role === "assistant") {
     const blocks = [...last.blocks];
@@ -210,7 +218,8 @@ export function appendReasoningDelta(prev: ChatMessage[], delta: string): ChatMe
 }
 
 /** Upsert of tool_call: tool_use_start pre-creates the card, tool_call finalizes it. */
-export function upsertToolCall(prev: ChatMessage[], callId: string, name: string, args: any): ChatMessage[] {
+export function upsertToolCall(prev: ChatMessage[], callId: string, name: string, args: any, messageId?: string): ChatMessage[] {
+  if (messageId) return updateMessage(prev, messageId, m => upsertToolCall([m], callId, name, args)[0]);
   const argsStr = prettyArgs(args);
   for (let i = prev.length - 1; i >= 0; i--) {
     const m = prev[i];
@@ -253,7 +262,8 @@ export function upsertToolCall(prev: ChatMessage[], callId: string, name: string
 }
 
 /** Appends streaming args to the existing tool_call (without card: no-op). */
-export function appendToolArgsDelta(prev: ChatMessage[], callId: string, delta: string): ChatMessage[] {
+export function appendToolArgsDelta(prev: ChatMessage[], callId: string, delta: string, messageId?: string): ChatMessage[] {
+  if (messageId) return updateMessage(prev, messageId, m => appendToolArgsDelta([m], callId, delta)[0]);
   for (let i = prev.length - 1; i >= 0; i--) {
     const m = prev[i];
     if (m.role !== "assistant") continue;
@@ -265,7 +275,6 @@ export function appendToolArgsDelta(prev: ChatMessage[], callId: string, delta: 
       blocks[bi] = { ...blocks[bi], toolArgs: (blocks[bi].toolArgs || "") + delta };
       return [...prev.slice(0, i), { ...m, blocks }, ...prev.slice(i + 1)];
     }
-    break;
   }
   return prev;
 }
@@ -279,35 +288,28 @@ export function appendToolResult(
   startedAt?: number,
   durationMs?: number,
   details?: any,
+  messageId?: string,
 ): ChatMessage[] {
-  const last = prev[prev.length - 1];
+  if (messageId) return updateMessage(prev,messageId,m=>appendToolResult([m],callId,result,isError,startedAt,durationMs,details)[0]);
+  const target = prev.findLastIndex(m => m.role === "assistant" && m.blocks.some(b => b.toolId === callId));
+  const index = target >= 0 ? target : prev.length - 1;
+  const carrier = prev[index];
   const resBlock: ContentBlock = {
-    type: "tool_result",
-    toolId: callId,
-    toolResult: result,
-    toolStartedAt: startedAt,
-    toolDurationMs: startedAt ? durationMs || 0 : undefined,
-    isError: !!isError,
-    toolDetails: details,
+    type: "tool_result", toolId: callId, toolResult: result,
+    toolStartedAt: startedAt, toolDurationMs: startedAt ? durationMs || 0 : undefined,
+    isError: !!isError, toolDetails: details,
   };
-
-  if (last && last.role === "assistant") {
-    return [
-      ...prev.slice(0, -1),
-      { ...last, blocks: [...last.blocks, resBlock] },
-    ];
+  if (carrier?.role === "assistant") {
+    const blocks = [...carrier.blocks];
+    const existing = blocks.findIndex(b => b.type === "tool_result" && b.toolId === callId);
+    if (existing >= 0) {
+      // A replayed detach placeholder must not undo a terminal background fold.
+      if ((blocks[existing].toolDetails as any)?.detached && !(details as any)?.detached) return prev;
+      blocks[existing] = resBlock;
+    } else blocks.push(resBlock);
+    return [...prev.slice(0,index),{...carrier,blocks},...prev.slice(index+1)];
   }
-  return [
-    ...prev,
-    {
-      id: `asst_${Date.now()}`,
-      role: "assistant",
-      turnIndex: last?.turnIndex,
-      streaming: true,
-      blocks: [resBlock],
-      time: Date.now(),
-    },
-  ];
+  return [...prev,{id:`tools_${callId}`,role:"assistant",blocks:[resBlock],time:0}];
 }
 
 /** Folds a finished background task into the originating tool row: the
@@ -378,39 +380,51 @@ export function cutTail(prev: ChatMessage[], keepRawIdx: number): ChatMessage[] 
 /** Merges assistant_message: merges into the last assistant or opens a bubble
  * (reasoning first — newest on top —, thinking duration preserved). */
 export function mergeAssistantMessage(prev: ChatMessage[], ev: any): ChatMessage[] {
+  const id = ev.message?.id || ev.messageId;
+  const index = id ? prev.findIndex(m => m.id === id) : typeof ev.index === "number"
+    ? prev.findIndex(m => m.srcIdx === ev.index)
+    : prev.at(-1)?.role === "assistant" ? prev.length - 1 : -1;
+  const old = prev[index];
   const blocks = parseContentBlocks(ev.message);
-  const reason = blocks.filter((b) => b.type === "reasoning").reverse();
-  const normalized = [...reason, ...blocks.filter((b) => b.type !== "reasoning")];
+  const calls = new Set(blocks.filter(b => b.type === "tool_call").map(b => b.toolId));
+  const results = (old?.blocks || []).filter(b => b.type === "tool_result" && calls.has(b.toolId));
+  const reason = blocks.filter(b => b.type === "reasoning").reverse();
   const duration = Number(ev.message?.meta?.thinking_ms);
-  const last = prev[prev.length - 1];
   const message: ChatMessage = {
-    id: last?.role === "assistant" ? last.id : `msg_${ev.index}`,
-    role: "assistant",
-    blocks: normalized,
-    time: Date.now(),
-    srcIdx: ev.index,
-    turnIndex: ev.message?.turnIndex || ev.turnIndex || last?.turnIndex,
-    streaming: false,
-    thinkingDuration: duration > 0 ? Math.max(1, Math.ceil(duration / 1000)) : last?.thinkingDuration,
-    turnDurationMs: Number(ev.message?.meta?.turn_ms) > 0 ? Number(ev.message.meta.turn_ms) : last?.turnDurationMs,
+    id: id || old?.id || `msg_${ev.index}`, role:"assistant",
+    blocks:[...reason,...blocks.filter(b=>b.type!=="reasoning"),...results],
+    time:Date.parse(ev.message?.time) || old?.time || 0,
+    srcIdx:ev.index ?? old?.srcIdx, turnIndex:ev.message?.turnIndex ?? ev.turnIndex ?? old?.turnIndex,
+    streaming:false,
+    thinkingDuration:duration>0 ? Math.max(1,Math.ceil(duration/1000)) : old?.thinkingDuration,
+    turnDurationMs:Number(ev.message?.meta?.turn_ms)>0 ? Number(ev.message.meta.turn_ms) : old?.turnDurationMs,
   };
-  return last?.role === "assistant" ? [...prev.slice(0, -1), message] : [...prev, message];
+  return index>=0 ? [...prev.slice(0,index),message,...prev.slice(index+1)] : orderedMessages([...prev,message]);
 }
 
-/** New empty carrier per model step (tool loops do not merge new
- * thinking into the previous assistant response). */
-export function pushAssistantCarrier(prev: ChatMessage[], index?: number, turnIndex?: number): ChatMessage[] {
-  // Retries replace an uncommitted response at the same raw position.
-  const kept = index == null ? prev : prev.filter((m) => m.srcIdx == null || m.srcIdx < index);
-  return [...kept, {
-    id: index == null ? `asst_${crypto.randomUUID()}` : `msg_${index}`,
-    srcIdx: index,
-    turnIndex: turnIndex || prev.at(-1)?.turnIndex,
-    streaming: true,
-    role: "assistant",
-    blocks: [],
-    time: Date.now(),
-  }];
+/** A model step has one daemon identity across deltas, commit and snapshots. */
+export function pushAssistantCarrier(prev: ChatMessage[], index?: number, turnIndex?: number, messageId?: string): ChatMessage[] {
+  if (messageId && prev.some(m=>m.id===messageId)) return prev;
+  const kept = index == null ? prev : prev.filter(m => m.srcIdx == null || m.srcIdx < index);
+  return [...kept,{id:messageId || (index==null ? `asst_${crypto.randomUUID()}` : `msg_${index}`),
+    srcIdx:index,turnIndex:turnIndex ?? prev.at(-1)?.turnIndex,streaming:true,role:"assistant",blocks:[],time:0}];
+}
+
+function updateMessage(prev: ChatMessage[], id: string, update: (m: ChatMessage) => ChatMessage): ChatMessage[] {
+  const index=prev.findIndex(m=>m.id===id);
+  if(index<0 || prev[index].role!=="assistant") return prev;
+  return [...prev.slice(0,index),update(prev[index]),...prev.slice(index+1)];
+}
+
+export function orderedMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.toSorted((a,b)=>(a.srcIdx ?? Infinity)-(b.srcIdx ?? Infinity));
+}
+
+/** A tail snapshot replaces its raw range, including removed/retried rows.
+ * Older pages remain intact; snapshot order is authoritative. */
+export function mergeTranscriptTail(prev: ChatMessage[], tail: ChatMessage[], firstIndex: number): ChatMessage[] {
+  const ids=new Set(tail.map(m=>m.id));
+  return [...prev.filter(m=>m.srcIdx!=null && m.srcIdx<firstIndex && !ids.has(m.id)),...tail];
 }
 
 /** Turn transition when becoming idle (turn end without endedAt). */
@@ -430,4 +444,24 @@ export function parseMessageAttachments(message: any): import("../viewTypes").St
     const refs = JSON.parse(message.meta?.attachments || "[]");
     return Array.isArray(refs) ? refs.filter((a) => a && typeof a.id === "string" && typeof a.name === "string") : [];
   } catch { return []; }
+}
+
+/** Worker-normalized pages retain completed background projections by job ID. */
+export function preserveBackgroundFolds(next: ChatMessage[], previous: ChatMessage[]): ChatMessage[] {
+  const folds=new Map<string,ContentBlock>();
+  for(const m of previous) for(const b of m.blocks) {
+    const d=b.toolDetails as any;
+    if(b.type==="tool_result" && d?.detached && d.background_job_id) folds.set(`${d.background_job_id}:${b.toolId}`,b);
+  }
+  return next.map(m=>{
+    let changed=false;
+    const blocks=m.blocks.map(b=>{
+      const d=b.toolDetails as any;
+      const saved=folds.get(`${d?.background_job_id}:${b.toolId}`);
+      if(!saved || d?.detached || b.type!=="tool_result") return b;
+      changed=true; return {...b,toolResult:saved.toolResult,isError:saved.isError,toolDurationMs:saved.toolDurationMs,
+        toolDetails:{...d,...saved.toolDetails as any}};
+    });
+    return changed?{...m,blocks}:m;
+  });
 }

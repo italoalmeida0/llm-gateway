@@ -1,3 +1,4 @@
+import { createTranscriptOrder, type TranscriptCursor } from "../transcript/order";
 import type { DaemonCommand } from "../daemon-protocol";
 import { batch, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
@@ -17,6 +18,9 @@ import { prettyArgs } from "../utils/wire";import {
   mergeAssistantMessage,
   mergeUsage,
   normalizeSessionMessages,
+  mergeTranscriptTail,
+  orderedMessages,
+  preserveBackgroundFolds,
   pushAssistantCarrier,
   stampDuration,
   upsertToolCall as reduceToolCall,
@@ -131,7 +135,7 @@ export function createTranscript(opts: {
     setPendingQuestion(question);
     setQuestionSubmitting(false);
     setQuestionError("");
-    if (question) scrollToBottom(true);
+    if (question) scrollToBottom();
   }
   function answerQuestion(answers: string[][]) {
     const question = pendingQuestion();
@@ -233,7 +237,8 @@ export function createTranscript(opts: {
   createEffect(() => {
     if (!pageVisible()) return;
     const blocks = buildRenderBlocks(messages()).map((block) => ({ ...block, id: block.msg.id }));
-    setRenderState("blocks", reconcile(blocks, { merge: true }));
+    transcriptScroll.preserveReadingPosition();
+    setRenderState("blocks", reconcile(blocks, { key: "id", merge: true }));
   });
   const renderBlocks = () => renderState.blocks;
 
@@ -313,6 +318,7 @@ export function createTranscript(opts: {
     setSealedBudget(1);
   }
   function resetHistory() {
+    historyRequestId="";
     setHistoryCursor(null);
     setHistoryArmed(false);
     setLoadingOlder(false);
@@ -348,12 +354,14 @@ export function createTranscript(opts: {
     return Math.max(0, cur.oldestTurn - 1);
   };
   /** Ask the daemon for the next older turn block (cursor = oldest known turn). */
+  let historyRequestId = "";
   function requestOlderHistory() {
     const sid = opts.getSessionId();
     const cur = historyCursor();
     if (!sid || !cur || !cur.hasOlder || cur.oldestTurn <= 0 || loadingOlder()) return;
     setLoadingOlder(true);
-    opts.send({ type: "get_history", sessionId: sid, beforeTurn: cur.oldestTurn });
+    historyRequestId=crypto.randomUUID();
+    opts.send({ type: "get_history", sessionId: sid, beforeTurn: cur.oldestTurn, requestId:historyRequestId });
   }
   /** Seal a daemon block: note its turn range + raw base. Duplicate
    * seals (same oldestTurn) are ignored — retries never double-note. */
@@ -374,7 +382,9 @@ export function createTranscript(opts: {
     });
   }
   /** Prepend one daemon history page, keeping the viewport anchored. */
-  async function noteHistoryPage(rawMsgs: any[], history: any) {
+  async function noteHistoryPage(rawMsgs: any[], history: any, requestId?: string, onApplied?:()=>void) {
+    if(requestId && requestId!==historyRequestId) return;
+    const version=contextVersion, sid=opts.getSessionId(), host=opts.getHostId();
     const base = typeof history?.firstIndex === "number" ? history.firstIndex : 0;
     const el = chatContainerRef();
     const prevHeight = el ? el.scrollHeight : 0;
@@ -382,13 +392,14 @@ export function createTranscript(opts: {
     const page = await normalizeAsync(rawMsgs, base);
     // Stale guard: the container detached (session switched) while the
     // worker ran — drop the page instead of splicing it anywhere.
+    if(version!==contextVersion || sid!==opts.getSessionId() || host!==opts.getHostId()) return;
     if (!el?.isConnected) {
       setLoadingOlder(false);
       return;
     }
     setMessages((prev) => {
       const known = new Set(prev.map((m) => m.id));
-      return [...page.filter((m) => !known.has(m.id)), ...prev];
+      return orderedMessages([...page.filter((m) => !known.has(m.id)), ...prev]);
     });
     // Seal the arriving block (whole turns, newest last) and reveal
     // exactly it: budget +1 exposes this seal; older seals stay hidden
@@ -405,6 +416,7 @@ export function createTranscript(opts: {
       setHistoryCursor((c) => (c ? { ...c, hasOlder: false } : c));
     }
     setLoadingOlder(false);
+    onApplied?.();
     // Anchor: the content above grew by (newHeight - prevHeight); shift
     // scrollTop by the same delta so the reader stays on the same bubble.
     if (el) {
@@ -511,10 +523,16 @@ export function createTranscript(opts: {
   function beginLoad(sessionId: string) {
     initialScrollSession = sessionId;
   }
+  const transcriptOrder = createTranscriptOrder(() => { const sid=opts.getSessionId(); if(sid && opts.isOpen()) fetchSession(sid); });
+  let contextVersion = 0;
   let snapshotVersion = 0;
   let pendingSnapshot: { replay: (() => void)[] } | null = null;
-  async function applySessionContent(sessionId: string, rawMsgs: any[], compaction?: any, history?: any) {
+  async function applySessionContent(sessionId: string, rawMsgs: any[], compaction?: any, history?: any, overlay?: any) {
+    if(sessionId!==opts.getSessionId()) return;
     const version = ++snapshotVersion;
+    const host = opts.getHostId();
+    if (overlay?.liveMessage) rawMsgs=[...rawMsgs,overlay.liveMessage];
+    if (overlay?.pendingToolResults?.length) rawMsgs=[...rawMsgs,{role:"tool",content:overlay.pendingToolResults}];
     pendingSnapshot = null;
     const paged = history && typeof history.oldestTurn === "number";
     const base = paged && typeof history.firstIndex === "number" ? history.firstIndex : 0;
@@ -528,14 +546,17 @@ export function createTranscript(opts: {
       pendingSnapshot = { replay: [] };
       tail = await normalized;
     }
-    if (version !== snapshotVersion || sessionId !== opts.getSessionId()) return;
-    const replay = pendingSnapshot?.replay || [];
+    if (version !== snapshotVersion || sessionId !== opts.getSessionId() || host !== opts.getHostId()) return;
+    const orderedReplay=transcriptOrder.snapshot(overlay?.transcript);
+    if (orderedReplay===null) { pendingSnapshot=null; return; }
+    tail=preserveBackgroundFolds(tail,messages());
+    const replay = overlay?.transcript ? orderedReplay : pendingSnapshot?.replay || [];
     pendingSnapshot = null;
     batch(() => {
+      overlay?.applyMetadata?.();
       if (paged) {
         setMessages((prev) => {
-          const ids = new Set(tail.map((m) => m.id));
-          return [...prev.filter((m) => !ids.has(m.id)), ...tail];
+          return mergeTranscriptTail(prev, tail, base);
         });
         sealBlock(rawMsgs, history);
         setSealedBudget((n) => Math.max(n, sealedBlocks().length));
@@ -548,7 +569,7 @@ export function createTranscript(opts: {
     });
     if (initialScrollSession === sessionId) {
       initialScrollSession = "";
-      scrollToBottom(true);
+      if (transcriptScroll.isPinned()) scrollToBottom(true);
     } else scrollToBottom();
   }
   onCleanup(() => {
@@ -564,7 +585,8 @@ export function createTranscript(opts: {
 
   /** Transcript-owned block of the session_data event (model/options live in
    * the options domain; workspace in the workspace domain — the page composes). */
-  function applySnapshot(sid: string, r: any) {
+  function applySnapshot(sid: string, r: any, onApplied?:()=>void) {
+    const applyMetadata = () => {
     if (r.workspace) setWorkspaceSnapshot(r.workspace);
     setSessionStatus(r.status === "running" ? "running" : "idle");
     setSessionCompaction(r.compaction ?? null);
@@ -582,7 +604,7 @@ export function createTranscript(opts: {
     setLoadingOlder(false);
     setTodos(r.todos || []);
     if (typeof r.todosOpen === "boolean") applyTodosOpenFromRemote(r.todosOpen);
-    applySessionContent(sid, r.messages || r.Messages || [], r.compaction, r.history);
+
     showQuestion(r.question || null);
     setToolProgress(r.toolProgress || {});
     setToolStarts(r.toolStarts || {});
@@ -591,7 +613,9 @@ export function createTranscript(opts: {
     else stopThinkingTimer();
     if (r.usage) applyUsage(sid, r.usage, null);
     setSessionContexts((prev) => ({ ...prev, [sid]: r.context ?? null }));
-
+    onApplied?.();
+    };
+    applySessionContent(sid, r.messages || r.Messages || [], r.compaction, r.history, {...r, applyMetadata});
   }
 
   // Point-in-time workspace received in the snapshot — redirected by the page via
@@ -607,9 +631,6 @@ export function createTranscript(opts: {
   function stampThinkingDuration(dur: number) {
     setMessages((prev) => stampDuration(prev, dur));
   }
-  function appendStreamingDelta(delta: string) {
-    setMessages((prev) => reduceTextDelta(prev, delta));
-  }
   function appendReasoningDelta(delta: string) {
     if (!delta) return;
     if (thinkingStart() === null) startThinkingTimer();
@@ -617,15 +638,12 @@ export function createTranscript(opts: {
     // The live clock/ticks belong to this message's first reasoning block.
     setThinkingIndex(0);
   }
-  function appendToolCall(callId: string, name: string, args: any) {
-    setMessages((prev) => reduceToolCall(prev, callId, name, args));
-  }
   function appendToolArgsDelta(callId: string, delta: string) {
     if (!delta) return;
     setMessages((prev) => reduceToolArgs(prev, callId, delta));
   }
-  function appendToolResult(callId: string, result: string | undefined, isError?: boolean, startedAt?: number, durationMs?: number, details?: any) {
-    setMessages((prev) => reduceToolResult(prev, callId, result, isError, startedAt, durationMs, details));
+  function appendToolResult(callId: string, result: string | undefined, isError?: boolean, startedAt?: number, durationMs?: number, details?: any, messageId?:string) {
+    setMessages((prev) => reduceToolResult(prev, callId, result, isError, startedAt, durationMs, details, messageId));
   }
   /** Folds a finished background task into the originating tool row
    * (daemon bg_update snapshot → placeholder row). Idempotent. */
@@ -898,17 +916,21 @@ export function createTranscript(opts: {
     if (requestId && requestId !== transcriptRequestId) return true;
     return false;
   }
-  function handleTruncated(sessionId: string | undefined, keep: number) {
+  function handleTruncated(sessionId: string | undefined, keep: number, cursor?: TranscriptCursor, onApplied?: () => void) {
+    if(sessionId!==opts.getSessionId()) return;
+    if(cursor) { transcriptOrder.event(cursor,()=>handleTruncated(sessionId,keep,undefined,onApplied)); return; }
     if (pendingSnapshot && sessionId === opts.getSessionId()) {
-      pendingSnapshot.replay.push(() => handleTruncated(sessionId, keep)); return;
+      pendingSnapshot.replay.push(() => handleTruncated(sessionId, keep,undefined,onApplied)); return;
     }
     // Authoritative tail cut after edit/regenerate (daemon broadcast).
     // keepIndex is the last RAW message to keep; drop rendered messages
     // whose srcIdx exceeds it, then let the following session_content
     // (or the new turn) repaint.
     if (sessionId !== opts.getSessionId()) return;
-    if (keep >= 0) {
+    if (keep >= -1) {
+      contextVersion++;
       setMessages((prev: ChatMessage[]) => {
+        if (keep === -1) return [];
         const cut = prev.findIndex((m) => (m.srcIdx ?? -1) > keep);
         return cut < 0 ? prev : prev.slice(0, cut);
       });
@@ -916,9 +938,12 @@ export function createTranscript(opts: {
       // next and re-seals).
       resetHistory();
       showQuestion(null);
+      onApplied?.();
     }
   }
   function handleStatusEvent(msg: SessionStatusEvent) {
+    if(msg.sessionId!==opts.getSessionId()) return;
+    if(msg.transcript) { const {transcript,...event}=msg; transcriptOrder.event(transcript,()=>handleStatusEvent(event)); return; }
     if (pendingSnapshot && msg.sessionId === opts.getSessionId()) {
       pendingSnapshot.replay.push(() => handleStatusEvent(msg)); return;
     }
@@ -937,7 +962,9 @@ export function createTranscript(opts: {
       }
     }
   }
-  function handleAgentEvent(sessionId: string, ev: AgentEvent | undefined) {
+  function handleAgentEvent(sessionId: string, ev: AgentEvent | undefined, cursor?: TranscriptCursor) {
+    if(sessionId!==opts.getSessionId() || !ev) return;
+    if(cursor) { transcriptOrder.event(cursor,()=>handleAgentEvent(sessionId,ev)); return; }
     if (!ev || sessionId !== opts.getSessionId()) return;
     if (pendingSnapshot) { pendingSnapshot.replay.push(() => handleAgentEvent(sessionId, ev)); return; }
     if (ev.type === "turn_start") {
@@ -946,9 +973,9 @@ export function createTranscript(opts: {
     } else if (ev.type === "user_message") {
       const user = normalizeSessionMessages([ev.message])[0];
       if (user) setMessages((prev) => {
-        const i = prev.findIndex((m) => m.srcIdx === ev.index || (m.role === "user" && m.srcIdx == null));
-        const next = { ...user, id: i >= 0 ? prev[i].id : `msg_${ev.index}`, srcIdx: ev.index, turnIndex: ev.turnIndex };
-        return i >= 0 ? [...prev.slice(0,i),next,...prev.slice(i+1)] : [...prev,next];
+        const i = prev.findIndex((m) => m.id === user.id || (typeof ev.index === "number" && m.srcIdx === ev.index) || (m.role === "user" && m.srcIdx == null));
+        const next = { ...user, id: ev.message?.id || (i >= 0 ? prev[i].id : `msg_${ev.index}`), srcIdx: ev.index, turnIndex: ev.turnIndex };
+        return i >= 0 ? [...prev.slice(0,i),next,...prev.slice(i+1)] : orderedMessages([...prev,next]);
       });
     } else if (ev.type === "todo_update") {
       setTodos(ev.items || []);
@@ -958,22 +985,24 @@ export function createTranscript(opts: {
     } else if (ev.type === "assistant_start") {
       // Each model step gets its own carrier. Tool loops cannot merge new
       // thinking into the previous assistant response.
-      setMessages((prev) => pushAssistantCarrier(prev, ev.index, ev.turnIndex));
+      setMessages((prev) => pushAssistantCarrier(prev, ev.index, ev.turnIndex, ev.messageId));
     } else if (ev.type === "text_delta") {
       // First content chunk freezes the thinking clock (chatbot-style).
       if (thinkingStart() !== null) {
         const dur = stopThinkingTimer();
         stampThinkingDuration(dur);
       }
-      appendStreamingDelta(ev.delta);
+      setMessages(prev=>reduceTextDelta(prev,ev.delta,ev.messageId));
     } else if (ev.type === "reasoning_delta") {
-      appendReasoningDelta(ev.delta || "");
+      if (thinkingStart() === null) startThinkingTimer();
+      setMessages(prev=>reduceReasoningDelta(prev,ev.delta || "",ev.messageId));
+      setThinkingIndex(0);
     } else if (ev.type === "tool_use_start") {
       if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
       // Pre-render a live "composing call" card while args stream in.
-      appendToolCall(ev.id, ev.name, "");
+      setMessages(prev=>reduceToolCall(prev,ev.id,ev.name,"",ev.messageId));
     } else if (ev.type === "tool_use_args") {
-      appendToolArgsDelta(ev.id, ev.delta);
+      setMessages(prev=>reduceToolArgs(prev,ev.id,ev.delta,ev.messageId));
     } else if (ev.type === "tool_use_end") {
       // No-op: the final tool_call event carries the full block.
     } else if (ev.type === "tool_execution_start") {
@@ -983,7 +1012,7 @@ export function createTranscript(opts: {
       setToolProgress((prev) => ({ ...prev, [ev.id]: ((prev[ev.id] || "") + (ev.text || "")).slice(-65536) }));
     } else if (ev.type === "tool_call") {
       if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
-      appendToolCall(ev.id, ev.name, ev.args);
+      setMessages(prev=>reduceToolCall(prev,ev.id,ev.name,ev.args,ev.messageId));
     } else if (ev.type === "tool_result") {
       setPendingApproval(null);
       setToolProgress((prev) => {
@@ -991,7 +1020,7 @@ export function createTranscript(opts: {
         delete next[ev.id];
         return next;
       });
-      appendToolResult(ev.id, ev.result ?? ev.content, ev.isError, ev.startedAt, ev.durationMs, ev.details);
+      appendToolResult(ev.id, ev.result ?? ev.content, ev.isError, ev.startedAt, ev.durationMs, ev.details, ev.messageId);
       setToolStarts((prev) => { const next = { ...prev }; delete next[ev.id]; return next; });
     } else if (ev.type === "usage") {
       applyUsage(sessionId, ev.usage, ev.cumulative);
@@ -1056,6 +1085,8 @@ export function createTranscript(opts: {
    * cleaned up by their own domains; the page orchestrates).
    */
   function resetForSession() {
+    contextVersion++; transcriptOrder.reset();
+    transcriptRequestId="";
     snapshotVersion++; pendingSnapshot = null;
     editSource = null;
     editAttachments.clearAttachments();

@@ -57,6 +57,13 @@ jobs:
       - name: SPA build sanity
         run: bun run build:web
 
+      - name: Transcript browser regressions
+        run: |
+          mkdir -p "$RUNNER_TEMP/transcript-browser"
+          bun add --cwd "$RUNNER_TEMP/transcript-browser" playwright@1.63.0
+          bun "$RUNNER_TEMP/transcript-browser/node_modules/playwright/cli.js" install --with-deps chromium
+          PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-transcript-ui.ts
+
   daemon:
     name: Daemon (${{ matrix.name }})
     runs-on: ${{ matrix.os }}

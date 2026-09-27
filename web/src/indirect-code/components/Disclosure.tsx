@@ -1,10 +1,15 @@
-import { createContext, createEffect, createSignal, useContext, on, Show, type JSX } from "solid-js";
+import { createContext, createEffect, createMemo, createSignal, useContext, on, Show, type JSX } from "solid-js";
 
 /** Manual choices survive snapshots, but expire when the activity phase changes. */
-export function createDisclosure(phase: () => string, autoOpen: () => boolean) {
+export function createDisclosure(phase: () => string, autoOpen: () => boolean, allowAutomatic = () => true) {
   const [manual, setManual] = createSignal<boolean>();
-  createEffect(on(phase, () => setManual(undefined), { defer: true }));
-  const open = () => manual() ?? autoOpen();
+  // Preserve the reader's expanded content when work finishes off the tail.
+  const automatic = createMemo<boolean>((previous) => {
+    const next = autoOpen();
+    return previous !== undefined && !allowAutomatic() ? previous : next;
+  });
+  createEffect(on(phase, () => { if (allowAutomatic()) setManual(undefined); }, { defer: true }));
+  const open = () => manual() ?? automatic();
   return { open, toggle: () => setManual(!open()) };
 }
 

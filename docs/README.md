@@ -1,5 +1,9 @@
 # V2 release preparation
 
+See [Transcript identity, ordering, and reading position](transcript-consistency.md)
+for message IDs, snapshot/event reconciliation, unpinned reading behavior, and
+the daemon, reducer, and Chromium regression tests.
+
 See [Daemon crash recovery: contracts, implementation, and validation](daemon-crash-only-hardening.md)
 for the five architectural hardening changes, their executable regression tests,
 primary-source examples, and explicit platform/durability limits. The document

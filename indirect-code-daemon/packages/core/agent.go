@@ -404,6 +404,9 @@ func (a *Agent) SeedLastTurnUsage(u provider.Usage) {
 // stampTurn tags m with the current turn before it joins the transcript.
 // An already-stamped message keeps its id (fork prefixes, repairs).
 func (a *Agent) stampTurn(m *provider.Message) {
+	if m.ID == "" {
+		m.ID = provider.NewMessageID()
+	}
 	if m.TurnIndex == 0 {
 		m.TurnIndex = a.TurnIndex
 	}
@@ -901,7 +904,8 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		return provider.StopError, provider.Message{}, err
 	}
 
-	sink(EvAssistantStart{})
+	messageID := provider.NewMessageID()
+	sink(EvAssistantStart{ID: messageID})
 
 	var (
 		stop     provider.StopReason
@@ -952,6 +956,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			finalMsg = e.Message
 		}
 	}
+	finalMsg.ID = messageID
 	finishThinking()
 	if a.PersistentTurns && finalErr == nil && (!gotDone || stop == provider.StopError || stop == provider.StopAborted) {
 		finalErr = io.ErrUnexpectedEOF

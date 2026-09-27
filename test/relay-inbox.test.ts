@@ -51,3 +51,10 @@ test("host disconnect/switch clears pending data and permits new traffic", () =>
   send("text_delta", { delta: "new" }); inbox.flush();
   expect(received.map((m) => m.event.delta)).toEqual(["new"]);
 });
+
+test("sequenced deltas retain boundaries needed to rebase an intervening snapshot",()=>{
+ const {inbox,received}=fixture();
+ for(const seq of [2,3]) inbox.push({type:"agent_event",sessionId:"s",hostId:"h",transcript:{stream:"one",seq},event:{type:"text_delta",messageId:"a",delta:String(seq)}});
+ inbox.flush();
+ expect(received.map(m=>m.transcript.seq)).toEqual([2,3]);
+});

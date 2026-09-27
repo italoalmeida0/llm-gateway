@@ -1,3 +1,4 @@
+import type { TranscriptCursor } from "./transcript/order";
 import type { MCPServerConfig, SkillConfig } from "./types";
 import type { SessionContext } from "./context";
 import type { QueuedMessage, TodoItem } from "./viewTypes";
@@ -31,7 +32,7 @@ export interface SessionChoice {
 export type DaemonCommand = CommandBase &
   (
   | { type: "get_session"; sessionId: string; requestId?: string }
-  | { type: "get_history"; sessionId: string; beforeTurn: number }
+  | { type: "get_history"; sessionId: string; beforeTurn: number; requestId?: string }
   | { type: "pull"; collection: string }
   | { type: "configure_session"; sessionId: string; model: string; options: Omit<SessionChoice, "model"> }
   | { type: "prompt"; sessionId: string; text: string; model: string; yolo: boolean; options: Omit<SessionChoice, "model">; attachmentIds: string[] }
@@ -87,10 +88,11 @@ export type DaemonCommand = CommandBase &
 export type WireRecord = any;
 
 interface EventBase {
+  transcript?: TranscriptCursor;
   hostId?: string;
 }
 
-export type AgentEvent = { turnIndex?: number } & (
+export type AgentEvent = { turnIndex?: number; messageId?: string } & (
   | { type: "turn_start" }
   | { type: "todo_update"; items?: TodoItem[] }
   | { type: "user_message"; index: number; message: WireRecord }

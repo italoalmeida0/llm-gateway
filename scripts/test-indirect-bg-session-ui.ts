@@ -29,6 +29,12 @@ try {
   page.on("pageerror", (e: Error) => errors.push(String(e)));
   await page.goto(server.url.toString());
   await page.waitForFunction(() => (window as any).bgTest);
+  const waitStep = async (i: number, fn: () => Promise<unknown>) => {
+    try { await fn(); } catch (_e) {
+      const st = await page.evaluate(() => ({ body: (document.body.textContent || "").slice(-300) }));
+      throw new Error(`WAIT STEP ${i} timed out. bodyTail=${JSON.stringify(st.body)}`, { cause: _e });
+    }
+  };
 
   // 1. Empty session: no card.
   assert.equal(await page.locator("text=Background tasks").count(), 0, "card renders with zero tasks");
@@ -38,7 +44,7 @@ try {
     { id: "bg_1", kind: "bash", label: "sleep 30", status: "running", startedAt: Date.now() - 5000, content: "history-" },
     { id: "bg_2", kind: "python", label: "train.py", status: "done", startedAt: 1, endedAt: 2, exitCode: 0, content: "epoch 1\nloss 0.5" },
   ]));
-  await page.waitForFunction(() => document.body.textContent?.includes("Background tasks"));
+  await waitStep(2, () => page.waitForFunction(() => document.body.textContent?.includes("Background tasks")));
   const cardText = await page.textContent("body");
   assert.ok(cardText?.includes("1 running"), "running counter");
   assert.ok(cardText?.includes("sleep 30"), "bash label renders");
@@ -49,15 +55,18 @@ try {
   const logButtons = page.getByRole("button", { name: "Logs" });
   assert.equal(await logButtons.count(), 2, "one Logs toggle per task");
   await logButtons.first().click();
-  await page.waitForFunction(() => document.body.textContent?.includes("history-live-1"));
+  await waitStep(3, () => page.waitForFunction(() => {
+    const b = document.body.textContent || "";
+    return b.includes("history-") && b.includes("live-1");
+  }));
   const logText = await page.textContent("body");
-  assert.ok(logText?.includes("history-live-1"), "session tail + live stream glued");
+  assert.ok(logText?.includes("history-") && logText?.includes("live-1"), "session tail + live stream glued");
 
   // 4. Register/finish events touch the list without a full refresh.
   await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_registered", sessionId: "s1", jobId: "bg_9", kind: "bash", label: "make build" }));
-  await page.waitForFunction(() => document.body.textContent?.includes("make build"));
+  await waitStep(4, () => page.waitForFunction(() => document.body.textContent?.includes("make build")));
   await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_finished", sessionId: "s1", jobId: "bg_9", status: "done" }));
-  await page.waitForFunction(() => document.body.textContent?.includes("2 running") === false);
+  await waitStep(5, () => page.waitForFunction(() => document.body.textContent?.includes("2 running") === false));
   // Foreign sessions never leak in.
   await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_registered", sessionId: "other", jobId: "bg_x", kind: "bash", label: "evil" }));
   await page.waitForTimeout(150);
@@ -78,6 +87,51 @@ try {
   const sleep = await page.evaluate(() => (window as any).bgTest.summary("sleep", { seconds: 90, waitingFor: "bg_1", summary: "waiting for build" }, "waiting for build\nSlept 1m30s."));
   assert.ok(String(sleep.target).includes("1m") || String(sleep.verb).toLowerCase().includes("sleep"), "sleep header");
 
+  // 5b. No-cut, no-dup: tail 21..30 (total 30) + live "31, ok" (from=31).
+  // Then a refresh with the full tail collapses live. "ok" exactly once.
+  await page.evaluate(() => {
+    const t = (window as any).bgTest;
+    t.seed([{ id: "bg_seq", kind: "bash", label: "uniqueseqlabel", status: "running", startedAt: 1, content: "21\n22\n23\n24\n25\n26\n27\n28\n29\n30", totalLines: 30, droppedLines: 20, contentFrom: 21 }]);
+    t.output("bg_seq", "31\nok", 31);
+  });
+  await waitStep(6, () => page.waitForFunction(() => document.body.textContent?.includes("uniqueseqlabel"), null, { timeout: 10000 }));
+  const rendered = await page.evaluate(() => {
+    const bg: any = (window as any).bgTest.bg;
+    const task = bg.sessionJobs().find((t: any) => t.id === "bg_seq");
+    if (!task) return { error: "bg_seq missing from sessionJobs" };
+    const sess: string = task.content || "";
+    const live: string = bg.liveTail("bg_seq");
+    return { sessTail: sess.slice(-40), live };
+  });
+  if ((rendered as any).error) throw new Error((rendered as any).error);
+  assert.ok(((rendered as any).sessTail || "").includes("29\n30"), `session tail wrong: ${JSON.stringify(rendered)}`);
+  assert.equal((rendered as any).live, "31\nok", `live must be exactly the new lines: ${JSON.stringify(rendered)}`);
+  await page.getByRole("button", { name: "Logs" }).last().click();
+  await page.waitForTimeout(500);
+  const seqCode = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll("div")].filter((d) => (d.textContent || "").includes("uniqueseqlabel"));
+    const row = rows[rows.length - 1];
+    const pre = row?.parentElement?.querySelector("pre") || document.querySelector("pre");
+    return (pre?.textContent || "").trim();
+  });
+  const seqLines = seqCode.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+  for (const n of ["21", "29", "30", "31"]) {
+    assert.equal(seqLines.filter((l) => l === n).length, 1, `line ${n} exactly once (code=${JSON.stringify(seqCode.slice(0, 200))})`);
+  }
+  assert.equal(seqLines.filter((l) => l === "ok").length, 1, '"ok" exactly once');
+  // Refresh with the full tail: live collapses, "ok" stays single.
+  await page.evaluate(() => (window as any).bgTest.seed([
+    { id: "bg_seq", kind: "bash", label: "uniqueseqlabel", status: "done", startedAt: 1, endedAt: 2, exitCode: 0, content: "21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\nok", totalLines: 32, droppedLines: 20, contentFrom: 21 },
+  ]));
+  await page.waitForTimeout(200);
+  const seqCodeAfter = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll("div")].filter((d) => (d.textContent || "").includes("uniqueseqlabel"));
+    const row = rows[rows.length - 1];
+    const pre = row?.parentElement?.querySelector("pre") || document.querySelector("pre");
+    return (pre?.textContent || "").trim();
+  });
+  assert.equal(seqCodeAfter.split("\n").map((l) => l.trim()).filter((l) => l === "ok").length, 1, '"ok" must stay single after snapshot refresh');
+
   // 6. Row bodies: sleep shows only the summary, bg_check reads like a
   // file, bg_cancel stays minimal.
   const sleepBody = await page.textContent('[data-testid="row-sleep"]');
@@ -90,9 +144,14 @@ try {
   assert.ok(!cancelBody?.includes("bg_9"), "bg_cancel body must not show the task id");
 
   // 7. Stop button sends bg_cancel (no id in UI, id on the wire).
+  // Re-seed a running task (5b left only a finished one: no Stop button).
+  await page.evaluate(() => (window as any).bgTest.seed([
+    { id: "bg_stop", kind: "bash", label: "stoppable", status: "running", startedAt: Date.now(), content: "working" },
+  ]));
+  await page.waitForFunction(() => document.body.textContent?.includes("stoppable"));
   const sentBefore = await page.evaluate(() => ((window as any).__sent ?? []).length);
   await page.getByRole("button", { name: "Stop" }).first().click();
-  await page.waitForFunction((n) => ((window as any).__sent ?? []).length > n, sentBefore as any).catch(() => {});
+  await waitStep(7, () => page.waitForFunction((n) => ((window as any).__sent ?? []).length > n, sentBefore as any).catch(() => {}));
   assert.deepEqual(errors, [], `page errors: ${errors.join("\n")}`);
   console.log("bg-session-ui: OK (card, live glue, events, summaries, no page errors)");
 } finally {

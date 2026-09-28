@@ -118,7 +118,7 @@ func (t *PythonTool) Description() string {
 	return "Run Python 3 code (`code`) or a workspace script (`script` + `args`), with optional `stdin`, `env` and `workdir`. " +
 		"Use for data analysis, quick calculations, file transforms, or running project scripts. " +
 		"Stdout/stderr are captured separately; a non-zero exit is reported with the exit code. " +
-		"There is no timeout: if the execution still runs after 10 seconds it automatically moves to the background (its output streams to a .log file, you are notified, and its result is delivered when it finishes — wait with the sleep tool, stop it with bg_cancel). " +
+		"There is no timeout: if the execution still runs after 10 seconds it automatically moves to the background (you are notified with a job id; read the output with bg_check, wait with the sleep tool, stop it with bg_cancel). " +
 		"Only available when a Python 3 interpreter exists on this machine."
 }
 
@@ -264,7 +264,7 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		inlineErr := markInline()
 		cleanup(true)
 		if inlineErr != nil {
-			return core.ToolResult{}, fmt.Errorf("could not persist inline outcome; inspect %s: %w", proc.LogPath, inlineErr)
+			return core.ToolResult{}, fmt.Errorf("could not persist inline outcome: %w", inlineErr)
 		}
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	case <-ctx.Done():
@@ -274,7 +274,7 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		inlineErr := markInline()
 		cleanup(true)
 		if inlineErr != nil {
-			return core.ToolResult{}, fmt.Errorf("could not persist inline outcome; inspect %s: %w", proc.LogPath, inlineErr)
+			return core.ToolResult{}, fmt.Errorf("could not persist inline outcome: %w", inlineErr)
 		}
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	case <-time.After(AutoBackgroundAfter):
@@ -284,25 +284,25 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		inlineErr := markInline()
 		cleanup(true)
 		if inlineErr != nil {
-			return core.ToolResult{}, fmt.Errorf("could not persist inline outcome; inspect %s: %w", proc.LogPath, inlineErr)
+			return core.ToolResult{}, fmt.Errorf("could not persist inline outcome: %w", inlineErr)
 		}
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	}
-	jobID, logPath, sink, deliver := t.Slow("python", label, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, StderrPath: proc.ErrLogPath, Stop: stop})
+	jobID, _, sink, deliver := t.Slow("python", label, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, StderrPath: proc.ErrLogPath, Stop: stop})
 	// V2R-001: detached into a real background job — notify on terminal.
 	if proc.Disposition != nil && proc.JobID != "" {
 		if err := proc.Disposition(proc.JobID, DispBackground); err != nil {
 			stop()
 			<-doneCh
 			cleanup(false)
-			return core.ToolResult{}, fmt.Errorf("could not persist background disposition; process stopped, inspect %s: %w", proc.LogPath, err)
+			return core.ToolResult{}, fmt.Errorf("could not persist background disposition; process stopped, inspect it with bg_check (job_id %q): %w", jobID, err)
 		}
 	}
 	if jobID == "" {
 		stop()
 		<-doneCh
 		cleanup(false)
-		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", proc.LogPath)
+		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped (job_id %q)", jobID)
 	}
 	stream = sink
 	close(detached)
@@ -320,31 +320,25 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		// a detached background job.
 		if det, ok := res.Details.(map[string]any); ok {
 			det["background_job_id"] = jobID
-			det["log_path"] = logPath
-			det["detached"] = true
+						det["detached"] = true
 		}
 		deliver(text, res.IsError)
 	}()
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: pythonBackgroundNotice(jobID, logPath, label)}},
-		Details: map[string]any{"background_job_id": jobID, "log_path": logPath},
+		Content: []provider.Content{provider.TextBlock{Text: pythonBackgroundNotice(jobID, label)}},
+		Details: map[string]any{"background_job_id": jobID},
 	}, nil
 }
 
 // pythonBackgroundNotice mirrors bashBackgroundNotice for detached python
 // executions: where the output goes, how to force-stop it (bg_cancel) and
 // the automatic wake-up with a completion notice when the script ends.
-func pythonBackgroundNotice(jobID, logPath, label string) string {
+func pythonBackgroundNotice(jobID, label string) string {
 	var b strings.Builder
-	b.WriteString("Execution moved to background (still running).\n")
-	if logPath != "" {
-		fmt.Fprintf(&b, "All output (stdout+stderr) is being appended to: %s\n", logPath)
-		b.WriteString("You can follow it with your read tool — but there is no need to poll: you are woken automatically when the execution finishes, and the .log file is kept.\n")
-	} else {
-		b.WriteString("Output is captured in memory and delivered when the execution finishes.\n")
-	}
-	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q (task: %s).\n", jobID, ClipLabel(label))
-	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then (read it with bg_check).\n")
+	b.WriteString("Command moved to background (still running).\n")
+	fmt.Fprintf(&b, "To read the output, call bg_check with job_id %q (paged log: tail by default, offset/limit for more).\n", jobID)
+	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q.\n", jobID)
+	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then.\n")
 	b.WriteString("While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.")
 	return b.String()
 }

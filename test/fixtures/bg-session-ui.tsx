@@ -100,8 +100,8 @@ Object.assign(window, {
     event(msg: any) {
       bg.noteSessionTaskEvent(msg);
     },
-    output(jobId: string, text: string) {
-      bg.noteOutput(jobId, text);
+    output(jobId: string, text: string, from?: number) {
+      bg.noteOutput(jobId, text, undefined, from);
     },
     // toolSummary probes (pure, no DOM).
     summary(toolName: string, args: any, result?: string) {

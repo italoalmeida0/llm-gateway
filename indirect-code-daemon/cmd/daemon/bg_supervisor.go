@@ -382,23 +382,15 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 	if by != "" {
 		j.Result = fmt.Sprintf("Background task %s cancelled by %s.", j.Label, by)
 		if j.LogPath != "" {
-			j.Result += fmt.Sprintf("\nPartial output (if any) is in the .log at: %s", j.LogPath)
+			bgAppendLogLine(j.LogPath, fmt.Sprintf("\n[cancelled by %s]\n", by))
 		}
-		bgAppendLogLine(j.LogPath, fmt.Sprintf("\n[cancelled by %s]\n", by))
 	}
 	_ = os.Remove(b.pidPath(jobID))
 	trace("bg.cancel", map[string]any{"job": j.ID, "sid": j.SessionID, "by": by})
 	// Mirror the terminal state into the session BgTask now (trim +
 	// persist): the runner's death rattle arrives later and loses to
 	// cancelled via the actor gate.
-	if b.session != nil {
-		if inbox, _, ok := b.session(j.SessionID); ok {
-			select {
-			case inbox <- Envelope{SessionID: j.SessionID, Payload: bgTaskFinishMsg{JobID: j.ID, Status: BgStatusCancelled, ExitCode: -1}}:
-			default:
-			}
-		}
-	}
+	b.sessionInbox(j.SessionID, bgTaskFinishMsg{JobID: j.ID, Status: BgStatusCancelled, ExitCode: -1})
 	if by == "user" {
 		b.deliver(j, false)
 	}
@@ -561,9 +553,6 @@ func (b *bgSupervisor) deliver(j *bgJob, finished bool) {
 		// Logs live in the session BgTask: read them with bg_check
 		// (job_id %s). The runner files are already cleaned.
 		fmt.Fprintf(&sb, "Read the output with bg_check (job_id %s) — it pages by lines, tail by default.\n", j.ID)
-		if j.StderrPath != "" {
-			fmt.Fprintf(&sb, "Standard error is in: %s\n", j.StderrPath)
-		}
 		sb.WriteString("Continue your work based on what the log shows.</system-reminder>")
 		text = sb.String()
 	} else {
@@ -604,6 +593,22 @@ func (b *bgSupervisor) retainNotice(jobID, sessionID, text string, finished bool
 
 // tryNotice attempts one non-blocking delivery. The notice STAYS pending
 // until the session acks it — a successful send is not the ack.
+// sessionInbox delivers a message to a session actor best-effort
+// (never blocks the supervisor loop).
+func (b *bgSupervisor) sessionInbox(sessionID string, payload any) {
+	if b.session == nil {
+		return
+	}
+	inbox, _, ok := b.session(sessionID)
+	if !ok {
+		return
+	}
+	select {
+	case inbox <- Envelope{SessionID: sessionID, Payload: payload}:
+	default:
+	}
+}
+
 func (b *bgSupervisor) tryNotice(n *pendingNotice) {
 	if b.session == nil {
 		return

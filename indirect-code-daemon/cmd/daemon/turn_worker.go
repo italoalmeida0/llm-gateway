@@ -666,12 +666,9 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 			if chunk == "" {
 				return
 			}
-			// Session-first: the chunk lands in the BgTask (RAM + WAL).
-			// The live bg_output emit stays for the streaming row.
+			// Session-first: the chunk lands in the BgTask (RAM + WAL);
+			// the actor emits the numbered bg_output for the live card.
 			w.sendInboxBestEffort(bgTaskChunkMsg{JobID: id, Text: chunk})
-			if w.env.emit != nil {
-				w.env.emit(map[string]any{"type": "bg_output", "sessionId": w.env.actorID, "jobId": id, "text": chunk})
-			}
 		}
 		var once sync.Once
 		finish := func(result string, isError bool) {

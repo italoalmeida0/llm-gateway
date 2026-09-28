@@ -151,7 +151,7 @@ export type DaemonEvent = EventBase &
     | { type: "convert_resolved"; sessionId?: string; requestId: string }
     | { type: "session_queue"; sessionId?: string; queue: QueuedMessage[] }
     | { type: "agent_event"; sessionId?: string; event?: AgentEvent }
-    | { type: "bg_output"; jobId?: string; sessionId?: string; text?: string }
+    | { type: "bg_output"; jobId?: string; sessionId?: string; text?: string; from?: number; total?: number }
     | { type: "bg_task_registered"; sessionId?: string; jobId?: string; kind?: string; label?: string }
     | { type: "bg_task_finished"; sessionId?: string; jobId?: string; status?: string; exitCode?: number }
     | { type: "error"; requestId?: string; sessionId?: string; message?: string; replyTo?: string }

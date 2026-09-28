@@ -162,7 +162,7 @@ export function ToolEditBodies(props: ToolPartProps) {
               <CodeBlock follow={() => props.m.open() && props.running} text={String(props.m.args().code || "")} language="python" scrollKey={`${props.m.key()}:code`} />
             </Show>
             <div class="border-t border-line/50">
-              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.bgRunning() ? (props.m.bgStream() || props.m.prog() || "Running in background…") : props.m.terminal().output || "No output"} language={undefined} scrollKey={props.m.key()} />
+              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.bgRunning() || props.m.isDetachedBg() ? (props.m.bgStream() || props.m.prog() || "Running in background…") : props.m.terminal().output || "No output"} language={undefined} scrollKey={props.m.key()} />
             </div>
           </Show>
         </Show>

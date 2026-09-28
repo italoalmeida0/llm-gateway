@@ -64,7 +64,7 @@ export function BackgroundCard() {
         <div class="flex flex-col gap-1.5">
           <For each={tasks()}>
             {(job) => (
-              <div class="rounded-lg border border-line/60 bg-ink-900/40">
+              <div class="rounded-lg border border-line/60 bg-ink-900/40" data-bg-row={job.id}>
                 <div class="flex items-center gap-2 px-2.5 py-1.5">
                   <Show
                     when={job.status === "running"}

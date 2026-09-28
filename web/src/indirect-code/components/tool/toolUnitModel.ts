@@ -78,7 +78,12 @@ const elapsed = () => {
     if (job && job.startedAt) return ctx.elapsedLabel(Math.max(0, ctx.bgClock() - job.startedAt));
   }
   const start = ctx.toolStarts()[u.call?.toolId || ""];
-  return start && active() ? ctx.elapsedLabel(ctx.turnClock() - start) : "";
+  if (start && active()) return ctx.elapsedLabel(ctx.turnClock() - start);
+  // Detached window: the placeholder landed but the job isn't in the
+  // session list yet (register/snapshot still flying). Keep ticking off
+  // the tool start so the time never blanks mid-detach.
+  if (isDetachedBg() && start) return ctx.elapsedLabel(Math.max(0, ctx.bgClock() - start));
+  return "";
 };
 /** Background job id when this call detached (placeholder or folded). */
 const bgJobId = () => {

@@ -254,7 +254,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-56 whitespace-pre-wrap"
             >
               {props.m.name() === "bash" && props.u.result
-                ? (props.m.bgRunning()
+                ? (props.m.bgRunning() || props.m.isDetachedBg()
                   ? (props.m.bgStream() || props.m.prog() || "Running in background…")
                   : props.m.terminal().output || "No output")
                 : props.u.result?.toolResult || props.m.prog() || ""}

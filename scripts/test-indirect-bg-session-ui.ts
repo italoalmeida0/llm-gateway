@@ -78,7 +78,18 @@ try {
   const sleep = await page.evaluate(() => (window as any).bgTest.summary("sleep", { seconds: 90, waitingFor: "bg_1", summary: "waiting for build" }, "waiting for build\nSlept 1m30s."));
   assert.ok(String(sleep.target).includes("1m") || String(sleep.verb).toLowerCase().includes("sleep"), "sleep header");
 
-  // 6. Stop button sends bg_cancel (no id in UI, id on the wire).
+  // 6. Row bodies: sleep shows only the summary, bg_check reads like a
+  // file, bg_cancel stays minimal.
+  const sleepBody = await page.textContent('[data-testid="row-sleep"]');
+  assert.ok(sleepBody?.includes("waiting for build"), `sleep body must show the summary: ${sleepBody?.slice(0, 200)}`);
+  assert.ok(!sleepBody?.includes("bg_1"), "sleep body must not show the task id");
+  const checkBody = await page.textContent('[data-testid="row-bgcheck"]');
+  assert.ok(checkBody?.includes("hello"), "bg_check body must show the log content");
+  assert.ok(checkBody?.includes("Background Task#L1-2") || checkBody?.includes("Background Task"), "bg_check header must name the task");
+  const cancelBody = await page.textContent('[data-testid="row-bgcancel"]');
+  assert.ok(!cancelBody?.includes("bg_9"), "bg_cancel body must not show the task id");
+
+  // 7. Stop button sends bg_cancel (no id in UI, id on the wire).
   const sentBefore = await page.evaluate(() => ((window as any).__sent ?? []).length);
   await page.getByRole("button", { name: "Stop" }).first().click();
   await page.waitForFunction((n) => ((window as any).__sent ?? []).length > n, sentBefore as any).catch(() => {});

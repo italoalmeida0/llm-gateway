@@ -36,7 +36,7 @@ async function run(label: string) {
           // Explicit phase flag: the history contains bg_test (unknown-id
           // warning) from the earlier sleep scenario, so a regex would
           // match the wrong id and loop on immediate warnings.
-          if(!cancelBashed){cancelBashed=true;return sse('bash',{command:'sleep 30'});}
+          if(!cancelBashed){cancelBashed=true;return sse('bash',{command:'sleep 300'});}
           if(!cancelBgId){
             const hist=JSON.stringify(body?.messages||[]);
             const m=hist.match(/bg_[A-Za-z0-9]{8,}/);

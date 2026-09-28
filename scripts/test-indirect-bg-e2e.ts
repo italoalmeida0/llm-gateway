@@ -201,9 +201,13 @@ async function openSessionPage(ctx: any, sessionId: string) {
   return { browser, page, pageErrors, consoleErrors };
 }
 
+// Google GSI (auth widget) trips a CSP console error on every page load —
+// environment noise unrelated to bg tasks. Fail only on new errors.
+const KNOWN_CONSOLE_NOISE = [/Content Security Policy.*accounts\.google\.com/i, /gsi\/client/i];
 function assertNoPageErrors(pageErrors: string[], consoleErrors: string[], where: string) {
   assert.deepEqual(pageErrors, [], `${where}: page errors: ${pageErrors.join(" | ")}`);
-  assert.deepEqual(consoleErrors, [], `${where}: console errors: ${consoleErrors.join(" | ")}`);
+  const fresh = consoleErrors.filter((m) => !KNOWN_CONSOLE_NOISE.some((re) => re.test(m)));
+  assert.deepEqual(fresh, [], `${where}: console errors: ${fresh.join(" | ")}`);
 }
 
 // A. finish flow: detach -> sleep(waitingFor+summary) -> bg_check read.

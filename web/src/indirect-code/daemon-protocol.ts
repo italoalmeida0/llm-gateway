@@ -168,6 +168,8 @@ export type DaemonEvent = EventBase &
     | { type: "bg_update"; jobs?: BgJobWire[] }
     | { type: "bg_list"; jobs?: BgJobWire[] }
     | { type: "bg_output"; jobId?: string; sessionId?: string; text?: string }
+    | { type: "bg_task_registered"; sessionId?: string; jobId?: string; kind?: string; label?: string }
+    | { type: "bg_task_finished"; sessionId?: string; jobId?: string; status?: string; exitCode?: number }
     | { type: "bg_tail"; jobId?: string; text?: string; truncated?: boolean }
     | { type: "error"; requestId?: string; sessionId?: string; message?: string; replyTo?: string }
   );

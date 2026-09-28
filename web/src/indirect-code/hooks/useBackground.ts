@@ -2,16 +2,28 @@ import { createSignal, onCleanup } from "solid-js";
 import type { BgJobWire, DaemonCommand } from "../daemon-protocol";
 
 /**
- * Background tasks (per host).
+ * Background tasks (per session).
  *
- * The daemon owns the registry (process-local, never persisted) and
- * broadcasts `bg_update` on every transition; `bg_list` answers with a
- * snapshot. Live output streams as `bg_output` chunks (ephemeral);
- * clients that connect mid-run fetch the .log tail via `bg_tail`.
- * Finished jobs disappear from the card — their result is folded into
- * the originating tool row instead.
+ * The session owns the tasks (daemon BgTasks, persisted + mirrored in
+ * session_data/session_content as bgTasks). The hook keeps the session
+ * list as the source of truth: tasks NEVER disappear (no GC) — a
+ * finished task stays rendered like a tool call. Live output still
+ * streams as `bg_output` chunks; the `bg_update`/`bg_list` registry
+ * remains as a fallback for sessions recorded before the split.
  */
-export type BgTask = BgJobWire;
+export interface SessionBgTask {
+  id: string;
+  kind: string;
+  label: string;
+  status: string;
+  startedAt: number;
+  endedAt?: number;
+  exitCode?: number;
+  content?: string;
+  totalLines?: number;
+  droppedLines?: number;
+}
+export type BgTask = BgJobWire | SessionBgTask;
 
 /** Per-job streamed output cap (tail kept, head dropped). */
 const OUTPUT_CAP = 96 * 1024;
@@ -30,6 +42,50 @@ export function createBackground(opts: {
 }) {
   const [jobs, setJobs] = createSignal<BgTask[]>([]);
   const [output, setOutput] = createSignal<Record<string, string>>({});
+  /** Session-owned tasks (bgTasks from session_data/session_content).
+   * Merged with registry jobs by id; session wins on conflict. */
+  const [sessionTasks, setSessionTasks] = createSignal<SessionBgTask[]>([]);
+  /** Session task events (bg_task_registered/bg_task_finished): force
+   * the card to re-render even without a session_data refresh. */
+  function noteSessionTaskEvent(msg: any) {
+    if (!msg || typeof msg.jobId !== "string") return;
+    const sid = opts.getSessionId();
+    if (msg.sessionId && sid && msg.sessionId !== sid) return;
+    // Touch the list so dependents re-evaluate; the authoritative
+    // content arrives via session_data/session_content (pingChange).
+    setSessionTasks((prev) => {
+      const i = prev.findIndex((t) => t.id === msg.jobId);
+      if (i < 0) {
+        return [...prev, { id: msg.jobId, kind: String(msg.kind || ""), label: String(msg.label || ""), status: msg.type === "bg_task_finished" ? String(msg.status || "done") : "running", startedAt: Date.now() }];
+      }
+      const next = [...prev];
+      if (msg.type === "bg_task_finished") next[i] = { ...next[i], status: String(msg.status || "done") };
+      return next;
+    });
+  }
+  /** Authoritative session task list (from session payload bgTasks). */
+  function noteSessionTasks(list: unknown) {
+    if (!Array.isArray(list)) return;
+    const parsed: SessionBgTask[] = [];
+    for (const t of list as any[]) {
+      if (!t || typeof t.id !== "string") continue;
+      parsed.push({
+        id: t.id,
+        kind: String(t.kind || ""),
+        label: String(t.label || ""),
+        status: String(t.status || "running"),
+        startedAt: typeof t.startedAt === "number" ? t.startedAt : 0,
+        endedAt: typeof t.endedAt === "number" ? t.endedAt : undefined,
+        exitCode: typeof t.exitCode === "number" ? t.exitCode : undefined,
+        content: typeof t.content === "string" ? t.content : undefined,
+        totalLines: typeof t.totalLines === "number" ? t.totalLines : undefined,
+        droppedLines: typeof t.droppedLines === "number" ? t.droppedLines : undefined,
+      });
+    }
+    setSessionTasks(parsed);
+    if (parsed.some((t) => t.status === "running")) ensureClock();
+    else maybeStopClock();
+  }
   /** 1s ticker (only while a job runs) for elapsed labels. */
   const [clock, setClock] = createSignal(Date.now());
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -79,10 +135,10 @@ export function createBackground(opts: {
     if (opts.onTerminalResult) {
       const prev = jobs();
       for (const job of parsed) {
-        if (job.sessionId !== sid) continue;
+        if ((job as BgJobWire).sessionId !== sid) continue;
         if (job.kind !== "bash" && job.kind !== "python") continue;
         if (job.status === "running") {
-          if (!prev.some((p) => p.id === job.id)) requestTail(job.id);
+          if (!prev.some((p) => (p as BgJobWire).id === job.id)) requestTail(job.id);
           continue;
         }
         flushTailBuffer(job.id);
@@ -208,14 +264,24 @@ export function createBackground(opts: {
   }
 
   /** Jobs owned by the OPEN session (the daemon registry is per host; the
-   * card must never show another conversation's tasks). */
+   * card must never show another conversation's tasks). Session-owned
+   * tasks (bgTasks) merge in by id — session wins — and NEVER disappear. */
   function sessionJobs() {
     const sid = opts.getSessionId();
     if (!sid) return [];
-    return jobs().filter((j) => j.sessionId === sid);
+    const reg = jobs().filter((j) => (j as BgJobWire).sessionId === sid || !(j as BgJobWire).sessionId);
+    const sess = sessionTasks();
+    if (sess.length === 0) return reg;
+    const ids = new Set(sess.map((t) => t.id));
+    return [...sess, ...reg.filter((j) => !ids.has(j.id))];
   }
 
-  return { jobs, sessionJobs, running, output, clock, noteJobs, noteOutput, noteTail, tail, refresh, stop };
+  /** Session-owned content for a task (authoritative tail from bgTasks). */
+  function sessionContent(jobId: string): string | undefined {
+    return sessionTasks().find((t) => t.id === jobId)?.content;
+  }
+
+  return { jobs, sessionJobs, sessionContent, running, output, clock, noteJobs, noteOutput, noteTail, noteSessionTasks, noteSessionTaskEvent, tail, refresh, stop };
 }
 
 export type Background = ReturnType<typeof createBackground>;

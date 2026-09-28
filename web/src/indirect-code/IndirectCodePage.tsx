@@ -817,6 +817,7 @@ export default function IndirectCodePage() {
           const atts = r.attachments || r.Attachments || [];
           review.noteSessionFiles(sid, atts);
           queue.noteQueue(sid, r.queue);
+          if (r.bgTasks) background.noteSessionTasks(r.bgTasks);
         }
         if (sid && sid === activeSessionId()) {
           transcript.applySnapshot(sid, r, () => {
@@ -844,7 +845,14 @@ export default function IndirectCodePage() {
         // Tail events (end-of-turn tail, edit/slash/truncate tail,
         // single-message notice) carry the same history cursor as
         // session_data: replace the authoritative tail and retain older pages.
+        if ((msg as any).bgTasks) background.noteSessionTasks((msg as any).bgTasks);
         transcript.applySessionContent(msg.sessionId, msg.messages || [], msg.compaction, (msg as any).history, msg);
+        break;
+      }
+
+      case "bg_task_registered":
+      case "bg_task_finished": {
+        background.noteSessionTaskEvent(msg);
         break;
       }
 

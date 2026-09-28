@@ -214,11 +214,32 @@ export function ToolSearchBodies(props: ToolPartProps) {
             </Show>
           </Show>
         </Show>
-        <Show when={props.m.name().startsWith("mcp__")}>
-          <div class="px-3 pt-2 text-[11px] text-ink-500">Arguments</div>
-          <CodeBlock text={JSON.stringify(props.m.args(), null, 2)} language="json" scrollKey={`${props.m.key()}:arguments`} />
+        <Show when={props.m.name() === "sleep"}>
+          <Show
+            when={props.u.result?.toolResult}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Waiting…" : null}</div>}
+          >
+            {/* Clean sleep body: only the summary in markdown (no id,
+                no seconds — the header already shows "Sleep Xs"). */}
+            <div class="px-3 py-2 max-h-96 overflow-y-auto [scrollbar-gutter:stable] text-[12.5px] leading-relaxed text-ink-200 article-body">
+              <StreamingMarkdown>{String(props.u.result?.toolResult || "").split("\n")[0] || ""}</StreamingMarkdown>
+            </div>
+          </Show>
         </Show>
-        <Show when={props.m.name() !== "edit" && props.m.name() !== "read" && props.m.name() !== "write" && props.m.name() !== "python" && props.m.name() !== "search" && props.m.name() !== "inspect" && props.m.name() !== "glob" && props.m.name() !== "question" && props.m.name() !== "patch" && props.m.name() !== "search_web" && props.m.name() !== "fetch_url" && !isHeaderOnlySleep(props.m.name(), !!props.u.result)}>
+        <Show when={props.m.name() === "bg_check"}>
+          <Show
+            when={props.u.result?.toolResult || props.m.prog()}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Reading background task…" : null}</div>}
+          >
+            {/* Reads like a file: numbered lines in a CodeBlock. */}
+            <CodeBlock follow={() => props.m.open() && props.running} text={props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+          </Show>
+        </Show>
+        <Show when={props.m.name() === "bg_cancel" && !!props.u.result?.toolResult}>
+          <div class="px-3 py-2 text-[11px] text-ink-500">Background task canceled.</div>
+          {/* Canceled body stays minimal — the header says it all. */}
+        </Show>
+        <Show when={props.m.name() !== "sleep" && props.m.name() !== "bg_check" && props.m.name() !== "bg_cancel" && props.m.name() !== "edit" && props.m.name() !== "read" && props.m.name() !== "write" && props.m.name() !== "python" && props.m.name() !== "search" && props.m.name() !== "inspect" && props.m.name() !== "glob" && props.m.name() !== "question" && props.m.name() !== "patch" && props.m.name() !== "search_web" && props.m.name() !== "fetch_url" && !isHeaderOnlySleep(props.m.name(), !!props.u.result)}>
           <Show
             when={props.u.result?.toolResult || props.m.prog() || props.m.bgRunning() || props.m.bgStream()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.m.name() === "question" ? "Waiting for your answers…" : props.ctx.pendingApproval()?.callId === props.u.call?.toolId ? "Waiting for approval…" : props.active ? "Running…" : null}</div>}

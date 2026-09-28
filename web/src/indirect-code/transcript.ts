@@ -2,6 +2,30 @@ import type { ChatMessage, ContentBlock, RenderBlock, ToolUnit, TurnBalloon, Tur
 import { formatDurationSecs } from "./utils/format";
 import { displayToolArgs, withoutContinueNudges, withoutTodoActivity } from "./live";
 
+/** bg_cancel/bg_check kind: python vs terminal. The daemon includes the
+ * kind in the result header ("Background Task (python) — …"); fall back
+ * to the job registry via toolDetails when present. */
+function bgTaskKind(args: any, res: string): string {
+  const m = /Background Task \((bash|python)\)/.exec(res || "");
+  if (m) return m[1];
+  const k = String((args as any)?.kind || "").toLowerCase();
+  if (k === "python") return "python";
+  return "bash";
+}
+function bgCancelKind(args: any, res: string): string {
+  return bgTaskKind(args, res);
+}
+function bgCheckKind(args: any, res: string): string {
+  return bgTaskKind(args, res);
+}
+/** Extracts the "LX-Y" range from a bg_check result header
+ * ("Lines X–Y of N") for the row target. */
+function bgCheckRange(res: string): string {
+  const m = /Lines (\d+)[–-](\d+) of \d+/.exec(res || "");
+  if (m) return `L${m[1]}-${m[2]}`;
+  return "";
+}
+
 function hasVisibleText(message: ChatMessage): boolean {
   return message.blocks.some((b) => b.type === "text" && !!b.text?.trim());
 }
@@ -490,11 +514,22 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       };
     }
     case "bg_cancel": {
-      const id = String(args.job_id || "");
+      // Clean UI: never show the id. "Canceled <kind> Background Task".
+      const kind = bgCancelKind(args, res);
       return {
-        icon: "lucide:octagon-x",
-        verb: u.result ? "Stopped" : "Stopping",
-        target: id ? `background task ${id.length > 14 ? id.slice(0, 14) + "…" : id}` : "background task",
+        icon: kind === "python" ? "mdi:language-python" : "lucide:terminal",
+        verb: u.result ? "Canceled" : "Canceling",
+        target: `${kind === "python" ? "Python" : "Terminal"} Background Task`,
+      };
+    }
+    case "bg_check": {
+      // Reads like a file: "Background Task#Lfrom-to", kind icon.
+      const kind = bgCheckKind(args, res);
+      const range = bgCheckRange(res);
+      return {
+        icon: kind === "python" ? "mdi:language-python" : "lucide:terminal",
+        verb: "Read",
+        target: range ? `Background Task#${range}` : "Background Task",
       };
     }
     case "search": {

@@ -10,7 +10,7 @@ async function run(label: string) {
   const work = join(dir, 'work'); mkdirSync(work);
   writeFileSync(join(work,'hello.txt'),'review fixture');
   const events:any[]=[]; const requests:any[]=[];
-  let socket:any; let scenario='text'; let toolIssued=false; let sleepCalls=0; let cancelBgId='';
+  let socket:any; let scenario='text'; let toolIssued=false; let sleepCalls=0; let cancelBgId=''; let cancelBashed=false;
   const sse=(name:string,input:unknown)=>{
     const items=[{type:'message_start',message:{id:'msg-review',model:'m',role:'assistant',usage:{input_tokens:10,output_tokens:0}}}];
     if(name){items.push({type:'content_block_start',index:0,content_block:{type:'tool_use',id:'tool-review',name,input:{}}} as any);items.push({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify(input)}} as any);}
@@ -33,9 +33,13 @@ async function run(label: string) {
         if(scenario==='sleep_cancel'){
           // New sleep model: sleep only blocks on a RUNNING bg task. Detach
           // a real one first (10s foreground window), then sleep on it.
+          // Explicit phase flag: the history contains bg_test (unknown-id
+          // warning) from the earlier sleep scenario, so a regex would
+          // match the wrong id and loop on immediate warnings.
+          if(!cancelBashed){cancelBashed=true;return sse('bash',{command:'sleep 30'});}
           if(!cancelBgId){
             const hist=JSON.stringify(body?.messages||[]);
-            const m=hist.match(/bg_[A-Za-z0-9]+/);
+            const m=hist.match(/bg_[A-Za-z0-9]{8,}/);
             if(m){cancelBgId=m[0];return sse('sleep',{seconds:360,waitingFor:cancelBgId,summary:'test wait'});}
             return sse('bash',{command:'sleep 30'});
           }

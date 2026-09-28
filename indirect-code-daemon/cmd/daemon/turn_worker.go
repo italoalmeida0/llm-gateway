@@ -869,6 +869,12 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 				wait = max(wait, time.Duration(min(max(args.Seconds, 1), 3600)*float64(time.Second))+2*tuneWatchEvery)
 			}
 		}
+		if e.Name == "bash" || e.Name == "python" {
+			// Commands inside the foreground window are expected silence:
+			// they detach at AutoBackgroundAfter, so the wait must cover
+			// the detach deadline, not just the tool poll interval.
+			wait = max(wait, tools.AutoBackgroundAfter+2*tuneWatchEvery)
+		}
 		w.declareWait("tool", time.Now().Add(wait))
 		payload["event"] = map[string]any{"type": "tool_execution_start", "id": e.ID, "startedAt": e.StartedAt}
 	case core.EvUsage:

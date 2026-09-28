@@ -560,7 +560,7 @@ func (w *turnBridge) BgTaskStatus(sessionID, jobID string) (string, string, bool
 	}
 	reply := make(chan any, 1)
 	select {
-	case w.env.inbox <- w.stamp(Envelope{Payload: bgTaskReadMsg{JobID: jobID, Offset: 1, Limit: 1, Reply: reply}}):
+	case w.env.inbox <- w.stamp(bgTaskReadMsg{JobID: jobID, Offset: 1, Limit: 1, Reply: reply}):
 	case <-w.ctx.Done():
 		return "", "", false
 	}
@@ -589,12 +589,11 @@ func (w *turnBridge) CancelBackgroundJob(callerSessionID, jobID string) (tools.B
 // BgCheckHost: the session actor owns the logs.
 func (w *turnBridge) ReadBackgroundTask(callerSessionID, jobID string, offset, limit int) (tools.BgCheckResult, error) {
 	reply := make(chan any, 1)
-		sel := Envelope{Payload: bgTaskReadMsg{JobID: jobID, Offset: offset, Limit: limit, Reply: reply}}
 		if callerSessionID != "" && callerSessionID != w.env.actorID {
 			return tools.BgCheckResult{}, fmt.Errorf("bg_check: foreign task")
 		}
 		select {
-		case w.env.inbox <- w.stamp(sel):
+		case w.env.inbox <- w.stamp(bgTaskReadMsg{JobID: jobID, Offset: offset, Limit: limit, Reply: reply}):
 		case <-w.ctx.Done():
 			return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
 		}

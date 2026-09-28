@@ -137,6 +137,9 @@ async function run(label: string) {
       send({type:'prompt',sessionId:sleepSID,text:`Sleep before ${delay}`,requestId:`before-${delay}`,options:{mode:'build',access:'full',effort:'none'}});
       assert(await wait(()=>events.slice(start).find(e=>e.sessionId===sleepSID&&e.type==='agent_event'&&e.event?.type==='tool_execution_start'),30000));
       send({type:'cancel',sessionId:sleepSID});
+      // Wait for idle BEFORE the follow-up: a cancelled turn never drains
+      // the queue, and stopping the detached runner takes a moment.
+      assert(await wait(()=>events.slice(start).find(e=>e.sessionId===sleepSID&&e.type==='session_status'&&e.status==='idle'),30000),'cancelled turn did not become idle');
       await Bun.sleep(delay);
       scenario='text';
       const marker=`Follow-up ${delay}ms after Stop`;

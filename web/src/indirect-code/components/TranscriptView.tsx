@@ -62,7 +62,7 @@ export function TranscriptView() {
     activeSession: s.activeSession,
     pendingApproval: t.pendingApproval,
     projects: s.projects,
-    backgroundJobs: bg.jobs,
+    backgroundJobs: bg.sessionJobs,
     bgOutput: bg.output,
     bgClock: bg.clock,
   });

@@ -18,30 +18,6 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
   // daemon array. Full snapshots use base 0 (positions are already raw).
   const at = (idx: number) => idx + indexBase;
   const byIndex = new Map(previous.filter((m) => m.srcIdx != null).map((m) => [m.srcIdx, m]));
-  // Folds are client-side only (the server never sends detached rows): a
-  // later full snapshot (turn end, fetch, reconnect) must not wipe the
-  // folded result text back to the "still running" placeholder. Carry the
-  // terminal fields forward by tool call id — job ids are unique per
-  // detach, so a carried fold always belongs to the same logical call.
-  const prevFolded = new Map<string, ContentBlock>();
-  for (const m of previous) {
-    for (const b of m.blocks || []) {
-      if (b.type === "tool_result" && b.toolId && (b.toolDetails as any)?.detached) prevFolded.set(b.toolId, b);
-    }
-  }
-  const carryFold = (b: ContentBlock): ContentBlock => {
-    if (b.type !== "tool_result" || !b.toolId || (b.toolDetails as any)?.detached) return b;
-    if (!(b.toolDetails as any)?.background_job_id) return b;
-    const folded = prevFolded.get(b.toolId);
-    if (!folded || !(folded.toolDetails as any)?.detached || (folded.toolDetails as any).background_job_id !== (b.toolDetails as any).background_job_id) return b;
-    return {
-      ...b,
-      toolResult: folded.toolResult,
-      toolDurationMs: folded.toolDurationMs ?? b.toolDurationMs,
-      isError: folded.isError,
-      toolDetails: { ...(b.toolDetails as any), detached: true, display: (folded.toolDetails as any)?.display },
-    };
-  };
   let carrier: ChatMessage | null = null;
   const callCarriers = new Map<string, ChatMessage>();
   const ensureCarrier = (srcIdx: number, wire: any): ChatMessage => {
@@ -71,7 +47,7 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
         id: typeof m.id === "string" && m.id ? m.id : byIndex.get(at(idx))?.id ?? `msg_${at(idx)}`,
         role,
         streaming: m.streaming === true,
-        blocks: [...reason, ...rest.map(carryFold)],
+        blocks: [...reason, ...rest],
         thinkingDuration: Number(m.meta?.thinking_ms) > 0 ? Math.max(1, Math.ceil(Number(m.meta.thinking_ms) / 1000)) : undefined,
         turnDurationMs: Number(m.meta?.turn_ms) > 0 ? Number(m.meta.turn_ms) : undefined,
         time: Date.parse(m.time) || byIndex.get(at(idx))?.time || 0,
@@ -89,7 +65,7 @@ export function normalizeSessionMessages(rawMsgs: any[], previous: ChatMessage[]
       if (b.type === "tool_result") {
         const owner=(b.toolId && callCarriers.get(b.toolId)) || ensureCarrier(at(idx),m);
         const existing=owner.blocks.findIndex(x=>x.type==="tool_result" && x.toolId===b.toolId);
-        if(existing>=0) owner.blocks[existing]=carryFold(b); else owner.blocks.push(carryFold(b));
+        if(existing>=0) owner.blocks[existing]=b; else owner.blocks.push(b);
       }
       else rest.push(b);
     }
@@ -312,49 +288,6 @@ export function appendToolResult(
   return [...prev,{id:`tools_${callId}`,role:"assistant",blocks:[resBlock],time:0}];
 }
 
-/** Folds a finished background task into the originating tool row: the
- * daemon's bg_update snapshot carries the terminal result; the row that
- * still shows the detach placeholder (same background_job_id, not yet
- * folded) absorbs it — text, detached stamp and a display snapshot for
- * the terminal view. Idempotent: a second fold is a no-op. */
-export function foldBackgroundResult(
-  prev: ChatMessage[],
-  job: { id: string; result?: string; status?: string; endedAt?: number },
-): ChatMessage[] {
-  if (!job || typeof job.id !== "string") return prev;
-  let folded = false;
-  const next = prev.map((msg) => {
-    if (folded || msg.role !== "assistant") return msg;
-    let changed = false;
-    const blocks = msg.blocks.map((b) => {
-      if (folded || b.type !== "tool_result") return b;
-      const det = b.toolDetails as any;
-      if (!det || det.background_job_id !== job.id || det.detached) return b;
-      folded = true;
-      changed = true;
-      // A terminal job with empty output folds to blank text (the body
-      // then reads "No output") — never keep the "still running"
-      // placeholder for a job that already ended.
-      const text = typeof job.result === "string" && job.result !== "" ? job.result : undefined;
-      return {
-        ...b,
-        toolResult: text ?? "",
-        isError: job.status === "error" ? true : b.isError,
-        toolDurationMs: typeof job.endedAt === "number" && typeof b.toolStartedAt === "number"
-          ? Math.max(0, job.endedAt - b.toolStartedAt)
-          : b.toolDurationMs,
-        toolDetails: {
-          ...(typeof det === "object" ? det : {}),
-          detached: true,
-          display: text ?? (typeof det.display === "string" && det.display !== "" ? det.display : undefined),
-        },
-      };
-    });
-    return changed ? { ...msg, blocks } : msg;
-  });
-  return folded ? next : prev;
-}
-
 /** Stamps thinking duration onto the most recent assistant that actually
  * thought. Messages without reasoning keep no duration (a stop landing on
  * a fresh empty carrier must not mint a phantom "0s"), and sub-second
@@ -453,24 +386,4 @@ export function parseMessageAttachments(message: any): import("../viewTypes").St
     const refs = JSON.parse(message.meta?.attachments || "[]");
     return Array.isArray(refs) ? refs.filter((a) => a && typeof a.id === "string" && typeof a.name === "string") : [];
   } catch { return []; }
-}
-
-/** Worker-normalized pages retain completed background projections by job ID. */
-export function preserveBackgroundFolds(next: ChatMessage[], previous: ChatMessage[]): ChatMessage[] {
-  const folds=new Map<string,ContentBlock>();
-  for(const m of previous) for(const b of m.blocks) {
-    const d=b.toolDetails as any;
-    if(b.type==="tool_result" && d?.detached && d.background_job_id) folds.set(`${d.background_job_id}:${b.toolId}`,b);
-  }
-  return next.map(m=>{
-    let changed=false;
-    const blocks=m.blocks.map(b=>{
-      const d=b.toolDetails as any;
-      const saved=folds.get(`${d?.background_job_id}:${b.toolId}`);
-      if(!saved || d?.detached || b.type!=="tool_result") return b;
-      changed=true; return {...b,toolResult:saved.toolResult,isError:saved.isError,toolDurationMs:saved.toolDurationMs,
-        toolDetails:{...d,...saved.toolDetails as any}};
-    });
-    return changed?{...m,blocks}:m;
-  });
 }

@@ -22,7 +22,7 @@ import { parseDaemonMessage } from "../web/src/indirect-code/daemon-protocol";
 import { parseContentBlocks } from "../web/src/indirect-code/utils/wire";
 import {
   appendReasoningDelta, appendTextDelta, appendToolArgsDelta, appendToolResult,
-  cutTail, finishTurn, foldBackgroundResult, mergeUsage, normalizeSessionMessages, stampDuration, upsertToolCall,
+  cutTail, finishTurn, mergeUsage, normalizeSessionMessages, stampDuration, upsertToolCall,
 } from "../web/src/indirect-code/transcript/updaters";
 import type { ChatMessage, ContentBlock, ToolUnit, TurnBalloon } from "../web/src/indirect-code/types";
 import { fileIcon } from "../web/src/indirect-code/files";
@@ -1559,37 +1559,20 @@ describe("Turn audit regressions", () => {
 });
 
 describe("Background tasks (bash/python detach)", () => {
-  const placeholder = (): ChatMessage => ({
-    id: "a1", role: "assistant", time: 0,
-    blocks: [{
-      type: "tool_result", toolId: "t1",
-      toolResult: "Command moved to background (still running).",
-      toolStartedAt: 1000,
-      toolDetails: { background_job_id: "bg_1", log_path: "/brain/bg_1.log" },
-    }],
-  });
-
-  test("foldBackgroundResult folds the terminal result into the placeholder row", () => {
-    const folded = foldBackgroundResult([placeholder()], { id: "bg_1", result: "out\n[exit 0]", status: "done", endedAt: 5000 });
-    const b = folded[0].blocks[0] as any;
-    expect(b.toolResult).toBe("out\n[exit 0]");
-    expect(b.toolDetails.detached).toBe(true);
-    expect(b.toolDetails.display).toBe("out\n[exit 0]");
-    expect(b.toolDetails.background_job_id).toBe("bg_1");
-    expect(b.toolDurationMs).toBe(4000);
-  });
-
-  test("foldBackgroundResult is idempotent and ignores unknown jobs", () => {
-    const once = foldBackgroundResult([placeholder()], { id: "bg_1", result: "out", status: "done", endedAt: 2000 });
-    expect(foldBackgroundResult(once, { id: "bg_1", result: "out", status: "done", endedAt: 2000 })).toBe(once);
-    expect(foldBackgroundResult([placeholder()], { id: "bg_other", result: "x", status: "done" })).toHaveLength(1);
-    const untouched = foldBackgroundResult([placeholder()], { id: "bg_other", result: "x", status: "done" });
-    expect((untouched[0].blocks[0] as any).toolDetails.detached).toBeUndefined();
-  });
-
-  test("foldBackgroundResult marks errors", () => {
-    const folded = foldBackgroundResult([placeholder()], { id: "bg_1", result: "boom", status: "error", endedAt: 2000 });
-    expect((folded[0].blocks[0] as any).isError).toBe(true);
+  test("detach placeholder rows keep their text (no fold: results live in the bg card)", () => {
+    const wire: any[] = [{
+      role: "assistant",
+      content: [
+        { name: "bash", id: "c1", arguments: { command: "sleep 15" } },
+        { call_id: "c1", content: [{ text: "Command moved to background (still running)." }], is_error: false, started_at: 1000, duration_ms: 10009, details: { background_job_id: "bg_1", log_path: "/tmp/x.log" } },
+      ],
+    }];
+    const first = normalizeSessionMessages(wire);
+    const rb = first.flatMap((m) => m.blocks).find((b) => b.type === "tool_result");
+    expect(rb?.toolResult).toContain("moved to background");
+    // A later snapshot rebuilds from the same wire — placeholder stays.
+    const again = normalizeSessionMessages(wire, first);
+    expect(again.flatMap((m) => m.blocks).find((b) => b.type === "tool_result")?.toolResult).toContain("moved to background");
   });
 
   test("normalizeSessionMessages drops background deliveries (tagged and sanitized)", () => {
@@ -1631,7 +1614,7 @@ describe("Background tasks (bash/python detach)", () => {
     expect(toolSummary({
       call: { type: "tool_call", toolId: "t", toolName: "bg_cancel", toolArgs: JSON.stringify({ job_id: "bg_9" }) },
       result: { type: "tool_result", toolId: "t", toolResult: "cancelled" },
-    } as any).verb).toBe("Stopped");
+    } as any).verb).toBe("Canceled");
   });
 
   test("sleep rows are header-only while running, with a body once finished", () => {
@@ -1664,44 +1647,42 @@ describe("Background tasks (bash/python detach)", () => {
   });
 });
 
-describe("Background hook (tail buffering + always-fold)", () => {
-  test("terminal jobs fold on every snapshot; live chunks buffer until the tail lands", async () => {
+describe("Background hook (session-owned tasks)", () => {
+  test("session tasks are the source of truth; live chunks glue after the tail", async () => {
     const { createBackground } = await import("../web/src/indirect-code/hooks/useBackground");
     const { createRoot } = await import("solid-js");
     const sent: any[] = [];
-    const folded: string[] = [];
     createRoot((dispose) => {
       const bg = createBackground({
         send: (p) => { sent.push(p); },
         isOpen: () => true,
         getSessionId: () => "s1",
         toast: () => {},
-        onTerminalResult: (job) => { folded.push(job.id); },
       });
-      const done1 = { id: "bg_1", kind: "bash", sessionId: "s1", label: "sleep 30", status: "done", startedAt: 1, endedAt: 2, result: "out" };
-      // Terminal job never seen running: still folds (self-healing a
-      // missed bg_update instead of showing the AI notice forever).
-      bg.noteJobs([done1]);
-      expect(folded).toEqual(["bg_1"]);
-      // Repeated snapshots re-fold (idempotent downstream).
-      bg.noteJobs([done1]);
-      expect(folded).toEqual(["bg_1", "bg_1"]);
-      // Foreign sessions never fold.
-      bg.noteJobs([{ id: "bg_9", kind: "bash", sessionId: "other", label: "x", status: "done", startedAt: 1, result: "x" }]);
-      expect(folded).toEqual(["bg_1", "bg_1"]);
-      // Running job: tail requested, live chunks buffered (pre-detach
-      // history is not lost to a tail/live race).
-      bg.noteJobs([{ id: "bg_2", kind: "python", sessionId: "s1", label: "code", status: "running", startedAt: 1 }]);
-      expect(sent).toContainEqual({ type: "bg_tail", jobId: "bg_2" });
+      // Authoritative list from session_data.
+      bg.noteSessionTasks([
+        { id: "bg_1", kind: "bash", label: "sleep 30", status: "running", startedAt: 1, content: "history-" },
+      ]);
+      expect(bg.sessionJobs().map((t) => t.id)).toEqual(["bg_1"]);
+      expect(bg.running().map((t) => t.id)).toEqual(["bg_1"]);
+      // Live chunks append directly.
       bg.noteOutput("bg_2", "live-1");
-      expect(bg.output()["bg_2"] || "").toBe("");
-      bg.noteTail("bg_2", "history-");
-      expect(bg.output()["bg_2"]).toBe("history-live-1");
-      bg.noteOutput("bg_2", "live-2");
-      expect(bg.output()["bg_2"]).toBe("history-live-1live-2");
-      // Finishing flushes the fold again (heals rows that mounted late).
-      bg.noteJobs([{ id: "bg_2", kind: "python", sessionId: "s1", label: "code", status: "done", startedAt: 1, endedAt: 2, result: "done" }]);
-      expect(folded[folded.length - 1]).toBe("bg_2");
+      expect(bg.output()["bg_2"] || "").toBe("live-1");
+      // Finished tasks stay (never GCed).
+      bg.noteSessionTasks([
+        { id: "bg_1", kind: "bash", label: "sleep 30", status: "done", startedAt: 1, endedAt: 2, content: "history-live-1" },
+      ]);
+      expect(bg.sessionJobs().map((t) => t.id)).toEqual(["bg_1"]);
+      expect(bg.running()).toEqual([]);
+      expect(bg.sessionContent("bg_1")).toBe("history-live-1");
+      // Register/finish events touch the list without a full refresh.
+      bg.noteSessionTaskEvent({ type: "bg_task_registered", sessionId: "s1", jobId: "bg_9", kind: "python", label: "code" });
+      expect(bg.sessionJobs().some((t) => t.id === "bg_9")).toBe(true);
+      bg.noteSessionTaskEvent({ type: "bg_task_finished", sessionId: "s1", jobId: "bg_9", status: "done" });
+      expect(bg.sessionJobs().find((t) => t.id === "bg_9")?.status).toBe("done");
+      // Foreign sessions never leak in.
+      bg.noteSessionTaskEvent({ type: "bg_task_registered", sessionId: "other", jobId: "bg_x", kind: "bash", label: "x" });
+      expect(bg.sessionJobs().some((t) => t.id === "bg_x")).toBe(false);
       dispose();
     });
   });
@@ -1742,46 +1723,6 @@ describe("Tool row model", () => {
     });
   });
 
-  test("folded bg rows survive a later full snapshot (normalize carries folds)", () => {
-    const wire: any[] = [{
-      role: "assistant",
-      content: [
-        { name: "bash", id: "c1", arguments: { command: "sleep 15" } },
-        { call_id: "c1", content: [{ text: "Command moved to background (still running)." }], is_error: false, started_at: 1000, duration_ms: 10009, details: { background_job_id: "bg_1", log_path: "/tmp/x.log" } },
-      ],
-    }];
-    const first = normalizeSessionMessages(wire);
-    const folded = foldBackgroundResult(first, { id: "bg_1", result: "done-gamma\n", status: "done", endedAt: 16005 });
-    const resBlock = (msgs: ChatMessage[]) => msgs.flatMap((m) => m.blocks).find((b) => b.type === "tool_result");
-    const fb = resBlock(folded);
-    expect(fb?.toolResult).toBe("done-gamma\n");
-    expect((fb?.toolDetails as any)?.detached).toBe(true);
-    // Full duration (15s), not the 10s foreground slice.
-    expect(fb?.toolDurationMs).toBe(15005);
-    // A later snapshot (turn end, fetch, reconnect) rebuilds from the same
-    // wire — the folded result must ride along, not revert to the
-    // "still running" placeholder.
-    const again = normalizeSessionMessages(wire, folded);
-    const rb = resBlock(again);
-    expect(rb?.toolResult).toBe("done-gamma\n");
-    expect((rb?.toolDetails as any)?.detached).toBe(true);
-    expect(rb?.toolDurationMs).toBe(15005);
-  });
-
-  test("terminal fold with empty output blanks the body instead of lying", () => {
-    const wire: any[] = [{
-      role: "assistant",
-      content: [
-        { name: "bash", id: "c1", arguments: { command: "sleep 15" } },
-        { call_id: "c1", content: [{ text: "Command moved to background (still running)." }], is_error: false, started_at: 1000, duration_ms: 10009, details: { background_job_id: "bg_1" } },
-      ],
-    }];
-    const first = normalizeSessionMessages(wire);
-    const folded = foldBackgroundResult(first, { id: "bg_1", status: "cancelled", endedAt: 12000 });
-    const rb = folded.flatMap((m) => m.blocks).find((b) => b.type === "tool_result");
-    expect(rb?.toolResult).toBe("");
-    expect((rb?.toolDetails as any)?.detached).toBe(true);
-  });
 });
 
 

@@ -43,23 +43,6 @@ type BgSleepCheckHost interface {
 	// "cancelled") and label. ok=false when the id is unknown or foreign.
 	BgTaskStatus(sessionID, jobID string) (status, label string, ok bool)
 }
-// that finished just before the sleep started, so a long sleep decided
-// on stale state returns immediately instead of waiting out the full
-// duration for an event that already happened.
-type BgFreshnessHost interface {
-	// RecentBgFinish returns the label and age of the session's most
-	// recently finished job (any terminal status) — but only when no
-	// session job is still running (otherwise the watcher owns the wait).
-	// ok=false when there is nothing freshly finished to skip for.
-	RecentBgFinish(sessionID string) (label string, ago time.Duration, ok bool)
-}
-
-// sleepFreshGrace bounds the staleness window: a job that finished less
-// than this ago (a model roundtrip) when a LONG sleep starts means the
-// sleep was decided before the completion landed — return immediately.
-// Short sleeps always run (cheap; preserves pacing/backoff uses).
-const sleepFreshGrace = 60 * time.Second
-
 // SleepTool parks the model for a bounded wait — the "wait for the
 // background task" primitive. It ends early when a background task of the
 // session finishes (the system-reminder delivery lands in context right
@@ -110,17 +93,6 @@ func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 			}
 		if status != "running" {
 				return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("%s\n[Note: background task %s (%s) already %s — its completion notice is in context above. Use bg_check with job_id %s to read the output.]", summary, jobID, label, status, jobID)}}}, nil
-			}
-		}
-	}
-	// Stale-decision shortcut: the job finished after the model asked for
-	// this sleep but before it started executing (detach at 10s, finish at
-	// 11s, sleep issued from a stale roundtrip). Its delivery notice is
-	// already in context — waiting the full duration would dead-wait.
-	if t.Host != nil && wait > sleepFreshGrace {
-		if fh, ok := t.Host.(BgFreshnessHost); ok {
-			if label, ago, found := fh.RecentBgFinish(t.SessionID); found && ago < sleepFreshGrace {
-				return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Background task %s finished %s ago — its delivery notice is already in context above (read the .log file for the output). Skipping the %s wait. If you still want to pause (e.g. rate-limit backoff), sleep again.", label, humanizeSeconds(ago.Seconds()), humanizeSeconds(a.Seconds))}}}, nil
 			}
 		}
 	}

@@ -397,13 +397,29 @@ func fileHas(path, needle string) bool {
 func listJobs(b *bgSupervisor) []map[string]any {
 	reply := make(chan any, 1)
 	select {
-	case b.inbox <- Envelope{Payload: bgListMsg{Reply: reply}}:
+	case b.inbox <- Envelope{Payload: bgJobsOfMsg{SessionID: "", Reply: reply}}:
 	case <-time.After(time.Second):
 		return nil
 	}
 	select {
 	case r := <-reply:
-		rows, _ := r.([]map[string]any)
+		ids, _ := r.([]string)
+		var rows []map[string]any
+		for _, id := range ids {
+			qr := make(chan any, 1)
+			select {
+			case b.inbox <- Envelope{Payload: bgQueryMsg{JobID: id, Reply: qr}}:
+			case <-time.After(time.Second):
+				continue
+			}
+			select {
+			case q := <-qr:
+				if res, ok := q.(bgQueryResult); ok && res.Found {
+					rows = append(rows, map[string]any{"id": id, "status": res.Status, "label": res.Label})
+				}
+			case <-time.After(time.Second):
+			}
+		}
 		return rows
 	case <-time.After(time.Second):
 		return nil

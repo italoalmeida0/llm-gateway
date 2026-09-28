@@ -64,18 +64,6 @@ type bgJob struct {
 
 	done     chan struct{}
 	doneOnce sync.Once
-
-	lastFinish int64 // unix milli of terminal transition (freshness)
-	finishName string
-}
-
-// noticePath is the readable log the completion notice points at: the
-// brain copy when the runner produced one, else the live path (V2R-010).
-func (j *bgJob) noticePath() string {
-	if j.BrainLog != "" {
-		return j.BrainLog
-	}
-	return j.LogPath
 }
 
 func (j *bgJob) closeDone() {
@@ -135,31 +123,10 @@ type bgCancelMsg struct {
 	Reply chan any
 }
 
-type bgListMsg struct {
-	Reply chan any
-}
-
-type bgReadMsg struct {
-	JobID string
-	Max   int
-	Reply chan any
-}
-
 type bgSubscribeMsg struct {
 	SessionID string
 	Done      <-chan struct{} // host done (turn end): unsubscribe
 	Reply     chan any        // chan struct{} closed on first finish
-}
-
-type bgRecentMsg struct {
-	SessionID string
-	Reply     chan any
-}
-
-type bgRecentResult struct {
-	Label string
-	Age   time.Duration
-	OK    bool
 }
 
 // bgLogPathMsg corrects the log path after the worker renames the pending
@@ -265,11 +232,20 @@ func (b *bgSupervisor) handle(env Envelope) {
 		b.onFinish(m.JobID, m.Status, m.Result)
 	case bgCancelMsg:
 		m.Reply <- b.onCancel(m.JobID, m.By)
-	case bgListMsg:
-		m.Reply <- b.snapshot()
-	case bgReadMsg:
-		text, ok := bgReadTail(m.JobID, b, m.Max)
-		m.Reply <- map[string]any{"text": text, "ok": ok}
+	case bgQueryMsg:
+		m.Reply <- b.onQuery(m.JobID)
+	case bgJobsOfMsg:
+		var ids []string
+		for _, j := range b.jobs {
+			if j.Status != BgStatusRunning {
+				continue
+			}
+			if m.SessionID != "" && j.SessionID != m.SessionID {
+				continue
+			}
+			ids = append(ids, j.ID)
+		}
+		m.Reply <- ids
 	case bgLogPathMsg:
 		if j, ok := b.jobs[m.JobID]; ok && j.Status == BgStatusRunning {
 			j.LogPath = m.LogPath
@@ -279,8 +255,6 @@ func (b *bgSupervisor) handle(env Envelope) {
 		m.Reply <- b.onSubscribe(m.SessionID, m.Done)
 	case bgUnsubscribeMsg:
 		b.unsubscribe(m.ch)
-	case bgRecentMsg:
-		m.Reply <- b.onRecent(m.SessionID)
 	}
 }
 
@@ -318,7 +292,6 @@ func (b *bgSupervisor) onRegister(m bgRegisterMsg) {
 	}
 	b.jobs[j.ID] = j
 	trace("bg.register", map[string]any{"job": j.ID, "sid": j.SessionID, "kind": j.Kind, "labelLen": len(j.Label)})
-	b.broadcast()
 	m.Reply <- bgRegisterResult{JobID: j.ID, Done: j.done}
 }
 
@@ -333,11 +306,8 @@ func (b *bgSupervisor) onFinish(jobID, status, result string) {
 	j.Status = status
 	j.EndedAt = time.Now().UnixMilli()
 	j.Result = result
-	j.lastFinish = j.EndedAt
-	j.finishName = j.Label
 	_ = os.Remove(b.pidPath(jobID))
 	trace("bg.finish", map[string]any{"job": j.ID, "sid": j.SessionID, "status": status, "resultLen": len(result)})
-	b.broadcast()
 	b.deliver(j, status == BgStatusDone || status == BgStatusError || status == BgStatusOrphaned)
 	b.wakeSession(j.SessionID)
 	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": 1})
@@ -405,11 +375,9 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 	}
 	_ = os.Remove(b.pidPath(jobID))
 	trace("bg.cancel", map[string]any{"job": j.ID, "sid": j.SessionID, "by": by})
-	b.broadcast()
 	if by == "user" {
 		b.deliver(j, false)
 	}
-	j.lastFinish, j.finishName = j.EndedAt, j.Label
 	b.wakeSession(j.SessionID)
 	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": 1})
 	j.closeDone()
@@ -440,10 +408,6 @@ func (b *bgSupervisor) wakeSession(sessionID string) {
 
 func (b *bgSupervisor) onSubscribe(sessionID string, hostDone <-chan struct{}) any {
 	ch := make(chan struct{})
-	if _, _, ok := b.recentLocked(sessionID); ok {
-		close(ch)
-		return ch
-	}
 	b.subscribers[ch] = sessionID
 	if hostDone != nil {
 		go func() {
@@ -487,53 +451,27 @@ func (b *bgSupervisor) subscribeFinish(sessionID string, done <-chan struct{}) <
 	return c
 }
 
-func (b *bgSupervisor) onRecent(sessionID string) bgRecentResult {
-	label, age, ok := b.recentLocked(sessionID)
-	return bgRecentResult{Label: label, Age: age, OK: ok}
+// bgJobsOfMsg asks the supervisor for the running job ids of one session
+// (purge path).
+
+type bgJobsOfMsg struct {
+	SessionID string
+	Reply     chan any
 }
 
-func (b *bgSupervisor) recentLocked(sessionID string) (string, time.Duration, bool) {
-	var bestLabel string
-	var bestEnd int64
-	for _, j := range b.jobs {
-		if j.SessionID != sessionID {
-			continue
-		}
-		if j.Status == BgStatusRunning {
-			return "", 0, false // running jobs own the wait
-		}
-		if j.lastFinish > bestEnd {
-			bestEnd = j.lastFinish
-			bestLabel = j.finishName
-		}
-	}
-	if bestEnd <= 0 {
-		return "", 0, false
-	}
-	if age := time.Since(time.UnixMilli(bestEnd)); age <= 60*time.Second {
-		return bestLabel, age, true
-	}
-	return "", 0, false
+// bgQueryMsg asks the supervisor for one job's identity (cancel path).
+
+type bgQueryMsg struct {
+	JobID string
+	Reply chan any
 }
 
-func (b *bgSupervisor) recentFinish(sessionID string) (string, time.Duration, bool) {
-	if b == nil {
-		return "", 0, false
-	}
-	reply := make(chan any, 1)
-	select {
-	case b.inbox <- Envelope{Payload: bgRecentMsg{SessionID: sessionID, Reply: reply}}:
-	case <-time.After(replyTimeout):
-		return "", 0, false
-	}
-	select {
-	case r := <-reply:
-		if res, ok := r.(bgRecentResult); ok {
-			return res.Label, res.Age, res.OK
-		}
-	case <-time.After(replyTimeout):
-	}
-	return "", 0, false
+type bgQueryResult struct {
+	Status  string
+	Label   string
+	Owner   string
+	Running bool
+	Found   bool
 }
 
 // ---- cancel API (turnBridge.CancelBackgroundJob + dashboard) ----
@@ -544,19 +482,15 @@ func (b *bgSupervisor) cancelJob(callerSessionID, jobID string) (tools.BgCancelO
 	}
 	reply := make(chan any, 1)
 	select {
-	case b.inbox <- Envelope{Payload: bgListMsg{Reply: reply}}:
+	case b.inbox <- Envelope{Payload: bgQueryMsg{JobID: jobID, Reply: reply}}:
 	case <-time.After(replyTimeout):
 		return tools.BgCancelOutcome{}, fmt.Errorf("bg supervisor unreachable")
 	}
 	var status, label, owner string
 	select {
 	case r := <-reply:
-		for _, p := range r.([]map[string]any) {
-			if p["id"] == jobID {
-				status, _ = p["status"].(string)
-				label, _ = p["label"].(string)
-				owner, _ = p["sessionId"].(string)
-			}
+		if q, ok := r.(bgQueryResult); ok && q.Found {
+			status, label, owner = q.Status, q.Label, q.Owner
 		}
 	case <-time.After(replyTimeout):
 		return tools.BgCancelOutcome{}, fmt.Errorf("bg supervisor unreachable")
@@ -718,41 +652,13 @@ func (b *bgSupervisor) loadNotices() {
 	}
 }
 
-// ---- snapshot / broadcast / tail ----
+// onQuery answers the cancel path with one job's identity.
 
-func (b *bgSupervisor) snapshot() []map[string]any {
-	out := make([]map[string]any, 0, len(b.jobs))
-	for _, j := range b.jobs {
-		out = append(out, map[string]any{
-			"id": j.ID, "kind": j.Kind, "sessionId": j.SessionID,
-			"label": j.Label, "status": j.Status,
-			"startedAt": j.StartedAt, "endedAt": j.EndedAt,
-			"result": j.Result, "logPath": j.LogPath, "stderrPath": j.StderrPath,
-		})
+func (b *bgSupervisor) onQuery(jobID string) bgQueryResult {
+	if j, ok := b.jobs[jobID]; ok {
+		return bgQueryResult{Status: j.Status, Label: j.Label, Owner: j.SessionID, Running: j.Status == BgStatusRunning, Found: true}
 	}
-	return out
-}
-
-func (b *bgSupervisor) broadcast() {
-	if b.emit == nil {
-		return
-	}
-	host := ""
-	if b.hostID != nil {
-		host = b.hostID()
-	}
-	b.emit(map[string]any{"type": "bg_update", "hostId": host, "jobs": b.snapshot()})
-}
-
-func bgReadTail(jobID string, b *bgSupervisor, max int) (string, bool) {
-	if max <= 0 || max > 256*1024 {
-		max = 64 * 1024
-	}
-	j, ok := b.jobs[jobID]
-	if !ok || j.LogPath == "" {
-		return "", false
-	}
-	return bgReadTailPath(j.LogPath, max)
+	return bgQueryResult{}
 }
 
 func bgAppendLogLine(logPath, line string) {

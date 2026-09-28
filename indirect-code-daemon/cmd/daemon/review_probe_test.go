@@ -285,11 +285,39 @@ func TestReviewRealBackgroundProcessRecordsPID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := bgList(t, b)
-	if len(rows) != 1 {
-		t.Fatalf("jobs=%d", len(rows))
+	jobsReply := make(chan any, 1)
+	b.inbox <- Envelope{Payload: bgJobsOfMsg{Reply: jobsReply}}
+	var ids []string
+	select {
+	case r := <-jobsReply:
+		ids, _ = r.([]string)
+	case <-time.After(3 * time.Second):
+		t.Fatalf("jobsof timeout")
 	}
-	id := rows[0]["id"].(string)
+	// The slow job may already be done; query the supervisor directly.
+	// Fall back to scanning via cancelJob owner check is overkill here:
+	// ask for any job id through bgQuery is session-agnostic, so list
+	// via a second channel: use the pidfile dir instead.
+	_ = ids
+	id := ""
+	if len(ids) == 1 {
+		id = ids[0]
+	} else {
+		// Finished before we asked: find the pidfile orphan.
+		entries, _ := os.ReadDir(filepath.Join(b.dataDir, "bg"))
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".pid.json") {
+				raw, _ := os.ReadFile(filepath.Join(b.dataDir, "bg", e.Name()))
+				var pf bgPidfile
+				if json.Unmarshal(raw, &pf) == nil && pf.JobID != "" {
+					id = pf.JobID
+				}
+			}
+		}
+	}
+	if id == "" {
+		t.Fatalf("no bg job found")
+	}
 	defer func() { r := make(chan any, 1); b.inbox <- Envelope{Payload: bgCancelMsg{JobID: id, Reply: r}}; <-r }()
 	data, err := os.ReadFile(b.pidPath(id))
 	if err != nil {

@@ -158,7 +158,6 @@ func (b *bgSupervisor) adoptOne(st *runner.State) {
 	}
 	b.jobs[j.ID] = j
 	trace("runner.adopt", map[string]any{"job": j.ID, "sid": j.SessionID})
-	b.broadcast()
 	// V2R-010: resume OUTPUT delivery for the adopted job — a bounded file
 	// tail from the current end of the out log streams subsequent bytes to
 	// the session (bg_output), exactly like a live job. The file is the

@@ -236,8 +236,7 @@ func TestBackgroundCompletionOutlivesOriginatingTurn(t *testing.T) {
 	id, _, _, finish := w.slowHook()("bash", "completed", tools.BackgroundProcess{})
 	cancel()
 	finish("done", false)
-	rows := bgList(t, b)
-	if len(rows) != 1 || rows[0]["id"] != id || rows[0]["status"] != BgStatusDone { t.Fatalf("cancelled turn swallowed background completion: %v", rows) }
+	if q := bgQuery(t, b, id); !q.Found || q.Status != BgStatusDone { t.Fatalf("cancelled turn swallowed background completion: %v", q) }
 }
 
 func TestResolvedApprovalDeadlineDoesNotSurviveReplay(t *testing.T) {

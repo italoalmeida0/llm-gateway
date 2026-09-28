@@ -227,7 +227,7 @@ export default function IndirectCodePage() {
           }
         }
       }).catch((e) => console.warn("[rc-sync] syncAll:", e));
-      if (activeSessionId()) { transcript.fetchSession(activeSessionId()); turnChanges.requestBalloons(); background.refresh(); }
+      if (activeSessionId()) { transcript.fetchSession(activeSessionId()); turnChanges.requestBalloons(); }
     },
     onClose: () => {
       options.resetPendingChoice();
@@ -307,7 +307,6 @@ export default function IndirectCodePage() {
     isOpen: () => relay.wsOpen(),
     getSessionId: () => activeSessionId(),
     toast: notice.toast,
-    onTerminalResult: (job) => transcript.foldBgResult(job),
   });
 
   const queue = createQueue({
@@ -596,10 +595,6 @@ export default function IndirectCodePage() {
     }
     transcript.fetchSession(id);
     turnChanges.requestBalloons();
-    // The terminal snapshots that fold bg results into rows only arrive
-    // on transitions — a freshly opened session needs its own, or
-    // finished jobs would sit on the "still running" placeholder.
-    background.refresh();
   }
 
   // Open a centered draft without creating a conversation on the host.
@@ -695,7 +690,6 @@ export default function IndirectCodePage() {
         if (msg.hostId === hosts.activeHostId() && msg.status === "online") {
           mirror.dataLayer.storeFor(msg.hostId).syncAll().catch((e) => console.warn("[rc-sync] syncAll:", e));
           if (activeSessionId()) transcript.fetchSession(activeSessionId());
-          background.refresh();
         }
         // The overlay reads host status directly (updating = naive
         // updater owns the host). No per-host frozen flag needed.
@@ -881,19 +875,9 @@ export default function IndirectCodePage() {
         break;
       }
 
-      case "bg_update":
-      case "bg_list": {
-        background.noteJobs(msg.jobs);
-        break;
-      }
-
       case "bg_output": {
+        // Live stream: glued after the session tail in the bg card.
         if (typeof msg.jobId === "string") background.noteOutput(msg.jobId, typeof msg.text === "string" ? msg.text : "");
-        break;
-      }
-
-      case "bg_tail": {
-        if (typeof msg.jobId === "string") background.noteTail(msg.jobId, typeof msg.text === "string" ? msg.text : "");
         break;
       }
 

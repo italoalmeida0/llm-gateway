@@ -96,11 +96,90 @@ type stateTimeoutMsg struct {
 
 // editRegenerateMsg truncates the tail and starts a fresh turn.
 // Accepted ONLY in idle (simpler than v1's branches).
+// Deprecated: use discardAndResendMsg (atomic, never loses the text).
 type editRegenerateMsg struct {
 	Keep          int
 	AttachmentIDs []string
 	Model         string
 	Reply         chan any // promptResult
+}
+
+// discardAndResendMsg is the ATOMIC discard&resend / regenerate primitive.
+// One operation, one durable commit:
+//  1. stop the running turn (sendNow semantics: flag + cancel, the
+//     finalizer continues — no fighting "turn already in flight");
+//  2. cut every row with TurnIndex >= TurnID (the boundary user row
+//     included) and insert the new user row in its place;
+//  3. persist BEFORE starting the turn — a failed turn start can never
+//     lose the message (it is already a durable user row);
+//  4. start the turn with Seeded semantics (the worker runs Continue:
+//     the user row already exists, no duplicate).
+//
+// Empty Text = regenerate (reuses the boundary row's original text).
+// TurnID is the turn INDEX (provider.Message.TurnIndex) that the edited
+// user message started.
+type discardAndResendMsg struct {
+	TurnID        int
+	Text          string
+	AttachmentIDs []string
+	Model         string
+	YOLO          bool
+	Reply         chan any // discardResendResult
+}
+
+// discardResendResult answers discardAndResendMsg. Error is ALWAYS set on
+// failure (no silent returns): the client keeps its edit text and retries.
+type discardResendResult struct {
+	Error string
+	// TurnSeq is the new turn's index (0 when the resend was queued).
+	TurnSeq int
+	Queued  bool
+}
+
+// forkAndResendMsg forks the prefix ABOVE the turn at TurnID into a new
+// session (the boundary turn is NOT included) and starts a turn there with
+// Text. The new user row is persisted INTO the fork before the turn starts
+// (same no-loss guarantee as discardAndResendMsg).
+type forkAndResendMsg struct {
+	TurnID        int
+	Text          string
+	AttachmentIDs []string
+	Model         string
+	YOLO          bool
+	Reply         chan any // forkResendResult
+}
+
+// forkResendResult answers forkAndResendMsg.
+type forkResendResult struct {
+	Error string
+	NewID string
+}
+
+// clearTailMsg discards the whole transcript WITHOUT starting a turn
+// (/clear). The old truncateAndRun(sid, 0, "", ...) started an empty turn
+// — the model answered a blank prompt.
+type clearTailMsg struct {
+	Reply chan any // clearTailResult
+}
+
+// clearTailResult answers clearTailMsg.
+type clearTailResult struct {
+	Error string
+}
+
+// seededStartMsg starts a turn whose user row is already durable in the
+// record (fork&resend continuation: the row was persisted into the fork).
+type seededStartMsg struct {
+	TurnSeq       int
+	Model         string
+	YOLO          bool
+	AttachmentIDs []string
+	Reply         chan any // seededStartResult
+}
+
+// seededStartResult answers seededStartMsg.
+type seededStartResult struct {
+	Error string
 }
 
 // forkReqMsg snapshots a prefix of this session into a new session id.

@@ -290,6 +290,15 @@ func (s *sessionSupervisor) routeCold(id string, forRead bool) spawnResult {
 	prevEpoch := s.epochs[id] - 1
 	s.mu.Unlock()
 	act := newSessionActor(id, rec, st, s.emit, s.bg, s.onEvent)
+	// Fork&resend continuation: the actor reaches OTHER session actors
+	// (the fork's actor spawns transparently on first route).
+	act.routeFn = func(other string) (chan Envelope, chan any, bool) {
+		r := s.route(other, false)
+		if r.Error != "" {
+			return nil, nil, false
+		}
+		return r.Inbox, r.Control, true
+	}
 	act.epoch = prevEpoch + 1
 	act.supCfg = s.cfg
 	act.convertServer = func(msg map[string]any) {

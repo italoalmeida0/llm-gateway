@@ -51,6 +51,10 @@ type workerSnapshot struct {
 	compact   bool
 	resume    bool
 	resumeGen int
+	// seeded: the actor already inserted the user row (atomic
+	// discard&resend/fork&resend). The worker runs Continue — no duplicate
+	// user row, and the row survives even if this turn never starts.
+	seeded bool
 }
 
 // workerEnv are the actor services the worker may call. All are
@@ -258,11 +262,13 @@ func (w *turnBridge) run() error {
 		return err
 	}
 	var turnErr error
-	if w.snap.resume {
+	if w.snap.resume || w.snap.seeded {
 		// Resume: no new user message — the fused transcript (disk + WAL
 		// replay) already holds everything; Continue picks up the pending
 		// assistant/tool loop where it died. Same turn index (numbering
 		// never advances for a turn that never ended).
+		// Seeded (discard&resend): the actor persisted the new user row in
+		// the same commit as the tail cut — Continue answers it in place.
 		turnErr = w.agent.Continue(w.ctx, sink)
 	} else {
 		fullPrompt, images := buildTurnPrompt(w.snap.attachments, w.snap.prompt, w.snap.attachIDs, w.snap.options.Mode)

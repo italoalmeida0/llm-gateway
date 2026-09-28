@@ -850,6 +850,29 @@ export default function IndirectCodePage() {
         break;
       }
 
+      case "discard_and_resend_result":
+      case "edit_message_result": {
+        // Atomic resend/save ACK: on ok the daemon committed (tail cut +
+        // new row + turn). On error the user's edit text stays on screen —
+        // nothing is ever lost to a silent failure.
+        transcript.noteResendResult(msg);
+        break;
+      }
+      case "fork_and_resend_result": {
+        if (msg.ok && msg.newSessionId) {
+          notice.toast("Fork created — resending with edited text", "ok");
+          mirror.dataLayer.storeFor(hosts.activeHostId()).syncAll().catch(() => {});
+          selectSession(msg.newSessionId);
+        } else if (!msg.ok) {
+          notice.toast(msg.error || "Could not fork and resend", "err");
+        }
+        break;
+      }
+      case "clear_tail_result": {
+        if (!msg.ok) notice.toast(msg.error || "Could not clear the conversation", "err");
+        break;
+      }
+
       case "daemon_update": {
         // Per-host: the relay fans out every host, but the foreground
         // filter above already dropped other hosts — msg.hostId is ours.

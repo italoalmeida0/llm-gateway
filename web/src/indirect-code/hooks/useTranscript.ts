@@ -740,31 +740,55 @@ export function createTranscript(opts: {
       setForking(true);
       opts.onForkKind?.("regenerate");
       opts.send({
-        type: "fork_session",
+        type: "fork_and_resend",
         sessionId: sid,
-        index: userRawIdx,
         requestId: forkRequestId,
-        editText: userText,
-        editModel: getModel(),
-        editYolo: getYolo(),
+        turnId: userMsg?.turnIndex || 0,
+        text: userText,
+        model: getModel(),
+        yolo: getYolo(),
         attachmentIds: userMsg?.attachments?.map((a) => a.id),
       });
       return;
     }
-    // Arm full reload after daemon signals the new turn
-    opts.onDiscardResendOrRegenerate?.(sid);
-
-    // Optimistic cut: drop rendered tail now (daemon reconciles via session_truncated and subsequent full reload).
-    cutLiveTail(userRawIdx);
+    // ATOMIC discard&resend (empty text = regenerate: the daemon reuses
+    // the boundary row's original text). Cut on ACK only.
+    resendRequestId = crypto.randomUUID();
+    resendCutIdx = userRawIdx;
+    opts.onForkKind?.("regenerate");
     opts.send({
-      type: "regenerate",
+      type: "discard_and_resend",
       sessionId: sid,
-      index: userRawIdx,
+      requestId: resendRequestId,
+      turnId: userMsg?.turnIndex || 0,
       text: userText,
       model: getModel(),
       yolo: getYolo(),
+      attachmentIds: userMsg?.attachments?.map((a) => a.id),
     });
+    setSessionStatus("running");
   }
+
+  /** discard_and_resend / edit_message ACK: the daemon committed (or
+   * refused). On ok the edit buffer drops and the tail cuts (the daemon
+   * broadcasts session_truncated; this is the optimistic mirror). On
+   * error the text STAYS on screen — nothing was lost. */
+  function noteResendResult(msg: any) {
+    if (msg.requestId && msg.requestId !== resendRequestId) return;
+    if (msg.ok) {
+      // Optimistic mirror of the daemon's committed cut (it broadcasts
+      // session_truncated as the authoritative event).
+      if (resendCutIdx >= 0) cutLiveTail(resendCutIdx);
+      resendCutIdx = -1;
+      cancelEditMsg();
+      return;
+    }
+    resendCutIdx = -1;
+    setSessionStatus("idle");
+    opts.toast(msg.error || "Could not resend the message", "err");
+  }
+  let resendRequestId = "";
+  let resendCutIdx = -1;
   let editSource: { host: string; sid: string; idx: number; source: string } | null = null;
   function editDraftPrefix() {
     return `llmgw-edit:${opts.getHostId()}:${opts.getSessionId()}:`;
@@ -890,11 +914,28 @@ export function createTranscript(opts: {
         cancelEditMsg();
         return;
       }
-      // Arm full reload after daemon signals the new turn
-      opts.onDiscardResendOrRegenerate?.(sid);
-      // Optimistic cut: drop rendered tail now (daemon reconciles via session_truncated).
-      cutLiveTail(targetRawIdx);
+      // ATOMIC discard&resend: the daemon cuts + inserts + starts in one
+      // durable commit and ALWAYS answers (discard_and_resend_result).
+      // The optimistic cut + edit-buffer drop happen on the ACK — a
+      // failure keeps the edited text on screen (the daemon persists the
+      // row BEFORE the turn starts, so nothing can be lost).
+      resendRequestId = crypto.randomUUID();
+      resendCutIdx = targetRawIdx;
+      opts.send({
+        type: "discard_and_resend",
+        sessionId: sid,
+        requestId: resendRequestId,
+        turnId: m.turnIndex || 0,
+        text,
+        model: getModel(),
+        yolo: getYolo(),
+        attachmentIds,
+      });
+      setSessionStatus("running");
+      return;
     }
+    // Non-regen edit (save only): same ack contract (edit_message_result).
+    resendRequestId = crypto.randomUUID();
     opts.send({
       type: "edit_message",
       sessionId: sid,
@@ -902,11 +943,9 @@ export function createTranscript(opts: {
       text,
       model: getModel(),
       yolo: getYolo(),
-      regenerate: regen,
+      regenerate: false,
       attachmentIds,
     });
-    cancelEditMsg();
-    if (regen) setSessionStatus("running");
     } catch (e) { if (opts.getHostId() === host && opts.getSessionId() === sid) opts.toast(e instanceof Error ? e.message : "Could not save message", "err"); }
     finally { setSavingEdit(false); }
   }
@@ -1167,6 +1206,7 @@ export function createTranscript(opts: {
     clearForkRequest: () => { forkRequestId = ""; }, setForking,
     forkMessage, regenerateMsg, startEditMsg, cancelEditMsg, saveEditMsg,
     editAttachments, editingAttachments, setEditingAttachments, savingEdit, editMentions,
+    noteResendResult,
     resetForSession, resetCaches, purgeSession, pushUserMessage, beginTurn,
   };
 }

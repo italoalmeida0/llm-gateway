@@ -39,7 +39,7 @@ func bashJSON(t *testing.T, command string) json.RawMessage {
 	return raw
 }
 
-// Closing the remaining plan scenarios (docs/runner-plan.md T4/T8/T9):
+// Closing the remaining runner scenarios (T4/T8/T9):
 // update crossing, slow parent, and the 10s agent-foreground window
 // THROUGH the runner-backed starter (the production seam).
 

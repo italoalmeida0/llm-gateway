@@ -1,5 +1,5 @@
 // Package runner implements the crash-only background task runner
-// (docs/runner-plan.md, decisions D1–D8).
+// (runner design decisions D1–D8).
 //
 // The runner is a role of the multi-call binary. It OWNS one command:
 // it starts it immediately (never waiting for a parent), writes live
@@ -18,7 +18,7 @@ import (
 	"strings"
 )
 
-// ProtoVersion is the IPC protocol this build speaks (docs/runner-protocol.md).
+// ProtoVersion is the IPC protocol this build speaks.
 const ProtoVersion = 1
 
 // Status values (state file).

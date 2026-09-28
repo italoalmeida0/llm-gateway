@@ -14,7 +14,7 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/runner"
 )
 
-// Runner adoption, orphan policy and GC (docs/runner-plan.md F5/F5b/F6/F8).
+// Runner adoption, orphan policy and GC (F5/F5b/F6/F8).
 //
 // The state files under runners/ are the contract: at boot (and hourly)
 // the daemon reconciles them. Live runners are adopted (their out logs

@@ -10,7 +10,7 @@ import (
 )
 
 // runnerMain is the RUNNER role of the multi-call binary: it executes ONE
-// command with crash-only semantics (docs/runner-plan.md). The parent
+// command with crash-only semantics. The parent
 // hands the full exec spec (binary, args, env, cwd + identity + paths)
 // over stdin as JSON — the runner is generic and never knows what it
 // runs (terminal AND python go through it).

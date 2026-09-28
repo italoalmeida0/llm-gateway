@@ -17,7 +17,7 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/runner"
 )
 
-// Runner adoption tests (docs/runner-plan.md T2/T3/T5/T7/T10): real
+// Runner adoption tests (T2/T3/T5/T7/T10): real
 // runner subprocesses, real signals, real state files.
 
 // runnerTestRoot lays out <root>/slots/slot-a (the daemon's real shape).

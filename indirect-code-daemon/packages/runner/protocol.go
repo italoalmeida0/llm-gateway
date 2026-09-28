@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// IPC protocol v1 (docs/runner-protocol.md) — FROZEN: exactly five verbs,
+// IPC protocol v1 — FROZEN: exactly five verbs,
 // forever. Growth is always additive: receivers ignore unknown types and
 // fields; a proto mismatch silently falls back to file-only mode. The
 // protocol is never load-bearing — files carry everything.

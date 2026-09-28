@@ -235,15 +235,17 @@ func (b *bgSupervisor) handle(env Envelope) {
 	case bgQueryMsg:
 		m.Reply <- b.onQuery(m.JobID)
 	case bgJobsOfMsg:
+		// Empty SessionID = test/debug listing: every job id (any
+		// status). A session purge passes its id and gets running only.
 		var ids []string
 		for _, j := range b.jobs {
-			if j.Status != BgStatusRunning {
+			if m.SessionID == "" {
+				ids = append(ids, j.ID)
 				continue
 			}
-			if m.SessionID != "" && j.SessionID != m.SessionID {
-				continue
+			if j.SessionID == m.SessionID && j.Status == BgStatusRunning {
+				ids = append(ids, j.ID)
 			}
-			ids = append(ids, j.ID)
 		}
 		m.Reply <- ids
 	case bgLogPathMsg:
@@ -318,17 +320,16 @@ func (b *bgSupervisor) onFinish(jobID, status, result string) {
 	b.cleanupRunnerFiles(j)
 }
 
-// cleanupRunnerFiles removes every per-job file once its output is durable
-// in the session BgTask: state, disposition, launch claim, live out log,
-// and the brain copy. Binaries are untouched (gcRunners owns them).
+// cleanupRunnerFiles removes the bulky per-job output files once the
+// output is durable in the session BgTask: live out log, brain copy,
+// stderr. The state + disposition + launch claim STAY until the notice
+// is acked (onAck): crash recovery between terminal and ack still finds
+// the outcome, and tests can assert the terminal state. Binaries are
+// untouched (gcRunners owns them).
 func (b *bgSupervisor) cleanupRunnerFiles(j *bgJob) {
 	if j == nil || j.ID == "" {
 		return
 	}
-	root := b.rootDir()
-	_ = os.Remove(runner.StatePath(root, j.ID))
-	_ = os.Remove(runner.DispositionPath(root, j.ID))
-	_ = os.Remove(filepath.Join(runner.RunnersDir(root), j.ID+".launch"))
 	if j.LogPath != "" {
 		_ = os.Remove(j.LogPath)
 	}
@@ -339,6 +340,18 @@ func (b *bgSupervisor) cleanupRunnerFiles(j *bgJob) {
 		_ = os.Remove(j.StderrPath)
 	}
 	trace("bg.files.cleaned", map[string]any{"job": j.ID, "sid": j.SessionID})
+}
+
+// cleanupRunnerIdentity removes state + disposition + launch claim: the
+// job is fully done (terminal + notice acked). Called from onAck.
+func (b *bgSupervisor) cleanupRunnerIdentity(jobID string) {
+	if jobID == "" {
+		return
+	}
+	root := b.rootDir()
+	_ = os.Remove(runner.StatePath(root, jobID))
+	_ = os.Remove(runner.DispositionPath(root, jobID))
+	_ = os.Remove(filepath.Join(runner.RunnersDir(root), jobID+".launch"))
 }
 
 func (b *bgSupervisor) onCancel(jobID, by string) bool {
@@ -610,6 +623,8 @@ func (b *bgSupervisor) onAck(m bgAckMsg) {
 	}
 	delete(b.notices, m.JobID)
 	_ = os.Remove(b.noticePath(m.JobID))
+	// Fully done: terminal + folded. Drop the identity files now.
+	b.cleanupRunnerIdentity(m.JobID)
 	trace("bg.notice.acked", map[string]any{"job": m.JobID})
 }
 

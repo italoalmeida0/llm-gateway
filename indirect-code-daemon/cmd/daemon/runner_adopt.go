@@ -364,9 +364,26 @@ func (b *bgSupervisor) gcRunners(now int64) {
 			continue
 		}
 		// Leftover sweep: a terminal state with no live supervisor job
-		// is either pre-cleanup or orphaned — remove it now. A live
-		// job's files are owned by onFinish/onCancel, never by GC.
+		// is either pre-cleanup or orphaned — remove it now, UNLESS:
+		// - a background notice is still pending (crash between
+		//   terminal and ack: the outcome must survive until folded);
+		// - disposition is background (notice not yet delivered);
+		// - it ended recently (<1h grace: a fresh terminal from this
+		//   boot's reconciliation must survive for readers/tests).
+		// A live job's files are owned by onFinish/onCancel, never by GC.
 		if _, ok := b.jobs[st.JobID]; !ok {
+			if _, pending := b.notices[st.JobID]; pending {
+				aliveVersions[st.RunnerVersion] = true
+				continue
+			}
+			if runner.ReadDisposition(root, st.JobID) == runner.DispBackground {
+				aliveVersions[st.RunnerVersion] = true
+				continue
+			}
+			if end := NowIfZero(st); now-end < int64(time.Hour/time.Millisecond) {
+				aliveVersions[st.RunnerVersion] = true
+				continue
+			}
 			_ = os.Remove(runner.StatePath(root, st.JobID))
 			_ = os.Remove(runner.DispositionPath(root, st.JobID))
 			_ = os.Remove(filepath.Join(runner.RunnersDir(root), st.JobID+".launch"))

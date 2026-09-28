@@ -41,7 +41,9 @@ runtime defects to ship; the following regressions now have executable coverage.
   allowance, expires normally, encounters a 503, and continues to explicit
   completion. It also verifies Stop, reload, and prompt rejection, including
   sending follow-ups one and five seconds after Stop, provider receipt, and
-  exactly one durable user message. This runs on all six native platforms.
+  exactly one durable user message. Completion must match the new running
+  activity; a delayed idle event from the cancelled turn is not sufficient.
+  This runs three times on all six native platforms.
 - Chromium exercises snapshots containing stale out-of-page results and rejected
   prompt admission with the draft preserved and no fabricated running turn.
   It also exercises Stop followed by submission while browser status is stale.

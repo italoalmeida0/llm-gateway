@@ -44,7 +44,20 @@ async function run(label: string) {
   const wait=async(pred:()=>any,ms=4000)=>{const deadline=Date.now()+ms;while(Date.now()<deadline){const v=pred();if(v)return v;await Bun.sleep(10)}return null};
   const send=(m:any)=>socket.send(JSON.stringify({...m,hostId:'review-host'}));
   const create=async(id:string,mode='talk',access='full')=>{send({type:'create_session',requestId:id,cwd:work,title:'original',model:'m',options:{mode,access,effort:'none'}});const ev=await wait(()=>events.find(e=>e.type==='session_created'&&e.requestId===id));if(!ev)throw Error('create timeout');return ev.session.id;};
-  const prompt=async(sid:string,text:string,extra={})=>{const from=events.length;send({type:'prompt',sessionId:sid,text,...extra});const result = await wait(()=>events.slice(from).find(e=>e.type==='session_status'&&e.sessionId===sid&&e.status==='idle')); assert.ok(result, 'turn did not finish'); return result;};
+  const prompt=async(sid:string,text:string,extra={})=>{
+    const from=events.length;
+    send({type:'prompt',sessionId:sid,text,...extra});
+    // A cancelled turn's final snapshot/idle can arrive after this send.
+    // Observe the NEW running activity, then its own completed snapshot.
+    const started=await wait(()=>events.slice(from).find(e=>e.type==='session_status'&&e.sessionId===sid&&e.status==='running'));
+    assert.ok(started,'new turn did not start');
+    const result=await wait(()=>events.slice(from).find(e=>e.type==='session_data'&&e.session?.id===sid&&e.session.turn?.startedAt===started.turn.startedAt&&e.session.turn?.endedAt));
+    assert.ok(result,'new turn did not finish');
+    assert.equal(result.session.turn.status,'completed','new turn did not complete normally');
+    const finalIndex=events.indexOf(result);
+    assert(await wait(()=>events.slice(finalIndex).find(e=>e.type==='session_status'&&e.sessionId===sid&&e.status==='idle')),'completed turn did not become idle');
+    return result;
+  };
   try{
     if(!await wait(()=>socket,12000))throw Error('daemon did not connect: '+readFileSync(join(dir,'stderr.log'),'utf8'));
     const sid=await create('simple');
@@ -131,6 +144,11 @@ async function run(label: string) {
     const result = {renameMirror:renamed,attachmentPresent,compacted,compactSentAsPrompt,approvalAdvanced,questionHasID,questionAdvanced};
     console.log(JSON.stringify(result));
     assert.deepEqual(result, {renameMirror:'renamed',attachmentPresent:true,compacted:true,compactSentAsPrompt:false,approvalAdvanced:true,questionHasID:true,questionAdvanced:true});
+  }catch(error){
+    // Local fixture data only. Preserve lifecycle evidence in CI output so
+    // failures distinguish admission, turn identity, provider I/O and commit.
+    console.error(JSON.stringify({events:events.slice(-100).map(e=>({type:e.type,sessionId:e.sessionId||e.session?.id,requestId:e.requestId,status:e.status||e.session?.status,turn:e.turn||e.session?.turn,queued:e.queued,event:e.event?.type,error:e.message||e.event?.error})),requests:requests.slice(-12).map(r=>({scenario:r.scenario,messages:r.body.messages})),stdout:readFileSync(join(dir,'stdout.log'),'utf8'),stderr:readFileSync(join(dir,'stderr.log'),'utf8')},null,2));
+    throw error;
   }finally{proc.kill('SIGKILL');await proc.exited;server.stop(true);rmSync(dir,{recursive:true,force:true})}
 }
 await run('current');

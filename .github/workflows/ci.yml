@@ -155,7 +155,9 @@ jobs:
         working-directory: .
         run: |
           go build -C indirect-code-daemon -o bin/protocol-fixture.exe ./cmd/daemon
-          DAEMON_BINARY="indirect-code-daemon/bin/protocol-fixture.exe" bun scripts/test-indirect-daemon-protocol.ts
+          for iteration in 1 2 3; do
+            DAEMON_BINARY="indirect-code-daemon/bin/protocol-fixture.exe" bun scripts/test-indirect-daemon-protocol.ts
+          done
 
   daemon-musl:
     name: Daemon (linux amd64 musl + glibc-free proof)

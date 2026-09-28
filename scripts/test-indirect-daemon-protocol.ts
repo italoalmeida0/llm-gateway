@@ -10,7 +10,7 @@ async function run(label: string) {
   const work = join(dir, 'work'); mkdirSync(work);
   writeFileSync(join(work,'hello.txt'),'review fixture');
   const events:any[]=[]; const requests:any[]=[];
-  let socket:any; let scenario='text'; let toolIssued=false; let sleepCalls=0;
+  let socket:any; let scenario='text'; let toolIssued=false; let sleepCalls=0; let cancelBgId='';
   const sse=(name:string,input:unknown)=>{
     const items=[{type:'message_start',message:{id:'msg-review',model:'m',role:'assistant',usage:{input_tokens:10,output_tokens:0}}}];
     if(name){items.push({type:'content_block_start',index:0,content_block:{type:'tool_use',id:'tool-review',name,input:{}}} as any);items.push({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify(input)}} as any);}
@@ -30,7 +30,17 @@ async function run(label: string) {
           if(sleepCalls===2)return new Response('temporary failure after sleep',{status:503});
           return sse('mark_task_as_complete',{summary:'Recovered after sleep'});
         }
-        if(scenario==='sleep_cancel')return sse('sleep',{seconds:360,waitingFor:'bg_test',summary:'test wait'});
+        if(scenario==='sleep_cancel'){
+          // New sleep model: sleep only blocks on a RUNNING bg task. Detach
+          // a real one first (10s foreground window), then sleep on it.
+          if(!cancelBgId){
+            const hist=JSON.stringify(body?.messages||[]);
+            const m=hist.match(/bg_[A-Za-z0-9]+/);
+            if(m){cancelBgId=m[0];return sse('sleep',{seconds:360,waitingFor:cancelBgId,summary:'test wait'});}
+            return sse('bash',{command:'sleep 30'});
+          }
+          return sse('sleep',{seconds:360,waitingFor:cancelBgId,summary:'test wait'});
+        }
         if((scenario==='approval'||scenario==='question')&&!toolIssued){toolIssued=true;return scenario==='approval'?sse('read',{path:join(work,'hello.txt')}):sse('question',{questions:[{header:'Choice',question:'Pick?',options:[{label:'One'}]}]});}
         if(scenario==='approval'||scenario==='question')return sse('mark_task_as_complete',{summary:'Done'});
         return sse('',null);

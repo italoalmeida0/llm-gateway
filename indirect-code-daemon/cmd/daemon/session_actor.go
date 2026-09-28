@@ -1416,7 +1416,7 @@ func (a *sessionActor) onBgTaskRegister(m bgTaskRegisterMsg) {
 		upsertBgTask(a.rec, task)
 		a.saveOrAppend(walEvent{Type: walTypeBgTask, BgTask: task})
 		a.pingChange()
-		a.emit(map[string]any{"type": "bg_task_registered", "sessionId": a.id, "jobId": m.JobID, "kind": m.Kind, "label": m.Label})
+		a.emit(map[string]any{"type": "bg_task_registered", "hostId": a.hostID(), "sessionId": a.id, "jobId": m.JobID, "kind": m.Kind, "label": m.Label})
 	}
 	if m.Reply != nil {
 		select {
@@ -1426,29 +1426,39 @@ func (a *sessionActor) onBgTaskRegister(m bgTaskRegisterMsg) {
 	}
 }
 
-// onBgTaskChunk appends output to a session BgTask. RAM is immediate;
-// persistence is throttled while idle (WAL append while running).
+// onBgTaskChunk appends output to a session BgTask. RAM is immediate and
+// persistence is IMMEDIATE too: a chunk is the only copy of that output
+// (no runner log survives terminal), so a crash must never lose bytes —
+// the throttle window was a silent-loss bug (regression: ChunksDurable).
 func (a *sessionActor) onBgTaskChunk(m bgTaskChunkMsg) {
 	if m.Text == "" || findBgTask(a.rec, m.JobID) < 0 {
 		return
 	}
 	a.touch()
+	// Line math carries across chunk splits: a chunk continuing a partial
+	// line adds one fewer line, and `from` counts only the NEW lines (a
+	// mid-line split must not shift numbering). Seq is the authoritative
+	// ordering for the client join.
+	i := findBgTask(a.rec, m.JobID)
+	partial := a.rec.BgTasks[i].Content != "" && !strings.HasSuffix(a.rec.BgTasks[i].Content, "\n")
+	added := int64(countLines(m.Text))
+	if partial {
+		added--
+	}
 	applyBgChunk(a.rec, m.JobID, m.Text, bgLiveCap)
 	if i := findBgTask(a.rec, m.JobID); i >= 0 {
 		t := &a.rec.BgTasks[i]
-		lines := int64(countLines(m.Text))
-		from := t.TotalLines - lines + 1
+		from := t.TotalLines - added + 1
 		if from < 1 {
 			from = 1
 		}
-		a.emit(map[string]any{"type": "bg_output", "sessionId": a.id, "jobId": m.JobID, "text": m.Text, "from": from, "total": t.TotalLines})
+		a.emit(map[string]any{"type": "bg_output", "hostId": a.hostID(), "sessionId": a.id, "jobId": m.JobID, "text": m.Text,
+			"from": from, "total": t.TotalLines, "seq": t.Seq})
 	}
-	now := time.Now().UnixMilli()
-	if a.wal != nil {
-		_ = a.saveOrAppend(walEvent{Type: walTypeBgChunk, BgChunk: &BgChunk{JobID: m.JobID, Text: m.Text}})
-	} else if now-a.bgLastPersist >= bgPersistThrottleMs {
-		a.bgLastPersist = now
-		if err := a.saveOrAppend(walEvent{Type: walTypeBgChunk, BgChunk: &BgChunk{JobID: m.JobID, Text: m.Text}}); err == nil {
+	if err := a.saveOrAppend(walEvent{Type: walTypeBgChunk, BgChunk: &BgChunk{JobID: m.JobID, Text: m.Text}}); err == nil {
+		a.bgDirty = false
+		a.bgLastPersist = time.Now().UnixMilli()
+		if a.wal == nil {
 			a.pingChange()
 		}
 	} else {
@@ -1476,7 +1486,7 @@ func (a *sessionActor) onBgTaskFinish(m bgTaskFinishMsg) {
 	if err := a.saveOrAppend(walEvent{Type: walTypeBgFinish, BgFinish: fin}); err == nil {
 		a.pingChange()
 	}
-	a.emit(map[string]any{"type": "bg_task_finished", "sessionId": a.id, "jobId": m.JobID, "status": m.Status, "exitCode": m.ExitCode})
+	a.emit(map[string]any{"type": "bg_task_finished", "hostId": a.hostID(), "sessionId": a.id, "jobId": m.JobID, "status": m.Status, "exitCode": m.ExitCode})
 }
 
 // onBgTaskRead pages a BgTask's content for bg_check.
@@ -1520,7 +1530,7 @@ func (a *sessionActor) onBgNotice(m bgNoticeMsg) {
 		return
 	}
 	a.touch()
-	a.emit(map[string]any{"type": "bg_notice", "sessionId": a.id, "jobId": m.JobID, "text": noticePreview(m.Text), "finished": m.Finished})
+	a.emit(map[string]any{"type": "bg_notice", "hostId": a.hostID(), "sessionId": a.id, "jobId": m.JobID, "text": noticePreview(m.Text), "finished": m.Finished})
 	if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
 		msg := provider.Message{ID: provider.NewMessageID(), Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: m.Text}}, TurnIndex: a.rec.TurnSeq, Meta: map[string]string{"background_delivery": m.JobID}}
 		a.rec.Messages = append(a.rec.Messages, msg)

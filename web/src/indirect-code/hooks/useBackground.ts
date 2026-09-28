@@ -2,13 +2,18 @@ import { createSignal, onCleanup } from "solid-js";
 import type { DaemonCommand } from "../daemon-protocol";
 
 /**
- * Background tasks (per session).
+ * Background tasks (per session, exactly like the todo list).
  *
  * The session owns the tasks (daemon BgTasks, persisted + mirrored in
- * session_data/session_content as bgTasks). The hook keeps the session
- * list as the source of truth: tasks NEVER disappear (no GC) — a
- * finished task stays rendered like a tool call. Live output streams as
- * `bg_output` chunks glued after the session tail.
+ * session_data/session_content as bgTasks) and this hook keeps ONE list
+ * PER SESSION: switching sessions never leaks tasks across conversations
+ * and never loses a running task's live stream (each session's buffers
+ * survive until that session's own snapshot reconciles them). Tasks NEVER
+ * disappear (no GC) — a finished task stays rendered like a tool call.
+ *
+ * Live output joins the session tail by the daemon's monotonic `seq`:
+ * every bg_output carries the chunk sequence number, so the overlap
+ * with the snapshot tail is exact — no line arithmetic, no dup, no gap.
  */
 export interface SessionBgTask {
   id: string;
@@ -25,65 +30,74 @@ export interface SessionBgTask {
   contentFrom?: number;
 }
 export type BgTask = SessionBgTask;
+export type Background = ReturnType<typeof createBackground>;
 
 /** Per-job streamed output cap (tail kept, head dropped). */
 const OUTPUT_CAP = 96 * 1024;
 /** Stream buffer entries cap (oldest entries pruned first). */
 const JOBS_CAP = 50;
 
+interface JobLive {
+  /** Concatenated live text (fallback for chunks without seq). */
+  text: string;
+  /** Numbered segments by daemon seq: the join key with the tail. */
+  segs: { seq: number; from: number; text: string }[];
+}
+
 export function createBackground(opts: {
   send: (payload: DaemonCommand) => void;
   isOpen: () => boolean;
-  /** The open conversation's id — the card is scoped to it. */
+  /** The open conversation's id — the card reads THIS session's list. */
   getSessionId: () => string;
   toast: (msg: string, kind?: "ok" | "err") => void;
 }) {
-  const [output, setOutput] = createSignal<Record<string, string>>({});
-  /** Live buffer base: snapshot totalLines covered when the buffer
-   * started (or was last reconciled). Lets the card cut the overlap:
-   * live lines <= snapshot total are already in the tail. */
-  const [outputBase, setOutputBase] = createSignal<Record<string, number>>({});
-  /** Session-owned tasks (bgTasks from session_data/session_content).
-   * Scoped to ONE session: switching sessions clears the list, so a
-   * task never leaks into another conversation (or host). */
-  const [sessionTasks, setSessionTasks] = createSignal<SessionBgTask[]>([]);
-  const [taskSessionId, setTaskSessionId] = createSignal<string>("");
-  /** Switch scope: drop the old session's list AND its live buffers.
-   * Called with the active session id on every authoritative payload. */
-  function scopeTo(sid: string) {
-    if (!sid || sid === taskSessionId()) return;
-    setTaskSessionId(sid);
-    setSessionTasks([]);
-    setOutput({});
-    setOutputBase({});
-    setSegments({});
+  /** Tasks BY SESSION (todo-list pattern): a payload for ANY session
+   * writes into its own list — the active card just reads its own. */
+  const [bySession, setBySession] = createSignal<Record<string, SessionBgTask[]>>({});
+  /** Live buffers BY SESSION: {jobId: {text, segs}}. */
+  const [liveBySession, setLiveBySession] = createSignal<Record<string, Record<string, JobLive>>>({});
+
+  function tasksOf(sid: string): SessionBgTask[] {
+    return bySession()[sid] || [];
   }
-  /** Session task events (bg_task_registered/bg_task_finished): force
-   * the card to re-render even without a session_data refresh. */
+
   function noteSessionTaskEvent(msg: any) {
     if (!msg || typeof msg.jobId !== "string") return;
-    const sid = opts.getSessionId();
-    // No open session, or another session's task: never touch the list.
-    if (!sid || (msg.sessionId && msg.sessionId !== sid)) return;
-    scopeTo(sid);
-    // Touch the list so dependents re-evaluate; the authoritative
-    // content arrives via session_data/session_content (pingChange).
-    setSessionTasks((prev) => {
-      const i = prev.findIndex((t) => t.id === msg.jobId);
+    const sid = String(msg.sessionId || opts.getSessionId() || "");
+    if (!sid) return;
+    setBySession((prev) => {
+      const list = [...(prev[sid] || [])];
+      const i = list.findIndex((t) => t.id === msg.jobId);
       if (i < 0) {
-        return [...prev, { id: msg.jobId, kind: String(msg.kind || ""), label: String(msg.label || ""), status: msg.type === "bg_task_finished" ? String(msg.status || "done") : "running", startedAt: Date.now() }];
+        // Register: placeholder until the authoritative snapshot lands.
+        if (msg.type !== "bg_task_registered") return prev;
+        list.push({
+          id: msg.jobId,
+          kind: String(msg.kind || ""),
+          label: String(msg.label || ""),
+          status: "running",
+          startedAt: typeof msg.startedAt === "number" ? msg.startedAt : Date.now(),
+        });
+      } else if (msg.type === "bg_task_finished") {
+        list[i] = {
+          ...list[i],
+          status: String(msg.status || "done"),
+          endedAt: typeof msg.endedAt === "number" ? msg.endedAt : Date.now(),
+          exitCode: typeof msg.exitCode === "number" ? msg.exitCode : list[i].exitCode,
+        };
+      } else {
+        return prev;
       }
-      const next = [...prev];
-      if (msg.type === "bg_task_finished") next[i] = { ...next[i], status: String(msg.status || "done") };
-      return next;
+      return { ...prev, [sid]: list };
     });
+    if (msg.type === "bg_task_registered") ensureClock();
   }
+
   /** Authoritative session task list (from session payload bgTasks). */
   function noteSessionTasks(list: unknown, sid?: string) {
     if (!Array.isArray(list)) return;
-    const active = sid || opts.getSessionId();
-    if (!active) return;
-    scopeTo(active);
+    const owner = String(sid || opts.getSessionId() || "");
+    if (!owner) return;
     const parsed: SessionBgTask[] = [];
     for (const t of list as any[]) {
       if (!t || typeof t.id !== "string") continue;
@@ -101,89 +115,80 @@ export function createBackground(opts: {
         contentFrom: typeof t.contentFrom === "number" ? t.contentFrom : undefined,
       });
     }
-    setSessionTasks(parsed);
-    // Reconcile live buffers against the new snapshot totals: drop the
-    // head the tail now covers (exact line math, no heuristics).
-    setOutputBase((prev) => {
-      const next = { ...prev };
-      for (const t of parsed) {
-        const total = typeof t.totalLines === "number" ? t.totalLines : 0;
-        const base = next[t.id];
-        if (base === undefined) {
-          // Buffer starts here: everything before `total` is in the tail.
-          next[t.id] = total;
-        } else if (total < base) {
-          next[t.id] = total;
-        }
-      }
-      return next;
-    });
+    setBySession((prev) => ({ ...prev, [owner]: parsed }));
+    pruneLive(owner, parsed);
     if (parsed.some((t) => t.status === "running")) ensureClock();
-    else maybeStopClock();
-    pruneOutput(parsed);
   }
+
+  /** Live chunk from the daemon. Written into the OWNING session's
+   * buffers (msg.sessionId), never the active one: a stale chunk after a
+   * session switch lands where it belongs (or nowhere if unknown). */
+  function noteOutput(jobId: string, text: string, sid?: string, from?: number, seq?: number) {
+    if (typeof jobId !== "string" || typeof text !== "string" || !text) return;
+    const owner = String(sid || opts.getSessionId() || "");
+    if (!owner) return;
+    const known = tasksOf(owner).some((t) => t.id === jobId);
+    const hasBuf = !!liveBySession()[owner]?.[jobId];
+    if (!known && !hasBuf) return; // foreign/stale: not ours
+    setLiveBySession((prev) => {
+      const sess = { ...(prev[owner] || {}) };
+      const cur = sess[jobId] || { text: "", segs: [] };
+      const segs = [...cur.segs];
+      // Only NUMBERED chunks (seq + first line) join by line math; an
+      // unnumbered chunk falls back to the text buffer below.
+      if (typeof seq === "number" && typeof from === "number" && from >= 1 && segs.every((s) => s.seq !== seq)) {
+        segs.push({ seq, from, text });
+        segs.sort((a, b) => a.seq - b.seq);
+        if (segs.length > 400) segs.splice(0, segs.length - 400);
+      }
+      const joined = cur.text + text;
+      sess[jobId] = {
+        text: joined.length > OUTPUT_CAP ? joined.slice(-OUTPUT_CAP) : joined,
+        segs,
+      };
+      return { ...prev, [owner]: sess };
+    });
+  }
+
+  function pruneLive(owner: string, tasks: SessionBgTask[]) {
+    setLiveBySession((prev) => {
+      const sess = prev[owner];
+      if (!sess) return prev;
+      const keys = Object.keys(sess);
+      if (keys.length <= JOBS_CAP) return prev;
+      const liveIds = new Set(tasks.map((j) => j.id));
+      const next: Record<string, JobLive> = {};
+      for (const k of keys) {
+        if (liveIds.has(k)) next[k] = sess[k];
+      }
+      const rest = Object.keys(next);
+      if (rest.length > JOBS_CAP) {
+        for (const k of rest.slice(0, rest.length - JOBS_CAP)) delete next[k];
+      }
+      return { ...prev, [owner]: next };
+    });
+  }
+
   /** 1s ticker (only while a job runs) for elapsed labels. */
   const [clock, setClock] = createSignal(Date.now());
   let timer: ReturnType<typeof setInterval> | undefined;
 
+  function anyRunning(): boolean {
+    for (const list of Object.values(bySession())) {
+      if (list.some((t) => t.status === "running")) return true;
+    }
+    return false;
+  }
   function ensureClock() {
     if (!timer) timer = setInterval(() => setClock(Date.now()), 1000);
   }
   function maybeStopClock() {
-    if (timer && !sessionTasks().some((t) => t.status === "running")) {
+    if (timer && !anyRunning()) {
       clearInterval(timer);
       timer = undefined;
     }
   }
   onCleanup(() => clearInterval(timer));
-
-  function appendOutput(jobId: string, text: string) {
-    if (!jobId || !text) return;
-    setOutput((prev) => {
-      const next = (prev[jobId] || "") + text;
-      return { ...prev, [jobId]: next.length > OUTPUT_CAP ? next.slice(-OUTPUT_CAP) : next };
-    });
-  }
-
-  /** Numbered live segments per job: {from (1-indexed first line),
-   * text}. Absolute numbering from the daemon makes overlap exact. */
-  const [segments, setSegments] = createSignal<Record<string, { from: number; text: string }[]>>({});
-  /** Live chunk from the daemon (post-detach output). Scoped: chunks
-   * for another session's job are dropped (stale event after switch). */
-  function noteOutput(jobId: string, text: string, sid?: string, from?: number) {
-    if (typeof jobId !== "string" || typeof text !== "string" || !text) return;
-    const active = sid || opts.getSessionId();
-    if (!active || active !== taskSessionId()) return;
-    // Unknown job id (not in this session's list and never streamed):
-    // drop — it belongs to a session we already left.
-    if (!(jobId in output()) && !sessionTasks().some((t) => t.id === jobId)) return;
-    appendOutput(jobId, text);
-    if (typeof from === "number" && from >= 1) {
-      setSegments((prev) => {
-        const list = [...(prev[jobId] || []), { from, text }];
-        // Bound: keep the last 200 segments per job.
-        return { ...prev, [jobId]: list.length > 200 ? list.slice(-200) : list };
-      });
-    }
-  }
-
-  function pruneOutput(live: BgTask[]) {
-    setOutput((prev) => {
-      const keys = Object.keys(prev);
-      if (keys.length <= JOBS_CAP) return prev;
-      const liveIds = new Set(live.map((j) => j.id));
-      const next: Record<string, string> = {};
-      for (const k of keys) {
-        if (liveIds.has(k)) next[k] = prev[k];
-      }
-      // Still over cap (huge history): keep the newest entries.
-      const rest = Object.keys(next);
-      if (rest.length > JOBS_CAP) {
-        for (const k of rest.slice(0, rest.length - JOBS_CAP)) delete next[k];
-      }
-      return next;
-    });
-  }
 
   function stop(jobId: string) {
     if (!opts.isOpen()) return;
@@ -192,33 +197,36 @@ export function createBackground(opts: {
   }
 
   function running() {
-    return sessionTasks().filter((t) => t.status === "running");
+    return tasksOf(opts.getSessionId()).filter((t) => t.status === "running");
   }
 
   /** Tasks of the OPEN session — session-owned, never disappear. */
   function sessionJobs() {
-    return sessionTasks();
+    return tasksOf(opts.getSessionId());
   }
 
   /** Session-owned content for a task (authoritative tail from bgTasks). */
   function sessionContent(jobId: string): string | undefined {
-    return sessionTasks().find((t) => t.id === jobId)?.content;
+    return tasksOf(opts.getSessionId()).find((t) => t.id === jobId)?.content;
   }
 
-  /** Live tail for a job: numbered segments joined, cut to lines the
-   * snapshot tail doesn't cover yet (from > snapTotal). Exact — the
-   * daemon numbers every chunk, so overlap is impossible by construction.
-   * Falls back to the legacy buffer math when segments are absent (old
-   * snapshots during reload). */
+  /**
+   * Live tail for a job: the streamed lines the snapshot tail does NOT
+   * cover yet. The daemon numbers every chunk (seq + first line), so the
+   * cut is exact: keep lines whose absolute number is past the snapshot
+   * total. Chunks without numbering (legacy) fall back to the text buffer.
+   */
   function liveTail(jobId: string): string {
-    const segs = segments()[jobId];
-    const task = sessionTasks().find((t) => t.id === jobId);
+    const sid = opts.getSessionId();
+    const task = tasksOf(sid).find((t) => t.id === jobId);
     const snapTotal = task && typeof task.totalLines === "number" ? task.totalLines : 0;
-    if (segs && segs.length > 0) {
+    const live = liveBySession()[sid]?.[jobId];
+    if (!live) return "";
+    if (live.segs.length > 0) {
       const parts: string[] = [];
-      for (const s of segs) {
+      for (const s of live.segs) {
         const lines = s.text.split("\n");
-        // Drop trailing phantom after a trailing newline (daemon countLines).
+        // Drop the phantom after a trailing newline (daemon countLines).
         if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
         for (let i = 0; i < lines.length; i++) {
           if (s.from + i > snapTotal) parts.push(lines[i]);
@@ -226,17 +234,19 @@ export function createBackground(opts: {
       }
       return parts.join("\n");
     }
-    const buf = output()[jobId] || "";
-    if (!buf) return "";
-    const base = outputBase()[jobId] ?? snapTotal;
-    const skip = snapTotal - base;
-    if (skip <= 0) return buf;
-    const lines = buf.split("\n");
-    if (skip >= lines.length) return "";
-    return lines.slice(skip).join("\n");
+    // Legacy (no seq): show the whole buffer — the snapshot tail is
+    // authoritative for older lines and the card shows the notice.
+    return live.text;
   }
 
-  return { sessionJobs, sessionContent, liveTail, running, output, clock, noteOutput, noteSessionTasks, noteSessionTaskEvent, stop };
-}
+  /** Concatenated live text per job of the OPEN session (tool-row stream). */
+  function output(): Record<string, string> {
+    const sid = opts.getSessionId();
+    const sess = liveBySession()[sid] || {};
+    const out: Record<string, string> = {};
+    for (const [id, live] of Object.entries(sess)) out[id] = live.text;
+    return out;
+  }
 
-export type Background = ReturnType<typeof createBackground>;
+  return { sessionJobs, sessionContent, liveTail, running, clock, output, noteOutput, noteSessionTasks, noteSessionTaskEvent, stop, maybeStopClock };
+}

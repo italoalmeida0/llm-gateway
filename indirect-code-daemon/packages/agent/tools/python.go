@@ -219,7 +219,14 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	exited := proc.Exited
 	var stdout, stderr bytes.Buffer
 	detached := make(chan struct{})
+	// Pre-detach output is buffered and flushed as the FIRST chunks at
+	// handoff, so the bg log shows EVERY line from the start (regression:
+	// StreamIncludesPreDetachOutput*). The handoff publishes the sink under
+	// the pump's mutex AFTER the flush — pump order stays exact.
+	var streamMu sync.Mutex
 	var stream func(string)
+	var preBuf []byte
+	const preBufCap = 4 << 20
 	var pumpWG sync.WaitGroup
 	pump := func(pumpFn func(<-chan struct{}, func([]byte)), target *bytes.Buffer) {
 		if pumpFn == nil {
@@ -231,12 +238,17 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 			w := &cappedWriter{W: target, Max: 256 * 1024}
 			pumpFn(exited, func(chunk []byte) {
 				_, _ = w.Write(chunk)
-				select {
-				case <-detached:
-					if stream != nil {
-						stream(string(chunk))
+				streamMu.Lock()
+				sink := stream
+				if sink == nil {
+					preBuf = append(preBuf, chunk...)
+					if len(preBuf) > preBufCap {
+						preBuf = preBuf[len(preBuf)-preBufCap:]
 					}
-				default:
+				}
+				streamMu.Unlock()
+				if sink != nil {
+					sink(string(chunk))
 				}
 			})
 		}()
@@ -304,7 +316,15 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		cleanup(false)
 		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped (job_id %q)", jobID)
 	}
+	// Handoff: flush pre-detach output FIRST, then publish the sink (the
+	// pump is serialized on streamMu, so chunk order is exact).
+	streamMu.Lock()
+	if len(preBuf) > 0 && sink != nil {
+		sink(string(preBuf))
+	}
+	preBuf = nil
 	stream = sink
+	streamMu.Unlock()
 	close(detached)
 	go func() {
 		out := <-doneCh

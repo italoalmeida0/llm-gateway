@@ -103,10 +103,14 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	// then on the turn-context watcher stands down (the background job owns
 	// the process lifetime; only an explicit stop kills it).
 	detached := make(chan struct{})
-	// streamSink forwards post-detach output chunks to the background job
-	// (live frontend row + .log file). Set before close(detached), so the
-	// pump below reads it race-free (channel close is the happens-before).
+	// streamSink forwards output chunks to the background job (session
+	// BgTask + live card). Pre-detach output is buffered and flushed as the
+	// FIRST chunks at handoff, so the bg log shows EVERY line from the
+	// start — not only what was printed after the 10s threshold.
+	var streamMu sync.Mutex
 	var streamSink func(string)
+	var preBuf []byte
+	const preBufCap = 4 << 20 // safety valve only; the BgTask trims anyway
 
 	// Watch for context cancellation and kill the entire process
 	// group immediately. exec.CommandContext only kills the direct
@@ -137,15 +141,19 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		}
 	}()
 	emit := func(chunk []byte) {
-		select {
-		case <-detached:
-			if streamSink != nil {
-				streamSink(string(chunk))
+		streamMu.Lock()
+		sink := streamSink
+		if sink == nil {
+			preBuf = append(preBuf, chunk...)
+			if len(preBuf) > preBufCap {
+				preBuf = preBuf[len(preBuf)-preBufCap:]
 			}
-		default:
-			if progress != nil {
-				progress(string(chunk))
-			}
+		}
+		streamMu.Unlock()
+		if sink != nil {
+			sink(string(chunk))
+		} else if progress != nil {
+			progress(string(chunk))
 		}
 	}
 	go func() {
@@ -219,7 +227,17 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		proc.Cleanup(false)
 		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped (job_id %q)", jobID)
 	}
+	// Handoff under the pump's mutex: flush the pre-detach buffer FIRST
+	// (inside the critical section), then publish the sink. A pump emit is
+	// either already inside preBuf (flushed before any direct chunk) or
+	// reads the sink after the flush completed — order is exact either way.
+	streamMu.Lock()
+	if len(preBuf) > 0 && stream != nil {
+		stream(string(preBuf))
+	}
+	preBuf = nil
 	streamSink = stream
+	streamMu.Unlock()
 	close(detached)
 	go func() {
 		waitErr := <-waitCh
@@ -284,8 +302,9 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 	snapshot := output.snapshot(true)
 	output.closeTempFile()
 
-	// Tail-truncated content plus an actionable notice
-	// pointing at the temp file with the complete output.
+	// Tail-truncated content plus a truncation notice. The model never
+	// sees file paths (V2: the runner/session own the bytes) — the notice
+	// names the range and how to inspect the effect instead.
 	outputText := snapshot.content
 	if outputText == "" {
 		outputText = "(no output)"
@@ -295,14 +314,14 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 		endLine := snapshot.totalLines
 		switch {
 		case snapshot.lastLinePartial:
-			outputText += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). Full output: %s]",
-				formatSize(snapshot.outputBytes), endLine, formatSize(output.getLastLineBytes()), snapshot.fullOutputPath)
+			outputText += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). The earlier output is truncated — the shown tail is complete output.]",
+				formatSize(snapshot.outputBytes), endLine, formatSize(output.getLastLineBytes()))
 		case snapshot.truncatedBy == "lines":
-			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Full output: %s]",
-				startLine, endLine, snapshot.totalLines, snapshot.fullOutputPath)
+			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (line limit). The earlier lines are truncated.]",
+				startLine, endLine, snapshot.totalLines)
 		default:
-			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Full output: %s]",
-				startLine, endLine, snapshot.totalLines, formatSize(defaultMaxBytes), snapshot.fullOutputPath)
+			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). The earlier lines are truncated.]",
+				startLine, endLine, snapshot.totalLines, formatSize(defaultMaxBytes))
 		}
 	}
 
@@ -331,7 +350,7 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 
 	// Frontend-only rendering: the terminal-log view ($ command,
 	// output, [exit N] Took Xs) shown by the UI transcript.
-	display := renderBashDisplay(a.Command, head.String(), exitCode, elapsed, snapshot.fullOutputPath)
+	display := renderBashDisplay(a.Command, head.String(), exitCode, elapsed)
 
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: outputText}},
@@ -342,6 +361,9 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 			"stdout":           head.String(),
 			"stderr":           "",
 			"truncated":        snapshot.truncated,
+			// UI-only (Details never reach the LLM): the full output file
+			// for the frontend's copy/inspect affordances. The model-visible
+			// Content above is deliberately path-free.
 			"full_output_path": snapshot.fullOutputPath,
 			"lines_truncated":  snapshot.truncated && snapshot.truncatedBy == "lines",
 			"bytes_truncated":  snapshot.truncated && snapshot.truncatedBy == "bytes",
@@ -355,7 +377,7 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 // renderBashDisplay builds the terminal-log presentation for the UI:
 // shell-prompt echo of the command, the captured output (head-truncated like
 // before), and a footer with exit code and elapsed time.
-func renderBashDisplay(command, captured string, exitCode int, elapsed time.Duration, fullPath string) string {
+func renderBashDisplay(command, captured string, exitCode int, elapsed time.Duration) string {
 	lines := strings.Split(captured, "\n")
 	truncLines := false
 	if len(lines) > defaultMaxLines {
@@ -382,9 +404,6 @@ func renderBashDisplay(command, captured string, exitCode int, elapsed time.Dura
 	}
 	sb.WriteString("\n")
 	fmt.Fprintf(&sb, "[exit %d]", exitCode)
-	if fullPath != "" {
-		fmt.Fprintf(&sb, " (full output: %s)", fullPath)
-	}
 	fmt.Fprintf(&sb, "  Took %s", humanDuration(elapsed))
 	return sb.String()
 }

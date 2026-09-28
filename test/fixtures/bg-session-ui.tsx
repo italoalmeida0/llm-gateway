@@ -107,6 +107,8 @@ render(() => (
   </BackgroundCtx.Provider>
 ), document.getElementById("root")!);
 
+let seqCounter = 0;
+let lineCounter = 0;
 Object.assign(window, {
   bgTest: {
     bg,
@@ -117,8 +119,10 @@ Object.assign(window, {
     event(msg: any) {
       bg.noteSessionTaskEvent(msg);
     },
-    output(jobId: string, text: string, from?: number) {
-      bg.noteOutput(jobId, text, undefined, from);
+    output(jobId: string, text: string, from?: number, seq?: number) {
+      seqCounter += 1;
+      lineCounter += text.split("\n").filter((l) => l !== "").length;
+      bg.noteOutput(jobId, text, undefined, from ?? lineCounter - text.split("\n").filter((l) => l !== "").length + 1, seq ?? seqCounter);
     },
     // toolSummary probes (pure, no DOM).
     summary(toolName: string, args: any, result?: string) {

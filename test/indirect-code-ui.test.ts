@@ -1667,13 +1667,26 @@ describe("Background hook (session-owned tasks)", () => {
       expect(bg.running().map((t) => t.id)).toEqual(["bg_1"]);
       // Live chunks append for known jobs; unknown ids are dropped
       // (stale chunk from a session we already left).
-      bg.noteOutput("bg_1", "live-1");
+      bg.noteOutput("bg_1", "live-1", "s1");
       expect(bg.output()["bg_1"] || "").toBe("live-1");
-      bg.noteOutput("bg_2", "live-1");
+      bg.noteOutput("bg_2", "live-1", "s1");
       expect(bg.output()["bg_2"] || "").toBe("");
-      // Numbered chunks feed liveTail (exact overlap math, no dup).
-      bg.noteOutput("bg_1", "a\nb", undefined, 8);
+      // Numbered chunks (seq + first line) feed liveTail: only lines past
+      // the snapshot total show (exact, no dup, no cut).
+      bg.noteOutput("bg_1", "a\nb", "s1", 8, 2);
       expect(bg.liveTail("bg_1")).toBe("a\nb");
+      // BUG 1 regression: a payload for ANOTHER session must never leak
+      // into the open session's card (and vice versa) — each session owns
+      // its own list, exactly like the todo list.
+      bg.noteSessionTasks([{ id: "bg_B", kind: "bash", label: "other-session-task", status: "running", startedAt: 1 }], "session-B");
+      expect(bg.sessionJobs().some((t) => t.id === "bg_B")).toBe(false);
+      expect(bg.sessionJobs().map((t) => t.id)).toEqual(["bg_1"]);
+      // A live chunk for session B's job stays in B's buffers.
+      bg.noteOutput("bg_B", "leak", "session-B", 1, 1);
+      expect(bg.output()["bg_B"] || "").toBe("");
+      // Events for other sessions never touch the open list either.
+      bg.noteSessionTaskEvent({ type: "bg_task_registered", sessionId: "session-B", jobId: "bg_B2", kind: "bash", label: "x" });
+      expect(bg.sessionJobs().some((t) => t.id === "bg_B2")).toBe(false);
       // Finished tasks stay (never GCed).
       bg.noteSessionTasks([
         { id: "bg_1", kind: "bash", label: "sleep 30", status: "done", startedAt: 1, endedAt: 2, content: "history-live-1" },

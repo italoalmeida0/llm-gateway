@@ -151,6 +151,33 @@ type SessionRecord struct {
 	// (15 min per request). Persisted so a respawn recomputes the remainder
 	// instead of resetting the timer — a restart never bypasses the timeout.
 	ApprovalDeadlineUnix int64 `json:"approvalDeadlineUnix,omitempty"`
+	// BgTasks holds the session-global background tasks (bash/python that
+	// outlived the 10s foreground window). Logs live HERE, not in files:
+	// Content keeps the tail (RAM 100KB live, 50KB persisted at terminal),
+	// Total/Dropped counters let bg_check report stable line ranges even
+	// after the head was discarded. Never GCed — a bg task is part of the
+	// session transcript forever, like a tool call.
+	BgTasks []BgTask `json:"bgTasks,omitempty"`
+}
+
+// BgTask is one session-global background task. Content is the retained
+// tail of the command output (live: last 100KB in RAM; persisted: last
+// 50KB at terminal). TotalLines counts every line ever received;
+// DroppedLines counts head lines discarded by the cap, so readers can
+// report stable ranges ("lines X–Y of N, Z dropped above").
+type BgTask struct {
+	ID           string `json:"id"`
+	Kind         string `json:"kind"` // "bash" | "python"
+	Label        string `json:"label"`
+	Status       string `json:"status"` // "running" | "done" | "error" | "cancelled"
+	StartedAt    int64  `json:"startedAt"`
+	EndedAt      int64  `json:"endedAt,omitempty"`
+	ExitCode     int    `json:"exitCode,omitempty"`
+	Content      string `json:"content,omitempty"`
+	TotalBytes   int64  `json:"totalBytes,omitempty"`
+	TotalLines   int64  `json:"totalLines,omitempty"`
+	DroppedBytes int64  `json:"droppedBytes,omitempty"`
+	DroppedLines int64  `json:"droppedLines,omitempty"`
 }
 
 // SessionSummary is returned to the web client for listing.

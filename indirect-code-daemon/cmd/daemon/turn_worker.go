@@ -195,12 +195,13 @@ func (w *turnBridge) run() error {
 		baseTools = append(baseTools, &tools.PythonTool{CWD: w.sessionCWD, Sandbox: sb, Slow: w.slowHook(), LogDir: brainDir, Starter: runnerStart})
 	}
 	bgCancelTool := &tools.BgCancelTool{Host: w, SessionID: w.env.actorID}
+	bgCheckTool := &tools.BgCheckTool{Host: w, SessionID: w.env.actorID}
 	sleepTool := &tools.SleepTool{Host: w, SessionID: w.env.actorID}
 	questionTool := &tools.QuestionTool{Ask: w.askQuestions}
 	todoTool := &tools.TodoTool{Update: w.updateTodos}
 	markTaskTool := &tools.MarkTaskAsCompleteTool{}
 	markPlanTool := &tools.MarkPlanAsReadyToExecuteTool{}
-	w.reg = core.NewRegistry(append(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool), bgCancelTool, sleepTool)...)
+	w.reg = core.NewRegistry(append(append(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool), bgCancelTool, sleepTool), bgCheckTool)...)
 
 	if w.env.store != nil {
 		header, err := w.env.store.readWALHeader(w.env.actorID)
@@ -550,11 +551,31 @@ func (w *turnBridge) WaitForAnyJob(sessionID string, done <-chan struct{}) <-cha
 	return w.env.bg.subscribeFinish(sessionID, done)
 }
 
-func (w *turnBridge) RecentBgFinish(sessionID string) (string, time.Duration, bool) {
-	if w.env.bg == nil {
-		return "", 0, false
+// BgTaskStatus implements tools.BgSleepCheckHost: the session actor owns
+// the BgTasks, so this asks it (fast mailbox round-trip). Unknown ids
+// report ok=false — sleep warns, never fails.
+func (w *turnBridge) BgTaskStatus(sessionID, jobID string) (string, string, bool) {
+	if sessionID != "" && sessionID != w.env.actorID {
+		return "", "", false
 	}
-	return w.env.bg.recentFinish(sessionID)
+	reply := make(chan any, 1)
+	select {
+	case w.env.inbox <- w.stamp(Envelope{Payload: bgTaskReadMsg{JobID: jobID, Offset: 1, Limit: 1, Reply: reply}}):
+	case <-w.ctx.Done():
+		return "", "", false
+	}
+	select {
+	case r := <-reply:
+		res, _ := r.(bgTaskReadResult)
+		if !res.Found || res.Error != "" {
+			return "", "", false
+		}
+		return res.Status, res.Label, true
+	case <-w.ctx.Done():
+		return "", "", false
+	case <-time.After(replyTimeout):
+		return "", "", false
+	}
 }
 
 // BgCancelHost.
@@ -563,6 +584,32 @@ func (w *turnBridge) CancelBackgroundJob(callerSessionID, jobID string) (tools.B
 		return tools.BgCancelOutcome{}, fmt.Errorf("no background support")
 	}
 	return w.env.bg.cancelJob(callerSessionID, jobID)
+}
+
+// BgCheckHost: the session actor owns the logs.
+func (w *turnBridge) ReadBackgroundTask(callerSessionID, jobID string, offset, limit int) (tools.BgCheckResult, error) {
+	reply := make(chan any, 1)
+		sel := Envelope{Payload: bgTaskReadMsg{JobID: jobID, Offset: offset, Limit: limit, Reply: reply}}
+		if callerSessionID != "" && callerSessionID != w.env.actorID {
+			return tools.BgCheckResult{}, fmt.Errorf("bg_check: foreign task")
+		}
+		select {
+		case w.env.inbox <- w.stamp(sel):
+		case <-w.ctx.Done():
+			return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
+		}
+		select {
+		case r := <-reply:
+			res, _ := r.(bgTaskReadResult)
+			if res.Error != "" {
+				return tools.BgCheckResult{}, fmt.Errorf("%s", res.Error)
+			}
+			return tools.BgCheckResult{Found: res.Found, Kind: res.Kind, Label: res.Label, Status: res.Status, ExitCode: res.ExitCode, Text: res.Text, From: res.From, To: res.To, Total: res.Total, Dropped: res.Dropped, Truncated: res.Truncated}, nil
+		case <-w.ctx.Done():
+			return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
+		case <-time.After(replyTimeout):
+			return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
+		}
 }
 
 // slowHook registers a bg job on the supervisor and returns the
@@ -611,10 +658,17 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 			return "", "", func(string) {}, func(string, bool) {}
 		}
 		id := reg.JobID
+		// Register the session-global BgTask: from here every chunk is
+		// durable in session+WAL, independent of turn state. Best-effort:
+		// the supervisor job is the source of truth for lifecycle.
+		w.sendInbox(bgTaskRegisterMsg{JobID: id, Kind: kind, Label: label})
 		stream := func(chunk string) {
 			if chunk == "" {
 				return
 			}
+			// Session-first: the chunk lands in the BgTask (RAM + WAL).
+			// The live bg_output emit stays for the streaming row.
+			w.sendInbox(bgTaskChunkMsg{JobID: id, Text: chunk})
 			if w.env.emit != nil {
 				w.env.emit(map[string]any{"type": "bg_output", "sessionId": w.env.actorID, "jobId": id, "text": chunk})
 			}
@@ -626,6 +680,9 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 				if isError {
 					status = BgStatusError
 				}
+				// Terminal BgTask first (trim + persist + cleanup), then
+				// the supervisor finish (notice/wake-up).
+				w.sendInbox(bgTaskFinishMsg{JobID: id, Status: status})
 				select {
 				case w.env.bg.inbox <- Envelope{Payload: bgFinishMsg{JobID: id, Status: status, Result: result}}:
 				case <-w.env.bg.done:

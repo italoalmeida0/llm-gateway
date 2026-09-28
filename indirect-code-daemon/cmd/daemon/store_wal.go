@@ -46,6 +46,9 @@ const (
 	walTypeTurnState  = "turn_state"  // turn activity status flip
 	walTypeMeta       = "meta"        // updatedAt / lastDate / lastMode / turn_ms stamps
 	walTypeAttach     = "attachments" // attachment list replace (upload)
+	walTypeBgTask     = "bg_task"     // bg task register/upsert (id, kind, label, status)
+	walTypeBgChunk    = "bg_chunk"    // bg task output chunk append (content tail)
+	walTypeBgFinish   = "bg_finish"   // bg task terminal transition (status, trim)
 )
 
 // walHeader is always line 1: the turn's recovery record (prompt,
@@ -60,6 +63,20 @@ type walHeader struct {
 	Prompt         string                  `json:"prompt,omitempty"`
 	AttachmentIDs  []string                `json:"attachmentIds,omitempty"`
 	Incoming       []filetrack.TrackedFile `json:"incoming,omitempty"`
+}
+
+// BgChunk carries one output append for a session-global bg task.
+type BgChunk struct {
+	JobID string `json:"jobId"`
+	Text  string `json:"text"`
+}
+
+// BgFinish carries a bg task terminal transition.
+type BgFinish struct {
+	JobID    string `json:"jobId"`
+	Status   string `json:"status"`
+	ExitCode int    `json:"exitCode,omitempty"`
+	EndedAt  int64  `json:"endedAt,omitempty"`
 }
 
 // walEvent is one JSONL line. Only the fields for its Type are set.
@@ -84,6 +101,9 @@ type walEvent struct {
 	Options     *SessionOptions         `json:"options,omitempty"`
 	TurnStatus  string                  `json:"turnStatus,omitempty"`
 	Attachments []AttachmentRef         `json:"attachments,omitempty"`
+	BgTask      *BgTask                 `json:"bgTask,omitempty"`
+	BgChunk     *BgChunk                `json:"bgChunk,omitempty"`
+	BgFinish    *BgFinish               `json:"bgFinish,omitempty"`
 	UpdatedAt   int64                   `json:"updatedAt,omitempty"`
 	// ApprovalDeadlineUnix persists the 15-min decision deadline inside the
 	// WAL: a respawn recomputes the remainder instead of
@@ -441,6 +461,27 @@ func applyWALEvent(rec *SessionRecord, ev *walEvent) error {
 		if ev.UpdatedAt > 0 {
 			rec.UpdatedAt = ev.UpdatedAt
 		}
+	case walTypeBgTask:
+		if ev.BgTask != nil {
+			upsertBgTask(rec, ev.BgTask)
+		}
+		if ev.UpdatedAt > 0 {
+			rec.UpdatedAt = ev.UpdatedAt
+		}
+	case walTypeBgChunk:
+		if ev.BgChunk != nil {
+			applyBgChunk(rec, ev.BgChunk.JobID, ev.BgChunk.Text, bgLiveCap)
+		}
+		if ev.UpdatedAt > 0 {
+			rec.UpdatedAt = ev.UpdatedAt
+		}
+	case walTypeBgFinish:
+		if ev.BgFinish != nil {
+			applyBgFinish(rec, ev.BgFinish)
+		}
+		if ev.UpdatedAt > 0 {
+			rec.UpdatedAt = ev.UpdatedAt
+		}
 	case walTypeMeta:
 		if ev.Pinned != nil {
 			rec.Pinned = *ev.Pinned
@@ -664,7 +705,8 @@ func appendWALEvent(wal *walWriter, ev walEvent) error {
 		switch ev.Type {
 		case walTypeMsg, walTypeUsage, walTypeCompaction, walTypeTodos,
 			walTypeQueue, walTypeTitle, walTypeModel, walTypeOptions,
-			walTypeTurnState, walTypeMeta, walTypeAttach:
+			walTypeTurnState, walTypeMeta, walTypeAttach,
+			walTypeBgTask, walTypeBgChunk, walTypeBgFinish:
 			ev.UpdatedAt = time.Now().UnixMilli()
 		}
 	}

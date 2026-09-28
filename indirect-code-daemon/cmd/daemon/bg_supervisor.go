@@ -342,6 +342,33 @@ func (b *bgSupervisor) onFinish(jobID, status, result string) {
 	b.wakeSession(j.SessionID)
 	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": 1})
 	j.closeDone()
+	// Logs are durable in the session BgTask (RAM + WAL) from here: the
+	// runner files (state/disposition/launch/out/brain) are removed NOW,
+	// not after 7 days. Best-effort: the session is the source of truth.
+	b.cleanupRunnerFiles(j)
+}
+
+// cleanupRunnerFiles removes every per-job file once its output is durable
+// in the session BgTask: state, disposition, launch claim, live out log,
+// and the brain copy. Binaries are untouched (gcRunners owns them).
+func (b *bgSupervisor) cleanupRunnerFiles(j *bgJob) {
+	if j == nil || j.ID == "" {
+		return
+	}
+	root := b.rootDir()
+	_ = os.Remove(runner.StatePath(root, j.ID))
+	_ = os.Remove(runner.DispositionPath(root, j.ID))
+	_ = os.Remove(filepath.Join(runner.RunnersDir(root), j.ID+".launch"))
+	if j.LogPath != "" {
+		_ = os.Remove(j.LogPath)
+	}
+	if j.BrainLog != "" && j.BrainLog != j.LogPath {
+		_ = os.Remove(j.BrainLog)
+	}
+	if j.StderrPath != "" && j.StderrPath != j.LogPath && j.StderrPath != j.BrainLog {
+		_ = os.Remove(j.StderrPath)
+	}
+	trace("bg.files.cleaned", map[string]any{"job": j.ID, "sid": j.SessionID})
 }
 
 func (b *bgSupervisor) onCancel(jobID, by string) bool {
@@ -386,6 +413,8 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 	b.wakeSession(j.SessionID)
 	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": 1})
 	j.closeDone()
+	// Same as finish: output is durable in the session BgTask.
+	b.cleanupRunnerFiles(j)
 	return true
 }
 
@@ -571,9 +600,9 @@ func (b *bgSupervisor) deliver(j *bgJob, finished bool) {
 		var sb strings.Builder
 		sb.WriteString("<system-reminder>\n")
 		fmt.Fprintf(&sb, "Background task %s %s.\n", j.Label, state)
-		if p := j.noticePath(); p != "" {
-			fmt.Fprintf(&sb, "The output is NOT included here — read the full log at: %s\n", p)
-		}
+		// Logs live in the session BgTask: read them with bg_check
+		// (job_id %s). The runner files are already cleaned.
+		fmt.Fprintf(&sb, "Read the output with bg_check (job_id %s) — it pages by lines, tail by default.\n", j.ID)
 		if j.StderrPath != "" {
 			fmt.Fprintf(&sb, "Standard error is in: %s\n", j.StderrPath)
 		}
@@ -583,9 +612,7 @@ func (b *bgSupervisor) deliver(j *bgJob, finished bool) {
 		var sb strings.Builder
 		sb.WriteString("<system-reminder>\n")
 		fmt.Fprintf(&sb, "Background task %s was cancelled by the user.\n", j.Label)
-		if p := j.noticePath(); p != "" {
-			fmt.Fprintf(&sb, "Partial output (if any) is in the .log at: %s\n", p)
-		}
+		fmt.Fprintf(&sb, "Partial output (if any) is in the session task — read it with bg_check (job_id %s).\n", j.ID)
 		sb.WriteString("Do not wait for it — continue your work another way.</system-reminder>")
 		text = sb.String()
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -365,11 +366,13 @@ func runnerNoticeText(st *runner.State) string {
 	return fmt.Sprintf("[Background %s task %s] %s. Full output: %s", st.Kind, st.JobID, status, path)
 }
 
-// gcRunners (F8): dead terminal states age out; dead generation binaries
-// go once nothing references them. runners/out/ is NEVER touched (D8).
+// gcRunners (F8): dead generation binaries go once nothing references
+// them. Per-job files (state/disposition/launch/out/brain) are cleaned
+// AT TERMINAL by cleanupRunnerFiles — the session BgTask is the durable
+// record, so no 7-day retention. This GC only sweeps leftovers (crash
+// between terminal and cleanup) plus dead binaries.
 func (b *bgSupervisor) gcRunners(now int64) {
 	root := b.rootDir()
-	const stateRetentionMs = int64(7 * 24 * time.Hour / time.Millisecond)
 	aliveVersions := map[string]bool{}
 	states, invalid := runner.ScanStates(root)
 	if len(invalid) != 0 {
@@ -380,10 +383,23 @@ func (b *bgSupervisor) gcRunners(now int64) {
 			aliveVersions[st.RunnerVersion] = true
 			continue
 		}
-		end := NowIfZero(st)
-		if now-end > stateRetentionMs {
+		// Leftover sweep: a terminal state with no live supervisor job
+		// is either pre-cleanup or orphaned — remove it now. A live
+		// job's files are owned by onFinish/onCancel, never by GC.
+		if _, ok := b.jobs[st.JobID]; !ok {
 			_ = os.Remove(runner.StatePath(root, st.JobID))
+			_ = os.Remove(runner.DispositionPath(root, st.JobID))
+			_ = os.Remove(filepath.Join(runner.RunnersDir(root), st.JobID+".launch"))
+			if st.LogPath != "" {
+				_ = os.Remove(st.LogPath)
+			}
+			if st.BrainPath != "" && st.BrainPath != st.LogPath {
+				_ = os.Remove(st.BrainPath)
+			}
+		} else {
+			aliveVersions[st.RunnerVersion] = true
 		}
+		_ = now
 	}
 	// Dead generation binaries: no live state of that version remains and
 	// a different version is present (strict D3: no rollback copies).

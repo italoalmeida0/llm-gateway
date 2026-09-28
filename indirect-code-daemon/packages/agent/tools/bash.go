@@ -270,8 +270,8 @@ func bashBackgroundNotice(jobID, logPath, cmd string) string {
 		b.WriteString("Output is captured in memory and delivered when the command finishes.\n")
 	}
 	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q (task: %s).\n", jobID, ClipLabel(cmd))
-	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then (read the .log file for the output).\n")
-	b.WriteString("While waiting, use your sleep tool (e.g. seconds: 120) — it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.")
+	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then (read it with bg_check).\n")
+	b.WriteString("While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.")
 	return b.String()
 }
 

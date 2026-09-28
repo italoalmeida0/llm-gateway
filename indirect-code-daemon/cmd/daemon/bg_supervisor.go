@@ -593,6 +593,34 @@ func (b *bgSupervisor) retainNotice(jobID, sessionID, text string, finished bool
 
 // tryNotice attempts one non-blocking delivery. The notice STAYS pending
 // until the session acks it — a successful send is not the ack.
+// sessionInboxReliable delivers a bg chunk to a session actor with a
+// bounded retry: a chunk is the only copy of its output, so mailbox
+// pressure must not drop it (the supervisor loop is not blocked — this
+// runs on tail goroutines).
+func (b *bgSupervisor) sessionInboxReliable(sessionID string, payload any) {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if b.session == nil {
+			return
+		}
+		inbox, _, ok := b.session(sessionID)
+		if !ok {
+			return
+		}
+		select {
+		case inbox <- Envelope{SessionID: sessionID, Payload: payload}:
+			return
+		case <-b.done:
+			return
+		case <-time.After(50 * time.Millisecond):
+			if time.Now().After(deadline) {
+				trace("bg.chunk.lost", map[string]any{"sid": sessionID, "reason": "tail delivery stalled"})
+				return
+			}
+		}
+	}
+}
+
 // sessionInbox delivers a message to a session actor best-effort
 // (never blocks the supervisor loop).
 func (b *bgSupervisor) sessionInbox(sessionID string, payload any) {

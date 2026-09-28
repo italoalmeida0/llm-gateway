@@ -658,17 +658,24 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 		}
 		id := reg.JobID
 		// Register the session-global BgTask: from here every chunk is
-		// durable in session+WAL, independent of turn state. Best-effort
-		// and never blocking: the supervisor job is the source of truth
-		// for lifecycle (tests run slowHook without an actor inbox).
-		w.sendInboxBestEffort(bgTaskRegisterMsg{JobID: id, Kind: kind, Label: label})
+		// durable in session+WAL, independent of turn state.
+		//
+		// Delivery is RELIABLE (sendBgTask) with a job-scoped context: a
+		// chunk is the ONLY copy of that output (the runner log dies at
+		// terminal), so neither mailbox pressure nor the TURN ending may
+		// drop it — the job outlives the turn by design. Only the job's
+		// own finish (or a 60s delivery stall) stops delivery, and then
+		// loudly.
+		jobCtx, jobStop := context.WithCancel(context.Background())
+		send := func(payload any) { w.sendBgTask(jobCtx, payload) }
+		send(bgTaskRegisterMsg{JobID: id, Kind: kind, Label: label})
 		stream := func(chunk string) {
 			if chunk == "" {
 				return
 			}
 			// Session-first: the chunk lands in the BgTask (RAM + WAL);
 			// the actor emits the numbered bg_output for the live card.
-			w.sendInboxBestEffort(bgTaskChunkMsg{JobID: id, Text: chunk})
+			send(bgTaskChunkMsg{JobID: id, Text: chunk})
 		}
 		var once sync.Once
 		finish := func(result string, isError bool) {
@@ -678,8 +685,11 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 					status = BgStatusError
 				}
 				// Terminal BgTask first (trim + persist + cleanup), then
-				// the supervisor finish (notice/wake-up).
-				w.sendInboxBestEffort(bgTaskFinishMsg{JobID: id, Status: status})
+				// the supervisor finish (notice/wake-up). Late chunks
+				// (pump tail) still deliver: jobStop runs AFTER the
+				// terminal message lands.
+				send(bgTaskFinishMsg{JobID: id, Status: status})
+				jobStop()
 				select {
 				case w.env.bg.inbox <- Envelope{Payload: bgFinishMsg{JobID: id, Status: status, Result: result}}:
 				case <-w.env.bg.done:
@@ -690,10 +700,10 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 	}
 }
 
-// sendInboxBestEffort delivers a bg-task message to the session actor
-// without blocking: no actor inbox (tests), a full inbox, or a dead
-// worker context all drop the message. The supervisor remains the
-// lifecycle source of truth; the session BgTask is a best-effort mirror.
+// sendInboxBestEffort delivers a non-critical bg message (register/finish
+// lifecycle mirrors) without blocking: a full inbox drops it — acceptable
+// because the supervisor job remains the lifecycle source of truth and a
+// register is re-created by the next chunk (fail-closed upsert).
 func (w *turnBridge) sendInboxBestEffort(payload any) {
 	if w.env.inbox == nil {
 		return
@@ -702,6 +712,38 @@ func (w *turnBridge) sendInboxBestEffort(payload any) {
 	case w.env.inbox <- w.stamp(payload):
 	case <-w.ctx.Done():
 	default:
+	}
+}
+
+// sendBgTask delivers a bg chunk/terminal RELIABLY: it retries under
+// mailbox pressure and outlives the turn (jobCtx, not w.ctx). A chunk is
+// the only durable copy of its output, so it may never be dropped: the
+// send blocks (backpressure on the pump) and only gives up when the job
+// itself ends or delivery stalls for 60s — and then it says so.
+func (w *turnBridge) sendBgTask(jobCtx context.Context, payload any) {
+	if w.env.inbox == nil {
+		return
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		select {
+		case w.env.inbox <- w.stamp(payload):
+			return
+		case <-jobCtx.Done():
+			// Job finished: one last blocking attempt (drain window),
+			// then stop — terminal already landed in order.
+			select {
+			case w.env.inbox <- w.stamp(payload):
+			case <-time.After(time.Second):
+				trace("bg.chunk.lost", map[string]any{"sid": w.env.actorID, "reason": "job ended"})
+			}
+			return
+		case <-time.After(50 * time.Millisecond):
+			if time.Now().After(deadline) {
+				trace("bg.chunk.lost", map[string]any{"sid": w.env.actorID, "reason": "delivery stalled"})
+				return
+			}
+		}
 	}
 }
 

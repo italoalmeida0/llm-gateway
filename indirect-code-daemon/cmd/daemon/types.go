@@ -178,6 +178,10 @@ type BgTask struct {
 	TotalLines   int64  `json:"totalLines,omitempty"`
 	DroppedBytes int64  `json:"droppedBytes,omitempty"`
 	DroppedLines int64  `json:"droppedLines,omitempty"`
+	// Seq is a per-task monotonic chunk counter: snapshots and live chunks
+	// share one ordering so the client joins tail + live by sequence (no
+	// line arithmetic between the two streams).
+	Seq int64 `json:"seq,omitempty"`
 }
 
 // SessionSummary is returned to the web client for listing.

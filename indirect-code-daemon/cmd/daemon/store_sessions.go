@@ -79,6 +79,11 @@ type metaLine struct {
 	// Persisted so a respawn recomputes the remainder — a restart never
 	// bypasses the timeout. Zero = no pending decision.
 	ApprovalDeadlineUnix int64 `json:"approvalDeadlineUnix,omitempty"`
+	// BgTasks are the session-global background tasks (content tail +
+	// counters). Persisted on EVERY save: a chunk is the only copy of
+	// that output (the runner log dies at terminal), so losing BgTasks
+	// in a crash loses the log itself.
+	BgTasks []BgTask `json:"bgTasks,omitempty"`
 }
 
 // validSessionID refuses traversal.
@@ -143,6 +148,7 @@ func splitRecord(rec *SessionRecord) ([]turnLine, metaLine) {
 		Attachments: rec.Attachments, LastDate: rec.LastDate, LastMode: rec.LastMode,
 		Compaction: rec.Compaction, TurnSeq: rec.TurnSeq, Queue: rec.Queue,
 		ApprovalDeadlineUnix: rec.ApprovalDeadlineUnix,
+		BgTasks: rec.BgTasks,
 	}
 	// Group message indices by turn.
 	type group struct {
@@ -365,6 +371,7 @@ func assembleRecord(lines []turnLine, meta metaLine) *SessionRecord {
 		Attachments: meta.Attachments, Compaction: meta.Compaction,
 		TurnSeq: meta.TurnSeq, Queue: meta.Queue,
 		ApprovalDeadlineUnix: meta.ApprovalDeadlineUnix,
+		BgTasks: meta.BgTasks,
 	}
 	for _, tl := range lines {
 		for _, raw := range tl.Messages {

@@ -71,7 +71,7 @@ func (b *bgSupervisor) readopt() {
 				Label: pf.Label, PID: pf.PID, Identity: pf.Identity, Status: BgStatusOrphaned,
 				StartedAt: pf.StartedAt, EndedAt: time.Now().UnixMilli(),
 				LogPath: pf.LogPath, StderrPath: pf.StderrPath,
-				Result: fmt.Sprintf("Background task %s orphaned by daemon restart (process gone). Partial output (if any) is in the .log at: %s\n%s", pf.Label, pf.LogPath, tail),
+				Result: fmt.Sprintf("Background task %s orphaned by daemon restart (process gone). Read its output with bg_check (job_id %s).\n%s", pf.Label, pf.JobID, tail),
 				done:   make(chan struct{}),
 			}
 			j.closeDone()
@@ -86,7 +86,7 @@ func (b *bgSupervisor) readopt() {
 // job exactly like a normal finish (no re-run, log preserved).
 func (b *bgSupervisor) watchReadopted(j *bgJob) {
 	// Capture immutable values; the supervisor owns subsequent job mutations.
-	pid, identity, id, label, path, done := j.PID, j.Identity, j.ID, j.Label, j.LogPath, j.done
+	pid, identity, id, label, done := j.PID, j.Identity, j.ID, j.Label, j.done
 	go func() {
 		tick := time.NewTicker(2 * time.Second)
 		defer tick.Stop()
@@ -99,7 +99,7 @@ func (b *bgSupervisor) watchReadopted(j *bgJob) {
 			case <-tick.C:
 				if tools.ProcessIdentity(pid) != identity {
 					select {
-					case b.inbox <- Envelope{Payload: bgFinishMsg{JobID: id, Status: BgStatusOrphaned, Result: fmt.Sprintf("Background task %s ended after restart; exit status unavailable. Read %s", label, path)}}:
+					case b.inbox <- Envelope{Payload: bgFinishMsg{JobID: id, Status: BgStatusOrphaned, Result: fmt.Sprintf("Background task %s ended after restart; exit status unavailable. Read its output with bg_check (job_id %s).", label, id)}}:
 					case <-b.done:
 					}
 					return

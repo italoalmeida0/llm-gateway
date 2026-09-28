@@ -198,15 +198,16 @@ func (b *bgSupervisor) tailAdoptedOutput(st *runner.State) {
 		if n > 0 {
 			offset += int64(n)
 			// Numbered live output flows through the actor (single source);
-			// adoption tails feed the session directly.
-			b.sessionInbox(st.SessionID, bgTaskChunkMsg{JobID: st.JobID, Text: string(buf[:n])})
+			// adoption tails feed the session reliably (chunks are the
+			// only copy of this output).
+			b.sessionInboxReliable(st.SessionID, bgTaskChunkMsg{JobID: st.JobID, Text: string(buf[:n])})
 		}
 		_ = f.Close()
 		if !pidAlive(pidString(st.PID)) {
 			// One last read to catch the final bytes, then stop.
 			if f, err := os.Open(st.LogPath); err == nil {
 				if n, _ := f.ReadAt(buf, offset); n > 0 {
-					b.sessionInbox(st.SessionID, bgTaskChunkMsg{JobID: st.JobID, Text: string(buf[:n])})
+					b.sessionInboxReliable(st.SessionID, bgTaskChunkMsg{JobID: st.JobID, Text: string(buf[:n])})
 				}
 				_ = f.Close()
 			}
@@ -241,8 +242,12 @@ func (b *bgSupervisor) watchAdopted(jobID string, st *runner.State) {
 			return
 		}
 		if pidAlive(pidString(cur.PID)) && !processutil.Matches(cur.PID, cur.ProcessIdentity) {
+			// Identity race (pid recycling window / slow identity write):
+			// NOT fatal — keep watching. Giving up here left the job
+			// running forever with no finish and no notice (regression:
+			// TestBgWatchAdoptedSurvivesIdentityRace).
 			trace("runner.identity.unverified", map[string]any{"job": cur.JobID})
-			return
+			continue
 		}
 		if !pidAlive(pidString(cur.PID)) {
 			// F6 mid-watch: crash, not a silent hang. The state records

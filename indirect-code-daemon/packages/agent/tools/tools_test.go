@@ -527,16 +527,23 @@ func TestBashTailTruncation(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := res.Content[0].(provider.TextBlock).Text
-	// Expected style: keep the LAST 2000 lines and point at the full output file.
+	// Expected style: keep the LAST 2000 lines and say so — WITHOUT a file
+	// path (the model never sees runner/temp paths).
 	if !strings.Contains(got, "1001") || strings.Contains(got, "\n1\n") {
 		t.Fatalf("tail truncation must keep the last lines:\n%s", got[:80])
 	}
-	if !strings.Contains(got, "[Showing lines 1001-3000 of 3000. Full output: ") {
+	if !strings.Contains(got, "[Showing lines 1001-3000 of 3000 (line limit). The earlier lines are truncated.]") {
 		t.Fatalf("want truncation notice, got:\n%s", got[len(got)-200:])
 	}
-	details := res.Details.(map[string]any)
-	if fp, _ := details["full_output_path"].(string); fp == "" {
-		t.Fatal("full output path missing")
+	if strings.Contains(got, "/tmp") || strings.Contains(got, "full output:") {
+		t.Fatalf("model-visible result must not leak paths: %q", got[len(got)-200:])
+	}
+	// Details must not carry log paths either (they leak into logs/ev
+	// payloads). workdir is the session cwd — legitimate.
+	for k, v := range res.Details.(map[string]any) {
+		if vs, ok := v.(string); ok && (strings.Contains(vs, "lgrc-") || strings.Contains(vs, ".log")) {
+			t.Fatalf("details[%q] leaks a log path: %q", k, vs)
+		}
 	}
 }
 

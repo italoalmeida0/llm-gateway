@@ -106,6 +106,7 @@ func upsertBgTask(rec *SessionRecord, task *BgTask) {
 			cp.TotalLines = keep.TotalLines
 			cp.DroppedBytes = keep.DroppedBytes
 			cp.DroppedLines = keep.DroppedLines
+			cp.Seq = keep.Seq
 		}
 		if cp.Status == "" {
 			cp.Status = keep.Status
@@ -118,14 +119,30 @@ func upsertBgTask(rec *SessionRecord, task *BgTask) {
 
 // applyBgChunk appends output to a task, trimming the tail to capBytes.
 // Unknown job IDs are ignored (fail-closed: never invent a task).
+//
+// Line accounting carries across chunk boundaries: the pump hands us byte
+// windows that can cut a line in half ("a\nb" + "\nc" is THREE lines, not
+// four). A chunk that continues a partial line adds one fewer line; the
+// partial flag is derived from the retained content, so replay rebuilds
+// the exact same counters.
+//
+// Every append bumps Seq (a per-task monotonic chunk counter): snapshots
+// and live chunks share one ordering, so the client joins tail + live by
+// sequence — no line arithmetic, no overlap, no gaps.
 func applyBgChunk(rec *SessionRecord, jobID, text string, capBytes int) {
 	i := findBgTask(rec, jobID)
 	if i < 0 || text == "" {
 		return
 	}
 	t := &rec.BgTasks[i]
+	partial := t.Content != "" && !strings.HasSuffix(t.Content, "\n")
+	added := int64(countLines(text))
+	if partial {
+		added--
+	}
 	t.TotalBytes += int64(len(text))
-	t.TotalLines += int64(countLines(text))
+	t.TotalLines += added
+	t.Seq++
 	buf := &bgBuffer{chunks: splitContent(t.Content)}
 	buf.bytes = len(t.Content)
 	db, dl := buf.append(text, capBytes)

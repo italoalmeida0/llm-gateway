@@ -302,7 +302,15 @@ func TestRunnerOrphanPolicy(t *testing.T) {
 	// Known job: adopted.
 	rootKnown, dataDirKnown := runnerTestRoot(t)
 	known := spawnTestRunner(t, rootKnown, dataDirKnown, "sleep 30")
-	t.Cleanup(known.Stop)
+	t.Cleanup(func() {
+		known.Stop()
+		// Windows holds the self-copied binary handle briefly after the
+		// kill; TempDir RemoveAll would hit Access denied without this.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) && pidAlive(strconv.Itoa(known.PID)) {
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
 	seedSession(t, dataDirKnown, "sess1", known.JobID)
 
 	// Unknown job (session has moved past it): orphan.

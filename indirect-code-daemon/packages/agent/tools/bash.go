@@ -42,7 +42,7 @@ const bashSchema = `{"type":"object","properties":{"command":{"type":"string","d
 
 func (t *BashTool) Name() string { return "bash" }
 func (t *BashTool) Description() string {
-	return "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. There is no timeout: if the command still runs after 10 seconds it automatically moves to the background (its output streams to a .log file, you are notified, and its result is delivered when it finishes — wait with the sleep tool, stop it with bg_cancel)."
+	return "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). There is no timeout: if the command still runs after 10 seconds it automatically moves to the background (you are notified with a job id; read the output with bg_check, wait with the sleep tool, stop it with bg_cancel)."
 }
 func (t *BashTool) Schema() json.RawMessage { return json.RawMessage(bashSchema) }
 
@@ -171,7 +171,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		// here, so a restart must NOT invent a background wake-up.
 		if proc.Disposition != nil && proc.JobID != "" {
 			if err := proc.Disposition(proc.JobID, DispInline); err != nil {
-				return core.ToolResult{}, fmt.Errorf("could not persist inline outcome; inspect %s: %w", proc.LogPath, err)
+				return core.ToolResult{}, fmt.Errorf("could not persist inline outcome: %w", err)
 			}
 		}
 		return finishBashCommand(a, cwd, start, output, &head, waitErr, ctx.Err(), runErr, progress)
@@ -195,7 +195,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		return finishSync(waitErr)
 	}
 	// From here the job owns the process lifetime.
-	jobID, logPath, stream, deliver := t.Slow("bash", a.Command, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, Stop: func() {
+	jobID, _, stream, deliver := t.Slow("bash", a.Command, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, Stop: func() {
 		runCancel()
 		proc.Stop()
 	}})
@@ -208,7 +208,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 			<-waitCh
 			<-done
 			proc.Cleanup(false)
-			return core.ToolResult{}, fmt.Errorf("could not persist background disposition; process stopped, inspect %s: %w", proc.LogPath, err)
+			return core.ToolResult{}, fmt.Errorf("could not persist background disposition; process stopped, inspect it with bg_check (job_id %q): %w", jobID, err)
 		}
 	}
 	if jobID == "" {
@@ -217,7 +217,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		<-waitCh
 		<-done
 		proc.Cleanup(false)
-		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped, output: %s", proc.LogPath)
+		return core.ToolResult{}, fmt.Errorf("could not register background job; process stopped (job_id %q)", jobID)
 	}
 	streamSink = stream
 	close(detached)
@@ -245,32 +245,26 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		// background run, not a plain synchronous result).
 		if det, ok := res.Details.(map[string]any); ok {
 			det["background_job_id"] = jobID
-			det["log_path"] = logPath
-			det["detached"] = true
+						det["detached"] = true
 		}
 		deliver(text, isErr)
 	}()
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: bashBackgroundNotice(jobID, logPath, a.Command)}},
-		Details: map[string]any{"background_job_id": jobID, "log_path": logPath},
+		Content: []provider.Content{provider.TextBlock{Text: bashBackgroundNotice(jobID, a.Command)}},
+		Details: map[string]any{"background_job_id": jobID},
 	}, nil
 }
 
 // bashBackgroundNotice is the placeholder the model sees when a command
-// detaches: where the output goes (absolute .log path in the session's
-// brain scratch space), how to force-stop it (bg_cancel) and that the
-// daemon wakes the turn with a completion notice when the process ends.
-func bashBackgroundNotice(jobID, logPath, cmd string) string {
+// detaches: the job id (read output with bg_check, wait with sleep,
+// force-stop with bg_cancel) and that the daemon wakes the turn with a
+// completion notice when the process ends.
+func bashBackgroundNotice(jobID, cmd string) string {
 	var b strings.Builder
 	b.WriteString("Command moved to background (still running).\n")
-	if logPath != "" {
-		fmt.Fprintf(&b, "All output (stdout+stderr) is being appended to: %s\n", logPath)
-		b.WriteString("You can follow it with your read tool — but there is no need to poll: you are woken automatically when the command finishes, and the .log file is kept.\n")
-	} else {
-		b.WriteString("Output is captured in memory and delivered when the command finishes.\n")
-	}
-	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q (task: %s).\n", jobID, ClipLabel(cmd))
-	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then (read it with bg_check).\n")
+	fmt.Fprintf(&b, "To read the output, call bg_check with job_id %q (paged log: tail by default, offset/limit for more).\n", jobID)
+	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q.\n", jobID)
+	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then.\n")
 	b.WriteString("While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.")
 	return b.String()
 }

@@ -197,14 +197,16 @@ func (b *bgSupervisor) tailAdoptedOutput(st *runner.State) {
 		n, _ := f.ReadAt(buf, offset)
 		if n > 0 {
 			offset += int64(n)
-			b.emit(map[string]any{"type": "bg_output", "sessionId": st.SessionID, "jobId": st.JobID, "text": string(buf[:n])})
+			// Numbered live output flows through the actor (single source);
+			// adoption tails feed the session directly.
+			b.sessionInbox(st.SessionID, bgTaskChunkMsg{JobID: st.JobID, Text: string(buf[:n])})
 		}
 		_ = f.Close()
 		if !pidAlive(pidString(st.PID)) {
 			// One last read to catch the final bytes, then stop.
 			if f, err := os.Open(st.LogPath); err == nil {
 				if n, _ := f.ReadAt(buf, offset); n > 0 {
-					b.emit(map[string]any{"type": "bg_output", "sessionId": st.SessionID, "jobId": st.JobID, "text": string(buf[:n])})
+					b.sessionInbox(st.SessionID, bgTaskChunkMsg{JobID: st.JobID, Text: string(buf[:n])})
 				}
 				_ = f.Close()
 			}

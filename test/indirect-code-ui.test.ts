@@ -1665,9 +1665,15 @@ describe("Background hook (session-owned tasks)", () => {
       ]);
       expect(bg.sessionJobs().map((t) => t.id)).toEqual(["bg_1"]);
       expect(bg.running().map((t) => t.id)).toEqual(["bg_1"]);
-      // Live chunks append directly.
+      // Live chunks append for known jobs; unknown ids are dropped
+      // (stale chunk from a session we already left).
+      bg.noteOutput("bg_1", "live-1");
+      expect(bg.output()["bg_1"] || "").toBe("live-1");
       bg.noteOutput("bg_2", "live-1");
-      expect(bg.output()["bg_2"] || "").toBe("live-1");
+      expect(bg.output()["bg_2"] || "").toBe("");
+      // Numbered chunks feed liveTail (exact overlap math, no dup).
+      bg.noteOutput("bg_1", "a\nb", undefined, 8);
+      expect(bg.liveTail("bg_1")).toBe("a\nb");
       // Finished tasks stay (never GCed).
       bg.noteSessionTasks([
         { id: "bg_1", kind: "bash", label: "sleep 30", status: "done", startedAt: 1, endedAt: 2, content: "history-live-1" },

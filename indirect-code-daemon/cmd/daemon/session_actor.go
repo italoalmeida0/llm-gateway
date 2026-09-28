@@ -1434,6 +1434,15 @@ func (a *sessionActor) onBgTaskChunk(m bgTaskChunkMsg) {
 	}
 	a.touch()
 	applyBgChunk(a.rec, m.JobID, m.Text, bgLiveCap)
+	if i := findBgTask(a.rec, m.JobID); i >= 0 {
+		t := &a.rec.BgTasks[i]
+		lines := int64(countLines(m.Text))
+		from := t.TotalLines - lines + 1
+		if from < 1 {
+			from = 1
+		}
+		a.emit(map[string]any{"type": "bg_output", "sessionId": a.id, "jobId": m.JobID, "text": m.Text, "from": from, "total": t.TotalLines})
+	}
 	now := time.Now().UnixMilli()
 	if a.wal != nil {
 		_ = a.saveOrAppend(walEvent{Type: walTypeBgChunk, BgChunk: &BgChunk{JobID: m.JobID, Text: m.Text}})

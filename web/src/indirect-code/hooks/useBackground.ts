@@ -21,6 +21,8 @@ export interface SessionBgTask {
   content?: string;
   totalLines?: number;
   droppedLines?: number;
+  /** 1-indexed first line covered by content (tail may be shorter). */
+  contentFrom?: number;
 }
 export type BgTask = SessionBgTask;
 
@@ -37,14 +39,33 @@ export function createBackground(opts: {
   toast: (msg: string, kind?: "ok" | "err") => void;
 }) {
   const [output, setOutput] = createSignal<Record<string, string>>({});
-  /** Session-owned tasks (bgTasks from session_data/session_content). */
+  /** Live buffer base: snapshot totalLines covered when the buffer
+   * started (or was last reconciled). Lets the card cut the overlap:
+   * live lines <= snapshot total are already in the tail. */
+  const [outputBase, setOutputBase] = createSignal<Record<string, number>>({});
+  /** Session-owned tasks (bgTasks from session_data/session_content).
+   * Scoped to ONE session: switching sessions clears the list, so a
+   * task never leaks into another conversation (or host). */
   const [sessionTasks, setSessionTasks] = createSignal<SessionBgTask[]>([]);
+  const [taskSessionId, setTaskSessionId] = createSignal<string>("");
+  /** Switch scope: drop the old session's list AND its live buffers.
+   * Called with the active session id on every authoritative payload. */
+  function scopeTo(sid: string) {
+    if (!sid || sid === taskSessionId()) return;
+    setTaskSessionId(sid);
+    setSessionTasks([]);
+    setOutput({});
+    setOutputBase({});
+    setSegments({});
+  }
   /** Session task events (bg_task_registered/bg_task_finished): force
    * the card to re-render even without a session_data refresh. */
   function noteSessionTaskEvent(msg: any) {
     if (!msg || typeof msg.jobId !== "string") return;
     const sid = opts.getSessionId();
-    if (msg.sessionId && sid && msg.sessionId !== sid) return;
+    // No open session, or another session's task: never touch the list.
+    if (!sid || (msg.sessionId && msg.sessionId !== sid)) return;
+    scopeTo(sid);
     // Touch the list so dependents re-evaluate; the authoritative
     // content arrives via session_data/session_content (pingChange).
     setSessionTasks((prev) => {
@@ -58,8 +79,11 @@ export function createBackground(opts: {
     });
   }
   /** Authoritative session task list (from session payload bgTasks). */
-  function noteSessionTasks(list: unknown) {
+  function noteSessionTasks(list: unknown, sid?: string) {
     if (!Array.isArray(list)) return;
+    const active = sid || opts.getSessionId();
+    if (!active) return;
+    scopeTo(active);
     const parsed: SessionBgTask[] = [];
     for (const t of list as any[]) {
       if (!t || typeof t.id !== "string") continue;
@@ -74,9 +98,26 @@ export function createBackground(opts: {
         content: typeof t.content === "string" ? t.content : undefined,
         totalLines: typeof t.totalLines === "number" ? t.totalLines : undefined,
         droppedLines: typeof t.droppedLines === "number" ? t.droppedLines : undefined,
+        contentFrom: typeof t.contentFrom === "number" ? t.contentFrom : undefined,
       });
     }
     setSessionTasks(parsed);
+    // Reconcile live buffers against the new snapshot totals: drop the
+    // head the tail now covers (exact line math, no heuristics).
+    setOutputBase((prev) => {
+      const next = { ...prev };
+      for (const t of parsed) {
+        const total = typeof t.totalLines === "number" ? t.totalLines : 0;
+        const base = next[t.id];
+        if (base === undefined) {
+          // Buffer starts here: everything before `total` is in the tail.
+          next[t.id] = total;
+        } else if (total < base) {
+          next[t.id] = total;
+        }
+      }
+      return next;
+    });
     if (parsed.some((t) => t.status === "running")) ensureClock();
     else maybeStopClock();
     pruneOutput(parsed);
@@ -104,10 +145,26 @@ export function createBackground(opts: {
     });
   }
 
-  /** Live chunk from the daemon (post-detach output). */
-  function noteOutput(jobId: string, text: string) {
+  /** Numbered live segments per job: {from (1-indexed first line),
+   * text}. Absolute numbering from the daemon makes overlap exact. */
+  const [segments, setSegments] = createSignal<Record<string, { from: number; text: string }[]>>({});
+  /** Live chunk from the daemon (post-detach output). Scoped: chunks
+   * for another session's job are dropped (stale event after switch). */
+  function noteOutput(jobId: string, text: string, sid?: string, from?: number) {
     if (typeof jobId !== "string" || typeof text !== "string" || !text) return;
+    const active = sid || opts.getSessionId();
+    if (!active || active !== taskSessionId()) return;
+    // Unknown job id (not in this session's list and never streamed):
+    // drop — it belongs to a session we already left.
+    if (!(jobId in output()) && !sessionTasks().some((t) => t.id === jobId)) return;
     appendOutput(jobId, text);
+    if (typeof from === "number" && from >= 1) {
+      setSegments((prev) => {
+        const list = [...(prev[jobId] || []), { from, text }];
+        // Bound: keep the last 200 segments per job.
+        return { ...prev, [jobId]: list.length > 200 ? list.slice(-200) : list };
+      });
+    }
   }
 
   function pruneOutput(live: BgTask[]) {
@@ -148,7 +205,38 @@ export function createBackground(opts: {
     return sessionTasks().find((t) => t.id === jobId)?.content;
   }
 
-  return { sessionJobs, sessionContent, running, output, clock, noteOutput, noteSessionTasks, noteSessionTaskEvent, stop };
+  /** Live tail for a job: numbered segments joined, cut to lines the
+   * snapshot tail doesn't cover yet (from > snapTotal). Exact — the
+   * daemon numbers every chunk, so overlap is impossible by construction.
+   * Falls back to the legacy buffer math when segments are absent (old
+   * snapshots during reload). */
+  function liveTail(jobId: string): string {
+    const segs = segments()[jobId];
+    const task = sessionTasks().find((t) => t.id === jobId);
+    const snapTotal = task && typeof task.totalLines === "number" ? task.totalLines : 0;
+    if (segs && segs.length > 0) {
+      const parts: string[] = [];
+      for (const s of segs) {
+        const lines = s.text.split("\n");
+        // Drop trailing phantom after a trailing newline (daemon countLines).
+        if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+        for (let i = 0; i < lines.length; i++) {
+          if (s.from + i > snapTotal) parts.push(lines[i]);
+        }
+      }
+      return parts.join("\n");
+    }
+    const buf = output()[jobId] || "";
+    if (!buf) return "";
+    const base = outputBase()[jobId] ?? snapTotal;
+    const skip = snapTotal - base;
+    if (skip <= 0) return buf;
+    const lines = buf.split("\n");
+    if (skip >= lines.length) return "";
+    return lines.slice(skip).join("\n");
+  }
+
+  return { sessionJobs, sessionContent, liveTail, running, output, clock, noteOutput, noteSessionTasks, noteSessionTaskEvent, stop };
 }
 
 export type Background = ReturnType<typeof createBackground>;

@@ -3,6 +3,7 @@ import { render } from "solid-js/web";
 import { createBackground } from "../../web/src/indirect-code/hooks/useBackground";
 import { BackgroundCard } from "../../web/src/indirect-code/components/BackgroundCard";
 import { ToolSearchBodies } from "../../web/src/indirect-code/components/tool/ToolSearchBodies";
+import { ToolUnitHeader } from "../../web/src/indirect-code/components/tool/ToolUnitHeader";
 import { useToolUnitModel } from "../../web/src/indirect-code/components/tool/toolUnitModel";
 import { BackgroundCtx } from "../../web/src/indirect-code/ctx";
 import { UICtx } from "../../web/src/indirect-code/ctx";
@@ -21,7 +22,10 @@ const uiStub = { convWidthClass: () => "max-w-3xl" } as any;
 // Minimal TranscriptRenderCtx for tool rows (static signals are fine:
 // bodies render from the unit, not the clock).
 const [toolProgress] = createSignal<Record<string, string>>({});
-const [toolStarts] = createSignal<Record<string, number>>({});
+const _toolStartsSeed: Record<string, number> = { "c-detach": Date.now() - 3000 };
+const [toolStarts] = createSignal(_toolStartsSeed);
+const [turnClock, setTurnClock] = createSignal(Date.now());
+setInterval(() => setTurnClock(Date.now()), 500);
 const renderCtx: any = {
   renderBlocks: () => [],
   sessionStatus: () => "idle",
@@ -35,7 +39,7 @@ const renderCtx: any = {
   verboseChat: () => true,
   hideToolMessages: () => false,
   setPreviewFile: () => {},
-  turnClock: () => Date.now(),
+  turnClock,
   toolStarts,
   activeSession: () => null,
   pendingApproval: () => null,
@@ -47,7 +51,12 @@ const renderCtx: any = {
 
 function ToolRow(props: { unit: any }) {
   const m = useToolUnitModel(renderCtx, "msg1", props.unit, 0, () => false, () => false);
-  return <ToolSearchBodies ctx={renderCtx} msgId="msg1" u={props.unit} m={m} running={false} active={false} />;
+  return (
+    <>
+      <ToolUnitHeader ctx={renderCtx} msgId="msg1" u={props.unit} m={m} running={false} active={false} />
+      <ToolSearchBodies ctx={renderCtx} msgId="msg1" u={props.unit} m={m} running={false} active={false} />
+    </>
+  );
 }
 
 function ToolRows() {
@@ -66,6 +75,14 @@ function ToolRows() {
           unit={{
             call: { type: "tool_call", toolId: "c-check", toolName: "bg_check", toolArgs: JSON.stringify({ job_id: "bg_1" }) },
             result: { type: "tool_result", toolId: "c-check", toolResult: "Background Task (bash) — running\nCommand: sleep 30\nLines 1–2 of 100\n1:hello\n2:world\nStatus: still running." },
+          }}
+        />
+      </div>
+      <div data-testid="row-detach">
+        <ToolRow
+          unit={{
+            call: { type: "tool_call", toolId: "c-detach", toolName: "bash", toolArgs: JSON.stringify({ command: "sleep 30" }) },
+            result: { type: "tool_result", toolId: "c-detach", toolResult: "Command moved to background (still running).", toolDetails: { background_job_id: "bg_window" } },
           }}
         />
       </div>
@@ -100,8 +117,8 @@ Object.assign(window, {
     event(msg: any) {
       bg.noteSessionTaskEvent(msg);
     },
-    output(jobId: string, text: string) {
-      bg.noteOutput(jobId, text);
+    output(jobId: string, text: string, from?: number) {
+      bg.noteOutput(jobId, text, undefined, from);
     },
     // toolSummary probes (pure, no DOM).
     summary(toolName: string, args: any, result?: string) {

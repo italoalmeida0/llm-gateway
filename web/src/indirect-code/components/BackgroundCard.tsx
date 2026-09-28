@@ -47,11 +47,13 @@ export function BackgroundCard() {
   const isOpen = (id: string) => open()[id] === true;
   const toggle = (id: string) => setOpen((prev) => ({ ...prev, [id]: !prev[id] }));
   const logText = (job: any) => {
-    // Session tail (authoritative) + live stream glued after it.
+    // Session tail (authoritative) + live tail (buffer minus the lines
+    // the snapshot already covers — exact line math, never glued twice).
     const sess = typeof job.content === "string" ? job.content : bg.sessionContent(job.id) || "";
-    const live = bg.output()[job.id] || "";
-    if (sess && live && !sess.endsWith(live.slice(0, 64))) return sess + live;
-    return sess + live;
+    const live = bg.liveTail(job.id);
+    if (!live) return sess;
+    if (!sess) return live;
+    return sess.endsWith("\n") ? sess + live : sess + "\n" + live;
   };
   return (
     <Show when={tasks().length > 0}>
@@ -62,7 +64,7 @@ export function BackgroundCard() {
         <div class="flex flex-col gap-1.5">
           <For each={tasks()}>
             {(job) => (
-              <div class="rounded-lg border border-line/60 bg-ink-900/40">
+              <div class="rounded-lg border border-line/60 bg-ink-900/40" data-bg-row={job.id}>
                 <div class="flex items-center gap-2 px-2.5 py-1.5">
                   <Show
                     when={job.status === "running"}

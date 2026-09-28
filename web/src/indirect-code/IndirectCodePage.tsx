@@ -811,7 +811,7 @@ export default function IndirectCodePage() {
           const atts = r.attachments || r.Attachments || [];
           review.noteSessionFiles(sid, atts);
           queue.noteQueue(sid, r.queue);
-          if (r.bgTasks) background.noteSessionTasks(r.bgTasks);
+          if (r.bgTasks) background.noteSessionTasks(r.bgTasks, sid);
         }
         if (sid && sid === activeSessionId()) {
           transcript.applySnapshot(sid, r, () => {
@@ -839,7 +839,7 @@ export default function IndirectCodePage() {
         // Tail events (end-of-turn tail, edit/slash/truncate tail,
         // single-message notice) carry the same history cursor as
         // session_data: replace the authoritative tail and retain older pages.
-        if ((msg as any).bgTasks) background.noteSessionTasks((msg as any).bgTasks);
+        if ((msg as any).bgTasks) background.noteSessionTasks((msg as any).bgTasks, msg.sessionId);
         transcript.applySessionContent(msg.sessionId, msg.messages || [], msg.compaction, (msg as any).history, msg);
         break;
       }
@@ -877,7 +877,8 @@ export default function IndirectCodePage() {
 
       case "bg_output": {
         // Live stream: glued after the session tail in the bg card.
-        if (typeof msg.jobId === "string") background.noteOutput(msg.jobId, typeof msg.text === "string" ? msg.text : "");
+        // Scoped by sessionId so a stale chunk never lands on the open session.
+        if (typeof msg.jobId === "string") background.noteOutput(msg.jobId, typeof msg.text === "string" ? msg.text : "", msg.sessionId, typeof (msg as any).from === "number" ? (msg as any).from : undefined);
         break;
       }
 

@@ -229,13 +229,17 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 	if p.JobID == "" {
 		t.Fatal("the runner identity must flow into the background registration")
 	}
-	// The placeholder must name the brain log and the job identity.
+	// The placeholder must carry the job identity and point at bg_check —
+	// never a file path (the AI only ever sees the id).
 	text := resultText(res)
-	if !strings.Contains(text, p.BrainLog) {
-		t.Fatalf("placeholder must name the brain log (%s), got: %q", p.BrainLog, text)
+	if strings.Contains(text, p.BrainLog) || strings.Contains(text, ".log") {
+		t.Fatalf("placeholder must not leak file paths, got: %q", text)
 	}
-	if !strings.Contains(text, p.JobID) {
-		t.Fatalf("placeholder must carry the job identity (%s), got: %q", p.JobID, text)
+	if !strings.Contains(text, "bg_t9") {
+		t.Fatalf("placeholder must carry the job identity (bg_t9), got: %q", text)
+	}
+	if !strings.Contains(text, "bg_check") {
+		t.Fatalf("placeholder must point at bg_check, got: %q", text)
 	}
 	// Stop cleans the tree.
 	p.Stop()

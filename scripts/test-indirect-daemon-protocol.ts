@@ -26,11 +26,11 @@ async function run(label: string) {
         const body=await req.json();requests.push({scenario,body});
         if(scenario==='sleep') {
           sleepCalls++;
-          if(sleepCalls===1)return sse('sleep',{seconds:1});
+          if(sleepCalls===1)return sse('sleep',{seconds:1,waitingFor:'bg_test',summary:'test wait'});
           if(sleepCalls===2)return new Response('temporary failure after sleep',{status:503});
           return sse('mark_task_as_complete',{summary:'Recovered after sleep'});
         }
-        if(scenario==='sleep_cancel')return sse('sleep',{seconds:360});
+        if(scenario==='sleep_cancel')return sse('sleep',{seconds:360,waitingFor:'bg_test',summary:'test wait'});
         if((scenario==='approval'||scenario==='question')&&!toolIssued){toolIssued=true;return scenario==='approval'?sse('read',{path:join(work,'hello.txt')}):sse('question',{questions:[{header:'Choice',question:'Pick?',options:[{label:'One'}]}]});}
         if(scenario==='approval'||scenario==='question')return sse('mark_task_as_complete',{summary:'Done'});
         return sse('',null);

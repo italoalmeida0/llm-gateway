@@ -121,7 +121,9 @@ async function run(label: string) {
     const cancelFrom=events.length;
     send({type:'prompt',sessionId:sleepSID,text:'Sleep again',requestId:'cancel-send'});
     // New sleep model: detach (10s) + sleep(waitingFor) start lands ~11s in.
-    assert(await wait(()=>events.slice(cancelFrom).find(e=>e.type==='agent_event'&&e.event?.type==='tool_execution_start'),30000),'sleep did not start');
+    // Two tool_execution_starts fire (bash, then the blocking sleep) —
+    // cancelling on the first would kill the foreground bash pre-detach.
+    assert(await wait(()=>events.slice(cancelFrom).filter(e=>e.type==='agent_event'&&e.event?.type==='tool_execution_start').length>=2,30000),'sleep did not start');
     send({type:'cancel',sessionId:sleepSID});
     assert(await wait(()=>events.slice(cancelFrom).find(e=>e.type==='session_status'&&e.status==='idle')),'explicit Stop did not end sleep');
     const cancelFinal=events.slice(cancelFrom).filter(e=>e.type==='session_data'&&e.session?.id===sleepSID).at(-1)?.session;
@@ -135,7 +137,7 @@ async function run(label: string) {
       scenario='sleep_cancel';
       const start=events.length;
       send({type:'prompt',sessionId:sleepSID,text:`Sleep before ${delay}`,requestId:`before-${delay}`,options:{mode:'build',access:'full',effort:'none'}});
-      assert(await wait(()=>events.slice(start).find(e=>e.sessionId===sleepSID&&e.type==='agent_event'&&e.event?.type==='tool_execution_start'),30000));
+      assert(await wait(()=>events.slice(start).filter(e=>e.sessionId===sleepSID&&e.type==='agent_event'&&e.event?.type==='tool_execution_start').length>=2,30000));
       send({type:'cancel',sessionId:sleepSID});
       // Wait for idle BEFORE the follow-up: a cancelled turn never drains
       // the queue, and stopping the detached runner takes a moment.

@@ -169,6 +169,6 @@ async function run(label: string) {
     // failures distinguish admission, turn identity, provider I/O and commit.
     console.error(JSON.stringify({events:events.slice(-100).map(e=>({type:e.type,sessionId:e.sessionId||e.session?.id,requestId:e.requestId,status:e.status||e.session?.status,turn:e.turn||e.session?.turn,queued:e.queued,event:e.event?.type,error:e.message||e.event?.error})),requests:requests.slice(-12).map(r=>({scenario:r.scenario,messages:r.body.messages})),stdout:readFileSync(join(dir,'stdout.log'),'utf8'),stderr:readFileSync(join(dir,'stderr.log'),'utf8')},null,2));
     throw error;
-  }finally{proc.kill('SIGKILL');await proc.exited;server.stop(true);rmSync(dir,{recursive:true,force:true})}
+  }finally{proc.kill('SIGKILL');await proc.exited;server.stop(true);for(let i=0;i<3;i++){try{rmSync(dir,{recursive:true,force:true});break;}catch(e){if(i===2)console.warn('[fixture] temp cleanup failed (handles still open):',String(e).slice(0,200));else await Bun.sleep(2000);}}}
 }
 await run('current');

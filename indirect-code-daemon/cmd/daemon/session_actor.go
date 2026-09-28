@@ -1450,7 +1450,13 @@ func (a *sessionActor) onBgTaskChunk(m bgTaskChunkMsg) {
 // onBgTaskFinish marks a BgTask terminal, persists immediately, and
 // cleans the runner files now that every byte is durable in session+WAL.
 func (a *sessionActor) onBgTaskFinish(m bgTaskFinishMsg) {
-	if findBgTask(a.rec, m.JobID) < 0 {
+	i := findBgTask(a.rec, m.JobID)
+	if i < 0 {
+		return
+	}
+	// Cancelled is final and wins: the runner's death rattle (killed →
+	// error) arrives after the user's Stop and must not overwrite it.
+	if a.rec.BgTasks[i].Status == BgStatusCancelled && m.Status != BgStatusCancelled {
 		return
 	}
 	a.touch()

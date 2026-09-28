@@ -123,27 +123,25 @@ func (r *root) watchdogLoop() {
 	defer tick.Stop()
 	for range tick.C {
 		round := map[string]infraHealth{}
-		// bg supervisor: list round-trips the mailbox (alive + depth proxy).
+		// bg supervisor: query round-trips the mailbox (alive proxy).
 		bgOK := false
-		bgJobs := 0
 		func() {
 			defer func() { _ = recover() }()
 			reply := make(chan any, 1)
 			select {
-			case r.bgSup.inbox <- Envelope{Payload: bgListMsg{Reply: reply}}:
+			case r.bgSup.inbox <- Envelope{Payload: bgQueryMsg{JobID: "", Reply: reply}}:
 			case <-time.After(5 * time.Second):
 				return
 			}
 			select {
 			case resp := <-reply:
-				if rows, ok := resp.([]map[string]any); ok {
+				if _, ok := resp.(bgQueryResult); ok {
 					bgOK = true
-					bgJobs = len(rows)
 				}
 			case <-time.After(5 * time.Second):
 			}
 		}()
-		round["bg"] = infraHealth{Alive: bgOK, Jobs: bgJobs}
+		round["bg"] = infraHealth{Alive: bgOK}
 		// projects actor: list round-trip.
 		projOK := false
 		func() {

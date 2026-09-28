@@ -638,21 +638,6 @@ func (s *wsServer) handleRaw(raw []byte) {
 			}
 		}
 
-	case "bg_list":
-		reply := make(chan any, 1)
-		select {
-		case s.bg.inbox <- Envelope{Payload: bgListMsg{Reply: reply}}:
-		case <-time.After(replyTimeout):
-			return
-		}
-		select {
-		case r := <-reply:
-			if rows, ok := r.([]map[string]any); ok {
-				s.emit(map[string]any{"type": "bg_list", "hostId": s.host(), "jobs": rows})
-			}
-		case <-time.After(replyTimeout):
-		}
-
 	case "bg_cancel":
 		var req struct {
 			JobID string `json:"jobId"`
@@ -665,28 +650,6 @@ func (s *wsServer) handleRaw(raw []byte) {
 			return
 		}
 		<-creply
-
-	case "bg_tail":
-		var req struct {
-			JobID string `json:"jobId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		reply := make(chan any, 1)
-		select {
-		case s.bg.inbox <- Envelope{Payload: bgReadMsg{JobID: req.JobID, Max: 64 * 1024, Reply: reply}}:
-		case <-time.After(replyTimeout):
-			return
-		}
-		select {
-		case r := <-reply:
-			if m, ok := r.(map[string]any); ok {
-				text, _ := m["text"].(string)
-				okv, _ := m["ok"].(bool)
-				_ = okv
-				s.emit(map[string]any{"type": "bg_tail", "hostId": s.host(), "jobId": req.JobID, "text": text})
-			}
-		case <-time.After(replyTimeout):
-		}
 
 	case "tool_approval_response":
 		var req struct {

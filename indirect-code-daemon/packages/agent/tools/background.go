@@ -1,6 +1,9 @@
 package tools
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 // AutoBackgroundAfter is the fixed threshold after which a still-running
 // bash/python execution detaches into a background job: the tool returns a
@@ -8,7 +11,16 @@ import "time"
 // finishes (a system-reminder into the live turn, or a wake-up turn when the
 // turn already ended). Fixed by design — no setting exposes it. Tests may
 // override it; production code must not.
-var AutoBackgroundAfter = 10 * time.Second
+var AutoBackgroundAfter = autoBackgroundAfter()
+
+func autoBackgroundAfter() time.Duration {
+	if raw := os.Getenv("ICD_AUTOBG_AFTER"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 10 * time.Second
+}
 
 // BgLabelMax mirrors the daemon's job label rule: the first 300
 // characters of the bash command (or the python code / script

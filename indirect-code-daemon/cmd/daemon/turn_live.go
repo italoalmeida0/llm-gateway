@@ -180,7 +180,38 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"compaction":   rec.Compaction,
 		"turnSeq":      rec.TurnSeq,
 		"fileBalloons": fileBalloonPayloads(rec.FileBalloons),
+		"bgTasks":      bgTaskPayloads(rec.BgTasks),
 	}
+}
+
+// bgTaskPayloads serializes session-global bg tasks for the web client.
+// Content ships trimmed (last 20KB) — the full tail pages via bg_check.
+func bgTaskPayloads(tasks []BgTask) []map[string]any {
+	out := make([]map[string]any, 0, len(tasks))
+	for _, t := range tasks {
+		content := t.Content
+		if len(content) > 20*1024 {
+			content = content[len(content)-20*1024:]
+			if i := indexByte(content, '\n'); i >= 0 {
+				content = content[i+1:]
+			}
+		}
+		out = append(out, map[string]any{
+				"id": t.ID, "kind": t.Kind, "label": t.Label, "status": t.Status,
+				"startedAt": t.StartedAt, "endedAt": t.EndedAt, "exitCode": t.ExitCode,
+				"content": content, "totalLines": t.TotalLines, "droppedLines": t.DroppedLines,
+			})
+	}
+	return out
+}
+
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // pagedHistoryBlock swaps a full payload's transcript for the tail history

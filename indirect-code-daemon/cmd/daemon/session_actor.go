@@ -98,6 +98,10 @@ type sessionActor struct {
 	// sendNow promotes the queue head after a cancelled turn
 	// (queue_send_now semantics: cancel + promote).
 	sendNow bool
+	// bgDirty marks unpersisted bg chunk output while idle (throttled
+	// saves); flushed on the next tick or at terminal.
+	bgDirty bool
+	bgLastPersist int64
 	// cancelRounds counts consecutive watchdog cancels without worker exit
 	// (F3 escalation → quarantine).
 	cancelRounds int
@@ -194,6 +198,15 @@ func (a *sessionActor) run() {
 					a.pingChange()
 				}
 			}
+			if a.bgDirty && a.wal == nil {
+				a.bgDirty = false
+				a.bgLastPersist = time.Now().UnixMilli()
+				if err := a.store.saveSessionSync(a.rec); err == nil {
+					a.pingChange()
+				} else {
+					a.storageError(err)
+				}
+			}
 			if a.state == statePersist {
 				a.finishTurn(a.finishOK)
 			}
@@ -273,6 +286,14 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.onConvertResponse(m)
 	case bgNoticeMsg:
 		a.onBgNotice(m)
+	case bgTaskRegisterMsg:
+		a.onBgTaskRegister(m)
+	case bgTaskChunkMsg:
+		a.onBgTaskChunk(m)
+	case bgTaskFinishMsg:
+		a.onBgTaskFinish(m)
+	case bgTaskReadMsg:
+		a.onBgTaskRead(m)
 	case turnBalloonMsg:
 		// Stashed until finishTurn appends it with the final message count.
 		// Gen gate (B1): a zombie worker's balloon must not anchor to a new
@@ -1227,7 +1248,7 @@ func (a *sessionActor) onWALAppend(m walAppendMsg) {
 		}
 	case walTypeIncoming:
 		// tracker snapshot only; no record change.
-	case walTypeQueue, walTypeTitle, walTypeModel, walTypeOptions, walTypeTurnState, walTypeMeta, walTypeAttach:
+	case walTypeQueue, walTypeTitle, walTypeModel, walTypeOptions, walTypeTurnState, walTypeMeta, walTypeAttach, walTypeBgTask, walTypeBgChunk, walTypeBgFinish:
 		a.applyControlWAL(ev)
 	}
 	a.rec.UpdatedAt = time.Now().UnixMilli()
@@ -1261,6 +1282,8 @@ func (a *sessionActor) applyControlWAL(ev walEvent) {
 		}
 	case walTypeAttach:
 		a.rec.Attachments = append([]AttachmentRef(nil), ev.Attachments...)
+	case walTypeBgTask, walTypeBgChunk, walTypeBgFinish:
+		a.applyBgWAL(ev)
 	case walTypeMeta:
 		if ev.Pinned != nil {
 			a.rec.Pinned = *ev.Pinned
@@ -1359,6 +1382,120 @@ func (a *sessionActor) wakeQuestion(id string, answers [][]string) {
 	select {
 	case ch <- questionOutcome{answers: answers}:
 	default:
+	}
+}
+
+// applyBgWAL applies bg WAL events to the record (replay + live path).
+func (a *sessionActor) applyBgWAL(ev walEvent) {
+	switch ev.Type {
+	case walTypeBgTask:
+		if ev.BgTask != nil {
+			upsertBgTask(a.rec, ev.BgTask)
+		}
+	case walTypeBgChunk:
+		if ev.BgChunk != nil {
+			applyBgChunk(a.rec, ev.BgChunk.JobID, ev.BgChunk.Text, bgLiveCap)
+		}
+	case walTypeBgFinish:
+		if ev.BgFinish != nil {
+			applyBgFinish(a.rec, ev.BgFinish)
+		}
+	}
+}
+
+// bgPersistThrottle bounds direct-save frequency for chunk streams while
+// idle (each save rewrites the whole session JSON). WAL appends during a
+// running turn are cheap; idle saves are throttled to one per interval.
+const bgPersistThrottleMs = int64(1000)
+
+// onBgTaskRegister registers a session-global bg task.
+func (a *sessionActor) onBgTaskRegister(m bgTaskRegisterMsg) {
+	a.touch()
+	if findBgTask(a.rec, m.JobID) < 0 {
+		task := &BgTask{ID: m.JobID, Kind: m.Kind, Label: m.Label, Status: BgStatusRunning, StartedAt: time.Now().UnixMilli()}
+		upsertBgTask(a.rec, task)
+		a.saveOrAppend(walEvent{Type: walTypeBgTask, BgTask: task})
+		a.pingChange()
+		a.emit(map[string]any{"type": "bg_task_registered", "sessionId": a.id, "jobId": m.JobID, "kind": m.Kind, "label": m.Label})
+	}
+	if m.Reply != nil {
+		select {
+		case m.Reply <- bgTaskRegisterResult{}:
+		default:
+		}
+	}
+}
+
+// onBgTaskChunk appends output to a session BgTask. RAM is immediate;
+// persistence is throttled while idle (WAL append while running).
+func (a *sessionActor) onBgTaskChunk(m bgTaskChunkMsg) {
+	if m.Text == "" || findBgTask(a.rec, m.JobID) < 0 {
+		return
+	}
+	a.touch()
+	applyBgChunk(a.rec, m.JobID, m.Text, bgLiveCap)
+	now := time.Now().UnixMilli()
+	if a.wal != nil {
+		_ = a.saveOrAppend(walEvent{Type: walTypeBgChunk, BgChunk: &BgChunk{JobID: m.JobID, Text: m.Text}})
+	} else if now-a.bgLastPersist >= bgPersistThrottleMs {
+		a.bgLastPersist = now
+		if err := a.saveOrAppend(walEvent{Type: walTypeBgChunk, BgChunk: &BgChunk{JobID: m.JobID, Text: m.Text}}); err == nil {
+			a.pingChange()
+		}
+	} else {
+		a.bgDirty = true
+	}
+}
+
+// onBgTaskFinish marks a BgTask terminal, persists immediately, and
+// cleans the runner files now that every byte is durable in session+WAL.
+func (a *sessionActor) onBgTaskFinish(m bgTaskFinishMsg) {
+	i := findBgTask(a.rec, m.JobID)
+	if i < 0 {
+		return
+	}
+	// Cancelled is final and wins: the runner's death rattle (killed →
+	// error) arrives after the user's Stop and must not overwrite it.
+	if a.rec.BgTasks[i].Status == BgStatusCancelled && m.Status != BgStatusCancelled {
+		return
+	}
+	a.touch()
+	fin := &BgFinish{JobID: m.JobID, Status: m.Status, ExitCode: m.ExitCode, EndedAt: time.Now().UnixMilli()}
+	applyBgFinish(a.rec, fin)
+	a.bgDirty = false
+	a.bgLastPersist = time.Now().UnixMilli()
+	if err := a.saveOrAppend(walEvent{Type: walTypeBgFinish, BgFinish: fin}); err == nil {
+		a.pingChange()
+	}
+	a.emit(map[string]any{"type": "bg_task_finished", "sessionId": a.id, "jobId": m.JobID, "status": m.Status, "exitCode": m.ExitCode})
+}
+
+// onBgTaskRead pages a BgTask's content for bg_check.
+func (a *sessionActor) onBgTaskRead(m bgTaskReadMsg) {
+	res := bgTaskReadResult{}
+	i := findBgTask(a.rec, m.JobID)
+	if i < 0 {
+		res.Error = "unknown background task " + m.JobID
+	} else {
+		t := &a.rec.BgTasks[i]
+		res.Found = true
+		res.Kind = t.Kind
+		res.Label = t.Label
+		res.Status = t.Status
+		res.ExitCode = t.ExitCode
+		res.Total = t.TotalLines
+		res.Dropped = t.DroppedLines
+		text, from, to, trunc := bgReadPage(t, m.Offset, m.Limit)
+		res.Text = text
+		res.From = from
+		res.To = to
+		res.Truncated = trunc
+	}
+	if m.Reply != nil {
+		select {
+		case m.Reply <- res:
+		default:
+		}
 	}
 }
 

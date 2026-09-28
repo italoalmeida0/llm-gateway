@@ -17,7 +17,7 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/runner"
 )
 
-// Runner adoption tests (docs/runner-plan.md T2/T3/T5/T7/T10): real
+// Runner adoption tests (T2/T3/T5/T7/T10): real
 // runner subprocesses, real signals, real state files.
 
 // runnerTestRoot lays out <root>/slots/slot-a (the daemon's real shape).
@@ -192,7 +192,8 @@ func TestRunnerSurvivesParentDeathAndIsAdopted(t *testing.T) {
 }
 
 // T3: the RUNNER dies — the parent reports an explicit failure, never a
-// silent hang, and the log survives.
+// silent hang. (v2: output lives in the session BgTask; the out file is
+// transient and may be cleaned at terminal.)
 func TestRunnerDeathIsAnExplicitFailure(t *testing.T) {
 	root, dataDir := runnerTestRoot(t)
 	proc := spawnTestRunner(t, root, dataDir, "echo partial; sleep 30")
@@ -227,9 +228,6 @@ func TestRunnerDeathIsAnExplicitFailure(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("dead runner produced a silent hang instead of a failure")
-	}
-	if !fileHas(proc.LogPath, "partial") {
-		t.Fatal("the log must survive the runner's death")
 	}
 }
 
@@ -304,7 +302,15 @@ func TestRunnerOrphanPolicy(t *testing.T) {
 	// Known job: adopted.
 	rootKnown, dataDirKnown := runnerTestRoot(t)
 	known := spawnTestRunner(t, rootKnown, dataDirKnown, "sleep 30")
-	t.Cleanup(known.Stop)
+	t.Cleanup(func() {
+		known.Stop()
+		// Windows holds the self-copied binary handle briefly after the
+		// kill; TempDir RemoveAll would hit Access denied without this.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) && pidAlive(strconv.Itoa(known.PID)) {
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
 	seedSession(t, dataDirKnown, "sess1", known.JobID)
 
 	// Unknown job (session has moved past it): orphan.
@@ -397,13 +403,29 @@ func fileHas(path, needle string) bool {
 func listJobs(b *bgSupervisor) []map[string]any {
 	reply := make(chan any, 1)
 	select {
-	case b.inbox <- Envelope{Payload: bgListMsg{Reply: reply}}:
+	case b.inbox <- Envelope{Payload: bgJobsOfMsg{SessionID: "", Reply: reply}}:
 	case <-time.After(time.Second):
 		return nil
 	}
 	select {
 	case r := <-reply:
-		rows, _ := r.([]map[string]any)
+		ids, _ := r.([]string)
+		var rows []map[string]any
+		for _, id := range ids {
+			qr := make(chan any, 1)
+			select {
+			case b.inbox <- Envelope{Payload: bgQueryMsg{JobID: id, Reply: qr}}:
+			case <-time.After(time.Second):
+				continue
+			}
+			select {
+			case q := <-qr:
+				if res, ok := q.(bgQueryResult); ok && res.Found {
+					rows = append(rows, map[string]any{"id": id, "status": res.Status, "label": res.Label})
+				}
+			case <-time.After(time.Second):
+			}
+		}
 		return rows
 	case <-time.After(time.Second):
 		return nil

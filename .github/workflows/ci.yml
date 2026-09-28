@@ -64,6 +64,7 @@ jobs:
           bun "$RUNNER_TEMP/transcript-browser/node_modules/playwright/cli.js" install --with-deps chromium
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-transcript-ui.ts
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-composer-ui.ts
+          PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-bg-session-ui.ts
 
       - name: Daemon protocol and turn lifecycle
         run: bun scripts/test-indirect-daemon-protocol.ts

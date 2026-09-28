@@ -38,7 +38,7 @@ const envGet = (k: string) => {
   const m = new RegExp(`^${k}=(.*)$`, "m").exec(envFile);
   return m ? m[1].trim() : process.env[k] || "";
 };
-const META_KEY = envGet("META_API_KEY");
+const META_KEY = envGet("META_API_KEY") || envGet("META_TEST_KEY");
 const META_BASE = envGet("META_BASE_URL") || "https://api.meta.ai/v1";
 const MODEL = process.env.E2E_MODEL || "muse-spark-1.3-contributor";
 if (!META_KEY) {
@@ -139,19 +139,18 @@ async function boot(): Promise<{ jwt: string; login: any; hostId: string; ws: We
       setTimeout(() => { if (pending.has(payload.requestId)) { pending.delete(payload.requestId); resolve(undefined); } }, 30000);
     });
   };
-  let lastBg: any = null;
   await new Promise<void>((res) => { ws.onopen = () => res(); });
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
       if (msg.requestId && pending.has(msg.requestId)) { pending.get(msg.requestId)!(msg); pending.delete(msg.requestId); return; }
-      if (msg.type === "bg_list" || msg.type === "bg_update") lastBg = msg;
     } catch {}
   };
-  const bgSnapshot = async () => {
-    ws.send(JSON.stringify({ type: "bg_list", hostId, requestId: "bgx" }));
-    await Bun.sleep(1200);
-    return (lastBg?.jobs || []) as any[];
+  // Session-owned tasks: the source of truth is session_data bgTasks
+  // (bg_list/bg_update no longer exist).
+  const bgSnapshot = async (sessionId: string) => {
+    const data: any = await send({ type: "get_session", sessionId });
+    return ((data?.session as any)?.bgTasks || []) as any[];
   };
   {
     const start = Date.now();
@@ -202,13 +201,18 @@ async function openSessionPage(ctx: any, sessionId: string) {
   return { browser, page, pageErrors, consoleErrors };
 }
 
+// Google GSI (auth widget) trips a CSP console error on every page load —
+// environment noise unrelated to bg tasks. Fail only on new errors.
+const KNOWN_CONSOLE_NOISE = [/Content Security Policy.*accounts\.google\.com/i, /gsi\/client/i];
 function assertNoPageErrors(pageErrors: string[], consoleErrors: string[], where: string) {
   assert.deepEqual(pageErrors, [], `${where}: page errors: ${pageErrors.join(" | ")}`);
-  assert.deepEqual(consoleErrors, [], `${where}: console errors: ${consoleErrors.join(" | ")}`);
+  const fresh = consoleErrors.filter((m) => !KNOWN_CONSOLE_NOISE.some((re) => re.test(m)));
+  assert.deepEqual(fresh, [], `${where}: console errors: ${fresh.join(" | ")}`);
 }
 
-// A. finish flow: detach -> sleep-wait -> done. The row must fold the
-// result (never the "still running" placeholder) with the full duration.
+// A. finish flow: detach -> sleep(waitingFor+summary) -> bg_check read.
+// The tool row keeps the detach placeholder; the output lives in the
+// session BgTask (bg card + bg_check), never in a file.
 async function scenarioFinish(ctx: any) {
   log("test", "scenario A: finish flow");
   const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e bg finish", model: MODEL });
@@ -216,7 +220,7 @@ async function scenarioFinish(ctx: any) {
   assert(sessionId, "create_session failed");
   ctx.ws.send(JSON.stringify({
     type: "prompt", hostId: ctx.hostId, sessionId, model: MODEL,
-    text: "Run `sleep 15 && echo done-gamma` with the bash tool. Wait for it with the sleep tool (NOT a bare sleep command), then reply exactly DONE-GAMMA plus the echo text.",
+    text: "Run `sleep 15 && echo done-gamma` with the bash tool. It will go to the background after 10s. Then use the sleep tool with waitingFor=<the bg task id> and a short summary to wait, then read the output with bg_check (job_id <id>), then reply exactly DONE-GAMMA plus the echo text.",
   }));
   const t0 = Date.now();
   for (;;) {
@@ -224,31 +228,40 @@ async function scenarioFinish(ctx: any) {
     const data: any = await ctx.send({ type: "get_session", sessionId });
     const txt = JSON.stringify(data?.session?.messages || []);
     if (txt.includes("DONE-GAMMA") && data?.session?.status !== "running") break;
-    assert(Date.now() - t0 < 240000, "turn timed out");
+    assert(Date.now() - t0 < 300000, "turn timed out");
   }
+  // Wire-side: the session owns the finished task with its output.
+  const tasks = await ctx.bgSnapshot(sessionId);
+  const task = tasks.find((x: any) => x.status === "done" || x.status === "error");
+  assert(task, `no finished bg task in session (tasks: ${JSON.stringify(tasks.map((t: any) => ({ id: t.id, status: t.status })))} )`);
+  assert((task.content || "").includes("done-gamma"), `session task content missing output: ${(task.content || "").slice(-200)}`);
+  assert(Number(task.totalLines || 0) > 0, "task must report totalLines");
+  // Runner files are cleaned at terminal (no 7-day retention, no logs).
+  assert(!task.logPath, "session must not expose runner log paths");
   const { browser, page, pageErrors, consoleErrors } = await openSessionPage(ctx, sessionId);
   try {
     const rows: any[] = await page.evaluate(() => [...document.querySelectorAll("[data-toolseg]")].map((s) => ({
       text: (s.textContent || ""),
       pres: [...s.querySelectorAll("pre")].map((el) => (el.textContent || "")),
-      duration: s.querySelector("[data-tool-duration]")?.textContent || null,
     })));
     const bash = rows.find((r) => /sleep 15/.test(r.text));
     assert(bash, `bash row missing (rows: ${rows.map((r) => r.text.slice(0, 60)).join(" // ")})`);
-    assert(!/still running/i.test(bash.pres.join("\n")), `row body kept the placeholder: ${bash.pres.join("|").slice(0, 200)}`);
-    assert(/done-gamma/.test(bash.pres.join("\n")), `row body missing the result: ${bash.pres.join("|").slice(0, 200)}`);
-    const secs = bash.duration ? Number(/(\d+)s/.exec(bash.duration)?.[1]) : NaN;
-    assert(Number.isFinite(secs) && secs >= 14, `row must show the full ~15s duration, got ${bash.duration}`);
+    // The tool row keeps the detach placeholder (no fold: results live in the card).
+    assert(/background/i.test(bash.text), `row must keep the detach placeholder: ${bash.text.slice(0, 200)}`);
+    // The bg card shows the finished task forever with its output.
+    const card: string = await page.evaluate(() => document.body.textContent || "");
+    assert(/Background tasks/.test(card), "bg card missing");
+    assert(/done-gamma|sleep 15/.test(card), `bg card missing the task: ${card.slice(-500)}`);
     assertNoPageErrors(pageErrors, consoleErrors, "finish flow");
-    log("test", `scenario A PASS (duration ${bash.duration})`);
+    log("test", "scenario A PASS");
   } finally {
     await browser.close();
   }
 }
 
 // B. manual cancel: while a job runs, the dashboard Stop button is
-// clicked. The AI must get a cancellation notice, the .log must record
-// who stopped it, and the row must fold a truthful marker.
+// clicked. The AI must get a cancellation notice pointing at bg_check,
+// the session task goes cancelled, and the row keeps the placeholder.
 async function scenarioCancel(ctx: any) {
   log("test", "scenario B: manual cancel");
   const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e bg cancel", model: MODEL });
@@ -256,16 +269,16 @@ async function scenarioCancel(ctx: any) {
   assert(sessionId, "create_session failed");
   ctx.ws.send(JSON.stringify({
     type: "prompt", hostId: ctx.hostId, sessionId, model: MODEL,
-    text: "Run `sleep 60 && echo done-never` with the bash tool. Then wait with the sleep tool (90 seconds) and report what happened.",
+    text: "Run `sleep 60 && echo done-never` with the bash tool. It will go to the background after 10s. Then use the sleep tool with waitingFor=<the bg task id> and a short summary to wait 90 seconds, then report what happened.",
   }));
-  let jobId = "", logPath = "";
+  let jobId = "";
   {
     const t0 = Date.now();
     while (!jobId && Date.now() - t0 < 90000) {
       await Bun.sleep(2000);
-      const jobs = await ctx.bgSnapshot();
-      const j = jobs.find((x: any) => x.sessionId === sessionId && x.status === "running");
-      if (j) { jobId = j.id; logPath = j.logPath; }
+      const tasks = await ctx.bgSnapshot(sessionId);
+      const j = tasks.find((x: any) => x.status === "running");
+      if (j) jobId = j.id;
     }
   }
   assert(jobId, "job never detached");
@@ -283,32 +296,22 @@ async function scenarioCancel(ctx: any) {
       while (!noticed && Date.now() - t0 < 60000) {
         await Bun.sleep(2500);
         const data: any = await ctx.send({ type: "get_session", sessionId });
-        if (JSON.stringify(data?.session?.messages || []).includes("cancelled by the user")) noticed = true;
+        const txt = JSON.stringify(data?.session?.messages || []);
+        if (txt.includes("cancelled by the user") && txt.includes("bg_check")) noticed = true;
       }
     }
-    assert(noticed, "AI never got the cancellation notice");
-    // …the snapshot carries the cancelled state…
-    const jobs = await ctx.bgSnapshot();
-    const job = jobs.find((x: any) => x.id === jobId);
+    assert(noticed, "AI never got the cancellation notice pointing at bg_check");
+    // …the session task carries the cancelled state…
+    const tasks = await ctx.bgSnapshot(sessionId);
+    const job = tasks.find((x: any) => x.id === jobId);
     assert.equal(job?.status, "cancelled", `job status: ${job?.status}`);
-    assert.match(job?.result || "", /cancelled by user/, "snapshot result must name the cancellation");
-    // …and the .log records who stopped it.
-    const logTail = await fs.readFile(logPath, "utf8").then((t) => t.slice(-200)).catch((e) => `(read fail: ${e})`);
-    assert.match(logTail, /\[cancelled by user\]/, `.log tail: ${JSON.stringify(logTail)}`);
-    // The folded row reads truthfully.
-    await page.evaluate(() => {
-      for (const h of [...document.querySelectorAll("[data-toolseg] div.group\\/tool")]) {
-        try { (h as HTMLElement).click(); } catch {}
-      }
-    });
-    await page.waitForTimeout(1500);
+    // The row keeps the placeholder (no fold).
     const rows: any[] = await page.evaluate(() => [...document.querySelectorAll("[data-toolseg]")].map((s) => ({
       text: (s.textContent || ""),
-      pres: [...s.querySelectorAll("pre")].map((el) => (el.textContent || "")),
     })));
     const bash = rows.find((r) => /sleep 60/.test(r.text));
     assert(bash, "bash row missing after cancel");
-    assert.match(bash.pres.join("\n"), /cancelled by user/, `row body: ${bash.pres.join("|").slice(0, 200)}`);
+    assert(/background/i.test(bash.text), `row must keep the placeholder: ${bash.text.slice(0, 200)}`);
     assertNoPageErrors(pageErrors, consoleErrors, "manual cancel");
     log("test", "scenario B PASS");
   } finally {

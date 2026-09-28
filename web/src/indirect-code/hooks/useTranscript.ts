@@ -14,14 +14,12 @@ import { prettyArgs, parseContentBlocks } from "../utils/wire";import {
   appendToolResult as reduceToolResult,
   cutTail,
   finishTurn,
-  foldBackgroundResult as reduceFoldBackground,
   mergeAssistantMessage,
   mergeUsage,
   normalizeSessionMessages,
   normalizeTurnActivity,
   mergeTranscriptTail,
   orderedMessages,
-  preserveBackgroundFolds,
   pushAssistantCarrier,
   stampDuration,
   upsertToolCall as reduceToolCall,
@@ -556,7 +554,6 @@ export function createTranscript(opts: {
     if (version !== snapshotVersion || sessionId !== opts.getSessionId() || host !== opts.getHostId()) return;
     const orderedReplay=transcriptOrder.snapshot(overlay?.transcript);
     if (orderedReplay===null) { pendingSnapshot=null; return; }
-    tail=preserveBackgroundFolds(tail,messages());
     const replay = overlay?.transcript ? orderedReplay : pendingSnapshot?.replay || [];
     pendingSnapshot = null;
     batch(() => {
@@ -651,11 +648,6 @@ export function createTranscript(opts: {
   }
   function appendToolResult(callId: string, result: string | undefined, isError?: boolean, startedAt?: number, durationMs?: number, details?: any, messageId?:string) {
     setMessages((prev) => reduceToolResult(prev, callId, result, isError, startedAt, durationMs, details, messageId));
-  }
-  /** Folds a finished background task into the originating tool row
-   * (daemon bg_update snapshot → placeholder row). Idempotent. */
-  function foldBgResult(job: { id: string; result?: string; status?: string; endedAt?: number }) {
-    setMessages((prev) => reduceFoldBackground(prev, job));
   }
   // Drop rendered messages below a raw keep-index (optimistic edit/regen cut).
   function cutLiveTail(keepRawIdx: number) {
@@ -1169,7 +1161,7 @@ export function createTranscript(opts: {
     handleTruncated, handleStatusEvent, handleAgentEvent,
     noteApprovalRequest, noteQuestionResolved, noteQuestionError,
     appendReasoningDelta,
-    appendToolArgsDelta, appendToolResult, foldBgResult,
+    appendToolArgsDelta, appendToolResult,
     cancelTurnForSession, cancelCurrentTurn, respondApproval,
     forking, forkRequestId: () => forkRequestId,
     clearForkRequest: () => { forkRequestId = ""; }, setForking,

@@ -199,14 +199,6 @@ func TestWSSearchRemoved(t *testing.T) {
 	}
 }
 
-func TestWSBgListTail(t *testing.T) {
-	h := newWSHarness(t)
-	h.send(map[string]any{"type": "bg_list"})
-	if m := h.lastType("bg_list"); m == nil {
-		t.Fatalf("no bg_list")
-	}
-}
-
 func TestWSPullSessions(t *testing.T) {
 	h := newWSHarness(t)
 	h.mkSession(t, "s9")

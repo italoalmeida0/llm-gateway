@@ -80,25 +80,21 @@ func (a *sessionAdmin) purgeSession(id string) {
 	if a.bg != nil {
 		reply := make(chan any, 1)
 		select {
-		case a.bg.inbox <- Envelope{Payload: bgListMsg{Reply: reply}}:
+		case a.bg.inbox <- Envelope{Payload: bgJobsOfMsg{SessionID: id, Reply: reply}}:
 		case <-time.After(replyTimeout):
 		}
 		select {
 		case r := <-reply:
-			if rows, ok := r.([]map[string]any); ok {
-				for _, row := range rows {
-					if row["sessionId"] == id && row["status"] == BgStatusRunning {
-						creply := make(chan any, 1)
-						if jid, _ := row["id"].(string); jid != "" {
-							select {
-							case a.bg.inbox <- Envelope{Payload: bgCancelMsg{JobID: jid, Reply: creply}}:
-							case <-time.After(replyTimeout):
-							}
-							select {
-							case <-creply:
-							case <-time.After(replyTimeout):
-							}
-						}
+			if ids, ok := r.([]string); ok {
+				for _, jid := range ids {
+					creply := make(chan any, 1)
+					select {
+					case a.bg.inbox <- Envelope{Payload: bgCancelMsg{JobID: jid, Reply: creply}}:
+					case <-time.After(replyTimeout):
+					}
+					select {
+					case <-creply:
+					case <-time.After(replyTimeout):
 					}
 				}
 			}

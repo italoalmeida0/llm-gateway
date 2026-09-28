@@ -10,7 +10,7 @@ async function run(label: string) {
   const work = join(dir, 'work'); mkdirSync(work);
   writeFileSync(join(work,'hello.txt'),'review fixture');
   const events:any[]=[]; const requests:any[]=[];
-  let socket:any; let scenario='text'; let toolIssued=false; let sleepCalls=0;
+  let socket:any; let scenario='text'; let toolIssued=false; let sleepCalls=0; let cancelBgId=''; let cancelBashed=false;
   const sse=(name:string,input:unknown)=>{
     const items=[{type:'message_start',message:{id:'msg-review',model:'m',role:'assistant',usage:{input_tokens:10,output_tokens:0}}}];
     if(name){items.push({type:'content_block_start',index:0,content_block:{type:'tool_use',id:'tool-review',name,input:{}}} as any);items.push({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify(input)}} as any);}
@@ -26,11 +26,25 @@ async function run(label: string) {
         const body=await req.json();requests.push({scenario,body});
         if(scenario==='sleep') {
           sleepCalls++;
-          if(sleepCalls===1)return sse('sleep',{seconds:1});
+          if(sleepCalls===1)return sse('sleep',{seconds:1,waitingFor:'bg_test',summary:'test wait'});
           if(sleepCalls===2)return new Response('temporary failure after sleep',{status:503});
           return sse('mark_task_as_complete',{summary:'Recovered after sleep'});
         }
-        if(scenario==='sleep_cancel')return sse('sleep',{seconds:360});
+        if(scenario==='sleep_cancel'){
+          // New sleep model: sleep only blocks on a RUNNING bg task. Detach
+          // a real one first (10s foreground window), then sleep on it.
+          // Explicit phase flag: the history contains bg_test (unknown-id
+          // warning) from the earlier sleep scenario, so a regex would
+          // match the wrong id and loop on immediate warnings.
+          if(!cancelBashed){cancelBashed=true;return sse('bash',{command:'sleep 300'});}
+          if(!cancelBgId){
+            const hist=JSON.stringify(body?.messages||[]);
+            const m=hist.match(/bg_[A-Za-z0-9]{8,}/);
+            if(m){cancelBgId=m[0];return sse('sleep',{seconds:360,waitingFor:cancelBgId,summary:'test wait'});}
+            return sse('bash',{command:'sleep 30'});
+          }
+          return sse('sleep',{seconds:360,waitingFor:cancelBgId,summary:'test wait'});
+        }
         if((scenario==='approval'||scenario==='question')&&!toolIssued){toolIssued=true;return scenario==='approval'?sse('read',{path:join(work,'hello.txt')}):sse('question',{questions:[{header:'Choice',question:'Pick?',options:[{label:'One'}]}]});}
         if(scenario==='approval'||scenario==='question')return sse('mark_task_as_complete',{summary:'Done'});
         return sse('',null);
@@ -40,7 +54,7 @@ async function run(label: string) {
     websocket:{open(ws){socket=ws},message(_ws,data){try{events.push(JSON.parse(String(data)))}catch{}}}
   });
   writeFileSync(join(dir,'config.json'),JSON.stringify({gateway_url:`http://127.0.0.1:${server.port}`,daemon_token:'local-review-token',api_key:'local-review-key',host_id:'review-host',name:'Review',auto_update:false,settings:{no_auto_title:true,reasoning:'none',auto_compact_threshold:0}}));
-  const proc=Bun.spawn([binary,'--slot','a','--data-dir',dir],{env:{...process.env,ICD_WAIT_TOOL:'200ms',ICD_WATCH_EVERY:'50ms'},stdout:Bun.file(join(dir,'stdout.log')),stderr:Bun.file(join(dir,'stderr.log'))});
+  const proc=Bun.spawn([binary,'--slot','a','--data-dir',dir],{env:{...process.env,ICD_WAIT_TOOL:'200ms',ICD_WATCH_EVERY:'1s',ICD_AUTOBG_AFTER:'1s'},stdout:Bun.file(join(dir,'stdout.log')),stderr:Bun.file(join(dir,'stderr.log'))});
   const wait=async(pred:()=>any,ms=4000)=>{const deadline=Date.now()+ms;while(Date.now()<deadline){const v=pred();if(v)return v;await Bun.sleep(10)}return null};
   const send=(m:any)=>socket.send(JSON.stringify({...m,hostId:'review-host'}));
   const create=async(id:string,mode='talk',access='full')=>{send({type:'create_session',requestId:id,cwd:work,title:'original',model:'m',options:{mode,access,effort:'none'}});const ev=await wait(()=>events.find(e=>e.type==='session_created'&&e.requestId===id));if(!ev)throw Error('create timeout');return ev.session.id;};
@@ -110,7 +124,10 @@ async function run(label: string) {
     scenario='sleep_cancel';
     const cancelFrom=events.length;
     send({type:'prompt',sessionId:sleepSID,text:'Sleep again',requestId:'cancel-send'});
-    assert(await wait(()=>events.slice(cancelFrom).find(e=>e.type==='agent_event'&&e.event?.type==='tool_execution_start')),'sleep did not start');
+    // New sleep model: detach (10s) + sleep(waitingFor) start lands ~11s in.
+    // Two tool_execution_starts fire (bash, then the blocking sleep) —
+    // cancelling on the first would kill the foreground bash pre-detach.
+    assert(await wait(()=>events.slice(cancelFrom).filter(e=>e.type==='agent_event'&&e.event?.type==='tool_execution_start').length>=2,30000),'sleep did not start');
     send({type:'cancel',sessionId:sleepSID});
     assert(await wait(()=>events.slice(cancelFrom).find(e=>e.type==='session_status'&&e.status==='idle')),'explicit Stop did not end sleep');
     const cancelFinal=events.slice(cancelFrom).filter(e=>e.type==='session_data'&&e.session?.id===sleepSID).at(-1)?.session;
@@ -124,8 +141,11 @@ async function run(label: string) {
       scenario='sleep_cancel';
       const start=events.length;
       send({type:'prompt',sessionId:sleepSID,text:`Sleep before ${delay}`,requestId:`before-${delay}`,options:{mode:'build',access:'full',effort:'none'}});
-      assert(await wait(()=>events.slice(start).find(e=>e.sessionId===sleepSID&&e.type==='agent_event'&&e.event?.type==='tool_execution_start')));
+      assert(await wait(()=>events.slice(start).filter(e=>e.sessionId===sleepSID&&e.type==='agent_event'&&e.event?.type==='tool_execution_start').length>=2,30000));
       send({type:'cancel',sessionId:sleepSID});
+      // Wait for idle BEFORE the follow-up: a cancelled turn never drains
+      // the queue, and stopping the detached runner takes a moment.
+      assert(await wait(()=>events.slice(start).find(e=>e.sessionId===sleepSID&&e.type==='session_status'&&e.status==='idle'),30000),'cancelled turn did not become idle');
       await Bun.sleep(delay);
       scenario='text';
       const marker=`Follow-up ${delay}ms after Stop`;
@@ -149,6 +169,6 @@ async function run(label: string) {
     // failures distinguish admission, turn identity, provider I/O and commit.
     console.error(JSON.stringify({events:events.slice(-100).map(e=>({type:e.type,sessionId:e.sessionId||e.session?.id,requestId:e.requestId,status:e.status||e.session?.status,turn:e.turn||e.session?.turn,queued:e.queued,event:e.event?.type,error:e.message||e.event?.error})),requests:requests.slice(-12).map(r=>({scenario:r.scenario,messages:r.body.messages})),stdout:readFileSync(join(dir,'stdout.log'),'utf8'),stderr:readFileSync(join(dir,'stderr.log'),'utf8')},null,2));
     throw error;
-  }finally{proc.kill('SIGKILL');await proc.exited;server.stop(true);rmSync(dir,{recursive:true,force:true})}
+  }finally{proc.kill('SIGKILL');await proc.exited;server.stop(true);for(let i=0;i<3;i++){try{rmSync(dir,{recursive:true,force:true});break;}catch(e){if(i===2)console.warn('[fixture] temp cleanup failed (handles still open):',String(e).slice(0,200));else await Bun.sleep(2000);}}}
 }
 await run('current');

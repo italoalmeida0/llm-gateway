@@ -17,7 +17,7 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/runner"
 )
 
-// Parent-side runner plumbing (docs/runner-plan.md): self-copy the
+// Parent-side runner plumbing: self-copy the
 // multi-call binary into runners/, spawn the runner role with a full
 // exec spec, and expose the tool-visible handle. No binary verification
 // (decided D3: open source — verification is theater and slows the hot

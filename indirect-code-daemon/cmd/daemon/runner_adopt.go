@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/runner"
 )
 
-// Runner adoption, orphan policy and GC (docs/runner-plan.md F5/F5b/F6/F8).
+// Runner adoption, orphan policy and GC (F5/F5b/F6/F8).
 //
 // The state files under runners/ are the contract: at boot (and hourly)
 // the daemon reconciles them. Live runners are adopted (their out logs
@@ -58,13 +59,8 @@ func (b *bgSupervisor) adoptRunners() {
 	for _, st := range states {
 		switch {
 		case st.Terminal():
-			// Outcome already recorded: repair the terminal copy if the
-			// crash landed between the state write and the copy (or
-			// mid-copy).
-			if err := repairTerminalCopy(st); err != nil {
-				trace("runner.output.pending", map[string]any{"job": st.JobID})
-				continue
-			}
+			// Outcome already recorded (v2: the session BgTask is the
+			// durable record — no brain copy needed).
 			// V2R-001: only a task that was a real BACKGROUND job notifies.
 			// An inline (foreground) outcome was already consumed by the
 			// agent, and a suppressed (assistant) cancel is silent — a
@@ -86,16 +82,23 @@ func (b *bgSupervisor) adoptRunners() {
 				// Orphans are killed UNCONDITIONALLY (V2R-002/F5b): a
 				// graceful signal is not guaranteed to be honored, and the
 				// command's tree must die with the runner.
-				_ = processutil.SignalIdentity(st.PID, st.ProcessIdentity, 9)
-				reapStoredCommand(st)
-				// Wait for death BEFORE cleaning: the dying runner
-				// rewrites its own state (graceful SIGTERM) and must not
-				// resurrect a cleaned record.
-				deadline := time.Now().Add(5 * time.Second)
-				for time.Now().Before(deadline) && pidAlive(pidString(st.PID)) {
-					time.Sleep(50 * time.Millisecond)
+				// Retry the kill: a single failed signal (Windows handle
+				// race, slow teardown) must not leave the orphan alive
+				// until the next boot.
+				killed := false
+				for attempt := 0; attempt < 3 && !killed; attempt++ {
+					_ = processutil.SignalIdentity(st.PID, st.ProcessIdentity, 9)
+					reapStoredCommand(st)
+					// Wait for death BEFORE cleaning: the dying runner
+					// rewrites its own state (graceful SIGTERM) and must not
+					// resurrect a cleaned record.
+					deadline := time.Now().Add(5 * time.Second)
+					for time.Now().Before(deadline) && pidAlive(pidString(st.PID)) {
+						time.Sleep(50 * time.Millisecond)
+					}
+					killed = !processutil.Matches(st.PID, st.ProcessIdentity)
 				}
-				if processutil.Matches(st.PID, st.ProcessIdentity) {
+				if !killed {
 					trace("runner.orphan.stop_pending", map[string]any{"job": st.JobID})
 					continue
 				}
@@ -117,10 +120,6 @@ func (b *bgSupervisor) adoptRunners() {
 			st.Status, st.ExitCode, st.EndedAt = runner.StatusKilled, &code, &end
 			st.OutcomeUnknown = true
 			if err := runner.WriteState(root, st); err != nil {
-				continue
-			}
-			if err := repairTerminalCopy(st); err != nil {
-				trace("runner.output.pending", map[string]any{"job": st.JobID})
 				continue
 			}
 			// V2R-001: a dead runner still honours the disposition — a
@@ -157,7 +156,6 @@ func (b *bgSupervisor) adoptOne(st *runner.State) {
 	}
 	b.jobs[j.ID] = j
 	trace("runner.adopt", map[string]any{"job": j.ID, "sid": j.SessionID})
-	b.broadcast()
 	// V2R-010: resume OUTPUT delivery for the adopted job — a bounded file
 	// tail from the current end of the out log streams subsequent bytes to
 	// the session (bg_output), exactly like a live job. The file is the
@@ -233,9 +231,6 @@ func (b *bgSupervisor) watchAdopted(jobID string, st *runner.State) {
 			return // state gone (GC or explicit clean)
 		}
 		if cur.Terminal() {
-			if err := repairTerminalCopy(cur); err != nil {
-				continue
-			}
 			status := BgStatusDone
 			if cur.Status != runner.StatusDone || (cur.ExitCode != nil && *cur.ExitCode != 0) {
 				status = BgStatusError
@@ -256,9 +251,6 @@ func (b *bgSupervisor) watchAdopted(jobID string, st *runner.State) {
 			cur.Status, cur.ExitCode, cur.EndedAt = runner.StatusKilled, &code, &end
 			cur.OutcomeUnknown = true
 			if err := runner.WriteState(b.rootDir(), cur); err != nil {
-				continue
-			}
-			if err := repairTerminalCopy(cur); err != nil {
 				continue
 			}
 			b.finishAdopted(jobID, BgStatusError, runnerNoticeText(cur))
@@ -358,18 +350,16 @@ func runnerNoticeText(st *runner.State) string {
 	if st.OutcomeUnknown {
 		status = "interrupted; command outcome unknown; verify effects before repeating"
 	}
-	path := st.BrainPath
-	if path == "" {
-		path = st.LogPath
-	}
-	return fmt.Sprintf("[Background %s task %s] %s. Full output: %s", st.Kind, st.JobID, status, path)
+	return fmt.Sprintf("[Background %s task %s] %s. Read the output with bg_check (job_id %s).", st.Kind, st.JobID, status, st.JobID)
 }
 
-// gcRunners (F8): dead terminal states age out; dead generation binaries
-// go once nothing references them. runners/out/ is NEVER touched (D8).
+// gcRunners (F8): dead generation binaries go once nothing references
+// them. Per-job files (state/disposition/launch/out/brain) are cleaned
+// AT TERMINAL by cleanupRunnerFiles — the session BgTask is the durable
+// record, so no 7-day retention. This GC only sweeps leftovers (crash
+// between terminal and cleanup) plus dead binaries.
 func (b *bgSupervisor) gcRunners(now int64) {
 	root := b.rootDir()
-	const stateRetentionMs = int64(7 * 24 * time.Hour / time.Millisecond)
 	aliveVersions := map[string]bool{}
 	states, invalid := runner.ScanStates(root)
 	if len(invalid) != 0 {
@@ -380,10 +370,40 @@ func (b *bgSupervisor) gcRunners(now int64) {
 			aliveVersions[st.RunnerVersion] = true
 			continue
 		}
-		end := NowIfZero(st)
-		if now-end > stateRetentionMs {
+		// Leftover sweep: a terminal state with no live supervisor job
+		// is either pre-cleanup or orphaned — remove it now, UNLESS:
+		// - a background notice is still pending (crash between
+		//   terminal and ack: the outcome must survive until folded);
+		// - disposition is background (notice not yet delivered);
+		// - it ended recently (<1h grace: a fresh terminal from this
+		//   boot's reconciliation must survive for readers/tests).
+		// A live job's files are owned by onFinish/onCancel, never by GC.
+		if _, ok := b.jobs[st.JobID]; !ok {
+			if _, pending := b.notices[st.JobID]; pending {
+				aliveVersions[st.RunnerVersion] = true
+				continue
+			}
+			if runner.ReadDisposition(root, st.JobID) == runner.DispBackground {
+				aliveVersions[st.RunnerVersion] = true
+				continue
+			}
+			if end := NowIfZero(st); now-end < int64(time.Hour/time.Millisecond) {
+				aliveVersions[st.RunnerVersion] = true
+				continue
+			}
 			_ = os.Remove(runner.StatePath(root, st.JobID))
+			_ = os.Remove(runner.DispositionPath(root, st.JobID))
+			_ = os.Remove(filepath.Join(runner.RunnersDir(root), st.JobID+".launch"))
+			if st.LogPath != "" {
+				_ = os.Remove(st.LogPath)
+			}
+			if st.BrainPath != "" && st.BrainPath != st.LogPath {
+				_ = os.Remove(st.BrainPath)
+			}
+		} else {
+			aliveVersions[st.RunnerVersion] = true
 		}
+		_ = now
 	}
 	// Dead generation binaries: no live state of that version remains and
 	// a different version is present (strict D3: no rollback copies).

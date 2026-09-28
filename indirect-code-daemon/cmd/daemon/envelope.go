@@ -35,7 +35,7 @@ type Envelope struct {
 // Returns (nil, false) on timeout or when the actor is gone.
 // Canonical pattern (F5): use this for plain request/reply round-trips.
 // Call sites with extra select arms (done channels, fallbacks) stay inline
-// and say why — grep shows subscribeFinish/recentFinish/cancelJob keep
+// and say why — grep shows subscribeFinish/cancelJob keep
 // theirs for the <-done arm.
 func replyWithTimeout(inbox chan<- Envelope, env Envelope) (any, bool) {
 	if env.Reply == nil {

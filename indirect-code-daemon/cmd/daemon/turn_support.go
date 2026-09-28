@@ -27,13 +27,13 @@ func estimateContext(agent *core.Agent, model provider.Model) *SessionContext {
 func modeToolRestriction(mode, tool string) string {
 	mode = normalizedOptions(SessionOptions{Mode: mode}).Mode
 	if mode == "talk" {
-		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "patch", "sleep", "bg_cancel"} {
+		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "patch", "sleep", "bg_cancel", "bg_check"} {
 			if tool == name {
 				return "The session is in talk mode. Workspace tools are disabled."
 			}
 		}
 	}
-	if (tool == "sleep" || tool == "bg_cancel") && mode != "plan" && mode != "build" && mode != "learning" {
+	if (tool == "sleep" || tool == "bg_cancel" || tool == "bg_check") && mode != "plan" && mode != "build" && mode != "learning" {
 		return tool + " is only available in plan, build and learning modes."
 	}
 	if (mode == "plan" || mode == "learning") && (tool == "write" || tool == "edit" || tool == "patch") {

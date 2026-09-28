@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
@@ -15,6 +16,14 @@ type SleepArgs struct {
 	// Seconds to wait (1–3600). The wait ends early — with a notice —
 	// when a background task finishes while sleeping.
 	Seconds float64 `json:"seconds"`
+	// WaitingFor is the bg task id (bg_…) this sleep waits on. Required:
+	// it pins the wait to a task that is still running, so a stale
+	// sleep (task already finished) returns immediately instead of
+	// dead-waiting or failing.
+	WaitingFor string `json:"waitingFor"`
+	// Summary is a ≤100-char note shown in the row body (what is being
+	// waited on). Required, non-empty after trim; longer text is cut.
+	Summary string `json:"summary"`
 }
 
 // SleepHost lets the sleep tool observe background jobs: while it waits,
@@ -26,24 +35,14 @@ type SleepHost interface {
 	WaitForAnyJob(sessionID string, done <-chan struct{}) <-chan struct{}
 }
 
-// BgFreshnessHost is an optional SleepHost extension: it reports a task
-// that finished just before the sleep started, so a long sleep decided
-// on stale state returns immediately instead of waiting out the full
-// duration for an event that already happened.
-type BgFreshnessHost interface {
-	// RecentBgFinish returns the label and age of the session's most
-	// recently finished job (any terminal status) — but only when no
-	// session job is still running (otherwise the watcher owns the wait).
-	// ok=false when there is nothing freshly finished to skip for.
-	RecentBgFinish(sessionID string) (label string, ago time.Duration, ok bool)
+// BgSleepCheckHost is an optional SleepHost extension: it reports the
+// state of ONE task, so sleep(waitingFor=id) can return immediately when
+// the pinned task already left the running state.
+type BgSleepCheckHost interface {
+	// BgTaskStatus returns the task status ("running", "done", "error",
+	// "cancelled") and label. ok=false when the id is unknown or foreign.
+	BgTaskStatus(sessionID, jobID string) (status, label string, ok bool)
 }
-
-// sleepFreshGrace bounds the staleness window: a job that finished less
-// than this ago (a model roundtrip) when a LONG sleep starts means the
-// sleep was decided before the completion landed — return immediately.
-// Short sleeps always run (cheap; preserves pacing/backoff uses).
-const sleepFreshGrace = 60 * time.Second
-
 // SleepTool parks the model for a bounded wait — the "wait for the
 // background task" primitive. It ends early when a background task of the
 // session finishes (the system-reminder delivery lands in context right
@@ -56,11 +55,11 @@ type SleepTool struct {
 func (*SleepTool) Name() string { return "sleep" }
 
 func (*SleepTool) Description() string {
-	return `Wait for a bounded number of seconds. Use it to pause while a background task (a bash/python command that went to the background after 10s) runs, instead of polling in a tight loop. The wait ends EARLY — with a notice — as soon as one of your background tasks finishes, so prefer overestimating: sleep(120) returns immediately when the task completes after 5s. If the task already finished just before the sleep starts, a long sleep is skipped at once (the notice is already in context). Available in plan, build and learning modes only.`
+	return `Wait for a bounded number of seconds while a background task runs. REQUIRED args: waitingFor (the bg task id from the detach placeholder) and summary (≤100 chars describing what you are waiting for, shown in the UI). The wait ends EARLY — with a notice — as soon as one of your background tasks finishes. If the pinned task already finished, sleep returns immediately (no dead-wait, never fails). Prefer overestimating: sleep(120) returns immediately when the task completes after 5s. Available in plan, build and learning modes only.`
 }
 
 func (*SleepTool) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"seconds":{"type":"number","minimum":1,"maximum":3600,"description":"Seconds to wait (1–3600). Ends early when a background task finishes."}},"required":["seconds"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"seconds":{"type":"number","minimum":1,"maximum":3600,"description":"Seconds to wait (1–3600). Ends early when a background task finishes."},"waitingFor":{"type":"string","description":"Background task id (bg_…) this sleep waits on. Required."},"summary":{"type":"string","description":"What you are waiting for, max 100 chars (shown in the UI). Required.","maxLength":100}},"required":["seconds","waitingFor","summary"]}`)
 }
 
 func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
@@ -71,15 +70,29 @@ func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 	if a.Seconds < 1 || a.Seconds != a.Seconds || a.Seconds > 3600 {
 		return core.ToolResult{}, fmt.Errorf("seconds must be between 1 and 3600")
 	}
+	jobID := strings.TrimSpace(a.WaitingFor)
+	if jobID == "" {
+		return core.ToolResult{}, fmt.Errorf("waitingFor is required: pass the background task id (bg_…) this sleep waits on")
+	}
+	summary := strings.TrimSpace(a.Summary)
+	if summary == "" {
+		return core.ToolResult{}, fmt.Errorf("summary is required: describe in ≤100 chars what you are waiting for")
+	}
+	if len(summary) > 100 {
+		summary = summary[:100]
+	}
 	wait := time.Duration(a.Seconds * float64(time.Second))
-	// Stale-decision shortcut: the job finished after the model asked for
-	// this sleep but before it started executing (detach at 10s, finish at
-	// 11s, sleep issued from a stale roundtrip). Its delivery notice is
-	// already in context — waiting the full duration would dead-wait.
-	if t.Host != nil && wait > sleepFreshGrace {
-		if fh, ok := t.Host.(BgFreshnessHost); ok {
-			if label, ago, found := fh.RecentBgFinish(t.SessionID); found && ago < sleepFreshGrace {
-				return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Background task %s finished %s ago — its delivery notice is already in context above (read the .log file for the output). Skipping the %s wait. If you still want to pause (e.g. rate-limit backoff), sleep again.", label, humanizeSeconds(ago.Seconds()), humanizeSeconds(a.Seconds))}}}, nil
+	// Pinned-task shortcut: the wait is justified by a task that is still
+	// running. Unknown/foreign ids warn (never fail); an already-terminal
+	// task returns immediately with a pointer to bg_check.
+	if t.Host != nil {
+		if ch, ok := t.Host.(BgSleepCheckHost); ok {
+			status, label, found := ch.BgTaskStatus(t.SessionID, jobID)
+			if !found {
+				return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("%s\n[Note: background task %s is unknown in this session — nothing to wait for. Use bg_check with a valid id.]", summary, jobID)}}}, nil
+			}
+		if status != "running" {
+				return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("%s\n[Note: background task %s (%s) already %s — its completion notice is in context above. Use bg_check with job_id %s to read the output.]", summary, jobID, label, status, jobID)}}}, nil
 			}
 		}
 	}
@@ -104,11 +117,11 @@ func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 	start := time.Now()
 	select {
 	case <-ctx.Done():
-		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: "Sleep cancelled."}}}, nil
+		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: summary + "\nSleep cancelled."}}}, nil
 	case <-timer.C:
-		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Slept %s.", humanizeSeconds(a.Seconds))}}}, nil
+		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("%s\nSlept %s.", summary, humanizeSeconds(a.Seconds))}}}, nil
 	case <-wake:
-		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Woken early after %s: a background task finished — its completion notice is now in context.", humanizeSeconds(time.Since(start).Seconds()))}}}, nil
+		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("%s\nWoken early after %s: a background task finished — its completion notice is now in context.", summary, humanizeSeconds(time.Since(start).Seconds()))}}}, nil
 	}
 }
 

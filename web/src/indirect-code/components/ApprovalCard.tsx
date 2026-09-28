@@ -16,7 +16,7 @@ export interface ApprovalCardProps {
 }
 
 export function ApprovalCard(props: ApprovalCardProps) {
-  const jobs = useBackground().jobs;
+  const jobs = useBackground().sessionJobs;
   return (
     <Show when={props.pendingApproval()}>
       {(pa) => {

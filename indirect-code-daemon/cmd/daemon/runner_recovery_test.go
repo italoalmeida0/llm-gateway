@@ -1,10 +1,8 @@
 package main
 
 import (
-	"llm-gateway/indirect-code-daemon/packages/agent/tools"
 	"llm-gateway/indirect-code-daemon/packages/runner"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -134,13 +132,8 @@ func TestRecoveryTerminalRecoveryUsesReadableBrainLog(t *testing.T) {
 	if notice == nil {
 		t.Fatal("missing retained notice")
 	}
-	sandbox := tools.NewSandbox(t.TempDir())
-	sandbox.AllowExtra(filepath.Dir(proc.BrainLog))
-	sandbox.Lock()
-	if err := sandbox.CheckPath(proc.BrainLog); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(notice.Text, proc.BrainLog) {
-		t.Fatalf("boot recovery still points at the live log instead of the brain copy; live-log access: %v", sandbox.CheckPath(proc.LogPath))
+	// v2: the notice points at bg_check (session-owned logs), never at a file.
+	if !strings.Contains(notice.Text, "bg_check") || !strings.Contains(notice.Text, proc.JobID) {
+		t.Fatalf("boot recovery must point at bg_check: %q", notice.Text)
 	}
 }

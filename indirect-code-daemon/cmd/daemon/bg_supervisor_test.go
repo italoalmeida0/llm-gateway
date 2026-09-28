@@ -36,35 +36,40 @@ func bgRegister(t *testing.T, b *bgSupervisor, session, label string) bgRegister
 	}
 }
 
-func bgList(t *testing.T, b *bgSupervisor) []map[string]any {
+func bgQuery(t *testing.T, b *bgSupervisor, jobID string) bgQueryResult {
 	t.Helper()
 	reply := make(chan any, 1)
-	b.inbox <- Envelope{Payload: bgListMsg{Reply: reply}}
+	b.inbox <- Envelope{Payload: bgQueryMsg{JobID: jobID, Reply: reply}}
 	select {
 	case r := <-reply:
-		return r.([]map[string]any)
+		return r.(bgQueryResult)
 	case <-time.After(3 * time.Second):
-		t.Fatalf("list timeout")
-		return nil
+		t.Fatalf("query timeout")
+		return bgQueryResult{}
 	}
+}
+
+func bgList(t *testing.T, b *bgSupervisor) []map[string]any {
+	t.Helper()
+	// Legacy helper kept for assertions: queries every known job via
+	// bgJobsOfMsg is session-scoped, so tests use bgQuery per job.
+	return nil
 }
 
 func TestBgRegisterFinish(t *testing.T) {
 	b := testBG(t)
 	reg := bgRegister(t, b, "s1", "echo hi")
-	rows := bgList(t, b)
-	if len(rows) != 1 || rows[0]["status"] != BgStatusRunning {
-		t.Fatalf("want 1 running, got %+v", rows)
+	if q := bgQuery(t, b, reg.JobID); !q.Found || q.Status != BgStatusRunning {
+		t.Fatalf("want 1 running, got %+v", q)
 	}
 	b.inbox <- Envelope{Payload: bgFinishMsg{JobID: reg.JobID, Status: BgStatusDone, Result: "hi"}}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		rows = bgList(t, b)
-		if rows[0]["status"] == BgStatusDone {
+		if q := bgQuery(t, b, reg.JobID); q.Status == BgStatusDone {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("never finished: %+v", rows)
+			t.Fatalf("never finished")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -85,9 +90,8 @@ func TestBgCancelBeatsFinish(t *testing.T) {
 	}
 	// Late finish loses.
 	b.inbox <- Envelope{Payload: bgFinishMsg{JobID: reg.JobID, Status: BgStatusDone, Result: "late"}}
-	rows := bgList(t, b)
-	if rows[0]["status"] != BgStatusCancelled {
-		t.Fatalf("cancel lost to late finish: %+v", rows)
+	if q := bgQuery(t, b, reg.JobID); q.Status != BgStatusCancelled {
+		t.Fatalf("cancel lost to late finish: %+v", q)
 	}
 }
 
@@ -105,20 +109,6 @@ func TestBgSleepWakePush(t *testing.T) {
 	case <-wake:
 	case <-time.After(3 * time.Second):
 		t.Fatalf("sleep never woke on finish")
-	}
-}
-
-func TestBgFreshnessGrace(t *testing.T) {
-	b := testBG(t)
-	reg := bgRegister(t, b, "s1", "quick")
-	b.inbox <- Envelope{Payload: bgFinishMsg{JobID: reg.JobID, Status: BgStatusDone, Result: "x"}}
-	time.Sleep(50 * time.Millisecond)
-	// A new sleep right after finish wakes immediately (60s grace).
-	wake := b.subscribeFinish("s1", nil)
-	select {
-	case <-wake:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("freshness grace did not wake")
 	}
 }
 
@@ -150,19 +140,8 @@ func TestBgPidfileReadopt(t *testing.T) {
 	go b2.run(&wg2)
 	defer func() { b2.control <- shutdownMsg{}; wg2.Wait() }()
 	time.Sleep(200 * time.Millisecond)
-	rows := func() []map[string]any {
-		r := make(chan any, 1)
-		b2.inbox <- Envelope{Payload: bgListMsg{Reply: r}}
-		return (<-r).([]map[string]any)
-	}()
-	found := false
-	for _, row := range rows {
-		if row["id"] == reg.JobID && row["status"] == BgStatusRunning {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("live job not re-adopted: %+v", rows)
+	if q := bgQuery(t, b2, reg.JobID); !q.Found || q.Status != BgStatusRunning {
+		t.Fatalf("live job not re-adopted: %+v", q)
 	}
 }
 
@@ -189,16 +168,7 @@ func TestBgPidfileOrphan(t *testing.T) {
 	go b2.run(&wg2)
 	defer func() { b2.control <- shutdownMsg{}; wg2.Wait() }()
 	time.Sleep(200 * time.Millisecond)
-	r := make(chan any, 1)
-	b2.inbox <- Envelope{Payload: bgListMsg{Reply: r}}
-	rows := (<-r).([]map[string]any)
-	for _, row := range rows {
-		if row["id"] == reg.JobID {
-			if row["status"] != BgStatusOrphaned {
-				t.Fatalf("want orphaned, got %+v", row)
-			}
-			return
-		}
+	if q := bgQuery(t, b2, reg.JobID); !q.Found || q.Status != BgStatusOrphaned {
+		t.Fatalf("want orphaned, got %+v", q)
 	}
-	t.Fatalf("orphan missing: %+v", rows)
 }

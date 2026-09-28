@@ -771,9 +771,14 @@ func scanSpans(f *os.File) ([]lineSpan, error) {
 		}
 		trimmed := bytes.TrimRight(line, "\r\n")
 		if len(bytes.TrimSpace(trimmed)) > 0 {
+			// `turn` is a NUMBER on turn lines but an OBJECT (TurnActivity)
+			// on the meta line — probe it untyped and read the number only
+			// when it IS one. (Typed `Turn int` used to fail the meta line,
+			// making every persistEdited/truncateTail on a real session —
+			// any session that ever ran a turn — fail with "corrupt line".)
 			var probe struct {
-				Kind string `json:"kind"`
-				Turn int    `json:"turn"`
+				Kind string          `json:"kind"`
+				Turn json.RawMessage `json:"turn"`
 			}
 			if jerr := json.Unmarshal(trimmed, &probe); jerr != nil {
 				// Fail closed on corrupt middle lines (never silently
@@ -782,7 +787,9 @@ func scanSpans(f *os.File) ([]lineSpan, error) {
 				// the file end and tolerates exactly one partial line.
 				return nil, fmt.Errorf("corrupt line at offset %d", off)
 			}
-			spans = append(spans, lineSpan{turn: probe.Turn, start: off, end: off + n, isMeta: probe.Kind == "meta"})
+			turn := 0
+			_ = json.Unmarshal(probe.Turn, &turn) // object (meta) -> stays 0
+			spans = append(spans, lineSpan{turn: turn, start: off, end: off + n, isMeta: probe.Kind == "meta"})
 		}
 		off += n
 		if err != nil {

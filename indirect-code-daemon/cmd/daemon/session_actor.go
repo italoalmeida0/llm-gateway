@@ -1400,11 +1400,14 @@ func (a *sessionActor) onFork(m forkReqMsg) {
 		m.Reply <- forkResult{Error: "Select a user or assistant message to fork"}
 		return
 	}
+	// The fork INCLUDES the boundary's whole turn (user + assistant + tool
+	// results): every row with the same TurnIndex, stopping at the next
+	// turn's first row. (Role-based extents missed the assistant reply of
+	// a user boundary and rejected a tool-row boundary — fork&resend keeps
+	// can land on either.)
 	end := m.Keep + 1
-	if boundary.Role == provider.RoleAssistant {
-		for end < len(a.rec.Messages) && a.rec.Messages[end].Role == provider.RoleTool {
-			end++
-		}
+	for end < len(a.rec.Messages) && a.rec.Messages[end].TurnIndex == boundary.TurnIndex {
+		end++
 	}
 	now := time.Now().UnixMilli()
 	rec := &SessionRecord{

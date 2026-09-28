@@ -155,18 +155,6 @@ type forkResendResult struct {
 	NewID string
 }
 
-// clearTailMsg discards the whole transcript WITHOUT starting a turn
-// (/clear). The old truncateAndRun(sid, 0, "", ...) started an empty turn
-// — the model answered a blank prompt.
-type clearTailMsg struct {
-	Reply chan any // clearTailResult
-}
-
-// clearTailResult answers clearTailMsg.
-type clearTailResult struct {
-	Error string
-}
-
 // seededStartMsg starts a turn whose user row is already durable in the
 // record (fork&resend continuation: the row was persisted into the fork).
 type seededStartMsg struct {

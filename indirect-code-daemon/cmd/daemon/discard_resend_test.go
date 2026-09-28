@@ -44,6 +44,15 @@ func darActor(t *testing.T, rec *SessionRecord) (*sessionActor, *diskStore) {
 	// exits immediately so the actor's worker goroutine never touches the
 	// test's temp dir after the assertions.
 	a.startWorker = func(snap workerSnapshot, env workerEnv, ctx context.Context) {}
+	// Close the WAL on cleanup: startSeededTurn opens one and the stubbed
+	// worker never finishes the turn — on Windows the open handle blocks
+	// TempDir cleanup (unlinkat: file in use).
+	t.Cleanup(func() {
+		if a.wal != nil {
+			_ = a.wal.close()
+			a.wal = nil
+		}
+	})
 	return a, st
 }
 
@@ -169,29 +178,6 @@ func TestDiscardAndResendDuringRunningTurn(t *testing.T) {
 	}
 	if !ok {
 		t.Fatalf("stashed op lost the text: %+v", last.Content)
-	}
-}
-
-// /clear discards WITHOUT starting a turn (the old path ran an empty turn).
-func TestClearTailStartsNoTurn(t *testing.T) {
-	rec := &SessionRecord{ID: "sess1", Messages: darMsgs(4)}
-	a, st := darActor(t, rec)
-	started := false
-	a.startWorker = func(workerSnapshot, workerEnv, context.Context) { started = true }
-	reply := make(chan any, 1)
-	a.onClearTail(clearTailMsg{Reply: reply})
-	if r := (<-reply).(clearTailResult); r.Error != "" {
-		t.Fatal(r.Error)
-	}
-	if started {
-		t.Fatal("/clear must NOT start a turn")
-	}
-	fused, _, err := st.loadSessionFused("sess1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fused.Messages) != 0 {
-		t.Fatalf("clear must drop the transcript: %d rows", len(fused.Messages))
 	}
 }
 

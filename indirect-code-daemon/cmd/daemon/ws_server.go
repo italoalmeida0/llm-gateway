@@ -640,14 +640,6 @@ func (s *wsServer) handleRaw(raw []byte) {
 			Model: req.Model, YOLO: req.YOLO,
 		})
 
-	case "clear_tail":
-		var req struct {
-			SessionID string `json:"sessionId"`
-			RequestID string `json:"requestId"`
-		}
-		_ = json.Unmarshal(raw, &req)
-		s.onClearTail(req.SessionID, req.RequestID)
-
 	case "create_project":
 		var req struct {
 			RequestID string `json:"requestId"`
@@ -1268,30 +1260,6 @@ func (s *wsServer) onForkAndResend(sessionID, requestID string, msg forkAndResen
 	}
 }
 
-// onClearTail routes /clear (discard the transcript, NO turn) and ALWAYS
-// answers (clear_tail_result). The old path started an empty turn.
-func (s *wsServer) onClearTail(sessionID, requestID string) {
-	res := s.sessions.route(sessionID, false)
-	if res.Error != "" {
-		s.emit(map[string]any{"type": "clear_tail_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": res.Error})
-		return
-	}
-	msg := clearTailMsg{Reply: make(chan any, 1)}
-	select {
-	case res.Inbox <- Envelope{SessionID: sessionID, Payload: msg}:
-	case <-time.After(replyTimeout):
-		s.emit(map[string]any{"type": "clear_tail_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": "session busy"})
-		return
-	}
-	select {
-	case r := <-msg.Reply:
-		cr, _ := r.(clearTailResult)
-		s.emit(map[string]any{"type": "clear_tail_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": cr.Error == "", "error": cr.Error})
-	case <-time.After(replyTimeout):
-		s.emit(map[string]any{"type": "clear_tail_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": "session busy"})
-	}
-}
-
 func (s *wsServer) readRecord(sessionID string) *SessionRecord {
 	res := s.sessions.route(sessionID, true)
 	if res.Error != "" {
@@ -1365,10 +1333,9 @@ func (s *wsServer) onSlashCommand(res spawnResult, sessionID, text string) bool 
 	}
 	switch fields[0] {
 	case "/clear":
-		// Discard the transcript WITHOUT starting a turn (the old
-		// truncateAndRun(sid, 0, "", ...) started an EMPTY turn — the model
-		// answered a blank prompt).
-		s.onClearTail(sessionID, "")
+		// Handled by the frontend (new conversation = UI-only). Nothing to
+		// do here — the old path started an EMPTY turn (the model answered
+		// a blank prompt).
 		return true
 	case "/compact":
 		select {

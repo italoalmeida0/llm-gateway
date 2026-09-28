@@ -868,10 +868,6 @@ export default function IndirectCodePage() {
         }
         break;
       }
-      case "clear_tail_result": {
-        if (!msg.ok) notice.toast(msg.error || "Could not clear the conversation", "err");
-        break;
-      }
 
       case "daemon_update": {
         // Per-host: the relay fans out every host, but the foreground

@@ -420,13 +420,15 @@ try {
     );
   });
   snapshot = await state();
+  // User-row saves ride the ATOMIC discard_and_resend primitive.
   assert.deepEqual(
-    snapshot.commands.find((c: any) => c.type === "edit_message").attachmentIds,
+    snapshot.commands.find((c: any) => c.type === "discard_and_resend")
+      .attachmentIds,
     ["image"],
   );
   assert.equal(
-    snapshot.commands.find((c: any) => c.type === "edit_message").index,
-    3,
+    snapshot.commands.find((c: any) => c.type === "discard_and_resend").text,
+    "new text",
   );
   // Edit removal and replacement use an independent upload queue.
   await page.evaluate(async () => {
@@ -466,8 +468,9 @@ try {
   });
   snapshot = await state();
   assert.deepEqual(
-    snapshot.commands.filter((c: any) => c.type === "edit_message").at(-1)
-      .attachmentIds,
+    snapshot.commands
+      .filter((c: any) => c.type === "discard_and_resend")
+      .at(-1).attachmentIds,
     ["replacement"],
   );
   await reset();
@@ -531,11 +534,11 @@ try {
     a.t.cancelEditMsg();a.t.resetForSession();a.setHost("host-a");a.t.applySnapshot("session-a", a.rawEdit);
     a.choose = () => new Promise(resolve => a.resolveChoice = resolve);
     a.editDone = a.t.saveEditMsg(0,a.t.messages()[0],()=>"m",()=>true);
-    a.beforeChoiceCommands = a.commands.filter((c:any) => c.type === "edit_message").length;
+    a.beforeChoiceCommands = a.commands.filter((c:any) => c.type === "discard_and_resend").length;
     a.setHost("host-b");
   });
   await page.evaluate(async () => {const a=(window as any).composerUI; a.resolveChoice("resend"); await a.editDone;});
-  assert(await page.evaluate(() => {const a=(window as any).composerUI;return a.commands.filter((c:any)=>c.type === "edit_message").length === a.beforeChoiceCommands;}), "host switch invalidates a pending edit confirmation");
+  assert(await page.evaluate(() => {const a=(window as any).composerUI;return a.commands.filter((c:any)=>c.type === "discard_and_resend").length === a.beforeChoiceCommands;}), "host switch invalidates a pending edit confirmation");
   await page.evaluate(() => {
     const a = (window as any).composerUI;
     a.t.resetForSession();a.setHost("host-a");

@@ -52,7 +52,7 @@ type pendingAsk struct {
 // pendingResendOp is the stashed form of a discard&resend-family operation
 // (applied by the finalizer when a running turn gives way).
 type pendingResendOp struct {
-	kind string // "discard_and_resend" | "fork_and_resend" | "clear_tail"
+	kind string // "discard_and_resend" | "fork_and_resend"
 	msg  discardAndResendMsg
 	fork forkAndResendMsg
 }
@@ -269,8 +269,6 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.onDiscardAndResend(m)
 	case forkAndResendMsg:
 		a.onForkAndResend(m)
-	case clearTailMsg:
-		a.onClearTail(m)
 	case seededStartMsg:
 		a.onSeededStart(m)
 	case forkReqMsg:
@@ -859,8 +857,6 @@ func (a *sessionActor) finishTurn(ok bool) {
 			a.applyDiscardAndResend(op.msg)
 		case "fork_and_resend":
 			a.applyForkAndResend(op.fork)
-		case "clear_tail":
-			a.applyClearTail(nil)
 		}
 	}
 }
@@ -1195,43 +1191,6 @@ func (a *sessionActor) startSeededTurn(turnSeq int, model string, yolo bool, att
 	return nil
 }
 
-// onClearTail discards the whole transcript WITHOUT starting a turn
-// (/clear). The old path started an empty turn — the model answered a
-// blank prompt.
-func (a *sessionActor) onClearTail(m clearTailMsg) {
-	if a.state != stateIdle {
-		if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
-			a.pendingResend = &pendingResendOp{kind: "clear_tail"}
-			a.doCancel("clear_tail")
-			return // the finalizer answers m.Reply
-		}
-		replyClear(m.Reply, clearTailResult{Error: "session is busy"})
-		return
-	}
-	a.applyClearTail(m.Reply)
-}
-
-func (a *sessionActor) applyClearTail(reply chan any) {
-	if a.persistErr != nil {
-		replyClear(reply, clearTailResult{Error: "session storage is failing; try again"})
-		return
-	}
-	previous := cloneRecord(a.rec)
-	a.rec.Messages = nil
-	a.rec.FileBalloons = nil
-	// keepTurn=1 keeps only spans with turn < 1 (none): the transcript is
-	// dropped, the meta (incl. BgTasks) is rewritten.
-	if err := a.store.truncateTail(a.id, 1, recordMeta(a.rec)); err != nil {
-		a.rec = previous
-		replyClear(reply, clearTailResult{Error: "Could not clear: " + err.Error()})
-		return
-	}
-	a.emit(map[string]any{"type": "session_truncated", "hostId": a.hostID(), "sessionId": a.id, "keepIndex": -1})
-	a.emit(tailContentEvent(a.hostID(), a.id, "session_content", a.rec, 0, nil))
-	a.pingChange()
-	replyClear(reply, clearTailResult{})
-}
-
 // onForkAndResend forks the prefix ABOVE the turn at TurnID (the boundary
 // turn excluded) into a new session, inserts the new user row there and
 // starts the turn — the row is durable in the FORK before the turn starts.
@@ -1375,15 +1334,6 @@ func (a *sessionActor) sessionRoute(id string) (chan Envelope, chan any, bool) {
 
 // replyResend/replyClear/replyForkResend answer ALWAYS (no silent drops).
 func replyResend(ch chan any, r discardResendResult) {
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- r:
-	default:
-	}
-}
-func replyClear(ch chan any, r clearTailResult) {
 	if ch == nil {
 		return
 	}

@@ -659,16 +659,17 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 		}
 		id := reg.JobID
 		// Register the session-global BgTask: from here every chunk is
-		// durable in session+WAL, independent of turn state. Best-effort:
-		// the supervisor job is the source of truth for lifecycle.
-		w.sendInbox(bgTaskRegisterMsg{JobID: id, Kind: kind, Label: label})
+		// durable in session+WAL, independent of turn state. Best-effort
+		// and never blocking: the supervisor job is the source of truth
+		// for lifecycle (tests run slowHook without an actor inbox).
+		w.sendInboxBestEffort(bgTaskRegisterMsg{JobID: id, Kind: kind, Label: label})
 		stream := func(chunk string) {
 			if chunk == "" {
 				return
 			}
 			// Session-first: the chunk lands in the BgTask (RAM + WAL).
 			// The live bg_output emit stays for the streaming row.
-			w.sendInbox(bgTaskChunkMsg{JobID: id, Text: chunk})
+			w.sendInboxBestEffort(bgTaskChunkMsg{JobID: id, Text: chunk})
 			if w.env.emit != nil {
 				w.env.emit(map[string]any{"type": "bg_output", "sessionId": w.env.actorID, "jobId": id, "text": chunk})
 			}
@@ -682,7 +683,7 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 				}
 				// Terminal BgTask first (trim + persist + cleanup), then
 				// the supervisor finish (notice/wake-up).
-				w.sendInbox(bgTaskFinishMsg{JobID: id, Status: status})
+				w.sendInboxBestEffort(bgTaskFinishMsg{JobID: id, Status: status})
 				select {
 				case w.env.bg.inbox <- Envelope{Payload: bgFinishMsg{JobID: id, Status: status, Result: result}}:
 				case <-w.env.bg.done:
@@ -690,6 +691,21 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 			})
 		}
 		return id, logPath, stream, finish
+	}
+}
+
+// sendInboxBestEffort delivers a bg-task message to the session actor
+// without blocking: no actor inbox (tests), a full inbox, or a dead
+// worker context all drop the message. The supervisor remains the
+// lifecycle source of truth; the session BgTask is a best-effort mirror.
+func (w *turnBridge) sendInboxBestEffort(payload any) {
+	if w.env.inbox == nil {
+		return
+	}
+	select {
+	case w.env.inbox <- w.stamp(payload):
+	case <-w.ctx.Done():
+	default:
 	}
 }
 

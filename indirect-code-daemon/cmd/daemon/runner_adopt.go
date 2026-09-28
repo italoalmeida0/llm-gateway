@@ -59,13 +59,8 @@ func (b *bgSupervisor) adoptRunners() {
 	for _, st := range states {
 		switch {
 		case st.Terminal():
-			// Outcome already recorded: repair the terminal copy if the
-			// crash landed between the state write and the copy (or
-			// mid-copy).
-			if err := repairTerminalCopy(st); err != nil {
-				trace("runner.output.pending", map[string]any{"job": st.JobID})
-				continue
-			}
+			// Outcome already recorded (v2: the session BgTask is the
+			// durable record — no brain copy needed).
 			// V2R-001: only a task that was a real BACKGROUND job notifies.
 			// An inline (foreground) outcome was already consumed by the
 			// agent, and a suppressed (assistant) cancel is silent — a
@@ -118,10 +113,6 @@ func (b *bgSupervisor) adoptRunners() {
 			st.Status, st.ExitCode, st.EndedAt = runner.StatusKilled, &code, &end
 			st.OutcomeUnknown = true
 			if err := runner.WriteState(root, st); err != nil {
-				continue
-			}
-			if err := repairTerminalCopy(st); err != nil {
-				trace("runner.output.pending", map[string]any{"job": st.JobID})
 				continue
 			}
 			// V2R-001: a dead runner still honours the disposition — a
@@ -233,9 +224,6 @@ func (b *bgSupervisor) watchAdopted(jobID string, st *runner.State) {
 			return // state gone (GC or explicit clean)
 		}
 		if cur.Terminal() {
-			if err := repairTerminalCopy(cur); err != nil {
-				continue
-			}
 			status := BgStatusDone
 			if cur.Status != runner.StatusDone || (cur.ExitCode != nil && *cur.ExitCode != 0) {
 				status = BgStatusError
@@ -256,9 +244,6 @@ func (b *bgSupervisor) watchAdopted(jobID string, st *runner.State) {
 			cur.Status, cur.ExitCode, cur.EndedAt = runner.StatusKilled, &code, &end
 			cur.OutcomeUnknown = true
 			if err := runner.WriteState(b.rootDir(), cur); err != nil {
-				continue
-			}
-			if err := repairTerminalCopy(cur); err != nil {
 				continue
 			}
 			b.finishAdopted(jobID, BgStatusError, runnerNoticeText(cur))
@@ -358,11 +343,7 @@ func runnerNoticeText(st *runner.State) string {
 	if st.OutcomeUnknown {
 		status = "interrupted; command outcome unknown; verify effects before repeating"
 	}
-	path := st.BrainPath
-	if path == "" {
-		path = st.LogPath
-	}
-	return fmt.Sprintf("[Background %s task %s] %s. Full output: %s", st.Kind, st.JobID, status, path)
+	return fmt.Sprintf("[Background %s task %s] %s. Read the output with bg_check (job_id %s).", st.Kind, st.JobID, status, st.JobID)
 }
 
 // gcRunners (F8): dead generation binaries go once nothing references

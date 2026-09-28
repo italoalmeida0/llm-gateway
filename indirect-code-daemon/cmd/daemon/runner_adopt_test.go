@@ -192,7 +192,8 @@ func TestRunnerSurvivesParentDeathAndIsAdopted(t *testing.T) {
 }
 
 // T3: the RUNNER dies — the parent reports an explicit failure, never a
-// silent hang, and the log survives.
+// silent hang. (v2: output lives in the session BgTask; the out file is
+// transient and may be cleaned at terminal.)
 func TestRunnerDeathIsAnExplicitFailure(t *testing.T) {
 	root, dataDir := runnerTestRoot(t)
 	proc := spawnTestRunner(t, root, dataDir, "echo partial; sleep 30")
@@ -227,9 +228,6 @@ func TestRunnerDeathIsAnExplicitFailure(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("dead runner produced a silent hang instead of a failure")
-	}
-	if !fileHas(proc.LogPath, "partial") {
-		t.Fatal("the log must survive the runner's death")
 	}
 }
 

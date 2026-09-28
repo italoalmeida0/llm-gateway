@@ -60,27 +60,22 @@ Runners make the task itself the owner of its lifecycle:
     indirect-code-runner-<version>[.exe]   one self-copied binary per
                                            runner version (the multi-call
                                            binary copied under this name)
-    <jobId>.state.json                     one state file per task
-    out/                                   LIVE task logs — GC-EXEMPT
-      <sessionId>__<jobId>__<startedAtMs>.log
+    <jobId>.state.json                     transient per-task state
+    <jobId>.disposition                    background|inline|suppressed (transient)
+    <jobId>.launch                         launch claim (transient)
 ```
 
-**Live logs live in `runners/out/`, not in `brain/`** (decided D8): while
-the task runs, its output is appended to `runners/out/<name>` — reserved
-on the runner side, never handed to `brain/` yet. Only on a TERMINAL
-transition (finished, died, or cleaned) is the final log **COPIED** (not
-moved — essential per the owner) to the session's `brain/` location. The
-out copy stays: `out/` is never touched by GC.
+**Logs live in the SESSION, not in files** (v2, supersedes D8): while
+the task runs, every output chunk is appended to the session's `BgTasks[]`
+record (RAM tail 100KB + WAL event per chunk) and streamed to the
+frontend as `bg_output`. At terminal the tail is trimmed to 50KB and the
+runner files (state + disposition + launch) are REMOVED immediately —
+no retention window, no `out/` logs, no `brain/` copies. BgTasks are
+never GCed: a bg task is part of the session transcript forever.
 
-The filename is the identity (decided D8): `<sessionId>__<jobId>__<startedAtMs>.log`
-— parseable and attributable even if the state file and the task itself
-have already been cleaned.
-
-Interim compatibility: the job's internal `LogPath` points at the `out/`
-file while running and at the `brain/` copy after the terminal
-transition, so today's tail/read machinery keeps working unchanged. The
-model-facing read/placeholder redesign is the owner's future work (out
-of scope here).
+The v2 storage migration sweeps v1 leftovers (`runners/out/*.log`,
+`brain/bg_*.log`, terminal states, pid/notice files). Session files are
+never touched.
 
 ## 4. State file (`runners/<jobId>.state.json`)
 
@@ -255,25 +250,28 @@ A state file the parent does not recognize is not killed blindly:
   only — runners keep running their tasks — and once a generation's
   runners are gone its binary goes with them.
 
-### F8 — garbage collection (dead weight over time)
-- State files with dead pids and old `heartbeatAt`/`endedAt` are removed
-  after a retention window; the GC scan runs **hourly** plus at daemon
-  boot (decided D5). Logs are never affected — they live in `brain/`.
+### F8 — garbage collection (leftovers only)
+- Runner files are cleaned AT TERMINAL (state + disposition + launch go
+  as soon as the session BgTask holds every byte). The GC scan runs
+  **hourly** plus at daemon boot (decided D5) and only sweeps leftovers
+  (crash between terminal and cleanup) + dead generation binaries. No
+  retention window: the session BgTask is the durable record.
 - Version binaries are removed per F7 (generation dies out).
 - A parent that itself died repeatedly cannot leak: the boot scan is
   idempotent and every rule is based on files + pid liveness, never on
   in-memory bookkeeping.
 
-### F9 — completion (terminal transitions copy to brain)
+### F9 — completion (terminal transitions clean the files)
 1. Runner writes `exitCode` + `endedAt` + `status: done` to the state
    file (atomic tmp+rename) BEFORE anything else.
-2. **COPIES** the `runners/out/<name>` log to the session's `brain/`
-   location (copy, never move — D8). Any terminal transition triggers
-   the copy: finished, killed/died, or cleaned as an orphan.
+2. The daemon marks the session BgTask terminal (trim to 50KB, WAL
+   fsync) and REMOVES state + disposition + launch immediately. Any
+   terminal transition triggers it: finished, killed/died, or cleaned
+   as an orphan.
 3. Emits `done` on the socket (if connected) and exits immediately (D5).
    The parent folds the completion into the transcript via the existing
    notice machinery (`background_delivery` identity = idempotent
-   redelivery).
+   redelivery); the notice points at `bg_check` (job_id).
 
 ## 7. What changes vs today (integration map)
 
@@ -283,8 +281,8 @@ A state file the parent does not recognize is not killed blindly:
 | `runners/` | NEW: versioned self-copied binaries + per-job state files |
 | bg supervisor | jobs gain a runner-backed transport; registry reads state files (which also replace pidfiles — pidfile kept readable during transition for old jobs) |
 | notice machinery (V2-003) | UNCHANGED semantics; the runner's `done` state becomes the retained notice source |
-| logs | Live logs move to `runners/out/` (GC-exempt); terminal COPY to `brain/` (never move). `LogPath` follows the phase so current readers keep working |
-| agent tool surface | UNCHANGED (placeholder + 10s foreground window + `bg_cancel` semantics) |
+| logs | Session BgTasks own the output (RAM 100KB live, 50KB at terminal, WAL-durable); runner files cleaned at terminal; `bg_check` pages by lines |
+| agent tool surface | `bg_check` (paged session-log reads) NEW; `sleep` requires `waitingFor` + `summary`; `bg_cancel` unchanged; 10s foreground window unchanged |
 | update choreography | UNCHANGED (runners simply survive it; add F7 GC) |
 | `processutil`/`killslot` | REUSED for process-group kills |
 
@@ -331,15 +329,14 @@ SIGKILL things.
   background notice); over 10s detach exactly like today's
   `AutoBackgroundAfter`.
 - **T12 crash windows at the terminal transition**: the runner records
-  `done` and dies BEFORE the copy (W1) or MID-copy (W2) — the least
-  likely, most dangerous instants. Reconciliation heals the copy from
-  the out log and folds exactly one notice per outcome. (T3 uses a hard
+  `done` and dies BEFORE the daemon folds it into the session BgTask —
+  the least likely, most dangerous instant. Reconciliation replays the
+  state + WAL and folds exactly one notice per outcome. (T3 uses a hard
   SIGKILL too — no terminal transition at all.)
-- **T11 out→brain copy semantics (D8)**: live output lands only in
-  `runners/out/`; on finish AND on kill the `brain/` log appears as a
-  COPY (byte-identical, the out original still exists); `out/` survives
-  GC sweeps; and after deleting the state file + job, the filename alone
-  still attributes the log (sessionId/jobId/startedAt).
+- **T11 session durability (supersedes D8)**: live output lands only in
+  the session BgTask (RAM + WAL); on finish AND on kill the BgTask is
+  marked terminal (trim to 50KB) and the runner files are removed
+  immediately — no retention, no copies.
 - **T10 orphan resolution at boot (F5b)**: a runner whose state
   correlates to a session (placeholder/WAL) is adopted and its stream
   resumes; a runner whose session moved past it (no link) is SIGKILLed
@@ -398,12 +395,11 @@ Additive and migration-free:
   one code path.
 - **D7 — `ping` every ~2s; parent considered gone after ~6 misses
   (~12s)**.
-- **D8 — live logs in `runners/out/`, copy-to-brain at terminal** (owner):
-  during the task the output stays reserved on the runner side; only a
-  terminal transition (finish / die / clean) creates the final `brain/`
-  log, by COPY (never move — essential). `out/` is GC-exempt. Filename is
-  the identity: `<sessionId>__<jobId>__<startedAtMs>.log`. The read /
-  placeholder redesign is the owner's FUTURE work and out of scope here.
+- **D8 — SUPERSEDED by v2 (session-owned logs)**: live output now lands
+  in the session BgTask (RAM 100KB + WAL), trimmed to 50KB at terminal;
+  runner files are removed immediately at terminal. The v2 storage
+  migration sweeps v1 `out/` + `brain/bg_*.log` leftovers. (Original:
+  live logs in `runners/out/`, copy-to-brain at terminal.)
 
 ## Owner checklist
 

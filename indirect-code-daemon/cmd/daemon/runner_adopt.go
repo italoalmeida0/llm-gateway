@@ -82,16 +82,23 @@ func (b *bgSupervisor) adoptRunners() {
 				// Orphans are killed UNCONDITIONALLY (V2R-002/F5b): a
 				// graceful signal is not guaranteed to be honored, and the
 				// command's tree must die with the runner.
-				_ = processutil.SignalIdentity(st.PID, st.ProcessIdentity, 9)
-				reapStoredCommand(st)
-				// Wait for death BEFORE cleaning: the dying runner
-				// rewrites its own state (graceful SIGTERM) and must not
-				// resurrect a cleaned record.
-				deadline := time.Now().Add(5 * time.Second)
-				for time.Now().Before(deadline) && pidAlive(pidString(st.PID)) {
-					time.Sleep(50 * time.Millisecond)
+				// Retry the kill: a single failed signal (Windows handle
+				// race, slow teardown) must not leave the orphan alive
+				// until the next boot.
+				killed := false
+				for attempt := 0; attempt < 3 && !killed; attempt++ {
+					_ = processutil.SignalIdentity(st.PID, st.ProcessIdentity, 9)
+					reapStoredCommand(st)
+					// Wait for death BEFORE cleaning: the dying runner
+					// rewrites its own state (graceful SIGTERM) and must not
+					// resurrect a cleaned record.
+					deadline := time.Now().Add(5 * time.Second)
+					for time.Now().Before(deadline) && pidAlive(pidString(st.PID)) {
+						time.Sleep(50 * time.Millisecond)
+					}
+					killed = !processutil.Matches(st.PID, st.ProcessIdentity)
 				}
-				if processutil.Matches(st.PID, st.ProcessIdentity) {
+				if !killed {
 					trace("runner.orphan.stop_pending", map[string]any{"job": st.JobID})
 					continue
 				}

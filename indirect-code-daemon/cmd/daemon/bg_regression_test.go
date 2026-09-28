@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,11 +80,12 @@ func TestBgStreamIncludesPreDetachOutput(t *testing.T) {
 	dir := t.TempDir()
 	tools.AutoBackgroundAfter = 300 * time.Millisecond
 	defer func() { tools.AutoBackgroundAfter = 10 * time.Second }()
+	var mu sync.Mutex
 	var streamed []string
 	bt := &tools.BashTool{
 		CWD: dir, LogDir: dir,
 		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool)) {
-			return "bg_1", p.BrainLog, func(chunk string) { streamed = append(streamed, chunk) }, func(string, bool) {}
+			return "bg_1", p.BrainLog, func(chunk string) { mu.Lock(); streamed = append(streamed, chunk); mu.Unlock() }, func(string, bool) {}
 		},
 	}
 	args, _ := json.Marshal(map[string]any{"command": "echo EARLY-1; echo EARLY-2; sleep 1; echo LATE-3"})
@@ -92,12 +94,17 @@ func TestBgStreamIncludesPreDetachOutput(t *testing.T) {
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(strings.Join(streamed, ""), "LATE-3") {
+		mu.Lock()
+		all := strings.Join(streamed, "")
+		mu.Unlock()
+		if strings.Contains(all, "LATE-3") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	mu.Lock()
 	joined := strings.Join(streamed, "")
+	mu.Unlock()
 	for _, want := range []string{"EARLY-1", "EARLY-2", "LATE-3"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("bg stream lost pre-detach output %q (stream=%q): the card/bg_check must see EVERY line from the start", want, joined)
@@ -110,14 +117,18 @@ func TestBgStreamIncludesPreDetachOutput(t *testing.T) {
 }
 
 func TestBgStreamIncludesPreDetachOutputPython(t *testing.T) {
+	if _, err := tools.PythonAvailable(); err != nil {
+		t.Skip("no python3 interpreter on this host (musl/Alpine)")
+	}
 	dir := t.TempDir()
 	tools.AutoBackgroundAfter = 300 * time.Millisecond
 	defer func() { tools.AutoBackgroundAfter = 10 * time.Second }()
+	var mu sync.Mutex
 	var streamed []string
 	pt := &tools.PythonTool{
 		CWD: dir, LogDir: dir,
 		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool)) {
-			return "bg_1", p.BrainLog, func(chunk string) { streamed = append(streamed, chunk) }, func(string, bool) {}
+			return "bg_1", p.BrainLog, func(chunk string) { mu.Lock(); streamed = append(streamed, chunk); mu.Unlock() }, func(string, bool) {}
 		},
 	}
 	code := "import time\nprint('PY-EARLY')\ntime.sleep(1)\nprint('PY-LATE')\n"
@@ -127,12 +138,17 @@ func TestBgStreamIncludesPreDetachOutputPython(t *testing.T) {
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(strings.Join(streamed, ""), "PY-LATE") {
+		mu.Lock()
+		all := strings.Join(streamed, "")
+		mu.Unlock()
+		if strings.Contains(all, "PY-LATE") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	mu.Lock()
 	joined := strings.Join(streamed, "")
+	mu.Unlock()
 	if !strings.Contains(joined, "PY-EARLY") || !strings.Contains(joined, "PY-LATE") {
 		t.Fatalf("python bg stream lost output: %q", joined)
 	}
@@ -160,20 +176,9 @@ func TestBgInlineResultNeverLeaksPaths(t *testing.T) {
 	if !strings.Contains(text, "truncated") && !strings.Contains(text, "Showing") {
 		t.Fatalf("truncated result must SAY it is truncated: %q", text[len(text)-200:])
 	}
-	// Details never carry LOG paths either (defense in depth: they leak
-	// into logs/ev payloads even though the provider path drops them).
-	// workdir is the session cwd — legitimate, not a leak.
-	if det, ok := res.Details.(map[string]any); ok {
-		for k, v := range det {
-			vs, ok := v.(string)
-			if !ok {
-				continue
-			}
-			if strings.Contains(vs, "lgrc-") || strings.Contains(vs, ".log") {
-				t.Fatalf("details[%q] leaks a log path: %q", k, vs)
-			}
-		}
-	}
+	// Details are UI-only (core.ToolResult.Details never reaches the LLM —
+	// provider.ToolResultBlock carries Content only), so the full output
+	// path belongs there. The contract under test: Content is path-free.
 }
 
 // --- 4. chunks survive a crash while idle (no WAL yet) -------------------

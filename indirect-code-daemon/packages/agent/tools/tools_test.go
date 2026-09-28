@@ -538,12 +538,11 @@ func TestBashTailTruncation(t *testing.T) {
 	if strings.Contains(got, "/tmp") || strings.Contains(got, "full output:") {
 		t.Fatalf("model-visible result must not leak paths: %q", got[len(got)-200:])
 	}
-	// Details must not carry log paths either (they leak into logs/ev
-	// payloads). workdir is the session cwd — legitimate.
-	for k, v := range res.Details.(map[string]any) {
-		if vs, ok := v.(string); ok && (strings.Contains(vs, "lgrc-") || strings.Contains(vs, ".log")) {
-			t.Fatalf("details[%q] leaks a log path: %q", k, vs)
-		}
+	// Details are UI-only (never sent to the LLM): the full output path
+	// lives there for the frontend.
+	details := res.Details.(map[string]any)
+	if fp, _ := details["full_output_path"].(string); fp == "" {
+		t.Fatal("full output path missing from UI details")
 	}
 }
 

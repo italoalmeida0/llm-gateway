@@ -361,6 +361,10 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 			"stdout":           head.String(),
 			"stderr":           "",
 			"truncated":        snapshot.truncated,
+			// UI-only (Details never reach the LLM): the full output file
+			// for the frontend's copy/inspect affordances. The model-visible
+			// Content above is deliberately path-free.
+			"full_output_path": snapshot.fullOutputPath,
 			"lines_truncated":  snapshot.truncated && snapshot.truncatedBy == "lines",
 			"bytes_truncated":  snapshot.truncated && snapshot.truncatedBy == "bytes",
 			"duration_ms":      elapsed.Milliseconds(),
@@ -559,6 +563,7 @@ type outputSnapshot struct {
 	outputLines     int
 	outputBytes     int
 	lastLinePartial bool
+	fullOutputPath  string
 }
 
 // snapshot tail-truncates the rolling tail,
@@ -599,6 +604,7 @@ func (a *outputAccumulator) snapshot(persistIfTruncated bool) outputSnapshot {
 		outputLines:     tr.outputLines,
 		outputBytes:     tr.outputBytes,
 		lastLinePartial: tr.lastLinePartial,
+		fullOutputPath:  a.tempPath,
 	}
 }
 

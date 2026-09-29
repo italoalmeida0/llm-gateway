@@ -28,10 +28,18 @@ Every builtin tool result is wrapped in one pseudo-XML tag:
 
 - BODY  = ONLY tool content: program output, file text, log lines, search rows,
           JSON data. No system prose, no "[Showing lines…]" notes, no "Command
-          exited with code N", no status word, no file paths.
+          exited with code N", no status word, no file paths, and no separator
+          labels (stdout and stderr are merged, exactly like a terminal).
 - ATTRS = every system FACT, rendered in the order the tool declared them,
           after `type` (always first). Empty values are omitted. Attribute
           values are entity-escaped: & -> &amp;  " -> &quot;  < -> &lt;  > -> &gt;
+
+WHY: anything the system wants to say must be a FACT on the tag, so the body
+stays unambiguous. If a system note lived in the body ("(no output)",
+"[stderr]", "Command exited with code 2", "No output yet."), a program that
+printed that same literal string would be indistinguishable from the system.
+Empty output is therefore `info="no output"` with an empty body, and a command
+that really prints "(no output)" keeps it in the body — the two differ.
 
 Escaping in the body: only the two sequences that could close or spoof the
 envelope are escaped — `</tool_result` -> `&lt;/tool_result` and
@@ -91,17 +99,21 @@ Argument decoding (packages/agent/tools/args.go):
 --------------------------------------------------------------------------------
 3. bash
 --------------------------------------------------------------------------------
-Success (empty output gets the literal placeholder "(no output)"):
+Success:
     <tool_result type="ok" exit="0" duration="1.2s">hello
 world</result>
 
-No output:
-    <tool_result type="ok" exit="0" duration="0.1s">(no output)</result>
+No output — body EMPTY, info attr (matches python):
+    <tool_result type="ok" info="no output" exit="0" duration="0.1s"></result>
+
+A command that literally prints "(no output)" keeps it in the BODY (that is
+program content, not a system label — the two stay distinguishable):
+    <tool_result type="ok" exit="0" duration="0.0s">(no output)</result>
 
 Non-zero exit — STILL type="ok" (a command's exit is a FACT, not a tool error):
     <tool_result type="ok" exit="2" duration="0.4s">build failed: 3 errors</result>
-    <tool_result type="ok" exit="1" duration="0.0s">(no output)</result>
-    <tool_result type="ok" exit="-1" duration="0.0s">(no output)</result>
+    <tool_result type="ok" info="no output" exit="1" duration="0.0s"></result>
+    <tool_result type="ok" info="no output" exit="-1" duration="0.0s"></result>
 
 Aborted (turn cancelled) / stopped (run cancelled):
     <tool_result type="ok" status="aborted" duration="3.0s">partial output...</result>
@@ -133,10 +145,12 @@ Invalid args (tool misuse -> error):
 --------------------------------------------------------------------------------
 4. python
 --------------------------------------------------------------------------------
-Success — body = stdout (+ "[stderr]\n" section when stderr is non-empty):
+Success — body = stdout and stderr MERGED (stdout first), with NO system
+marker — exactly like bash. A script printing the literal "[stderr]" is
+indistinguishable from any other output, so the model never mistakes a label
+for program content:
     <tool_result type="ok" exit="0" duration="0.3s">hello world</result>
     <tool_result type="ok" exit="0" duration="0.2s">ação 日本語 🚀
-[stderr]
 ação 日本語 🚀</result>
 
 No output (info attr, empty body, exit still reported):
@@ -473,11 +487,12 @@ Global caps
 bash
   packages/agent/tools/bash.go ~52/55/58/219/228 invalid args | command is required | terminal unavailable | bg register
   packages/agent/tools/bash.go ~275             background placeholder (status="background", job_id=)
-  packages/agent/tools/bash.go ~310             "(no output)"
+  packages/agent/tools/bash.go ~316-321         info="no output" (empty body; body only when the command really printed it)
   packages/agent/tools/bash.go ~323-330         truncated/page/next/partial_last_line
   packages/agent/tools/bash.go ~337-343         status=aborted|stopped, exit=, duration=
 python
   packages/agent/tools/python.go ~349           background placeholder
+  packages/agent/tools/python.go ~419-437       stdout+stderr MERGED, no "[stderr]" marker
   packages/agent/tools/python.go ~439           info="no output"
   packages/agent/tools/python.go ~445-453       exit= | status=failed+error= | duration=
 read

@@ -209,3 +209,40 @@ func TestPythonUnicodeIO(t *testing.T) {
 		t.Fatal("explicit encoding override lost")
 	}
 }
+
+// stdout and stderr are merged into the body with NO system marker: a script
+// printing the literal string "[stderr]" must be indistinguishable from any
+// other output, so the model never mistakes a label for program content.
+func TestPythonMergesStdoutStderrWithoutMarker(t *testing.T) {
+	if _, err := PythonAvailable(); err != nil {
+		t.Skipf("no python3 on this machine: %v", err)
+	}
+	dir := t.TempDir()
+	tool := &PythonTool{CWD: dir, Sandbox: NewSandbox(dir)}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"code": "import sys; print('out'); print('err', file=sys.stderr)",
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := envBody(t, res)
+	if strings.Contains(got, "[stderr]") {
+		t.Fatalf("body must not carry a system marker: %q", got)
+	}
+	if !strings.Contains(got, "out") || !strings.Contains(got, "err") {
+		t.Fatalf("both streams must reach the body: %q", got)
+	}
+	// Empty output is a fact (attr), never "(no output)" prose in the body.
+	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
+		"code": "pass",
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envBody(t, res); got != "" {
+		t.Fatalf("empty output must have an empty body, got %q", got)
+	}
+	if got := envAttr(res, "info"); got != "no output" {
+		t.Fatalf("info attr = %q", got)
+	}
+}

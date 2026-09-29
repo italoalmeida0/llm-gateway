@@ -315,7 +315,9 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 	outputText := snapshot.content
 	var attrs []core.Attr
 	if outputText == "" {
-		outputText = "(no output)"
+		// Empty output is metadata, never body prose: a command that printed
+		// the literal string "(no output)" must stay distinguishable.
+		attrs = append(attrs, core.Attr{Key: "info", Value: "no output"})
 	}
 	if snapshot.truncated {
 		startLine := snapshot.totalLines - snapshot.outputLines + 1

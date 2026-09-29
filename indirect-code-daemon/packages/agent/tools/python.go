@@ -420,6 +420,9 @@ func finishPythonCommand(runErr error, stdout, stderr bytes.Buffer, start time.T
 
 	out := strings.TrimRight(stdout.String(), "\n")
 	errOut := strings.TrimRight(stderr.String(), "\n")
+	// stdout and stderr are merged, exactly like bash: the body is ONLY the
+	// program's own bytes. No "[stderr]" marker — a script that prints that
+	// literal string would be indistinguishable from a system label.
 	var b strings.Builder
 	if out != "" {
 		b.WriteString(out)
@@ -427,9 +430,6 @@ func finishPythonCommand(runErr error, stdout, stderr bytes.Buffer, start time.T
 	if errOut != "" {
 		if b.Len() > 0 {
 			b.WriteString("\n")
-		}
-		if out != "" {
-			b.WriteString("[stderr]\n")
 		}
 		b.WriteString(errOut)
 	}

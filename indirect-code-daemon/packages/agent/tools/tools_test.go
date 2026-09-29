@@ -767,3 +767,31 @@ func TestBashNoTimeout(t *testing.T) {
 			envBody(t, res))
 	}
 }
+
+// Empty bash output is a fact (info attr), never "(no output)" prose in the
+// body: a command that prints that literal string must stay distinguishable
+// from one that printed nothing.
+func TestBashEmptyOutputUsesInfoAttr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix shell only")
+	}
+	tool := &BashTool{CWD: t.TempDir()}
+	res, _ := tool.Execute(context.Background(), mustJSON(t, map[string]any{"command": "true"}), nil)
+	if got := envBody(t, res); got != "" {
+		t.Fatalf("empty output must have an empty body, got %q", got)
+	}
+	if got := envAttr(res, "info"); got != "no output" {
+		t.Fatalf("info attr = %q", got)
+	}
+	if got := envAttr(res, "exit"); got != "0" {
+		t.Fatalf("exit attr = %q", got)
+	}
+	// A command that literally prints "(no output)" keeps it in the body.
+	res, _ = tool.Execute(context.Background(), mustJSON(t, map[string]any{"command": "printf '(no output)'"}), nil)
+	if got := envBody(t, res); got != "(no output)" {
+		t.Fatalf("literal output must reach the body, got %q", got)
+	}
+	if got := envAttr(res, "info"); got != "" {
+		t.Fatalf("info attr must be absent when there is output, got %q", got)
+	}
+}

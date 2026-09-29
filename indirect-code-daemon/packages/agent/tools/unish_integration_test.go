@@ -40,8 +40,11 @@ func TestUnishToolBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		name, command, want string
 		failed              bool
+		exit                string
 	}{
-		{"stderr and exit status", `printf 'diagnostic\n' >&2; exit 7`, "diagnostic\n", true},
+		// A command's own non-zero exit is NOT tool misuse: type=ok
+		// exit=7 with the output in the body.
+		{"stderr and exit status", `printf 'diagnostic\n' >&2; exit 7`, "diagnostic\n", false, "7"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tool := &BashTool{CWD: t.TempDir(), LogDir: t.TempDir()}
@@ -53,8 +56,8 @@ func TestUnishToolBoundary(t *testing.T) {
 			if res.IsError != tc.failed || !strings.Contains(text, tc.want) {
 				t.Fatalf("unexpected result: %+v", res)
 			}
-			if tc.failed && !strings.Contains(text, "Command exited with code 7") {
-				t.Fatal("exit status lost")
+			if tc.exit != "" && envAttr(res, "exit") != tc.exit {
+				t.Fatalf("exit attr lost: %q", envAttr(res, "exit"))
 			}
 		})
 	}

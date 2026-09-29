@@ -36,10 +36,10 @@ export function ToolUnitHeader(props: ToolPartProps) {
       </Show>
       <span class="text-ink-500 shrink-0">{props.m.sum().verb}</span>
       <span class="flex items-center gap-2 min-w-0 flex-1">
-        <span class="inline-flex items-center gap-2 min-w-0" data-rc-tip={targetPath() ? absoluteRemotePath(targetPath(), props.ctx.activeSession()?.cwd || "", props.ctx.projects().find((p: { protected?: boolean }) => p.protected)?.path) : undefined}>
+        <span class="inline-flex items-center gap-2 min-w-0 flex-1" data-rc-tip={targetPath() ? absoluteRemotePath(targetPath(), props.ctx.activeSession()?.cwd || "", props.ctx.projects().find((p: { protected?: boolean }) => p.protected)?.path) : undefined}>
           <Show when={targetPath()}><FileIcon path={targetPath()} /></Show>
           <Show when={props.m.name() === "bash" || props.m.name() === "python"} fallback={
-            <span class="truncate text-ink-200 font-medium min-w-0">{props.m.name() === "sleep" && !props.u.result ? (props.m.sleepRemaining() || props.m.sum().target) : props.m.sum().target}</span>
+            <span class="truncate text-ink-200 font-medium min-w-0">{props.m.name() === "sleep" ? props.m.sleepLabel() : props.m.sum().target}</span>
           }>
             <span class="truncate text-ink-200 min-w-0 text-[12.5px]"><ShellCmd text={collapseCwd(props.m.bashHeaderCmd(), props.ctx.activeSession()?.cwd || "")} /></span>
           </Show>
@@ -65,11 +65,15 @@ export function ToolUnitHeader(props: ToolPartProps) {
       <Show when={props.m.isDetachedBg()}>
         <span class="rounded border border-line px-1 py-px text-[10px] leading-tight text-ink-500 shrink-0">background</span>
       </Show>
-      <Iconify
-        icon="lucide:chevron-down"
-        size={12}
-        class={`shrink-0 text-ink-600 transition-transform ${props.m.open() ? "rotate-180" : ""}`}
-      />
+      {/* Header-only rows (sleep) keep the clickable row but hide the
+          chevron: there is never a body to reveal. */}
+      <Show when={props.m.expandable()}>
+        <Iconify
+          icon="lucide:chevron-down"
+          size={12}
+          class={`shrink-0 text-ink-600 transition-transform ${props.m.open() ? "rotate-180" : ""}`}
+        />
+      </Show>
     </div>
   );
 }

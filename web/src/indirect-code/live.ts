@@ -104,7 +104,7 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
         let summaryText = "";
         try {
           const parsed = JSON.parse(b.toolArgs || "{}");
-          summaryText = parsed.comprehensive_summary || parsed.notes || "";
+          summaryText = parsed.comprehensive_summary || parsed.summary || parsed.notes || "";
         } catch {}
         if (summaryText.trim()) {
           if (!message.blocks.some((existing) => existing.type === "text" && existing.text?.trim() === summaryText.trim())) {

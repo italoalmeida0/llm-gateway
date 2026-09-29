@@ -28,7 +28,7 @@ async function run(label: string) {
           sleepCalls++;
           if(sleepCalls===1)return sse('sleep',{seconds:1,waitingFor:'bg_test',summary:'test wait'});
           if(sleepCalls===2)return new Response('temporary failure after sleep',{status:503});
-          return sse('mark_task_as_complete',{summary:'Recovered after sleep'});
+          return sse('mark_task_as_complete',{comprehensive_summary:'Recovered after sleep',summary:'Recovered after sleep'});
         }
         if(scenario==='sleep_cancel'){
           // New sleep model: sleep only blocks on a RUNNING bg task. Detach
@@ -46,7 +46,7 @@ async function run(label: string) {
           return sse('sleep',{seconds:360,waitingFor:cancelBgId,summary:'test wait'});
         }
         if((scenario==='approval'||scenario==='question')&&!toolIssued){toolIssued=true;return scenario==='approval'?sse('read',{path:join(work,'hello.txt')}):sse('question',{questions:[{header:'Choice',question:'Pick?',options:[{label:'One'}]}]});}
-        if(scenario==='approval'||scenario==='question')return sse('mark_task_as_complete',{summary:'Done'});
+        if(scenario==='approval'||scenario==='question')return sse('mark_task_as_complete',{comprehensive_summary:'Done',summary:'Done'});
         return sse('',null);
       }
       return Response.json({success:true});

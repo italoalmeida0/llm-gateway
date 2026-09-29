@@ -17,6 +17,7 @@ type MarkTaskAsCompleteTool struct {
 type completionArgs struct {
 	ComprehensiveSummary string `json:"comprehensive_summary"`
 	Notes                string `json:"notes"`
+	Summary              string `json:"summary"`
 }
 
 func (*MarkTaskAsCompleteTool) Name() string { return "mark_task_as_complete" }
@@ -30,6 +31,9 @@ func (t *MarkTaskAsCompleteTool) Execute(ctx context.Context, raw json.RawMessag
 	var args completionArgs
 	_ = json.Unmarshal(raw, &args)
 	summary := strings.TrimSpace(args.ComprehensiveSummary)
+	if summary == "" {
+		summary = strings.TrimSpace(args.Summary)
+	}
 	if summary == "" {
 		summary = strings.TrimSpace(args.Notes)
 	}
@@ -66,6 +70,9 @@ func (t *MarkPlanAsReadyToExecuteTool) Execute(ctx context.Context, raw json.Raw
 	var args completionArgs
 	_ = json.Unmarshal(raw, &args)
 	summary := strings.TrimSpace(args.ComprehensiveSummary)
+	if summary == "" {
+		summary = strings.TrimSpace(args.Summary)
+	}
 	if summary == "" {
 		summary = strings.TrimSpace(args.Notes)
 	}

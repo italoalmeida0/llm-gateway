@@ -180,10 +180,6 @@ export function setThemeMode(m: ThemeMode): void {
   }
 }
 
-export function setTheme(t: Theme): void {
-  setThemeMode(t);
-}
-
 export function toggleTheme(): void {
   setThemeMode(getTheme() === "dark" ? "light" : "dark");
 }

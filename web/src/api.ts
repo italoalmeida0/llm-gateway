@@ -189,20 +189,6 @@ export interface DailyPoint {
   label?: string;
 }
 
-export interface UsageEventDto {
-  id: number;
-  key_id: string;
-  ts: number;
-  proto: "openai" | "anthropic";
-  model: string;
-  in_tok: number;
-  cache_tok: number;
-  out_tok: number;
-  latency_ms: number;
-  status: number;
-  stream: number;
-}
-
 export type AuthStyle = "bearer" | "x-api-key";
 
 /** One upstream key of a provider (failover order). The key material itself

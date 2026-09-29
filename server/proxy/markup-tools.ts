@@ -539,9 +539,6 @@ export function buildWorkaroundToolInstruction(tools: ToolDef[]): string {
   return s;
 }
 
-/** Alias kept for callers/tests that referenced the Xiaomi-specific name. */
-export const buildXiaomiToolInstruction = buildWorkaroundToolInstruction;
-
 /** Build the in-band instruction for a mode (empty for passive modes). */
 export function buildMarkupInstruction(mode: ToolCallMode, tools: ToolDef[]): string {
   if (mode === "own") return buildOwnToolInstruction(tools);

@@ -17,8 +17,6 @@
  * service-tier metadata...).
  */
 
-export type IRRole = "system" | "user" | "assistant" | "tool";
-
 import { StreamText } from "./stream-text";
 import { isReasoningTarget } from "./target-profile";
 import { countTextTokens, estimateThinkingTokens } from "../tokens";
@@ -1477,26 +1475,6 @@ export function encodeResponseFromIR(proto: Proto, r: IRResponse, fallbackModel:
   });
 }
 
-/**
- * Translate a buffered upstream response body to the client's protocol via
- * the IR. Returns the translated body text plus usage for accounting.
- */
-export function translateBufferedResponse(
-  clientProto: Proto,
-  via: Proto,
-  upstreamText: string,
-  fallbackModel: string,
-): { body: string; inTok: number; cacheTok: number; outTok: number; model: string; estimated: boolean } {
-  const ir = decodeResponseToIR(via, upstreamText, fallbackModel);
-  return {
-    body: encodeResponseFromIR(clientProto, ir, fallbackModel),
-    inTok: ir.inTok,
-    cacheTok: ir.cacheTok,
-    outTok: ir.outTok,
-    model: ir.model,
-    estimated: ir.usageEstimated,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // errors: upstream body -> client envelope (via IR message extraction)
@@ -1561,9 +1539,6 @@ export interface IRStreamDelta {
   finish?: "stop" | "length" | "tool_calls";
   error?: { type: string; message: string };
 }
-
-/** Parse one upstream SSE line (post-`data:`/event-stripped payload) into IR deltas. */
-export type IRStreamParser = (data: string) => IRStreamDelta[];
 
 /** Serialize IR deltas into client SSE frames. Stateful per stream. */
 export interface IRStreamWriter {

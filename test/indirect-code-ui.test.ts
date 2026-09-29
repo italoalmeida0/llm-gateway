@@ -11,7 +11,7 @@ import {
 } from "../web/src/indirect-code/live";
 import { absoluteRemotePath, collapseCwd, projectForDirectory, projectsByActivity, sameRemotePath } from "../web/src/indirect-code/paths";
 import {
-  blockTurnDuration, buildRenderBlocks, createRenderBlockBuilder, cacheHitPct, fmtUsd, fuzzySame, isHeaderOnlySleep, isLongAssistantMessage, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
+  blockTurnDuration, buildRenderBlocks, createRenderBlockBuilder, cacheHitPct, fmtUsd, isHeaderOnlySleep, isTurnStartMessage, latestShortTurnMessage, mapBalloonsToBlocks, terminalPresentation, toolSummary, usageCosts,
 } from "../web/src/indirect-code/transcript";
 import { specialTitle } from "../web/src/indirect-code/utils/titles";
 import { partitionToolSegs } from "../web/src/indirect-code/utils/toolSegs";
@@ -124,11 +124,6 @@ test("text-only turns render each message as a distinct bubble", () => {
   expect(buildRenderBlocks(list.slice(0, 2)).map((b) => b.kind)).toEqual(["single", "single"]);
 });
 
-test("fuzzy duplicate text similarity", () => {
-  expect(fuzzySame("Reading package.json to understand the project layout", "reading package.json to understand the project layout now")).toBe(true);
-  expect(fuzzySame("Checking the file", "Running the test suite")).toBe(false);
-  expect(fuzzySame("", "something")).toBe(false);
-});
 
 test("duplicate tool calls with the same id merge into one unit", () => {
   const list: ChatMessage[] = [
@@ -1202,15 +1197,6 @@ describe("completion signals and turn nudges", () => {
     expect(blocks[2].msg.hasCompletion).toBe(true);
   });
 
-  test("isLongAssistantMessage estimates tokens as chars/4 with a 50-token threshold", () => {
-    const short: ChatMessage = { id: "s", role: "assistant", blocks: [{ type: "text", text: "Checking file" }] };
-    const long: ChatMessage = {
-      id: "l", role: "assistant",
-      blocks: [{ type: "text", text: "x".repeat(200) }, { type: "tool_call", toolId: "t", toolName: "bash" }],
-    };
-    expect(isLongAssistantMessage(short)).toBe(false);
-    expect(isLongAssistantMessage(long)).toBe(true);
-  });
 
   test("latestShortTurnMessage returns the last short assistant text of the current turn", () => {
     const mk = (id: string, text: string, turnIndex?: number): ChatMessage => ({

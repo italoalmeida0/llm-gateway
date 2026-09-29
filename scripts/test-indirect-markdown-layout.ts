@@ -108,16 +108,16 @@ try {
       ]);
     }, { reply, crlf });
     await page.waitForTimeout(200);
-    assert.equal(await page.locator('#transcript [data-turn-final]:visible').count(), 1);
+    assert.equal(await page.locator('#transcript [data-assistant-message]:visible').count(), 1);
     assert.equal(await page.locator('#transcript pre:visible').count(), 1);
     assert.equal(await page.locator('#transcript [data-streamdown="inline-code"]:visible').count(), 0);
     assert.equal((await page.locator('#transcript pre:visible > code').textContent())?.trimEnd(), body.trimEnd());
     assert.equal(await page.locator('#transcript p:visible').allTextContents().then((p: string[]) => p.filter(s => s === 'Here is a multiline code block:').length), 1);
-    assert.equal(await page.locator('#transcript [data-turn-final] p').last().textContent(), 'The paragraph after the fence stays outside the code.');
+    assert.equal(await page.locator('#transcript [data-assistant-message] p').last().textContent(), 'The paragraph after the fence stays outside the code.');
   }
   // Recover visibly from denied clipboard access.
   await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new Error('denied'); } } }); });
-  const copy = page.locator('#transcript [data-turn-final] .tarnav-copy');
+  const copy = page.locator('#transcript [data-assistant-message] .tarnav-copy');
   await copy.tap();
   assert.equal(await copy.getAttribute('data-copy-state'), 'error');
   assert.equal(await copy.getByRole('status').textContent(), 'Copy failed. Try again.');

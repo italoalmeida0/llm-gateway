@@ -142,11 +142,6 @@ export async function initTokenEstimator(): Promise<void> {
   await initPromise;
 }
 
-/** True once initTokenEstimator() has resolved. */
-export function tokensReady(): boolean {
-  return native !== null;
-}
-
 /** Raw text → tokens. Used for streamed output samples. */
 export function countTextTokens(text: string): number {
   return Math.max(1, engine().countText(text));
@@ -157,18 +152,6 @@ export function estimateThinkingTokens(encryptedPayload: string): number {
   return Math.max(0, engine().estimateThinkingTokens(encryptedPayload));
 }
 
-export type TokenImageInput =
-  | { width: number; height: number }
-  | { base64: string }
-  | { bytes: Uint8Array | ArrayBuffer };
-
-/** Image → tokens (dimensions, base64 payload or raw bytes). */
-export function countImageTokens(image: TokenImageInput): number {
-  const e = engine();
-  if ("width" in image) return Math.max(0, e.countImageSize(image.width, image.height));
-  if ("base64" in image) return Math.max(0, e.countImageBase64(image.base64));
-  return Math.max(0, e.countImageBytes(image.bytes));
-}
 
 export type Proto = "openai" | "anthropic" | "responses";
 

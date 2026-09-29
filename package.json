@@ -15,7 +15,7 @@
     "update": "bun ./scripts/release.ts",
     "update:release": "bun ./scripts/release.ts",
     "test": "DATA_DIR=./data/test bun test",
-    "lint": "eslint .",
+    "lint": "eslint . && bun ./scripts/check-unused-exports.ts",
     "typecheck": "tsc --noEmit",
     "bench": "bun ./test/bench.ts",
     "fake-upstream": "bun ./test/fake-upstream.ts",

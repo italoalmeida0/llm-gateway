@@ -104,13 +104,15 @@ import assert from "node:assert/strict";
  await page.evaluate(()=>{
    (window as any).turnUI.setRunning(false);
    (window as any).turnUI.setMessages([
-     {id:'a',role:'assistant',turnIndex:1,turnDurationMs:83000,blocks:[{type:'text',text:'Earlier answer'}]},
+     {id:'a',role:'assistant',turnIndex:1,blocks:[{type:'text',text:'Earlier answer'}]},
      {id:'a2',role:'assistant',turnIndex:1,turnDurationMs:83000,blocks:[{type:'text',text:'Chosen final answer'}]},
    ]);
  });await settle();
- assert.equal(await page.locator('[data-turn-final]').count(),1,'text-only multi-step turn has one featured final');
- assert.equal(await page.locator('[data-turn-final]').textContent(),'Chosen final answer');
- assert.equal(await page.getByText('Earlier answer',{exact:true}).filter({visible:true}).count(),0);
+ assert.equal(await page.locator('[data-turn-final]').count(),0);
+ assert.equal(await page.locator('[data-assistant-message="a"]').textContent(),'Earlier answer');
+ assert.equal(await page.locator('[data-assistant-message="a2"]').textContent(),'Chosen final answer');
+ assert.equal(await page.getByText('Earlier answer',{exact:true}).filter({visible:true}).count(),1);
+ assert.equal(await page.getByText('Chosen final answer',{exact:true}).filter({visible:true}).count(),1);
  assert.equal(await page.locator('#actions [data-turn-duration]').textContent(),'1m 23s');
  assert.equal(await page.locator('#aggregate [data-turn-duration]').count(),0);
  await page.evaluate(()=>(window as any).turnUI.setMessages([{id:'a',role:'assistant',turnIndex:1,turnDurationMs:83000,blocks:[{type:'text',text:'Single final answer'}]}]));await settle();

@@ -219,7 +219,7 @@ export function AssistantTurnContent(props: { ctx: TranscriptRenderCtx; block: R
 /** Plain assistant bubble for turns with no tools and no thinking. */
 function renderSingleAssistant(ctx: TranscriptRenderCtx, msg: ChatMessage) {
   return (
-    <div class="w-full space-y-2.5">
+    <div data-assistant-message={msg.id} class="w-full space-y-2.5">
       <For each={msg.blocks.filter((b) => b.type === "image" || (b.type === "text" && !!b.text?.trim()))}>
         {(block) => block.type === "image" ? renderImageBlock(ctx, block) : (
           <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">

@@ -441,19 +441,6 @@ const EVENT_COLS: Record<string, ColSpec> = {
   status: { col: "e.status", kind: "number" },
 };
 
-export type EventFilterEntry = GridFilterEntry;
-
-export function buildEventFilter(
-  filters: Record<string, EventFilterEntry>,
-): { clauses: string[]; params: Array<string | number> } {
-  return buildGridWhere(filters, EVENT_COLS);
-}
-
-export function buildEventOrder(
-  sort: Array<{ colId: string; sort: string }> | undefined,
-): string {
-  return buildGridOrder(sort, EVENT_COLS, "e.ts DESC", "e.id DESC");
-}
 
 export function userEvents(
   userId: string,

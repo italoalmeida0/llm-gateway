@@ -27,23 +27,7 @@ const BLOCKED_EXTS = new Set([
 
 const BLOCKED_MIME_PREFIX = ["video/", "audio/"];
 
-export type ExtractKind = "image" | "text" | "office";
-
-export interface ExtractedFile {
-  name: string;
-  mime: string;
-  size: number;
-  kind: ExtractKind;
-  /** Extracted markdown/text (text + converted office/pdf). */
-  text?: string;
-  /** Data URL for images. */
-  dataUrl?: string;
-  /** Raw bytes base64 (for daemon upload of images). */
-  bytesB64: string;
-  /** True while an async conversion (pdf/office) is still running. */
-  loading: boolean;
-  loadError?: string;
-}
+type ExtractKind = "image" | "text" | "office";
 
 export function uint8ToB64(u8: Uint8Array): string {
   let binary = "";

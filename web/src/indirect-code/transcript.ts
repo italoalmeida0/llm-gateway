@@ -38,24 +38,6 @@ function hasToolActivity(message: ChatMessage): boolean {
   return message.blocks.some((b) => b.type === "tool_call" || b.type === "tool_result");
 }
 
-/** Rough token estimate for hide-tool-messages: chars / 4. Messages with
- * >= LONG_MESSAGE_TOKENS always show even when hiding is enabled, so
- * genuinely useful agent output is never swallowed by the tool group. */
-const LONG_MESSAGE_TOKENS = 50;
-
-function assistantTextTokens(message: ChatMessage): number {
-  const text = message.blocks
-    .filter((b) => b.type === "text" && b.text)
-    .map((b) => b.text as string)
-    .join("\n")
-    .trim();
-  return text.length / 4;
-}
-
-export function isLongAssistantMessage(message: ChatMessage): boolean {
-  return assistantTextTokens(message) >= LONG_MESSAGE_TOKENS;
-}
-
 /** Per-row session costs with the output bucket split pro-rata between
  * plain output and reasoning (same unit price, so the split is exact).
  * Null when the daemon reported no pricing — callers then hide costs. */
@@ -158,36 +140,6 @@ export function latestShortTurnMessage(messages: ChatMessage[]): string {
     if (text && text.length < TURN_HINT_MAX_CHARS) return text;
   }
   return "";
-}
-
-/** Fuzzy text similarity for turn dedup: normalized containment either way
- * or high word-overlap. Keeps only the last of near-duplicate progress
- * notes (the agent restating itself while tools run). Pure — covered by tests. */
-interface FuzzyText { source: string; normalized: string; words: Set<string> }
-function prepareFuzzyText(source: string): FuzzyText {
-  const normalized = source.toLowerCase().replace(/\s+/g, " ").trim();
-  return { source, normalized, words: new Set(normalized.split(" ").filter(Boolean)) };
-}
-function compareFuzzyText(a: FuzzyText, b: FuzzyText): boolean {
-  const na = a.normalized, nb = b.normalized;
-  if (!na || !nb) return false;
-  if (na === nb) return true;
-  const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na];
-  if (short.length >= 24 && long.includes(short)) return true;
-  const [small, large] = a.words.size <= b.words.size ? [a.words, b.words] : [b.words, a.words];
-  // Even complete overlap cannot reach the threshold for very different sizes.
-  if (small.size < large.size * .8) return false;
-  const required = .8 * (small.size + large.size) / 1.8;
-  let intersection = 0, remaining = small.size;
-  for (const word of small) {
-    remaining--;
-    if (large.has(word)) intersection++;
-    if (intersection + remaining < required) return false;
-  }
-  return intersection / (small.size + large.size - intersection) >= .8;
-}
-export function fuzzySame(a: string, b: string): boolean {
-  return compareFuzzyText(prepareFuzzyText(a), prepareFuzzyText(b));
 }
 
 /** Pair tool calls with results across a turn, in display order.

@@ -82,14 +82,6 @@ function envelopeFooter(e: ToolEnvelope): string {
  * Strip the envelope for human display: returns the body plus a footer line
  * of the notable facts. Legacy text (no envelope) is returned unchanged.
  */
-export function stripToolEnvelope(text: string): string {
-  const e = parseToolEnvelope(text);
-  if (!e) return text;
-  const footer = envelopeFooter(e);
-  if (!footer) return e.body;
-  return e.body ? `${e.body}\n\n${footer}` : footer;
-}
-
 /** Strip for display but keep the envelope facts (for UI labels). */
 export function stripToolEnvelopeDetailed(text: string): {
   body: string;
@@ -102,9 +94,4 @@ export function stripToolEnvelopeDetailed(text: string): {
     body: footer ? (e.body ? `${e.body}\n\n${footer}` : footer) : e.body,
     attrs: e.attrs,
   };
-}
-
-/** The envelope facts as a plain record ({} for legacy text). */
-export function toolEnvelopeAttrs(text: string): Record<string, string> {
-  return parseToolEnvelope(text)?.attrs ?? {};
 }

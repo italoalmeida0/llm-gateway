@@ -106,7 +106,7 @@ try {
   t.resetForSession();
   t.applySnapshot("other",{status:"running",messages:[{id:"answer",role:"assistant",streaming:true,content:[{summary:"thought"},{text:"reading this answer"}]}],transcript:{stream:"answer",seq:1}});
  });
- const answer=page.locator('#actual [data-text-row] .rc-markdown');
+ const answer=page.locator('#actual [data-assistant-message="answer"] .rc-markdown');
  await answer.waitFor({state:"visible",timeout:5000}).catch(async e=>{throw new Error(String(e)+await page.locator("#actual").innerHTML());});
  await page.evaluate(()=>{
   const {t}=(window as any).transcriptTest;

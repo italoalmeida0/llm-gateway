@@ -81,19 +81,6 @@ export function classifyHttpError(status: number, bodyPeek: string): FailClass |
   return null;
 }
 
-/** Legacy (no-skip policy): consecutive-failure cooldowns are gone —
- *  kept as a no-op so older call sites/tests fail loudly at import time
- *  instead of silently changing behavior. Do not use. */
-export function nextCooldown(_failCount: number): number | null {
-  return null;
-}
-
-/** Legacy (no-skip policy): midnight auto-retry no longer exists — keys
- *  never leave rotation, so there is nothing to retry. Kept for import
- *  compatibility only. */
-export function billingCooldownUntil(_now = Date.now()): number {
-  return _now;
-}
 
 /** Is this provider key currently usable? Only an explicit admin
  *  `disabled` removes a key from rotation — billing/auth/transient

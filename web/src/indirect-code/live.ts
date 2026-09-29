@@ -95,6 +95,7 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
   );
   return messages.flatMap((message) => {
     let hadCompletion = message.hasCompletion || false;
+    let hadSummary = message.hasSummary || false;
     let mutated = false;
     const newBlocks: ContentBlock[] = [];
     for (const b of message.blocks) {
@@ -114,6 +115,7 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
         continue;
       }
       if (b.type === "tool_call" && b.toolName === "summary") {
+        hadSummary = true;
         mutated = true;
         let forUser = "";
         try {
@@ -139,6 +141,6 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
     if (!mutated) return [message];
     if (newBlocks.length === 0 && message.blocks.length > 0) return [];
     if (newBlocks.every((b) => b.type === "text" && !b.text?.trim())) return [];
-    return [{ ...message, blocks: newBlocks, hasCompletion: hadCompletion }];
+    return [{ ...message, blocks: newBlocks, hasCompletion: hadCompletion, hasSummary: hadSummary }];
   });
 }

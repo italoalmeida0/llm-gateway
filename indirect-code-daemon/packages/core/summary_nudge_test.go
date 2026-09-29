@@ -27,6 +27,30 @@ func TestStripIntermediateAssistantText(t *testing.T) {
 	}
 }
 
+func TestStripIntermediateAssistantTextStandalone(t *testing.T) {
+	msgs := []provider.Message{
+		{
+			Role:    provider.RoleUser,
+			Content: []provider.Content{provider.TextBlock{Text: "Fix the bug"}},
+		},
+		{
+			Role:    provider.RoleAssistant,
+			Content: []provider.Content{provider.TextBlock{Text: "Boa, tenho artefatos ricos. Vou montar um plano..."}},
+		},
+		{
+			Role:    provider.RoleAssistant,
+			Content: []provider.Content{provider.ToolCallBlock{ID: "call_1", Name: "read"}},
+		},
+	}
+	cleaned := stripIntermediateAssistantText(msgs)
+	if len(cleaned) != 2 {
+		t.Fatalf("expected 2 messages (user + tool call), got %d: %+v", len(cleaned), cleaned)
+	}
+	if cleaned[1].Role != provider.RoleAssistant || len(cleaned[1].Content) != 1 {
+		t.Fatalf("expected 1 tool call in assistant message, got %+v", cleaned[1])
+	}
+}
+
 func TestStripNudgedAssistantText(t *testing.T) {
 	msgs := []provider.Message{
 		{

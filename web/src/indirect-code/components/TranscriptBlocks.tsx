@@ -198,7 +198,7 @@ function renderTurnAggregate(
     if (!ctx.verboseChat() && idx !== lastTextIdx()) return true;
     if (
       ctx.hideToolMessages() && series.units.length > 0 &&
-      !entry.msg.hasCompletion && !isLongAssistantMessage(entry.msg)
+      !entry.msg.hasCompletion && !entry.msg.hasSummary && !isLongAssistantMessage(entry.msg)
     ) return true;
     return false;
   };

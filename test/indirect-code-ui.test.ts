@@ -1277,7 +1277,21 @@ describe("completion signals and turn nudges", () => {
     // No short text at all -> empty.
     expect(latestShortTurnMessage([mk("a1", "z".repeat(120), 50)])).toBe("");
     // Unstamped (live streaming): tail after the last user turn-start.
-    expect(latestShortTurnMessage([mk("old", "stale"), user, mk("new", "Reading config")])).toBe("Reading config");
+    // In a tool turn with summary tool, extracts for_user:
+    const summaryMsg: ChatMessage = {
+      id: "sum", role: "assistant", turnIndex: 50,
+      blocks: [{
+        type: "tool_call", toolId: "s1", toolName: "summary",
+        toolArgs: JSON.stringify({ for_user: "Refactoring database connection pool and testing postgres.", for_me: "internal" }),
+      }],
+    };
+    expect(latestShortTurnMessage([mk("a1", "chatter", 50), summaryMsg])).toBe("Refactoring database connection pool and testing postgres.");
+    // In a tool turn without summary, suppresses conversational chatter:
+    const bashMsg: ChatMessage = {
+      id: "b1", role: "assistant", turnIndex: 50,
+      blocks: [{ type: "tool_call", toolId: "cmd1", toolName: "bash" }],
+    };
+    expect(latestShortTurnMessage([mk("a1", "chatter before bash", 50), bashMsg])).toBe("");
     expect(latestShortTurnMessage([])).toBe("");
   });
 });

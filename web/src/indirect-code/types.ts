@@ -91,6 +91,8 @@ export interface ChatMessage {
   streaming?: boolean;
   /** True when this message included a completion signal (mark_task_as_complete / mark_plan_as_ready_to_execute). */
   hasCompletion?: boolean;
+  /** True when this message included a progress summary signal. */
+  hasSummary?: boolean;
   /**
    * Index of the source message in the daemon's raw transcript. Display
    * normalization merges/drops raw messages (tool results are hoisted onto

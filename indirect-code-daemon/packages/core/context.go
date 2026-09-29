@@ -119,33 +119,72 @@ func applyAssistantTextTransforms(msg provider.Message, transforms []AssistantTe
 }
 
 // stripIntermediateAssistantText removes TextBlocks from assistant messages
-// that also contain ToolCallBlocks. During tool usage, conversational chatter
-// is stripped so only the tool calls (and reasoning if present) remain in context.
+// in turns that have tool usage. During tool execution, conversational chatter
+// is stripped so only tool calls (and reasoning if present) remain in context.
 func stripIntermediateAssistantText(msgs []provider.Message) []provider.Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
 	out := make([]provider.Message, 0, len(msgs))
-	for _, m := range msgs {
-		if m.Role != provider.RoleAssistant {
-			out = append(out, m)
-			continue
-		}
-		hasTools := false
-		for _, c := range m.Content {
-			if _, ok := c.(provider.ToolCallBlock); ok {
-				hasTools = true
-				break
-			}
-		}
-		if hasTools {
-			var clean []provider.Content
-			for _, c := range m.Content {
-				if _, ok := c.(provider.TextBlock); !ok {
-					clean = append(clean, c)
+
+	i := 0
+	for i < len(msgs) {
+		turnStart := i
+		turnEnd := i
+		for turnEnd < len(msgs) {
+			if turnEnd > turnStart && msgs[turnEnd].Role == provider.RoleUser {
+				text := extractText(msgs[turnEnd])
+				if !isSyntheticNudge(text) {
+					break
 				}
 			}
-			m.Content = clean
+			turnEnd++
 		}
-		out = append(out, m)
+
+		for j := turnStart; j < turnEnd; j++ {
+			m := msgs[j]
+			if m.Role == provider.RoleAssistant {
+				hasOwnTools := false
+				for _, c := range m.Content {
+					if _, ok := c.(provider.ToolCallBlock); ok {
+						hasOwnTools = true
+						break
+					}
+				}
+				hasSubsequentTools := false
+				for k := j + 1; k < turnEnd; k++ {
+					if msgs[k].Role == provider.RoleAssistant {
+						for _, c := range msgs[k].Content {
+							if _, ok := c.(provider.ToolCallBlock); ok {
+								hasSubsequentTools = true
+								break
+							}
+						}
+					}
+					if hasSubsequentTools {
+						break
+					}
+				}
+
+				if hasOwnTools || hasSubsequentTools {
+					var clean []provider.Content
+					for _, c := range m.Content {
+						if _, ok := c.(provider.TextBlock); !ok {
+							clean = append(clean, c)
+						}
+					}
+					m.Content = clean
+					if len(m.Content) == 0 {
+						continue
+					}
+				}
+			}
+			out = append(out, m)
+		}
+
+		i = turnEnd
 	}
+
 	return out
 }
 
@@ -161,8 +200,8 @@ func isSyntheticNudge(text string) bool {
 	return false
 }
 
-// stripNudgedAssistantText prunes intermediate conversational text-only messages
-// that were followed by an automated system nudge once the model has proceeded to work.
+// stripNudgedAssistantText prunes synthetic system nudges and intermediate conversational
+// text once the model has proceeded to execute tools in the turn.
 func stripNudgedAssistantText(msgs []provider.Message) []provider.Message {
 	if len(msgs) == 0 {
 		return msgs
@@ -178,12 +217,32 @@ func stripNudgedAssistantText(msgs []provider.Message) []provider.Message {
 					break
 				}
 			}
-			// If text-only and followed by a synthetic nudge, and there are further messages after the nudge:
 			if !hasTools && i+1 < len(msgs) && msgs[i+1].Role == provider.RoleUser {
 				nextText := extractText(msgs[i+1])
 				if isSyntheticNudge(nextText) && i+2 < len(msgs) {
-					// Drop both the intermediate conversational text and the nudge
 					i++
+					continue
+				}
+			}
+		}
+		if m.Role == provider.RoleUser {
+			text := extractText(m)
+			if isSyntheticNudge(text) {
+				hasSubsequentTools := false
+				for j := i + 1; j < len(msgs); j++ {
+					if msgs[j].Role == provider.RoleAssistant {
+						for _, c := range msgs[j].Content {
+							if _, ok := c.(provider.ToolCallBlock); ok {
+								hasSubsequentTools = true
+								break
+							}
+						}
+					}
+					if hasSubsequentTools {
+						break
+					}
+				}
+				if hasSubsequentTools {
 					continue
 				}
 			}

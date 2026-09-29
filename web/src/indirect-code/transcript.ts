@@ -133,6 +133,26 @@ export function latestShortTurnMessage(messages: ChatMessage[]): string {
   }
   for (let i = turnMsgs.length - 1; i >= 0; i--) {
     const m = turnMsgs[i];
+    for (const b of m.blocks) {
+      if (b.type === "tool_call" && b.toolName === "summary") {
+        try {
+          const parsed = JSON.parse(b.toolArgs || "{}");
+          const forUser = (parsed.for_user || "").replace(/\s+/g, " ").trim();
+          if (forUser) {
+            return forUser.length > TURN_HINT_MAX_CHARS ? forUser.slice(0, TURN_HINT_MAX_CHARS - 1) + "…" : forUser;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // In tool turns without an explicit summary tool call, suppress conversational chatter hints.
+  if (turnMsgs.some(hasToolActivity)) {
+    return "";
+  }
+
+  for (let i = turnMsgs.length - 1; i >= 0; i--) {
+    const m = turnMsgs[i];
     if (m.role !== "assistant") continue;
     const text = assistantSingleLine(m);
     if (text && text.length < TURN_HINT_MAX_CHARS) return text;

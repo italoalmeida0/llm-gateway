@@ -12,7 +12,8 @@ import type { TranscriptRenderCtx } from "../TranscriptBlocks";
  * so createMemo instances belong to the row and dispose with it.
  * Rows start open only while active (the turn's live tail) with
  * non-blank content, and closed otherwise — unless the user toggled
- * them explicitly. */
+ * them explicitly. Sleep is never expandable: its row is header-only in
+ * every state (see expandable). */
 export function useToolUnitModel(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: () => boolean, active: () => boolean) {
 const key = () => toolRowKey(msgId, u, ui);
 const sum = createMemo(() => toolSummary(u));
@@ -22,19 +23,23 @@ const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
  * calling name() before this const initializes throws a TDZ
  * ReferenceError and breaks every tool row on expand. */
 const name = () => u.call?.toolName || "tool";
+/** Sleep rows are header-only (live counter in the label while running,
+ * plain summary once finished): no body and no chevron, ever. */
+const expandable = () => !isHeaderOnlySleep(name(), !!u.result);
 /** Anything worth showing: result output, streamed args/progress. Rows
  * with nothing (pre-created card, empty call) stay shut until content
  * lands — the chevron still opens them manually. */
 const hasContent = createMemo(() => {
-  // Sleep rows are header-only while running (live counter in the label,
-  // see sleepRemaining); finished sleeps report content like other tools.
-  if (isHeaderOnlySleep(name(), !!u.result)) return false;
+  // Sleep never renders a body, finished or not.
+  if (!expandable()) return false;
   if (((u.result?.toolDetails?.display ?? u.result?.toolResult) || "").trim() !== "") return true;
   if ((prog() || "").trim() !== "") return true;
   return Object.keys(args()).length > 0;
 });
 const { open, toggle } = createDisclosure(() => `${running()}:${active()}`,
   () => running() && active() && !u.result && u.call?.toolName !== "question" && hasContent());
+/** Header-only rows stay clickable but never reveal a body. */
+const openBody = () => open() && expandable();
 // Full shell command for the highlighted header: commands[] joined with
 // the effective joiner (&& or ;), else the single command. Python rows
 // show script + args or the first code line (same as the summary).
@@ -105,7 +110,7 @@ const bgStream = () => {
 /** True once the call carries a background job — the row renders as a
  * background run (badge, spinner while running). */
 const isDetachedBg = () => bgJobId() !== "";
-  return { key, open, toggle, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed, sleepRemaining, bgJobId, bgRunning, bgStream, isDetachedBg };
+  return { key, open, openBody, expandable, toggle, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed, sleepRemaining, bgJobId, bgRunning, bgStream, isDetachedBg };
 }
 
 export type ToolModel = ReturnType<typeof useToolUnitModel>;

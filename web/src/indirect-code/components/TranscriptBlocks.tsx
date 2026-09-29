@@ -434,7 +434,7 @@ function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui
   return (
     <div class="w-full">
       <ToolUnitHeader {...part} />
-      <DisclosureBody open={m.open()}>
+      <DisclosureBody open={m.openBody()}>
         <div class="mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 max-h-96 overflow-auto overscroll-contain [scrollbar-gutter:stable]">
           <ToolEditBodies {...part} />
           <ToolSearchBodies {...part} />

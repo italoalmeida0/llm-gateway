@@ -634,13 +634,14 @@ export function toolSummary(u: ToolUnit): ToolSummary {
   }
 }
 
-/** Sleep rows stay header-only while the timer runs (the live remaining
- * counter renders in the label); once the result lands ("Slept …" /
- * "Woken early …") the body renders like any other tool. Single source
- * of truth for the row model and the body gate — they must agree, or
- * expanding a finished sleep shows an empty body. */
-export function isHeaderOnlySleep(toolName: string, hasResult: boolean): boolean {
-  return toolName === "sleep" && !hasResult;
+/** Sleep rows are header-only in every state: while the timer runs the
+ * live remaining counter renders in the label, and once the result lands
+ * ("Slept …" / "Woken early …") the header summary carries the outcome.
+ * No body and no chevron, ever. Single source of truth for the row model
+ * and the body gate — they must agree, or expanding a sleep shows an
+ * empty body. */
+export function isHeaderOnlySleep(toolName: string, _hasResult: boolean): boolean {
+  return toolName === "sleep";
 }
 
 /** Determines if a chat message marks the beginning of an agent turn.

@@ -1617,9 +1617,11 @@ describe("Background tasks (bash/python detach)", () => {
     } as any).verb).toBe("Canceled");
   });
 
-  test("sleep rows are header-only while running, with a body once finished", () => {
+  test("sleep rows are header-only in every state (no body, no chevron)", () => {
     expect(isHeaderOnlySleep("sleep", false)).toBe(true);
-    expect(isHeaderOnlySleep("sleep", true)).toBe(false);
+    // A finished sleep is still header-only: the outcome lives in the header
+    // summary ("Slept 30s" / "Woken early …"), never in a body.
+    expect(isHeaderOnlySleep("sleep", true)).toBe(true);
     expect(isHeaderOnlySleep("bash", false)).toBe(false);
     expect(isHeaderOnlySleep("bash", true)).toBe(false);
     expect(isHeaderOnlySleep("python", false)).toBe(false);
@@ -1639,10 +1641,12 @@ describe("Background tasks (bash/python detach)", () => {
     expect(blocks[0].kind).toBe("series");
     if (blocks[0].kind === "series") {
       expect(blocks[0].units.map((u) => u.call?.toolId)).toEqual(["b", "s"]);
-      // The finished sleep keeps its result text: the body gate must let it through.
+      // The finished sleep keeps its result text in the unit, but the row
+      // stays header-only: the summary carries the outcome, the body gate
+      // keeps it shut (no chevron, nothing to expand).
       const sleep = blocks[0].units.find((u) => u.call?.toolId === "s");
       expect(sleep?.result?.toolResult).toContain("Woken early");
-      expect(isHeaderOnlySleep(sleep?.call?.toolName || "", !!sleep?.result)).toBe(false);
+      expect(isHeaderOnlySleep(sleep?.call?.toolName || "", !!sleep?.result)).toBe(true);
     }
   });
 });
@@ -1734,10 +1738,26 @@ describe("Tool row model", () => {
       const sleep = useToolUnitModel(ctx, "m1", sleepUnit, 0, () => true, () => true);
       expect(sleep.name()).toBe("sleep");
       expect(sleep.open()).toBe(false); // header-only while running
+      expect(sleep.expandable()).toBe(false); // no chevron for sleep
+      expect(sleep.openBody()).toBe(false); // ...and never a body
       expect(sleep.sleepRemaining()).toBe("25s left");
       const bash = useToolUnitModel(ctx, "m1", bashUnit, 1, () => false, () => false);
       expect(bash.sum().verb).toBe("Ran");
       expect(bash.open()).toBe(false);
+      expect(bash.expandable()).toBe(true); // normal rows keep the chevron
+      // A finished sleep is header-only too: no chevron, no body, ever.
+      const sleptUnit: any = {
+        call: { type: "tool_call", toolId: "s2", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 30 }) },
+        result: { type: "tool_result", toolId: "s2", toolResult: "Woken early after 12s: a background task finished." },
+      };
+      const slept = useToolUnitModel(ctx, "m1", sleptUnit, 2, () => false, () => false);
+      expect(slept.name()).toBe("sleep");
+      expect(slept.expandable()).toBe(false);
+      expect(slept.openBody()).toBe(false);
+      // Clicking the row toggles the disclosure state but reveals nothing.
+      slept.toggle();
+      expect(slept.open()).toBe(true);
+      expect(slept.openBody()).toBe(false);
       dispose();
     });
   });

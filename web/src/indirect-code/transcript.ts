@@ -190,54 +190,6 @@ export function fuzzySame(a: string, b: string): boolean {
   return compareFuzzyText(prepareFuzzyText(a), prepareFuzzyText(b));
 }
 
-interface TextDedupState { texts: FuzzyText[]; matches: number[] }
-/** Append-only turns reuse previous decisions. Edits invalidate only comparisons
- * involving the changed suffix, including matches whose later note disappeared. */
-function deduplicateTexts(sources: string[], previous?: TextDedupState): TextDedupState {
-  let prefix = 0;
-  while (prefix < sources.length && previous?.texts[prefix]?.source === sources[prefix]) prefix++;
-  const texts = sources.map((source, i) => i < prefix ? previous!.texts[i] : prepareFuzzyText(source));
-  const matches = texts.map((text, i) => {
-    const prior = i < prefix ? previous!.matches[i] : -1;
-    if (prior >= 0 && prior < prefix) return prior;
-    const floor = i < prefix && prior < 0 ? Math.max(prefix, i + 1) : i + 1;
-    for (let j = texts.length - 1; j >= floor; j--) if (compareFuzzyText(text, texts[j])) return j;
-    return -1;
-  });
-  return { texts, matches };
-}
-
-/** Featured final message of a turn, by priority: among the last two
- * messages with 50+ tokens written either without calling any tool or
- * alongside the completion signal, the longest wins; with none
- * qualifying, the last text the AI sent in the turn regardless of size.
- * Rendered below the aggregate once the turn ends. */
-export function finalTurnMessage(turnMsgs: ChatMessage[]): ChatMessage | null {
-  // If a completion signal message carries text (e.g. from comprehensive_summary), it is always the featured final message.
-  for (let k = turnMsgs.length - 1; k >= 0; k--) {
-    if (turnMsgs[k].hasCompletion && hasVisibleText(turnMsgs[k])) {
-      return turnMsgs[k];
-    }
-  }
-
-  const qualifying = turnMsgs.filter((m) =>
-    hasVisibleText(m) &&
-    (!hasToolActivity(m) || m.hasCompletion) &&
-    isLongAssistantMessage(m));
-  const lastTwo = qualifying.slice(-2);
-  if (lastTwo.length > 0) {
-    let best = lastTwo[0];
-    for (const m of lastTwo.slice(1)) {
-      if (assistantTextTokens(m) > assistantTextTokens(best)) best = m;
-    }
-    return best;
-  }
-  for (let k = turnMsgs.length - 1; k >= 0; k--) {
-    if (hasVisibleText(turnMsgs[k])) return turnMsgs[k];
-  }
-  return null;
-}
-
 /** Pair tool calls with results across a turn, in display order.
  * Duplicate calls with the same id (pre-created card + finalized call)
  * merge into one unit so no result-less orphan lingers mid-list. */
@@ -273,11 +225,9 @@ function pairTurnUnits(turnMsgs: ChatMessage[]): ToolUnit[] {
   return units;
 }
 
-/** Ordered aggregate rows for a turn, in stored (daemon) block order.
- * Tool runs stay merged across messages until a thinking/text/image entry
- * breaks them, preserving the existing cross-message explore/command
- * sub-grouping for pure tool runs. */
-function buildTurnEntries(turnMsgs: ChatMessage[], previous?: TextDedupState): { entries: TurnEntry[]; dedup: TextDedupState } {
+/** Ordered aggregate rows for a tool/thinking block, in stored (daemon) block order.
+ * Tool runs stay merged across messages until a thinking/image entry breaks them. */
+function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
   const entries: TurnEntry[] = [];
   let run: ToolUnit[] = [];
   let runMsg: ChatMessage | null = null;
@@ -294,7 +244,6 @@ function buildTurnEntries(turnMsgs: ChatMessage[], previous?: TextDedupState): {
       flushRun();
       entries.push({ kind: "thinking", msg: message, block: reasoning[r], nth: r, isNewest: r === 0 });
     }
-    let textNth = 0;
     for (const block of message.blocks) {
       if (block.type === "tool_call") {
         if (!runMsg) runMsg = message;
@@ -302,7 +251,6 @@ function buildTurnEntries(turnMsgs: ChatMessage[], previous?: TextDedupState): {
       } else if (block.type === "tool_result") {
         const unit = block.toolId ? byId.get(block.toolId) : undefined;
         if (unit) {
-          // Pairs wherever the call lives, even in an already-flushed run.
           unit.result = block;
         } else {
           if (!runMsg) runMsg = message;
@@ -310,9 +258,6 @@ function buildTurnEntries(turnMsgs: ChatMessage[], previous?: TextDedupState): {
           run.push(orphan);
           if (block.toolId) byId.set(block.toolId, orphan);
         }
-      } else if (block.type === "text" && !!block.text?.trim()) {
-        flushRun();
-        entries.push({ kind: "text", msg: message, block, nth: textNth++ });
       } else if (block.type === "image") {
         flushRun();
         entries.push({ kind: "image", msg: message, block });
@@ -320,17 +265,60 @@ function buildTurnEntries(turnMsgs: ChatMessage[], previous?: TextDedupState): {
     }
   }
   flushRun();
-  // Normalize each note once, retaining decisions across live deltas/resumes.
-  const texts = entries.filter((e) => e.kind === "text");
-  const dedup = deduplicateTexts(texts.map((entry) => entry.block.text || ""), previous);
-  texts.forEach((entry, i) => { entry.hidden = dedup.matches[i] >= 0; });
-  return { dedup, entries: entries.map((entry, index) => ({ ...entry, id: entry.kind === "tools"
-    ? `${entry.msg.id}:tools:${entry.units[0]?.id || index}`
-    : `${entry.msg.id}:${entry.kind}:${"nth" in entry ? entry.nth : index}` })) };
-
+  return entries.map((entry, index) => ({
+    ...entry,
+    id: entry.kind === "tools"
+      ? `${entry.msg.id}:tools:${entry.units[0]?.id || index}`
+      : `${entry.msg.id}:${entry.kind}:${"nth" in entry ? entry.nth : index}`,
+  }));
 }
 
-type RenderCache = Map<string, { messages: ChatMessage[]; block: RenderBlock; dedup?: TextDedupState }>;
+function buildTurnBlocks(turnMsgs: ChatMessage[]): RenderBlock[] {
+  const blocks: RenderBlock[] = [];
+  let currentToolMsgs: ChatMessage[] = [];
+
+  const flushToolGroup = () => {
+    if (currentToolMsgs.length === 0) return;
+    const entries = buildTurnEntries(currentToolMsgs);
+    if (entries.length > 0) {
+      blocks.push({
+        kind: "series",
+        id: `${currentToolMsgs[0].id}:series`,
+        msg: currentToolMsgs[0],
+        extras: currentToolMsgs.slice(1),
+        units: pairTurnUnits(currentToolMsgs),
+        entries,
+      });
+    } else if (blocks.length === 0) {
+      // Empty in-flight message with no entries yet: render as single for typing indicator
+      blocks.push({ kind: "single", msg: currentToolMsgs[0] });
+    }
+    currentToolMsgs = [];
+  };
+
+  for (const m of turnMsgs) {
+    if (hasToolActivity(m)) {
+      currentToolMsgs.push(m);
+    } else if (hasVisibleText(m)) {
+      const hasReasoning = m.blocks.some((b) => b.type === "reasoning" && !!b.reasoning?.trim());
+      if (hasReasoning) {
+        currentToolMsgs.push({
+          ...m,
+          blocks: m.blocks.filter((b) => b.type === "reasoning"),
+        });
+      }
+      flushToolGroup();
+      blocks.push({ kind: "single", msg: m });
+    } else {
+      // Message with only reasoning or empty blocks
+      currentToolMsgs.push(m);
+    }
+  }
+  flushToolGroup();
+  return blocks;
+}
+
+type RenderCache = Map<string, { messages: ChatMessage[]; blocks: RenderBlock[] }>;
 
 /** Per-view cache: immutable message identities invalidate only changed turns.
  * Keeping only the latest turn set bounds retention across session switches. */
@@ -339,9 +327,9 @@ export function createRenderBlockBuilder() {
   return (messages: ChatMessage[]) => buildRenderBlocks(messages, cache);
 }
 
-/** One aggregate per assistant turn: thinking/tools become ordered rows;
- * a single plain assistant message stays a bubble. Source indices remain
- * attached to the original daemon messages. */
+/** One aggregate per contiguous tool execution/thinking run; visible text
+ * messages (summaries, completions, direct answers) separate as individual
+ * bubbles. Source indices remain attached to the original daemon messages. */
 export function buildRenderBlocks(
   messages: ChatMessage[], cache?: RenderCache,
 ): RenderBlock[] {
@@ -359,27 +347,11 @@ export function buildRenderBlocks(
     const turnMsgs = list.slice(i, turnEnd + 1);
     const cached = cache?.get(head.id);
     if (cached && cached.messages.length === turnMsgs.length && cached.messages.every((m, index) => m === turnMsgs[index])) {
-      result.push(cached.block); nextCache.set(head.id, cached); i = turnEnd; continue;
+      result.push(...cached.blocks); nextCache.set(head.id, cached); i = turnEnd; continue;
     }
-    const tools = turnMsgs.some(hasToolActivity);
-    const thoughts = turnMsgs.some((m) =>
-      m.blocks.some((b) => b.type === "reasoning" && !!b.reasoning?.trim()));
-    let dedup: TextDedupState | undefined;
-    if (!tools && !thoughts && turnMsgs.length === 1) {
-      for (const m of turnMsgs) result.push({ kind: "single", msg: m });
-    } else {
-      const built = buildTurnEntries(turnMsgs, cached?.dedup);
-      dedup = built.dedup;
-      result.push({
-        kind: "series",
-        msg: turnMsgs[0],
-        extras: turnMsgs.slice(1),
-        units: pairTurnUnits(turnMsgs),
-        entries: built.entries,
-        finalMsgId: finalTurnMessage(turnMsgs)?.id ?? null,
-      });
-    }
-    nextCache.set(head.id, { messages: turnMsgs, block: result[result.length - 1], dedup });
+    const blocks = buildTurnBlocks(turnMsgs);
+    result.push(...blocks);
+    nextCache.set(head.id, { messages: turnMsgs, blocks });
     i = turnEnd;
   }
   if (cache) { cache.clear(); for (const [key, value] of nextCache) cache.set(key, value); }

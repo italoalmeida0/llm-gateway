@@ -5,7 +5,6 @@ import { StreamingMarkdown } from "./StreamingMarkdown";
 import { followTail } from "../utils/scrollMemory";
 import { Icon as Iconify } from "../../components/icon";
 import type { ChatMessage, ContentBlock, RenderBlock, RenderBlockSeries, ToolUnit, TurnEntry } from "../types";
-import { isLongAssistantMessage } from "../transcript";
 import { partitionToolSegs } from "../utils/toolSegs";
 import type { ToolSeg } from "../utils/toolSegs";
 import { groupTitle, specialTitle } from "../utils/titles";
@@ -103,71 +102,23 @@ function renderThinkingRow(
   );
 }
 
-/** Assistant text as a tool-style row: header with a one-line preview and
- * an incremental Markdown body. Hidden (display:none, kept in the DOM) while the
- * hide-tool-messages rule, verbose filter, fuzzy dedup or the featured
- * final message takes it out of the card. */
-function renderTextRow(
-  entry: Extract<TurnEntry, { kind: "text" }>,
-  openByDefault: () => boolean,
-  hidden: () => boolean,
-  streaming: () => boolean,
-  running: () => boolean,
-  isPinned?: () => boolean,
-) {
-  const key = `${entry.msg.id}:text:${entry.nth}`;
-  const { open, toggle } = createDisclosure(() => `${running()}:${streaming()}`, openByDefault, isPinned);
-  const preview = () =>
-    (entry.block.text || "").replace(/\s+/g, " ").trim().slice(0, 80);
-  return (
-    <div style={hidden() ? { display: "none" } : undefined} data-text-row={key}>
-      <div
-        onClick={toggle}
-        class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
-      >
-        <Iconify icon="lucide:message-circle" size={14} class="shrink-0 text-ink-500" />
-        <span class="text-ink-500 shrink-0">Message</span>
-        <span class="truncate text-ink-200 font-medium min-w-0 flex-1">{preview()}</span>
-        <Iconify
-          icon="lucide:chevron-down"
-          size={12}
-          class={`shrink-0 text-ink-600 transition-transform ${open() ? "rotate-180" : ""}`}
-        />
-      </div>
-      <DisclosureBody open={open()}>
-        <div
-          ref={(el) => onCleanup(followTail(el, () => open() && streaming()))}
-          class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-96 pl-1 pb-1"
-        >
-          <StreamingMarkdown streaming={streaming()} active={open() && !hidden()}>{entry.block.text}</StreamingMarkdown>
-        </div>
-      </DisclosureBody>
-    </div>
-  );
-}
-
 /**
- * The turn aggregate: one card per turn with every thinking, message and
- * tool run in event order. Open by default while the turn runs (verbose no
- * longer affects this), closed once it ends — unless toggled explicitly.
+ * The turn aggregate: one card per contiguous tool execution/thinking run.
+ * Open by default while the turn runs, closed once it ends — unless toggled explicitly.
  * Questions stay collapsed here; the questionnaire renders separately.
  */
 function renderTurnAggregate(
   ctx: TranscriptRenderCtx,
   series: RenderBlockSeries,
-  featured: () => boolean,
 ) {
   // NOTE: ctx.renderBlocks() is the FULL list (sealed blocks + live
   // tail; the <For> in TranscriptView slices by seal); the running turn
   // is always the newest block, which always renders.
   const running = createMemo(() => ctx.renderBlocks().at(-1)?.msg.id === series.msg.id && ctx.sessionStatus() === "running");
   const summary = createMemo(() => specialTitle(series.units, {
-    texts: series.entries.filter((e) => e.kind === "text").length,
     thoughts: series.entries.filter((e) => e.kind === "thinking").length,
   }));
   const { open, toggle } = createDisclosure(() => String(running()), running, ctx.isPinned);
-  /** The featured final renders below once idle; inside the card its rows
-   * stay mounted with display:none so Solid keeps DOM identity. */
   const lastTurnId = () => series.extras.at(-1)?.id ?? series.msg.id;
   /** Live tail: the turn's latest call, or any call with live progress
    * (parallel in-flight). Only the tail spins/auto-opens; when a new
@@ -186,33 +137,15 @@ function renderTurnAggregate(
   /** A stale thinking timer (snapshot restart mid-tools) must not spin:
    * live only while the turn's tail is still thinking. */
   const tailIsThinking = () => series.entries?.[lastEntryIdx()]?.kind === "thinking";
-  const lastTextIdx = () => {
-    let idx = -1;
-    series.entries.forEach((e, i) => { if (e.kind === "text") idx = i; });
-    return idx;
-  };
   const thinkingHidden = () => !ctx.verboseChat();
-  const textHidden = (entry: Extract<TurnEntry, { kind: "text" }>, idx: number) => {
-    if (entry.hidden) return true;
-    if (featured() && entry.msg.id === series.finalMsgId) return true;
-    if (!ctx.verboseChat() && idx !== lastTextIdx()) return true;
-    if (
-      ctx.hideToolMessages() && series.units.length > 0 &&
-      !entry.msg.hasCompletion && !entry.msg.hasSummary && !isLongAssistantMessage(entry.msg)
-    ) return true;
-    return false;
-  };
-  // Invisible notes must not split a visible command/exploration run. Keep
-  // those rows mounted; attach merged units to the first tool entry's key.
   const visibleRuns = createMemo(() => {
     const runs = new Map<string | undefined, ToolUnit[]>();
     let run: ToolUnit[] | undefined;
-    series.entries.forEach((entry, idx) => {
+    series.entries.forEach((entry) => {
       if (entry.kind === "tools") {
         if (!run) { run = []; runs.set(entry.id, run); }
         run.push(...entry.units);
-      } else if (!(entry.kind === "thinking" && thinkingHidden()) &&
-        !(entry.kind === "text" && textHidden(entry, idx))) {
+      } else if (!(entry.kind === "thinking" && thinkingHidden())) {
         run = undefined;
       }
     });
@@ -264,11 +197,6 @@ function renderTurnAggregate(
                 const content = () => (entry.block.reasoning || "").trim() !== "";
                 return renderThinkingRow(ctx, entry, () => live() && content(), thinkingHidden, live, live, running);
               }
-              if (entry.kind === "text") {
-                const content = () => (entry.block.text || "").trim() !== "";
-                const streaming = () => running() && tail() && entry.msg.streaming === true;
-                return renderTextRow(entry, () => streaming() && content(), () => textHidden(entry, ei()), streaming, running, ctx.isPinned);
-              }
               return renderImageBlock(ctx, entry.block);
             }}
           </For>
@@ -278,41 +206,12 @@ function renderTurnAggregate(
   );
 }
 
-/** The same carrier can acquire reasoning/tools after its first text delta. */
+/** Assistant content: series renders as collapsible tool aggregate, single renders as bubble. */
 export function AssistantTurnContent(props: { ctx: TranscriptRenderCtx; block: RenderBlock; finished: boolean }) {
-  // Moving the final text out of the aggregate also changes reading position.
-  const featured = createMemo<boolean>((previous) => {
-    if (!props.finished) return false;
-    return previous !== undefined && props.ctx.isPinned?.() === false ? previous : true;
-  });
-  return <Show when={props.block.kind === "series" ? props.block : undefined}
-    fallback={renderSingleAssistant(props.ctx, props.block.msg)}>
-    {(series) => <>
-      {renderTurnAggregate(props.ctx, series(), featured)}
-      <Show when={featured() && series().finalMsgId != null}>
-        <div class="w-full mt-2.5" data-turn-final>{renderFinalMsg(props.ctx, series())}</div>
-      </Show>
-    </>}
-  </Show>;
-}
-
-/** Featured final message of a finished turn, rendered as a plain bubble
- * below the aggregate (the files balloon comes right after). */
-function renderFinalMsg(ctx: TranscriptRenderCtx, series: RenderBlockSeries) {
-  const msg = () => [series.msg, ...series.extras].find((m) => m.id === series.finalMsgId);
   return (
-    <Show when={msg()}>
-      {(m) => (
-        <div class="w-full space-y-2.5">
-          <For each={m().blocks.filter((b) => b.type === "image" || (b.type === "text" && !!b.text?.trim()))}>
-            {(block) => block.type === "image" ? renderImageBlock(ctx, block) : (
-              <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
-                <StreamingMarkdown>{block.text}</StreamingMarkdown>
-              </div>
-            )}
-          </For>
-        </div>
-      )}
+    <Show when={props.block.kind === "series" ? props.block : undefined}
+      fallback={renderSingleAssistant(props.ctx, props.block.msg)}>
+      {(series) => renderTurnAggregate(props.ctx, series())}
     </Show>
   );
 }

@@ -150,32 +150,23 @@ export interface ToolUnit {
 
 export type ToolCat = "explore" | "command" | "edit" | "other";
 
-/** One ordered row inside a turn aggregate: thinking/text/image entries
- * render as tool-style rows, tool runs render as tool rows. Entries follow
- * message (wire) order; within a message, thinkings come first (they caused
- * what follows) then the remaining blocks in stored order. */
+/** One ordered row inside a tool/thinking aggregate: thinking, image and
+ * tool runs render in event order. Text messages separate as distinct single blocks. */
 export type TurnEntry = { id?: string } & (
   | { kind: "thinking"; msg: ChatMessage; block: ContentBlock; /** stored newest-first index (0 = newest/live) */ nth: number; isNewest: boolean }
-  | { kind: "text"; msg: ChatMessage; block: ContentBlock; /** text-block index within its message */ nth: number; /** fuzzy-duplicate of a later entry: display:none, last wins */ hidden?: boolean }
   | { kind: "image"; msg: ChatMessage; block: ContentBlock }
   | { kind: "tools"; msg: ChatMessage; units: ToolUnit[] });
 
 /**
- * Display-only turn aggregate. The renderer calls this with
- * the rendered message array; every assistant message of a turn with tool
- * activity or thinking fuses into one "series" block that renders as a
- * single aggregate card — thinkings, texts and tool runs in event order —
- * with the featured final message below once the turn ends.
- *
- * Implementation detail: series fusing happens at RENDER time over
- * ChatMessage[] (not in applySessionContent) so the raw transcript array
- * — and therefore every srcIdx used by edit/delete/regenerate — stays
- * byte-identical to the daemon's wire order.
+ * Display-only turn aggregate. Contiguous tool executions and thinkings
+ * form a series aggregate block, while visible text messages (summaries,
+ * completions, or normal messages) render as distinct single bubbles.
  */
 export type RenderBlockKind = "single" | "series";
 
 export interface RenderBlockBase {
   kind: RenderBlockKind;
+  id?: string;
 }
 
 export interface RenderBlockSingle extends RenderBlockBase {
@@ -185,18 +176,15 @@ export interface RenderBlockSingle extends RenderBlockBase {
 
 export interface RenderBlockSeries extends RenderBlockBase {
   kind: "series";
-  /** Lead message (first of the turn). */
+  /** Lead message (first of the tool group). */
   msg: ChatMessage;
-  /** Fused-in following messages of the same turn. */
+  /** Fused-in following messages of the same tool group. */
   extras: ChatMessage[];
-  /** Every ToolUnit of the whole turn, in display order. */
+  /** Every ToolUnit of this tool group, in display order. */
   units: ToolUnit[];
-  /** Ordered aggregate rows (thinkings, texts, images, tool runs). */
+  /** Ordered aggregate rows (thinkings, images, tool runs). */
   entries: TurnEntry[];
-  /** Id of the turn's featured final message (long text with no tools or
-   * alongside a completion signal): rendered below the card once idle, and
-   * display:none inside the card so DOM identity stays stable. */
-  finalMsgId: string | null;
+  finalMsgId?: null;
 }
 
 export type RenderBlock = RenderBlockSingle | RenderBlockSeries;

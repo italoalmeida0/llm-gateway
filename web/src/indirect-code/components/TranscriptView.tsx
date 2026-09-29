@@ -145,12 +145,7 @@ export function TranscriptView() {
         return isLast();
       };
       const rctx = renderCtx();
-      const featuredFinal = () =>
-        block.kind === "series" && block.finalMsgId != null &&
-        (t.sessionStatus() !== "running" || !isLast())
-          ? [block.msg, ...block.extras].find((m) => m.id === block.finalMsgId)
-          : undefined;
-      const textOf = () => messageText(featuredFinal() ?? msg);
+      const textOf = () => messageText(msg);
       const isEditing = () => t.editingMsgIdx() === rawIdx();
       return (
         <>

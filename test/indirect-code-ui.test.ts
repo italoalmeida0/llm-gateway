@@ -1159,6 +1159,60 @@ describe("completion signals and turn nudges", () => {
     expect(result[0].hasCompletion).toBe(true);
   });
 
+  test("withoutTodoActivity extracts comprehensive_summary from mark_task_as_complete args into text block", () => {
+    const msgs: ChatMessage[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        blocks: [
+          {
+            type: "tool_call",
+            toolId: "call_done",
+            toolName: "mark_task_as_complete",
+            toolArgs: JSON.stringify({ comprehensive_summary: "All 5 endpoints implemented and tested." }),
+          },
+        ],
+      },
+    ];
+    const result = withoutTodoActivity(msgs);
+    expect(result.length).toBe(1);
+    expect(result[0].blocks).toEqual([{ type: "text", text: "All 5 endpoints implemented and tested." }]);
+    expect(result[0].hasCompletion).toBe(true);
+  });
+
+  test("withoutTodoActivity extracts for_user from summary tool and hides for_me", () => {
+    const msgs: ChatMessage[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        blocks: [
+          {
+            type: "tool_call",
+            toolId: "call_sum",
+            toolName: "summary",
+            toolArgs: JSON.stringify({
+              for_user: "Currently refactoring database connection pool and validating queries.",
+              for_me: "Private notes: already verified db.go, next is testing postgres connection.",
+            }),
+          },
+        ],
+      },
+      {
+        id: "t1",
+        role: "tool",
+        blocks: [
+          { type: "tool_result", toolId: "call_sum", toolResult: "Progress summary recorded." },
+        ],
+      },
+    ];
+    const result = withoutTodoActivity(msgs);
+    expect(result.length).toBe(1);
+    expect(result[0].blocks).toEqual([
+      { type: "text", text: "Currently refactoring database connection pool and validating queries." },
+    ]);
+    expect((result[0].blocks[0] as any).text).not.toContain("Private notes");
+  });
+
   test("buildRenderBlocks displays text sent with completion tool even when hideToolMessages is true", () => {
     const user: ChatMessage = { id: "u1", role: "user", blocks: [{ type: "text", text: "Fix bug" }] };
     const step1: ChatMessage = {

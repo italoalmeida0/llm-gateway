@@ -205,7 +205,8 @@ func (w *turnBridge) run() error {
 	todoTool := &tools.TodoTool{Update: w.updateTodos}
 	markTaskTool := &tools.MarkTaskAsCompleteTool{}
 	markPlanTool := &tools.MarkPlanAsReadyToExecuteTool{}
-	w.reg = core.NewRegistry(append(append(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool), bgCancelTool, sleepTool), bgCheckTool)...)
+	summaryTool := &tools.SummaryTool{}
+	w.reg = core.NewRegistry(append(append(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool, summaryTool), bgCancelTool, sleepTool), bgCheckTool)...)
 
 	if w.env.store != nil {
 		header, err := w.env.store.readWALHeader(w.env.actorID)

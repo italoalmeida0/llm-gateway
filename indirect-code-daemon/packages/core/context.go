@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
@@ -116,3 +117,79 @@ func applyAssistantTextTransforms(msg provider.Message, transforms []AssistantTe
 	}
 	return emit, false
 }
+
+// stripIntermediateAssistantText removes TextBlocks from assistant messages
+// that also contain ToolCallBlocks. During tool usage, conversational chatter
+// is stripped so only the tool calls (and reasoning if present) remain in context.
+func stripIntermediateAssistantText(msgs []provider.Message) []provider.Message {
+	out := make([]provider.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role != provider.RoleAssistant {
+			out = append(out, m)
+			continue
+		}
+		hasTools := false
+		for _, c := range m.Content {
+			if _, ok := c.(provider.ToolCallBlock); ok {
+				hasTools = true
+				break
+			}
+		}
+		if hasTools {
+			var clean []provider.Content
+			for _, c := range m.Content {
+				if _, ok := c.(provider.TextBlock); !ok {
+					clean = append(clean, c)
+				}
+			}
+			m.Content = clean
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func isSyntheticNudge(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	for _, tag := range []string{"system-reminder", "system_prompt", "system-warn"} {
+		open := "<" + tag + ">"
+		closeTag := "</" + tag + ">"
+		if strings.HasPrefix(trimmed, open) && strings.HasSuffix(trimmed, closeTag) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripNudgedAssistantText prunes intermediate conversational text-only messages
+// that were followed by an automated system nudge once the model has proceeded to work.
+func stripNudgedAssistantText(msgs []provider.Message) []provider.Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+	out := make([]provider.Message, 0, len(msgs))
+	for i := 0; i < len(msgs); i++ {
+		m := msgs[i]
+		if m.Role == provider.RoleAssistant {
+			hasTools := false
+			for _, c := range m.Content {
+				if _, ok := c.(provider.ToolCallBlock); ok {
+					hasTools = true
+					break
+				}
+			}
+			// If text-only and followed by a synthetic nudge, and there are further messages after the nudge:
+			if !hasTools && i+1 < len(msgs) && msgs[i+1].Role == provider.RoleUser {
+				nextText := extractText(msgs[i+1])
+				if isSyntheticNudge(nextText) && i+2 < len(msgs) {
+					// Drop both the intermediate conversational text and the nudge
+					i++
+					continue
+				}
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+

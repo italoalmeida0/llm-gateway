@@ -40,7 +40,17 @@ func TestMarkPlanAsReadyToExecuteTool(t *testing.T) {
 	if tool.Name() != "mark_plan_as_ready_to_execute" {
 		t.Fatalf("unexpected name: %s", tool.Name())
 	}
+	// Missing comprehensive_summary should error
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{}`), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected error on empty comprehensive_summary")
+	}
+
+	// Valid comprehensive_summary
+	res, err = tool.Execute(context.Background(), json.RawMessage(`{"comprehensive_summary":"Plan is ready to proceed."}`), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

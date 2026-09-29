@@ -152,22 +152,25 @@ func TestNudgeBudgetResetsOnToolUse(t *testing.T) {
 }
 
 func TestSanitizeUserText(t *testing.T) {
-	if got := SanitizeUserText(ContinueNudgeText); got != "You should continue what you are doing." {
+	wantContinue := "Automated system notice (not from the user): Your previous response was empty or interrupted. Continue your work silently using tools."
+	if got := SanitizeUserText(ContinueNudgeText); got != wantContinue {
 		t.Fatalf("continue nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("  " + ContinueNudgeText + "  "); got != "You should continue what you are doing." {
+	if got := SanitizeUserText("  " + ContinueNudgeText + "  "); got != wantContinue {
 		t.Fatalf("padded continue nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText(CompletionNudgeTextBuild); got != "If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
+	wantBuild := "Automated system notice (not from the user): Do not send conversational text messages. If you have completed the task or answered the user's question, call mark_task_as_complete with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools."
+	if got := SanitizeUserText(CompletionNudgeTextBuild); got != wantBuild {
 		t.Fatalf("build completion nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("  " + CompletionNudgeTextBuild + "  "); got != "If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
+	if got := SanitizeUserText("  " + CompletionNudgeTextBuild + "  "); got != wantBuild {
 		t.Fatalf("padded build completion nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText(CompletionNudgeTextPlan); got != "If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
+	wantPlan := "Automated system notice (not from the user): Do not send conversational text messages. If your plan is ready, call mark_plan_as_ready_to_execute with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools."
+	if got := SanitizeUserText(CompletionNudgeTextPlan); got != wantPlan {
 		t.Fatalf("plan completion nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("  " + CompletionNudgeTextPlan + "  "); got != "If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work." {
+	if got := SanitizeUserText("  " + CompletionNudgeTextPlan + "  "); got != wantPlan {
 		t.Fatalf("padded plan completion nudge = %q; want tags stripped", got)
 	}
 	if got := SanitizeUserText("<system-reminder>qualquer coisa</system-reminder>"); got != "qualquer coisa" {

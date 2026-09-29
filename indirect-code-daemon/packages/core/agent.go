@@ -19,13 +19,14 @@ import (
 // turn, the loop nudges the model to continue. Frontends hide user
 // messages whose trimmed text is wrapped in <system-reminder>...</system-reminder>
 // (same idea as TODO activity, which is also transcript-real but display-hidden).
-const ContinueNudgeText = "<system-reminder>You should continue what you are doing.</system-reminder>"
+const ContinueNudgeText = "<system-warn>Automated system notice (not from the user): Your previous response was empty or interrupted. Continue your work silently using tools.</system-warn>"
 
 // CompletionNudgeTextBuild and CompletionNudgeTextPlan prompt the model
 // when it returns visible text without calling a completion tool in build/plan modes.
 const (
-	CompletionNudgeTextBuild = "<system-reminder>If you have completed the task, call mark_task_as_complete. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system-reminder>"
-	CompletionNudgeTextPlan  = "<system-reminder>If your plan is ready, call mark_plan_as_ready_to_execute. If you still have questions, use the question tool to await the user's response. Otherwise, continue your work.</system-reminder>"
+	CompletionNudgeTextBuild = "<system-warn>Automated system notice (not from the user): Do not send conversational text messages. If you have completed the task or answered the user's question, call mark_task_as_complete with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools.</system-warn>"
+	CompletionNudgeTextPlan  = "<system-warn>Automated system notice (not from the user): Do not send conversational text messages. If your plan is ready, call mark_plan_as_ready_to_execute with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools.</system-warn>"
+	SummaryWarnNudge         = "<system-warn>Automated system notice (not from the user): Multiple tools have been executed without a progress update. Call the summary tool now with 'for_user' (100-500 chars user-facing update) and 'for_me' (your private tracking of next steps/verified items). Do not send conversational text messages.</system-warn>"
 )
 
 // maxContinueNudges caps consecutive empty-response nudges per turn so a
@@ -38,10 +39,10 @@ const maxCompletionNudges = 3
 
 // SanitizeUserText keeps a user-authored message distinguishable from
 // synthetic system prompt nudges: when the trimmed text contains or is wrapped in
-// system tags (like <system-reminder> or <system_prompt>), the tags are stripped so
+// system tags (like <system-reminder>, <system_prompt>, or <system-warn>), the tags are stripped so
 // the frontend's nudge filter never hides a real user message and users cannot forge system directives.
 func SanitizeUserText(s string) string {
-	for _, tag := range []string{"system-reminder", "system_prompt"} {
+	for _, tag := range []string{"system-reminder", "system_prompt", "system-warn"} {
 		open := "<" + tag + ">"
 		closeTag := "</" + tag + ">"
 		t := strings.TrimSpace(s)
@@ -511,6 +512,8 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 	completionNudges := 0
 	completedInTurn := false
 	preparationAttempt := 0
+	lastSummaryAt := time.Now()
+	toolsSinceSummary := 0
 	for step := 1; ; step++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -647,6 +650,46 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 				sink(EvDone{})
 				return nil
 			}
+
+			hadSummary := false
+			for _, content := range toolMsg.Content {
+				if res, ok := content.(provider.ToolResultBlock); ok {
+					for _, c := range assistantMsg.Content {
+						if tc, ok := c.(provider.ToolCallBlock); ok && tc.ID == res.CallID && tc.Name == "summary" && !res.IsError {
+							hadSummary = true
+							break
+						}
+					}
+					if !hadSummary {
+						toolsSinceSummary++
+					}
+				}
+			}
+			if hadSummary {
+				toolsSinceSummary = 0
+				lastSummaryAt = time.Now()
+			}
+
+			a.mu.Lock()
+			_, hasSummaryTool := a.Tools["summary"]
+			a.mu.Unlock()
+			if hasSummaryTool && ((time.Since(lastSummaryAt) >= 60*time.Second && toolsSinceSummary >= 15) || toolsSinceSummary >= 30) {
+				toolsSinceSummary = 0
+				lastSummaryAt = time.Now()
+				nudge := provider.Message{
+					Role:    provider.RoleUser,
+					Content: []provider.Content{provider.TextBlock{Text: SummaryWarnNudge}},
+					Time:    time.Now(),
+				}
+				a.stampTurn(&nudge)
+				a.mu.Lock()
+				a.messages = append(a.messages, nudge)
+				a.rev++
+				a.mu.Unlock()
+				a.fireMessageAppended(nudge)
+				sink(EvUserMessage{Message: nudge})
+			}
+
 			continue
 		}
 
@@ -832,6 +875,8 @@ func (a *Agent) BuildContext() []provider.Message {
 // BuildContextLocked share it so the pipeline exists in one place.
 func (a *Agent) buildContextFromLocked(msgs []provider.Message, clientName string) []provider.Message {
 	msgs = filterHidden(msgs)
+	msgs = stripIntermediateAssistantText(msgs)
+	msgs = stripNudgedAssistantText(msgs)
 	msgs = PruneOldToolResults(msgs)
 	msgs = repairToolUseResultPairs(msgs)
 	if mirror := mirrorImagesForProvider(clientName, msgs); mirror != nil {

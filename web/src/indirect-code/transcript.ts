@@ -193,6 +193,13 @@ function deduplicateTexts(sources: string[], previous?: TextDedupState): TextDed
  * qualifying, the last text the AI sent in the turn regardless of size.
  * Rendered below the aggregate once the turn ends. */
 export function finalTurnMessage(turnMsgs: ChatMessage[]): ChatMessage | null {
+  // If a completion signal message carries text (e.g. from comprehensive_summary), it is always the featured final message.
+  for (let k = turnMsgs.length - 1; k >= 0; k--) {
+    if (turnMsgs[k].hasCompletion && hasVisibleText(turnMsgs[k])) {
+      return turnMsgs[k];
+    }
+  }
+
   const qualifying = turnMsgs.filter((m) =>
     hasVisibleText(m) &&
     (!hasToolActivity(m) || m.hasCompletion) &&

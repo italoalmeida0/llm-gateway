@@ -72,6 +72,16 @@ const sleepRemaining = () => {
   if (!start) return "";
   return `${formatDurationSecs(Math.max(0, Math.ceil(total - (ctx.turnClock() - start) / 1000)))} left`;
 };
+/** Header label for a sleep row (the row is header-only): the time/counter
+ * followed by the human summary when the model passed one, e.g.
+ * "1m 30s left · waiting for build" or "Slept 1m 30s · waiting for build".
+ * The summary must stay visible now that no body renders it. */
+const sleepLabel = () => {
+  const when = sleepRemaining() || sum().target;
+  const summary = String((args() as any)?.summary || "").replace(/\s+/g, " ").trim();
+  if (!summary || summary === when) return when;
+  return when ? `${when} · ${summary}` : summary;
+};
 const elapsed = () => {
   if (name() !== "bash" && name() !== "python" && !name().startsWith("mcp__")) return "";
   const duration = u.result?.toolDurationMs ?? terminal().durationMs;
@@ -110,7 +120,7 @@ const bgStream = () => {
 /** True once the call carries a background job — the row renders as a
  * background run (badge, spinner while running). */
 const isDetachedBg = () => bgJobId() !== "";
-  return { key, open, openBody, expandable, toggle, sum, prog, args, name, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed, sleepRemaining, bgJobId, bgRunning, bgStream, isDetachedBg };
+  return { key, open, openBody, expandable, toggle, sum, prog, args, name, sleepLabel, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed, sleepRemaining, bgJobId, bgRunning, bgStream, isDetachedBg };
 }
 
 export type ToolModel = ReturnType<typeof useToolUnitModel>;

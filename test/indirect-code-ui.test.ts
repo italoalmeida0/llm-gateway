@@ -1750,10 +1750,14 @@ describe("Tool row model", () => {
         call: { type: "tool_call", toolId: "s2", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 30 }) },
         result: { type: "tool_result", toolId: "s2", toolResult: "Woken early after 12s: a background task finished." },
       };
+      // give the finished sleep a summary so the header carries it
+      sleptUnit.call.toolArgs = JSON.stringify({ seconds: 30, summary: "waiting for build" });
       const slept = useToolUnitModel(ctx, "m1", sleptUnit, 2, () => false, () => false);
       expect(slept.name()).toBe("sleep");
       expect(slept.expandable()).toBe(false);
       expect(slept.openBody()).toBe(false);
+      // The summary arg stays visible in the header now that no body renders it.
+      expect(slept.sleepLabel()).toBe("30s · waiting for build");
       // Clicking the row toggles the disclosure state but reveals nothing.
       slept.toggle();
       expect(slept.open()).toBe(true);

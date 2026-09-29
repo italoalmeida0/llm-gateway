@@ -126,11 +126,16 @@ try {
   });
   assert.equal(seqCodeAfter.split("\n").map((l) => l.trim()).filter((l) => l === "ok").length, 1, '"ok" must stay single after snapshot refresh');
 
-  // 6. Row bodies: sleep shows only the summary, bg_check reads like a
-  // file, bg_cancel stays minimal.
+  // 6. Row bodies: sleep is header-only (summary in the header, never a
+  // body/chevron), bg_check reads like a file, bg_cancel stays minimal.
   const sleepBody = await page.textContent('[data-testid="row-sleep"]');
-  assert.ok(sleepBody?.includes("waiting for build"), `sleep body must show the summary: ${sleepBody?.slice(0, 200)}`);
-  assert.ok(!sleepBody?.includes("bg_1"), "sleep body must not show the task id");
+  assert.ok(sleepBody?.includes("waiting for build"), `sleep row must show the summary in the header: ${sleepBody?.slice(0, 200)}`);
+  assert.ok(!sleepBody?.includes("bg_1"), "sleep row must not show the task id");
+  // Header-only contract: no disclosure body mount and no chevron.
+  const sleepBodies = await page.locator('[data-testid="row-sleep"] .article-body, [data-testid="row-sleep"] pre, [data-testid="row-sleep"] .max-h-96').count();
+  assert.equal(sleepBodies, 0, "sleep row must never render a body");
+  const sleepChevrons = await page.locator('[data-testid="row-sleep"] svg path[d="m6 9l6 6l6-6"]').count();
+  assert.equal(sleepChevrons, 0, "sleep row must not render a chevron");
   const checkBody = await page.textContent('[data-testid="row-bgcheck"]');
   assert.ok(checkBody?.includes("hello"), "bg_check body must show the log content");
   assert.ok(checkBody?.includes("Background Task#L1-2") || checkBody?.includes("Background Task"), "bg_check header must name the task");

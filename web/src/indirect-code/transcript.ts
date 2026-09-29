@@ -227,46 +227,42 @@ function buildTurnEntries(turnMsgs: ChatMessage[]): TurnEntry[] {
 
 function buildTurnBlocks(turnMsgs: ChatMessage[]): RenderBlock[] {
   const blocks: RenderBlock[] = [];
-  let currentToolMsgs: ChatMessage[] = [];
+  let currentGroup: ChatMessage[] = [];
 
-  const flushToolGroup = () => {
-    if (currentToolMsgs.length === 0) return;
-    const entries = buildTurnEntries(currentToolMsgs);
+  const flushGroup = (textMsg?: ChatMessage) => {
+    if (currentGroup.length === 0 && !textMsg) return;
+    const groupMsgs = textMsg && !currentGroup.includes(textMsg)
+      ? [...currentGroup, textMsg]
+      : [...currentGroup];
+    const entries = buildTurnEntries(groupMsgs);
+    const leadMsg = groupMsgs[0] || textMsg!;
+    const blockId = textMsg ? textMsg.id : leadMsg.id;
+
     if (entries.length > 0) {
       blocks.push({
         kind: "series",
-        id: `${currentToolMsgs[0].id}:series`,
-        msg: currentToolMsgs[0],
-        extras: currentToolMsgs.slice(1),
-        units: pairTurnUnits(currentToolMsgs),
+        id: blockId,
+        msg: leadMsg,
+        extras: groupMsgs.slice(1),
+        units: pairTurnUnits(groupMsgs),
         entries,
+        textMsg,
       });
-    } else if (blocks.length === 0) {
-      // Empty in-flight message with no entries yet: render as single for typing indicator
-      blocks.push({ kind: "single", msg: currentToolMsgs[0] });
+    } else {
+      blocks.push({ kind: "single", msg: textMsg || leadMsg });
     }
-    currentToolMsgs = [];
+    currentGroup = [];
   };
 
   for (const m of turnMsgs) {
-    if (hasToolActivity(m)) {
-      currentToolMsgs.push(m);
-    } else if (hasVisibleText(m)) {
-      const hasReasoning = m.blocks.some((b) => b.type === "reasoning" && !!b.reasoning?.trim());
-      if (hasReasoning) {
-        currentToolMsgs.push({
-          ...m,
-          blocks: m.blocks.filter((b) => b.type === "reasoning"),
-        });
-      }
-      flushToolGroup();
-      blocks.push({ kind: "single", msg: m });
+    if (hasVisibleText(m)) {
+      currentGroup.push(m);
+      flushGroup(m);
     } else {
-      // Message with only reasoning or empty blocks
-      currentToolMsgs.push(m);
+      currentGroup.push(m);
     }
   }
-  flushToolGroup();
+  flushGroup(undefined);
   return blocks;
 }
 
@@ -312,7 +308,9 @@ export function buildRenderBlocks(
 
 /** Wall-clock duration belongs to the turn, regardless of its presentation. */
 export function blockTurnDuration(block: RenderBlock): number | undefined {
-  const messages = block.kind === "series" ? [block.msg, ...block.extras] : [block.msg];
+  const messages = block.kind === "series"
+    ? (block.textMsg ? [block.textMsg, block.msg, ...block.extras] : [block.msg, ...block.extras])
+    : [block.msg];
   return messages.find((m) => Number.isFinite(m.turnDurationMs) && (m.turnDurationMs ?? 0) > 0)?.turnDurationMs;
 }
 

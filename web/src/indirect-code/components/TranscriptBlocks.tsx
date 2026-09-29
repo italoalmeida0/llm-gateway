@@ -206,12 +206,29 @@ function renderTurnAggregate(
   );
 }
 
-/** Assistant content: series renders as collapsible tool aggregate, single renders as bubble. */
+/** Assistant content: series renders aggregate (if any) + message text together in one balloon. */
 export function AssistantTurnContent(props: { ctx: TranscriptRenderCtx; block: RenderBlock; finished: boolean }) {
   return (
     <Show when={props.block.kind === "series" ? props.block : undefined}
       fallback={renderSingleAssistant(props.ctx, props.block.msg)}>
-      {(series) => renderTurnAggregate(props.ctx, series())}
+      {(series) => (
+        <div data-assistant-message={series().textMsg?.id || series().msg.id} class="w-full space-y-2.5">
+          <Show when={series().entries.length > 0}>
+            {renderTurnAggregate(props.ctx, series())}
+          </Show>
+          <Show when={series().textMsg}>
+            {(textMsg) => (
+              <For each={textMsg().blocks.filter((b) => b.type === "image" || (b.type === "text" && !!b.text?.trim()))}>
+                {(block) => block.type === "image" ? renderImageBlock(props.ctx, block) : (
+                  <div class="rc-markdown w-full text-sm leading-relaxed break-words overflow-x-auto">
+                    <StreamingMarkdown streaming={textMsg().streaming}>{block.text}</StreamingMarkdown>
+                  </div>
+                )}
+              </For>
+            )}
+          </Show>
+        </div>
+      )}
     </Show>
   );
 }

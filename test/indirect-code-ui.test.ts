@@ -92,24 +92,44 @@ test("groups a whole tool turn into one aggregate with ordered entries", () => {
   expect(list[1].blocks).toHaveLength(3);
 });
 
-test("turn aggregate separates tools and closing text message into distinct blocks", () => {
+test("turn aggregate combines tools and closing text message into a unified balloon", () => {
   const long = "All issues are now resolved across the workspace. " + "x".repeat(200);
   const list: ChatMessage[] = [
     {id:"one",role:"assistant",srcIdx:1,thinkingDuration:3,blocks:[{type:"reasoning",reasoning:"Inspect"},{type:"tool_call",toolId:"a",toolName:"read"}]},
-    {id:"two",role:"assistant",srcIdx:3,thinkingDuration:1,blocks:[{type:"text",text:"Checking file"},{type:"reasoning",reasoning:"Verify"},{type:"tool_call",toolId:"b",toolName:"bash"}]},
-    {id:"three",role:"assistant",srcIdx:5,blocks:[{type:"text",text:"I found an issue."},{type:"tool_call",toolId:"c",toolName:"edit"}]},
+    {id:"two",role:"assistant",srcIdx:3,thinkingDuration:1,blocks:[{type:"reasoning",reasoning:"Verify"},{type:"tool_call",toolId:"b",toolName:"bash"}]},
+    {id:"three",role:"assistant",srcIdx:5,blocks:[{type:"tool_call",toolId:"c",toolName:"edit"}]},
     {id:"four",role:"assistant",srcIdx:7,blocks:[{type:"reasoning",reasoning:"Testing"},{type:"tool_call",toolId:"d",toolName:"bash"}]},
     {id:"five",role:"assistant",srcIdx:9,blocks:[{type:"text",text:long}]},
   ];
   const blocks = buildRenderBlocks(list);
-  expect(blocks).toHaveLength(2);
+  expect(blocks).toHaveLength(1);
   expect(blocks[0].kind).toBe("series");
   if (blocks[0].kind === "series") {
     expect(blocks[0].units.map((u) => u.call?.toolId)).toEqual(["a","b","c","d"]);
-    expect(blocks[0].extras.map((m) => m.id)).toEqual(["two","three","four"]);
+    expect(blocks[0].extras.map((m) => m.id)).toEqual(["two","three","four","five"]);
+    expect(blocks[0].textMsg?.id).toBe("five");
   }
-  expect(blocks[1].kind).toBe("single");
-  expect(blocks[1].msg.id).toBe("five");
+});
+
+test("multi-step turns produce distinct balloons each with its own aggregate and message", () => {
+  const list: ChatMessage[] = [
+    {id:"one",role:"assistant",srcIdx:1,blocks:[{type:"tool_call",toolId:"a",toolName:"read"}]},
+    {id:"two",role:"assistant",srcIdx:2,blocks:[{type:"tool_result",toolId:"a",toolResult:"content"}]},
+    {id:"three",role:"assistant",srcIdx:3,blocks:[{type:"text",text:"Read file."}]},
+    {id:"four",role:"assistant",srcIdx:4,blocks:[{type:"tool_call",toolId:"b",toolName:"edit"}]},
+    {id:"five",role:"assistant",srcIdx:5,blocks:[{type:"tool_result",toolId:"b",toolResult:"ok"}]},
+    {id:"six",role:"assistant",srcIdx:6,blocks:[{type:"text",text:"Edited file."}]},
+  ];
+  const blocks = buildRenderBlocks(list);
+  expect(blocks).toHaveLength(2);
+  expect(blocks[0].kind).toBe("series");
+  expect(blocks[1].kind).toBe("series");
+  if (blocks[0].kind === "series" && blocks[1].kind === "series") {
+    expect(blocks[0].units.map((u) => u.call?.toolId)).toEqual(["a"]);
+    expect(blocks[0].textMsg?.id).toBe("three");
+    expect(blocks[1].units.map((u) => u.call?.toolId)).toEqual(["b"]);
+    expect(blocks[1].textMsg?.id).toBe("six");
+  }
 });
 
 test("text-only turns render each message as a distinct bubble", () => {

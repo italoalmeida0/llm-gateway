@@ -184,6 +184,8 @@ export interface RenderBlockSeries extends RenderBlockBase {
   units: ToolUnit[];
   /** Ordered aggregate rows (thinkings, images, tool runs). */
   entries: TurnEntry[];
+  /** Associated message text delivered for this balloon (if any). */
+  textMsg?: ChatMessage;
   finalMsgId?: null;
 }
 

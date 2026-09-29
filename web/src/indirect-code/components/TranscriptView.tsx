@@ -145,7 +145,7 @@ export function TranscriptView() {
         return isLast();
       };
       const rctx = renderCtx();
-      const textOf = () => messageText(msg);
+      const textOf = () => messageText(block.kind === "series" && block.textMsg ? block.textMsg : msg);
       const isEditing = () => t.editingMsgIdx() === rawIdx();
       return (
         <>
@@ -294,11 +294,11 @@ export function TranscriptView() {
                 <AssistantMsgActions
                   duration={blockTurnDuration(block) != null ? elapsedLabel(blockTurnDuration(block)!) : undefined}
                   forking={t.forking()}
-                  canFork={(block.kind === "series" ? block.extras.at(-1) || msg : msg).srcIdx != null}
+                  canFork={(block.kind === "series" ? block.textMsg || block.extras.at(-1) || msg : msg).srcIdx != null}
                   showCopy={textOf().trim() !== ""}
-                  copied={t.copiedMsgId() === msg.id}
+                  copied={t.copiedMsgId() === (block.kind === "series" && block.textMsg ? block.textMsg.id : msg.id)}
                   onFork={() => t.forkMessage(block)}
-                  onCopy={() => t.copyMsg(msg.id, textOf())}
+                  onCopy={() => t.copyMsg(block.kind === "series" && block.textMsg ? block.textMsg.id : msg.id, textOf())}
                   onRegenerate={() => t.regenerateMsg(rawIdx())}
                 />
               </Show>

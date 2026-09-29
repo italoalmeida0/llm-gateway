@@ -13,7 +13,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -174,12 +177,29 @@ func TestBgInlineResultNeverLeaksPaths(t *testing.T) {
 		t.Fatalf("model-visible result leaked a file path (around %q)", text[max(0, i):min(i+140, len(text))])
 	}
 	// Truncation is an envelope attr (page/truncated), not body prose.
+	// The exact line count is platform-dependent (\r\n output on Windows
+	// changes the count), so assert the SHAPE: page="from-to/total" with
+	// truncated=true and a next cursor beyond the shown range.
 	attrs := map[string]string{}
 	for _, a := range res.Attrs {
 		attrs[a.Key] = a.Value
 	}
-	if attrs["truncated"] != "true" || attrs["page"] != "18001-20000/20000" {
-		t.Fatalf("truncated result must report page/truncated attrs: %v", attrs)
+	if attrs["truncated"] != "true" {
+		t.Fatalf("truncated result must report truncated=true: %v", attrs)
+	}
+	m := regexp.MustCompile(`^(\d+)-(\d+)/(\d+)$`).FindStringSubmatch(attrs["page"])
+	if m == nil {
+		t.Fatalf("page attr must be from-to/total: %q", attrs["page"])
+	}
+	from, to, total := m[1], m[2], m[3]
+	fi, _ := strconv.Atoi(from)
+	ti, _ := strconv.Atoi(to)
+	totaI, _ := strconv.Atoi(total)
+	if !(fi <= ti && ti <= totaI) {
+		t.Fatalf("page range out of order: %q", attrs["page"])
+	}
+	if attrs["next"] != fmt.Sprintf("%d", ti+1) {
+		t.Fatalf("next attr must continue after %s: %q", to, attrs["next"])
 	}
 	// Details are UI-only (core.ToolResult.Details never reaches the LLM —
 	// provider.ToolResultBlock carries Content only), so the full output

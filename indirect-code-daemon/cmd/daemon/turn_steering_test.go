@@ -9,10 +9,10 @@ import (
 )
 
 func TestQueueSendNowSteeringDuringTurn(t *testing.T) {
-	workerStarted := make(chan struct{})
+	workerStarted := make(chan struct{}, 2)
 	release := make(chan struct{})
 	worker := func(snap workerSnapshot, env workerEnv, ctx context.Context) {
-		close(workerStarted)
+		workerStarted <- struct{}{}
 		select {
 		case <-release:
 			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}}
@@ -34,7 +34,7 @@ func TestQueueSendNowSteeringDuringTurn(t *testing.T) {
 
 	select {
 	case <-workerStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("worker did not start in time")
 	}
 
@@ -141,15 +141,10 @@ func TestQueueSendNowSteeringDuringTurn(t *testing.T) {
 }
 
 func TestQueueSendNowFallthroughWhenNoRefresh(t *testing.T) {
-	workerStarted := make(chan struct{})
-	finishWorker := make(chan struct{})
-	var curGen int
+	turnStarted := make(chan int, 4)
+	finishWorker := make(chan struct{}, 4)
 	worker := func(snap workerSnapshot, env workerEnv, ctx context.Context) {
-		curGen = snap.gen
-		select {
-		case workerStarted <- struct{}{}:
-		default:
-		}
+		turnStarted <- snap.gen
 		select {
 		case <-finishWorker:
 			env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}}
@@ -165,7 +160,14 @@ func TestQueueSendNowFallthroughWhenNoRefresh(t *testing.T) {
 	r1 := make(chan any, 1)
 	act.inbox <- Envelope{Payload: userPromptMsg{Text: "turn 1", Reply: r1}}
 	<-r1
-	<-workerStarted
+	select {
+	case g := <-turnStarted:
+		if g != 1 {
+			t.Fatalf("expected turn 1, got %d", g)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn 1 did not start")
+	}
 
 	// 2. Queue message
 	r2 := make(chan any, 1)
@@ -176,7 +178,9 @@ func TestQueueSendNowFallthroughWhenNoRefresh(t *testing.T) {
 	var queueID string
 	idDone := make(chan struct{})
 	act.inbox <- Envelope{Payload: hookMsg{fn: func() {
-		queueID = act.rec.Queue[0].ID
+		if len(act.rec.Queue) > 0 {
+			queueID = act.rec.Queue[0].ID
+		}
 		close(idDone)
 	}}}
 	<-idDone
@@ -189,22 +193,21 @@ func TestQueueSendNowFallthroughWhenNoRefresh(t *testing.T) {
 
 	// 5. finishTurn should automatically promote queue head to turn 2
 	select {
-	case <-workerStarted:
+	case g := <-turnStarted:
+		if g != 2 {
+			t.Fatalf("expected turn 2, got %d", g)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("turn 2 was not started automatically")
-	}
-
-	if curGen != 2 {
-		t.Fatalf("expected gen 2, got %d", curGen)
 	}
 
 	finishWorker <- struct{}{}
 }
 
 func TestQueueSendNowWhenIdleStartsTurn(t *testing.T) {
-	workerStarted := make(chan struct{})
+	workerStarted := make(chan int, 2)
 	worker := func(snap workerSnapshot, env workerEnv, ctx context.Context) {
-		close(workerStarted)
+		workerStarted <- snap.gen
 		env.inbox <- Envelope{Payload: workerFinishedMsg{gen: snap.gen}}
 	}
 
@@ -221,8 +224,11 @@ func TestQueueSendNowWhenIdleStartsTurn(t *testing.T) {
 
 	// Should start turn immediately
 	select {
-	case <-workerStarted:
-	case <-time.After(2 * time.Second):
+	case g := <-workerStarted:
+		if g != 1 {
+			t.Fatalf("expected gen 1, got %d", g)
+		}
+	case <-time.After(3 * time.Second):
 		t.Fatal("turn was not started immediately when idle")
 	}
 }

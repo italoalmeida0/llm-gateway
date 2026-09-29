@@ -43,6 +43,8 @@ export type DaemonCommand = CommandBase &
   | { type: "cancel"; sessionId: string }
   | { type: "bg_cancel"; jobId: string }
   | { type: "fork_session"; sessionId: string; index: number; requestId?: string; editText?: string; editModel?: string; editYolo?: boolean; attachmentIds?: string[] }
+  | { type: "discard_and_resend"; sessionId: string; requestId?: string; turnId: number; text: string; model: string; yolo: boolean; attachmentIds?: string[] }
+  | { type: "fork_and_resend"; sessionId: string; requestId?: string; turnId: number; text: string; model: string; yolo: boolean; attachmentIds?: string[] }
   | { type: "regenerate"; sessionId: string; index: number; text?: string; model: string; yolo: boolean }
   | { type: "edit_message"; sessionId: string; index: number; text: string; model: string; yolo: boolean; regenerate: boolean; attachmentIds?: string[] }
   | { type: "create_session"; requestId: string; cwd: string; title: string; model: string; options: Omit<SessionChoice, "model"> }
@@ -152,6 +154,9 @@ export type DaemonEvent = EventBase &
     | { type: "session_queue"; sessionId?: string; queue: QueuedMessage[] }
     | { type: "agent_event"; sessionId?: string; event?: AgentEvent }
     | { type: "bg_output"; jobId?: string; sessionId?: string; text?: string; from?: number; total?: number }
+    | { type: "discard_and_resend_result"; sessionId?: string; hostId?: string; requestId?: string; ok?: boolean; error?: string; queued?: boolean }
+    | { type: "fork_and_resend_result"; sessionId?: string; hostId?: string; requestId?: string; ok?: boolean; error?: string; newSessionId?: string }
+    | { type: "edit_message_result"; sessionId?: string; hostId?: string; ok?: boolean; error?: string }
     | { type: "bg_task_registered"; sessionId?: string; jobId?: string; kind?: string; label?: string }
     | { type: "bg_task_finished"; sessionId?: string; jobId?: string; status?: string; exitCode?: number }
     | { type: "error"; requestId?: string; sessionId?: string; message?: string; replyTo?: string }

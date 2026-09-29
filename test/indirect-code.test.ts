@@ -508,8 +508,8 @@ describe("Indirect Code Relay and Pairing", () => {
       { stdout: "inherit", stderr: "inherit" },
     );
 
+    let featHostId = "";
     try {
-      let featHostId = "";
       const started = Date.now();
       while (Date.now() - started < 10_000) {
         const hRes = await fetch(`${GW}/api/indirect-code/hosts`, {
@@ -596,13 +596,16 @@ describe("Indirect Code Relay and Pairing", () => {
 
       // Forks are daemon-owned independent prefixes, with an action ack and a
       // normal mirrored listing; both user and assistant boundaries are valid.
+      // Contract: the fork INCLUDES the boundary's whole turn (user +
+      // assistant + tool results). /help seeds ONE turn [user, assistant]
+      // — both boundaries yield that full turn (2 rows), never `index + 1`.
       for (const index of [0, 1]) {
         send({ type: "fork_session", sessionId: sid, index, requestId: `fork-${index}` });
         const forked = await waitFor((m) => m.type === "session_forked" && m.requestId === `fork-${index}`);
         expect(forked.session.id).not.toBe(sid);
         expect(forked.session.cwd).toBe(workDir);
         expect(forked.session.status).toBe("idle");
-        expect(forked.session.messages.length).toBe(index + 1);
+        expect(forked.session.messages.length).toBe(2);
         expect(forked.session.options).toEqual(configured.session.options);
       }
 
@@ -727,6 +730,16 @@ describe("Indirect Code Relay and Pairing", () => {
       });
       expect(delRes.status).toBe(200);
     } finally {
+      // Remove the host row in the finally too: a mid-test assert failure
+      // used to leak it into the next test's `hosts.length === 0`.
+      try {
+        if (featHostId) {
+          await fetch(`${GW}/api/indirect-code/hosts/${featHostId}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${userToken}` },
+          });
+        }
+      } catch {}
       try {
         daemonSubproc.kill();
       } catch {}

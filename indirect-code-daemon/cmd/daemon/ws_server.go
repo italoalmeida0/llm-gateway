@@ -558,6 +558,20 @@ func (s *wsServer) handleRaw(raw []byte) {
 			AttachmentIDs []string `json:"attachmentIds"`
 		}
 		_ = json.Unmarshal(raw, &req)
+		if req.EditText != "" {
+			// Fork&resend (edit + resend in a copy): rides the ATOMIC
+			// primitive (the row is durable in the fork before its turn).
+			// Compat: `index` is a raw row index -> resolve its turn id.
+			turnID := req.Index
+			if rec := s.readRecord(req.SessionID); rec != nil && req.Index >= 0 && req.Index < len(rec.Messages) {
+				turnID = rec.Messages[req.Index].TurnIndex
+			}
+			s.onForkAndResend(req.SessionID, req.RequestID, forkAndResendMsg{
+				TurnID: turnID, Text: req.EditText, AttachmentIDs: req.AttachmentIDs,
+				Model: req.EditModel, YOLO: req.YOLO,
+			})
+			return
+		}
 		s.onFork(req.SessionID, req.Index, req.RequestID, req.EditText, req.EditModel, req.YOLO, req.AttachmentIDs)
 
 	case "regenerate":
@@ -582,7 +596,49 @@ func (s *wsServer) handleRaw(raw []byte) {
 			AttachmentIDs *[]string `json:"attachmentIds"`
 		}
 		_ = json.Unmarshal(raw, &req)
+		if req.Regen {
+			// Regenerate/discard&resend rides the ATOMIC primitive now (turn
+			// id resolved from the row index below).
+			s.onEditMessage(req.SessionID, req.Index, req.Text, req.Model, req.Regen, req.YOLO, req.AttachmentIDs)
+			return
+		}
 		s.onEditMessage(req.SessionID, req.Index, req.Text, req.Model, req.Regen, req.YOLO, req.AttachmentIDs)
+
+	case "discard_and_resend":
+		// ATOMIC discard&resend / regenerate (turnId = the boundary turn's
+		// index). Reply event always: discard_and_resend_result.
+		var req struct {
+			SessionID     string   `json:"sessionId"`
+			TurnID        int      `json:"turnId"`
+			Text          string   `json:"text"`
+			Model         string   `json:"model"`
+			YOLO          bool     `json:"yolo"`
+			AttachmentIDs []string `json:"attachmentIds"`
+			RequestID     string   `json:"requestId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		s.onDiscardAndResend(req.SessionID, req.RequestID, discardAndResendMsg{
+			TurnID: req.TurnID, Text: req.Text, AttachmentIDs: req.AttachmentIDs,
+			Model: req.Model, YOLO: req.YOLO,
+		})
+
+	case "fork_and_resend":
+		// Fork the prefix ABOVE the turn + start a turn there with Text.
+		// Reply event always: fork_and_resend_result.
+		var req struct {
+			SessionID     string   `json:"sessionId"`
+			TurnID        int      `json:"turnId"`
+			Text          string   `json:"text"`
+			Model         string   `json:"model"`
+			YOLO          bool     `json:"yolo"`
+			AttachmentIDs []string `json:"attachmentIds"`
+			RequestID     string   `json:"requestId"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		s.onForkAndResend(req.SessionID, req.RequestID, forkAndResendMsg{
+			TurnID: req.TurnID, Text: req.Text, AttachmentIDs: req.AttachmentIDs,
+			Model: req.Model, YOLO: req.YOLO,
+		})
 
 	case "create_project":
 		var req struct {
@@ -1055,23 +1111,46 @@ func (s *wsServer) onRegenerate(sessionID string, index int, text, model string,
 		userText = core.StripLeadingSystemPrompt(strings.TrimSpace(text))
 	}
 	if userIdx < 0 || userText == "" {
+		s.emit(map[string]any{"type": "discard_and_resend_result", "hostId": s.host(), "sessionId": sessionID, "ok": false, "error": "no user message to regenerate"})
 		return
 	}
-	s.truncateAndRun(sessionID, userIdx, messageUserText(rec.Messages[userIdx]), model, yolo, messageAttachmentIDs(rec.Messages[userIdx], rec.Attachments))
+	// Regenerate rides the ATOMIC primitive (empty text = reuse original).
+	s.onDiscardAndResend(sessionID, "", discardAndResendMsg{
+		TurnID: rec.Messages[userIdx].TurnIndex,
+		Model:  model, YOLO: yolo,
+		AttachmentIDs: messageAttachmentIDs(rec.Messages[userIdx], rec.Attachments),
+	})
 }
 
 func (s *wsServer) onEditMessage(sessionID string, index int, text, model string, regen bool, yolo bool, attachmentIDs *[]string) {
+	// Every failure path answers the client (edit_message_result): a silent
+	// return used to lose the user's edited text forever (the frontend had
+	// already dropped its edit buffer).
+	fail := func(err string) {
+		s.emit(map[string]any{"type": "edit_message_result", "hostId": s.host(), "sessionId": sessionID, "ok": false, "error": err})
+	}
 	rec := s.readRecord(sessionID)
-	if rec == nil || index < 0 || index >= len(rec.Messages) {
+	if rec == nil {
+		fail("session not found")
+		return
+	}
+	if index < 0 || index >= len(rec.Messages) {
+		fail("stale message index — the transcript changed; try again")
 		return
 	}
 	res := s.sessions.route(sessionID, false)
 	if res.Error != "" {
+		fail(res.Error)
 		return
 	}
 	// Must be idle.
 	repCh := make(chan any, 1)
-	res.Control <- watchdogPingMsg{Reply: repCh}
+	select {
+	case res.Control <- watchdogPingMsg{Reply: repCh}:
+	case <-time.After(replyTimeout):
+		fail("session busy")
+		return
+	}
 	state := ""
 	select {
 	case r := <-repCh:
@@ -1079,14 +1158,16 @@ func (s *wsServer) onEditMessage(sessionID string, index int, text, model string
 			state = rep.State
 		}
 	case <-time.After(replyTimeout):
+		fail("session busy")
 		return
 	}
 	if state != stateIdle {
-		s.error(sessionID, "", "Stop the current turn before editing")
+		fail("Stop the current turn before editing")
 		return
 	}
 	msg := rec.Messages[index]
 	if msg.Role != provider.RoleUser {
+		fail("only user messages can be edited")
 		return
 	}
 	text = core.SanitizeUserText(text)
@@ -1095,31 +1176,87 @@ func (s *wsServer) onEditMessage(sessionID string, index int, text, model string
 		ids = *attachmentIDs
 	}
 	if err := validateAttachmentIDs(rec, ids); err != nil {
-		s.error(sessionID, "", err.Error())
+		fail(err.Error())
 		return
 	}
 	if strings.TrimSpace(text) == "" && len(ids) == 0 {
-		s.error(sessionID, "", "Message cannot be empty")
+		fail("Message cannot be empty")
 		return
 	}
 	if regen {
-		s.truncateAndRun(sessionID, index, text, model, yolo, ids)
+		// Discard&resend rides the ATOMIC primitive: the turn id is the
+		// boundary row's turn (index -> TurnIndex).
+		s.onDiscardAndResend(sessionID, "", discardAndResendMsg{
+			TurnID: msg.TurnIndex, Text: text, AttachmentIDs: ids,
+			Model: model, YOLO: yolo,
+		})
 		return
 	}
 	er := make(chan any, 1)
 	select {
 	case res.Inbox <- Envelope{SessionID: sessionID, Payload: editApplyMsg{Index: index, Text: text, AttachmentIDs: ids, Reply: er}}:
 	case <-time.After(replyTimeout):
+		fail("session busy")
 		return
 	}
 	select {
 	case r := <-er:
 		if er2, ok := r.(editApplyResult); ok && er2.Error == "" {
 			s.notifyChange("sessions")
+			s.emit(map[string]any{"type": "edit_message_result", "hostId": s.host(), "sessionId": sessionID, "ok": true})
 		} else if ok && er2.Error != "" {
-			s.error(sessionID, "", er2.Error)
+			fail(er2.Error)
 		}
 	case <-time.After(replyTimeout):
+		fail("session busy")
+	}
+}
+
+// onDiscardAndResend routes the ATOMIC discard&resend to the actor and
+// ALWAYS answers the client (discard_and_resend_result): no silent
+// returns — a failure keeps the user's edit text on screen.
+func (s *wsServer) onDiscardAndResend(sessionID, requestID string, msg discardAndResendMsg) {
+	res := s.sessions.route(sessionID, false)
+	if res.Error != "" {
+		s.emit(map[string]any{"type": "discard_and_resend_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": res.Error})
+		return
+	}
+	msg.Reply = make(chan any, 1)
+	select {
+	case res.Inbox <- Envelope{SessionID: sessionID, Payload: msg}:
+	case <-time.After(replyTimeout):
+		s.emit(map[string]any{"type": "discard_and_resend_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": "session busy"})
+		return
+	}
+	select {
+	case r := <-msg.Reply:
+		dr, _ := r.(discardResendResult)
+		s.emit(map[string]any{"type": "discard_and_resend_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": dr.Error == "", "error": dr.Error, "queued": dr.Queued})
+	case <-time.After(replyTimeout):
+		s.emit(map[string]any{"type": "discard_and_resend_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": "session busy"})
+	}
+}
+
+// onForkAndResend routes fork&resend and ALWAYS answers (fork_and_resend_result).
+func (s *wsServer) onForkAndResend(sessionID, requestID string, msg forkAndResendMsg) {
+	res := s.sessions.route(sessionID, false)
+	if res.Error != "" {
+		s.emit(map[string]any{"type": "fork_and_resend_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": res.Error})
+		return
+	}
+	msg.Reply = make(chan any, 1)
+	select {
+	case res.Inbox <- Envelope{SessionID: sessionID, Payload: msg}:
+	case <-time.After(replyTimeout):
+		s.emit(map[string]any{"type": "fork_and_resend_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": "session busy"})
+		return
+	}
+	select {
+	case r := <-msg.Reply:
+		fr, _ := r.(forkResendResult)
+		s.emit(map[string]any{"type": "fork_and_resend_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": fr.Error == "", "error": fr.Error, "newSessionId": fr.NewID})
+	case <-time.After(replyTimeout):
+		s.emit(map[string]any{"type": "fork_and_resend_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": "session busy"})
 	}
 }
 
@@ -1196,7 +1333,9 @@ func (s *wsServer) onSlashCommand(res spawnResult, sessionID, text string) bool 
 	}
 	switch fields[0] {
 	case "/clear":
-		s.truncateAndRun(sessionID, 0, "", "", false, nil)
+		// Handled by the frontend (new conversation = UI-only). Nothing to
+		// do here — the old path started an EMPTY turn (the model answered
+		// a blank prompt).
 		return true
 	case "/compact":
 		select {

@@ -49,6 +49,14 @@ type pendingAsk struct {
 	question    *tools.QuestionRequest
 }
 
+// pendingResendOp is the stashed form of a discard&resend-family operation
+// (applied by the finalizer when a running turn gives way).
+type pendingResendOp struct {
+	kind string // "discard_and_resend" | "fork_and_resend"
+	msg  discardAndResendMsg
+	fork forkAndResendMsg
+}
+
 // sessionActor owns one SessionRecord. Single goroutine, no locks.
 // The turn itself runs in worker (daughter goroutine); all state changes
 // come back as mailbox messages.
@@ -98,6 +106,13 @@ type sessionActor struct {
 	// sendNow promotes the queue head after a cancelled turn
 	// (queue_send_now semantics: cancel + promote).
 	sendNow bool
+	// pendingResend, when non-nil, is a discard&resend/fork&resend/clear
+	// that arrived while a turn was running: flagged like sendNow and
+	// applied by the finalizer (the single running→idle transition), so
+	// it never fights "turn already in flight".
+	pendingResend *pendingResendOp
+	// routeFn reaches another session's actor (fork&resend continuation).
+	routeFn func(id string) (chan Envelope, chan any, bool)
 	// bgDirty marks unpersisted bg chunk output while idle (throttled
 	// saves); flushed on the next tick or at terminal.
 	bgDirty bool
@@ -250,6 +265,12 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.onStateTimeout(m)
 	case editRegenerateMsg:
 		a.onEditRegenerate(m)
+	case discardAndResendMsg:
+		a.onDiscardAndResend(m)
+	case forkAndResendMsg:
+		a.onForkAndResend(m)
+	case seededStartMsg:
+		a.onSeededStart(m)
 	case forkReqMsg:
 		a.onFork(m)
 	case readReqMsg:
@@ -827,6 +848,17 @@ func (a *sessionActor) finishTurn(ok bool) {
 	} else {
 		a.sendNow = false
 	}
+	// discard&resend-family stash: the user OP is applied here (the single
+	// running→idle transition) — never mid-turn, never lost.
+	if op := a.pendingResend; op != nil {
+		a.pendingResend = nil
+		switch op.kind {
+		case "discard_and_resend":
+			a.applyDiscardAndResend(op.msg)
+		case "fork_and_resend":
+			a.applyForkAndResend(op.fork)
+		}
+	}
 }
 
 func (a *sessionActor) doCancel(reason string) {
@@ -1007,6 +1039,330 @@ func (a *sessionActor) onStateTimeout(m stateTimeoutMsg) {
 
 // ---- edit / fork / read ----
 
+// onDiscardAndResend is the ATOMIC discard&resend / regenerate primitive.
+// One durable commit: the tail (boundary turn included) is cut AND the new
+// user row is inserted before the turn starts — a failed turn start can
+// never lose the message (it is already a durable row). Empty text =
+// regenerate (reuses the boundary row's original text).
+//
+// Running turn: sendNow semantics — stash + cancel; the finalizer (the
+// single running→idle transition) applies it, so it never fights
+// "turn already in flight".
+func (a *sessionActor) onDiscardAndResend(m discardAndResendMsg) {
+	if a.state != stateIdle {
+		if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
+			a.pendingResend = &pendingResendOp{kind: "discard_and_resend", msg: m}
+			a.doCancel("discard_and_resend")
+			return // the finalizer answers m.Reply
+		}
+		replyResend(m.Reply, discardResendResult{Error: "session is busy"})
+		return
+	}
+	a.applyDiscardAndResend(m)
+}
+
+// applyDiscardResend runs the atomic cut+insert+start on the actor loop.
+func (a *sessionActor) applyDiscardAndResend(m discardAndResendMsg) {
+	if a.persistErr != nil {
+		replyResend(m.Reply, discardResendResult{Error: "session storage is failing; try again"})
+		return
+	}
+	// Boundary: the first row of the turn (its initiating user row).
+	idx := -1
+	for i, msg := range a.rec.Messages {
+		if msg.TurnIndex == m.TurnID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || m.TurnID <= 0 {
+		replyResend(m.Reply, discardResendResult{Error: "turn not found"})
+		return
+	}
+	boundary := a.rec.Messages[idx]
+	if boundary.Role != provider.RoleUser {
+		replyResend(m.Reply, discardResendResult{Error: "the turn does not start with a user message"})
+		return
+	}
+	// Text: explicit edit wins; empty = regenerate (reuse the original).
+	text := core.SanitizeUserText(m.Text)
+	ids := append([]string(nil), m.AttachmentIDs...)
+	if strings.TrimSpace(text) == "" && len(ids) == 0 {
+		text = messageUserText(boundary)
+		ids = messageAttachmentIDs(boundary, a.rec.Attachments)
+	}
+	if strings.TrimSpace(text) == "" && len(ids) == 0 {
+		replyResend(m.Reply, discardResendResult{Error: "Message cannot be empty"})
+		return
+	}
+	if err := validateAttachmentIDs(a.rec, ids); err != nil {
+		replyResend(m.Reply, discardResendResult{Error: err.Error()})
+		return
+	}
+	previous := cloneRecord(a.rec)
+	// Cut the boundary turn and everything below it.
+	a.rec.Messages = append([]provider.Message(nil), a.rec.Messages[:idx]...)
+	a.rec.FileBalloons = filterBalloonsBelow(a.rec.FileBalloons, m.TurnID)
+	// Insert the new user row in the boundary's place (same turn number:
+	// a re-run of that turn, like a tool retry — numbering stays stable).
+	row := provider.Message{
+		ID: provider.NewMessageID(), Role: provider.RoleUser, Time: time.Now(),
+		TurnIndex: m.TurnID,
+		Content:   []provider.Content{provider.TextBlock{Text: text}},
+		Meta:      attachmentMessageMeta(text, ids, a.rec.Attachments),
+	}
+	a.rec.Messages = append(a.rec.Messages, row)
+	// ONE durable commit: the cut AND the new row land together.
+	if err := a.store.persistEdited(a.id, m.TurnID, a.rec.Messages, nil, recordMeta(a.rec)); err != nil {
+		a.rec = previous
+		replyResend(m.Reply, discardResendResult{Error: "Could not save: " + err.Error()})
+		return
+	}
+	a.emit(map[string]any{"type": "session_truncated", "hostId": a.hostID(), "sessionId": a.id, "keepIndex": idx - 1})
+	a.emit(tailContentEvent(a.hostID(), a.id, "session_content", a.rec, 0, nil))
+	a.pingChange()
+	// Start the turn SEEDED (the row exists; the worker runs Continue).
+	if err := a.startSeededTurn(m.TurnID, m.Model, m.YOLO, m.AttachmentIDs); err != nil {
+		// The message is SAFE (durable row above) — report, never lose.
+		replyResend(m.Reply, discardResendResult{Error: "Message saved, but the turn did not start: " + err.Error()})
+		return
+	}
+	replyResend(m.Reply, discardResendResult{TurnSeq: m.TurnID})
+}
+
+// startSeededTurn starts a turn whose user row already exists in the
+// record (atomic discard&resend / fork&resend). Same contract as
+// startTurnWithMeta minus the TurnSeq bump: the row carries turnSeq.
+func (a *sessionActor) startSeededTurn(turnSeq int, model string, yolo bool, attachIDs []string) error {
+	if a.state != stateIdle || a.persistErr != nil || a.closing {
+		return fmt.Errorf("session is busy or cannot persist")
+	}
+	if yolo && a.rec.Options.Access == "ask" {
+		a.rec.Options.Access = "full"
+	}
+	previous := *a.rec
+	a.gen++
+	if model != "" {
+		a.rec.Model = model
+	}
+	a.rec.TurnSeq = turnSeq
+	a.rec.Status = "running"
+	a.rec.Turn = &TurnActivity{StartedAt: time.Now().UnixMilli(), Status: "running"}
+	a.rec.UpdatedAt = time.Now().UnixMilli()
+	h := &walHeader{TurnIndex: turnSeq, StartedAt: a.rec.Turn.StartedAt, Model: a.rec.Model, Prompt: "", AttachmentIDs: attachIDs}
+	wal, err := a.store.openWAL(a.id, h)
+	if err != nil {
+		*a.rec = previous
+		a.storageError(err)
+		return err
+	}
+	a.wal = wal
+	for _, ev := range []walEvent{
+		{Type: walTypeOptions, Options: &a.rec.Options},
+		{Type: walTypeQueue, Queue: a.rec.Queue},
+		{Type: walTypeTitle, Title: a.rec.Title, TitleSource: a.rec.TitleSource},
+	} {
+		if err := appendWALEvent(a.wal, ev); err != nil {
+			a.storageError(err)
+			a.setState(statePersist)
+			a.finishOK = false
+			return err
+		}
+	}
+	a.setState(stateRunning)
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancel = cancel
+	a.workerDone = make(chan struct{})
+	gen := a.gen
+	snap, env := snapshotTurn(a, gen, "", nil)
+	snap.seeded = true
+	a.pendingContext = nil
+	workerDone := a.workerDone
+	go func() {
+		defer close(workerDone)
+		a.startWorker(snap, env, ctx)
+	}()
+	a.pingChange()
+	hostID := a.hostID()
+	a.emit(map[string]any{
+		"type": "session_status", "hostId": hostID, "sessionId": a.id,
+		"status": "running", "turn": map[string]any{"startedAt": a.rec.Turn.StartedAt, "status": "running"},
+	})
+	return nil
+}
+
+// onForkAndResend forks the prefix ABOVE the turn at TurnID (the boundary
+// turn excluded) into a new session, inserts the new user row there and
+// starts the turn — the row is durable in the FORK before the turn starts.
+func (a *sessionActor) onForkAndResend(m forkAndResendMsg) {
+	if a.state == stateRunning || a.state == stateAwaitAppr || a.state == stateAwaitQ {
+		a.pendingResend = &pendingResendOp{kind: "fork_and_resend", fork: m}
+		a.doCancel("fork_and_resend")
+		return
+	}
+	if a.state != stateIdle {
+		replyForkResend(m.Reply, forkResendResult{Error: "session is busy"})
+		return
+	}
+	a.applyForkAndResend(m)
+}
+
+func (a *sessionActor) applyForkAndResend(m forkAndResendMsg) {
+	// Boundary: first row of the turn — the fork EXCLUDES it (above only).
+	idx := -1
+	for i, msg := range a.rec.Messages {
+		if msg.TurnIndex == m.TurnID {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 || m.TurnID <= 0 {
+		replyForkResend(m.Reply, forkResendResult{Error: "turn not found (or nothing above it)"})
+		return
+	}
+	boundary := a.rec.Messages[idx]
+	if boundary.Role != provider.RoleUser {
+		replyForkResend(m.Reply, forkResendResult{Error: "the turn does not start with a user message"})
+		return
+	}
+	text := core.SanitizeUserText(m.Text)
+	ids := append([]string(nil), m.AttachmentIDs...)
+	if strings.TrimSpace(text) == "" && len(ids) == 0 {
+		text = messageUserText(boundary)
+		ids = messageAttachmentIDs(boundary, a.rec.Attachments)
+	}
+	if strings.TrimSpace(text) == "" && len(ids) == 0 {
+		replyForkResend(m.Reply, forkResendResult{Error: "Message cannot be empty"})
+		return
+	}
+	// Fork the prefix ABOVE the boundary (Keep = idx-1 includes it + tools).
+	fr := forkResult{}
+	fch := make(chan any, 1)
+	a.onFork(forkReqMsg{Keep: idx - 1, Title: a.rec.Title + " (fork)", Reply: fch})
+	fr = (<-fch).(forkResult)
+	if fr.Error != "" {
+		replyForkResend(m.Reply, forkResendResult{Error: fr.Error})
+		return
+	}
+	// Insert the new user row INTO the fork (durable before the turn).
+	forkRec, err := a.store.loadSession(fr.NewID)
+	if err != nil {
+		replyForkResend(m.Reply, forkResendResult{Error: "Could not load the fork: " + err.Error()})
+		return
+	}
+	newTurn := forkRec.TurnSeq + 1
+	row := provider.Message{
+		ID: provider.NewMessageID(), Role: provider.RoleUser, Time: time.Now(),
+		TurnIndex: newTurn,
+		Content:   []provider.Content{provider.TextBlock{Text: text}},
+		Meta:      attachmentMessageMeta(text, ids, forkRec.Attachments),
+	}
+	forkRec.Messages = append(forkRec.Messages, row)
+	forkRec.TurnSeq = newTurn
+	if err := a.store.saveSessionSync(forkRec); err != nil {
+		replyForkResend(m.Reply, forkResendResult{Error: "Could not save the fork: " + err.Error()})
+		return
+	}
+	replyForkResend(m.Reply, forkResendResult{NewID: fr.NewID})
+	// Start the seeded turn in the FORK (its actor spawns on this message).
+	a.startForkedSeeded(fr.NewID, newTurn, m.Model, m.YOLO, ids)
+}
+
+// startForkedSeeded routes a seededStartMsg to the fork's actor (spawned
+// transparently by the supervisor).
+func (a *sessionActor) startForkedSeeded(forkID string, turnSeq int, model string, yolo bool, attachIDs []string) {
+	inbox, control, ok := a.sessionRoute(forkID)
+	_ = control
+	if !ok {
+		return
+	}
+	reply := make(chan any, 1)
+	select {
+	case inbox <- Envelope{SessionID: forkID, Payload: seededStartMsg{TurnSeq: turnSeq, Model: model, YOLO: yolo, AttachmentIDs: attachIDs, Reply: reply}}:
+	case <-time.After(replyTimeout):
+	}
+	select {
+	case r := <-reply:
+		if res, ok := r.(seededStartResult); ok && res.Error != "" {
+			trace("fork.seeded.start_failed", map[string]any{"sid": forkID, "error": res.Error})
+		}
+	case <-time.After(replyTimeout):
+	}
+}
+
+// onSeededStart starts a turn whose user row already exists (fork&resend
+// continuation). The row is durable in the fork; a failure here never
+// loses it.
+func (a *sessionActor) onSeededStart(m seededStartMsg) {
+	if a.state != stateIdle {
+		select {
+		case m.Reply <- seededStartResult{Error: "session is busy"}:
+		default:
+		}
+		return
+	}
+	last := len(a.rec.Messages) - 1
+	if last < 0 || a.rec.Messages[last].Role != provider.RoleUser || a.rec.Messages[last].TurnIndex != m.TurnSeq {
+		select {
+		case m.Reply <- seededStartResult{Error: "no seeded user row for this turn"}:
+		default:
+		}
+		return
+	}
+	ids := messageAttachmentIDs(a.rec.Messages[last], a.rec.Attachments)
+	if err := a.startSeededTurn(m.TurnSeq, m.Model, m.YOLO, ids); err != nil {
+		select {
+		case m.Reply <- seededStartResult{Error: err.Error()}:
+		default:
+		}
+		return
+	}
+	select {
+	case m.Reply <- seededStartResult{}:
+	default:
+	}
+}
+
+// sessionRoute reaches another session's actor (fork continuation). Wired
+// once at construction from the supervisor (nil in tests).
+func (a *sessionActor) sessionRoute(id string) (chan Envelope, chan any, bool) {
+	if a.routeFn == nil {
+		return nil, nil, false
+	}
+	return a.routeFn(id)
+}
+
+// replyResend/replyClear/replyForkResend answer ALWAYS (no silent drops).
+func replyResend(ch chan any, r discardResendResult) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- r:
+	default:
+	}
+}
+func replyForkResend(ch chan any, r forkResendResult) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- r:
+	default:
+	}
+}
+
+// filterBalloonsBelow keeps balloons of turns strictly below turnID.
+func filterBalloonsBelow(balloons []filetrack.TurnChanges, turnID int) []filetrack.TurnChanges {
+	out := make([]filetrack.TurnChanges, 0, len(balloons))
+	for _, b := range balloons {
+		if b.TurnIndex < turnID {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 func (a *sessionActor) onEditRegenerate(m editRegenerateMsg) {
 	if a.state != stateIdle {
 		m.Reply <- promptResult{Error: "stop the turn first"}
@@ -1044,11 +1400,14 @@ func (a *sessionActor) onFork(m forkReqMsg) {
 		m.Reply <- forkResult{Error: "Select a user or assistant message to fork"}
 		return
 	}
+	// The fork INCLUDES the boundary's whole turn (user + assistant + tool
+	// results): every row with the same TurnIndex, stopping at the next
+	// turn's first row. (Role-based extents missed the assistant reply of
+	// a user boundary and rejected a tool-row boundary — fork&resend keeps
+	// can land on either.)
 	end := m.Keep + 1
-	if boundary.Role == provider.RoleAssistant {
-		for end < len(a.rec.Messages) && a.rec.Messages[end].Role == provider.RoleTool {
-			end++
-		}
+	for end < len(a.rec.Messages) && a.rec.Messages[end].TurnIndex == boundary.TurnIndex {
+		end++
 	}
 	now := time.Now().UnixMilli()
 	rec := &SessionRecord{
@@ -1080,6 +1439,16 @@ func (a *sessionActor) onFork(m forkReqMsg) {
 	if st := a.rec.Compaction; st != nil && st.KeepFrom >= 0 && st.KeepFrom <= end {
 		cp := *st
 		rec.Compaction = &cp
+	}
+	// Bg tasks: the fork inherits the TERMINAL ones (their logs are
+	// history the user can read with bg_check). Running tasks stay with
+	// the owning session — their runner/pids belong to it; the fork card
+	// shows history only.
+	for _, t := range a.rec.BgTasks {
+		if t.Status != BgStatusRunning {
+			cp := t
+			rec.BgTasks = append(rec.BgTasks, cp)
+		}
 	}
 	used := map[string]bool{}
 	for _, msg := range rec.Messages {

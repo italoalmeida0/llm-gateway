@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 func editDisplay(t *testing.T, res core.ToolResult) string {
@@ -37,8 +36,8 @@ func TestEditPreviewReturnsDiffWithoutWriting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := preview.Content[0].(provider.TextBlock).Text; got != "Successfully replaced 1 block(s) in a.txt." {
-		t.Fatalf("preview AI content = %q", got)
+	if got := envAttr(preview, "info"); got != "Successfully replaced 1 block(s) in a.txt." {
+		t.Fatalf("preview AI info = %q", got)
 	}
 	display := editDisplay(t, preview)
 	for _, want := range []string{"APPLIED.", "-hello world", "+hello gopher"} {

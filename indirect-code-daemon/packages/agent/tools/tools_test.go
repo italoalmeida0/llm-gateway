@@ -38,6 +38,29 @@ func toolDisplay(t *testing.T, res core.ToolResult) string {
 	return d
 }
 
+// envBody returns the concatenated text body of a tool result (pure tool
+// content, before envelope wrapping).
+func envBody(t *testing.T, res core.ToolResult) string {
+	t.Helper()
+	var b []string
+	for _, c := range res.Content {
+		if tb, ok := c.(provider.TextBlock); ok {
+			b = append(b, tb.Text)
+		}
+	}
+	return strings.Join(b, "\n")
+}
+
+// envAttr returns one envelope attribute value ("" when absent).
+func envAttr(res core.ToolResult, key string) string {
+	for _, a := range res.Attrs {
+		if a.Key == key {
+			return a.Value
+		}
+	}
+	return ""
+}
+
 func TestReadText(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.txt")
@@ -50,7 +73,7 @@ func TestReadText(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Expected style: raw content, no line prefixes, no notice.
-	got := res.Content[0].(provider.TextBlock).Text
+	got := envBody(t, res)
 	if got != "hello\nworld\n" {
 		t.Fatalf("want raw content, got %q", got)
 	}
@@ -84,7 +107,7 @@ func TestReadImageMimeFromContentNotExtension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := res.Content[0].(provider.TextBlock).Text; got != "Read image file [image/jpeg]" {
+	if got := envBody(t, res); got != "Read image file [image/jpeg]" {
 		t.Fatalf("text note = %q", got)
 	}
 	imgBlock, ok := res.Content[1].(provider.ImageBlock)
@@ -116,7 +139,7 @@ func TestReadLargeImageResizesAndAddsPiHints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := res.Content[0].(provider.TextBlock).Text
+	text := envBody(t, res)
 	if !strings.Contains(text, "Read image file [image/png]") || !strings.Contains(text, "original 3000x1000, displayed at 2000x667") {
 		t.Fatalf("missing resize hint: %q", text)
 	}
@@ -139,11 +162,17 @@ func TestReadOffsetLimit(t *testing.T) {
 	os.WriteFile(p, []byte("1\n2\n3\n4\n5\n"), 0o644)
 	tool := &ReadTool{CWD: dir}
 	res, _ := tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": "a.txt", "offset": 2, "limit": 2}), nil)
-	// Expected style: raw lines plus the actionable continuation notice.
-	got := res.Content[0].(provider.TextBlock).Text
-	wantAI := "2\n3\n\n[2 more lines in file. Use offset=4 to continue.]"
+	// Expected style: raw lines only; pagination is an envelope attr.
+	got := envBody(t, res)
+	wantAI := "2\n3"
 	if got != wantAI {
 		t.Fatalf("want %q, got %q", wantAI, got)
+	}
+	if got := envAttr(res, "next"); got != "4" {
+		t.Fatalf("next attr want 4, got %q", got)
+	}
+	if got := envAttr(res, "page"); got != "2-3/5" {
+		t.Fatalf("page attr want 2-3/5, got %q", got)
 	}
 	// Frontend display keeps the line-prefixed view.
 	if display := toolDisplay(t, res); !strings.Contains(display, "2:2\n3:3\n") {
@@ -167,12 +196,17 @@ func TestReadTruncationNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := res.Content[0].(provider.TextBlock).Text
+	got := envBody(t, res)
 	// 3000 newline-terminated lines count as 3000 (no phantom extra line);
-	// head keeps 2000.
-	want := "[Showing lines 1-2000 of 3000. Use offset=2001 to continue.]"
-	if !strings.HasSuffix(got, want) {
-		t.Fatalf("want notice suffix %q, got tail %q", want, got[len(got)-120:])
+	// head keeps 2000. Pagination is an envelope attr, not body prose.
+	if got := envAttr(res, "page"); got != "1-2000/3000" {
+		t.Fatalf("page attr = %q", got)
+	}
+	if got := envAttr(res, "next"); got != "2001" {
+		t.Fatalf("next attr = %q", got)
+	}
+	if got := envAttr(res, "truncated"); got != "true" {
+		t.Fatalf("truncated attr = %q", got)
 	}
 	if strings.Contains(got, LinePrefixNotice) || strings.Contains(got, "1:line") {
 		t.Fatalf("AI content must not carry line prefixes: %q", got[:40])
@@ -214,9 +248,12 @@ func TestWriteCreatesDirs(t *testing.T) {
 	if string(b) != "hi" {
 		t.Fatalf("got %q", string(b))
 	}
-	// Expected style: one-line confirmation.
-	if got := res.Content[0].(provider.TextBlock).Text; got != "Successfully wrote to sub/a.txt" {
-		t.Fatalf("AI content = %q", got)
+	// Confirmation is an envelope attr (info=); body stays empty.
+	if got := envAttr(res, "info"); got != "Successfully wrote to sub/a.txt" {
+		t.Fatalf("info attr = %q", got)
+	}
+	if got := envBody(t, res); got != "" {
+		t.Fatalf("body must be empty, got %q", got)
 	}
 }
 
@@ -301,8 +338,8 @@ func TestEditSingle(t *testing.T) {
 	if string(b) != "hello gopher\n" {
 		t.Fatalf("got %q", string(b))
 	}
-	if got := res.Content[0].(provider.TextBlock).Text; got != "Successfully replaced 1 block(s) in a.txt." {
-		t.Fatalf("AI content = %q", got)
+	if got := envAttr(res, "info"); got != "Successfully replaced 1 block(s) in a.txt." {
+		t.Fatalf("info attr = %q", got)
 	}
 }
 
@@ -456,7 +493,7 @@ func TestBashSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Expected style: raw merged output, no prompt echo, no [exit N] footer.
-	got := res.Content[0].(provider.TextBlock).Text
+	got := envBody(t, res)
 	if got != "hi\n" && got != "hi" {
 		t.Fatalf("got %q", got)
 	}
@@ -486,7 +523,7 @@ func TestBashSyntax(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := res.Content[0].(provider.TextBlock).Text
+	got := envBody(t, res)
 	if res.IsError || !strings.Contains(got, "bash syntax works") {
 		t.Fatalf("got %q", got)
 	}
@@ -498,16 +535,13 @@ func TestBashFailure(t *testing.T) {
 	}
 	tool := &BashTool{CWD: t.TempDir()}
 	res, _ := tool.Execute(context.Background(), mustJSON(t, map[string]any{"command": "false"}), nil)
-	if !res.IsError {
-		t.Fatal("want error")
+	// A command's own non-zero exit is NOT a tool error: it is
+	// type=ok exit=1 with the output in the body.
+	if res.IsError {
+		t.Fatal("non-zero exit must not be IsError")
 	}
-	// Expected style: output + status appended, no [exit N] footer.
-	got := res.Content[0].(provider.TextBlock).Text
-	if !strings.Contains(got, "Command exited with code 1") {
-		t.Fatalf("got %q", got)
-	}
-	if strings.Contains(got, "[exit 1]") {
-		t.Fatalf("AI content must not carry the footer: %q", got)
+	if got := envAttr(res, "exit"); got != "1" {
+		t.Fatalf("exit attr = %q", got)
 	}
 	// Frontend display keeps the footer.
 	if display := toolDisplay(t, res); !strings.Contains(display, "[exit 1]") {
@@ -526,14 +560,17 @@ func TestBashTailTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := res.Content[0].(provider.TextBlock).Text
-	// Expected style: keep the LAST 2000 lines and say so — WITHOUT a file
-	// path (the model never sees runner/temp paths).
+	got := envBody(t, res)
+	// Expected style: keep the LAST 2000 lines; truncation is an envelope
+	// attr (page/truncated), never body prose with a file path.
 	if !strings.Contains(got, "1001") || strings.Contains(got, "\n1\n") {
 		t.Fatalf("tail truncation must keep the last lines:\n%s", got[:80])
 	}
-	if !strings.Contains(got, "[Showing lines 1001-3000 of 3000 (line limit). The earlier lines are truncated.]") {
-		t.Fatalf("want truncation notice, got:\n%s", got[len(got)-200:])
+	if got := envAttr(res, "page"); got != "1001-3000/3000" {
+		t.Fatalf("page attr = %q", got)
+	}
+	if got := envAttr(res, "truncated"); got != "true" {
+		t.Fatalf("truncated attr = %q", got)
 	}
 	if strings.Contains(got, "/tmp") || strings.Contains(got, "full output:") {
 		t.Fatalf("model-visible result must not leak paths: %q", got[len(got)-200:])
@@ -557,10 +594,12 @@ func TestWriteLineNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Expected style: one-line confirmation only.
-	got := res.Content[0].(provider.TextBlock).Text
-	if got != "Successfully wrote to file.txt" {
-		t.Fatalf("AI content = %q", got)
+	// Confirmation is an envelope attr (info=); body stays empty.
+	if got := envAttr(res, "info"); got != "Successfully wrote to file.txt" {
+		t.Fatalf("info attr = %q", got)
+	}
+	if got := envBody(t, res); got != "" {
+		t.Fatalf("body must be empty, got %q", got)
 	}
 	// Frontend display keeps the line-prefixed echo.
 	wantDisplay := LinePrefixNotice + "1:alpha\n2:beta\n3:gamma\n"
@@ -581,9 +620,9 @@ func TestEditLineNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Expected style: one-line confirmation only.
-	if got := res.Content[0].(provider.TextBlock).Text; got != "Successfully replaced 1 block(s) in e.txt." {
-		t.Fatalf("AI content = %q", got)
+	// Confirmation is an envelope attr (info=); body stays empty.
+	if got := envAttr(res, "info"); got != "Successfully replaced 1 block(s) in e.txt." {
+		t.Fatalf("info attr = %q", got)
 	}
 	// Frontend display keeps the numbered diff.
 	display := toolDisplay(t, res)
@@ -662,7 +701,7 @@ func TestReadPaginationTerminates(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Lines 4-5 are the whole tail: no continuation notice.
-	if got := res.Content[0].(provider.TextBlock).Text; got != "4\n5\n" {
+	if got := envBody(t, res); got != "4\n5\n" {
 		t.Fatalf("tail page must be complete without notice, got %q", got)
 	}
 	// One past the end errors instead of returning an empty page.
@@ -696,13 +735,17 @@ func TestReadLongLineDeliversHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := res.Content[0].(provider.TextBlock).Text
+	got := envBody(t, res)
 	// The model gets content (head of the line), not just a "use bash" note.
 	if !strings.HasPrefix(got, strings.Repeat("z", 100)) {
 		t.Fatalf("long line head not delivered, got %q...", got[:80])
 	}
-	if !strings.Contains(got, "[Line 1 is 58.6KB; showing the first 50.0KB.") {
-		t.Fatalf("missing partial-line notice, got tail %q", got[len(got)-160:])
+	// Partial-line truncation is an envelope attr, not body prose.
+	if envAttr(res, "line") != "1" || envAttr(res, "truncated") != "true" {
+		t.Fatalf("missing line/truncated attrs: %q / %q", envAttr(res, "line"), envAttr(res, "truncated"))
+	}
+	if envAttr(res, "line_size") != "58.6KB" || envAttr(res, "shown") != "50.0KB" {
+		t.Fatalf("missing size attrs: %q / %q", envAttr(res, "line_size"), envAttr(res, "shown"))
 	}
 }
 
@@ -721,6 +764,6 @@ func TestBashNoTimeout(t *testing.T) {
 	}
 	if res.IsError {
 		t.Fatalf("sleep 1 must succeed without any timeout, got: %q",
-			res.Content[0].(provider.TextBlock).Text)
+			envBody(t, res))
 	}
 }

@@ -29,10 +29,19 @@ type Tool interface {
 type ToolResult struct {
 	StartedAt  int64
 	DurationMs int64
-	// Content is sent back to the LLM (text and/or images).
+	// Content is sent back to the LLM (text and/or images). Text bodies are
+	// PURE tool content (program output, file text, log lines): the agent
+	// wraps them in the <tool_result> envelope (see envelope.go) together
+	// with Attrs. System metadata never goes in the body.
 	Content []provider.Content
-	// IsError marks this result as an error to the LLM.
+	// IsError marks this result as a tool-MISUSE error (bad arguments,
+	// permission denied, not found, aborted). A command's own non-zero
+	// exit is NOT an error: report it via Attrs (exit="2") instead.
 	IsError bool
+	// Attrs are envelope attributes rendered on the <tool_result> open
+	// tag: exit, status, page, next, truncated, job_id, info, ... Empty
+	// values are skipped. Facts for the model to branch on; never prose.
+	Attrs []Attr
 	// ActivateTools names previously deferred tools that become available
 	// after this result. Unknown names are ignored by the agent.
 	ActivateTools []string

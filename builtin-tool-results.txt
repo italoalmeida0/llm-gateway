@@ -1,0 +1,933 @@
+================================================================================
+BUILT-IN TOOL RESULTS — EVERYTHING THE MODEL CAN RECEIVE (SUCCESS, ERROR, EDGE)
+================================================================================
+Source of truth: indirect-code-daemon (Go). Every string below is verbatim from
+the code; the RASTREAMENTO (tracing) section at the end maps each string to its
+file:line so you can adjust it.
+
+*** FORMATO ATUAL (envelope pseudo-XML) — lê isto primeiro ***
+Todos os exemplos abaixo mostram o TEXTO que hoje é o CORPO do envelope. Desde
+a mudança de envelope, cada tool_result que o modelo recebe é:
+
+    <tool_result type="ok" exit="0">hello\nworld</tool_result>
+    <tool_result type="error">permission denied: this agent has no filesystem read permission</tool_result>
+
+Contrato (packages/core/envelope.go + spec no system prompt):
+- Corpo = SÓ conteúdo da ferramenta (output de programa, texto de arquivo,
+  linhas de log). Metadado do sistema nunca vai no corpo — vai em atributos:
+  exit, status, page, next, truncated, job_id, info, duration, total, ...
+- type="error" é a ÚNICA exceção: corpo = mensagem de erro do sistema, e é
+  usado SÓ quando a CHAMADA falhou (argumento inválido, permission denied,
+  not found, abort). O exit≠0 de um comando NÃO é error: é type="ok" exit="2".
+- "<tool_result" literal no output é escapado como "&lt;tool_result".
+- Wrap centralizado: core.WrapToolResultContent (packages/core/envelope.go),
+  aplicado em core/agent.go runOneTool (choke point único). As tools só
+  preenchem Content (corpo puro) + Attrs (fatos).
+- Frontend faz strip das tags na renderização (web/src/indirect-code/utils/
+  envelope.ts) e guarda os attrs em toolDetails.env para os rótulos da UI.
+- Migração v3 (internal/migrations/v3_tool_result_envelope.go) envelopa os
+  tool_results legados dos JSONL de sessão; is_error vira type="error".
+
+Onde os exemplos antigos abaixo viram atributos (mapeamento):
+- bash "Command exited with code N"  -> exit="N" (type=ok!) + corpo = output
+- bash/python "Command aborted/stopped" -> status="aborted|stopped"
+- bash/python "[Showing lines X-Y of N]" -> page="X-Y/N" truncated="true" next="Y+1"
+- read "[Showing lines ... Use offset=N]" -> page= + next= + truncated=
+- read "[Line N is X; showing first Y]" -> line= line_size= shown= next_byte=
+- read "[N more lines in file]" -> page= + next=
+- glob/search "(Truncated: showing first N)" / "(capped at N …)" -> truncated="true"
+- glob/search "(no matches)" / "No files matched" -> info="no matches" (corpo vazio)
+- bg_check "No output yet." -> info="No output yet." (corpo vazio — seu caso!)
+- bg_check "Background Task (%s) — %s" + "Command:" + "Status:" -> kind= status= command= exit=
+- bg_check "Lines X–Y of N (D dropped)" + "[N more lines…]" -> page= dropped= next=
+- write/edit "Successfully wrote/replaced …" -> info= (corpo vazio)
+- python "[exit N]  Took X" -> exit="N" duration="X" (corpo = stdout+stderr)
+- python "(no output)" -> info="no output"
+- sleep "Slept X." / "Woken early…" / "[Note: …]" -> status= waited= info=
+- completion "Task marked as complete." -> info= (corpo vazio)
+- fetch_url "fetched URL" + "…(truncated, N chars)" -> url= chars= truncated=
+- web_search "(cached)" / "N results for Q" / "(no results)" -> cached= query= total= info=
+- inspect "(N entries, capped at M)" -> total= truncated= info=
+- todo JSON continua no corpo (é dado), done/total/progress viram attrs.
+
+
+HOW RESULTS REACH THE MODEL (envelope)
+--------------------------------------
+- Tool.Execute returns core.ToolResult { Content []provider.Content, IsError,
+  Details any } — indirect-code-daemon/packages/core/tool.go:27-40.
+- The agent wraps it as provider.ToolResultBlock{CallID, Content, IsError} in a
+  RoleTool message — packages/core/agent.go:1052-1060.
+- IMPORTANT: when Execute returns a Go error, the model sees ONLY the error
+  string as tool_result text with IsError=true (agent.go:1149-1150). The
+  "invalid args: " / "Could not edit file:" prefixes below are part of that
+  string. Details/display never reach the LLM (UI-only).
+
+GLOBAL WRAPPER ERRORS (any tool)
+--------------------------------
+- Unknown tool name:
+    unknown tool "foo"
+  (packages/core/tool.go:91; note: name "patch" is aliased to "edit", tool.go:87)
+- Extension/guard refused the call (BeforeToolExecute):
+    <reason>            (or default) tool call refused by extension guard
+  (packages/core/agent.go:1105-1113)
+- Tool panicked (recovered):
+    panic: <value>
+  (packages/core/agent.go:1131-1134)
+- Turn cancelled while a tool was running:
+    aborted: <err>
+  (packages/core/agent.go:1143)
+- Unmatched tool_use repaired on transcript read (stub tool_result):
+    Tool outcome is unknown: execution may have occurred before interruption.
+    Verify its effects or execution log before repeating a mutating action.
+  (packages/core/message.go:178)
+
+SANDBOX / PERMISSION ERRORS (surface through read/write/edit/bash/python/glob)
+-----------------------------------------------------------------------------
+- jailed: path "/etc/passwd" is outside sandbox root "/home/user/project" (use /unjail to disable)
+- jailed: command contains banned pattern "curl" (use /unjail to disable)
+- jailed: cd outside sandbox root is not allowed (use /unjail to disable)
+- sandbox root: <err> / sandbox path: <err>
+- permission denied: this agent has no filesystem read permission
+- permission denied: this agent has no filesystem write permission
+- permission denied: read "/etc/x" is outside declared scopes
+- permission denied: this agent has no bash permission
+- permission denied: bash allowlist does not permit substitution or redirection
+- permission denied: empty command
+- permission denied: bash command "rm" is not in allowlist
+- permission denied: unsupported bash mode "auto"
+(packages/agent/tools/sandbox.go:79-338, permissions.go:58-123)
+
+================================================================================
+read  (packages/agent/tools/read.go)
+================================================================================
+Args: {path (required), offset (1-indexed), limit}
+NOTE: the "<number>:" line prefix shown in the UI display is FRONTEND-ONLY
+(LinePrefixNotice, read.go:21) and is NEVER in AI-visible content.
+
+SUCCESS (plain text, fits window)
+---------------------------------
+    package main
+
+    func main() {}
+
+SUCCESS (offset/limit window, file continues)
+----------------------------------------------
+    <lines from offset...>
+
+    [12 more lines in file. Use offset=45 to continue.]        (read.go:205)
+
+SUCCESS (truncated by 2000-line/50KB window)
+--------------------------------------------
+    <first N lines...>
+
+    [Showing lines 1-2000 of 5312. Use offset=2001 to continue.]        (lines, read.go:196)
+    [Showing lines 1-812 of 5312 (50.0KB limit). Use offset=813 to continue.]  (bytes, read.go:199)
+
+SUCCESS (single line exceeds 50KB)
+----------------------------------
+    <first 50KB of the line>
+
+    [Line 12 is 2.1MB; showing the first 50.0KB. The rest of the line is only
+    reachable via bash: sed -n '12p' file.txt | tail -c +%d]             (read.go:189)
+
+SUCCESS (image)
+---------------
+    Read image file [image/png]
+    [Image: original 3000x1000, displayed at 2000x667. Multiply coordinates by 1.50 to map to original image.]
+    + ImageBlock{mime, data}                                            (read.go:90-95, image_resize.go:87-91)
+    (variants: "[Image converted from image/webp to image/png.]" image_resize.go:87)
+
+SUCCESS (image, processing failed — NOT an error, IsError=false)
+----------------------------------------------------------------
+    Read image file [image/jpeg]
+    <processErr>                                                        (read.go:87)
+
+SUCCESS (PDF/docx/odt/epub/rtf/rst/ipynb with a browser connected)
+-----------------------------------------------------------------
+    <converted markdown text, then normal window/offset pipeline>       (read.go:112-121)
+
+ERRORS (IsError=true, text = error string)
+------------------------------------------
+    invalid args: <json err>                        read.go:54
+    path is required                                read.go:57
+    stat /home/user/x: no such file or directory    read.go:64 (raw os.Stat error)
+    src is a directory                              read.go:70
+    video.mp4 is a video media file; inline video/audio reading is not supported   read.go:105
+    data.bin looks binary; refusing to read as text read.go:119 (no browser or >4MB or unconvertible)
+    file is larger than 100MB; use bash to inspect it in chunks          read.go:301
+    limit must be a positive number of lines        read.go:140
+    Offset 999 is beyond end of file (0 lines total)    read.go:150
+    Offset 999 is beyond end of file (120 lines total)  read.go:153
+    (+ sandbox/permission errors above)
+
+================================================================================
+write  (packages/agent/tools/write.go)
+================================================================================
+Args: {path (required), content (required)}
+
+SUCCESS (IsError=false — content is NOT echoed back)
+----------------------------------------------------
+    Successfully wrote to sub/a.txt                 write.go:103
+
+ERRORS
+------
+    invalid args: <json err>                        write.go:48
+    path is required                                write.go:51
+    mkdir /x/y: permission denied                   write.go:75 (raw error)
+    open /x/y: is a directory                       write.go:78 (raw error)
+    (+ sandbox/permission errors)
+
+================================================================================
+edit  (packages/agent/tools/edit.go)  [alias: "patch"]
+================================================================================
+Args: {path (required), edits: [{oldText, newText}, ...] (required)}
+Matching: exact first, then fuzzy (smart quotes/dashes/special spaces + trailing
+whitespace normalization, edit.go:252-325). All edits match the ORIGINAL file.
+
+SUCCESS
+-------
+    Successfully replaced 1 block(s) in a.txt.      edit.go:185
+    (UI-only Details: display "APPLIED." + numbered diff, edit.go:199-211)
+
+ERRORS
+------
+    invalid args: <json err>                        edit.go:64
+    path is required                                edit.go:110
+    Edit tool input is invalid. edits must contain at least one replacement.   edit.go:114
+    Could not edit file: /x/y. <stat/read err>.     edit.go:125
+    Could not edit file: /x/y. <write err>.         edit.go:175
+    Could not edit file: /x/y. binary file rejected.        edit.go:134
+    Could not edit file: /x/y. file too large (>2MB).       edit.go:137
+    Could not find the exact text in x. The old text must match exactly including all whitespace and newlines.            edit.go:329 (single edit)
+    Could not find edits[1] in x. The oldText must match exactly including all whitespace and newlines.                   edit.go:331 (multi edit)
+    Found 3 occurrences of the text in x. The text must be unique. Please provide more context to make it unique.         edit.go:336
+    Found 3 occurrences of edits[1] in x. Each oldText must be unique. Please provide more context to make it unique.     edit.go:338
+    oldText must not be empty in x.                 edit.go:343
+    edits[1].oldText must not be empty in x.        edit.go:345
+    No changes made to x. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.   edit.go:350
+    No changes made to x. The replacements produced identical content.        edit.go:352
+    edits[0] and edits[1] overlap in x. Merge them into one edit or target disjoint regions.   edit.go:426-428
+    Replacement range is outside the base content.  edit.go:512, 520
+    Cannot preserve unchanged lines because the base content has a different line count.       edit.go:534
+
+================================================================================
+bash  (packages/agent/tools/bash.go)
+================================================================================
+Args: {command (required)}. No timeout param. Merged stdout+stderr, TAIL
+truncated (last 2000 lines / 50KB). After 10s (AutoBackgroundAfter) it detaches.
+
+SUCCESS (exit 0)
+----------------
+    hello
+    world
+
+    Command exited with code 0 is NOT appended on success — output only.
+    (status line only added on abort/stop/nonzero, bash.go:336-349)
+
+NOTE: on success the text is just the output (or "(no output)", bash.go:310).
+There is no "[exit 0]" line in bash (unlike python).
+
+ERROR / NONZERO EXIT (IsError=true)
+-----------------------------------
+    <output>
+
+    Command exited with code 1                       bash.go:348
+
+ABORTED (turn cancelled pre-detach, IsError=true)
+-------------------------------------------------
+    <output>
+
+    Command aborted                                  bash.go:342
+
+STOPPED (bg_cancel / process killed, IsError=true)
+--------------------------------------------------
+    <output>
+
+    Command stopped                                  bash.go:345
+
+TRUNCATED OUTPUT (tail window)
+------------------------------
+    <last N lines...>
+
+    [Showing lines 3313-5312 of 5312 (line limit). The earlier lines are truncated.]   bash.go:320
+    [Showing lines 4801-5312 of 5312 (50.0KB limit). The earlier lines are truncated.] bash.go:323
+    [Showing last 2.1KB of line 5312 (line is 2.1MB). The earlier output is truncated — the shown tail is complete output.]  bash.go:317 (partial last line)
+
+BACKGROUND PLACEHOLDER (after ~10s, IsError=false)
+--------------------------------------------------
+    Command moved to background (still running).
+    To read the output, call bg_check with job_id "bg_7f3a…" (paged log: tail by default, offset/limit for more).
+    To force-stop it early, call bg_cancel with job_id "bg_7f3a…".
+    You are woken automatically when the task finishes — its completion notice is delivered to you then.
+    While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.
+    (bash.go:281-290)
+
+TOOL ERRORS
+-----------
+    invalid args: <json err>                        bash.go:52
+    command is required                             bash.go:55
+    terminal unavailable: no usable shell on this host (bash, unish, zsh and sh all failed their startup probe)   bash.go:58
+    could not persist inline outcome: <err>         bash.go:182
+    could not persist background disposition; process stopped, inspect it with bg_check (job_id "bg_…"): <err>   bash.go:219
+    could not register background job; process stopped (job_id "")   bash.go:228
+    (+ sandbox/permission errors)
+
+================================================================================
+python  (packages/agent/tools/python.go) — only registered when Python 3 exists
+================================================================================
+Args: {code | script (mutually exclusive), args, stdin, env, workdir}
+
+SUCCESS (exit 0)
+----------------
+    [1, 2, 3]
+    [exit 0]  Took 1s                                 python.go:443-445
+
+SUCCESS, no output
+------------------
+    (no output)
+    [exit 0]  Took 42ms                               python.go:434, 443
+
+NONZERO EXIT (IsError=false! — python marks nothing as error, see note)
+-----------------------------------------------------------------------
+    Traceback (most recent call last):
+      ...
+    ValueError: boom
+    [stderr]
+    <stderr stream>
+    [exit 1]  Took 350ms                              python.go:427-445
+    (stdout first, then "[stderr]" + stderr only when stdout non-empty, python.go:419-431)
+
+NOTE: finishPythonCommand never sets IsError (python.go:446-448) — even
+[exit 1] results are IsError=false. Non-ExitError failures append
+"[error: <err>]" instead of "[exit N]" (python.go:440).
+
+BACKGROUND PLACEHOLDER (after ~10s)
+-----------------------------------
+    Command moved to background (still running).
+    To read the output, call bg_check with job_id "bg_…" (paged log: tail by default, offset/limit for more).
+    To force-stop it early, call bg_cancel with job_id "bg_…".
+    You are woken automatically when the task finishes — its completion notice is delivered to you then.
+    While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.
+    (python.go:357-365)
+
+TOOL ERRORS
+-----------
+    python tool unavailable: no usable Python 3 interpreter on this host   python.go:133-135
+    python: provide `code` or `script`              python.go:144
+    python: `code` and `script` are mutually exclusive   python.go:147
+    python: invalid workdir: <err>                  python.go:155
+    python: invalid script path: <err>              python.go:176
+    python: script must be a .py file               python.go:179
+    python: script not found: scripts/x.py          python.go:182
+    could not persist inline outcome: <err>         python.go:279/289/299
+    could not persist background disposition; process stopped, inspect it with bg_check (job_id "bg_…"): <err>  python.go:310
+    could not register background job; process stopped (job_id "")  python.go:317
+    (+ sandbox/permission errors)
+
+================================================================================
+glob  (packages/agent/tools/glob.go)
+================================================================================
+Args: {pattern (required), path, hidden, caseInsensitive, type ("f"|"d")}
+Caps: 500 matches, depth 24. Honors .gitignore.
+
+SUCCESS
+-------
+    src/app.ts
+    src/app.test.ts                                  (sorted, one per line) glob.go:245
+
+SUCCESS (truncated at 500)
+--------------------------
+    src/a.ts
+    ...500 lines...
+
+    (Truncated: showing first 500 matches)           glob.go:250
+
+EMPTY
+-----
+    No files matched the pattern.                    glob.go:246
+
+ERRORS
+------
+    invalid args: <json err>                        glob.go:52
+    pattern is required                             glob.go:55
+    type must be "f" or "d"                         glob.go:58
+    src is not a directory                          glob.go:81
+    empty pattern                                   glob.go:315
+    invalid glob pattern "**{": <err>               glob.go:408
+    stat errors / walk errors (raw os error)        glob.go:69, 238
+    (+ sandbox/permission errors)
+
+================================================================================
+search  (packages/agent/tools/search.go)
+================================================================================
+Args: {pattern (required, RE2), path, include, exclude, maxResults (50/200),
+contextLines (0/20), caseSensitive, onlyMatching, count, filesOnly,
+respectGitignore (default true), maxFileBytes (default 1MB)}
+Default case-insensitive. Files >1MB (or maxFileBytes) are SKIPPED silently.
+
+SUCCESS (default mode)
+----------------------
+    3 matches (capped at 200 — narrow `path` or `include`)
+    src/app.ts:12:5: export function boot() {
+      // context line (when contextLines > 0)
+    src/app.ts:88:1: }
+    (no matches)                                     search.go:327-341
+    Format per match: <file>:<line>:<col>: <text>, context lines prefixed "  ".
+
+SUCCESS (count mode)
+--------------------
+    5 matches in 2 files
+    src/app.ts: 3 matches
+    src/util.ts: 2 matches
+    (capped at 200 — narrow `path` or `include`)      search.go:291-304
+
+SUCCESS (filesOnly mode)
+------------------------
+    2 files
+    src/app.ts
+    src/util.ts
+    (capped at 200 — narrow `path` or `include`)      search.go:311-320
+
+EMPTY (all modes)
+-----------------
+    (no matches)                                     search.go:300/316/340
+
+ERRORS
+------
+    invalid args: <json err>                        search.go:80
+    search: `pattern` is required                   search.go:84
+    search: invalid regex: <err>                    search.go:121
+    search: invalid path: <err>                     search.go:131
+    search: path not found: missing/                search.go:135
+    search: file exceeds size limit or cannot be read   search.go:427
+    (+ sandbox/permission errors)
+
+================================================================================
+inspect  (packages/agent/tools/inspect.go)
+================================================================================
+Args: {path (default "."), depth (1, max 5), showHidden, gitStatus (default
+true), maxEntries (200, max 1000), include, exclude, caseInsensitive,
+type ("f"|"d")}
+
+SUCCESS (directory tree)
+------------------------
+    . (12 entries, capped at 200)
+        [M] server/ (4.2KB, 2026-09-29 10:00)
+        src/ (12.5KB, 2026-09-28 18:22)
+          [M] app.ts (2.1KB, 143 lines, 2026-09-29 10:01)
+         ?? new.go (120B, 12 lines, 2026-09-29 09:58)
+    (header: "<scope>/ (%d entries", ", capped at %d" when truncated — inspect.go:222-227;
+     dirs: "<indent><flag><name>/ (<size>, <mtime>)" inspect.go:248;
+     files: "<indent><flag><name> (<size>, <N> lines, <mtime>)" inspect.go:254;
+     line counts only for text files <256KB, inspect.go:250-253;
+     git flags: "[M] ", "[A] ", "[D] ", "?? " or 4 spaces, inspect.go:296-301;
+     .git/node_modules/.hg/.svn always skipped, hidden skipped unless showHidden)
+
+SUCCESS (single file)
+---------------------
+        src/app.ts (2.1KB, 143 lines)                inspect.go:125
+
+ERRORS
+------
+    invalid args: <json err>                        inspect.go:71
+    inspect: invalid path: <sandbox err>            inspect.go:78
+    inspect: type must be "f" or "d"                inspect.go:101
+    inspect: path not found: missing                inspect.go:113
+    (walk errors returned raw)                      inspect.go:212
+
+================================================================================
+search_web  (packages/agent/tools/websearch.go)
+================================================================================
+Args: {query (required), count (10, max 20), offset (>= 0)}
+Rate-limited 1.5s between queries; results cached 60s.
+
+SUCCESS
+-------
+    10 results for "solidjs signals"
+
+    1. SolidJS Home
+       https://www.solidjs.com
+       Fine-grained reactive UI library...
+
+    2. ...                                            (websearch.go:124-129)
+
+SUCCESS (cached)
+----------------
+    (cached)
+    10 results for "solidjs signals"                  websearch.go:97
+
+EMPTY
+-----
+    0 results for "zzzqqq"
+
+    (no results)                                      websearch.go:132
+
+ERRORS
+------
+    invalid args: <json err>                        websearch.go:73
+    search_web: `query` is required                 websearch.go:77
+    search_web: `offset` must be >= 0               websearch.go:87
+    search_web: request failed: <err>               websearch.go:159
+    rate limited (429) — retry in a bit             websearch.go:203
+    HTTP 503                                        websearch.go:206
+
+================================================================================
+fetch_url  (packages/agent/tools/fetchurl.go)
+================================================================================
+Args: {url (required, http/https), maxChars (12000, max 50000), timeoutSec (20, max 60)}
+Follows up to 5 redirects (re-guarded each hop). Body cap 5MB.
+
+SUCCESS (HTML article)
+----------------------
+    fetched https://example.com/post
+    <extracted readable text>                         fetchurl.go:85
+
+SUCCESS (truncated at maxChars)
+-------------------------------
+    fetched https://example.com/api
+    <maxChars of text>
+    …(truncated, 34211 chars total)                   fetchurl.go:81
+
+SUCCESS (plain text/JSON/code returned raw)
+-------------------------------------------
+    fetched https://example.com/data.json
+    {"ok": true}                                      fetchurl.go:156-158
+
+ERRORS
+------
+    invalid args: <json err>                        fetchurl.go:56
+    fetch_url: `url` is required                    fetchurl.go:60
+    fetch_url: invalid URL                          fetchurl.go:96
+    fetch_url: only http/https allowed (got "file") fetchurl.go:99
+    fetch_url: too many redirects                   fetchurl.go:111
+    fetch_url: request failed: <err>                fetchurl.go:129
+    fetch_url: HTTP 404                             fetchurl.go:133
+    fetch_url: read failed: <err>                   fetchurl.go:138
+    fetch_url: PDFs not supported (content-type application/pdf)    fetchurl.go:144
+    fetch_url: media not supported (content-type video/mp4)        fetchurl.go:146
+    fetch_url: no readable content found            fetchurl.go:150
+    fetch_url: binary content not supported (content-type application/octet-stream)  fetchurl.go:156
+    fetch_url: empty host                           fetchurl.go:199
+    fetch_url: localhost blocked                    fetchurl.go:202
+    fetch_url: cloud metadata blocked               fetchurl.go:206
+    fetch_url: unresolvable IP blocked              fetchurl.go:213
+    fetch_url: private IP blocked (10.0.0.5)        fetchurl.go:219
+
+================================================================================
+bg_check  (packages/agent/tools/bgcheck.go)
+================================================================================
+Args: {job_id (required, bg_…), offset (1-indexed, <=0 = tail), limit (50, max 500)}
+
+SUCCESS (running, with output)
+------------------------------
+    Background Task (bash) — running
+    Command: go test ./...
+    Lines 120–169 of 169 (80 earlier lines discarded by the tail cap)
+    120:ok  	llm-gateway/indirect-code-daemon/packages/core	0.42s
+    121:...
+    [30 more lines: call bg_check again with offset 45]
+
+    Status: still running.                            bgcheck.go:83-105
+    (lines are numbered "N:text", bgcheck.go:113-123;
+     dropped note only when tail cap discarded head, bgcheck.go:93)
+
+SUCCESS (finished)
+------------------
+    Background Task (python) — done
+    Command: python analysis.py
+    Lines 1–20 of 20
+    1:...
+    Status: done (exit 0).                            bgcheck.go:105
+
+EMPTY OUTPUT
+------------
+    Background Task (bash) — running
+    Command: sleep 5
+    No output yet.
+
+    Status: still running.                            bgcheck.go:88
+
+ERRORS
+------
+    invalid args: <json err>                        bgcheck.go:68
+    bg_check: job_id is required                    bgcheck.go:70
+    bg_check: no background support                 bgcheck.go:73
+    bg_check: unknown background task bg_abc        bgcheck.go:80
+
+================================================================================
+bg_cancel  (packages/agent/tools/bgcancel.go + cmd/daemon/bg_supervisor.go)
+================================================================================
+Args: {job_id (required, bg_…)}
+
+SUCCESS (cancelled)
+-------------------
+    Background task go test ./... cancelled: the work is stopped and its result will NOT be delivered. Re-run it differently instead of waiting.
+    (bg_supervisor.go:534)
+
+ALREADY FINISHED (NOT an error — IsError=false)
+-----------------------------------------------
+    Background task go test ./... already finished (status done) — nothing to cancel.   (bg_supervisor.go:518)
+    Background task go test ./... already finished — nothing to cancel.                (bg_supervisor.go:529)
+
+ERRORS
+------
+    invalid args: <json err>                        bgcancel.go:57
+    bg_cancel: job_id is required                   bgcancel.go:59
+    bg_cancel: host not configured                  bgcancel.go:62
+    bg_cancel: no background task "bg_xyz" in this session   bg_supervisor.go:515
+    no background support                           bg_supervisor.go:497
+    bg supervisor unreachable                       bg_supervisor.go:503/512/524/532
+
+================================================================================
+sleep  (packages/agent/tools/sleep.go)
+================================================================================
+Args: {seconds (1–3600), waitingFor (required bg_…), summary (required, ≤100 chars)}
+
+SUCCESS (full duration)
+-----------------------
+    compiling the daemon
+    Slept 2m 30s.                                     sleep.go:122
+
+SUCCESS (woken early by a finishing background task)
+----------------------------------------------------
+    compiling the daemon
+    Woken early after 12s: a background task finished — its completion notice is now in context.   sleep.go:124
+
+PINNED TASK UNKNOWN (NOT an error)
+----------------------------------
+    compiling the daemon
+    [Note: background task bg_xyz is unknown in this session — nothing to wait for. Use bg_check with a valid id.]   sleep.go:92
+
+PINNED TASK ALREADY TERMINAL (NOT an error, returns immediately)
+-----------------------------------------------------------------
+    compiling the daemon
+    [Note: background task bg_xyz (go test ./...) already done — its completion notice is in context above. Use bg_check with job_id bg_xyz to read the output.]   sleep.go:95
+
+CANCELLED (turn cancelled)
+--------------------------
+    compiling the daemon
+    Sleep cancelled.                                  sleep.go:120
+
+ERRORS
+------
+    invalid args: <json err>                        sleep.go:68
+    seconds must be between 1 and 3600              sleep.go:71
+    waitingFor is required: pass the background task id (bg_…) this sleep waits on   sleep.go:75
+    summary is required: describe in ≤100 chars what you are waiting for   sleep.go:79
+
+================================================================================
+question  (packages/agent/tools/question.go)
+================================================================================
+Args: {questions: [{header, question, options: [{label, description}],
+multiple, recommend, decideLater}]} (1–4 questions, ≤8 options each)
+
+SUCCESS (the answers echo question order + option labels)
+---------------------------------------------------------
+    {"answers":[["Build mode (Recommended)"],["Backend only","Skip UI"]]}   question.go:135-139
+
+ERRORS
+------
+    invalid args (raw json error)                   question.go:115
+    ask between 1 and 4 questions                   question.go:53
+    each question needs a short header and a nonempty question   question.go:57
+    provide up to 8 options                         question.go:60
+    option labels must be nonempty and unique       question.go:66
+    answer every question before submitting         question.go:80
+    invalid number of answers for question 1        question.go:84
+    answers must be nonempty, unique and at most 4000 bytes   question.go:90
+    invalid custom answer for question 1            question.go:106
+    interactive questions are unavailable on this host   question.go:126
+    (user-side transport errors from t.Ask)         question.go:130
+
+================================================================================
+todo  (packages/agent/tools/todo.go)
+================================================================================
+Args: {items: [{id, text, status: pending|in_progress|completed}]} (full list,
+≤100 items, ≤1 in_progress)
+
+SUCCESS (echoes the full item list as JSON)
+-------------------------------------------
+    [{"id":"1","text":"Explore tools","status":"completed"},{"id":"2","text":"Write .txt","status":"in_progress"}]   todo.go:77-78
+
+ERRORS
+------
+    invalid args (raw json error)                   todo.go:35
+    items must be an array with at most 100 entries todo.go:37
+    each item needs a unique id and a nonempty short description   todo.go:45
+    invalid todo status: doing                     todo.go:53
+    only one item can be in_progress                todo.go:57
+
+================================================================================
+mark_task_as_complete / mark_plan_as_ready_to_execute  (packages/agent/tools/completion.go)
+================================================================================
+Args: {notes (optional)}
+
+SUCCESS
+-------
+    Task marked as complete.                        completion.go:30
+    Plan marked as ready to execute.                completion.go:53
+    (after these succeed the agent loop stops executing further tool calls,
+     packages/core/agent.go:1074)
+
+================================================================================
+BACKGROUND COMPLETION / CANCELLATION NOTICES (injected as user-role turn wakeups)
+(cmd/daemon/bg_supervisor.go:539-565)
+================================================================================
+COMPLETED (done)
+----------------
+    <system-reminder>
+    Background task go test ./... finished.
+    Read the output with bg_check (job_id bg_7f3a…) — it pages by lines, tail by default.
+    Continue your work based on what the log shows.</system-reminder>
+
+COMPLETED WITH ERROR
+--------------------
+    <system-reminder>
+    Background task go test ./... finished with an error.
+    ...same tail...</system-reminder>                (bg_supervisor.go:545)
+
+ORPHANED (daemon restart mid-job)
+---------------------------------
+    <system-reminder>
+    Background task go test ./... ended after daemon restart; its exit status is unavailable.
+    ...same tail...</system-reminder>                (bg_supervisor.go:548)
+
+CANCELLED BY USER (dashboard Stop)
+----------------------------------
+    <system-reminder>
+    Background task go test ./... was cancelled by the user.
+    Partial output (if any) is in the session task — read it with bg_check (job_id bg_7f3a…).
+    Do not wait for it — continue your work another way.</system-reminder>   (bg_supervisor.go:560-563)
+
+NOTE: notices contain NO result text (AGENTS.md invariant) and are retained
+until acknowledged (V2-003, bg_supervisor.go:152-158). Model-invoked bg_cancel
+delivers NO notice (silent); only dashboard Stop produces the cancellation notice.
+Also, a cancelled job's log gets an appended line "[cancelled by <by>]"
+(bg_supervisor.go:385) visible through bg_check.
+
+================================================================================
+RASTREAMENTO (TRACING) — string → file:line
+================================================================================
+Envelope / core:
+  ToolResult struct, IsError semantics ......... packages/core/tool.go:27-40
+  tool_result assembly ....................... packages/core/agent.go:1052-1060
+  unknown tool "x" ........................... packages/core/tool.go:91
+  guard refusal .............................. packages/core/agent.go:1105-1113
+  panic: %v .................................. packages/core/agent.go:1131-1134
+  aborted: ................................... packages/core/agent.go:1143
+  err.Error() as tool_result ................. packages/core/agent.go:1149-1150
+  "Tool outcome is unknown: ..." stub ........ packages/core/message.go:138, 178
+  registry (tool list) ....................... cmd/daemon/turn_worker.go:185-208
+
+read:
+  LinePrefixNotice (UI only) ................. packages/agent/tools/read.go:21
+  invalid args / path is required ............ read.go:54, 57
+  dir / media / binary refusals .............. read.go:70, 105, 119
+  "Read image file [...]" + hints ............ read.go:87, 90-95
+  image hints ............................... packages/agent/tools/image_resize.go:87-91
+  >100MB refusal ............................. read.go:301
+  limit/offset errors ........................ read.go:140, 150, 153
+  [Line %d is %s; showing the first %s...] ... read.go:189
+  [Showing lines ... Use offset=...] ......... read.go:196, 199
+  [%d more lines in file. Use offset=...] .... read.go:205
+  window math (truncateHead) ................ packages/agent/tools/truncate.go:59
+
+write:
+  "Successfully wrote to %s" ................. packages/agent/tools/write.go:103
+  errors ..................................... write.go:48, 51, 75, 78
+
+edit:
+  "Successfully replaced %d block(s) in %s." . packages/agent/tools/edit.go:185
+  APPLIED. + diff (UI only) .................. edit.go:199-211
+  input errors ............................... edit.go:64, 110, 114
+  "Could not edit file: ..." ................. edit.go:125, 129, 134, 137, 175
+  not found / duplicates / empty / no-change . edit.go:329, 331, 336, 338, 343, 345, 350, 352
+  overlap ................................... edit.go:426-428
+  range errors ............................... edit.go:512, 520, 534
+  fuzzy normalization ........................ edit.go:252-325
+
+bash:
+  "(no output)" .............................. packages/agent/tools/bash.go:310
+  truncation notices ......................... bash.go:317, 320, 323
+  Command aborted / stopped / exited ......... bash.go:342, 345, 348
+  background placeholder ..................... bash.go:281-290
+  tool errors ................................ bash.go:52, 55, 58, 182, 219, 228
+  display "[exit N]  Took X" (UI only) ....... bash.go:406-407
+
+python:
+  finishPythonCommand (out/[stderr]/[exit]/Took) packages/agent/tools/python.go:413-448
+  "(no output)" .............................. python.go:434
+  background placeholder ..................... python.go:357-365
+  tool errors ................................ python.go:133-135, 144, 147, 155, 176, 179, 182, 279-317
+
+glob:
+  "No files matched the pattern." ............ packages/agent/tools/glob.go:246
+  "(Truncated: showing first %d matches)" .... glob.go:250
+  errors ..................................... glob.go:52, 55, 58, 81, 315, 408
+
+search:
+  match lines "file:line:col: text" .......... packages/agent/tools/search.go:334
+  count mode header/rows ..................... search.go:291, 297
+  filesOnly mode ............................. search.go:311-316
+  "(no matches)" ............................. search.go:300, 316, 340
+  "(capped at %d — narrow `path` or `include`)" search.go:303, 319, 330
+  errors ..................................... search.go:80, 84, 121, 131, 135, 427
+
+inspect:
+  tree header "%s/ (%d entries" .............. packages/agent/tools/inspect.go:222-227
+  dir row "%s%s%s/ (%s%s)" ................... inspect.go:248
+  file row "%s%s%s (%s%s%s)" ................. inspect.go:254
+  single-file row ............................ inspect.go:125
+  flagField (git flags) ...................... inspect.go:296-301
+  errors ..................................... inspect.go:71, 78, 101, 113, 212
+
+search_web:
+  "(cached)" ................................. packages/agent/tools/websearch.go:97
+  "%d result%s for %q" + numbered entries ..... websearch.go:124-129
+  "(no results)" ............................. websearch.go:132
+  errors ..................................... websearch.go:73, 77, 87, 159, 203, 206
+
+fetch_url:
+  "fetched %s" + text ........................ packages/agent/tools/fetchurl.go:85
+  "…(truncated, %d chars total)" ............. fetchurl.go:81
+  content-type refusals ...................... fetchurl.go:144, 146, 150, 156
+  SSRF guard ................................. fetchurl.go:196-219
+  other errors ............................... fetchurl.go:56, 60, 96, 99, 111, 129, 133, 138
+
+bg_check:
+  header "Background Task (%s) — %s" ......... packages/agent/tools/bgcheck.go:83
+  "No output yet." ........................... bgcheck.go:88
+  "Lines %d–%d of %d" + dropped .............. bgcheck.go:90-93
+  numbered lines "%d:%s" ..................... bgcheck.go:113-123
+  "[N more lines: call bg_check again...]" ... bgcheck.go:99
+  status line ................................ bgcheck.go:103, 105
+  errors ..................................... bgcheck.go:68, 70, 73, 80
+
+bg_cancel:
+  cancelled notice ........................... cmd/daemon/bg_supervisor.go:534
+  already-finished notices ................... bg_supervisor.go:518, 529
+  unknown/foreign id ......................... bg_supervisor.go:515
+  tool errors ................................ packages/agent/tools/bgcancel.go:57-62, bg_supervisor.go:497-532
+  "[cancelled by %s]" log line ............... bg_supervisor.go:383-385
+
+sleep:
+  "Slept %s." / "Woken early after %s: ..." ... packages/agent/tools/sleep.go:122, 124
+  "Sleep cancelled." ......................... sleep.go:120
+  unknown-task / already-terminal notes ...... sleep.go:92, 95
+  errors ..................................... sleep.go:68, 71, 75, 79
+
+question:
+  {"answers":[[...]]} ........................ packages/agent/tools/question.go:135-139
+  validation errors .......................... question.go:53-106, 126
+
+todo:
+  JSON item list ............................. packages/agent/tools/todo.go:77-78
+  errors ..................................... todo.go:35-57
+
+completion:
+  "Task marked as complete." ................. packages/agent/tools/completion.go:30
+  "Plan marked as ready to execute." ......... completion.go:53
+
+Background notices (turn wakeups):
+  finished / finished with an error / orphaned cmd/daemon/bg_supervisor.go:551-556
+  "was cancelled by the user" notice .......... bg_supervisor.go:560-563
+  retention until ack (V2-003) ................ bg_supervisor.go:152-158
+
+Sandbox / permissions (shared):
+  jail errors ................................ packages/agent/tools/sandbox.go:79-338
+  permission denied errors ................... packages/agent/tools/permissions.go:58-123
+  unmarshalArgs (JSON coercion) .............. packages/agent/tools/args.go:32
+================================================================================
+ANTHROPIC MESSAGES API — REQUEST ENVELOPE (what the model receives, in general)
+================================================================================
+When the model "receives" a tool result, it is never a standalone payload: it is
+one block inside the messages array of a full Messages API request. Everything
+below travels on every request.
+
+Top-level request fields (Anthropic spec)
+-----------------------------------------
+    {
+      "model": "claude-sonnet-4-5-20250929",
+      "max_tokens": 8192,              // required
+      "system": "…" | [ {type:"text", text, cache_control?} ],
+      "messages": [ ...full conversation history... ],
+      "tools": [ {name, description, input_schema, cache_control?} ],  // resent every request
+      "tool_choice": {"type": "auto"|"any"|"tool"|"none", ...},
+      "temperature": 1,
+      "stream": true,
+      "metadata": {"user_id": "…"},
+      "stop_sequences": ["…"],
+      "thinking": {"type": "enabled", "budget_tokens": N}
+    }
+
+The tool_use → tool_result pairing
+----------------------------------
+Assistant turn (previous) carries the request:
+    {"role": "assistant", "content": [
+        {"type": "text", "text": "Vou ler o arquivo…"},
+        {"type": "thinking", "thinking": "…", "signature": "…"},
+        {"type": "tool_use", "id": "toolu_01ABC…", "name": "read", "input": {"path": "a.txt"}}
+    ]}
+User turn carries the reply:
+    {"role": "user", "content": [
+        {"type": "tool_result",
+         "tool_use_id": "toolu_01ABC…",     // REQUIRED — pairs with the tool_use
+         "content": "…" | [ {type:"text"| "image", …} ],   // string or rich blocks
+         "is_error": false}                 // optional flag
+    ]}
+
+What travels WITH the tool content
+----------------------------------
+- tool_use_id: the pairing key; mismatch = API 400 error.
+- is_error: boolean error flag.
+- content can be rich: array of text AND image blocks (e.g. read of an image
+  returns tool_result with an image block).
+- tool name + input are NOT in the tool_result — they live in the assistant's
+  tool_use block, still present in history.
+- the full tools[] (name/description/input_schema) is resent every request —
+  this is what consumes the prompt cache prefix.
+- system prompt + entire history: tool_result is just one block in the stream.
+
+Model response side
+-------------------
+    {
+      "id": "msg_…", "type": "message", "role": "assistant",
+      "content": [ {"type":"text",…}, {"type":"tool_use",…} ],
+      "model": "…",
+      "stop_reason": "tool_use",   // end_turn|max_tokens|stop_sequence|tool_use|pause_turn
+      "usage": {
+        "input_tokens": 1200,
+        "output_tokens": 85,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 1180
+      }
+    }
+
+Streaming events carrying it
+----------------------------
+message_start → content_block_start (block: tool_use|thinking|text) →
+content_block_delta (input_json_delta|text_delta|thinking_delta|signature_delta) →
+content_block_stop → message_delta (stop_reason + final usage) → message_stop.
+NOTE: final usage arrives in message_delta, not message_start.
+
+What OUR daemon sends (subset)
+------------------------------
+model, max_tokens, system, messages, tools, temperature (omitted for reasoning
+models), stream:true. anthToolResultBlock has only type, tool_use_id, content,
+is_error, cache_control (packages/provider/anthropic.go:95-102).
+We do NOT send tool_choice, metadata, stop_sequences or thinking today.
+Envelope pseudo-XML (NOVO contrato):
+  ToolEnvelope/Attr/escape ................ packages/core/envelope.go (arquivo novo)
+  WrapToolResultContent (choke point) ..... packages/core/envelope.go
+  ToolResult.Attrs (fatos) ................ packages/core/tool.go
+  wrap centralizado (runOneTool) .......... packages/core/agent.go
+  stub "Tool outcome is unknown" ......... packages/core/message.go (ErrorEnvelope)
+  spec no system prompt .................. cmd/daemon/turn_options.go
+  commandFailed (exit≠0 = job error) ..... packages/agent/tools/background.go
+  deliver(finished) bash/python .......... packages/agent/tools/bash.go / python.go
+  strip no frontend ...................... web/src/indirect-code/utils/envelope.ts
+  ingestão (attrs em toolDetails.env) .... web/src/indirect-code/utils/wire.ts
+  ingestão live .......................... web/src/indirect-code/transcript/updaters.ts
+  parsers bg_check/bg_cancel (env page) .. web/src/indirect-code/transcript.ts
+  migração v3 (legacy wrap) .............. internal/migrations/v3_tool_result_envelope.go
+  CurrentVersion = 3 ..................... internal/migrations/migrations.go

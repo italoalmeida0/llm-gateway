@@ -75,7 +75,15 @@ func (t *TodoTool) Execute(ctx context.Context, raw json.RawMessage, _ func(stri
 		progress = done * 100 / len(req.Items)
 	}
 	data, _ := json.Marshal(req.Items)
-	return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: string(data)}}, Details: map[string]any{
-		"items": req.Items, "progress": progress, "done": done, "total": len(req.Items),
-	}}, nil
+	return core.ToolResult{
+		Content: []provider.Content{provider.TextBlock{Text: string(data)}},
+		Attrs: []core.Attr{
+			{Key: "done", Value: fmt.Sprintf("%d", done)},
+			{Key: "total", Value: fmt.Sprintf("%d", len(req.Items))},
+			{Key: "progress", Value: fmt.Sprintf("%d", progress)},
+		},
+		Details: map[string]any{
+			"items": req.Items, "progress": progress, "done": done, "total": len(req.Items),
+		},
+	}, nil
 }

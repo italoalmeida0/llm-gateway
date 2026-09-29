@@ -242,17 +242,20 @@ func (t *GlobTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	sort.Strings(matches)
 
 	var text string
+	var attrs []core.Attr
 	if len(matches) == 0 {
-		text = "No files matched the pattern."
+		attrs = append(attrs, core.Attr{Key: "info", Value: "no matches"})
 	} else {
 		text = strings.Join(matches, "\n")
+		attrs = append(attrs, core.Attr{Key: "total", Value: fmt.Sprintf("%d", len(matches))})
 		if truncated {
-			text += fmt.Sprintf("\n\n(Truncated: showing first %d matches)", maxGlobMatches)
+			attrs = append(attrs, core.Attr{Key: "truncated", Value: "true"})
 		}
 	}
 
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: text}},
+		Attrs:   attrs,
 		Details: map[string]any{
 			"matches":   len(matches),
 			"truncated": truncated,

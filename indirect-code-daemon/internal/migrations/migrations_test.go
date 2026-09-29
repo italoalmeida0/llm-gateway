@@ -3,6 +3,7 @@ package migrations
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -68,8 +69,8 @@ func TestMigrateV1ToV2SweepsBgFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(applied) != 1 || applied[0] != 2 {
-		t.Fatalf("applied = %v, want [2]", applied)
+	if len(applied) != 2 || applied[0] != 2 || applied[1] != 3 {
+		t.Fatalf("applied = %v, want [2 3]", applied)
 	}
 	for _, p := range []string{
 		"runners/j1.state.json", "runners/j1.disposition", "runners/j1.launch",
@@ -87,5 +88,58 @@ func TestMigrateV1ToV2SweepsBgFiles(t *testing.T) {
 	// Idempotent.
 	if _, err := Migrate(slotDir); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMigrateV3WrapsLegacyToolResults(t *testing.T) {
+	slotDir := t.TempDir()
+	sessDir := filepath.Join(slotDir, "sessions")
+	os.MkdirAll(sessDir, 0o700)
+	// One turn with a legacy tool_result (plain text), one already-wrapped,
+	// one image block, and a meta line that must stay untouched.
+	legacy := `{"v":1,"kind":"turn","turn":1,"messages":[{"role":"assistant","content":[{"name":"read","id":"tu_1","arguments":{}},{"call_id":"tu_1","is_error":false,"content":[{"text":"package main"}]},{"call_id":"tu_2","is_error":true,"content":[{"text":"permission denied"}]}]},{"role":"assistant","content":[{"call_id":"tu_3","content":[{"text":"<tool_result type=\"ok\">already wrapped</tool_result>"}]}]}]}`
+	legacy += "\n" + `{"v":1,"kind":"meta","id":"s1","title":"T"}` + "\n"
+	sessPath := filepath.Join(sessDir, "s1.jsonl")
+	if err := os.WriteFile(sessPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start at v2 so only v3 runs.
+	os.WriteFile(filepath.Join(slotDir, "storage_version.json"), []byte(`{"version": 2}`), 0o600)
+	applied, err := Migrate(slotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 1 || applied[0] != 3 {
+		t.Fatalf("applied = %v, want [3]", applied)
+	}
+	got, err := os.ReadFile(sessPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	// Go escapes < > in JSON; match the escaped form.
+	for _, want := range []string{
+		`\u003ctool_result type=\"ok\"\u003epackage main\u003c/tool_result\u003e`,
+		`\u003ctool_result type=\"error\"\u003epermission denied\u003c/tool_result\u003e`,
+		`\u003ctool_result type=\"ok\"\u003ealready wrapped\u003c/tool_result\u003e`,
+		`"title":"T"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in:\n%s", want, text)
+		}
+	}
+	// The already-wrapped body must not be double-wrapped.
+	if strings.Contains(text, "already wrapped\u003c/tool_result\u003e\u003c/tool_result") {
+		t.Fatal("double-wrapped body")
+	}
+	// Idempotent: re-run changes nothing.
+	before := string(got)
+	if _, err := Migrate(slotDir); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(sessPath)
+	if string(after) != before {
+		t.Fatal("re-run must be a no-op")
 	}
 }

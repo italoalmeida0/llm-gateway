@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/processutil"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 func TestUnishExternalChild(t *testing.T) {
@@ -50,7 +49,7 @@ func TestUnishToolBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			text := res.Content[0].(provider.TextBlock).Text
+			text := envBody(t, res)
 			if res.IsError != tc.failed || !strings.Contains(text, tc.want) {
 				t.Fatalf("unexpected result: %+v", res)
 			}
@@ -75,7 +74,7 @@ func TestUnishToolBoundary(t *testing.T) {
 		if err != nil || string(full) != payload {
 			t.Fatalf("full output lost: %v, bytes=%d", err, len(full))
 		}
-		if !strings.Contains(res.Content[0].(provider.TextBlock).Text, "TAIL") {
+		if !strings.Contains(envBody(t, res), "TAIL") {
 			t.Fatal("tail lost")
 		}
 	})

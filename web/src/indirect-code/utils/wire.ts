@@ -1,4 +1,5 @@
 import type { ContentBlock } from "../types";
+import { stripToolEnvelopeDetailed } from "./envelope";
 
 export function prettyArgs(v: any): string {
   if (v == null) return "";
@@ -11,6 +12,15 @@ export function prettyArgs(v: any): string {
 }
 
 export function toolResultText(c: any): string {
+  return stripToolEnvelopeDetailed(rawToolResultText(c)).body;
+}
+
+/** Envelope facts of a raw tool result ({} for legacy results). */
+export function toolResultEnvAttrs(c: any): Record<string, string> {
+  return stripToolEnvelopeDetailed(rawToolResultText(c)).attrs;
+}
+
+function rawToolResultText(c: any): string {
   const content = c.content ?? c.result;
   if (typeof content === "string") return content;
   const partText = (p: any): string => {
@@ -84,13 +94,15 @@ export function parseContentBlocks(m: any): ContentBlock[] {
       typeof c.call_id === "string" ||
       (typeof c.tool_use_id === "string" && c.content !== undefined)
     ) {
+      const envAttrs = toolResultEnvAttrs(c);
+      const details = parseToolDetails(c.details);
       blocks.push({
         type: "tool_result",
         toolId: c.tool_use_id || c.call_id || c.id,
         toolResult: toolResultText(c),
         toolStartedAt:c.started_at, toolDurationMs:c.started_at ? (c.duration_ms || 0) : undefined,
         isError: !!(c.is_error ?? c.isError ?? c.is_error === true),
-        toolDetails: parseToolDetails(c.details),
+        toolDetails: Object.keys(envAttrs).length ? { ...details, env: envAttrs } : details,
       });
       return;
     }

@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // BgCancelArgs are the model-facing arguments of the bg_cancel tool.
@@ -65,8 +64,17 @@ func (t *BgCancelTool) Execute(ctx context.Context, raw json.RawMessage, _ func(
 	if err != nil {
 		return core.ToolResult{}, err
 	}
+	attrs := []core.Attr{
+		{Key: "job_id", Value: strings.TrimSpace(a.JobID)},
+		{Key: "cancelled", Value: fmt.Sprintf("%t", out.OK)},
+		{Key: "status", Value: out.Status},
+	}
+	if out.Notice != "" {
+		attrs = append(attrs, core.Attr{Key: "info", Value: out.Notice})
+	}
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: out.Notice}},
+		Content: nil,
+		Attrs:   attrs,
 		Details: map[string]any{
 			"background_job_id": a.JobID,
 			"cancelled":         out.OK,

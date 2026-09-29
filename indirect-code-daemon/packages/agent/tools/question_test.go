@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
-
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 func TestQuestionReturnsOrderedLabelsAndDefaultCustomAnswer(t *testing.T) {
@@ -24,7 +22,7 @@ func TestQuestionReturnsOrderedLabelsAndDefaultCustomAnswer(t *testing.T) {
 	var got struct {
 		Answers [][]string `json:"answers"`
 	}
-	if err := json.Unmarshal([]byte(res.Content[0].(provider.TextBlock).Text), &got); err != nil || !reflect.DeepEqual(got.Answers, want) {
+	if err := json.Unmarshal([]byte(envBody(t, res)), &got); err != nil || !reflect.DeepEqual(got.Answers, want) {
 		t.Fatalf("wrong returned answers: %+v, %v", got, err)
 	}
 }

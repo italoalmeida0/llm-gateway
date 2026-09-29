@@ -10,7 +10,6 @@ import (
 	"unicode"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // EditTool edits a single file using exact text replacement: every
@@ -34,7 +33,7 @@ type textEdit struct {
 }
 
 type editArgs struct {
-	Path  string   `json:"path"`
+	Path  string     `json:"path"`
 	Edits []textEdit `json:"edits"`
 }
 
@@ -181,8 +180,13 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 	display := t.renderDisplay(path, baseContent, newContent, len(a.Edits))
 
 	return core.ToolResult{
-		// A one-line confirmation; the diff is frontend-only.
-		Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(a.Edits), path)}},
+		// Confirmation is system metadata (info=): the body stays pure
+		// content; the diff is frontend-only (Details.display).
+		Attrs: []core.Attr{
+			{Key: "info", Value: fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(a.Edits), path)},
+			{Key: "path", Value: path},
+			{Key: "edits", Value: fmt.Sprintf("%d", len(a.Edits))},
+		},
 		Details: map[string]any{
 			"display": display,
 			"diff":    DiffText(baseContent, newContent),

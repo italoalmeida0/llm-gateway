@@ -5,22 +5,26 @@ import { displayToolArgs, withoutContinueNudges, withoutTodoActivity } from "./l
 /** bg_cancel/bg_check kind: python vs terminal. The daemon includes the
  * kind in the result header ("Background Task (python) — …"); fall back
  * to the job registry via toolDetails when present. */
-function bgTaskKind(args: any, res: string): string {
+function bgTaskKind(args: any, res: string, env?: Record<string, string>): string {
+  const k = String(env?.kind || "").toLowerCase();
+  if (k === "python" || k === "bash") return k;
   const m = /Background Task \((bash|python)\)/.exec(res || "");
   if (m) return m[1];
-  const k = String((args as any)?.kind || "").toLowerCase();
-  if (k === "python") return "python";
+  const ak = String((args as any)?.kind || "").toLowerCase();
+  if (ak === "python") return "python";
   return "bash";
 }
-function bgCancelKind(args: any, res: string): string {
-  return bgTaskKind(args, res);
+function bgCancelKind(args: any, res: string, env?: Record<string, string>): string {
+  return bgTaskKind(args, res, env);
 }
-function bgCheckKind(args: any, res: string): string {
-  return bgTaskKind(args, res);
+function bgCheckKind(args: any, res: string, env?: Record<string, string>): string {
+  return bgTaskKind(args, res, env);
 }
-/** Extracts the "LX-Y" range from a bg_check result header
- * ("Lines X–Y of N") for the row target. */
-function bgCheckRange(res: string): string {
+/** Extracts the "LX-Y" range from a bg_check result (envelope page attr,
+ * legacy header "Lines X–Y of N") for the row target. */
+function bgCheckRange(res: string, env?: Record<string, string>): string {
+  const pm = /^(\d+)-(\d+)\//.exec(env?.page || "");
+  if (pm) return `L${pm[1]}-${pm[2]}`;
   const m = /Lines (\d+)[–-](\d+) of \d+/.exec(res || "");
   if (m) return `L${m[1]}-${m[2]}`;
   return "";
@@ -515,7 +519,8 @@ export function toolSummary(u: ToolUnit): ToolSummary {
     }
     case "bg_cancel": {
       // Clean UI: never show the id. "Canceled <kind> Background Task".
-      const kind = bgCancelKind(args, res);
+      const env = (u.result?.toolDetails as any)?.env;
+      const kind = bgCancelKind(args, res, env);
       return {
         icon: kind === "python" ? "mdi:language-python" : "lucide:terminal",
         verb: u.result ? "Canceled" : "Canceling",
@@ -524,8 +529,9 @@ export function toolSummary(u: ToolUnit): ToolSummary {
     }
     case "bg_check": {
       // Reads like a file: "Background Task#Lfrom-to", kind icon.
-      const kind = bgCheckKind(args, res);
-      const range = bgCheckRange(res);
+      const env = (u.result?.toolDetails as any)?.env;
+      const kind = bgCheckKind(args, res, env);
+      const range = bgCheckRange(res, env);
       return {
         icon: kind === "python" ? "mdi:language-python" : "lucide:terminal",
         verb: "Read",

@@ -80,31 +80,35 @@ func (t *BgCheckTool) Execute(ctx context.Context, raw json.RawMessage, _ func(s
 		return core.ToolResult{}, fmt.Errorf("bg_check: unknown background task %s", strings.TrimSpace(a.JobID))
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Background Task (%s) — %s\n", res.Kind, res.Status)
-	if res.Label != "" {
-		fmt.Fprintf(&sb, "Command: %s\n", res.Label)
+	var attrs []core.Attr
+	attrs = append(attrs,
+		core.Attr{Key: "kind", Value: res.Kind},
+		core.Attr{Key: "status", Value: res.Status},
+		core.Attr{Key: "command", Value: res.Label},
+	)
+	if res.Status != "running" {
+		attrs = append(attrs, core.Attr{Key: "exit", Value: fmt.Sprintf("%d", res.ExitCode)})
 	}
 	if res.Total == 0 {
-		sb.WriteString("No output yet.\n")
+		// Empty body: the log has no output yet. The note is metadata
+		// (info=), never body prose — the body is only tool output.
+		attrs = append(attrs, core.Attr{Key: "info", Value: "No output yet."})
 	} else {
-		fmt.Fprintf(&sb, "Lines %d–%d of %d", res.From, res.To, res.Total)
+		attrs = append(attrs, core.Attr{Key: "page", Value: fmt.Sprintf("%d-%d/%d", res.From, res.To, res.Total)})
 		if res.Dropped > 0 {
-			fmt.Fprintf(&sb, " (%d earlier lines discarded by the tail cap)", res.Dropped)
+			attrs = append(attrs, core.Attr{Key: "dropped", Value: fmt.Sprintf("%d", res.Dropped)})
 		}
-		sb.WriteString("\n")
 		if res.Text != "" {
 			sb.WriteString(numberedLines(res.Text, res.From))
 		}
 		if res.To < res.Total {
-			fmt.Fprintf(&sb, "\n[%d more lines: call bg_check again with offset %d]", res.Total-res.To, res.To+1)
+			attrs = append(attrs, core.Attr{Key: "next", Value: fmt.Sprintf("%d", res.To+1)})
 		}
 	}
-	if res.Status == "running" {
-		sb.WriteString("\nStatus: still running.")
-	} else {
-		fmt.Fprintf(&sb, "\nStatus: %s (exit %d).", res.Status, res.ExitCode)
-	}
-	return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: sb.String()}}}, nil
+	return core.ToolResult{
+		Content: []provider.Content{provider.TextBlock{Text: sb.String()}},
+		Attrs:   attrs,
+	}, nil
 }
 
 func numberedLines(text string, from int64) string {

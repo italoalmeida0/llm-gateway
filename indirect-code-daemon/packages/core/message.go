@@ -174,8 +174,8 @@ func repairToolUseResultPairs(msgs []provider.Message) []provider.Message {
 				continue
 			}
 			stubs = append(stubs, provider.ToolResultBlock{
-				CallID:  id,
-				Content: []provider.Content{provider.TextBlock{Text: "Tool outcome is unknown: execution may have occurred before interruption. Verify its effects or execution log before repeating a mutating action."}},
+				CallID: id,
+				Content: []provider.Content{provider.TextBlock{Text: ErrorEnvelope("Tool outcome is unknown: execution may have occurred before interruption. Verify its effects or execution log before repeating a mutating action.")}},
 				IsError: true,
 			})
 		}

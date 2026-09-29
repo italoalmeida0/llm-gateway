@@ -77,15 +77,22 @@ func (t *FetchURLTool) Execute(ctx context.Context, raw json.RawMessage, progres
 	if err != nil {
 		return core.ToolResult{}, err
 	}
+	totalChars := len(text)
 	if len(text) > maxChars {
-		text = text[:maxChars] + fmt.Sprintf("\n…(truncated, %d chars total)", len(text))
+		text = text[:maxChars]
 		truncated = true
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "fetched %s\n", finalURL)
-	b.WriteString(text)
+	var attrs []core.Attr
+	attrs = append(attrs,
+		core.Attr{Key: "url", Value: finalURL},
+		core.Attr{Key: "chars", Value: fmt.Sprintf("%d", totalChars)},
+	)
+	if truncated {
+		attrs = append(attrs, core.Attr{Key: "truncated", Value: "true"})
+	}
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+		Content: []provider.Content{provider.TextBlock{Text: text}},
+		Attrs:   attrs,
 		Details: fetchDetail(finalURL, text, truncated),
 	}, nil
 }

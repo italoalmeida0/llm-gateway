@@ -173,8 +173,13 @@ func TestBgInlineResultNeverLeaksPaths(t *testing.T) {
 		}
 		t.Fatalf("model-visible result leaked a file path (around %q)", text[max(0, i):min(i+140, len(text))])
 	}
-	if !strings.Contains(text, "truncated") && !strings.Contains(text, "Showing") {
-		t.Fatalf("truncated result must SAY it is truncated: %q", text[len(text)-200:])
+	// Truncation is an envelope attr (page/truncated), not body prose.
+	attrs := map[string]string{}
+	for _, a := range res.Attrs {
+		attrs[a.Key] = a.Value
+	}
+	if attrs["truncated"] != "true" || attrs["page"] != "18001-20000/20000" {
+		t.Fatalf("truncated result must report page/truncated attrs: %v", attrs)
 	}
 	// Details are UI-only (core.ToolResult.Details never reaches the LLM —
 	// provider.ToolResultBlock carries Content only), so the full output

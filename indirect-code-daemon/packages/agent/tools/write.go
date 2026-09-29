@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // WriteTool writes content to a file, creating parent directories.
@@ -98,9 +97,13 @@ func (t *WriteTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 		totalLines++ // count the last unterminated line
 	}
 	return core.ToolResult{
-		// A one-line confirmation; the model already knows
-		// what it wrote and does not need the content echoed back.
-		Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("Successfully wrote to %s", a.Path)}},
+		// Confirmation is system metadata (info=), not body content: the
+		// model already knows what it wrote and the body stays pure content.
+		Attrs: []core.Attr{
+			{Key: "info", Value: fmt.Sprintf("Successfully wrote to %s", a.Path)},
+			{Key: "path", Value: a.Path},
+			{Key: "lines", Value: fmt.Sprintf("%d", totalLines)},
+		},
 		Details: map[string]any{
 			"display":     display,
 			"path":        path,

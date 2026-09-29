@@ -3,6 +3,8 @@ package tools
 import (
 	"os"
 	"time"
+
+	"llm-gateway/indirect-code-daemon/packages/core"
 )
 
 // AutoBackgroundAfter is the fixed threshold after which a still-running
@@ -37,6 +39,26 @@ func ClipLabel(s string) string {
 	return string(r[:BgLabelMax]) + "…"
 }
 
+// commandFailed reports whether a finished command's envelope attrs say the
+// COMMAND failed (non-zero exit, abort or stop) — the distinction a detached
+// job needs to record BgStatusError. Tool misuse (type=error) is a separate
+// axis and never reaches this path.
+func commandFailed(attrs []core.Attr) bool {
+	for _, a := range attrs {
+		switch a.Key {
+		case "exit":
+			if a.Value != "" && a.Value != "0" {
+				return true
+			}
+		case "status":
+			if a.Value == "aborted" || a.Value == "stopped" || a.Value == "failed" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SlowHook detaches a long-running command into a background job. kind is
 // "bash" or "python". stop is the tool's own force-stop for the detached
 // process (process-group kill for bash, context cancel for python) — the
@@ -65,9 +87,9 @@ type BackgroundProcess struct {
 	JobID string
 	// BrainLog is the final log destination (the runner COPIES the live
 	// log there at terminal; == LogPath on the direct path).
-	BrainLog    string
-	StderrPath  string
-	Stop        func()
+	BrainLog   string
+	StderrPath string
+	Stop       func()
 }
 
 type SlowHook func(kind, label string, process BackgroundProcess) (jobID string, logPath string, stream func(chunk string), deliver func(result string, isError bool))

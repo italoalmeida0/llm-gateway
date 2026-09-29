@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // SleepArgs are the model-facing arguments of the sleep tool.
@@ -43,6 +42,7 @@ type BgSleepCheckHost interface {
 	// "cancelled") and label. ok=false when the id is unknown or foreign.
 	BgTaskStatus(sessionID, jobID string) (status, label string, ok bool)
 }
+
 // SleepTool parks the model for a bounded wait — the "wait for the
 // background task" primitive. It ends early when a background task of the
 // session finishes (the system-reminder delivery lands in context right
@@ -89,10 +89,21 @@ func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 		if ch, ok := t.Host.(BgSleepCheckHost); ok {
 			status, label, found := ch.BgTaskStatus(t.SessionID, jobID)
 			if !found {
-				return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("%s\n[Note: background task %s is unknown in this session — nothing to wait for. Use bg_check with a valid id.]", summary, jobID)}}}, nil
+				return core.ToolResult{Attrs: []core.Attr{
+					{Key: "summary", Value: summary},
+					{Key: "status", Value: "unknown_task"},
+					{Key: "job_id", Value: jobID},
+					{Key: "info", Value: fmt.Sprintf("background task %s is unknown in this session — nothing to wait for. Use bg_check with a valid id.", jobID)},
+				}}, nil
 			}
-		if status != "running" {
-				return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("%s\n[Note: background task %s (%s) already %s — its completion notice is in context above. Use bg_check with job_id %s to read the output.]", summary, jobID, label, status, jobID)}}}, nil
+			if status != "running" {
+				return core.ToolResult{Attrs: []core.Attr{
+					{Key: "summary", Value: summary},
+					{Key: "status", Value: "already_" + status},
+					{Key: "job_id", Value: jobID},
+					{Key: "command", Value: label},
+					{Key: "info", Value: fmt.Sprintf("background task %s (%s) already %s — its completion notice is in context above. Use bg_check with job_id %s to read the output.", jobID, label, status, jobID)},
+				}}, nil
 			}
 		}
 	}
@@ -117,11 +128,26 @@ func (t *SleepTool) Execute(ctx context.Context, raw json.RawMessage, progress f
 	start := time.Now()
 	select {
 	case <-ctx.Done():
-		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: summary + "\nSleep cancelled."}}}, nil
+		return core.ToolResult{Attrs: []core.Attr{
+			{Key: "summary", Value: summary},
+			{Key: "status", Value: "cancelled"},
+			{Key: "job_id", Value: jobID},
+		}}, nil
 	case <-timer.C:
-		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("%s\nSlept %s.", summary, humanizeSeconds(a.Seconds))}}}, nil
+		return core.ToolResult{Attrs: []core.Attr{
+			{Key: "summary", Value: summary},
+			{Key: "status", Value: "slept"},
+			{Key: "job_id", Value: jobID},
+			{Key: "waited", Value: humanizeSeconds(a.Seconds)},
+		}}, nil
 	case <-wake:
-		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: fmt.Sprintf("%s\nWoken early after %s: a background task finished — its completion notice is now in context.", summary, humanizeSeconds(time.Since(start).Seconds()))}}}, nil
+		return core.ToolResult{Attrs: []core.Attr{
+			{Key: "summary", Value: summary},
+			{Key: "status", Value: "woken_early"},
+			{Key: "job_id", Value: jobID},
+			{Key: "waited", Value: humanizeSeconds(time.Since(start).Seconds())},
+			{Key: "info", Value: "a background task finished — its completion notice is now in context."},
+		}}, nil
 	}
 }
 

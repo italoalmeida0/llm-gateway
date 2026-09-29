@@ -283,12 +283,16 @@ outer:
 	}
 
 	var b strings.Builder
+	var attrs []core.Attr
 	if a.Count {
 		total := 0
 		for _, f := range countOrder {
 			total += counts[f]
 		}
-		fmt.Fprintf(&b, "%d match%s in %d file%s\n", total, plural(total), len(countOrder), filePlural(len(countOrder)))
+		attrs = append(attrs,
+			core.Attr{Key: "total", Value: fmt.Sprintf("%d", total)},
+			core.Attr{Key: "files", Value: fmt.Sprintf("%d", len(countOrder))},
+		)
 		for i, f := range countOrder {
 			if i >= maxResults {
 				truncated = true
@@ -297,39 +301,40 @@ outer:
 			fmt.Fprintf(&b, "%s: %d match%s\n", f, counts[f], plural(counts[f]))
 		}
 		if len(countOrder) == 0 {
-			b.WriteString("(no matches)")
+			attrs = append(attrs, core.Attr{Key: "info", Value: "no matches"})
 		}
 		if truncated {
-			fmt.Fprintf(&b, "(capped at %d — narrow `path` or `include`)", maxResults)
+			attrs = append(attrs, core.Attr{Key: "truncated", Value: "true"})
 		}
 		return core.ToolResult{
 				Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+				Attrs:   attrs,
 			},
 			nil
 	}
 	if a.FilesOnly {
-		fmt.Fprintf(&b, "%d file%s\n", len(filesOnly), plural(len(filesOnly)))
+		attrs = append(attrs, core.Attr{Key: "total", Value: fmt.Sprintf("%d", len(filesOnly))})
 		for _, f := range filesOnly {
 			fmt.Fprintf(&b, "%s\n", f)
 		}
 		if len(filesOnly) == 0 {
-			b.WriteString("(no matches)")
+			attrs = append(attrs, core.Attr{Key: "info", Value: "no matches"})
 		}
 		if truncated {
-			fmt.Fprintf(&b, "(capped at %d — narrow `path` or `include`)", maxResults)
+			attrs = append(attrs, core.Attr{Key: "truncated", Value: "true"})
 		}
 		return core.ToolResult{
 				Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+				Attrs:   attrs,
 			},
 			nil
 	}
 
 	var nb strings.Builder
-	fmt.Fprintf(&nb, "%d match%s", len(matches), plural(len(matches)))
+	attrs = append(attrs, core.Attr{Key: "total", Value: fmt.Sprintf("%d", len(matches))})
 	if truncated {
-		fmt.Fprintf(&nb, " (capped at %d — narrow `path` or `include`)", maxResults)
+		attrs = append(attrs, core.Attr{Key: "truncated", Value: "true"})
 	}
-	nb.WriteString("\n")
 	for _, m := range matches {
 		fmt.Fprintf(&nb, "%s:%d:%d: %s\n", m.File, m.Line, m.Col, m.Text)
 		for _, c := range m.Context {
@@ -337,10 +342,11 @@ outer:
 		}
 	}
 	if len(matches) == 0 {
-		nb.WriteString("(no matches)")
+		attrs = append(attrs, core.Attr{Key: "info", Value: "no matches"})
 	}
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: nb.String()}},
+		Attrs:   attrs,
 	}, nil
 }
 

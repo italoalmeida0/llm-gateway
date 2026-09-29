@@ -1155,6 +1155,9 @@ func (a *Agent) runOneTool(ctx context.Context, tc provider.ToolCallBlock, sink 
 	}()
 	res.StartedAt = started.UnixMilli()
 	res.DurationMs = time.Since(started).Milliseconds()
+	// Single choke point: every result body is pure tool content wrapped in
+	// the <tool_result> envelope (type=error only for tool misuse).
+	res.Content = WrapToolResultContent(res)
 	return res
 }
 

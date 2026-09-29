@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 func TestGlobBasic(t *testing.T) {
@@ -37,7 +35,7 @@ func TestGlobBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute error: %v", err)
 	}
-	text := res.Content[0].(provider.TextBlock).Text
+	text := envBody(t, res)
 	for _, want := range []string{"main.go", "pkg/util.go", "pkg/util_test.go", "pkg/sub/deep.go"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected %q in result, got:\n%s", want, text)
@@ -52,7 +50,7 @@ func TestGlobBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute error: %v", err)
 	}
-	text = res.Content[0].(provider.TextBlock).Text
+	text = envBody(t, res)
 	if strings.Contains(text, "main.go") {
 		t.Errorf("did not expect main.go in pkg/**/*.go, got:\n%s", text)
 	}
@@ -67,7 +65,7 @@ func TestGlobBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute error: %v", err)
 	}
-	text = res.Content[0].(provider.TextBlock).Text
+	text = envBody(t, res)
 	if strings.Contains(text, "pkg/sub/deep.go") {
 		t.Errorf("did not expect deep.go in single-star pkg/*.go, got:\n%s", text)
 	}
@@ -94,7 +92,7 @@ func TestGlobBraceExpansion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute error: %v", err)
 	}
-	text := res.Content[0].(provider.TextBlock).Text
+	text := envBody(t, res)
 	if !strings.Contains(text, "a.go") || !strings.Contains(text, "b.json") {
 		t.Errorf("expected a.go and b.json, got:\n%s", text)
 	}
@@ -127,7 +125,7 @@ func TestGlobGitignore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute error: %v", err)
 	}
-	text := res.Content[0].(provider.TextBlock).Text
+	text := envBody(t, res)
 	if strings.Contains(text, "secret.go") || strings.Contains(text, "error.log") || strings.Contains(text, "test.log") {
 		t.Errorf("result contains gitignored files:\n%s", text)
 	}
@@ -158,7 +156,7 @@ func TestGlobNestedGitignore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := res.Content[0].(provider.TextBlock).Text
+	text := envBody(t, res)
 	if strings.Contains(text, "temp.go") {
 		t.Errorf("nested gitignore rule was not respected: %s", text)
 	}
@@ -187,7 +185,7 @@ func TestGlobHiddenFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := res.Content[0].(provider.TextBlock).Text
+	text := envBody(t, res)
 	if strings.Contains(text, ".hidden.txt") || strings.Contains(text, "settings.json") {
 		t.Errorf("hidden files should be skipped by default: %s", text)
 	}
@@ -200,7 +198,7 @@ func TestGlobHiddenFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text = res.Content[0].(provider.TextBlock).Text
+	text = envBody(t, res)
 	if !strings.Contains(text, ".hidden.txt") || !strings.Contains(text, ".config/settings.json") {
 		t.Errorf("hidden files missing when hidden=true: %s", text)
 	}
@@ -225,7 +223,7 @@ func TestGlobSubdirectoryPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := res.Content[0].(provider.TextBlock).Text
+	text := envBody(t, res)
 	if strings.Contains(text, "root.txt") || strings.Contains(text, "other/c.txt") {
 		t.Errorf("result should only contain files from sub: %s", text)
 	}
@@ -253,7 +251,7 @@ func TestGlobSubdirectoryHonorsParentGitignore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := res.Content[0].(provider.TextBlock).Text
+	text := envBody(t, res)
 	if strings.Contains(text, "ignored.go") {
 		t.Fatalf("parent .gitignore rule was not respected: %s", text)
 	}
@@ -280,7 +278,7 @@ func TestGlobSymlinkSearchRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := res.Content[0].(provider.TextBlock).Text; text != "link/found.go" {
+	if text := envBody(t, res); text != "link/found.go" {
 		t.Fatalf("unexpected symlink search result: %q", text)
 	}
 }
@@ -294,9 +292,12 @@ func TestGlobNoMatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := res.Content[0].(provider.TextBlock).Text
-	if text != "No files matched the pattern." {
-		t.Fatalf("expected 'No files matched the pattern.', got: %q", text)
+	text := envBody(t, res)
+	if text != "" {
+		t.Fatalf("expected empty body, got: %q", text)
+	}
+	if got := envAttr(res, "info"); got != "no matches" {
+		t.Fatalf("info attr = %q", got)
 	}
 	details := res.Details.(map[string]any)
 	if details["matches"] != 0 {
@@ -343,8 +344,8 @@ func TestGlobSandboxing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success inside sandbox, got %v", err)
 	}
-	if res.Content[0].(provider.TextBlock).Text != "No files matched the pattern." {
-		t.Fatalf("unexpected content: %v", res.Content[0])
+	if envBody(t, res) != "" {
+		t.Fatalf("unexpected content: %q", envBody(t, res))
 	}
 
 	// Absolute paths inside the sandbox should not leak the sandbox root.
@@ -356,7 +357,7 @@ func TestGlobSandboxing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected absolute path inside sandbox to succeed, got %v", err)
 	}
-	if text := res.Content[0].(provider.TextBlock).Text; text != "inside.go" {
+	if text := envBody(t, res); text != "inside.go" {
 		t.Fatalf("jailed result should be relative, got %q", text)
 	}
 
@@ -385,7 +386,7 @@ func TestGlobCaseInsensitiveAndType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := res.Content[0].(provider.TextBlock).Text; strings.Contains(text, "Main.GO") {
+	if text := envBody(t, res); strings.Contains(text, "Main.GO") {
 		t.Fatalf("case-sensitive should miss Main.GO, got:\n%s", text)
 	}
 	// caseInsensitive finds it (find -iname).
@@ -393,7 +394,7 @@ func TestGlobCaseInsensitiveAndType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := res.Content[0].(provider.TextBlock).Text; !strings.Contains(text, "Main.GO") {
+	if text := envBody(t, res); !strings.Contains(text, "Main.GO") {
 		t.Fatalf("caseInsensitive should find Main.GO, got:\n%s", text)
 	}
 	// type=d lists matching directories with trailing slash.
@@ -401,7 +402,7 @@ func TestGlobCaseInsensitiveAndType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := res.Content[0].(provider.TextBlock).Text; !strings.Contains(text, "Pkg/") {
+	if text := envBody(t, res); !strings.Contains(text, "Pkg/") {
 		t.Fatalf("type=d should list Pkg/, got:\n%s", text)
 	}
 	// type=f never lists directories.
@@ -409,7 +410,7 @@ func TestGlobCaseInsensitiveAndType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := res.Content[0].(provider.TextBlock).Text; strings.Contains(text, "Pkg/") && !strings.Contains(text, "Pkg/Util.GO") {
+	if text := envBody(t, res); strings.Contains(text, "Pkg/") && !strings.Contains(text, "Pkg/Util.GO") {
 		t.Fatalf("type=f must not list bare dirs, got:\n%s", text)
 	}
 	// Invalid type errors.

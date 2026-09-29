@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 func TestPythonAvailableFindsInterpreter(t *testing.T) {
@@ -42,8 +41,8 @@ func TestPythonCodeExecution(t *testing.T) {
 	if !strings.Contains(got, "hello world") {
 		t.Fatalf("expected output, got %q", got)
 	}
-	if !strings.Contains(got, "[exit 0]") {
-		t.Fatalf("expected exit marker, got %q", got)
+	if got := envAttr(res, "exit"); got != "0" {
+		t.Fatalf("expected exit attr 0, got %q", got)
 	}
 }
 
@@ -70,8 +69,11 @@ func TestPythonStdinAndExitCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolResultText(t, res); !strings.Contains(got, "[exit 3]") {
-		t.Fatalf("expected exit 3 marker, got %q", got)
+	if got := envAttr(res, "exit"); got != "3" {
+		t.Fatalf("expected exit attr 3, got %q", got)
+	}
+	if res.IsError {
+		t.Fatal("non-zero exit must not be IsError (it is type=ok exit=3)")
 	}
 }
 
@@ -152,21 +154,17 @@ func TestPythonNoTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolResultText(t, res); !strings.Contains(got, "done") || !strings.Contains(got, "[exit 0]") {
+	if got := toolResultText(t, res); !strings.Contains(got, "done") {
 		t.Fatalf("expected normal completion, got %q", got)
+	}
+	if got := envAttr(res, "exit"); got != "0" {
+		t.Fatalf("expected exit attr 0, got %q", got)
 	}
 }
 
 func toolResultText(t *testing.T, res core.ToolResult) string {
 	t.Helper()
-	if len(res.Content) == 0 {
-		t.Fatal("expected content in tool result")
-	}
-	tb, ok := res.Content[0].(provider.TextBlock)
-	if !ok {
-		t.Fatalf("expected TextBlock, got %T", res.Content[0])
-	}
-	return tb.Text
+	return envBody(t, res)
 }
 
 func TestPythonUnicodeIO(t *testing.T) {
@@ -200,7 +198,7 @@ func TestPythonUnicodeIO(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := toolResultText(t, res)
-		if strings.Count(got, "ação 日本語 🚀") != 2 || !strings.Contains(got, "[exit 0]") {
+		if strings.Count(got, "ação 日本語 🚀") != 2 || envAttr(res, "exit") != "0" {
 			t.Fatalf("Unicode stdin/file/stdout/stderr roundtrip: %s", got)
 		}
 	}

@@ -79,7 +79,7 @@ func TestFetchURLArticle(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := toolResultText(t, res)
-	if !strings.Contains(got, "# Main Title") || !strings.Contains(got, srv.URL+"/post") {
+	if !strings.Contains(got, "# Main Title") || envAttr(res, "url") != srv.URL+"/post" {
 		t.Fatalf("article not extracted:\n%s", got)
 	}
 }
@@ -124,7 +124,10 @@ func TestFetchURLMaxChars(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolResultText(t, res); !strings.Contains(got, "truncated") {
-		t.Fatalf("expected truncation note, got %d chars", len(got))
+	if got := envAttr(res, "truncated"); got != "true" {
+		t.Fatalf("expected truncated attr, got %q", got)
+	}
+	if got := toolResultText(t, res); len(got) != 100 {
+		t.Fatalf("expected 100 chars of body, got %d", len(got))
 	}
 }

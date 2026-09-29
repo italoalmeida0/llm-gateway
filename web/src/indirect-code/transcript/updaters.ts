@@ -1,4 +1,5 @@
 import { parseContentBlocks, prettyArgs } from "../utils/wire";
+import { stripToolEnvelopeDetailed } from "../utils/envelope";
 import type { ChatMessage, ContentBlock, SessionUsage } from "../types";
 import type { TurnActivity } from "../viewTypes";
 
@@ -270,10 +271,13 @@ export function appendToolResult(
   const target = prev.findLastIndex(m => m.role === "assistant" && m.blocks.some(b => b.toolId === callId));
   const index = target >= 0 ? target : prev.length - 1;
   const carrier = prev[index];
+  const detailed = result == null ? null : stripToolEnvelopeDetailed(result);
+  const env = detailed && Object.keys(detailed.attrs).length ? { ...(details as any), env: detailed.attrs } : details;
   const resBlock: ContentBlock = {
-    type: "tool_result", toolId: callId, toolResult: result,
+    type: "tool_result", toolId: callId,
+    toolResult: detailed ? detailed.body : result,
     toolStartedAt: startedAt, toolDurationMs: startedAt ? durationMs || 0 : undefined,
-    isError: !!isError, toolDetails: details,
+    isError: !!isError, toolDetails: env,
   };
   if (carrier?.role === "assistant") {
     const blocks = [...carrier.blocks];

@@ -340,12 +340,16 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		// a detached background job.
 		if det, ok := res.Details.(map[string]any); ok {
 			det["background_job_id"] = jobID
-						det["detached"] = true
+			det["detached"] = true
 		}
-		deliver(text, res.IsError)
+		deliver(text, commandFailed(res.Attrs))
 	}()
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: pythonBackgroundNotice(jobID, label)}},
+		Attrs: []core.Attr{
+			{Key: "status", Value: "background"},
+			{Key: "job_id", Value: jobID},
+		},
 		Details: map[string]any{"background_job_id": jobID},
 	}, nil
 }
@@ -430,22 +434,27 @@ func finishPythonCommand(runErr error, stdout, stderr bytes.Buffer, start time.T
 		b.WriteString(errOut)
 	}
 	text := b.String()
+	var attrs []core.Attr
 	if text == "" {
-		text = "(no output)"
+		attrs = append(attrs, core.Attr{Key: "info", Value: "no output"})
 	}
+	// Command outcome is a FACT (attr), not an error: a non-zero exit is
+	// type="ok" exit="N". Only tool misuse is type="error".
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			text += fmt.Sprintf("\n[exit %d]", exitErr.ExitCode())
+			attrs = append(attrs, core.Attr{Key: "exit", Value: fmt.Sprintf("%d", exitErr.ExitCode())})
 		} else {
-			text += fmt.Sprintf("\n[error: %v]", runErr)
+			attrs = append(attrs, core.Attr{Key: "status", Value: "failed"})
+			attrs = append(attrs, core.Attr{Key: "error", Value: runErr.Error()})
 		}
 	} else {
-		text += "\n[exit 0]"
+		attrs = append(attrs, core.Attr{Key: "exit", Value: "0"})
 	}
-	text += fmt.Sprintf("  Took %s", humanDuration(duration))
+	attrs = append(attrs, core.Attr{Key: "duration", Value: humanDuration(duration)})
 
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: text}},
+		Attrs:   attrs,
 	}, nil
 }
 

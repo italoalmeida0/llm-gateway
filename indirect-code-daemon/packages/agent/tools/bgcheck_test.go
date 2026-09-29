@@ -3,10 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
-	"llm-gateway/indirect-code-daemon/packages/provider"
+	"llm-gateway/indirect-code-daemon/packages/core"
 )
 
 type fakeBgCheckHost struct {
@@ -18,20 +17,13 @@ func (h fakeBgCheckHost) ReadBackgroundTask(callerSessionID, jobID string, offse
 	return h.res, h.err
 }
 
-func bgCheckText(t *testing.T, tool *BgCheckTool, args string) string {
+func bgCheck(t *testing.T, tool *BgCheckTool, args string) core.ToolResult {
 	t.Helper()
 	res, err := tool.Execute(context.Background(), json.RawMessage(args), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Content) != 1 {
-		t.Fatalf("expected one text block, got %+v", res.Content)
-	}
-	tb, ok := res.Content[0].(provider.TextBlock)
-	if !ok {
-		t.Fatalf("expected TextBlock, got %T", res.Content[0])
-	}
-	return tb.Text
+	return res
 }
 
 func TestBgCheckTailDefault(t *testing.T) {
@@ -39,18 +31,18 @@ func TestBgCheckTailDefault(t *testing.T) {
 		Found: true, Kind: "bash", Label: "sleep 15", Status: "running",
 		Text: "out1\nout2", From: 91, To: 92, Total: 92,
 	}}, SessionID: "s"}
-	text := bgCheckText(t, tool, `{"job_id":"bg_1"}`)
-	if !strings.Contains(text, "Background Task (bash) — running") {
-		t.Fatalf("header: %q", text)
+	res := bgCheck(t, tool, `{"job_id":"bg_1"}`)
+	if got := envAttr(res, "status"); got != "running" {
+		t.Fatalf("status attr = %q", got)
 	}
-	if !strings.Contains(text, "Lines 91–92 of 92") {
-		t.Fatalf("range: %q", text)
+	if got := envAttr(res, "command"); got != "sleep 15" {
+		t.Fatalf("command attr = %q", got)
 	}
-	if !strings.Contains(text, "91:out1\n92:out2") {
-		t.Fatalf("numbered lines: %q", text)
+	if got := envAttr(res, "page"); got != "91-92/92" {
+		t.Fatalf("page attr = %q", got)
 	}
-	if !strings.Contains(text, "still running") {
-		t.Fatalf("status: %q", text)
+	if got := envBody(t, res); got != "91:out1\n92:out2" {
+		t.Fatalf("body = %q", got)
 	}
 }
 
@@ -59,12 +51,31 @@ func TestBgCheckTruncationAndTerminal(t *testing.T) {
 		Found: true, Kind: "python", Label: "train.py", Status: "done", ExitCode: 0,
 		Text: "last", From: 1000, To: 1000, Total: 1000, Dropped: 999, Truncated: true,
 	}}, SessionID: "s"}
-	text := bgCheckText(t, tool, `{"job_id":"bg_2","offset":1000,"limit":10}`)
-	if !strings.Contains(text, "999 earlier lines discarded") {
-		t.Fatalf("dropped: %q", text)
+	res := bgCheck(t, tool, `{"job_id":"bg_2","offset":1000,"limit":10}`)
+	if got := envAttr(res, "dropped"); got != "999" {
+		t.Fatalf("dropped attr = %q", got)
 	}
-	if !strings.Contains(text, "Status: done (exit 0).") {
-		t.Fatalf("terminal: %q", text)
+	if got := envAttr(res, "exit"); got != "0" {
+		t.Fatalf("exit attr = %q", got)
+	}
+	if got := envAttr(res, "status"); got != "done" {
+		t.Fatalf("status attr = %q", got)
+	}
+	if got := envBody(t, res); got != "1000:last" {
+		t.Fatalf("body = %q", got)
+	}
+}
+
+func TestBgCheckNoOutputYet(t *testing.T) {
+	tool := &BgCheckTool{Host: fakeBgCheckHost{res: BgCheckResult{
+		Found: true, Kind: "bash", Label: "sleep 5", Status: "running",
+	}}, SessionID: "s"}
+	res := bgCheck(t, tool, `{"job_id":"bg_3"}`)
+	if got := envAttr(res, "info"); got != "No output yet." {
+		t.Fatalf("info attr = %q", got)
+	}
+	if got := envBody(t, res); got != "" {
+		t.Fatalf("body must be empty, got %q", got)
 	}
 }
 

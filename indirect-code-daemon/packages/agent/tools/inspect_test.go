@@ -54,7 +54,7 @@ func TestInspectNestedFiltersAndUnicodeGitStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := toolResultText(t, res)
-	if !strings.Contains(got, "(1 entries)") || !strings.Contains(got, "[A] ação arquivo.ts") || strings.Contains(got, "generated") {
+	if envAttr(res, "total") != "1" || !strings.Contains(got, "[A] ação arquivo.ts") || strings.Contains(got, "generated") {
 		t.Fatalf("filters or raw Git filenames lost: %s", got)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // MarkTaskAsCompleteTool allows the model to signal completion in Build mode.
@@ -27,7 +26,7 @@ func (t *MarkTaskAsCompleteTool) Execute(ctx context.Context, raw json.RawMessag
 		}
 	}
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: "Task marked as complete."}},
+		Attrs: []core.Attr{{Key: "info", Value: "Task marked as complete."}},
 	}, nil
 }
 
@@ -50,6 +49,6 @@ func (t *MarkPlanAsReadyToExecuteTool) Execute(ctx context.Context, raw json.Raw
 		}
 	}
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: "Plan marked as ready to execute."}},
+		Attrs: []core.Attr{{Key: "info", Value: "Plan marked as ready to execute."}},
 	}, nil
 }

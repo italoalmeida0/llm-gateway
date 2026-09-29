@@ -85,7 +85,7 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		if processErr != nil {
 			return core.ToolResult{Content: []provider.Content{
 				provider.TextBlock{Text: fmt.Sprintf("Read image file [%s]\n%s", mime, processErr)},
-			}}, nil
+			}, Attrs: []core.Attr{{Key: "media", Value: mime}}}, nil
 		}
 		text := fmt.Sprintf("Read image file [%s]", processed.mimeType)
 		if len(processed.hints) > 0 {
@@ -94,7 +94,7 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		return core.ToolResult{Content: []provider.Content{
 			provider.TextBlock{Text: text},
 			provider.ImageBlock{MimeType: processed.mimeType, Data: processed.data},
-		}}, nil
+		}, Attrs: []core.Attr{{Key: "media", Value: processed.mimeType}}}, nil
 	}
 
 	// A media file is not currently representable by provider.Content in this
@@ -180,32 +180,41 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 
 	truncation := truncateHead(selectedContent, defaultMaxLines, defaultMaxBytes)
 	var outputText string
+	var attrs []core.Attr
 	switch {
 	case truncation.firstLineExceeds:
 		// Deliver the head of the long line instead of refusing: the model
 		// stays on read instead of falling back to terminal commands.
 		head := truncateStringToBytesFromStart(allLines[startLine], defaultMaxBytes)
-		firstLineSize := formatSize(len(allLines[startLine]))
-		outputText = head + fmt.Sprintf("\n\n[Line %d is %s; showing the first %s. The rest of the line is only reachable via bash: sed -n '%dp' %s | tail -c +%d]",
-			startLineDisplay, firstLineSize, formatSize(len(head)), startLineDisplay, a.Path, len(head)+1)
+		outputText = head
+		attrs = append(attrs,
+			core.Attr{Key: "line", Value: fmt.Sprintf("%d", startLineDisplay)},
+			core.Attr{Key: "line_size", Value: formatSize(len(allLines[startLine]))},
+			core.Attr{Key: "shown", Value: formatSize(len(head))},
+			core.Attr{Key: "next_byte", Value: fmt.Sprintf("%d", len(head)+1)},
+			core.Attr{Key: "truncated", Value: "true"},
+		)
 	case truncation.truncated:
 		endLineDisplay := startLineDisplay + truncation.outputLines - 1
 		nextOffset := endLineDisplay + 1
 		outputText = truncation.content
-		if truncation.truncatedBy == "lines" {
-			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Use offset=%d to continue.]",
-				startLineDisplay, endLineDisplay, totalFileLines, nextOffset)
-		} else {
-			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Use offset=%d to continue.]",
-				startLineDisplay, endLineDisplay, totalFileLines, formatSize(defaultMaxBytes), nextOffset)
-		}
+		attrs = append(attrs,
+			core.Attr{Key: "page", Value: fmt.Sprintf("%d-%d/%d", startLineDisplay, endLineDisplay, totalFileLines)},
+			core.Attr{Key: "next", Value: fmt.Sprintf("%d", nextOffset)},
+			core.Attr{Key: "truncated", Value: "true"},
+		)
 	case userLimited && startLine+userLimitedLines < totalFileLines:
-		remaining := totalFileLines - (startLine + userLimitedLines)
 		nextOffset := startLine + userLimitedLines + 1
-		outputText = fmt.Sprintf("%s\n\n[%d more lines in file. Use offset=%d to continue.]",
-			truncation.content, remaining, nextOffset)
+		outputText = truncation.content
+		attrs = append(attrs,
+			core.Attr{Key: "page", Value: fmt.Sprintf("%d-%d/%d", startLineDisplay, startLine+userLimitedLines, totalFileLines)},
+			core.Attr{Key: "next", Value: fmt.Sprintf("%d", nextOffset)},
+		)
 	default:
 		outputText = truncation.content
+		if totalFileLines > 0 {
+			attrs = append(attrs, core.Attr{Key: "page", Value: fmt.Sprintf("%d-%d/%d", startLineDisplay, totalFileLines, totalFileLines)})
+		}
 	}
 
 	display := t.renderDisplay(allLines, startLine, &truncation, userLimited, userLimitedLines)
@@ -214,6 +223,7 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 	}
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: outputText}},
+		Attrs:   attrs,
 		Details: map[string]any{
 			"display":         display,
 			"path":            path,

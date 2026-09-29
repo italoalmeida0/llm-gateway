@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
-
-	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 func TestMarkTaskAsCompleteTool(t *testing.T) {
@@ -26,11 +24,8 @@ func TestMarkTaskAsCompleteTool(t *testing.T) {
 	if !called {
 		t.Fatal("expected OnComplete callback to be invoked")
 	}
-	if len(res.Content) == 0 {
-		t.Fatal("expected non-empty content")
-	}
-	if tb, ok := res.Content[0].(provider.TextBlock); !ok || tb.Text != "Task marked as complete." {
-		t.Fatalf("unexpected result text: %v", res.Content[0])
+	if got := envAttr(res, "info"); got != "Task marked as complete." {
+		t.Fatalf("info attr = %q", got)
 	}
 }
 
@@ -52,10 +47,7 @@ func TestMarkPlanAsReadyToExecuteTool(t *testing.T) {
 	if !called {
 		t.Fatal("expected OnReady callback to be invoked")
 	}
-	if len(res.Content) == 0 {
-		t.Fatal("expected non-empty content")
-	}
-	if tb, ok := res.Content[0].(provider.TextBlock); !ok || tb.Text != "Plan marked as ready to execute." {
-		t.Fatalf("unexpected result text: %v", res.Content[0])
+	if got := envAttr(res, "info"); got != "Plan marked as ready to execute." {
+		t.Fatalf("info attr = %q", got)
 	}
 }

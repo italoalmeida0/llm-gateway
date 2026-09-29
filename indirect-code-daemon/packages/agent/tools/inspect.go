@@ -127,7 +127,10 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 			lines = fmt.Sprintf(", %d lines", countLines(data))
 		}
 		fmt.Fprintf(&b, "%s  %s (%s%s)\n", flagField(flag), slash(rel), humanBytes(st.Size()), lines)
-		return core.ToolResult{Content: []provider.Content{provider.TextBlock{Text: b.String()}}}, nil
+		return core.ToolResult{
+			Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+			Attrs:   []core.Attr{{Key: "total", Value: "1"}},
+		}, nil
 	}
 
 	gi := ignore.Load(abs)
@@ -225,11 +228,15 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 	if scopeSlash == "." {
 		scopeSlash = ""
 	}
-	fmt.Fprintf(&b, "%s/ (%d entries", scope, len(entries))
+	var attrs []core.Attr
+	attrs = append(attrs, core.Attr{Key: "total", Value: fmt.Sprintf("%d", len(entries))})
 	if truncated {
-		fmt.Fprintf(&b, ", capped at %d", maxEntries)
+		attrs = append(attrs, core.Attr{Key: "truncated", Value: "true"})
 	}
-	b.WriteString(")\n")
+	if len(entries) == 0 {
+		attrs = append(attrs, core.Attr{Key: "info", Value: "no entries"})
+	}
+	fmt.Fprintf(&b, "%s/\n", scope)
 	for _, e := range entries {
 		name := e.rel
 		if scopeSlash != "" {
@@ -257,6 +264,7 @@ func (t *InspectTool) Execute(ctx context.Context, raw json.RawMessage, progress
 	}
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+		Attrs:   attrs,
 	}, nil
 }
 

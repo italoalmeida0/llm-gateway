@@ -48,7 +48,6 @@ var (
 
 const webCacheTTL = 60 * time.Second
 
-
 type SearchWebTool struct {
 	CWD     string
 	Sandbox *Sandbox
@@ -97,8 +96,20 @@ func (t *SearchWebTool) Execute(ctx context.Context, raw json.RawMessage, progre
 		b.WriteString("(cached)\n")
 	}
 	b.WriteString(text)
+	var attrs []core.Attr
+	if cached {
+		attrs = append(attrs, core.Attr{Key: "cached", Value: "true"})
+	}
+	attrs = append(attrs,
+		core.Attr{Key: "query", Value: q},
+		core.Attr{Key: "total", Value: fmt.Sprintf("%d", len(results))},
+	)
+	if len(results) == 0 {
+		attrs = append(attrs, core.Attr{Key: "info", Value: "no results"})
+	}
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: b.String()}},
+		Attrs:   attrs,
 		Details: map[string]any{"query": q, "count": count, "cached": cached, "results": webDetailItems(results)},
 	}, nil
 }

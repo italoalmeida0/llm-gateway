@@ -247,7 +247,10 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		runCancel()
 		res, err := finishBashCommand(a, cwd, start, output, &head, waitErr, nil, runErr, nil)
 		text := ""
-		isErr := err != nil
+		// Job failure is the COMMAND's outcome (non-zero exit, abort,
+		// stop), not tool misuse: exit≠0 is type=ok exit=N but the job
+		// still finished with an error.
+		failed := err != nil
 		if err != nil {
 			text = err.Error()
 		} else {
@@ -256,19 +259,23 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 					text = tb.Text
 				}
 			}
-			isErr = res.IsError
+			failed = commandFailed(res.Attrs)
 		}
 		// Stamp the delivery so the frontend knows this terminal result
 		// belongs to a detached background job (it renders the row as a
 		// background run, not a plain synchronous result).
 		if det, ok := res.Details.(map[string]any); ok {
 			det["background_job_id"] = jobID
-						det["detached"] = true
+			det["detached"] = true
 		}
-		deliver(text, isErr)
+		deliver(text, failed)
 	}()
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: bashBackgroundNotice(jobID, a.Command)}},
+		Attrs: []core.Attr{
+			{Key: "status", Value: "background"},
+			{Key: "job_id", Value: jobID},
+		},
 		Details: map[string]any{"background_job_id": jobID},
 	}, nil
 }
@@ -302,51 +309,38 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 	snapshot := output.snapshot(true)
 	output.closeTempFile()
 
-	// Tail-truncated content plus a truncation notice. The model never
-	// sees file paths (V2: the runner/session own the bytes) — the notice
-	// names the range and how to inspect the effect instead.
+	// Tail-truncated content. The model never sees file paths (V2: the
+	// runner/session own the bytes) — truncation is reported as envelope
+	// attrs (page/next/truncated), never as body prose.
 	outputText := snapshot.content
+	var attrs []core.Attr
 	if outputText == "" {
 		outputText = "(no output)"
 	}
 	if snapshot.truncated {
 		startLine := snapshot.totalLines - snapshot.outputLines + 1
 		endLine := snapshot.totalLines
-		switch {
-		case snapshot.lastLinePartial:
-			outputText += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). The earlier output is truncated — the shown tail is complete output.]",
-				formatSize(snapshot.outputBytes), endLine, formatSize(output.getLastLineBytes()))
-		case snapshot.truncatedBy == "lines":
-			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (line limit). The earlier lines are truncated.]",
-				startLine, endLine, snapshot.totalLines)
-		default:
-			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). The earlier lines are truncated.]",
-				startLine, endLine, snapshot.totalLines, formatSize(defaultMaxBytes))
+		attrs = append(attrs, core.Attr{Key: "truncated", Value: "true"})
+		attrs = append(attrs, core.Attr{Key: "page", Value: fmt.Sprintf("%d-%d/%d", startLine, endLine, snapshot.totalLines)})
+		if snapshot.lastLinePartial {
+			attrs = append(attrs, core.Attr{Key: "partial_last_line", Value: formatSize(output.getLastLineBytes())})
+		} else {
+			next := endLine + 1
+			attrs = append(attrs, core.Attr{Key: "next", Value: fmt.Sprintf("%d", next)})
 		}
 	}
 
-	appendStatus := func(text, status string) string {
-		if text != "" {
-			return text + "\n\n" + status
-		}
-		return status
-	}
-
-	isErr := false
-	// Abort (turn cancelled pre-detach) and stop (bg_cancel / process
-	// killed) use short status lines. There is no timeout: a detached
-	// job that ends after any amount of time reports its real output.
+	// Command outcome is a FACT (attr), not an error: only tool misuse is
+	// type="error". Abort/stop report status=; a non-zero exit reports exit=.
 	switch {
 	case ctxErr != nil:
-		isErr = true
-		outputText = appendStatus(outputText, "Command aborted")
+		attrs = append(attrs, core.Attr{Key: "status", Value: "aborted"})
 	case runCtxErr != nil:
-		isErr = true
-		outputText = appendStatus(outputText, "Command stopped")
-	case exitCode != 0:
-		isErr = true
-		outputText = appendStatus(outputText, fmt.Sprintf("Command exited with code %d", exitCode))
+		attrs = append(attrs, core.Attr{Key: "status", Value: "stopped"})
+	default:
+		attrs = append(attrs, core.Attr{Key: "exit", Value: fmt.Sprintf("%d", exitCode)})
 	}
+	attrs = append(attrs, core.Attr{Key: "duration", Value: humanDuration(elapsed)})
 
 	// Frontend-only rendering: the terminal-log view ($ command,
 	// output, [exit N] Took Xs) shown by the UI transcript.
@@ -354,13 +348,13 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 
 	return core.ToolResult{
 		Content: []provider.Content{provider.TextBlock{Text: outputText}},
-		IsError: isErr,
+		Attrs:   attrs,
 		Details: map[string]any{
-			"display":          display,
-			"exitCode":         exitCode,
-			"stdout":           head.String(),
-			"stderr":           "",
-			"truncated":        snapshot.truncated,
+			"display":   display,
+			"exitCode":  exitCode,
+			"stdout":    head.String(),
+			"stderr":    "",
+			"truncated": snapshot.truncated,
 			// UI-only (Details never reach the LLM): the full output file
 			// for the frontend's copy/inspect affordances. The model-visible
 			// Content above is deliberately path-free.

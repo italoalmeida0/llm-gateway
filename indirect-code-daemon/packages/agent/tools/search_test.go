@@ -49,8 +49,11 @@ func TestSearchCountCapRetainsRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := toolResultText(t, res)
-	if !strings.Contains(got, "6 matches in 3 files") || !strings.Contains(got, "a.txt: 2 matches") || !strings.Contains(got, "b.txt: 2 matches") || strings.Contains(got, "c.txt:") {
+	if envAttr(res, "total") != "6" || envAttr(res, "files") != "3" || !strings.Contains(got, "a.txt: 2 matches") || !strings.Contains(got, "b.txt: 2 matches") || strings.Contains(got, "c.txt:") {
 		t.Fatalf("capped count discarded rows: %s", got)
+	}
+	if envAttr(res, "truncated") != "true" {
+		t.Fatalf("expected truncated attr, got %q", envAttr(res, "truncated"))
 	}
 }
 
@@ -73,7 +76,7 @@ func TestSearchNestedGlobUnicodeAndFileLimit(t *testing.T) {
 		t.Fatalf("glob/Unicode failure: %s", got)
 	}
 	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "hit", "path": path, "maxFileBytes": 10}), nil)
-	if err != nil || !strings.Contains(toolResultText(t, res), "no matches") {
+	if err != nil || envAttr(res, "info") != "no matches" {
 		t.Fatal("explicit file bypasses size limit")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,8 +111,8 @@ func TestSearchLiteral(t *testing.T) {
 	if !strings.Contains(got, "a.ts:1:") || !strings.Contains(got, "b.ts:2:") {
 		t.Fatalf("expected both hits, got:\n%s", got)
 	}
-	if !strings.HasPrefix(got, "3 matches") {
-		t.Fatalf("expected 3 matches header, got:\n%s", got)
+	if envAttr(res, "total") != "3" {
+		t.Fatalf("expected total attr 3, got %q", envAttr(res, "total"))
 	}
 }
 
@@ -167,8 +170,8 @@ func TestSearchContextAndCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolResultText(t, res); !strings.HasPrefix(got, "3 matches (capped at 3") {
-		t.Fatalf("expected cap notice, got:\n%s", got)
+	if envAttr(res, "truncated") != "true" {
+		t.Fatalf("expected truncated attr, got %q", envAttr(res, "truncated"))
 	}
 }
 
@@ -197,8 +200,8 @@ func TestSearchOnlyMatching(t *testing.T) {
 	}
 	got := toolResultText(t, res)
 	// 4 matches (one entry per match, not per line).
-	if !strings.HasPrefix(got, "4 matches") {
-		t.Fatalf("expected 4 matches header, got:\n%s", got)
+	if envAttr(res, "total") != "4" {
+		t.Fatalf("expected total attr 4, got %q", envAttr(res, "total"))
 	}
 	if !strings.Contains(got, "a.txt:1:1: foo") || !strings.Contains(got, "a.txt:1:9: foo") {
 		t.Fatalf("expected per-match cols, got:\n%s", got)
@@ -218,8 +221,8 @@ func TestSearchCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := toolResultText(t, res)
-	if !strings.Contains(got, "4 matches in 2 files") {
-		t.Fatalf("expected aggregate header, got:\n%s", got)
+	if envAttr(res, "total") != "4" || envAttr(res, "files") != "2" {
+		t.Fatalf("expected total=4 files=2 attrs, got %q/%q", envAttr(res, "total"), envAttr(res, "files"))
 	}
 	if !strings.Contains(got, "a.txt: 3 matches") || !strings.Contains(got, "c.txt: 1 match") {
 		t.Fatalf("expected per-file counts, got:\n%s", got)
@@ -241,7 +244,7 @@ func TestSearchFilesOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := toolResultText(t, res)
-	if !strings.Contains(got, "1 file") || !strings.Contains(got, "a.txt") {
+	if envAttr(res, "total") != "1" || !strings.Contains(got, "a.txt") {
 		t.Fatalf("expected files-only listing, got:\n%s", got)
 	}
 	if strings.Contains(got, "b.txt") || strings.Contains(got, ":1:") {

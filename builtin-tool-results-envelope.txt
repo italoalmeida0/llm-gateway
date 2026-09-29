@@ -1,0 +1,533 @@
+================================================================================
+BUILT-IN TOOL RESULTS — WHAT THE MODEL RECEIVES NOW (ENVELOPE FORMAT)
+================================================================================
+Companion to builtin-tool-results.txt (the OLD, pre-envelope document). Keep
+both side by side to compare: the old file shows the mixed TEXT bodies the
+model used to receive; this file shows the ENVELOPE it receives today.
+
+Source of truth: indirect-code-daemon (Go). Every example below is what the
+model actually gets, generated from the code paths listed in the RASTREAMENTO
+(tracing) section at the end. Error strings are verbatim.
+
+Note on rendering in THIS file: the envelope-close tag is written as
+`</result>` to avoid confusing the reader's tooling; in the real wire it is
+`</tool_result>`.
+
+--------------------------------------------------------------------------------
+1. THE ENVELOPE (read this first)
+--------------------------------------------------------------------------------
+Every builtin tool result is wrapped in one pseudo-XML tag:
+
+    <tool_result type="ok" ATTR="value" ...>BODY</result>
+    <tool_result type="error">SYSTEM ERROR MESSAGE</result>
+
+- type="ok"    : a normal result (including a command that exited non-zero).
+- type="error" : ONLY when the CALL failed — bad arguments, permission denied,
+                 path not found, aborted turn, unknown tool, panic. Its body is
+                 the system error message (the one exception to "body = content").
+
+- BODY  = ONLY tool content: program output, file text, log lines, search rows,
+          JSON data. No system prose, no "[Showing lines…]" notes, no "Command
+          exited with code N", no status word, no file paths.
+- ATTRS = every system FACT, rendered in the order the tool declared them,
+          after `type` (always first). Empty values are omitted. Attribute
+          values are entity-escaped: & -> &amp;  " -> &quot;  < -> &lt;  > -> &gt;
+
+Escaping in the body: only the two sequences that could close or spoof the
+envelope are escaped — `</tool_result` -> `&lt;/tool_result` and
+`<tool_result` -> `&lt;tool_result`. Everything else in the body is byte-exact,
+so program output that happens to contain XML is preserved.
+
+Wrap point (single choke point): core.WrapToolResultContent, called from
+core/agent.go runOneTool after DurationMs is stamped. Tools only fill
+Content (pure body) + Attrs (facts). See packages/core/envelope.go.
+
+--------------------------------------------------------------------------------
+2. GLOBAL (non-tool) RESULTS — type="error"
+--------------------------------------------------------------------------------
+Produced by the agent around any tool, never by the tool itself.
+
+Unknown tool name:
+    <tool_result type="error">unknown tool "foo"</result>
+
+Extension/guard refusal (BeforeToolExecute):
+    <tool_result type="error">tool call refused by extension guard</result>
+    <tool_result type="error">THE REASON THE GUARD RETURNED</result>
+
+Tool returned a Go error (any misuse: bad args, permission, not found…):
+    <tool_result type="error">THE ERROR STRING (err.Error())</result>
+
+Aborted turn (ctx cancelled / deadline):
+    <tool_result type="error">aborted: context canceled</result>
+    <tool_result type="error">aborted: context deadline exceeded</result>
+
+Panic inside a tool (recovered):
+    <tool_result type="error">panic: runtime error: index out of range [0] with length 0</result>
+
+Interrupted turn (synthetic stub for a tool that never reported a result,
+packages/core/message.go):
+    <tool_result type="error">Tool outcome is unknown: execution may have occurred before interruption. Verify its effects or execution log before repeating a mutating action.</result>
+
+Sandbox / jail refusals (returned as errors by the tools, sandbox.go):
+    <tool_result type="error">jailed: path "/etc/passwd" is outside sandbox root "/home/u/proj" (use /unjail to disable)</result>
+    <tool_result type="error">jailed: command contains banned pattern "rm -rf /" (use /unjail to disable)</result>
+    <tool_result type="error">jailed: cd outside sandbox root is not allowed (use /unjail to disable)</result>
+
+Permission refusals (returned as errors, permissions.go):
+    <tool_result type="error">permission denied: this agent has no filesystem read permission</result>
+    <tool_result type="error">permission denied: this agent has no filesystem write permission</result>
+    <tool_result type="error">permission denied: this agent has no bash permission</result>
+    <tool_result type="error">permission denied: filesystem read "/etc/passwd" is outside declared scopes</result>
+    <tool_result type="error">permission denied: bash allowlist does not permit substitution or redirection</result>
+    <tool_result type="error">permission denied: empty command</result>
+    <tool_result type="error">permission denied: bash command "curl" is not in allowlist</result>
+    <tool_result type="error">permission denied: unsupported bash mode "weird"</result>
+
+Argument decoding (packages/agent/tools/args.go):
+    <tool_result type="error">empty args</result>
+    <tool_result type="error">invalid args: json: cannot unmarshal string into Go struct field X.field of type int</result>
+(floats/strings for int fields are tolerated silently: 3.0 -> 3, "3" -> 3)
+
+--------------------------------------------------------------------------------
+3. bash
+--------------------------------------------------------------------------------
+Success (empty output gets the literal placeholder "(no output)"):
+    <tool_result type="ok" exit="0" duration="1.2s">hello
+world</result>
+
+No output:
+    <tool_result type="ok" exit="0" duration="0.1s">(no output)</result>
+
+Non-zero exit — STILL type="ok" (a command's exit is a FACT, not a tool error):
+    <tool_result type="ok" exit="2" duration="0.4s">build failed: 3 errors</result>
+    <tool_result type="ok" exit="1" duration="0.0s">(no output)</result>
+    <tool_result type="ok" exit="-1" duration="0.0s">(no output)</result>
+
+Aborted (turn cancelled) / stopped (run cancelled):
+    <tool_result type="ok" status="aborted" duration="3.0s">partial output...</result>
+    <tool_result type="ok" status="stopped" duration="2.5s">partial output...</result>
+
+Tail-truncated output (line or byte cap). Body holds ONLY the kept lines:
+    <tool_result type="ok" truncated="true" page="1001-3000/3000" next="3001" exit="0" duration="1.0s">line-1001
+line-1002
+...
+line-3000</result>
+    <tool_result type="ok" truncated="true" page="18001-20000/20000" exit="0" duration="0.9s">...</result>
+(partial last line instead of `next`:)
+    <tool_result type="ok" truncated="true" page="18001-20000/20000" partial_last_line="58.6KB" exit="0" duration="0.9s">...</result>
+
+Background detach placeholder (the command outlived the auto-background
+threshold). Body is pure tool content; the id/status are attrs:
+    <tool_result type="ok" status="background" job_id="bg_8ed0b469015841a2">Command moved to background (still running).
+To read the output, call bg_check with job_id "bg_8ed0b469015841a2" (paged log: tail by default, offset/limit for more).
+To force-stop it early, call bg_cancel with job_id "bg_8ed0b469015841a2".
+You are woken automatically when the task finishes — its completion notice is delivered to you then.
+While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.</result>
+
+Invalid args (tool misuse -> error):
+    <tool_result type="error">invalid args: json: cannot unmarshal string into Go struct field bashArgs.command of type string</result>
+    <tool_result type="error">command is required</result>
+    <tool_result type="error">terminal unavailable: EOF</result>
+    <tool_result type="error">bg: failed to register background job</result>
+
+--------------------------------------------------------------------------------
+4. python
+--------------------------------------------------------------------------------
+Success — body = stdout (+ "[stderr]\n" section when stderr is non-empty):
+    <tool_result type="ok" exit="0" duration="0.3s">hello world</result>
+    <tool_result type="ok" exit="0" duration="0.2s">ação 日本語 🚀
+[stderr]
+ação 日本語 🚀</result>
+
+No output (info attr, empty body, exit still reported):
+    <tool_result type="ok" info="no output" exit="0" duration="0.1s"></result>
+
+Non-zero exit — type="ok":
+    <tool_result type="ok" exit="3" duration="0.2s">got:ping</result>
+
+Killed / not an ExitError (status=failed + the Go error as an attr):
+    <tool_result type="ok" status="failed" error="signal: killed" duration="10.1s">partial output</result>
+
+Background detach placeholder (identical text to bash):
+    <tool_result type="ok" status="background" job_id="bg_5e26275b4c989fb6">Command moved to background (still running).
+To read the output, call bg_check with job_id "bg_5e26275b4c989fb6" (paged log: tail by default, offset/limit for more).
+To force-stop it early, call bg_cancel with job_id "bg_5e26275b4c989fb6".
+You are woken automatically when the task finishes — its completion notice is delivered to you then.
+While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.</result>
+
+Invalid args (error):
+    <tool_result type="error">invalid args: json: cannot unmarshal number into Go struct field pythonArgs.code of type string</result>
+    <tool_result type="error">python: provide `code` or `script`</result>
+    <tool_result type="error">python tool unavailable: no usable Python 3 interpreter on this host</result>
+
+--------------------------------------------------------------------------------
+5. read
+--------------------------------------------------------------------------------
+Text success — body = raw file lines (NO line-number prefixes, NO notices):
+    <tool_result type="ok">package main
+
+func main() {}</result>
+
+Paged (offset/limit) — body = only the requested lines; paging is attrs:
+    <tool_result type="ok" page="2-3/5" next="4" truncated="true">2
+3</result>
+
+Head-capped by the default line limit:
+    <tool_result type="ok" page="1-2000/3000" next="2001" truncated="true">line 1
+...
+line 2000</result>
+
+Byte-capped (single huge line) — partial-line attrs:
+    <tool_result type="ok" line="1" line_size="58.6KB" shown="50.0KB" next_byte="50001" truncated="true">zzzz...(first 50KB of line 1)</result>
+
+Image file — body carries the marker (plus any processing hints on extra
+lines), and the image bytes follow as a sibling block in the same tool_result
+(media attr):
+    <tool_result type="ok" media="image/png">Read image file [image/png]</result>
+    <tool_result type="ok" media="image/jpeg">Read image file [image/jpeg]
+<processing hint line(s), when present></result>
+  + an ImageBlock (mime_type "image/png", base64 data) RIGHT AFTER this text.
+
+Refusals / errors:
+    <tool_result type="error">path is required</result>
+    <tool_result type="error">dir is a directory</result>
+    <tool_result type="error">clip.mp4 is a video media file; inline video/audio reading is not supported</result>
+    <tool_result type="error">blob.dat looks binary; refusing to read as text</result>
+    <tool_result type="error">limit must be a positive number of lines</result>
+    <tool_result type="error">Offset 500 is beyond end of file (5 lines total)</result>
+    <tool_result type="error">Offset 5 is beyond end of file (0 lines total)</result>
+    <tool_result type="error">file is larger than 100MB; use bash to inspect it in chunks</result>
+    <tool_result type="error">invalid args: json: cannot unmarshal string into Go struct field readArgs.limit of type int</result>
+
+--------------------------------------------------------------------------------
+6. write
+--------------------------------------------------------------------------------
+Success — body EMPTY (the model already knows what it wrote); confirmation is
+an info attr:
+    <tool_result type="ok" info="Successfully wrote to src/main.go" path="src/main.go" lines="42"></result>
+
+Error:
+    <tool_result type="error">path is required</result>
+    <tool_result type="error">invalid args: json: cannot unmarshal string into Go struct field writeArgs.content of type string</result>
+
+--------------------------------------------------------------------------------
+7. edit
+--------------------------------------------------------------------------------
+Success — body EMPTY; the diff is frontend-only (Details.display, never sent
+to the model):
+    <tool_result type="ok" info="Successfully replaced 1 block(s) in src/main.go." path="src/main.go" edits="1"></result>
+    <tool_result type="ok" info="Successfully replaced 3 block(s) in a.txt." path="a.txt" edits="3"></result>
+
+Errors (all type="error"):
+    <tool_result type="error">path is required</result>
+    <tool_result type="error">Edit tool input is invalid. edits must contain at least one replacement.</result>
+    <tool_result type="error">Could not find the exact text in a.txt. The old text must match exactly including all whitespace and newlines.</result>
+    <tool_result type="error">Could not find edits[0] in a.txt. The oldText must match exactly including all whitespace and newlines.</result>
+    <tool_result type="error">Found 2 occurrences of edits[0] in a.txt. Each oldText must be unique. Please provide more context to make it unique.</result>
+    <tool_result type="error">edits[0].oldText must not be empty in a.txt.</result>
+    <tool_result type="error">No changes made to a.txt. The replacements produced identical content.</result>
+    <tool_result type="error">Could not edit file: a.txt. binary file rejected.</result>
+    <tool_result type="error">Could not edit file: a.txt. file too large (>2MB).</result>
+
+--------------------------------------------------------------------------------
+8. glob
+--------------------------------------------------------------------------------
+Matches — body = paths only:
+    <tool_result type="ok" total="12">src/a.ts
+src/b.ts
+...</result>
+
+No matches — body EMPTY, info attr:
+    <tool_result type="ok" info="no matches"></result>
+
+Truncated at the cap:
+    <tool_result type="ok" total="500" truncated="true">src/a.ts
+...</result>
+
+Errors:
+    <tool_result type="error">pattern is required</result>
+    <tool_result type="error">invalid glob pattern "src/**[": syntax error in pattern</result>
+    <tool_result type="error">type must be "f" or "d"</result>
+    <tool_result type="error">src/nope is not a directory</result>
+
+--------------------------------------------------------------------------------
+9. search
+--------------------------------------------------------------------------------
+Default (one line per match, path:line:col: text):
+    <tool_result type="ok" total="3">a.ts:1:10: import { foo } from "./foo";
+skip.min.js:1:1: foo foo foo
+sub/b.ts:2:1: foo bar</result>
+
+onlyMatching (one entry per match):
+    <tool_result type="ok" total="4">a.txt:1:1: foo
+a.txt:1:9: foo
+a.txt:3:1: foo
+a.txt:3:11: foo</result>
+
+Count mode — body = per-file counts:
+    <tool_result type="ok" total="4" files="2">a.txt: 3 matches
+c.txt: 1 match</result>
+
+Files-only mode:
+    <tool_result type="ok" total="1">a.txt</result>
+
+Capped (truncated attr, rows kept):
+    <tool_result type="ok" total="6" files="3" truncated="true">a.txt: 2 matches
+b.txt: 2 matches</result>
+
+No matches — body EMPTY, info attr:
+    <tool_result type="ok" info="no matches"></result>
+
+Errors:
+    <tool_result type="error">search: `pattern` is required</result>
+    <tool_result type="error">search: invalid regex: error parsing regexp: missing closing ]: `[`</result>
+    <tool_result type="error">search: invalid path: stat /nope: no such file or directory</result>
+
+--------------------------------------------------------------------------------
+10. inspect
+--------------------------------------------------------------------------------
+Tree — body = the tree (always starts with "<scope>/"); total/truncated/info
+are attrs:
+    <tool_result type="ok" total="14">./
+  a.ts (4B, 3 lines, 2026-09-29 11:47)
+  [A] b.ts (12B, 1 lines)
+  deep/ (2.1KB, 2026-09-29 11:47)
+    c.go (2.1KB, 88 lines)</result>
+
+Single file (total="1"):
+    <tool_result type="ok" total="1">f.txt (6B, 2 lines, 2026-09-29 11:47)</result>
+
+No entries — body EMPTY, info attr:
+    <tool_result type="ok" info="no entries" total="0"></result>
+
+Truncated at the cap:
+    <tool_result type="ok" total="312" truncated="true">...</result>
+
+Errors:
+    <tool_result type="error">inspect: path not found: /nope</result>
+    <tool_result type="error">inspect: type must be "f" or "d"</result>
+    <tool_result type="error">inspect: invalid path: lstat /nope: no such file or directory</result>
+
+--------------------------------------------------------------------------------
+11. bg_check
+--------------------------------------------------------------------------------
+Running with output — body = NUMBERED log lines ("N:line"); header facts attrs:
+    <tool_result type="ok" kind="bash" status="running" command="npm run build" page="1-2/100" next="3">1:line 1
+2:line 2</result>
+
+Running, NO output yet (your case) — body EMPTY, info attr:
+    <tool_result type="ok" kind="bash" status="running" command="npm run build" info="No output yet."></result>
+
+Terminal with output — exit attr present whenever status != running:
+    <tool_result type="ok" kind="bash" status="done" command="npm run build" exit="0" page="90-100/100">90:last line A
+100:last line B</result>
+
+Terminal, nothing captured:
+    <tool_result type="ok" kind="python" status="error" command="python build.py" exit="1" info="No output yet."></result>
+
+Dropped ring-buffer lines (dropped attr):
+    <tool_result type="ok" kind="bash" status="running" command="yes" page="5000-5100/6000" dropped="100" next="5101">5000:y
+...</result>
+
+Tail page already at the end (NO next attr):
+    <tool_result type="ok" kind="bash" status="done" command="ls -R" exit="0" page="49-50/50">49:a
+50:b</result>
+
+Errors:
+    <tool_result type="error">bg_check: job_id is required</result>
+    <tool_result type="error">bg_check: no background support</result>
+    <tool_result type="error">bg_check: unknown background task bg_nope</result>
+
+--------------------------------------------------------------------------------
+12. bg_cancel
+--------------------------------------------------------------------------------
+Success — body EMPTY; outcome is attrs (cancelled=true/false + status):
+    <tool_result type="ok" job_id="bg_8ed0b469015841a2" cancelled="true" status="cancelled"></result>
+
+Already terminal (nothing to cancel) — the host notice goes to info:
+    <tool_result type="ok" job_id="bg_8ed0b469015841a2" cancelled="false" status="done" info="background task already done; nothing to cancel"></result>
+
+Unknown id (cancelled=false):
+    <tool_result type="ok" job_id="bg_nope" cancelled="false" status="unknown" info="no background task bg_nope in this session"></result>
+
+Errors:
+    <tool_result type="error">bg_cancel: job_id is required</result>
+    <tool_result type="error">bg_cancel: host not configured</result>
+
+--------------------------------------------------------------------------------
+13. sleep
+--------------------------------------------------------------------------------
+Slept the full duration:
+    <tool_result type="ok" summary="waiting for build" status="slept" job_id="bg_8ed0b469015841a2" waited="30s"></result>
+
+Woken early (a bg task finished):
+    <tool_result type="ok" summary="waiting for build" status="woken_early" job_id="bg_8ed0b469015841a2" waited="4.2s" info="a background task finished — its completion notice is now in context."></result>
+
+Cancelled:
+    <tool_result type="ok" summary="waiting for build" status="cancelled" job_id="bg_8ed0b469015841a2"></result>
+
+Pinned task UNKNOWN in this session (warn, never fail):
+    <tool_result type="ok" summary="waiting for build" status="unknown_task" job_id="bg_nope" info="background task bg_nope is unknown in this session — nothing to wait for. Use bg_check with a valid id."></result>
+
+Pinned task ALREADY terminal (returns immediately):
+    <tool_result type="ok" summary="waiting for build" status="already_done" job_id="bg_8ed0b469015841a2" command="npm run build" info="background task bg_8ed0b469015841a2 (npm run build) already done — its completion notice is in context above. Use bg_check with job_id bg_8ed0b469015841a2 to read the output."></result>
+
+--------------------------------------------------------------------------------
+14. question
+--------------------------------------------------------------------------------
+Success — body = the answers as JSON data (pure tool content):
+    <tool_result type="ok">{"answers":[["Option A"],["Option B"]]}</result>
+
+Multiple selections on one question come as a longer inner array.
+
+Errors:
+    <tool_result type="error">ask between 1 and 4 questions</result>
+    <tool_result type="error">each question needs a short header and a nonempty question</result>
+    <tool_result type="error">provide up to 8 options</result>
+    <tool_result type="error">option labels must be nonempty and unique</result>
+
+--------------------------------------------------------------------------------
+15. todo
+--------------------------------------------------------------------------------
+Body = the items JSON (data); done/total/progress are attrs:
+    <tool_result type="ok" done="1" total="3" progress="33">[{"text":"Read code","status":"completed"},{"text":"Write doc","status":"in_progress"},{"text":"Ship","status":"pending"}]</result>
+
+--------------------------------------------------------------------------------
+16. mark_task_as_complete / mark_plan_as_ready_to_execute
+--------------------------------------------------------------------------------
+Success — body EMPTY, confirmation is an info attr:
+    <tool_result type="ok" info="Task marked as complete."></result>
+    <tool_result type="ok" info="Plan marked as ready to execute."></result>
+
+--------------------------------------------------------------------------------
+17. search_web
+--------------------------------------------------------------------------------
+Results — body = the rows; query/total(/cached) are attrs:
+    <tool_result type="ok" query="golang channels" total="5">1. Go channels — https://go.dev/...
+2. ...</result>
+
+Served from cache — body keeps the literal "(cached)" first line AND the attr:
+    <tool_result type="ok" cached="true" query="golang channels" total="5">(cached)
+1. Go channels — https://go.dev/...
+2. ...</result>
+
+No results — body EMPTY, info attr:
+    <tool_result type="ok" query="zzzz" total="0" info="no results"></result>
+
+Error:
+    <tool_result type="error">search_web: `offset` must be >= 0</result>
+
+--------------------------------------------------------------------------------
+18. fetch_url
+--------------------------------------------------------------------------------
+Article — body = the extracted text; url/chars are attrs:
+    <tool_result type="ok" url="https://example.com/post" chars="1842"># Main Title
+
+First paragraph with a [link](https://example.com/more).
+...</result>
+
+Truncated at the char cap:
+    <tool_result type="ok" url="https://example.com/big" chars="50000" truncated="true">...first 50000 chars...</result>
+
+Errors (all type="error"):
+    <tool_result type="error">fetch_url: `url` is required</result>
+    <tool_result type="error">fetch_url: invalid URL</result>
+    <tool_result type="error">fetch_url: only http/https allowed (got "file")</result>
+    <tool_result type="error">fetch_url: too many redirects</result>
+    <tool_result type="error">fetch_url: request failed: dial tcp: lookup nope: no such host</result>
+    <tool_result type="error">fetch_url: HTTP 404</result>
+    <tool_result type="error">fetch_url: PDFs not supported (content-type application/pdf)</result>
+    <tool_result type="error">fetch_url: media not supported (content-type video/mp4)</result>
+    <tool_result type="error">fetch_url: binary content not supported (content-type application/octet-stream)</result>
+    <tool_result type="error">fetch_url: no readable content found</result>
+    <tool_result type="error">fetch_url: empty host</result>
+    <tool_result type="error">fetch_url: localhost blocked</result>
+    <tool_result type="error">fetch_url: cloud metadata blocked</result>
+    <tool_result type="error">fetch_url: unresolvable IP blocked</result>
+    <tool_result type="error">fetch_url: private IP blocked (10.0.0.5)</result>
+
+--------------------------------------------------------------------------------
+19. HOW IT REACHES THE API (wire shape)
+--------------------------------------------------------------------------------
+The daemon stores a tool result as JSON {call_id, content:[{text}], is_error}
+and serializes it to the provider as a ToolResultBlock {is_error, content}. The
+text content IS the envelope string above. is_error=true only ever accompanies a
+type="error" envelope (tool misuse) — a command's non-zero exit is is_error=false
+with exit="N" in the envelope. Details/display NEVER leave the daemon (UI only).
+
+--------------------------------------------------------------------------------
+RASTREAMENTO (file:line)
+--------------------------------------------------------------------------------
+Envelope
+  packages/core/envelope.go                     ToolEnvelope/Attr/escape/WrapToolResultContent/ParseToolEnvelope
+  packages/core/agent.go       runOneTool ~1088  single choke point: WrapToolResultContent (~1157)
+  packages/core/agent.go       ~1090            unknown tool -> `unknown tool %q` (error)
+  packages/core/agent.go       ~1108/1119       guard refusal (error)
+  packages/core/agent.go       ~1136            panic -> `panic: %v` (error)
+  packages/core/agent.go       ~1143            `aborted: ` + err (error)
+  packages/core/message.go     ~138/178         interrupted-turn stub (ErrorEnvelope)
+  packages/core/tool.go                         ToolResult.Attrs
+Global caps
+  packages/agent/tools/args.go                  "empty args"; tolerant float/string->int
+  packages/agent/tools/truncate.go              2000 lines / 50KB defaults; formatSize
+bash
+  packages/agent/tools/bash.go ~52/55/58/219/228 invalid args | command is required | terminal unavailable | bg register
+  packages/agent/tools/bash.go ~275             background placeholder (status="background", job_id=)
+  packages/agent/tools/bash.go ~310             "(no output)"
+  packages/agent/tools/bash.go ~323-330         truncated/page/next/partial_last_line
+  packages/agent/tools/bash.go ~337-343         status=aborted|stopped, exit=, duration=
+python
+  packages/agent/tools/python.go ~349           background placeholder
+  packages/agent/tools/python.go ~439           info="no output"
+  packages/agent/tools/python.go ~445-453       exit= | status=failed+error= | duration=
+read
+  packages/agent/tools/read.go ~57/70            path is required | %s is a directory
+  packages/agent/tools/read.go ~87-97            image: media= attr + ImageBlock sibling
+  packages/agent/tools/read.go ~105/119          video/audio media | looks binary
+  packages/agent/tools/read.go ~140/150/153      limit must be positive | Offset beyond EOF
+  packages/agent/tools/read.go ~189-216          line/line_size/shown/next_byte | page/next/truncated
+  packages/agent/tools/read.go ~301              file is larger than 100MB
+write
+  packages/agent/tools/write.go ~102            info= + path= + lines= (empty body)
+edit
+  packages/agent/tools/edit.go ~185             info= + path= + edits= (empty body)
+  packages/agent/tools/edit.go ~340-430         not found | duplicates | empty | no change | binary | >2MB
+glob
+  packages/agent/tools/glob.go ~55/58/81        pattern required | invalid glob | not a directory
+  packages/agent/tools/glob.go ~247/250/252     info="no matches" | total= | truncated=
+search
+  packages/agent/tools/search.go ~84/121/131/135/427  errors
+  packages/agent/tools/search.go ~293-345       total/files/truncated/info
+inspect
+  packages/agent/tools/inspect.go ~79/100/113   errors
+  packages/agent/tools/inspect.go ~132/232-237  total= | truncated= | info="no entries"
+bg_check
+  packages/agent/tools/bgcheck.go ~70/73/80     job_id required | no background support | unknown task
+  packages/agent/tools/bgcheck.go ~83-105       kind= status= command= exit= page= next= dropped= info="No output yet."
+  packages/agent/tools/bgcheck.go ~114-126      numberedLines -> "N:line" body
+bg_cancel
+  packages/agent/tools/bgcancel.go ~58/61/67-73 job_id required | host not configured | job_id= cancelled= status= (+info=)
+sleep
+  packages/agent/tools/sleep.go ~92-148         summary= status= job_id= waited= command= info=
+question
+  packages/agent/tools/question.go ~43          {"answers":[[...]]} | "ask between 1 and 4 questions"
+todo
+  packages/agent/tools/todo.go ~80              done= total= progress= + items JSON body
+completion
+  packages/agent/tools/completion.go ~29/52     info="Task marked as complete." | "Plan marked…"
+search_web
+  packages/agent/tools/websearch.go ~101-108    cached= query= total= info="no results"
+fetch_url
+  packages/agent/tools/fetchurl.go ~60-163      error strings
+  packages/agent/tools/fetchurl.go ~87-91       url= chars= truncated=
+  packages/agent/tools/fetchurl.go ~206-226     guardSSRF: empty host/localhost/metadata/unresolvable/private IP
+System prompt spec
+  cmd/daemon/turn_options.go ~204               envelope contract paragraph
+Frontend (strip on render; never shows XML)
+  web/src/indirect-code/utils/envelope.ts       parseToolEnvelope/stripToolEnvelope(+Detailed)
+  web/src/indirect-code/utils/wire.ts           toolResultText + toolResultEnvAttrs -> toolDetails.env
+  web/src/indirect-code/transcript/updaters.ts  appendToolResult (live path) strips + keeps attrs
+  web/src/indirect-code/transcript.ts           bgCheck/bgCancel labels read env.page/env.kind
+Legacy migration
+  internal/migrations/v3_tool_result_envelope.go  wraps pre-envelope bodies (is_error -> type="error")
+  internal/migrations/migrations.go               CurrentVersion = 3

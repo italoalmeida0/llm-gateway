@@ -76,7 +76,7 @@ export function createQueue(opts: {
     if (!sid || !opts.isOpen()) return;
     opts.send({ type: "queue_send_now", sessionId: sid, queueId });
     if (editingQueueId() === queueId) setEditingQueueId(null);
-    opts.toast("Turn cancelled — sending queued message", "ok");
+    opts.toast("Sending now — steering next step", "ok");
   }
 
   function toggleCollapsed(sid: string) {

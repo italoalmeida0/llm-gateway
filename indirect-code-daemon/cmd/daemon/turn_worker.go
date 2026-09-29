@@ -396,6 +396,11 @@ func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
 		rf.model, rf.options = rr.model, rr.options
 		if len(rr.context) > 0 {
 			w.agent.SetMessages(append(w.agent.History(), rr.context...))
+			for _, m := range rr.context {
+				if m.Role == provider.RoleUser {
+					w.handleEvent(core.EvUserMessage{Message: m})
+				}
+			}
 		}
 	case <-requestCtx.Done():
 		return requestCtx.Err()
@@ -842,17 +847,19 @@ func (w *turnBridge) autoCompact(cctx context.Context, esink func(core.AgentEven
 // ---- event streaming ----
 
 func (w *turnBridge) handleEvent(ev core.AgentEvent) {
-	w.live.track(ev)
-	// V2-004: ship the compact live overlay to the actor when it changes
-	// (tool starts/progress, thinking) so reconnect snapshots can restore
-	// it. Non-blocking; a full inbox keeps the overlay pending for the
-	// next change instead of stalling the stream.
-	if s := w.live.snapshot(); s != nil {
-		select {
-		case w.env.inbox <- w.stamp(workerLiveMsg{gen: w.snap.gen, live: s}):
-		case <-w.env.done:
-		default:
-			w.live.dirty = true
+	if w.live != nil {
+		w.live.track(ev)
+		// V2-004: ship the compact live overlay to the actor when it changes
+		// (tool starts/progress, thinking) so reconnect snapshots can restore
+		// it. Non-blocking; a full inbox keeps the overlay pending for the
+		// next change instead of stalling the stream.
+		if s := w.live.snapshot(); s != nil {
+			select {
+			case w.env.inbox <- w.stamp(workerLiveMsg{gen: w.snap.gen, live: s}):
+			case <-w.env.done:
+			default:
+				w.live.dirty = true
+			}
 		}
 	}
 	// Heartbeat: every stream/tool event proves the worker is alive, so a

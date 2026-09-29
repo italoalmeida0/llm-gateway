@@ -186,8 +186,7 @@ func (a *sessionActor) onAttachUpload(m attachUploadMsg) attachUploadResult {
 }
 
 // onQueueSendNow moves the item to the head and, if idle, promotes it;
-// if running, cancels the turn so the finalizer path promotes it
-// (v1 queue_send_now semantics).
+// if running, flags it for live mid-turn steering on the next model request.
 func (a *sessionActor) onQueueSendNow(m queueSendNowMsg) {
 	idx := -1
 	for i, q := range a.rec.Queue {
@@ -214,11 +213,13 @@ func (a *sessionActor) onQueueSendNow(m queueSendNowMsg) {
 		}
 		return
 	}
-	// Running: flag send-now and cancel; the finalizer (the single
-	// running→idle transition) promotes the head after cancelling, so
-	// there is no race with "Turn already in flight" (v1 parity).
+	// Running: flag send-now for live mid-turn steering. The next model
+	// request (beforeRequest) consumes and injects this queued message into
+	// the running context without aborting in-flight work. If the turn completes
+	// without another request, finishTurn promotes it as a fresh turn.
 	a.sendNow = true
-	a.doCancel("queue_send_now")
+	a.pingChange()
+	a.emit(map[string]any{"type": "session_queue", "hostId": a.hostID(), "sessionId": a.id, "queue": queuePayload(a.rec.Queue)})
 }
 
 // onEditApply applies a saved (non-regen) edit. Runs on the actor; caller

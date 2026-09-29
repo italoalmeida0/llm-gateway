@@ -58,7 +58,7 @@ export function QueueCard() {
                               📎{item.attachmentIds.length}
                             </span>
                           </Show>
-                          <MsgIconBtn tip="Send now (cancels current turn)" icon="lucide:arrow-right" compact onClick={() => q.sendNow(item.id)} />
+                          <MsgIconBtn tip="Send now (steers next step)" icon="lucide:arrow-right" compact onClick={() => q.sendNow(item.id)} />
                           <MsgIconBtn tip="Edit queued message" icon="lucide:pencil" compact onClick={() => q.beginEdit(item, m.sessionFiles()[sid()] || [])} />
                           <MsgIconBtn tip="Remove from queue" icon="lucide:trash-2" compact danger onClick={() => q.removeQueued(item.id)} />
                         </div>

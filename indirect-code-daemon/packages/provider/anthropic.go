@@ -182,14 +182,23 @@ func (c *anthropicClient) buildRequest(req Request) (*anthRequest, error) {
 	}
 
 	req.Messages = RepairOrphanedToolResults(req.Messages)
+	appendMessage := func(role string, blocks []interface{}) {
+		if len(blocks) == 0 {
+			return
+		}
+		if len(out.Messages) > 0 && out.Messages[len(out.Messages)-1].Role == role {
+			if prevBlocks, ok := out.Messages[len(out.Messages)-1].Content.([]interface{}); ok {
+				out.Messages[len(out.Messages)-1].Content = append(prevBlocks, blocks...)
+				return
+			}
+		}
+		out.Messages = append(out.Messages, anthMessage{Role: role, Content: blocks})
+	}
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case RoleUser:
 			blocks := buildAnthUserContent(msg.Content)
-			if len(blocks) == 0 {
-				continue
-			}
-			out.Messages = append(out.Messages, anthMessage{Role: "user", Content: blocks})
+			appendMessage("user", blocks)
 		case RoleAssistant:
 			var blocks []interface{}
 			var text strings.Builder
@@ -234,10 +243,7 @@ func (c *anthropicClient) buildRequest(req Request) (*anthRequest, error) {
 				}
 			}
 			flushText()
-			if len(blocks) == 0 {
-				continue
-			}
-			out.Messages = append(out.Messages, anthMessage{Role: "assistant", Content: blocks})
+			appendMessage("assistant", blocks)
 		case RoleTool:
 			// All results of one message share a single user turn, as the
 			// Anthropic format requires.
@@ -252,10 +258,7 @@ func (c *anthropicClient) buildRequest(req Request) (*anthRequest, error) {
 					})
 				}
 			}
-			if len(blocks) == 0 {
-				continue
-			}
-			out.Messages = append(out.Messages, anthMessage{Role: "user", Content: blocks})
+			appendMessage("user", blocks)
 		}
 	}
 

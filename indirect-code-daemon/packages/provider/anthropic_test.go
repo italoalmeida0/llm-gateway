@@ -401,3 +401,39 @@ func TestAnthropicStreamErrorClosesChannel(t *testing.T) {
 		t.Fatal("error channel must be closed (would block range forever)")
 	}
 }
+
+func TestAnthropicBuildRequestMergesToolAndUserSteering(t *testing.T) {
+	c := NewGatewayAnthropic("gw_key", "http://gw/anthropic/v1", Model{ID: "m"}).(*anthropicClient)
+	wire, err := c.buildRequest(Request{
+		Model:     "m",
+		MaxTokens: 512,
+		Messages: []Message{
+			{Role: RoleUser, Content: []Content{TextBlock{Text: "run something"}}},
+			{Role: RoleAssistant, Content: []Content{
+				ToolCallBlock{ID: "t1", Name: "bash", Arguments: json.RawMessage(`{"cmd":"ls"}`)},
+			}},
+			{Role: RoleTool, Content: []Content{
+				ToolResultBlock{CallID: "t1", Content: []Content{TextBlock{Text: "file.txt"}}},
+			}},
+			// Live steering user message appended right after tool results:
+			{Role: RoleUser, Content: []Content{TextBlock{Text: "Also check dir2"}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tool + live steering must merge into a single "user" turn (len 3: user, assistant, user).
+	if len(wire.Messages) != 3 {
+		t.Fatalf("expected 3 wire messages, got %d", len(wire.Messages))
+	}
+	lastBlocks, ok := wire.Messages[2].Content.([]interface{})
+	if !ok || len(lastBlocks) != 2 {
+		t.Fatalf("expected 2 blocks in merged user turn, got %v", wire.Messages[2].Content)
+	}
+	if _, isTool := lastBlocks[0].(anthToolResultBlock); !isTool {
+		t.Fatalf("first block must be tool_result, got %T", lastBlocks[0])
+	}
+	if tb, isText := lastBlocks[1].(anthTextBlock); !isText || tb.Text != "Also check dir2" {
+		t.Fatalf("second block must be steering text block, got %v", lastBlocks[1])
+	}
+}

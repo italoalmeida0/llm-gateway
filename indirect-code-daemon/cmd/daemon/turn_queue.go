@@ -3,6 +3,9 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
+	"time"
+
+	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 // Message queue: while a turn is running, new user messages wait here
@@ -31,5 +34,32 @@ func queuePayload(queue []QueuedMessage) []any {
 		})
 	}
 	return out
+}
+
+// buildQueuedUserMessage converts a queued message into a transcript user message
+// for live mid-turn steering (BeforeRequest).
+func (a *sessionActor) buildQueuedUserMessage(q QueuedMessage) provider.Message {
+	mode := normalizedOptions(a.rec.Options).Mode
+	fullText, images := buildTurnPrompt(a.rec.Attachments, q.Text, q.AttachmentIDs, mode)
+	content := []provider.Content{}
+	if fullText != "" {
+		content = append(content, provider.TextBlock{Text: fullText})
+	}
+	for _, img := range images {
+		content = append(content, img)
+	}
+	meta := attachmentMessageMeta(q.Text, q.AttachmentIDs, a.rec.Attachments)
+	if meta == nil {
+		meta = make(map[string]string)
+	}
+	meta["steering"] = "true"
+	return provider.Message{
+		ID:        provider.NewMessageID(),
+		Role:      provider.RoleUser,
+		Content:   content,
+		Time:      time.Now(),
+		TurnIndex: a.rec.TurnSeq,
+		Meta:      meta,
+	}
 }
 

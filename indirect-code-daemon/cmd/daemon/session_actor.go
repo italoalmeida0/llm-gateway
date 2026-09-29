@@ -103,8 +103,8 @@ type sessionActor struct {
 	// jailed locks the sandbox for future turns (v1 jail flag).
 	jailed bool
 
-	// sendNow promotes the queue head after a cancelled turn
-	// (queue_send_now semantics: cancel + promote).
+	// sendNow flags the queue head for live steering on the next model request,
+	// or promotion if the turn completes/cancels without another request.
 	sendNow bool
 	// pendingResend, when non-nil, is a discard&resend/fork&resend/clear
 	// that arrived while a turn was running: flagged like sendNow and
@@ -290,6 +290,32 @@ func (a *sessionActor) handleData(env Envelope) {
 			default:
 			}
 		} else {
+			if a.sendNow {
+				if len(a.rec.Queue) > 0 {
+					head := a.rec.Queue[0]
+					a.rec.Queue = a.rec.Queue[1:]
+					a.sendNow = false
+					if head.Model != "" {
+						a.rec.Model = head.Model
+					}
+					if head.YOLO && a.rec.Options.Access == "ask" {
+						a.rec.Options.Access = "full"
+					}
+					msg := a.buildQueuedUserMessage(head)
+					a.rec.Messages = append(a.rec.Messages, msg)
+					if err := a.saveOrAppend(walMsgEvent(msg)); err != nil {
+						a.rec.Messages = a.rec.Messages[:len(a.rec.Messages)-1]
+						a.rec.Queue = append([]QueuedMessage{head}, a.rec.Queue...)
+					} else {
+						_ = a.saveOrAppend(walEvent{Type: walTypeQueue, Queue: a.rec.Queue})
+						a.pendingContext = append(a.pendingContext, msg)
+						a.emit(map[string]any{"type": "session_queue", "hostId": a.hostID(), "sessionId": a.id, "queue": queuePayload(a.rec.Queue)})
+						a.pingChange()
+					}
+				} else {
+					a.sendNow = false
+				}
+			}
 			select {
 			case m.Reply <- workerRefreshResult{model: a.rec.Model, options: normalizedOptions(a.rec.Options), context: a.pendingContext}:
 				a.pendingContext = nil

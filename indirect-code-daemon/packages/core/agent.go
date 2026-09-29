@@ -226,6 +226,9 @@ type Agent struct {
 	// every keypress.
 	rev  uint64
 	cost CostTracker
+
+	lastToolKey          string
+	consecutiveToolCount int
 }
 
 // NewAgent returns an Agent with sensible defaults.
@@ -586,6 +589,14 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 					continue
 				}
 			}
+			if errors.Is(err, ErrRepetitionLoop) && attempt < 3 {
+				sink(EvToolProgress{Text: "Repetition loop detected; retrying response…"})
+				if a.Temperature != nil && *a.Temperature < 1.95 {
+					temp := *a.Temperature + 0.05
+					a.Temperature = &temp
+				}
+				continue
+			}
 			if ctx.Err() != nil || !a.canRetryError(err, attempt) {
 				break
 			}
@@ -717,6 +728,9 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 func (a *Agent) canRetryError(err error, _ int) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, ErrRepetitionLoop) {
+		return true
 	}
 	// The caller checks the TURN context before retrying. An individual
 	// request deadline/cancellation is not an explicit stop of that turn.
@@ -891,7 +905,11 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		a.mu.Unlock()
 		break
 	}
-	stream, err := a.Client.Stream(ctx, req)
+	guard := NewLoopGuard()
+	reqCtx, cancelReq := context.WithCancel(ctx)
+	defer cancelReq()
+
+	stream, err := a.Client.Stream(reqCtx, req)
 	if err != nil {
 		return provider.StopError, provider.Message{}, err
 	}
@@ -903,6 +921,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		stop     provider.StopReason
 		finalErr error
 		finalMsg provider.Message
+		loopErr  error
 	)
 	gotDone := false
 	var thinkingStart time.Time
@@ -921,11 +940,21 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			// nothing
 		case provider.EventTextDelta:
 			finishThinking()
+			if hit, detail := guard.FeedText(e.Delta); hit {
+				loopErr = fmt.Errorf("%w: %s", ErrRepetitionLoop, detail)
+				cancelReq()
+				break
+			}
 			sink(EvTextDelta{Delta: e.Delta})
 		case provider.EventReasoningDelta:
 			hadThinking = true
 			if thinkingStart.IsZero() {
 				thinkingStart = time.Now()
+			}
+			if hit, detail := guard.FeedReasoning(e.Delta); hit {
+				loopErr = fmt.Errorf("%w: %s", ErrRepetitionLoop, detail)
+				cancelReq()
+				break
 			}
 			sink(EvReasoningDelta{Delta: e.Delta})
 		case provider.EventToolStart:
@@ -950,7 +979,10 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 	}
 	finalMsg.ID = messageID
 	finishThinking()
-	if a.PersistentTurns && finalErr == nil && (!gotDone || stop == provider.StopError || stop == provider.StopAborted) {
+	if loopErr != nil {
+		finalErr = loopErr
+		stop = provider.StopError
+	} else if a.PersistentTurns && finalErr == nil && (!gotDone || stop == provider.StopError || stop == provider.StopAborted) {
 		finalErr = io.ErrUnexpectedEOF
 	}
 	if !hadThinking {
@@ -973,7 +1005,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 	// Append assistant message to transcript. Aborted turns (Esc / Ctrl+C)
 	// produce partial content. Preserve visible text and reasoning, removing
 	// only unfinished calls so the next request has no unmatched tool_use.
-	keep := len(finalMsg.Content) > 0
+	keep := len(finalMsg.Content) > 0 && loopErr == nil
 	if stop == provider.StopAborted && keep {
 		content := []provider.Content{}
 		for _, c := range finalMsg.Content {
@@ -1085,6 +1117,26 @@ func (a *Agent) executeTools(ctx context.Context, msg provider.Message, sink fun
 }
 
 func (a *Agent) runOneTool(ctx context.Context, tc provider.ToolCallBlock, sink func(AgentEvent)) ToolResult {
+	callKey := tc.Name + ":" + string(tc.Arguments)
+	a.mu.Lock()
+	if a.lastToolKey == callKey {
+		a.consecutiveToolCount++
+	} else {
+		a.lastToolKey = callKey
+		a.consecutiveToolCount = 1
+	}
+	consecutive := a.consecutiveToolCount
+	a.mu.Unlock()
+
+	if consecutive >= 3 {
+		return ToolResult{
+			Content: []provider.Content{provider.TextBlock{
+				Text: fmt.Sprintf("Loop prevention: tool %q was called 3 consecutive times with identical arguments. Stop repeating the same call. Inspect previous outputs and change strategy.", tc.Name),
+			}},
+			IsError: true,
+		}
+	}
+
 	tool, err := a.Tools.Get(tc.Name)
 	if err != nil {
 		return ToolResult{

@@ -74,12 +74,35 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 		applyGatewayPricing(&model, entry.Pricing)
 		model.ContextWindow = max(0, entry.Limit.Context, entry.ContextLength)
 		model.MaxOutput = max(0, entry.Limit.Output, entry.MaxOutputLength)
-		model.Reasoning = len(entry.Reasoning.Efforts) > 0
+		hasReasoningEfforts := false
+		levelMap := map[string]string{}
+		for _, effort := range entry.Reasoning.Efforts {
+			if level := provider.NormalizeReasoning(effort); level != "" {
+				hasReasoningEfforts = true
+				levelMap[level] = level
+			}
+		}
+		model.Reasoning = hasReasoningEfforts
+		if model.Reasoning {
+			model.ReasoningLevelMap = levelMap
+		}
+		for _, feature := range entry.Features {
+			if feature == "reasoning" || feature == "thinking" {
+				model.Reasoning = true
+			}
+		}
+		// If reasoning efforts were explicitly configured and all of them were "off" / "none",
+		// reasoning is disabled even if features or defaults had "reasoning".
+		if len(entry.Reasoning.Efforts) > 0 && !hasReasoningEfforts {
+			model.Reasoning = false
+			model.ReasoningLevelMap = nil
+		}
 		// Reasoning-only models (e.g. gpt-5.6-luna) reject `temperature`
 		// outright: when the gateway omits it from the advertised
-		// sampling params, drop the configured temperature so neither
-		// client sends a value the upstream refuses.
-		if model.Reasoning && len(entry.Sampling) > 0 {
+		// sampling params (or when sampling is unspecified), drop the
+		// configured temperature so neither client sends a value the
+		// upstream refuses.
+		if model.Reasoning {
 			advertisesTemp := false
 			for _, p := range entry.Sampling {
 				if p == "temperature" {
@@ -89,19 +112,6 @@ func gatewayModel(ctx context.Context, gatewayURL, daemonToken, id string) provi
 			}
 			if !advertisesTemp {
 				model.OmitTemperature = true
-			}
-		}
-		if model.Reasoning {
-			model.ReasoningLevelMap = map[string]string{}
-			for _, effort := range entry.Reasoning.Efforts {
-				if level := provider.NormalizeReasoning(effort); level != "" {
-					model.ReasoningLevelMap[level] = level
-				}
-			}
-		}
-		for _, feature := range entry.Features {
-			if feature == "reasoning" || feature == "thinking" {
-				model.Reasoning = true
 			}
 		}
 		return model

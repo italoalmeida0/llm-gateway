@@ -386,6 +386,41 @@ describe("public /v1/models registry entry", () => {
     expect("context_length" in e).toBe(false);
     expect(e.limit).toEqual({ context: 262_144, output: 65_536 });
   });
+
+  test("treats off/none reasoning efforts as disabled reasoning", () => {
+    const disabled: ModelRow = {
+      ...row,
+      reasoning_efforts: '["off"]',
+      sampling_params: '["temperature", "top_p"]',
+      features: '["tools", "reasoning"]',
+    };
+    const e = publicModelEntry(disabled, "p") as any;
+    expect("reasoning_parameters" in e).toBe(false);
+    expect(e.supported_sampling_parameters).toEqual(["temperature", "top_p"]);
+    expect(e.supported_features).toEqual(["tools"]);
+
+    const noneModel: ModelRow = {
+      ...row,
+      reasoning_efforts: '["none"]',
+      sampling_params: '["temperature"]',
+      features: '["thinking"]',
+    };
+    const e2 = publicModelEntry(noneModel, "p") as any;
+    expect("reasoning_parameters" in e2).toBe(false);
+    expect(e2.supported_sampling_parameters).toEqual(["temperature"]);
+    expect(e2.supported_features).toEqual([]);
+  });
+
+  test("filters off/none from mixed reasoning efforts", () => {
+    const mixed: ModelRow = {
+      ...row,
+      reasoning_efforts: '["off", "high", "medium"]',
+      sampling_params: '["temperature", "top_p"]',
+    };
+    const e = publicModelEntry(mixed, "p") as any;
+    expect(e.reasoning_parameters).toEqual({ efforts: ["high", "medium"] });
+    expect(e.supported_sampling_parameters).toEqual(["top_p"]);
+  });
 });
 
 describe("model routing without registry protos", () => {

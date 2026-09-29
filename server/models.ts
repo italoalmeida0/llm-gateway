@@ -309,8 +309,9 @@ export async function syncProviderModels(
 
 // ---------- public /v1/models format ----------
 
-const jsonArr = (s: string | null): unknown[] => {
+const jsonArr = (s: string | unknown[] | null): unknown[] => {
   if (!s) return [];
+  if (Array.isArray(s)) return s;
   try {
     const v = JSON.parse(s);
     return Array.isArray(v) ? v : [];
@@ -356,7 +357,12 @@ export function publicModelSummary(m: ModelRow) {
 
 /** The rich registry entry shape served by /v1/models in router mode. */
 export function publicModelEntry(m: ModelRow, providerName: string): Record<string, unknown> {
-  const efforts = jsonArr(m.reasoning_efforts);
+  const disabledReasoningEfforts = new Set(["off", "none", "no", "false", "disabled", ""]);
+  const rawEfforts = jsonArr(m.reasoning_efforts);
+  const efforts = rawEfforts.filter(
+    (e): e is string => typeof e === "string" && !disabledReasoningEfforts.has(e.trim().toLowerCase()),
+  );
+  const isExplicitlyDisabled = rawEfforts.length > 0 && efforts.length === 0;
   const pricing = modelPricing(m);
   const sampling = jsonArr(m.sampling_params);
   const entry: Record<string, unknown> = {
@@ -376,7 +382,10 @@ export function publicModelEntry(m: ModelRow, providerName: string): Record<stri
   entry.supported_sampling_parameters = efforts.length
     ? sampling.filter((p) => p !== "temperature")
     : sampling;
-  entry.supported_features = jsonArr(m.features);
+  const features = jsonArr(m.features);
+  entry.supported_features = isExplicitlyDisabled
+    ? features.filter((f) => f !== "reasoning" && f !== "thinking")
+    : features;
   return entry;
 }
 

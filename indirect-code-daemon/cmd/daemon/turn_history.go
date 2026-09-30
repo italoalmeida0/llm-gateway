@@ -27,6 +27,9 @@ type historyBlock struct {
 	Messages   []provider.Message
 	Balloons   []filetrack.TurnChanges
 	Attachments []AttachmentRef
+	// Mode mirrors the session mode at page time so the ws page path can
+	// apply the same assistant-text sanitization as the payload paths.
+	Mode string
 	OldestTurn int  // smallest TurnIndex in the block (cursor for beforeTurn)
 	NewestTurn int  // largest TurnIndex in the block
 	HasOlder   bool // more turns exist below OldestTurn
@@ -195,7 +198,7 @@ func historyCursorMap(block historyBlock) map[string]any {
 func completionPayload(rec *SessionRecord) map[string]any {
 	p := sessionPayload(rec)
 	block := sliceLastTurns(rec.Messages, rec.FileBalloons, completionTailTurns)
-	p["messages"] = sanitizeMessagesForFrontend(block.Messages, rec.Attachments)
+	p["messages"] = sanitizeMessagesForFrontend(rec.Options.Mode, block.Messages, rec.Attachments)
 	p["fileBalloons"] = fileBalloonPayloads(block.Balloons)
 	p["history"] = historyCursorMap(block)
 	return p
@@ -215,7 +218,7 @@ func tailContentEvent(hostID, sessionID string, typ string, rec *SessionRecord, 
 		"type":       typ,
 		"hostId":     hostID,
 		"sessionId":  sessionID,
-		"messages":   sanitizeMessagesForFrontend(block.Messages, rec.Attachments),
+		"messages":   sanitizeMessagesForFrontend(rec.Options.Mode, block.Messages, rec.Attachments),
 		"compaction": rec.Compaction,
 		"history":    historyCursorMap(block),
 	}

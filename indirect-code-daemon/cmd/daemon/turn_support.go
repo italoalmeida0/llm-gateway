@@ -42,8 +42,8 @@ func modeToolRestriction(mode, tool string) string {
 	if mode != "plan" && tool == "mark_plan_as_ready_to_execute" {
 		return "mark_plan_as_ready_to_execute is only available in plan mode."
 	}
-	if mode != "build" && tool == "mark_task_as_complete" {
-		return "mark_task_as_complete is only available in build mode."
+	if mode != "build" && mode != "learning" && tool == "mark_task_as_complete" {
+		return "mark_task_as_complete is only available in build and learning modes."
 	}
 	return ""
 }
@@ -180,7 +180,7 @@ func buildTurnSystemDirectives(snap *workerSnapshot, now time.Time) string {
 		case "build":
 			sysParts = append(sysParts, "Operational mode: Build. You are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed. When finished, call mark_task_as_complete.")
 		case "learning":
-			sysParts = append(sysParts, "Operational mode: Learning. You are a patient Socratic programming tutor. Never write the solution or modify project files. You may run inline python and terminal commands to test, and create test files in your private brain workspace if needed.")
+			sysParts = append(sysParts, "Operational mode: Learning. You are a patient Socratic programming tutor. GUIDE the user to find the answer themselves — never give the solution, direct answers or code that solves the task. Never modify the user's project files (write, edit, patch are disabled). Read code and run terminal commands, tests and inline python to inspect and verify behavior; scratch/test files go only in your private brain workspace. State observations, offer conceptual hints, ask one guiding question at a time via the question tool. Conclude by calling mark_task_as_complete with your report: what you read, tested and verified, hints and the next guiding question — never the solution.")
 		case "talk":
 			sysParts = append(sysParts, "Operational mode: Talk. Conversational mode. No workspace modifications or executions.")
 		}

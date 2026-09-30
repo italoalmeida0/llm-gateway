@@ -1550,6 +1550,7 @@ func (a *sessionActor) onRead(m readReqMsg) {
 		block := sliceHistoryBlock(a.rec.Messages, a.rec.FileBalloons, m.BeforeTurn)
 		block.Messages = cloneMessages(block.Messages)
 		block.Attachments = append([]AttachmentRef(nil), a.rec.Attachments...)
+		block.Mode = a.rec.Options.Mode
 		m.Reply <- readResult{Payload: block}
 	default:
 		m.Reply <- readResult{Error: "unknown read"}

@@ -388,7 +388,7 @@ func (s *wsServer) handleRaw(raw []byte) {
 					atts := block.Attachments
 					s.emit(map[string]any{
 						"type": "session_content", "hostId": s.host(), "sessionId": req.SessionID, "page": true, "requestId": req.RequestID,
-						"messages":     sanitizeMessagesForFrontend(block.Messages, atts),
+						"messages":     sanitizeMessagesForFrontend(block.Mode, block.Messages, atts),
 						"fileBalloons": fileBalloonPayloads(block.Balloons),
 						"history": map[string]any{
 							"oldestTurn": block.OldestTurn, "newestTurn": block.NewestTurn,

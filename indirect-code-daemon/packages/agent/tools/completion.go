@@ -9,7 +9,8 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// MarkTaskAsCompleteTool allows the model to signal completion in Build mode.
+// MarkTaskAsCompleteTool allows the model to signal completion in Build and
+// Learning modes.
 type MarkTaskAsCompleteTool struct {
 	OnComplete func() error
 }
@@ -22,7 +23,7 @@ type completionArgs struct {
 
 func (*MarkTaskAsCompleteTool) Name() string { return "mark_task_as_complete" }
 func (*MarkTaskAsCompleteTool) Description() string {
-	return "Signal that you have fully completed the requested task in Build mode, or provide your direct answer if the user only asked a question without requesting file changes. Call this tool with a comprehensive_summary of what was completed or your complete answer to the user's inquiry."
+	return "Signal that you have fully completed the requested task in Build or Learning mode, or provide your direct answer if the user only asked a question without requesting file changes. Call this tool with a comprehensive_summary of what was completed or your complete answer to the user's inquiry (in Learning mode: your report of what you read, tested and verified — observations, hints and the next guiding question; never the solution itself)."
 }
 func (*MarkTaskAsCompleteTool) Schema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"comprehensive_summary":{"type":"string","description":"Comprehensive summary of completed work, or the direct answer to the user's question."},"notes":{"type":"string","description":"Optional notes."}},"required":["comprehensive_summary"]}`)

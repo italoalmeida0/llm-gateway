@@ -113,15 +113,44 @@ func (t *liveTracker) track(event core.AgentEvent) {
 	}
 }
 
+// assistantTextSilenced reports whether free assistant text is dropped at
+// the client boundary for this session mode. Talk is conversational and
+// streams its text; workspace modes (build/plan/learning) follow the Silent
+// Execution Protocol, where the only user-visible text is the completion
+// tool's comprehensive_summary (extracted by the frontend from tool args).
+func assistantTextSilenced(mode string) bool {
+	return normalizedOptions(SessionOptions{Mode: mode}).Mode != "talk"
+}
+
+// stripAssistantText returns a copy of msg with every TextBlock removed.
+// Tool calls, tool results and reasoning are preserved in order, and the
+// message itself is kept even when empty so transcript indices keep
+// mapping 1:1 to the raw daemon transcript (srcIdx bookkeeping).
+func stripAssistantText(msg provider.Message) provider.Message {
+	clean := make([]provider.Content, 0, len(msg.Content))
+	for _, c := range msg.Content {
+		if _, ok := c.(provider.TextBlock); !ok {
+			clean = append(clean, c)
+		}
+	}
+	msg.Content = clean
+	return msg
+}
+
 // sanitizeMessagesForFrontend strips daemon-internal content (tool result
-// line-prefix notices) and resolves legacy user_text meta. Same behavior
-// as v1; pure function, no actor state.
-func sanitizeMessagesForFrontend(msgs []provider.Message, attachments ...[]AttachmentRef) []provider.Message {
+// line-prefix notices), resolves legacy user_text meta and — for workspace
+// modes — removes free assistant text (Silent Execution Protocol). Same
+// behavior as v1 otherwise; pure function, no actor state.
+func sanitizeMessagesForFrontend(mode string, msgs []provider.Message, attachments ...[]AttachmentRef) []provider.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
+	silent := assistantTextSilenced(mode)
 	out := make([]provider.Message, len(msgs))
 	for i, m := range msgs {
+		if silent && m.Role == provider.RoleAssistant {
+			m = stripAssistantText(m)
+		}
 		if _, modern := m.Meta["user_text"]; m.Role == provider.RoleUser && !modern && len(attachments) > 0 {
 			if ids := messageAttachmentIDs(m, attachments[0]); len(ids) > 0 {
 				meta := attachmentMessageMeta(messageUserText(m), ids, attachments[0])
@@ -174,7 +203,7 @@ func sessionPayload(rec *SessionRecord) map[string]any {
 		"pinned": rec.Pinned, "usage": rec.Usage, "context": rec.Context, "options": normalizedOptions(rec.Options),
 		"turn": rec.Turn, "todos": rec.Todos, "todosOpen": rec.TodosOpen,
 		"workspace": inspectWorkspace(rec.CWD),
-		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Messages, rec.Attachments),
+		"createdAt": rec.CreatedAt, "updatedAt": rec.UpdatedAt, "messages": sanitizeMessagesForFrontend(rec.Options.Mode, rec.Messages, rec.Attachments),
 		"attachments":  rec.Attachments,
 		"queue":        queuePayload(rec.Queue),
 		"compaction":   rec.Compaction,
@@ -220,7 +249,7 @@ func indexByte(s string, c byte) int {
 // here so no path ships a full transcript.
 func pagedHistoryBlock(p map[string]any, rec *SessionRecord) map[string]any {
 	block := sliceHistoryBlock(rec.Messages, rec.FileBalloons, 0)
-	p["messages"] = sanitizeMessagesForFrontend(block.Messages, rec.Attachments)
+	p["messages"] = sanitizeMessagesForFrontend(rec.Options.Mode, block.Messages, rec.Attachments)
 	p["fileBalloons"] = fileBalloonPayloads(block.Balloons)
 	p["history"] = map[string]any{
 		"oldestTurn": block.OldestTurn,
@@ -237,7 +266,7 @@ func sessionPayloadPaged(rec *SessionRecord, beforeTurn int) map[string]any {
 	if beforeTurn > 0 {
 		p := sessionPayload(rec)
 		block := sliceHistoryBlock(rec.Messages, rec.FileBalloons, beforeTurn)
-		p["messages"] = sanitizeMessagesForFrontend(block.Messages, rec.Attachments)
+		p["messages"] = sanitizeMessagesForFrontend(rec.Options.Mode, block.Messages, rec.Attachments)
 		p["fileBalloons"] = fileBalloonPayloads(block.Balloons)
 		p["history"] = map[string]any{
 			"oldestTurn": block.OldestTurn,

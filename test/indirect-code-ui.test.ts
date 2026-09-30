@@ -77,7 +77,7 @@ test("groups a whole tool turn into one aggregate with ordered entries", () => {
   const list:ChatMessage[] = [
     {id:"one",role:"assistant",srcIdx:1,thinkingDuration:3,blocks:[{type:"reasoning",reasoning:"Inspect"},{type:"tool_call",toolId:"a",toolName:"read"}]},
     {id:"two",role:"assistant",srcIdx:3,thinkingDuration:1,blocks:[{type:"text",text:" \n "},{type:"reasoning",reasoning:"Verify"},{type:"tool_call",toolId:"b",toolName:"bash"}]},
-    {id:"three",role:"assistant",srcIdx:5,blocks:[{type:"text",text:"I found an issue."},{type:"tool_call",toolId:"c",toolName:"edit"}]},
+    {id:"three",role:"assistant",srcIdx:5,blocks:[{type:"tool_call",toolId:"c",toolName:"edit"}]},
     {id:"four",role:"assistant",srcIdx:7,blocks:[{type:"reasoning",reasoning:"Testing"},{type:"tool_call",toolId:"d",toolName:"bash"}]},
   ];
   const blocks = buildRenderBlocks(list);
@@ -187,7 +187,7 @@ test("duration is available with or without aggregate and ignores invalid metada
   expect(blockTurnDuration(buildRenderBlocks([{...msg,turnDurationMs:NaN}])[0])).toBeUndefined();
 });
 
-test("interleaving tools and text messages separates into sequential series and single blocks", () => {
+test("interleaving tools and text messages attaches each text to its own balloon", () => {
   const list: ChatMessage[] = [
     { id: "t1", role: "assistant", blocks: [{ type: "tool_call", toolId: "a", toolName: "read" }] },
     { id: "s1", role: "assistant", blocks: [{ type: "text", text: "Summary 1" }], hasSummary: true },
@@ -195,8 +195,13 @@ test("interleaving tools and text messages separates into sequential series and 
     { id: "c1", role: "assistant", blocks: [{ type: "text", text: "Final complete" }], hasCompletion: true },
   ];
   const blocks = buildRenderBlocks(list);
-  expect(blocks.map((b) => b.kind)).toEqual(["series", "single", "series", "single"]);
-  expect(blocks.map((b) => b.msg.id)).toEqual(["t1", "s1", "t2", "c1"]);
+  expect(blocks.map((b) => b.kind)).toEqual(["series", "series"]);
+  expect(blocks.map((b) => b.msg.id)).toEqual(["t1", "t2"]);
+  if (blocks[0].kind === "series" && blocks[1].kind === "series") {
+    expect(blocks.map((b) => (b.kind === "series" ? b.textMsg?.id : undefined))).toEqual(["s1", "c1"]);
+    expect(blocks[0].units.map((u) => u.call?.toolId)).toEqual(["a"]);
+    expect(blocks[1].units.map((u) => u.call?.toolId)).toEqual(["b"]);
+  }
 });
 
 test("cache hit share rounds cached input over total input", () => {
@@ -712,13 +717,13 @@ describe("Indirect Code turn balloons anchoring", () => {
     const text1: ChatMessage = { id: "a1", role: "assistant", blocks: [{ type: "text", text: "done" }] };
 
     const blocks = buildRenderBlocks([user1, tool1, text1]).map((b) => ({ ...b, id: b.msg.id }));
-    expect(blocks.length).toBe(3); // user1, tool series (t1), text message (a1)
+    expect(blocks.length).toBe(2); // user1, unified balloon (tool series t1 + closing text a1)
 
     const balloon: TurnBalloon = { turnIndex: 1, files: [{ path: "test.ts", status: "modified" }] };
     const map = mapBalloonsToBlocks(blocks, [balloon]);
 
-    // Must attach to the final block of turn 1 (the text message a1)
-    expect(map.get("a1")?.map((b) => b.turnIndex)).toEqual([1]);
+    // Must attach to the final block of turn 1 (the unified balloon led by t1)
+    expect(map.get("t1")?.map((b) => b.turnIndex)).toEqual([1]);
     expect(map.get("u1")).toBeUndefined();
   });
 
@@ -1207,14 +1212,15 @@ describe("completion signals and turn nudges", () => {
     const cleaned = withoutTodoActivity([user, step1, res1, step2]);
     const blocks = buildRenderBlocks(cleaned);
 
-    // user1, tool series (step1+res1), completion text bubble (step2)
-    expect(blocks).toHaveLength(3);
+    // user1, unified balloon (tool series step1+res1 with the completion text a2 attached)
+    expect(blocks).toHaveLength(2);
     expect(blocks[0].kind).toBe("single");
     expect(blocks[1].kind).toBe("series");
-    expect(blocks[2].kind).toBe("single");
-    expect(blocks[2].msg.id).toBe("a2");
-    expect(blocks[2].msg.blocks[0].text).toBe("Everything fixed and verified.");
-    expect(blocks[2].msg.hasCompletion).toBe(true);
+    if (blocks[1].kind === "series") {
+      expect(blocks[1].textMsg?.id).toBe("a2");
+      expect(blocks[1].textMsg?.blocks[0].text).toBe("Everything fixed and verified.");
+      expect(blocks[1].textMsg?.hasCompletion).toBe(true);
+    }
   });
 
 
@@ -1802,9 +1808,9 @@ test("streaming reuses unchanged historical turn derivations and invalidates edi
   const updated = appendReasoningDelta([old, live], " delta");
   const second = build(updated);
   expect(second).toEqual(buildRenderBlocks(updated));
+  expect(second).toHaveLength(2);
   expect(second[0]).toBe(first[0]);
-  expect(second[1]).toBe(first[1]);
-  expect(second[2]).not.toBe(first[2]);
+  expect(second[1]).not.toBe(first[1]);
   const edited = [{ ...old, blocks: [{ type: "text" as const, text: "edited" }] }, updated[1]];
   expect(build(edited)).toEqual(buildRenderBlocks(edited));
   build([]);

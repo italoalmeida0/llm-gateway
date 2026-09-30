@@ -55,7 +55,7 @@ export function UserMsgActions(props: MsgActionState & { onEdit: () => void }) {
 /** Hover actions for assistant bubbles (fork/copy/regenerate). */
 export function AssistantMsgActions(props: MsgActionState & { onRegenerate: () => void; duration?: string }) {
   return (
-    <div class="rc-message-actions flex items-center gap-0.5 mt-1.5 transition-opacity">
+    <div class="rc-message-actions flex items-center gap-0.5 transition-opacity">
       <MsgIconBtn tip="Fork conversation from here" icon="lucide:git-branch" disabled={props.forking || !props.canFork} onClick={props.onFork} />
       <Show when={props.showCopy}>
         <MsgIconBtn tip="Copy" icon="lucide:copy" copied={props.copied} onClick={props.onCopy} />

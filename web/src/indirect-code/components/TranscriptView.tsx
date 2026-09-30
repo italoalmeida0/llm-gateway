@@ -101,7 +101,7 @@ export function TranscriptView() {
   aria-label="Conversation"
   class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 md:px-8 select-text [overflow-anchor:none] [scrollbar-gutter:stable]"
 >
-<div ref={t.setChatContentRef} class="pt-6 pb-10 space-y-6"
+<div ref={t.setChatContentRef} class="pt-6 pb-10 space-y-3"
 >
   {/* Conversation Messages.
       buildRenderBlocks fuses consecutive assistant messages that

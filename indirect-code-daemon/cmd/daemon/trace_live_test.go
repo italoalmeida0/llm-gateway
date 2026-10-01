@@ -37,16 +37,16 @@ func liveRecords() []map[string]any {
 }
 
 // withTrace enables the real sink into a temp dir for the test's duration.
-// NB: mutates package-level trace state — never run these in parallel.
+// Callers must keep each scenario in its own test lifetime: this mutates
+// package-level trace state and cleanup must finish before another scenario.
 func withTrace(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	globalTrace.mu.Lock()
 	oldDir := globalTrace.dir
 	globalTrace.dir = filepath.Join(dir, "trace")
-	// Force a rotate into the NEW dir: the sink only reopens when w == nil,
-	// and scenarios share one *testing.T (cleanups run at the very end), so
-	// a stale handle would keep writing to the previous scenario's file.
+	// Force a rotate into the new directory: a previously opened sink would
+	// otherwise keep writing to its old file until the date changes.
 	if globalTrace.f != nil {
 		_ = globalTrace.w.Flush()
 		_ = globalTrace.f.Close()

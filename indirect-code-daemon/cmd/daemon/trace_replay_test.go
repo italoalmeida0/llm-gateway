@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
-	"path/filepath"
 )
 
 // traceReplay loads a trace file and asserts the event-type sequence.
@@ -106,8 +106,8 @@ func TestTraceGoldenApproval(t *testing.T) {
 	recs := replayTrace(t, "testdata/trace/approval.jsonl")
 	got := traceTypes(recs)
 	assertSubsequence(t, got, []string{
-		"actor.wait",          // worker blocked, awaitingApproval
-		"actor.approval",      // human answered
+		"actor.wait",     // worker blocked, awaitingApproval
+		"actor.approval", // human answered
 		"worker.approve.resolved",
 	})
 }
@@ -142,33 +142,34 @@ var knownGaps = map[string]string{
 // Catches "added a trace() call but forgot the debugger's grep keys".
 func TestTraceSchemaContracts(t *testing.T) {
 	required := map[string][]string{
-		"actor.state":            {"sid", "from", "to", "gen"},
-		"actor.wal":              {"sid", "type", "turn"},
-		"actor.wait":             {"sid", "kind", "id"},
-		"actor.approval":         {"sid", "id", "approved"},
-		"actor.approval.stale":   {"sid", "id", "state"},
-		"actor.question":         {"sid", "id", "nAnswers"},
-		"actor.question.stale":   {"sid", "id", "state"},
-		"actor.waiter.lost":      {"sid", "kind", "id"},
-		"actor.timeout":          {"sid", "kind", "id"},
-		"actor.cancel":           {"sid", "reason", "state"},
-		"actor.quarantine":       {"sid", "rounds"},
-		"worker.approve.enter":   {"sid", "tool", "gen"},
+		"actor.state":             {"sid", "from", "to", "gen"},
+		"actor.wal":               {"sid", "type", "turn"},
+		"actor.wait":              {"sid", "kind", "id"},
+		"actor.approval":          {"sid", "id", "approved"},
+		"actor.approval.stale":    {"sid", "id", "state"},
+		"actor.question":          {"sid", "id", "nAnswers"},
+		"actor.question.stale":    {"sid", "id", "state"},
+		"actor.waiter.lost":       {"sid", "kind", "id"},
+		"actor.timeout":           {"sid", "kind", "id"},
+		"actor.cancel":            {"sid", "reason", "state"},
+		"actor.quarantine":        {"sid", "rounds"},
+		"worker.approve.enter":    {"sid", "tool", "gen"},
 		"worker.approve.resolved": {"sid", "tool", "approved", "stale"},
-		"worker.question.enter":  {"sid", "n", "gen"},
-		"worker.convert.enter":   {"sid", "file"},
-		"worker.drop":            {"sid", "type"},
-		"sup.route":              {"sid"},
-		"sup.evict":              {"n"},
-		"sup.passivate":          {"sid", "ok"},
-		"bg.register":            {"job", "sid"},
-		"bg.finish":              {"job", "status"},
-		"bg.cancel":              {"job", "by"},
-		"bg.wake":                {"job", "sid", "woke"},
-		"ws.dispatch":            {"type"},
+		"worker.question.enter":   {"sid", "n", "gen"},
+		"worker.convert.enter":    {"sid", "file"},
+		"worker.drop":             {"sid", "type"},
+		"sup.route":               {"sid"},
+		"sup.evict":               {"n"},
+		"sup.passivate":           {"sid", "ok"},
+		"bg.register":             {"job", "sid"},
+		"bg.finish":               {"job", "status"},
+		"bg.cancel":               {"job", "by"},
+		"bg.wake":                 {"job", "sid", "woke"},
+		"ws.dispatch":             {"type"},
 	}
 	seen := map[string]bool{}
-	check := func(src string, recs []map[string]any) {
+	check := func(t *testing.T, src string, recs []map[string]any) {
+		t.Helper()
 		for _, r := range recs {
 			ev, _ := r["ev"].(string)
 			seen[ev] = true
@@ -185,11 +186,13 @@ func TestTraceSchemaContracts(t *testing.T) {
 	}
 	// Real emissions first (the enforcement that matters).
 	for _, sc := range liveScenarios {
-		check("live:"+sc.name, sc.run(t))
+		t.Run(sc.name, func(t *testing.T) {
+			check(t, "live:"+sc.name, sc.run(t))
+		})
 	}
 	// Static goldens (kept for the historical backbone).
 	for _, f := range []string{"testdata/trace/turn.jsonl", "testdata/trace/approval.jsonl", "testdata/trace/timeout.jsonl"} {
-		check(f, replayTrace(t, f))
+		check(t, f, replayTrace(t, f))
 	}
 	// Enforcement (review item 3): every contracted event must be covered
 	// by a LIVE scenario, or be listed in knownGaps with a reason. Adding a

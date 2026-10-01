@@ -344,7 +344,7 @@ export function TranscriptView() {
     respondApproval={t.respondApproval}
     setYoloMode={c.setYoloMode}
   />
-  <BackgroundCard />
+  <BackgroundCard contextKey={`${h.activeHostId()}:${s.activeSessionId()}`} />
   <QueueCard />
 </div>
 </div>

@@ -212,7 +212,7 @@ function assertNoPageErrors(pageErrors: string[], consoleErrors: string[], where
 
 // A. finish flow: detach -> sleep(waitingFor+summary) -> bg_check read.
 // The tool row keeps the detach placeholder; the output lives in the
-// session BgTask (bg card + bg_check), never in a file.
+// session BgTask (bg card + bg_check), with full runner logs retained on disk.
 async function scenarioFinish(ctx: any) {
   log("test", "scenario A: finish flow");
   const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e bg finish", model: MODEL });
@@ -236,7 +236,7 @@ async function scenarioFinish(ctx: any) {
   assert(task, `no finished bg task in session (tasks: ${JSON.stringify(tasks.map((t: any) => ({ id: t.id, status: t.status })))} )`);
   assert((task.content || "").includes("done-gamma"), `session task content missing output: ${(task.content || "").slice(-200)}`);
   assert(Number(task.totalLines || 0) > 0, "task must report totalLines");
-  // Runner files are cleaned at terminal (no 7-day retention, no logs).
+  // Runner paths remain internal; the session exposes its display tail.
   assert(!task.logPath, "session must not expose runner log paths");
   const { browser, page, pageErrors, consoleErrors } = await openSessionPage(ctx, sessionId);
   try {
@@ -248,10 +248,18 @@ async function scenarioFinish(ctx: any) {
     assert(bash, `bash row missing (rows: ${rows.map((r) => r.text.slice(0, 60)).join(" // ")})`);
     // The tool row keeps the detach placeholder (no fold: results live in the card).
     assert(/background/i.test(bash.text), `row must keep the detach placeholder: ${bash.text.slice(0, 200)}`);
-    // The bg card shows the finished task forever with its output.
+    // Finished tasks move out of the running list but retain their logs.
     const card: string = await page.evaluate(() => document.body.textContent || "");
     assert(/Background tasks/.test(card), "bg card missing");
-    assert(/done-gamma|sleep 15/.test(card), `bg card missing the task: ${card.slice(-500)}`);
+    const archive = page.locator("[data-bg-archive-toggle]");
+    assert.equal(await archive.count(), 1, "archive toggle missing after finish");
+    assert.equal(await page.locator(`[data-bg-row="${task.id}"]`).count(), 0, "finished task remained in running view");
+    await archive.click();
+    const archivedRow = page.locator(`[data-bg-row="${task.id}"]`);
+    assert.equal(await archivedRow.locator('[data-bg-status][aria-label="Completed"]').count(), 1, "finished task status icon missing");
+    assert.match(await archivedRow.locator("[data-bg-duration]").textContent() || "", /\d+[smh]/, "finished task duration missing");
+    await archivedRow.getByRole("button", { name: "Logs", exact: true }).click();
+    assert.match(await archivedRow.locator("pre").textContent() || "", /done-gamma/, "archived task output missing");
     assertNoPageErrors(pageErrors, consoleErrors, "finish flow");
     log("test", "scenario A PASS");
   } finally {
@@ -305,6 +313,13 @@ async function scenarioCancel(ctx: any) {
     const tasks = await ctx.bgSnapshot(sessionId);
     const job = tasks.find((x: any) => x.id === jobId);
     assert.equal(job?.status, "cancelled", `job status: ${job?.status}`);
+    const archive = page.locator("[data-bg-archive-toggle]");
+    assert.equal(await archive.count(), 1, "archive toggle missing after cancel");
+    await page.waitForFunction((id) => !document.querySelector(`[data-bg-row="${id}"]`), jobId);
+    await archive.click();
+    const archivedRow = page.locator(`[data-bg-row="${jobId}"]`);
+    assert.equal(await archivedRow.locator('[data-bg-status][aria-label="Cancelled"]').count(), 1, "cancelled task status icon missing");
+    assert.match(await archivedRow.locator("[data-bg-duration]").textContent() || "", /\d+[smh]/, "cancelled task duration missing");
     // The row keeps the placeholder (no fold).
     const rows: any[] = await page.evaluate(() => [...document.querySelectorAll("[data-toolseg]")].map((s) => ({
       text: (s.textContent || ""),

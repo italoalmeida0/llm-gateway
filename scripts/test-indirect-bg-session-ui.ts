@@ -3,7 +3,7 @@
 //
 // No model, no daemon: drives the real useBackground hook + BackgroundCard
 // + toolSummary in a real Chromium and asserts what a user actually sees:
-//  - session tasks render in the card (running + finished, never GCed)
+//  - session tasks render in running and Archived views (terminal rows persist)
 //  - live bg_output chunks glue after the session tail
 //  - register/finish events touch the list without a full refresh
 //  - toolSummary: bg_check reads like a file, bg_cancel never shows the id,
@@ -42,12 +42,36 @@ try {
   const cardText = await page.textContent("body");
   assert.ok(cardText?.includes("1 running"), "running counter");
   assert.ok(cardText?.includes("sleep 30"), "bash label renders");
-  assert.ok(cardText?.includes("train.py"), "finished python task renders (never GCed)");
+  assert.ok(!cardText?.includes("train.py"), "finished task stays out of the running list");
+  const archiveToggle = page.locator("[data-bg-archive-toggle]");
+  assert.equal(await archiveToggle.count(), 1, "archive toggle renders");
+  assert.equal(await archiveToggle.getAttribute("aria-pressed"), "false", "running view is selected by default");
+  assert.ok((await archiveToggle.textContent())?.includes("Archived") && (await archiveToggle.textContent())?.includes("1"), "archive toggle includes terminal count");
+  await archiveToggle.click();
+  await page.waitForFunction(() => document.body.textContent?.includes("train.py"));
+  assert.equal(await archiveToggle.getAttribute("aria-pressed"), "true", "archive view selected");
+  // A second client receiving the same daemon snapshot starts in running
+  // view; archive selection is UI state, never mirrored session authority.
+  const peer = await browser.newPage();
+  await peer.goto(server.url.toString());
+  await peer.waitForFunction(() => (window as any).bgTest);
+  await peer.evaluate(() => (window as any).bgTest.seed([
+    { id: "bg_1", kind: "bash", label: "sleep 30", status: "running", startedAt: Date.now() - 5000, content: "history-" },
+    { id: "bg_2", kind: "python", label: "train.py", status: "done", startedAt: 1, endedAt: 2, exitCode: 0, content: "epoch 1" },
+  ]));
+  await peer.waitForFunction(() => document.body.textContent?.includes("sleep 30"));
+  assert.ok(!(await peer.textContent("body"))?.includes("train.py"), "peer snapshot defaults to running view");
+  await peer.locator("[data-bg-archive-toggle]").click();
+  assert.ok((await peer.textContent("body"))?.includes("train.py"), "peer can derive archived view from same snapshot");
+  await peer.close();
 
   // 3. Live chunks glue after the session tail: open the Logs and read.
+  assert.equal(await page.getByRole("button", { name: "Logs" }).count(), 1, "one Logs toggle in archived view");
+  await page.getByRole("button", { name: "Logs" }).click();
+  await page.locator("[data-bg-archive-toggle]").click();
   await page.evaluate(() => (window as any).bgTest.output("bg_1", "live-1"));
   const logButtons = page.getByRole("button", { name: "Logs" });
-  assert.equal(await logButtons.count(), 2, "one Logs toggle per task");
+  assert.equal(await logButtons.count(), 1, "one Logs toggle in running view");
   await logButtons.first().click();
   await page.waitForFunction(() => {
     const b = document.body.textContent || "";
@@ -114,6 +138,7 @@ try {
   }
   assert.equal(seqLines.filter((l) => l === "ok").length, 1, '"ok" exactly once');
   // Refresh with the full tail: live collapses, "ok" stays single.
+  await page.locator("[data-bg-archive-toggle]").click();
   await page.evaluate(() => (window as any).bgTest.seed([
     { id: "bg_seq", kind: "bash", label: "uniqueseqlabel", status: "done", startedAt: 1, endedAt: 2, exitCode: 0, content: "21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\nok", totalLines: 32, droppedLines: 20, contentFrom: 21 },
   ]));
@@ -144,6 +169,7 @@ try {
 
   // 7. Stop button sends bg_cancel (no id in UI, id on the wire).
   // Re-seed a running task (5b left only a finished one: no Stop button).
+  if (await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed") === "true") await page.locator("[data-bg-archive-toggle]").click();
   await page.evaluate(() => (window as any).bgTest.seed([
     { id: "bg_stop", kind: "bash", label: "stoppable", status: "running", startedAt: Date.now(), content: "working" },
   ]));
@@ -198,16 +224,16 @@ try {
   assert.ok(winDur >= 1, "detached row renders its duration element");
   assert.ok(!/No output/.test(winText || ""), `detached row must not claim "No output": ${JSON.stringify((winText || "").slice(0, 200))}`);
 
-  // 8. Full-scene review: every element of every row, in harmony.
-  // A running row must show spinner + kind icon + label + live time +
-  // Stop + Logs. A finished row must show status icon + kind icon + label
-  // + badge + Logs, and NO spinner/time/Stop. The header must count right.
+  // 8. Full-scene review: running and archived views are separate, ordered
+  // lists. Terminal rows keep a frozen duration and accessible status icon.
   await page.evaluate(() => (window as any).bgTest.seed([
     { id: "bg_run", kind: "bash", label: "run-cmd", status: "running", startedAt: Date.now() - 65000, content: "out" },
-    { id: "bg_done", kind: "python", label: "done-cmd", status: "done", startedAt: 1, endedAt: 61001, exitCode: 0, content: "ok" },
-    { id: "bg_err", kind: "bash", label: "err-cmd", status: "error", startedAt: 1, endedAt: 2000, exitCode: 1, content: "boom" },
+    { id: "bg_done", kind: "python", label: "done-cmd", status: "done", startedAt: 1000, endedAt: 61001, exitCode: 0, content: "ok" },
+    { id: "bg_err", kind: "bash", label: "err-cmd", status: "error", startedAt: 2000, endedAt: 5000, exitCode: 1, content: "boom" },
+    { id: "bg_cancel", kind: "bash", label: "cancel-cmd", status: "cancelled", startedAt: 3000, endedAt: 9000, content: "cancelled" },
   ]));
   await page.waitForFunction(() => (document.body.textContent || "").includes("run-cmd"));
+  if (await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed") === "true") await page.locator("[data-bg-archive-toggle]").click();
   await page.waitForTimeout(1200);
   const scene = await page.evaluate(() => {
     const body = document.body.textContent || "";
@@ -219,22 +245,78 @@ try {
     }));
     return { header: body.slice(body.indexOf("Background tasks"), body.indexOf("Background tasks") + 60), rows };
   });
-  assert.equal(scene.rows.length, 3, `3 rows visible, got ${scene.rows.length}`);
+  assert.equal(scene.rows.length, 1, `running view shows only running rows, got ${scene.rows.length}`);
   assert.ok(/1 running/.test(scene.header), `header counts running: ${scene.header}`);
   const run = scene.rows.find((r) => r.html.includes("run-cmd"))!;
   assert.ok(run.spinner, "running row needs the spinner");
   assert.ok(run.stop, "running row needs Stop");
   assert.ok(run.logs, "running row needs Logs toggle");
   assert.ok(/\d+[smh]/.test(run.html), `running row needs a live time, got: ${JSON.stringify(run.html.slice(0, 200))}`);
-  const done = scene.rows.find((r) => r.html.includes("done-cmd"))!;
-  assert.ok(!done.spinner, "finished row must not spin");
-  assert.ok(!done.stop, "finished row must not offer Stop");
-  assert.ok(done.logs, "finished row needs Logs toggle");
-  assert.ok(/done/.test(done.html), `finished row needs its badge: ${JSON.stringify(done.html.slice(0, 200))}`);
-  const err = scene.rows.find((r) => r.html.includes("err-cmd"))!;
-  assert.ok(!err.spinner && !err.stop && err.logs, "error row: badge + logs, no spinner/stop");
-  assert.ok(/error/.test(err.html), `error row needs its badge: ${JSON.stringify(err.html.slice(0, 200))}`);
+  await page.locator("[data-bg-archive-toggle]").click();
+  await page.waitForFunction(() => (document.body.textContent || "").includes("cancel-cmd"));
+  const archived = await page.evaluate(() => [...document.querySelectorAll("[data-bg-row]")].map((r) => ({
+    id: r.getAttribute("data-bg-row"),
+    status: r.querySelector("[data-bg-status]")?.getAttribute("aria-label"),
+    duration: r.querySelector("[data-bg-duration]")?.textContent || "",
+    stop: !!r.querySelector("[data-bg-stop]"),
+    logs: [...r.querySelectorAll("button")].some((b) => /Logs/.test(b.textContent || "")),
+  })));
+  assert.deepEqual(archived.map((r) => r.id), ["bg_cancel", "bg_err", "bg_done"], "archived rows newest first");
+  assert.ok(archived.every((r) => !r.stop && r.logs), "archived rows have Logs and no Stop");
+  assert.equal(archived.find((r) => r.id === "bg_done")?.status, "Completed", "done status icon is accessible");
+  assert.equal(archived.find((r) => r.id === "bg_err")?.status, "Failed", "error status icon is accessible");
+  assert.equal(archived.find((r) => r.id === "bg_cancel")?.status, "Cancelled", "cancelled status icon is accessible");
+  assert.equal(archived.find((r) => r.id === "bg_done")?.duration, "1m", "completed duration is rendered");
+  assert.equal(archived.find((r) => r.id === "bg_err")?.duration, "3s", "failed duration is rendered");
+  assert.equal(archived.find((r) => r.id === "bg_cancel")?.duration, "6s", "cancelled duration is rendered");
+  const doneDuration = archived.find((r) => r.id === "bg_done")?.duration;
+  await page.waitForTimeout(1200);
+  assert.equal(await page.locator('[data-bg-row="bg_done"] [data-bg-duration]').textContent(), doneDuration, "terminal duration is frozen");
+  // Both lists cap at three until expanded; changing views resets expansion.
+  await page.evaluate(() => (window as any).bgTest.seed([
+    ...Array.from({ length: 5 }, (_, i) => ({ id: `arc_${i}`, kind: "bash", label: `archived-${i}`, status: "done", startedAt: 10000 + i, endedAt: 11000 + i, content: "x" })),
+    ...Array.from({ length: 5 }, (_, i) => ({ id: `run_${i}`, kind: "bash", label: `running-${i}`, status: "running", startedAt: 20000 + i, content: "x" })),
+  ]));
+  await page.waitForFunction(() => (document.body.textContent || "").includes("archived-2"));
+  assert.equal(await page.locator("[data-bg-row]").count(), 3, "archived list initially shows three rows");
+  const listToggle = page.locator("[data-bg-list-toggle]");
+  assert.equal(await listToggle.count(), 1, "archived list has expansion toggle");
+  assert.match((await listToggle.textContent()) || "", /See all \(5\)/, "archived See all count");
+  await listToggle.click();
+  assert.equal(await page.locator("[data-bg-row]").count(), 5, "archived list expands");
+  assert.deepEqual(await page.locator("[data-bg-row]").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-bg-row"))), ["arc_4", "arc_3", "arc_2", "arc_1", "arc_0"], "archived expansion newest first");
+  assert.match((await page.locator("[data-bg-list-toggle]").textContent()) || "", /Show less/, "archived Show less");
+  await page.locator("[data-bg-list-toggle]").click();
+  assert.equal(await page.locator("[data-bg-row]").count(), 3, "Show less collapses archived list");
+  await page.locator("[data-bg-archive-toggle]").click();
+  assert.equal(await page.locator("[data-bg-row]").count(), 3, "switching to running resets expansion");
+  assert.match((await page.locator("[data-bg-list-toggle]").textContent()) || "", /See all \(5\)/, "running See all count");
+  await page.locator("[data-bg-list-toggle]").click();
+  assert.deepEqual(await page.locator("[data-bg-row]").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-bg-row"))), ["run_4", "run_3", "run_2", "run_1", "run_0"], "running expansion newest first");
+  await page.locator("[data-bg-list-toggle]").click();
+  await page.locator("[data-bg-archive-toggle]").click();
+  assert.equal(await page.locator("[data-bg-row]").count(), 3, "switching back to archived resets expansion");
+
+  // A session switch resets archive/expansion state and derives rows from the
+  // new session snapshot.
+  await page.locator("[data-bg-list-toggle]").click();
+  assert.equal(await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed"), "true", "switch starts from archived view");
+  assert.equal(await page.locator("[data-bg-row]").count(), 5, "switch starts from expanded list");
+  await page.evaluate(() => (window as any).bgTest.switchSession("s2"));
+  await page.evaluate(() => (window as any).bgTest.seed([
+    ...Array.from({ length: 5 }, (_, i) => ({ id: `s2_run_${i}`, kind: "bash", label: `session-two-running-${i}`, status: "running", startedAt: 30000 + i, content: "x" })),
+    { id: "s2_done", kind: "bash", label: "session-two-done", status: "done", startedAt: 29000, endedAt: 30000, content: "x" },
+  ]));
+  await page.waitForFunction(() => (document.body.textContent || "").includes("session-two-running"));
+  assert.equal(await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed"), "false", "session switch resets to running view");
+  assert.deepEqual(await page.locator("[data-bg-row]").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-bg-row"))), ["s2_run_4", "s2_run_3", "s2_run_2"], "session switch resets expansion and shows only the new session's latest running tasks");
+  assert.equal(await page.locator("[data-bg-list-toggle]").getAttribute("aria-expanded"), "false", "session switch collapses list");
+
   // Empty again: card disappears entirely (no orphan header).
+  // Return to the running view before clearing the snapshot; the card stays
+  // mounted while archived tasks still exist.
+  await page.evaluate(() => (window as any).bgTest.switchSession("s1"));
+  if (await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed") === "true") await page.locator("[data-bg-archive-toggle]").click();
   await page.evaluate(() => (window as any).bgTest.seed([]));
   await page.waitForTimeout(300);
   assert.equal(await page.locator("text=Background tasks").count(), 0, "card must vanish with zero tasks");
@@ -292,10 +374,13 @@ try {
     const f2 = await frame();
     checkFrame(f2, { card: true, rows: { bg_h: { hasTime: true, spinner: true, stop: true, logs: true } } });
   }
-  // Finish: badge appears, spinner/time/stop go together (never half).
+  // Finish: the running row leaves this view atomically; Archived retains it.
   await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_finished", sessionId: "s1", jobId: "bg_h", status: "done" }));
   await page.waitForTimeout(300);
-  checkFrame(await frame(), { card: true, rows: { bg_h: { hasTime: false, spinner: false, stop: false, logs: true, badge: true } } });
+  checkFrame(await frame(), { card: true });
+  assert.equal((await page.locator("[data-bg-row]").count()), 0, "running view has no visible rows after finish");
+  await page.locator("[data-bg-archive-toggle]").click();
+  checkFrame(await frame(), { card: true, rows: { bg_h: { hasTime: true, spinner: false, stop: false, logs: true, badge: false } } });
 
   assert.deepEqual(errors, [], `page errors: ${errors.join("\n")}`);
   console.log("bg-session-ui: OK (card, live glue, events, summaries, no page errors)");

@@ -11,10 +11,11 @@ import { toolSummary } from "../../web/src/indirect-code/transcript";
 
 const sent: unknown[] = [];
 (window as any).__sent = sent;
+const [sessionId, setSessionId] = createSignal("s1");
 const bg = createBackground({
   send: (p) => sent.push(p),
   isOpen: () => true,
-  getSessionId: () => "s1",
+  getSessionId: () => sessionId(),
   toast: () => {},
 });
 const uiStub = { convWidthClass: () => "max-w-3xl" } as any;
@@ -101,7 +102,7 @@ function ToolRows() {
 render(() => (
   <BackgroundCtx.Provider value={bg}>
     <UICtx.Provider value={uiStub}>
-      <BackgroundCard />
+      <BackgroundCard contextKey={sessionId()} />
       <ToolRows />
     </UICtx.Provider>
   </BackgroundCtx.Provider>
@@ -115,6 +116,9 @@ Object.assign(window, {
     // Session-owned tasks, as mirrored from session_data bgTasks.
     seed(tasks: any[]) {
       bg.noteSessionTasks(tasks);
+    },
+    switchSession(id: string) {
+      setSessionId(id);
     },
     event(msg: any) {
       bg.noteSessionTaskEvent(msg);

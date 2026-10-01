@@ -9,7 +9,7 @@ import type { DaemonCommand } from "../daemon-protocol";
  * PER SESSION: switching sessions never leaks tasks across conversations
  * and never loses a running task's live stream (each session's buffers
  * survive until that session's own snapshot reconciles them). Tasks NEVER
- * disappear (no GC) — a finished task stays rendered like a tool call.
+ * disappear (no GC) — finished tasks remain available in the archive.
  *
  * Live output joins the session tail by the daemon's monotonic `seq`:
  * every bg_output carries the chunk sequence number, so the overlap
@@ -210,7 +210,10 @@ export function createBackground(opts: {
     return false;
   }
   function ensureClock() {
-    if (!timer) timer = setInterval(() => setClock(Date.now()), 1000);
+    if (!timer) {
+      setClock(Date.now());
+      timer = setInterval(() => setClock(Date.now()), 1000);
+    }
   }
   function maybeStopClock() {
     if (timer && !anyRunning()) {

@@ -1,5 +1,6 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
 import { useBackground, useUI } from "../ctx";
+import type { SessionBgTask } from "../hooks/useBackground";
 import { elapsedLabel } from "../utils/format";
 import { Icon as Iconify } from "../../components/icon";
 import { CodeBlock, ShellCmd } from "./CodeBlock";
@@ -13,42 +14,60 @@ function shortLabel(cmd: string, max = 64) {
   return `${one.slice(0, head)}...${one.slice(one.length - tail)}`;
 }
 
-function statusBadge(status: string) {
-  const s = (status || "").toLowerCase();
-  if (s === "running") return null;
-  const color =
-    s === "done"
-      ? "bg-emerald-500/15 text-emerald-300"
-      : s === "error"
-        ? "bg-rose-500/15 text-rose-300"
-        : "bg-ink-800 text-ink-300";
-  return (
-    <span class={`shrink-0 rounded px-1.5 py-px font-mono text-[10px] ${color}`}>
-      {s || "done"}
-    </span>
-  );
+function taskState(status: string) {
+  switch (status) {
+    case "running": return { label: "Running", icon: "lucide:loader-circle", color: "text-ink-400" };
+    case "done": return { label: "Completed", icon: "lucide:circle-check", color: "text-emerald-400" };
+    case "error": return { label: "Failed", icon: "lucide:circle-x", color: "text-rose-400" };
+    case "cancelled": return { label: "Cancelled", icon: "lucide:circle-slash", color: "text-ink-500" };
+    default: return { label: "Stopped", icon: "lucide:circle-stop", color: "text-ink-500" };
+  }
 }
 
 /**
  * Background tasks card (below the transcript, above the queue).
  *
  * Session-global tasks (daemon BgTasks): one row per bash/python task of
- * the open session — running AND finished. Finished tasks stay rendered
- * forever (like a tool call), with a collapsible log view fed by the
- * session tail (content) + live stream (output). Running rows show a
- * live elapsed counter and a stop button.
+ * the open session. The daemon status determines the running/archive split
+ * on every client; archiving never changes or deletes a task. Both views
+ * start with the three newest tasks and retain access to their logs.
  */
-export function BackgroundCard() {
+export function BackgroundCard(props: { contextKey?: string }) {
   const bg = useBackground();
   const ui = useUI();
-  const tasks = () => bg.sessionJobs().filter((j) => j.kind === "bash" || j.kind === "python");
-  const running = () => tasks().filter((j) => j.status === "running");
+  const [showArchived, setShowArchived] = createSignal(false);
+  const [expanded, setExpanded] = createSignal(false);
   const [open, setOpen] = createSignal<Record<string, boolean>>({});
+  const tasks = createMemo(() => bg.sessionJobs()
+    .filter((j) => j.kind === "bash" || j.kind === "python")
+    .sort((a, b) => b.startedAt - a.startedAt || a.id.localeCompare(b.id)));
+  const running = createMemo(() => tasks().filter((j) => j.status === "running"));
+  const archived = createMemo(() => tasks().filter((j) => j.status !== "running"));
+  const selected = createMemo(() => showArchived() ? archived() : running());
+  const visible = createMemo(() => expanded() ? selected() : selected().slice(0, 3));
+
+  createEffect(on(() => props.contextKey, () => {
+    setShowArchived(false);
+    setExpanded(false);
+    setOpen({});
+  }));
+
+  function toggleArchive() {
+    setShowArchived((value) => !value);
+    setExpanded(false);
+  }
+
+  function duration(job: SessionBgTask) {
+    if (!Number.isFinite(job.startedAt) || job.startedAt <= 0) return "—";
+    const end = job.status === "running" ? bg.clock() : job.endedAt;
+    return typeof end === "number" && end > 0
+      ? elapsedLabel(Math.max(0, end - job.startedAt)) : "—";
+  }
+
   const isOpen = (id: string) => open()[id] === true;
   const toggle = (id: string) => setOpen((prev) => ({ ...prev, [id]: !prev[id] }));
-  const logText = (job: any) => {
-    // Session tail (authoritative) + live tail (buffer minus the lines
-    // the snapshot already covers — exact line math, never glued twice).
+  const logText = (job: SessionBgTask) => {
+    // Session tail (authoritative) + live output not covered by the snapshot.
     const sess = typeof job.content === "string" ? job.content : bg.sessionContent(job.id) || "";
     const live = bg.liveTail(job.id);
     if (!live) return sess;
@@ -57,36 +76,61 @@ export function BackgroundCard() {
   };
   return (
     <Show when={tasks().length > 0}>
-      <div class={`${ui.convWidthClass()} mx-auto border-t border-line/60 px-3 py-2`}>
-        <div class="text-[11px] uppercase tracking-wide text-ink-500 pb-1.5">
-          Background tasks · {running().length > 0 ? `${running().length} running` : "all finished"}
+      <div class={`${ui.convWidthClass()} mx-auto border-t border-line/60 px-3 py-2`} data-bg-card>
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 pb-2">
+          <span class="text-[11px] uppercase tracking-wide text-ink-500">Background tasks</span>
+          <button
+            type="button"
+            class={`inline-flex items-center gap-1 rounded-md border px-1.5 py-1 text-[11px] transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500 ${showArchived()
+              ? "border-brand-500/30 bg-brand-500/10 text-brand-400"
+              : "border-line/60 text-ink-500 hover:bg-elev hover:text-ink-200"}`}
+            aria-pressed={showArchived()}
+            aria-label={`Archived tasks (${archived().length})`}
+            title={showArchived() ? "Show running tasks" : "Show archived tasks"}
+            onClick={toggleArchive}
+            data-bg-archive-toggle
+          >
+            <Iconify icon="lucide:archive" size={12} />
+            Archived
+            <span class="tabular-nums opacity-80">({archived().length})</span>
+          </button>
+          <span class="ml-auto text-[10px] uppercase tracking-wide text-ink-500 tabular-nums whitespace-nowrap" data-bg-running-count>
+            {running().length} running
+          </span>
         </div>
         <div class="flex flex-col gap-1.5">
-          <For each={tasks()}>
+          <For each={visible()} fallback={
+            <p class="px-2.5 py-3 text-xs text-ink-500">
+              {showArchived() ? "No archived tasks yet." : "No tasks running."}
+            </p>
+          }>
             {(job) => (
-              <div class="rounded-lg border border-line/60 bg-ink-900/40" data-bg-row={job.id}>
+              <div class="rounded-lg border border-line/60 bg-card" data-bg-row={job.id}>
                 <div class="flex items-center gap-2 px-2.5 py-1.5">
-                  <Show
-                    when={job.status === "running"}
-                    fallback={<Iconify icon={job.status === "error" ? "lucide:circle-x" : "lucide:circle-check"} size={14} class={`shrink-0 ${job.status === "error" ? "text-rose-400" : "text-emerald-400"}`} />}
+                  <span
+                    class={`inline-flex shrink-0 ${taskState(job.status).color}`}
+                    role="img"
+                    aria-label={taskState(job.status).label}
+                    title={taskState(job.status).label}
+                    data-bg-status={job.status}
                   >
-                    <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
-                  </Show>
+                    <Iconify icon={taskState(job.status).icon} size={14} class={job.status === "running" ? "animate-spin" : ""} />
+                  </span>
                   <Iconify
                     icon={job.kind === "python" ? "mdi:language-python" : "lucide:terminal"}
                     size={14}
                     class="shrink-0 text-ink-500"
                   />
-                  <span class="truncate text-ink-200 min-w-0 flex-1 text-[12.5px]">
+                  <span class="truncate text-ink-200 min-w-0 flex-1 text-[12.5px]" title={job.label || job.id}>
                     <ShellCmd text={shortLabel(job.label || job.id)} />
                   </span>
-                  {statusBadge(job.status)}
+                  <span class="text-[11px] text-ink-500 tabular-nums shrink-0" title={job.status === "running" ? "Elapsed time" : "Total duration"} data-bg-duration>
+                    {duration(job)}
+                  </span>
                   <Show when={job.status === "running"}>
-                    <span class="text-[11px] text-ink-500 tabular-nums shrink-0">
-                      {elapsedLabel(Math.max(0, bg.clock() - ((job as any).startedAt || bg.clock())))}
-                    </span>
                     <button
-                      class="shrink-0 rounded border border-line px-1.5 py-0.5 text-[11px] text-ink-400 hover:text-ink-100 hover:border-ink-500"
+                      type="button"
+                      class="shrink-0 rounded border border-line px-1.5 py-0.5 text-[11px] text-ink-400 hover:text-ink-100 hover:border-ink-500 cursor-pointer"
                       onClick={() => bg.stop(job.id)}
                       data-bg-stop={job.id}
                     >
@@ -94,8 +138,10 @@ export function BackgroundCard() {
                     </button>
                   </Show>
                   <button
-                    class="shrink-0 rounded border border-line px-1.5 py-0.5 text-[11px] text-ink-400 hover:text-ink-100 hover:border-ink-500"
+                    type="button"
+                    class="shrink-0 rounded border border-line px-1.5 py-0.5 text-[11px] text-ink-400 hover:text-ink-100 hover:border-ink-500 cursor-pointer"
                     onClick={() => toggle(job.id)}
+                    aria-expanded={isOpen(job.id)}
                   >
                     {isOpen(job.id) ? "Hide logs" : "Logs"}
                   </button>
@@ -103,9 +149,9 @@ export function BackgroundCard() {
                 <Show when={isOpen(job.id)}>
                   <div class="border-t border-line/50">
                     <CodeBlock text={logText(job) || "No output yet."} language={undefined} scrollKey={`bg:${job.id}`} />
-                    <Show when={(job as any).droppedLines > 0}>
+                    <Show when={(job.droppedLines || 0) > 0}>
                       <p class="px-3 pb-1.5 text-[10px] text-ink-600">
-                        {(job as any).droppedLines} earlier lines discarded by the tail cap — use bg_check for full paging.
+                        {job.droppedLines} earlier lines discarded by the tail cap — use bg_check for full paging.
                       </p>
                     </Show>
                   </div>
@@ -113,6 +159,17 @@ export function BackgroundCard() {
               </div>
             )}
           </For>
+          <Show when={selected().length > 3}>
+            <button
+              type="button"
+              class="self-start px-3 py-2 text-xs text-ink-500 hover:text-ink-200 cursor-pointer"
+              aria-expanded={expanded()}
+              onClick={() => setExpanded((value) => !value)}
+              data-bg-list-toggle
+            >
+              {expanded() ? "Show less" : `See all (${selected().length})`}
+            </button>
+          </Show>
         </div>
       </div>
     </Show>

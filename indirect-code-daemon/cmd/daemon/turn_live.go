@@ -226,11 +226,12 @@ func bgTaskPayloads(tasks []BgTask) []map[string]any {
 			}
 		}
 		out = append(out, map[string]any{
-				"id": t.ID, "kind": t.Kind, "label": t.Label, "status": t.Status,
-				"startedAt": t.StartedAt, "endedAt": t.EndedAt, "exitCode": t.ExitCode,
-				"content": content, "totalLines": t.TotalLines, "droppedLines": t.DroppedLines,
-				"contentFrom": t.TotalLines - int64(countLines(content)) + 1,
-			})
+			"id": t.ID, "kind": t.Kind, "label": t.Label, "status": t.Status,
+			"startedAt": t.StartedAt, "endedAt": t.EndedAt, "exitCode": t.ExitCode,
+			"content": content, "totalLines": t.TotalLines, "droppedLines": t.DroppedLines,
+			"totalBytes": t.TotalBytes, "seq": t.Seq,
+			"contentFrom": t.TotalLines - int64(countLines(content)) + 1,
+		})
 	}
 	return out
 }

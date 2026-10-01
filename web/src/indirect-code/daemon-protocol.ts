@@ -1,5 +1,4 @@
 import type { TranscriptCursor } from "./transcript/order";
-import type { MCPServerConfig, SkillConfig } from "./types";
 import type { SessionContext } from "./context";
 import type { QueuedMessage, TodoItem } from "./viewTypes";
 
@@ -42,18 +41,17 @@ export type DaemonCommand = CommandBase &
   | { type: "queue_send_now"; sessionId: string; queueId: string }
   | { type: "cancel"; sessionId: string }
   | { type: "bg_cancel"; jobId: string }
-  | { type: "fork_session"; sessionId: string; index: number; requestId?: string; editText?: string; editModel?: string; editYolo?: boolean; attachmentIds?: string[] }
+  | { type: "fork_session"; sessionId: string; index: number; requestId?: string; editText?: string; model?: string; yolo?: boolean; attachmentIds?: string[] }
   | { type: "discard_and_resend"; sessionId: string; requestId?: string; turnId: number; text: string; model: string; yolo: boolean; attachmentIds?: string[] }
   | { type: "fork_and_resend"; sessionId: string; requestId?: string; turnId: number; text: string; model: string; yolo: boolean; attachmentIds?: string[] }
   | { type: "regenerate"; sessionId: string; index: number; text?: string; model: string; yolo: boolean }
-  | { type: "edit_message"; sessionId: string; index: number; text: string; model: string; yolo: boolean; regenerate: boolean; attachmentIds?: string[] }
+  | { type: "edit_message"; sessionId: string; requestId?: string; index: number; text: string; model: string; yolo: boolean; regenerate: boolean; attachmentIds?: string[] }
   | { type: "create_session"; requestId: string; cwd: string; title: string; model: string; options: Omit<SessionChoice, "model"> }
   | { type: "delete_session"; sessionId: string }
   | { type: "rename_session"; sessionId: string; title: string }
   | { type: "toggle_pin"; sessionId: string }
   | { type: "create_project"; path: string; requestId: string }
   | { type: "delete_project"; projectId: string }
-  | { type: "test_mcp"; requestId: string; expectedRevision?: string; name: string; server: MCPServerConfig }
   | { type: "browse_folders"; path: string; requestId: string }
   | { type: "upload_attachment"; requestId: string; sessionId: string; name: string; mime: string; data: string; text?: string }
   | { type: "search_files"; requestId: string; sessionId: string; projectId: string; query: string }
@@ -76,8 +74,6 @@ export type DaemonCommand = CommandBase &
         requestId: string;
         // Go keys (snake_case): translation of UI keys in useSettings.
       settings: Record<string, unknown>;
-      mcpServers: Record<string, MCPServerConfig>;
-      skills: Record<string, SkillConfig>;
     }
   );
 
@@ -123,7 +119,6 @@ export type DaemonEvent = EventBase &
     | { type: "host_status"; status?: string }
     | { type: "change"; collection: string }
     | { type: "config_updated"; requestId?: string; success?: boolean; error?: string; revision?: string }
-    | { type: "mcp_status"; requestId?: string; sessionId?: string; name: string; status: string; toolCount?: number; message?: string }
     | { type: "session_forked"; requestId?: string; session?: WireRecord; resent?: boolean }
     | { type: "session_created"; requestId?: string; session?: WireRecord }
     | { type: "project_created"; requestId?: string; project?: WireRecord }
@@ -149,26 +144,30 @@ export type DaemonEvent = EventBase &
     | { type: "question_resolved"; sessionId?: string; questionId: string }
     | { type: "question_error"; sessionId?: string; questionId: string; message?: string }
     | { type: "tool_approval_request"; sessionId?: string; callId: string; tool: string; args: unknown }
+    | { type: "approval_resolved"; sessionId?: string; callId: string; approved?: boolean; error?: string }
     | { type: "convert_request"; sessionId?: string; requestId: string; filename: string; data: string }
     | { type: "convert_resolved"; sessionId?: string; requestId: string }
     | { type: "session_queue"; sessionId?: string; queue: QueuedMessage[] }
     | { type: "agent_event"; sessionId?: string; event?: AgentEvent }
-    | { type: "bg_output"; jobId?: string; sessionId?: string; text?: string; from?: number; total?: number }
+    | { type: "bg_output"; jobId?: string; sessionId?: string; text?: string; from?: number; fromByte?: number; total?: number; totalBytes?: number; seq?: number }
     | { type: "discard_and_resend_result"; sessionId?: string; hostId?: string; requestId?: string; ok?: boolean; error?: string; queued?: boolean }
     | { type: "fork_and_resend_result"; sessionId?: string; hostId?: string; requestId?: string; ok?: boolean; error?: string; newSessionId?: string }
     | { type: "edit_message_result"; sessionId?: string; hostId?: string; ok?: boolean; error?: string }
     | { type: "bg_task_registered"; sessionId?: string; jobId?: string; kind?: string; label?: string }
     | { type: "bg_task_finished"; sessionId?: string; jobId?: string; status?: string; exitCode?: number }
-    | { type: "error"; requestId?: string; sessionId?: string; message?: string; replyTo?: string }
+    | { type: "error"; id?: number; requestId?: string; sessionId?: string; message?: string; replyTo?: string }
   );
 
-/** Sync pull response (no `type`: resolved via numeric id). */
+/** Sync pull response, correlated by its numeric id. */
 export interface PullWireMessage {
-  type?: undefined;
+  /** Older daemons omitted the discriminator. */
+  type?: "pull-response";
   id: number;
   hostId: string;
   items?: unknown[];
-  error?: string;
+  error?: unknown;
+  message?: string;
+  replyTo?: string;
 }
 
 export type DaemonMessage = DaemonEvent | PullWireMessage;

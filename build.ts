@@ -119,16 +119,11 @@ async function build() {
     console.log("[build] PWA head injected into dist/index.html");
   }
 
-  // pandoc.wasm (58MB office-to-markdown engine): copied from the reference
-  // checkout when present; office conversion degrades gracefully without it.
-  const pandocSrc = path.join(ROOT, "remote-code-ref", "chatbot", "pandoc.wasm");
-  if (existsSync(pandocSrc)) {
-    cpSync(pandocSrc, path.join(distDir, "pandoc.wasm"));
-    console.log("[build] pandoc.wasm -> dist/ (office conversion enabled)");
-  } else {
-    console.log("[build] pandoc.wasm not found, office conversion disabled");
+  // The versioned public asset is copied above, including in clean CI builds.
+  if (!existsSync(path.join(distDir, "pandoc.wasm"))) {
+    throw new Error("Missing web/public/pandoc.wasm: office conversion cannot be deployed");
   }
-
+  console.log("[build] pandoc.wasm -> dist/ (office conversion enabled)");
 
   console.log(`[build] OK -> dist/ (${result.outputs.length} outputs)`);
   process.exit(0);

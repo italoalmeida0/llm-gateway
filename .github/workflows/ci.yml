@@ -65,6 +65,9 @@ jobs:
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-transcript-ui.ts
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-composer-ui.ts
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-bg-session-ui.ts
+          PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-flow-regressions-ui.ts
+          PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-settings-ui.ts
+          PLAYWRIGHT_MODULE="$RUNNER_TEMP/transcript-browser/node_modules/playwright/index.mjs" bun scripts/test-indirect-office-ui.ts
 
       - name: Daemon protocol and turn lifecycle
         run: bun scripts/test-indirect-daemon-protocol.ts

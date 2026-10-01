@@ -97,13 +97,15 @@ func normalizedHarness(s HarnessSettings) HarnessSettings {
 }
 
 // applySettingsMap applies a JSON settings patch onto s (unknown keys ignored).
-func applySettingsMap(s *HarnessSettings, patch map[string]any) {
+// Type errors are returned so a malformed update cannot be acknowledged as a
+// successful partial save.
+func applySettingsMap(s *HarnessSettings, patch map[string]any) error {
 	if patch == nil {
-		return
+		return nil
 	}
 	data, err := json.Marshal(patch)
 	if err != nil {
-		return
+		return err
 	}
-	_ = json.Unmarshal(data, s)
+	return json.Unmarshal(data, s)
 }

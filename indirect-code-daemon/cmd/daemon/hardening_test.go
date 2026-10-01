@@ -235,20 +235,28 @@ func TestBackgroundCompletionOutlivesOriginatingTurn(t *testing.T) {
 	w := &turnBridge{ctx: ctx, env: workerEnv{bg: b, actorID: "origin"}}
 	id, _, _, finish := w.slowHook()("bash", "completed", tools.BackgroundProcess{})
 	cancel()
-	finish("done", false)
-	if q := bgQuery(t, b, id); !q.Found || q.Status != BgStatusDone { t.Fatalf("cancelled turn swallowed background completion: %v", q) }
+	finish("done", false, 0)
+	if q := bgQuery(t, b, id); !q.Found || q.Status != BgStatusDone {
+		t.Fatalf("cancelled turn swallowed background completion: %v", q)
+	}
 }
 
 func TestResolvedApprovalDeadlineDoesNotSurviveReplay(t *testing.T) {
 	a := reviewActor(t)
 	a.state, a.gen = stateRunning, 1
 	a.rec.Options.Access = "ask"
-	w, err := a.store.openWAL(a.id, &walHeader{TurnIndex: 1, Prompt: "work"}); if err != nil { t.Fatal(err) }
-	a.wal = w; defer w.close()
+	w, err := a.store.openWAL(a.id, &walHeader{TurnIndex: 1, Prompt: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.wal = w
+	defer w.close()
 	a.onWorkerApprovalReq(workerApprovalReqMsg{gen: 1, id: "call", tool: "bash", reply: make(chan approvalOutcome, 1)})
 	a.onApprovalResponse(approvalResponseMsg{ID: "call", Approved: true})
 	rec, _, err := a.store.loadSessionFused(a.id)
-	if err != nil || rec.ApprovalDeadlineUnix != 0 { t.Fatalf("answered approval still has a recovery deadline: %v", err) }
+	if err != nil || rec.ApprovalDeadlineUnix != 0 {
+		t.Fatalf("answered approval still has a recovery deadline: %v", err)
+	}
 }
 
 func TestPurgeColdSessionNeverResumesAndRejectsFutureRoutes(t *testing.T) {

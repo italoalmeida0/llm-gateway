@@ -189,7 +189,7 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 	short := &tools.BashTool{
 		CWD: t.TempDir(), LogDir: brainDir,
 		Starter: runnerStarter(root, "sess1", brainDir),
-		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool)) {
+		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool, int)) {
 			t.Fatal("short command must never register a background job")
 			return "", "", nil, nil
 		},
@@ -209,11 +209,11 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 	long := &tools.BashTool{
 		CWD: t.TempDir(), LogDir: brainDir,
 		Starter: runnerStarter(root, "sess1", brainDir),
-		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool)) {
+		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool, int)) {
 			mu.Lock()
 			registered = p
 			mu.Unlock()
-			return "bg_" + "t9", p.BrainLog, func(string) {}, func(string, bool) {}
+			return "bg_" + "t9", p.BrainLog, func(string) {}, func(string, bool, int) {}
 		},
 	}
 	res, err = long.Execute(context.Background(), bashJSON(t, "echo early; sleep 2"), nil)
@@ -230,10 +230,10 @@ func TestRunnerForegroundWindowThroughBashTool(t *testing.T) {
 		t.Fatal("the runner identity must flow into the background registration")
 	}
 	// The placeholder must carry the job identity and point at bg_check —
-	// never a file path (the AI only ever sees the id).
+	// and the brain copy that retains output beyond the bounded session tail.
 	text := resultText(res)
-	if strings.Contains(text, p.BrainLog) || strings.Contains(text, ".log") {
-		t.Fatalf("placeholder must not leak file paths, got: %q", text)
+	if !strings.Contains(text, p.BrainLog) {
+		t.Fatalf("placeholder must name the retained brain log, got: %q", text)
 	}
 	if !strings.Contains(text, "bg_t9") {
 		t.Fatalf("placeholder must carry the job identity (bg_t9), got: %q", text)
@@ -294,4 +294,3 @@ func TestRunnerTerminalCopyHealedAfterCrashWindows(t *testing.T) {
 		}
 	}
 }
-

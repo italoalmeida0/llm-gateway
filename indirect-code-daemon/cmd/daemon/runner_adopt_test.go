@@ -6,9 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,6 +115,9 @@ func spawnTestRunner(t *testing.T, root, dataDir, command string) *tools.Proc {
 func TestRunnerSurvivesParentDeathAndIsAdopted(t *testing.T) {
 	root, dataDir := runnerTestRoot(t)
 	proc := spawnTestRunner(t, root, dataDir, "echo one; sleep 2; echo two")
+	if err := runner.WriteDisposition(root, proc.JobID, runner.DispBackground); err != nil {
+		t.Fatal(err)
+	}
 
 	// Parent #1 registers the job the way slowHook does.
 	inbox1 := make(chan Envelope, 8)
@@ -159,17 +162,7 @@ func TestRunnerSurvivesParentDeathAndIsAdopted(t *testing.T) {
 	}
 
 	// Exactly one completion notice reaches the session; the ack retires it.
-	var notice bgNoticeMsg
-	select {
-	case env := <-inbox2:
-		n, ok := env.Payload.(bgNoticeMsg)
-		if !ok {
-			t.Fatalf("unexpected payload %T", env.Payload)
-		}
-		notice = n
-	case <-time.After(5 * time.Second):
-		t.Fatal("completion notice never delivered after adoption")
-	}
+	notice := receiveRunnerNotice(t, inbox2)
 	if notice.JobID != proc.JobID || !notice.Finished {
 		t.Fatalf("notice: %+v", notice)
 	}
@@ -219,16 +212,11 @@ func TestRunnerDeathIsAnExplicitFailure(t *testing.T) {
 	inbox := make(chan Envelope, 8)
 	startBG(t, dataDir, func(string) (chan Envelope, chan any, bool) { return inbox, nil, true })
 
-	// Adoption folds it as an explicit failure notice.
-	select {
-	case env := <-inbox:
-		n, ok := env.Payload.(bgNoticeMsg)
-		if !ok || n.Finished != true {
-			t.Fatalf("expected a terminal notice, got %+v", env.Payload)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("dead runner produced a silent hang instead of a failure")
+	// Adoption also restores task state before its terminal notice.
+	if n := receiveRunnerNotice(t, inbox); !n.Finished {
+		t.Fatalf("expected terminal notice: %+v", n)
 	}
+
 }
 
 // T5: kill takes the whole tree down (grandchildren included).
@@ -281,15 +269,10 @@ func TestRunnerDoneWithoutParentIsRecoveredFromState(t *testing.T) {
 	inbox := make(chan Envelope, 8)
 	startBG(t, dataDir, func(string) (chan Envelope, chan any, bool) { return inbox, nil, true })
 
-	select {
-	case env := <-inbox:
-		n, ok := env.Payload.(bgNoticeMsg)
-		if !ok || n.JobID != proc.JobID || !n.Finished {
-			t.Fatalf("notice: %+v", env.Payload)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("done state lost across parentless completion")
+	if n := receiveRunnerNotice(t, inbox); n.JobID != proc.JobID || !n.Finished {
+		t.Fatalf("notice: %+v", n)
 	}
+
 }
 
 // T10: orphan policy — a runner the session cannot know is SIGKILLed
@@ -429,5 +412,22 @@ func listJobs(b *bgSupervisor) []map[string]any {
 		return rows
 	case <-time.After(time.Second):
 		return nil
+	}
+}
+
+// Recovery now sends task state/output updates as well as the retained notice.
+func receiveRunnerNotice(t *testing.T, inbox <-chan Envelope) bgNoticeMsg {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case env := <-inbox:
+			if notice, ok := env.Payload.(bgNoticeMsg); ok {
+				return notice
+			}
+		case <-deadline:
+			t.Fatal("terminal notice never delivered")
+			return bgNoticeMsg{}
+		}
 	}
 }

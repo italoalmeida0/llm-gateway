@@ -69,16 +69,17 @@ import assert from "node:assert/strict";
  assert(await page.locator('#changes .font-mono.overflow-x-auto').isVisible(),'finished diff stays open');
  await page.evaluate(() => (window as any).turnUI.changes.noteTurnChanges({balloons:null}));await settle();
  assert.equal(await page.locator('#changes button').count(),0,'an empty authoritative snapshot clears obsolete balloons');
- const mcpCall={type:'tool_call',toolId:'mcp1',toolName:'mcp__remote__inspect_item_abcdef012345',toolArgs:'{"path":"remote-file","query":"example"}'};
- await page.evaluate(()=>{(window as any).turnUI.setRunning(true);(window as any).turnUI.setStarts({mcp1:1000});});
- await send([mcpCall]);
- assert(await page.getByText('Arguments',{exact:true}).isVisible(),'MCP call exposes its arguments');
- assert(await page.getByText('remote / inspect_item',{exact:true}).isVisible(),'MCP name uses a short label and tool target');
- assert.equal(await page.locator('[data-rc-tip]').count(),0,'MCP paths are not local workspace file links');
- await send([mcpCall,{type:'tool_result',toolId:'mcp1',toolResult:'remote result\n'.repeat(300),toolDurationMs:700}]);
+ // This is a new turn, not the previously collapsed carrier with id "a".
+ // Reset the fixture so retained disclosure state does not mask its tools.
+ await page.evaluate(() => (window as any).turnUI.setMessages([]));await settle();
+ const commandCall={type:'tool_call',toolId:'terminal1',toolName:'bash',toolArgs:'{"command":"printf example"}'};
+ await page.evaluate(()=>{(window as any).turnUI.setRunning(true);(window as any).turnUI.setStarts({terminal1:1000});});
+ await send([commandCall]);
+ assert(await page.getByText('printf example',{exact:true}).first().isVisible(),'shell command remains inspectable in its header');
+ await send([commandCall,{type:'tool_result',toolId:'terminal1',toolResult:'terminal result\n'.repeat(300),toolDurationMs:700}]);
  await page.locator('#aggregate .group\\/tool').click();
- assert(await page.getByText('remote result',{exact:false}).last().isVisible(),'MCP result remains inspectable');
- assert.equal(await page.locator('[data-tool-duration]').textContent(),'1s','MCP duration uses persisted result timing');
+ assert(await page.getByText('terminal result',{exact:false}).last().isVisible(),'terminal result remains inspectable');
+ assert.equal(await page.locator('[data-tool-duration]').textContent(),'1s','terminal duration uses persisted result timing');
  // Hidden progress notes do not split runs; append into stable chunks of five.
  await page.evaluate(()=>{(window as any).turnUI.setHideNotes(true);(window as any).turnUI.setVerbose(false);});
  const commands=Array.from({length:12},(_,i)=>[

@@ -26,15 +26,14 @@ type bgTaskRegisterResult struct {
 
 // bgTaskChunkMsg streams one output chunk into the session's BgTask.
 // Sent by the turn worker (pump) AND the bg supervisor (adopted/live
-// tails); the actor appends to RAM + WAL with throttled persistence.
+// tails); the actor persists the display tail through RAM + WAL.
 type bgTaskChunkMsg struct {
 	JobID string
 	Text  string
 }
 
 // bgTaskFinishMsg marks a session BgTask terminal. The actor trims the
-// tail to bgFinalCap, persists, and cleans the runner files now that
-// every byte is durable in session+WAL.
+// tail to bgFinalCap and persists it. Full runner logs remain on disk.
 type bgTaskFinishMsg struct {
 	JobID    string
 	Status   string

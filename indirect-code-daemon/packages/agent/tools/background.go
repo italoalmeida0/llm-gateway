@@ -2,6 +2,7 @@ package tools
 
 import (
 	"os"
+	"strconv"
 	"time"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
@@ -92,4 +93,19 @@ type BackgroundProcess struct {
 	Stop       func()
 }
 
-type SlowHook func(kind, label string, process BackgroundProcess) (jobID string, logPath string, stream func(chunk string), deliver func(result string, isError bool))
+type SlowHook func(kind, label string, process BackgroundProcess) (jobID string, logPath string, stream func(chunk string), deliver func(result string, isError bool, exitCode int))
+
+// commandExitCode preserves the process outcome separately from tool errors.
+func commandExitCode(attrs []core.Attr) int {
+	for _, attr := range attrs {
+		if attr.Key == "exit" {
+			if code, err := strconv.Atoi(attr.Value); err == nil {
+				return code
+			}
+		}
+	}
+	if commandFailed(attrs) {
+		return -1
+	}
+	return 0
+}

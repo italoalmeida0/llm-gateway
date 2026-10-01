@@ -86,6 +86,14 @@ export function withoutContinueNudges(messages: ChatMessage[]): ChatMessage[] {
 }
 /** Keep canonical messages untouched; signal tools (todo checklist, mark_task_as_complete, mark_plan_as_ready_to_execute, summary) are hidden or extracted as text. */
 export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
+  const signalResults = new Map<string, ContentBlock>();
+  for (const message of messages) {
+    for (const block of message.blocks) {
+      if (block.type === "tool_result" && block.toolId) {
+        signalResults.set(block.toolId, block);
+      }
+    }
+  }
   const ids = new Set(
     messages.flatMap((m) =>
       m.blocks
@@ -100,30 +108,46 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
     const newBlocks: ContentBlock[] = [];
     for (const b of message.blocks) {
       if (b.type === "tool_call" && b.toolName && COMPLETION_TOOL_NAMES.has(b.toolName)) {
+        const result = b.toolId ? signalResults.get(b.toolId) : undefined;
+        if (!result || result.isError) {
+          // Keep pending/failed completion calls visible. They must not look
+          // like a successful turn, and their result carries the diagnostic.
+          newBlocks.push(b);
+          continue;
+        }
         hadCompletion = true;
         mutated = true;
         let summaryText = "";
         try {
           const parsed = JSON.parse(b.toolArgs || "{}");
-          summaryText = parsed.comprehensive_summary || parsed.summary || parsed.notes || "";
+          const candidate = parsed?.comprehensive_summary || parsed?.summary || parsed?.notes;
+          summaryText = typeof candidate === "string" ? candidate : "";
         } catch {}
         if (summaryText.trim()) {
-          if (!message.blocks.some((existing) => existing.type === "text" && existing.text?.trim() === summaryText.trim())) {
+          if (!newBlocks.some((existing) => existing.type === "text" && existing.text?.trim() === summaryText.trim()) &&
+            !message.blocks.some((existing) => existing.type === "text" && existing.text?.trim() === summaryText.trim())) {
             newBlocks.push({ type: "text", text: summaryText.trim() });
           }
         }
         continue;
       }
       if (b.type === "tool_call" && b.toolName === "summary") {
+        const result = b.toolId ? signalResults.get(b.toolId) : undefined;
+        if (!result || result.isError) {
+          // A progress update is user-visible only after the tool accepted it.
+          newBlocks.push(b);
+          continue;
+        }
         hadSummary = true;
         mutated = true;
         let forUser = "";
         try {
           const parsed = JSON.parse(b.toolArgs || "{}");
-          forUser = parsed.for_user || "";
+          forUser = typeof parsed?.for_user === "string" ? parsed.for_user : "";
         } catch {}
         if (forUser.trim()) {
-          if (!message.blocks.some((existing) => existing.type === "text" && existing.text?.trim() === forUser.trim())) {
+          if (!newBlocks.some((existing) => existing.type === "text" && existing.text?.trim() === forUser.trim()) &&
+            !message.blocks.some((existing) => existing.type === "text" && existing.text?.trim() === forUser.trim())) {
             newBlocks.push({ type: "text", text: forUser.trim() });
           }
         }
@@ -133,6 +157,10 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
         (b.type === "tool_call" || b.type === "tool_result") &&
         ((b.toolName && SIGNAL_TOOL_NAMES.has(b.toolName)) || (b.toolId && ids.has(b.toolId)))
       ) {
+        if (b.type === "tool_result" && b.isError) {
+          newBlocks.push(b);
+          continue;
+        }
         mutated = true;
         continue;
       }

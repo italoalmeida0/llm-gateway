@@ -300,7 +300,7 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 		}
 		return finishPythonCommand(out.runErr, stdout, stderr, start, progress)
 	}
-	jobID, _, sink, deliver := t.Slow("python", label, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, StderrPath: proc.ErrLogPath, Stop: stop})
+	jobID, fullLog, sink, deliver := t.Slow("python", label, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, StderrPath: proc.ErrLogPath, Stop: stop})
 	// V2R-001: detached into a real background job — notify on terminal.
 	if proc.Disposition != nil && proc.JobID != "" {
 		if err := proc.Disposition(proc.JobID, DispBackground); err != nil {
@@ -342,10 +342,10 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 			det["background_job_id"] = jobID
 			det["detached"] = true
 		}
-		deliver(text, commandFailed(res.Attrs))
+		deliver(text, commandFailed(res.Attrs), commandExitCode(res.Attrs))
 	}()
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: pythonBackgroundNotice(jobID, label)}},
+		Content: []provider.Content{provider.TextBlock{Text: pythonBackgroundNotice(jobID, label, fullLog)}},
 		Attrs: []core.Attr{
 			{Key: "status", Value: "background"},
 			{Key: "job_id", Value: jobID},
@@ -357,9 +357,12 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 // pythonBackgroundNotice mirrors bashBackgroundNotice for detached python
 // executions: where the output goes, how to force-stop it (bg_cancel) and
 // the automatic wake-up with a completion notice when the script ends.
-func pythonBackgroundNotice(jobID, label string) string {
+func pythonBackgroundNotice(jobID, label string, fullLog ...string) string {
 	var b strings.Builder
 	b.WriteString("Command moved to background (still running).\n")
+	if len(fullLog) > 0 && fullLog[0] != "" {
+		fmt.Fprintf(&b, "The complete output is saved to %s when the command finishes.\n", fullLog[0])
+	}
 	fmt.Fprintf(&b, "To read the output, call bg_check with job_id %q (paged log: tail by default, offset/limit for more).\n", jobID)
 	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q.\n", jobID)
 	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then.\n")

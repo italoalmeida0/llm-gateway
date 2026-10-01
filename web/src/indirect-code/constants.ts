@@ -24,7 +24,7 @@ export const REASONING_LABELS: Record<string, string> = {
  * Slash command definitions for autocomplete palette.
  * Only commands NOT already configurable somewhere in the UI are listed:
  * model + reasoning effort live in the composer picker,
- * and help + protocols (mcp/skills) live in Settings (sec-* sections).
+ * and help live in the surrounding UI.
  */
 export const SLASH_COMMANDS = [
   {
@@ -48,5 +48,4 @@ export const SLASH_COMMANDS = [
     args: "",
   },
 ];
-
 

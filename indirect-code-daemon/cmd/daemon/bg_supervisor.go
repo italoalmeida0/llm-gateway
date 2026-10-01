@@ -38,17 +38,17 @@ const (
 // goroutine's single exit report. stop/cancel/done are set at register
 // and never mutated afterwards (safe for concurrent read).
 type bgJob struct {
-	ID         string
-	Kind       string
-	SessionID  string
-	Label      string
-	PID        int
-	Identity   string
+	ID        string
+	Kind      string
+	SessionID string
+	Label     string
+	PID       int
+	Identity  string
 	// Runner marks a crash-only runner-backed job (V2R-003): its durable
 	// state file under runners/ is the SOLE recovery authority, so the
 	// legacy pidfile path must never re-adopt or finalize it.
-	Runner   bool
-	Status   string
+	Runner     bool
+	Status     string
 	StartedAt  int64
 	EndedAt    int64
 	Result     string
@@ -112,9 +112,10 @@ type bgRegisterResult struct {
 }
 
 type bgFinishMsg struct {
-	JobID  string
-	Status string // done | error
-	Result string
+	ExitCode int
+	JobID    string
+	Status   string // done | error
+	Result   string
 }
 
 type bgCancelMsg struct {
@@ -229,7 +230,7 @@ func (b *bgSupervisor) handle(env Envelope) {
 	case bgDropNoticesMsg:
 		b.dropNoticesFor(m.SessionID)
 	case bgFinishMsg:
-		b.onFinish(m.JobID, m.Status, m.Result)
+		b.onFinish(m.JobID, m.Status, m.Result, m.ExitCode)
 	case bgCancelMsg:
 		m.Reply <- b.onCancel(m.JobID, m.By)
 	case bgQueryMsg:
@@ -287,7 +288,9 @@ func (b *bgSupervisor) onRegister(m bgRegisterMsg) {
 		b.jobs = map[string]*bgJob{}
 	}
 	if err := b.writePidfile(j); err != nil {
-		if j.stop != nil { j.stop() }
+		if j.stop != nil {
+			j.stop()
+		}
 		cancel()
 		m.Reply <- bgRegisterResult{Error: err.Error()}
 		return
@@ -297,7 +300,7 @@ func (b *bgSupervisor) onRegister(m bgRegisterMsg) {
 	m.Reply <- bgRegisterResult{JobID: j.ID, Done: j.done}
 }
 
-func (b *bgSupervisor) onFinish(jobID, status, result string) {
+func (b *bgSupervisor) onFinish(jobID, status, result string, exitCodes ...int) {
 	j, ok := b.jobs[jobID]
 	if !ok || j.Status != BgStatusRunning {
 		return
@@ -310,36 +313,31 @@ func (b *bgSupervisor) onFinish(jobID, status, result string) {
 	j.Result = result
 	_ = os.Remove(b.pidPath(jobID))
 	trace("bg.finish", map[string]any{"job": j.ID, "sid": j.SessionID, "status": status, "resultLen": len(result)})
+	exitCode := 0
+	if status != BgStatusDone {
+		exitCode = -1
+	}
+	if len(exitCodes) > 0 {
+		exitCode = exitCodes[0]
+	}
+	if j.Runner {
+		if st, err := runner.ReadState(runner.StatePath(b.rootDir(), jobID)); err == nil && st.ExitCode != nil {
+			exitCode = *st.ExitCode
+		}
+		b.sessionInbox(j.SessionID, bgTaskRecoverMsg{JobID: j.ID})
+	}
+	b.sessionInbox(j.SessionID, bgTaskFinishMsg{JobID: j.ID, Status: status, ExitCode: exitCode})
+	// Adoption must retain the durable delivery choice, including cancellation.
+	if j.Runner && runner.ReadDisposition(b.rootDir(), j.ID) != runner.DispBackground {
+		j.closeDone()
+		return
+	}
 	b.deliver(j, status == BgStatusDone || status == BgStatusError || status == BgStatusOrphaned)
 	b.wakeSession(j.SessionID)
 	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": 1})
 	j.closeDone()
-	// Logs are durable in the session BgTask (RAM + WAL) from here: the
-	// runner files (state/disposition/launch/out/brain) are removed NOW,
-	// not after 7 days. Best-effort: the session is the source of truth.
-	b.cleanupRunnerFiles(j)
-}
-
-// cleanupRunnerFiles removes the bulky per-job output files once the
-// output is durable in the session BgTask: live out log, brain copy,
-// stderr. The state + disposition + launch claim STAY until the notice
-// is acked (onAck): crash recovery between terminal and ack still finds
-// the outcome, and tests can assert the terminal state. Binaries are
-// untouched (gcRunners owns them).
-func (b *bgSupervisor) cleanupRunnerFiles(j *bgJob) {
-	if j == nil || j.ID == "" {
-		return
-	}
-	if j.LogPath != "" {
-		_ = os.Remove(j.LogPath)
-	}
-	if j.BrainLog != "" && j.BrainLog != j.LogPath {
-		_ = os.Remove(j.BrainLog)
-	}
-	if j.StderrPath != "" && j.StderrPath != j.LogPath && j.StderrPath != j.BrainLog {
-		_ = os.Remove(j.StderrPath)
-	}
-	trace("bg.files.cleaned", map[string]any{"job": j.ID, "sid": j.SessionID})
+	// Full output remains in runners/out and its brain copy. The session
+	// stores a bounded display tail; it cannot replace the original log.
 }
 
 // cleanupRunnerIdentity removes state + disposition + launch claim: the
@@ -397,8 +395,6 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 	b.wakeSession(j.SessionID)
 	trace("bg.wake", map[string]any{"job": j.ID, "sid": j.SessionID, "woke": 1})
 	j.closeDone()
-	// Same as finish: output is durable in the session BgTask.
-	b.cleanupRunnerFiles(j)
 	return true
 }
 
@@ -594,28 +590,28 @@ func (b *bgSupervisor) retainNotice(jobID, sessionID, text string, finished bool
 // tryNotice attempts one non-blocking delivery. The notice STAYS pending
 // until the session acks it — a successful send is not the ack.
 // sessionInboxReliable delivers a bg chunk to a session actor with a
-// bounded retry: a chunk is the only copy of its output, so mailbox
-// pressure must not drop it (the supervisor loop is not blocked — this
+// bounded retry: mailbox pressure must not lose the live display update
+// (the supervisor loop is not blocked — this
 // runs on tail goroutines).
-func (b *bgSupervisor) sessionInboxReliable(sessionID string, payload any) {
+func (b *bgSupervisor) sessionInboxReliable(sessionID string, payload any) bool {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if b.session == nil {
-			return
+			return false
 		}
 		inbox, _, ok := b.session(sessionID)
 		if !ok {
-			return
+			return false
 		}
 		select {
 		case inbox <- Envelope{SessionID: sessionID, Payload: payload}:
-			return
+			return true
 		case <-b.done:
-			return
+			return false
 		case <-time.After(50 * time.Millisecond):
 			if time.Now().After(deadline) {
 				trace("bg.chunk.lost", map[string]any{"sid": sessionID, "reason": "tail delivery stalled"})
-				return
+				return false
 			}
 		}
 	}

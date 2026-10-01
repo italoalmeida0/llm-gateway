@@ -1148,6 +1148,11 @@ describe("completion signals and turn nudges", () => {
           },
         ],
       },
+      {
+        id: "t1",
+        role: "tool",
+        blocks: [{ type: "tool_result", toolId: "call_done", toolResult: "Task marked complete." }],
+      },
     ];
     const result = withoutTodoActivity(msgs);
     expect(result.length).toBe(1);
@@ -1208,8 +1213,13 @@ describe("completion signals and turn nudges", () => {
         { type: "tool_call", toolId: "call_done", toolName: "mark_task_as_complete", toolArgs: "{}" },
       ],
     };
+    const doneResult: ChatMessage = {
+      id: "t2",
+      role: "tool",
+      blocks: [{ type: "tool_result", toolId: "call_done", toolResult: "Task marked complete." }],
+    };
 
-    const cleaned = withoutTodoActivity([user, step1, res1, step2]);
+    const cleaned = withoutTodoActivity([user, step1, res1, step2, doneResult]);
     const blocks = buildRenderBlocks(cleaned);
 
     // user1, unified balloon (tool series step1+res1 with the completion text a2 attached)
@@ -1221,6 +1231,24 @@ describe("completion signals and turn nudges", () => {
       expect(blocks[1].textMsg?.blocks[0].text).toBe("Everything fixed and verified.");
       expect(blocks[1].textMsg?.hasCompletion).toBe(true);
     }
+  });
+
+  test("withoutTodoActivity keeps pending and failed signals visible and validates extracted strings", () => {
+    const pending: ChatMessage = { id: "p", role: "assistant", blocks: [
+      { type: "tool_call", toolId: "pending", toolName: "summary", toolArgs: JSON.stringify({ for_user: { bad: true } }) },
+    ] };
+    const failedCall: ChatMessage = { id: "f", role: "assistant", blocks: [
+      { type: "tool_call", toolId: "failed", toolName: "mark_task_as_complete", toolArgs: JSON.stringify({ comprehensive_summary: 42 }) },
+    ] };
+    const failedResult: ChatMessage = { id: "fr", role: "tool", blocks: [
+      { type: "tool_result", toolId: "failed", toolResult: "permission denied", isError: true },
+    ] };
+    const cleaned = withoutTodoActivity([pending, failedCall, failedResult]);
+    expect(cleaned).toHaveLength(3);
+    expect(cleaned[0].blocks[0].type).toBe("tool_call");
+    expect(cleaned[1].blocks[0].type).toBe("tool_call");
+    expect(cleaned[2].blocks[0].type).toBe("tool_result");
+    expect(cleaned[1].hasCompletion).not.toBe(true);
   });
 
 
@@ -1737,6 +1765,30 @@ describe("Background hook (session-owned tasks)", () => {
       // Foreign sessions never leak in.
       bg.noteSessionTaskEvent({ type: "bg_task_registered", sessionId: "other", jobId: "bg_x", kind: "bash", label: "x" });
       expect(bg.sessionJobs().some((t) => t.id === "bg_x")).toBe(false);
+      dispose();
+    });
+  });
+
+  test("byte offsets overlap multibyte snapshot tails and retire acknowledged sequences", async () => {
+    const { createBackground } = await import("../web/src/indirect-code/hooks/useBackground");
+    const { createRoot } = await import("solid-js");
+    createRoot((dispose) => {
+      const bg = createBackground({ send: () => {}, isOpen: () => true, getSessionId: () => "s1", toast: () => {} });
+      bg.noteSessionTasks([{ id: "j", kind: "bash", label: "x", status: "running", startedAt: 1, totalBytes: 2, seq: 0 }]);
+      // Snapshot covers "hi" (2 UTF-8 bytes). Chunk starts at byte 1 and
+      // repeats "i" before adding a four-byte emoji.
+      bg.noteOutput("j", "i😀", "s1", 1, 1, undefined, true);
+      bg.noteOutput("j", "i😀", "s1", 1, 1, undefined, true); // replay
+      bg.noteOutput("j", "!\n", "s1", 6, 2, undefined, true);
+      expect(bg.liveTail("j")).toBe("😀!\n");
+      // The daemon snapshot now includes seq 1; only seq 2 remains live.
+      bg.noteSessionTasks([{ id: "j", kind: "bash", label: "x", status: "running", startedAt: 1, totalBytes: 6, seq: 1 }]);
+      expect(bg.liveTail("j")).toBe("!\n");
+      bg.noteSessionTasks([{ id: "j", kind: "bash", label: "x", status: "done", startedAt: 1, totalBytes: 8, seq: 2 }]);
+      expect(bg.running()).toEqual([]);
+      bg.purgeSession("s1");
+      expect(bg.sessionJobs()).toEqual([]);
+      bg.reset();
       dispose();
     });
   });

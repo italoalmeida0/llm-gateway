@@ -123,18 +123,6 @@ export interface AgentSettings {
   maxExecutionTimeSec: number;
 }
 
-export interface MCPServerConfig {
-  disabled?: boolean;
-  envKeys?: string[];
-  headerKeys?: string[];
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
-  transport: string;
-  url?: string;
-  headers?: Record<string, string>;
-}
-
 export interface SkillConfig {
   name: string;
   description: string;

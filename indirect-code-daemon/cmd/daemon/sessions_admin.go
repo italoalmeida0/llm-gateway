@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -72,9 +73,9 @@ func (a *sessionAdmin) host() string {
 }
 
 // purgeSession stops bg jobs, drops the resident actor, deletes disk state.
-func (a *sessionAdmin) purgeSession(id string) {
+func (a *sessionAdmin) purgeSession(id string) error {
 	if !validSessionID(id) {
-		return
+		return fmt.Errorf("invalid session id")
 	}
 	// Best-effort: cancel running jobs of this session via bg supervisor.
 	if a.bg != nil {
@@ -108,16 +109,21 @@ func (a *sessionAdmin) purgeSession(id string) {
 		}
 	}
 	if a.purge == nil {
-		return
+		err := fmt.Errorf("session purge unavailable")
+		if a.emit != nil {
+			a.emit(map[string]any{"type": "error", "hostId": a.host(), "sessionId": id, "message": err.Error()})
+		}
+		return err
 	}
 	if err := a.purge(id); err != nil {
 		a.emit(map[string]any{"type": "error", "hostId": a.host(), "sessionId": id, "message": err.Error()})
-		return
+		return err
 	}
 	a.emit(map[string]any{"type": "session_deleted", "hostId": a.host(), "sessionId": id})
 	if a.onEvent != nil {
 		a.onEvent("sessions")
 	}
+	return nil
 }
 
 func (a *sessionAdmin) createSession(cwd, title, model string, options SessionOptions, requestID string) {

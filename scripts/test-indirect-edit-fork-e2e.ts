@@ -1,13 +1,13 @@
 /**
  * scripts/test-indirect-edit-fork-e2e.ts — full-stack edit/resend/fork check
- * with a REAL browser + REAL daemon + REAL model (same family as
+ * with a REAL browser + REAL daemon + deterministic provider (same family as
  * test-indirect-bg-e2e.ts: Playwright stays an external install).
  *
  *   PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs CHROMIUM_PATH=/path/to/chrome \
  *     bun scripts/test-indirect-edit-fork-e2e.ts
  *
- * Boots a real gateway + real Go daemon + the Meta provider from .env
- * (META_API_KEY / META_TEST_KEY), runs deterministic model turns
+ * Boots a real gateway + real Go daemon + a local fake provider, runs
+ * deterministic Talk turns
  * ("Reply exactly: X"), then drives the ATOMIC primitives through the
  * REAL wire and the REAL browser page:
  *
@@ -25,7 +25,7 @@
  *
  * Prerequisites: web dist/ built (bun run build:web), daemon binary built
  * (go build -o bin/indirect-code ./cmd/daemon in indirect-code-daemon/).
- * Slow on purpose (~2 min, real model latency); this is a manual gate, not
+ * This is a manual full-stack gate, not
  * part of `bun test`. Fails non-zero with the collected evidence printed.
  */
 import assert from "node:assert/strict";
@@ -260,7 +260,7 @@ function userTextOf(msg: any): string {
 // never lost. The boundary turn is replaced by the edited text.
 async function scenarioResend(ctx: any) {
   log("test", "scenario A: discard_and_resend (edit + resend)");
-  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e edit resend", model: MODEL });
+  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e edit resend", model: MODEL, options: { mode: "talk" } });
   const sessionId = created?.session?.id;
   assert(sessionId, "create_session failed");
   await runTurn(ctx, sessionId, "Reply exactly: ALPHA", "ALPHA");
@@ -338,7 +338,7 @@ async function scenarioResend(ctx: any) {
 // B. regenerate (empty text): reuses the original text, the reply re-runs.
 async function scenarioRegenerate(ctx: any) {
   log("test", "scenario B: regenerate (empty text = reuse original)");
-  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e regenerate", model: MODEL });
+  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e regenerate", model: MODEL, options: { mode: "talk" } });
   const sessionId = created?.session?.id;
   assert(sessionId, "create_session failed");
   await runTurn(ctx, sessionId, "Reply exactly: OMEGA", "OMEGA");
@@ -377,7 +377,7 @@ async function scenarioRegenerate(ctx: any) {
 // row (durable there before its turn); the source is untouched.
 async function scenarioForkResend(ctx: any) {
   log("test", "scenario C: fork_and_resend");
-  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e fork resend", model: MODEL });
+  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e fork resend", model: MODEL, options: { mode: "talk" } });
   const sessionId = created?.session?.id;
   assert(sessionId, "create_session failed");
   await runTurn(ctx, sessionId, "Reply exactly: FIRST", "FIRST");
@@ -417,7 +417,7 @@ async function scenarioForkResend(ctx: any) {
 // D. plain fork: the fork INCLUDES the boundary turn.
 async function scenarioFork(ctx: any) {
   log("test", "scenario D: plain fork (boundary turn INCLUDED)");
-  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e fork", model: MODEL });
+  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e fork", model: MODEL, options: { mode: "talk" } });
   const sessionId = created?.session?.id;
   assert(sessionId, "create_session failed");
   await runTurn(ctx, sessionId, "Reply exactly: KEEP", "KEEP");
@@ -429,7 +429,7 @@ async function scenarioFork(ctx: any) {
   // mapping — compute it from the payload order).
   const boundaryIdx = msgs.indexOf(boundary);
   assert(boundaryIdx >= 0, "boundary row must be in the payload");
-  const fr: any = await ctx.send({ type: "fork_session", sessionId, index: boundaryIdx, editText: "", editModel: MODEL });
+  const fr: any = await ctx.send({ type: "fork_session", sessionId, index: boundaryIdx, editText: "", model: MODEL });
   // The wire ack is session_forked (the fork_session result).
   const forkId = fr?.session?.id || fr?.newID;
   assert(forkId, `fork_session produced no id: ${JSON.stringify(fr).slice(0, 200)}`);
@@ -443,47 +443,20 @@ async function scenarioFork(ctx: any) {
 // (edit a row -> save & resend) and the record + page agree.
 async function scenarioBrowserEdit(ctx: any) {
   log("test", "scenario E: browser-driven edit + save&resend");
-  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e browser edit", model: MODEL });
+  const created: any = await ctx.send({ type: "create_session", cwd: ctx.workDir, title: "e2e browser edit", model: MODEL, options: { mode: "talk" } });
   const sessionId = created?.session?.id;
   assert(sessionId, "create_session failed");
   await runTurn(ctx, sessionId, "Reply exactly: UIALPHA", "UIALPHA");
   await runTurn(ctx, sessionId, "Reply exactly: UIBETA", "UIBETA");
   const { browser, page, pageErrors, consoleErrors } = await openSessionPage(ctx, sessionId);
   try {
-    // Find the LAST user row and open its edit UI (the pencil button).
-    const edited = await page.evaluate(async () => {
-      const rows = [...document.querySelectorAll("[data-msg]")];
-      const userRows = rows.filter((r: any) => (r.getAttribute("data-role") || "") === "user");
-      const last = userRows[userRows.length - 1] as HTMLElement;
-      if (!last) return { err: "no user row" };
-      const pencil = [...last.querySelectorAll("button")].find((b: any) => /edit/i.test(b.getAttribute("aria-label") || b.title || ""));
-      if (!pencil) return { err: "no edit button on the user row" };
-      (pencil as HTMLElement).click();
-      await new Promise((r) => setTimeout(r, 500));
-      const ta = document.querySelector("textarea") as HTMLTextAreaElement;
-      if (!ta) return { err: "no textarea opened" };
-      ta.value = "Reply exactly: UIGAMMA";
-      ta.dispatchEvent(new Event("input", { bubbles: true }));
-      await new Promise((r) => setTimeout(r, 300));
-      const save = [...document.querySelectorAll("button")].find((b: any) => /save\s*&?\s*resend|resend/i.test(b.textContent || ""));
-      if (!save) return { err: "no save&resend button" };
-      (save as HTMLElement).click();
-      await new Promise((r) => setTimeout(r, 1000));
-      return { ok: true };
-    });
-    if ((edited as any).err) {
-      // The UI selectors are best-effort: fall back to the wire primitive
-      // (same contract) and still assert the page renders the result.
-      log("test", `browser edit selectors unavailable (${(edited as any).err}) — driving the wire primitive`);
-      const msgs: any[] = (await ctx.send({ type: "get_session", sessionId }))?.session?.messages || [];
-      const boundary = [...msgs].reverse().find((m: any) => m.role === "user" && userTextOf(m).includes("UIBETA"));
-      assert(boundary, "UIBETA row not found");
-      const res: any = await ctx.sendWait({
-        type: "discard_and_resend", sessionId, turnId: boundary.turnIndex,
-        text: "Reply exactly: UIGAMMA", model: MODEL,
-      }, "discard_and_resend_result");
-      assert(res?.ok, `wire resend failed: ${res?.error}`);
-    }
+    // Exercise the actual editor and confirmation; a missing selector must
+    // fail this browser gate rather than silently substitute a wire command.
+    const row = page.locator('[data-transcript-id]').filter({ hasText: "Reply exactly: UIBETA" }).last();
+    await row.getByRole("button", { name: "Edit and resend", exact: true }).click();
+    await page.locator("#rc-editing-msg").fill("Reply exactly: UIGAMMA");
+    await page.getByRole("button", { name: "Save and Send", exact: true }).click();
+    await page.getByRole("button", { name: "Discard & resend", exact: false }).click();
     const t0 = Date.now();
     for (;;) {
       await Bun.sleep(1500);

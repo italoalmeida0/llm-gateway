@@ -29,6 +29,7 @@ function normalizeBalloon(b: any): TurnBalloon {
 export function createTurnChanges(opts: {
   send: (payload: DaemonCommand) => void;
   getSessionId: () => string;
+  getHostId?: () => string;
   toast: (message: string, kind?: "ok" | "err") => void;
   showConfirm?: (o: {
     title?: string;
@@ -48,8 +49,10 @@ export function createTurnChanges(opts: {
   }
   const [undoBusy, setUndoBusy] = createSignal<number | null>(null);
   const [expanded, setExpanded] = createSignal<Record<string, boolean>>({});
+  let resetGeneration = 0;
 
   function reset() {
+    resetGeneration++;
     setBalloons([]);
     setUndoBusy(null);
     setExpanded({});
@@ -145,7 +148,10 @@ export function createTurnChanges(opts: {
   }
 
   async function undoTurn(turnIndex: number, path?: string) {
-    if (!opts.getSessionId() || undoBusy() !== null) return;
+    const sid = opts.getSessionId();
+    const host = opts.getHostId?.() || "";
+    const generation = resetGeneration;
+    if (!sid || undoBusy() !== null) return;
     if (opts.showConfirm) {
       const balloon = balloons().find((b) => b.turnIndex === turnIndex);
       const pendingFiles = (balloon?.files || []).filter((f) => !f.undone);
@@ -161,10 +167,14 @@ export function createTurnChanges(opts: {
       });
       if (!confirmed) return;
     }
+    // Confirmation is asynchronous. Do not send an undo to a new session or
+    // host if the user switched while the dialog was open.
+    if (generation !== resetGeneration || opts.getSessionId() !== sid ||
+      (opts.getHostId && opts.getHostId() !== host)) return;
     setUndoBusy(turnIndex);
     opts.send({
       type: "undo_turn_changes",
-      sessionId: opts.getSessionId(),
+      sessionId: sid,
       turnIndex,
       path,
       requestId: crypto.randomUUID(),

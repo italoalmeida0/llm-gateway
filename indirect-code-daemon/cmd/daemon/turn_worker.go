@@ -601,37 +601,37 @@ func (w *turnBridge) CancelBackgroundJob(callerSessionID, jobID string) (tools.B
 // BgCheckHost: the session actor owns the logs.
 func (w *turnBridge) ReadBackgroundTask(callerSessionID, jobID string, offset, limit int) (tools.BgCheckResult, error) {
 	reply := make(chan any, 1)
-		if callerSessionID != "" && callerSessionID != w.env.actorID {
-			return tools.BgCheckResult{}, fmt.Errorf("bg_check: foreign task")
+	if callerSessionID != "" && callerSessionID != w.env.actorID {
+		return tools.BgCheckResult{}, fmt.Errorf("bg_check: foreign task")
+	}
+	select {
+	case w.env.inbox <- w.stamp(bgTaskReadMsg{JobID: jobID, Offset: offset, Limit: limit, Reply: reply}):
+	case <-w.ctx.Done():
+		return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
+	}
+	select {
+	case r := <-reply:
+		res, _ := r.(bgTaskReadResult)
+		if res.Error != "" {
+			return tools.BgCheckResult{}, fmt.Errorf("%s", res.Error)
 		}
-		select {
-		case w.env.inbox <- w.stamp(bgTaskReadMsg{JobID: jobID, Offset: offset, Limit: limit, Reply: reply}):
-		case <-w.ctx.Done():
-			return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
-		}
-		select {
-		case r := <-reply:
-			res, _ := r.(bgTaskReadResult)
-			if res.Error != "" {
-				return tools.BgCheckResult{}, fmt.Errorf("%s", res.Error)
-			}
-			return tools.BgCheckResult{Found: res.Found, Kind: res.Kind, Label: res.Label, Status: res.Status, ExitCode: res.ExitCode, Text: res.Text, From: res.From, To: res.To, Total: res.Total, Dropped: res.Dropped, Truncated: res.Truncated}, nil
-		case <-w.ctx.Done():
-			return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
-		case <-time.After(replyTimeout):
-			return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
-		}
+		return tools.BgCheckResult{Found: res.Found, Kind: res.Kind, Label: res.Label, Status: res.Status, ExitCode: res.ExitCode, Text: res.Text, From: res.From, To: res.To, Total: res.Total, Dropped: res.Dropped, Truncated: res.Truncated}, nil
+	case <-w.ctx.Done():
+		return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
+	case <-time.After(replyTimeout):
+		return tools.BgCheckResult{}, fmt.Errorf("bg_check: session busy")
+	}
 }
 
 // slowHook registers a bg job on the supervisor and returns the
 // (id, logPath, stream, finish) tuple. The child owns its log output;
 // stream emits live bg_output and finish uses the supervisor lifetime.
 func (w *turnBridge) slowHook() tools.SlowHook {
-	return func(kind, label string, process tools.BackgroundProcess) (string, string, func(string), func(string, bool)) {
+	return func(kind, label string, process tools.BackgroundProcess) (string, string, func(string), func(string, bool, int)) {
 		if w.env.bg == nil {
 			// No supervisor (tests): local stub that still detaches.
 			id := "bg_" + randomID8()
-			finish := func(result string, isError bool) {
+			finish := func(result string, isError bool, exitCode int) {
 				_ = result
 				_ = isError
 			}
@@ -645,7 +645,7 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 			if process.Stop != nil {
 				process.Stop()
 			}
-			return "", "", func(string) {}, func(string, bool) {}
+			return "", "", func(string) {}, func(string, bool, int) {}
 		}
 		var reg bgRegisterResult
 		select {
@@ -655,29 +655,26 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 			if process.Stop != nil {
 				process.Stop()
 			}
-			return "", "", func(string) {}, func(string, bool) {}
+			return "", "", func(string) {}, func(string, bool, int) {}
 		case <-time.After(replyTimeout):
 			if process.Stop != nil {
 				process.Stop()
 			}
-			return "", "", func(string) {}, func(string, bool) {}
+			return "", "", func(string) {}, func(string, bool, int) {}
 		}
 		if reg.Error != "" || reg.JobID == "" {
 			if process.Stop != nil {
 				process.Stop()
 			}
-			return "", "", func(string) {}, func(string, bool) {}
+			return "", "", func(string) {}, func(string, bool, int) {}
 		}
 		id := reg.JobID
 		// Register the session-global BgTask: from here every chunk is
 		// durable in session+WAL, independent of turn state.
 		//
-		// Delivery is RELIABLE (sendBgTask) with a job-scoped context: a
-		// chunk is the ONLY copy of that output (the runner log dies at
-		// terminal), so neither mailbox pressure nor the TURN ending may
-		// drop it — the job outlives the turn by design. Only the job's
-		// own finish (or a 60s delivery stall) stops delivery, and then
-		// loudly.
+		// Display delivery uses a job-scoped context, so mailbox pressure
+		// and turn completion cannot silently drop updates. Full output also
+		// remains in the runner log for recovery and later inspection.
 		jobCtx, jobStop := context.WithCancel(context.Background())
 		send := func(payload any) { w.sendBgTask(jobCtx, payload) }
 		send(bgTaskRegisterMsg{JobID: id, Kind: kind, Label: label})
@@ -690,7 +687,7 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 			send(bgTaskChunkMsg{JobID: id, Text: chunk})
 		}
 		var once sync.Once
-		finish := func(result string, isError bool) {
+		finish := func(result string, isError bool, exitCode int) {
 			once.Do(func() {
 				status := BgStatusDone
 				if isError {
@@ -700,36 +697,25 @@ func (w *turnBridge) slowHook() tools.SlowHook {
 				// the supervisor finish (notice/wake-up). Late chunks
 				// (pump tail) still deliver: jobStop runs AFTER the
 				// terminal message lands.
-				send(bgTaskFinishMsg{JobID: id, Status: status})
+				send(bgTaskFinishMsg{JobID: id, Status: status, ExitCode: exitCode})
 				jobStop()
 				select {
-				case w.env.bg.inbox <- Envelope{Payload: bgFinishMsg{JobID: id, Status: status, Result: result}}:
+				case w.env.bg.inbox <- Envelope{Payload: bgFinishMsg{JobID: id, Status: status, Result: result, ExitCode: exitCode}}:
 				case <-w.env.bg.done:
 				}
 			})
 		}
-		return id, logPath, stream, finish
-	}
-}
-
-// sendInboxBestEffort delivers a non-critical bg message (register/finish
-// lifecycle mirrors) without blocking: a full inbox drops it — acceptable
-// because the supervisor job remains the lifecycle source of truth and a
-// register is re-created by the next chunk (fail-closed upsert).
-func (w *turnBridge) sendInboxBestEffort(payload any) {
-	if w.env.inbox == nil {
-		return
-	}
-	select {
-	case w.env.inbox <- w.stamp(payload):
-	case <-w.ctx.Done():
-	default:
+		fullLog := process.BrainLog
+		if fullLog == "" {
+			fullLog = logPath
+		}
+		return id, fullLog, stream, finish
 	}
 }
 
 // sendBgTask delivers a bg chunk/terminal RELIABLY: it retries under
 // mailbox pressure and outlives the turn (jobCtx, not w.ctx). A chunk is
-// the only durable copy of its output, so it may never be dropped: the
+// needed by the live display, so delivery applies backpressure: the
 // send blocks (backpressure on the pump) and only gives up when the job
 // itself ends or delivery stalls for 60s — and then it says so.
 func (w *turnBridge) sendBgTask(jobCtx context.Context, payload any) {
@@ -795,7 +781,7 @@ func (w *turnBridge) onCompactionState(state *core.CompactionState) {
 }
 
 func (w *turnBridge) compactionView(state *core.CompactionState, usage provider.Usage, ctxCopy *SessionContext) *SessionRecord {
-	return &SessionRecord{ID: w.env.actorID, Model: w.modelToUse, Status: "running", Messages: w.agent.History(), Compaction: state, Usage: usage, Context: ctxCopy, Attachments: w.snap.attachments}
+	return &SessionRecord{ID: w.env.actorID, Model: w.modelToUse, Options: w.snap.options, Status: "running", Messages: w.agent.History(), Compaction: state, Usage: usage, Context: ctxCopy, Attachments: w.snap.attachments}
 }
 
 func (w *turnBridge) onUsage(cumulative provider.Usage) {

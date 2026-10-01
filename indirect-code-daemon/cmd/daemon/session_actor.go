@@ -113,10 +113,9 @@ type sessionActor struct {
 	pendingResend *pendingResendOp
 	// routeFn reaches another session's actor (fork&resend continuation).
 	routeFn func(id string) (chan Envelope, chan any, bool)
-	// bgDirty marks unpersisted bg chunk output while idle (throttled
-	// saves); flushed on the next tick or at terminal.
+	// bgDirty marks unpersisted bg chunk output while idle; flushed on the
+	// next tick or at terminal.
 	bgDirty bool
-	bgLastPersist int64
 	// cancelRounds counts consecutive watchdog cancels without worker exit
 	// (F3 escalation → quarantine).
 	cancelRounds int
@@ -215,7 +214,6 @@ func (a *sessionActor) run() {
 			}
 			if a.bgDirty && a.wal == nil {
 				a.bgDirty = false
-				a.bgLastPersist = time.Now().UnixMilli()
 				if err := a.store.saveSessionSync(a.rec); err == nil {
 					a.pingChange()
 				} else {
@@ -245,22 +243,10 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.onUserPrompt(m)
 	case queueOpMsg:
 		a.onQueueOp(m)
-	case transcriptChunkMsg:
-		// Legacy protocol surface: the worker streams via the agent sink
-		// straight to the ws actor, so this is never sent. Kept for
-		// wire-compat; handled as a touch-only no-op.
-		a.touch()
-	case toolResultMsg:
-		// Legacy protocol surface: tool results flow inside the agent loop
-		// (agent.RunTool), never as actor messages. Touch-only no-op.
-		a.touch()
 	case approvalResponseMsg:
 		a.onApprovalResponse(m)
 	case questionResponseMsg:
 		a.onQuestionResponse(m)
-	case bgJobFinishedMsg:
-		a.touch()
-		a.emit(map[string]any{"type": "bg_finished", "sessionId": a.id, "jobId": m.JobID, "exit": m.Exit})
 	case stateTimeoutMsg:
 		a.onStateTimeout(m)
 	case editRegenerateMsg:
@@ -339,6 +325,10 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.onBgTaskChunk(m)
 	case bgTaskFinishMsg:
 		a.onBgTaskFinish(m)
+	case bgTaskRecoverMsg:
+		a.onBgTaskRecover(m)
+	case bgTaskRecoverChunkMsg:
+		a.onRecoveredBgChunk(m)
 	case bgTaskReadMsg:
 		a.onBgTaskRead(m)
 	case turnBalloonMsg:
@@ -408,13 +398,6 @@ func (a *sessionActor) handleData(env Envelope) {
 		a.emit(map[string]any{"type": "session_data", "hostId": a.hostID(), "session": pagedHistoryBlock(sessionPayload(a.rec), a.rec)})
 	case queueSendNowMsg:
 		a.onQueueSendNow(m)
-	case alwaysAllowMsg:
-		a.touch()
-		a.rec.Options.Access = "full"
-		opts := a.rec.Options
-		a.saveOrAppend(walEvent{Type: walTypeOptions, Options: &opts})
-		a.pingChange()
-		m.Reply <- struct{}{}
 	case editApplyMsg:
 		m.Reply <- a.onEditApply(m)
 	case compactNowMsg:
@@ -1001,6 +984,18 @@ func (a *sessionActor) onApprovalResponse(m approvalResponseMsg) {
 	}
 	a.touch()
 	approved := m.Approved && modeToolRestriction(a.rec.Options.Mode, a.pending.tool) == ""
+	if approved && m.Always {
+		// "Always allow" is part of this validated approval transaction. The
+		// access grant must reach durable storage before the worker is woken;
+		// a failed write therefore denies this approval and leaves access ask.
+		previous := a.rec.Options.Access
+		a.rec.Options.Access = "full"
+		opts := a.rec.Options
+		if err := a.saveOrAppend(walEvent{Type: walTypeOptions, Options: &opts}); err != nil {
+			a.rec.Options.Access = previous
+			approved = false
+		}
+	}
 	trace("actor.approval", map[string]any{"sid": a.id, "id": m.ID, "approved": approved})
 	a.clearPending()
 	a.setState(stateRunning)
@@ -1113,9 +1108,11 @@ func (a *sessionActor) applyDiscardAndResend(m discardAndResendMsg) {
 	// Text: explicit edit wins; empty = regenerate (reuse the original).
 	text := core.SanitizeUserText(m.Text)
 	ids := append([]string(nil), m.AttachmentIDs...)
-	if strings.TrimSpace(text) == "" && len(ids) == 0 {
-		text = messageUserText(boundary)
+	if m.AttachmentIDs == nil {
 		ids = messageAttachmentIDs(boundary, a.rec.Attachments)
+	}
+	if strings.TrimSpace(text) == "" && m.AttachmentIDs == nil {
+		text = messageUserText(boundary)
 	}
 	if strings.TrimSpace(text) == "" && len(ids) == 0 {
 		replyResend(m.Reply, discardResendResult{Error: "Message cannot be empty"})
@@ -1129,17 +1126,18 @@ func (a *sessionActor) applyDiscardAndResend(m discardAndResendMsg) {
 	// Cut the boundary turn and everything below it.
 	a.rec.Messages = append([]provider.Message(nil), a.rec.Messages[:idx]...)
 	a.rec.FileBalloons = filterBalloonsBelow(a.rec.FileBalloons, m.TurnID)
+	// A compaction summary derived from the edited boundary is stale. Clear it
+	// before the new seeded turn so Continue cannot project away the edit.
+	if c := a.rec.Compaction; c != nil && idx <= c.KeepFrom {
+		a.rec.Compaction = nil
+	}
 	// Insert the new user row in the boundary's place (same turn number:
 	// a re-run of that turn, like a tool retry — numbering stays stable).
-	row := provider.Message{
-		ID: provider.NewMessageID(), Role: provider.RoleUser, Time: time.Now(),
-		TurnIndex: m.TurnID,
-		Content:   []provider.Content{provider.TextBlock{Text: text}},
-		Meta:      attachmentMessageMeta(text, ids, a.rec.Attachments),
-	}
+	row := seededUserMessage(a.rec, text, ids)
+	row.TurnIndex = m.TurnID
 	a.rec.Messages = append(a.rec.Messages, row)
 	// ONE durable commit: the cut AND the new row land together.
-	if err := a.store.persistEdited(a.id, m.TurnID, a.rec.Messages, nil, recordMeta(a.rec)); err != nil {
+	if err := a.store.persistEdited(a.id, m.TurnID, a.rec.Messages[idx:], nil, recordMeta(a.rec)); err != nil {
 		a.rec = previous
 		replyResend(m.Reply, discardResendResult{Error: "Could not save: " + err.Error()})
 		return
@@ -1148,7 +1146,7 @@ func (a *sessionActor) applyDiscardAndResend(m discardAndResendMsg) {
 	a.emit(tailContentEvent(a.hostID(), a.id, "session_content", a.rec, 0, nil))
 	a.pingChange()
 	// Start the turn SEEDED (the row exists; the worker runs Continue).
-	if err := a.startSeededTurn(m.TurnID, m.Model, m.YOLO, m.AttachmentIDs); err != nil {
+	if err := a.startSeededTurn(m.TurnID, m.Model, m.YOLO, ids); err != nil {
 		// The message is SAFE (durable row above) — report, never lose.
 		replyResend(m.Reply, discardResendResult{Error: "Message saved, but the turn did not start: " + err.Error()})
 		return
@@ -1242,7 +1240,7 @@ func (a *sessionActor) applyForkAndResend(m forkAndResendMsg) {
 			break
 		}
 	}
-	if idx <= 0 || m.TurnID <= 0 {
+	if idx < 0 || m.TurnID <= 0 {
 		replyForkResend(m.Reply, forkResendResult{Error: "turn not found (or nothing above it)"})
 		return
 	}
@@ -1253,12 +1251,18 @@ func (a *sessionActor) applyForkAndResend(m forkAndResendMsg) {
 	}
 	text := core.SanitizeUserText(m.Text)
 	ids := append([]string(nil), m.AttachmentIDs...)
-	if strings.TrimSpace(text) == "" && len(ids) == 0 {
-		text = messageUserText(boundary)
+	if m.AttachmentIDs == nil {
 		ids = messageAttachmentIDs(boundary, a.rec.Attachments)
+	}
+	if strings.TrimSpace(text) == "" && m.AttachmentIDs == nil {
+		text = messageUserText(boundary)
 	}
 	if strings.TrimSpace(text) == "" && len(ids) == 0 {
 		replyForkResend(m.Reply, forkResendResult{Error: "Message cannot be empty"})
+		return
+	}
+	if err := validateAttachmentIDs(a.rec, ids); err != nil {
+		replyForkResend(m.Reply, forkResendResult{Error: err.Error()})
 		return
 	}
 	// Fork the prefix ABOVE the boundary (Keep = idx-1 includes it + tools).
@@ -1273,25 +1277,123 @@ func (a *sessionActor) applyForkAndResend(m forkAndResendMsg) {
 	// Insert the new user row INTO the fork (durable before the turn).
 	forkRec, err := a.store.loadSession(fr.NewID)
 	if err != nil {
+		a.removeForkSession(fr.NewID)
 		replyForkResend(m.Reply, forkResendResult{Error: "Could not load the fork: " + err.Error()})
 		return
 	}
-	newTurn := forkRec.TurnSeq + 1
-	row := provider.Message{
-		ID: provider.NewMessageID(), Role: provider.RoleUser, Time: time.Now(),
-		TurnIndex: newTurn,
-		Content:   []provider.Content{provider.TextBlock{Text: text}},
-		Meta:      attachmentMessageMeta(text, ids, forkRec.Attachments),
+	if err := a.copySelectedForkAttachments(forkRec, ids); err != nil {
+		a.removeForkSession(fr.NewID)
+		replyForkResend(m.Reply, forkResendResult{Error: "Could not copy attachment: " + err.Error()})
+		return
 	}
+	newTurn := 0
+	for _, msg := range forkRec.Messages {
+		if msg.TurnIndex > newTurn {
+			newTurn = msg.TurnIndex
+		}
+	}
+	newTurn++
+	row := seededUserMessage(forkRec, text, ids)
+	row.TurnIndex = newTurn
 	forkRec.Messages = append(forkRec.Messages, row)
 	forkRec.TurnSeq = newTurn
 	if err := a.store.saveSessionSync(forkRec); err != nil {
+		a.removeForkSession(fr.NewID)
 		replyForkResend(m.Reply, forkResendResult{Error: "Could not save the fork: " + err.Error()})
 		return
 	}
 	replyForkResend(m.Reply, forkResendResult{NewID: fr.NewID})
 	// Start the seeded turn in the FORK (its actor spawns on this message).
 	a.startForkedSeeded(fr.NewID, newTurn, m.Model, m.YOLO, ids)
+}
+
+// seededUserMessage is the actor-side equivalent of PromptWithMeta's
+// opening-message construction. Seeded turns call Continue, which bypasses
+// the worker's buildTurnPrompt path, so the durable row must already contain
+// attachment text/images and any current date/mode directives.
+func seededUserMessage(rec *SessionRecord, text string, ids []string) provider.Message {
+	options := normalizedOptions(rec.Options)
+	snap := workerSnapshot{options: options}
+	fullText, images := buildTurnPrompt(rec.Attachments, text, ids, options.Mode)
+	sysBlock := buildTurnSystemDirectives(&snap, time.Now())
+	rec.LastDate, rec.LastMode = snap.lastDate, snap.lastMode
+	content := make([]provider.Content, 0, 1+len(images))
+	if sysBlock != "" {
+		// Keep the directive in the model-facing row while retaining a
+		// separate ordinary text block for exact user text and attachments.
+		// The frontend replaces modern user rows from Meta.user_text.
+		content = append(content, provider.TextBlock{Text: sysBlock})
+	}
+	if fullText != "" {
+		content = append(content, provider.TextBlock{Text: fullText})
+	}
+	for _, image := range images {
+		content = append(content, image)
+	}
+	return provider.Message{
+		ID: provider.NewMessageID(), Role: provider.RoleUser, Time: time.Now(),
+		Content: content, Meta: attachmentMessageMeta(text, ids, rec.Attachments),
+	}
+}
+
+func (a *sessionActor) removeForkSession(id string) {
+	if !validSessionID(id) {
+		return
+	}
+	for _, path := range []string{a.store.sessionFile(id), a.store.walPath(id)} {
+		_ = os.Remove(path)
+	}
+	_ = os.RemoveAll(filepath.Join(a.store.sessionsDir(), id))
+	_ = os.RemoveAll(a.store.brainDir(id))
+}
+
+// copySelectedForkAttachments adds boundary/newly selected attachments that
+// are not referenced by the copied prefix. onFork only copies attachments
+// used by that prefix, while fork&resend needs them for its new user row.
+func (a *sessionActor) copySelectedForkAttachments(rec *SessionRecord, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	present := make(map[string]bool, len(rec.Attachments))
+	for _, attachment := range rec.Attachments {
+		present[attachment.ID] = true
+	}
+	dir := filepath.Join(a.store.sessionsDir(), rec.ID, "attachments")
+	for _, id := range ids {
+		if present[id] {
+			continue
+		}
+		var source AttachmentRef
+		found := false
+		for _, attachment := range a.rec.Attachments {
+			if attachment.ID == id {
+				source = attachment
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("unknown attachment %s", id)
+		}
+		copyRef := source
+		copyRef.UploadKey = ""
+		for _, pair := range []struct {
+			source string
+			target *string
+		}{{source.Path, &copyRef.Path}, {source.TextPath, &copyRef.TextPath}} {
+			if pair.source == "" {
+				continue
+			}
+			target := filepath.Join(dir, filepath.Base(pair.source))
+			if err := copyForkAttachment(pair.source, target); err != nil {
+				return err
+			}
+			*pair.target = target
+		}
+		rec.Attachments = append(rec.Attachments, copyRef)
+		present[id] = true
+	}
+	return nil
 }
 
 // startForkedSeeded routes a seededStartMsg to the fork's actor (spawned
@@ -1417,14 +1519,16 @@ func (a *sessionActor) onEditRegenerate(m editRegenerateMsg) {
 
 func (a *sessionActor) onFork(m forkReqMsg) {
 	// Snapshot the prefix (actor-local; never stops the source).
-	if m.Keep < 0 || m.Keep >= len(a.rec.Messages) {
+	if m.Keep < -1 || m.Keep >= len(a.rec.Messages) {
 		m.Reply <- forkResult{Error: "Select a completed message to fork"}
 		return
 	}
-	boundary := a.rec.Messages[m.Keep]
-	if boundary.Role != provider.RoleUser && boundary.Role != provider.RoleAssistant {
-		m.Reply <- forkResult{Error: "Select a user or assistant message to fork"}
-		return
+	if m.Keep >= 0 {
+		boundary := a.rec.Messages[m.Keep]
+		if boundary.Role != provider.RoleUser && boundary.Role != provider.RoleAssistant && boundary.Role != provider.RoleTool {
+			m.Reply <- forkResult{Error: "Select a user, assistant, or tool message to fork"}
+			return
+		}
 	}
 	// The fork INCLUDES the boundary's whole turn (user + assistant + tool
 	// results): every row with the same TurnIndex, stopping at the next
@@ -1432,15 +1536,20 @@ func (a *sessionActor) onFork(m forkReqMsg) {
 	// a user boundary and rejected a tool-row boundary — fork&resend keeps
 	// can land on either.)
 	end := m.Keep + 1
-	for end < len(a.rec.Messages) && a.rec.Messages[end].TurnIndex == boundary.TurnIndex {
+	boundaryTurn := -1
+	if m.Keep >= 0 {
+		boundaryTurn = a.rec.Messages[m.Keep].TurnIndex
+	}
+	for end < len(a.rec.Messages) && a.rec.Messages[end].TurnIndex == boundaryTurn {
 		end++
 	}
 	now := time.Now().UnixMilli()
 	rec := &SessionRecord{
 		ID: "sess_" + randomID8() + randomID8(), CWD: resolvePath(a.rec.CWD),
 		Title: a.rec.Title + " (fork)", TitleSource: "manual", Model: a.rec.Model,
-		Options: normalizedOptions(a.rec.Options), Status: "idle",
+		Options: normalizedOptions(a.rec.Options), Status: "idle", Jailed: a.rec.Jailed,
 		CreatedAt: now, UpdatedAt: now, TurnSeq: a.rec.TurnSeq,
+		LastDate: a.rec.LastDate, LastMode: a.rec.LastMode,
 	}
 	brainDir := a.store.brainDir(a.id)
 	for _, b := range stripBrainBalloonFiles(a.rec.FileBalloons, brainDir) {
@@ -1799,11 +1908,6 @@ func (a *sessionActor) applyBgWAL(ev walEvent) {
 	}
 }
 
-// bgPersistThrottle bounds direct-save frequency for chunk streams while
-// idle (each save rewrites the whole session JSON). WAL appends during a
-// running turn are cheap; idle saves are throttled to one per interval.
-const bgPersistThrottleMs = int64(1000)
-
 // onBgTaskRegister registers a session-global bg task.
 func (a *sessionActor) onBgTaskRegister(m bgTaskRegisterMsg) {
 	a.touch()
@@ -1822,10 +1926,9 @@ func (a *sessionActor) onBgTaskRegister(m bgTaskRegisterMsg) {
 	}
 }
 
-// onBgTaskChunk appends output to a session BgTask. RAM is immediate and
-// persistence is IMMEDIATE too: a chunk is the only copy of that output
-// (no runner log survives terminal), so a crash must never lose bytes —
-// the throttle window was a silent-loss bug (regression: ChunksDurable).
+// onBgTaskChunk appends output to the session display tail. RAM is immediate
+// and persistence is immediate too, while the runner/brain logs retain the
+// complete output for recovery and inspection.
 func (a *sessionActor) onBgTaskChunk(m bgTaskChunkMsg) {
 	if m.Text == "" || findBgTask(a.rec, m.JobID) < 0 {
 		return
@@ -1849,11 +1952,10 @@ func (a *sessionActor) onBgTaskChunk(m bgTaskChunkMsg) {
 			from = 1
 		}
 		a.emit(map[string]any{"type": "bg_output", "hostId": a.hostID(), "sessionId": a.id, "jobId": m.JobID, "text": m.Text,
-			"from": from, "total": t.TotalLines, "seq": t.Seq})
+			"from": from, "total": t.TotalLines, "fromByte": t.TotalBytes - int64(len(m.Text)), "totalBytes": t.TotalBytes, "seq": t.Seq})
 	}
 	if err := a.saveOrAppend(walEvent{Type: walTypeBgChunk, BgChunk: &BgChunk{JobID: m.JobID, Text: m.Text}}); err == nil {
 		a.bgDirty = false
-		a.bgLastPersist = time.Now().UnixMilli()
 		if a.wal == nil {
 			a.pingChange()
 		}
@@ -1862,8 +1964,8 @@ func (a *sessionActor) onBgTaskChunk(m bgTaskChunkMsg) {
 	}
 }
 
-// onBgTaskFinish marks a BgTask terminal, persists immediately, and
-// cleans the runner files now that every byte is durable in session+WAL.
+// onBgTaskFinish marks a BgTask terminal and persists its display snapshot;
+// the complete runner/brain logs remain available for recovery and reading.
 func (a *sessionActor) onBgTaskFinish(m bgTaskFinishMsg) {
 	i := findBgTask(a.rec, m.JobID)
 	if i < 0 {
@@ -1878,7 +1980,6 @@ func (a *sessionActor) onBgTaskFinish(m bgTaskFinishMsg) {
 	fin := &BgFinish{JobID: m.JobID, Status: m.Status, ExitCode: m.ExitCode, EndedAt: time.Now().UnixMilli()}
 	applyBgFinish(a.rec, fin)
 	a.bgDirty = false
-	a.bgLastPersist = time.Now().UnixMilli()
 	if err := a.saveOrAppend(walEvent{Type: walTypeBgFinish, BgFinish: fin}); err == nil {
 		a.pingChange()
 	}
@@ -1918,6 +2019,12 @@ func (a *sessionActor) onBgTaskRead(m bgTaskReadMsg) {
 // v1 semantics: late-result into the live turn when running, otherwise a
 // wake-up turn on the idle session carrying the notice as its prompt.
 func (a *sessionActor) onBgNotice(m bgNoticeMsg) {
+	if a.closing {
+		return
+	}
+	if _, err := a.restoreRunnerTask(m.JobID); err != nil {
+		return
+	}
 	// V2-003: idempotent by transcript identity — a redelivered notice
 	// must not append twice or start a second wake-up turn. The ack lets
 	// the BG supervisor retire the pending delivery.

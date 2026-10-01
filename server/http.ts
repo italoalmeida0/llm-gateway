@@ -31,15 +31,15 @@ export function baseHeaders(req?: Request, isHtml = false): Headers {
   h.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   if (isHtml) {
     // Google GSI button needs accounts.google.com scripts/frames; everything
-    // else is self-hosted. No 'unsafe-inline' — the one inline script we ship
-    // (the theme init in index.html, sets data-theme before first paint) is
-    // allowlisted by its sha256 hash. If index.html's inline script changes,
-    // recompute: sha256 base64 of its exact textContent.
+    // else is self-hosted. No 'unsafe-inline' — the inline scripts we ship in
+    // index.html (touch-device flag + theme init, both before first paint) are
+    // allowlisted by their sha256 hashes. If index.html's inline scripts
+    // change, recompute: sha256 base64 of each exact textContent.
     h.set(
       "Content-Security-Policy",
       [
         "default-src 'self'",
-        "script-src 'self' https://accounts.google.com/gsi/client 'sha256-udweQu0/QO+buA7Ub3sQ33gElcVLpH0v6ZhZe9H8LB8='",
+        "script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com/gsi/client 'sha256-aAOKq7p5tbRkm1hytS/pMUnesamMP3FEi+D9l1QSsQI=' 'sha256-udweQu0/QO+buA7Ub3sQ33gElcVLpH0v6ZhZe9H8LB8='",
         "frame-src https://accounts.google.com/gsi/",
         "connect-src 'self' https://accounts.google.com/gsi/ https://api.iconify.design",
         "img-src 'self' data:",

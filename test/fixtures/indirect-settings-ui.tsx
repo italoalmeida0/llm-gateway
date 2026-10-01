@@ -14,20 +14,15 @@ render(() => {
     id: "daemon",
     hostId: "host-a",
     revision: "v1",
+    settings: { auto_compact_threshold: 80, no_auto_title: false },
+    // Existing skills stay readable by the composer, but are not editable in
+    // this settings surface anymore.
     skills: {
       review: {
         name: "review",
         description: "Review",
-        body: "Original instructions",
+        body: "Existing instructions",
         enabled: true,
-      },
-    },
-    mcpServers: {
-      local: {
-        command: "exe",
-        args: ["path with spaces"],
-        transport: "stdio",
-        envKeys: ["TOKEN"],
       },
     },
   });
@@ -69,11 +64,7 @@ render(() => {
           permission: () => "default",
           testNotify: () => {},
         },
-        pushSub: {
-          supported: () => false,
-          state: () => "off",
-          sync: async () => {},
-        },
+        pushSub: { supported: () => false, state: () => "off", sync: async () => {} },
         daemonUpdate: {
           info: () => null,
           toggle: () => {},

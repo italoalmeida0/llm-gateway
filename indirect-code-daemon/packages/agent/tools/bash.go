@@ -203,7 +203,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 		return finishSync(waitErr)
 	}
 	// From here the job owns the process lifetime.
-	jobID, _, stream, deliver := t.Slow("bash", a.Command, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, Stop: func() {
+	jobID, fullLog, stream, deliver := t.Slow("bash", a.Command, BackgroundProcess{JobID: proc.JobID, PID: proc.PID, LogPath: proc.LogPath, BrainLog: proc.BrainLog, Stop: func() {
 		runCancel()
 		proc.Stop()
 	}})
@@ -268,10 +268,14 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 			det["background_job_id"] = jobID
 			det["detached"] = true
 		}
-		deliver(text, failed)
+		exitCode := commandExitCode(res.Attrs)
+		if err != nil {
+			exitCode = -1
+		}
+		deliver(text, failed, exitCode)
 	}()
 	return core.ToolResult{
-		Content: []provider.Content{provider.TextBlock{Text: bashBackgroundNotice(jobID, a.Command)}},
+		Content: []provider.Content{provider.TextBlock{Text: bashBackgroundNotice(jobID, a.Command, fullLog)}},
 		Attrs: []core.Attr{
 			{Key: "status", Value: "background"},
 			{Key: "job_id", Value: jobID},
@@ -284,9 +288,12 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 // detaches: the job id (read output with bg_check, wait with sleep,
 // force-stop with bg_cancel) and that the daemon wakes the turn with a
 // completion notice when the process ends.
-func bashBackgroundNotice(jobID, cmd string) string {
+func bashBackgroundNotice(jobID, cmd string, fullLog ...string) string {
 	var b strings.Builder
 	b.WriteString("Command moved to background (still running).\n")
+	if len(fullLog) > 0 && fullLog[0] != "" {
+		fmt.Fprintf(&b, "The complete output is saved to %s when the command finishes.\n", fullLog[0])
+	}
 	fmt.Fprintf(&b, "To read the output, call bg_check with job_id %q (paged log: tail by default, offset/limit for more).\n", jobID)
 	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q.\n", jobID)
 	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then.\n")

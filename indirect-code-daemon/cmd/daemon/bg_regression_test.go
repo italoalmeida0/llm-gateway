@@ -34,7 +34,7 @@ func TestBgChunkSplitMidLineKeepsNumbering(t *testing.T) {
 	upsertBgTask(rec, &BgTask{ID: "bg_1", Kind: "bash", Label: "x", Status: BgStatusRunning, StartedAt: 1})
 	// The pump hands us byte windows; a window can cut a line in half.
 	applyBgChunk(rec, "bg_1", "a\nb", bgLiveCap) // lines 1-2
-	applyBgChunk(rec, "bg_1", "\nc", bgLiveCap) // line 3 (split BEFORE its \n)
+	applyBgChunk(rec, "bg_1", "\nc", bgLiveCap)  // line 3 (split BEFORE its \n)
 	applyBgChunk(rec, "bg_1", "\nd\ne", bgLiveCap)
 	task := rec.BgTasks[0]
 	if task.TotalLines != 5 {
@@ -87,8 +87,8 @@ func TestBgStreamIncludesPreDetachOutput(t *testing.T) {
 	var streamed []string
 	bt := &tools.BashTool{
 		CWD: dir, LogDir: dir,
-		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool)) {
-			return "bg_1", p.BrainLog, func(chunk string) { mu.Lock(); streamed = append(streamed, chunk); mu.Unlock() }, func(string, bool) {}
+		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool, int)) {
+			return "bg_1", p.BrainLog, func(chunk string) { mu.Lock(); streamed = append(streamed, chunk); mu.Unlock() }, func(string, bool, int) {}
 		},
 	}
 	args, _ := json.Marshal(map[string]any{"command": "echo EARLY-1; echo EARLY-2; sleep 1; echo LATE-3"})
@@ -130,8 +130,8 @@ func TestBgStreamIncludesPreDetachOutputPython(t *testing.T) {
 	var streamed []string
 	pt := &tools.PythonTool{
 		CWD: dir, LogDir: dir,
-		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool)) {
-			return "bg_1", p.BrainLog, func(chunk string) { mu.Lock(); streamed = append(streamed, chunk); mu.Unlock() }, func(string, bool) {}
+		Slow: func(kind, label string, p tools.BackgroundProcess) (string, string, func(string), func(string, bool, int)) {
+			return "bg_1", p.BrainLog, func(chunk string) { mu.Lock(); streamed = append(streamed, chunk); mu.Unlock() }, func(string, bool, int) {}
 		},
 	}
 	code := "import time\nprint('PY-EARLY')\ntime.sleep(1)\nprint('PY-LATE')\n"

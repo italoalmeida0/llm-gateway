@@ -195,7 +195,10 @@ export function createDataLayer(opts: {
       onError: (o, e) => console.warn(`[rc-sync] ${o?.name}:`, e),
       pull: async ({ name }) => {
         const resp = await request(hostId, { type: "pull", collection: name });
-        const raw = Array.isArray(resp.items) ? resp.items : [];
+        if (!Array.isArray(resp?.items)) {
+          throw new Error(`pull '${name}' returned no items`);
+        }
+        const raw = resp.items;
         if (name === "projects") {
           return { items: raw.map((p: any) => normalizeProject(p, hostId)) };
         }
@@ -289,7 +292,13 @@ export function createDataLayer(opts: {
         if (pull.hostId !== p.hostId) return false;
         pending.delete(replyId);
         clearTimeout(p.timer);
-        if (typeof pull.error === "string" && pull.error) p.reject(new Error(pull.error));
+        const relayError = typeof pull.error === "string" && pull.error
+          ? pull.error
+          : (msg.type === "error" || pull.replyTo === "pull")
+            ? String(pull.message || "daemon pull failed")
+            : "";
+        if (relayError) p.reject(new Error(relayError));
+        else if (!Array.isArray(pull.items)) p.reject(new Error("pull response was missing items"));
         else p.resolve(pull);
         return true;
       }

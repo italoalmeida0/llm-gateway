@@ -1,0 +1,15 @@
+Pandoc WebAssembly asset used by web/src/office.ts.
+
+Recovered from the original chatbot integration:
+repository: italoalmeida0/chatbot
+commit: e2ef03aa88611f4c151afe248089745d8d90ab18
+path: pandoc.wasm
+Git blob: e53270fa5423ba6d99e7b2aa9f60dad2baf62c1b
+SHA256: 28b8957656c10114bc34e63978503b06be7404c92129fef9299782fd1829eef8
+Size: 58379729 bytes
+
+Keep this file in web/public so clean checkouts, CI and Docker builds include
+the engine without a separate reference checkout. The browser loads it lazily
+when converting an Office attachment. Do not substitute a command-line-only
+Pandoc build: this integration requires the convert and hs_init_with_rtsopts
+WebAssembly exports.

@@ -59,8 +59,12 @@ func (b *bgSupervisor) adoptRunners() {
 	for _, st := range states {
 		switch {
 		case st.Terminal():
-			// Outcome already recorded (v2: the session BgTask is the
-			// durable record — no brain copy needed).
+			// Restore the session tail/status before acknowledging the notice.
+			// The out log also repairs a copy interrupted by a crash.
+			if err := repairTerminalCopy(st); err != nil {
+				trace("runner.copy.repair_failed", map[string]any{"job": st.JobID, "error": err.Error()})
+			}
+			b.sessionInbox(st.SessionID, bgTaskRecoverMsg{JobID: st.JobID})
 			// V2R-001: only a task that was a real BACKGROUND job notifies.
 			// An inline (foreground) outcome was already consumed by the
 			// agent, and a suppressed (assistant) cancel is silent — a
@@ -122,6 +126,7 @@ func (b *bgSupervisor) adoptRunners() {
 			if err := runner.WriteState(root, st); err != nil {
 				continue
 			}
+			b.sessionInbox(st.SessionID, bgTaskRecoverMsg{JobID: st.JobID})
 			// V2R-001: a dead runner still honours the disposition — a
 			// suppressed (assistant) cancel or an inline foreground return
 			// must NOT become a wake-up just because the runner died before
@@ -160,57 +165,88 @@ func (b *bgSupervisor) adoptOne(st *runner.State) {
 	// tail from the current end of the out log streams subsequent bytes to
 	// the session (bg_output), exactly like a live job. The file is the
 	// contract; the socket remains optional.
-	go b.tailAdoptedOutput(st)
+	go b.tailAdoptedOutput(st, j.done)
 	go b.watchAdopted(st.JobID, st)
 }
 
 // tailAdoptedOutput streams new bytes of an adopted runner's out log to
 // the session until the file stops growing (the job ended). Bounded: it
 // reads incrementally and stops on the job's done channel.
-func (b *bgSupervisor) tailAdoptedOutput(st *runner.State) {
-	if st.LogPath == "" || b.emit == nil {
-		return // headless harness: no outbound surface
+func (b *bgSupervisor) tailAdoptedOutput(st *runner.State, jobDone <-chan struct{}) {
+	if st.LogPath == "" || b.session == nil || runner.ReadDisposition(b.rootDir(), st.JobID) != runner.DispBackground {
+		return
 	}
-	// Start at the CURRENT end: the pre-restart output is already in the
-	// log the client can read; only NEW bytes are streamed (no duplicate
-	// replay). The reader is late-arrival tolerant.
+	// Rebuild the durable tail first, including bytes produced while the
+	// daemon was down. Resume at the actor's acknowledged byte offset.
 	var offset int64
-	if fi, err := os.Stat(st.LogPath); err == nil {
-		offset = fi.Size()
+	for {
+		reply := make(chan bgTaskRecoverResult, 1)
+		if !b.sessionInboxReliable(st.SessionID, bgTaskRecoverMsg{JobID: st.JobID, Reply: reply}) {
+			return
+		}
+		select {
+		case res := <-reply:
+			if res.Error == nil {
+				offset = res.Offset
+				goto ready
+			}
+			trace("runner.tail.restore_failed", map[string]any{"job": st.JobID, "error": res.Error.Error()})
+		case <-jobDone:
+			return
+		case <-b.done:
+			return
+		case <-time.After(time.Second):
+		}
+		select {
+		case <-jobDone:
+			return
+		case <-b.done:
+			return
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
+ready:
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	buf := make([]byte, 32*1024)
 	for {
 		select {
+		case <-jobDone:
+			return
 		case <-b.done:
 			return
 		case <-tick.C:
-		}
-		if b.emit == nil {
-			return
 		}
 		f, err := os.Open(st.LogPath)
 		if err != nil {
 			return
 		}
-		n, _ := f.ReadAt(buf, offset)
-		if n > 0 {
-			offset += int64(n)
-			// Numbered live output flows through the actor (single source);
-			// adoption tails feed the session reliably (chunks are the
-			// only copy of this output).
-			b.sessionInboxReliable(st.SessionID, bgTaskChunkMsg{JobID: st.JobID, Text: string(buf[:n])})
-		}
-		_ = f.Close()
-		if !pidAlive(pidString(st.PID)) {
-			// One last read to catch the final bytes, then stop.
-			if f, err := os.Open(st.LogPath); err == nil {
-				if n, _ := f.ReadAt(buf, offset); n > 0 {
-					b.sessionInboxReliable(st.SessionID, bgTaskChunkMsg{JobID: st.JobID, Text: string(buf[:n])})
+		// Drain the available prefix completely, including the final burst.
+		for {
+			n, readErr := f.ReadAt(buf, offset)
+			if n > 0 {
+				if !b.sessionInboxReliable(st.SessionID, bgTaskRecoverChunkMsg{JobID: st.JobID, Text: string(buf[:n]), Offset: offset}) {
+					f.Close()
+					return
 				}
-				_ = f.Close()
+				offset += int64(n)
 			}
+			if readErr != nil || n == 0 {
+				break
+			}
+			select {
+			case <-jobDone:
+				f.Close()
+				return
+			case <-b.done:
+				f.Close()
+				return
+			default:
+			}
+		}
+		f.Close()
+		cur, err := runner.ReadState(runner.StatePath(b.rootDir(), st.JobID))
+		if err != nil || cur.Terminal() || !pidAlive(pidString(st.PID)) {
 			return
 		}
 	}
@@ -360,11 +396,8 @@ func runnerNoticeText(st *runner.State) string {
 	return fmt.Sprintf("[Background %s task %s] %s. Read the output with bg_check (job_id %s).", st.Kind, st.JobID, status, st.JobID)
 }
 
-// gcRunners (F8): dead generation binaries go once nothing references
-// them. Per-job files (state/disposition/launch/out/brain) are cleaned
-// AT TERMINAL by cleanupRunnerFiles — the session BgTask is the durable
-// record, so no 7-day retention. This GC only sweeps leftovers (crash
-// between terminal and cleanup) plus dead binaries.
+// gcRunners retires acknowledged runner identities and unused binaries.
+// Full output logs and brain copies are retained; runners/out is GC-exempt.
 func (b *bgSupervisor) gcRunners(now int64) {
 	root := b.rootDir()
 	aliveVersions := map[string]bool{}
@@ -401,12 +434,6 @@ func (b *bgSupervisor) gcRunners(now int64) {
 			_ = os.Remove(runner.StatePath(root, st.JobID))
 			_ = os.Remove(runner.DispositionPath(root, st.JobID))
 			_ = os.Remove(filepath.Join(runner.RunnersDir(root), st.JobID+".launch"))
-			if st.LogPath != "" {
-				_ = os.Remove(st.LogPath)
-			}
-			if st.BrainPath != "" && st.BrainPath != st.LogPath {
-				_ = os.Remove(st.BrainPath)
-			}
 		} else {
 			aliveVersions[st.RunnerVersion] = true
 		}

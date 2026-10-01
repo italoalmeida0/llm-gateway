@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -211,6 +212,26 @@ func (s *wsServer) dispatch(raw []byte) {
 	if err := json.Unmarshal(raw, &base); err != nil {
 		return
 	}
+	// A draft configure_session has no session actor. It still updates the
+	// host's remembered selection, and must be admitted to the host lane so a
+	// subsequent config pull observes the write. (The session lane below is
+	// only for an existing session.)
+	if base.Type == "configure_session" && base.SessionID == "" {
+		s.hostLane.pushFn(func() {
+			var req struct {
+				RequestID string         `json:"requestId"`
+				Model     string         `json:"model"`
+				Options   SessionOptions `json:"options"`
+			}
+			_ = json.Unmarshal(raw, &req)
+			if err := s.rememberSelection(req.Model, req.Options); err != nil {
+				s.emit(map[string]any{"type": "error", "hostId": s.host(), "requestId": req.RequestID, "message": err.Error()})
+			}
+		}, func() {
+			s.emit(map[string]any{"type": "error", "hostId": s.host(), "requestId": base.RequestID, "message": "Host busy"})
+		})
+		return
+	}
 	if base.SessionID == "" || base.Type == "cancel" {
 		// Host lane: host-level commands plus CANCELLATION — a cancel must
 		// never queue behind the very command it exists to stop (V2-006);
@@ -239,7 +260,9 @@ func (s *wsServer) dispatch(raw []byte) {
 				Options SessionOptions `json:"options"`
 			}
 			_ = json.Unmarshal(raw, &req)
-			s.rememberSelection(req.Model, req.Options)
+			if err := s.rememberSelection(req.Model, req.Options); err != nil {
+				s.emit(map[string]any{"type": "error", "hostId": s.host(), "requestId": base.RequestID, "sessionId": base.SessionID, "message": err.Error()})
+			}
 		}, func() {
 			s.emit(map[string]any{"type": "error", "hostId": s.host(), "message": "Host busy"})
 		})
@@ -588,6 +611,7 @@ func (s *wsServer) handleRaw(raw []byte) {
 	case "edit_message":
 		var req struct {
 			SessionID     string    `json:"sessionId"`
+			RequestID     string    `json:"requestId"`
 			Index         int       `json:"index"`
 			Text          string    `json:"text"`
 			Model         string    `json:"model"`
@@ -599,10 +623,10 @@ func (s *wsServer) handleRaw(raw []byte) {
 		if req.Regen {
 			// Regenerate/discard&resend rides the ATOMIC primitive now (turn
 			// id resolved from the row index below).
-			s.onEditMessage(req.SessionID, req.Index, req.Text, req.Model, req.Regen, req.YOLO, req.AttachmentIDs)
+			s.onEditMessage(req.SessionID, req.RequestID, req.Index, req.Text, req.Model, req.Regen, req.YOLO, req.AttachmentIDs)
 			return
 		}
-		s.onEditMessage(req.SessionID, req.Index, req.Text, req.Model, req.Regen, req.YOLO, req.AttachmentIDs)
+		s.onEditMessage(req.SessionID, req.RequestID, req.Index, req.Text, req.Model, req.Regen, req.YOLO, req.AttachmentIDs)
 
 	case "discard_and_resend":
 		// ATOMIC discard&resend / regenerate (turnId = the boundary turn's
@@ -943,22 +967,8 @@ func (s *wsServer) onApprovalResponse(sessionID, callID string, approved, always
 	if res.Error != "" {
 		return
 	}
-	// "always allow" upgrades access first (actor applies + persists).
-	if always && approved {
-		done := make(chan any, 1)
-		select {
-		case res.Inbox <- Envelope{SessionID: sessionID, Payload: alwaysAllowMsg{Reply: done}}:
-		case <-time.After(replyTimeout):
-			return
-		}
-		select {
-		case <-done:
-		case <-time.After(replyTimeout):
-			return
-		}
-	}
 	select {
-	case res.Inbox <- Envelope{SessionID: sessionID, Payload: approvalResponseMsg{ID: callID, Approved: approved}}:
+	case res.Inbox <- Envelope{SessionID: sessionID, Payload: approvalResponseMsg{ID: callID, Approved: approved, Always: always}}:
 	case <-time.After(replyTimeout):
 	}
 }
@@ -1122,12 +1132,12 @@ func (s *wsServer) onRegenerate(sessionID string, index int, text, model string,
 	})
 }
 
-func (s *wsServer) onEditMessage(sessionID string, index int, text, model string, regen bool, yolo bool, attachmentIDs *[]string) {
+func (s *wsServer) onEditMessage(sessionID, requestID string, index int, text, model string, regen bool, yolo bool, attachmentIDs *[]string) {
 	// Every failure path answers the client (edit_message_result): a silent
 	// return used to lose the user's edited text forever (the frontend had
 	// already dropped its edit buffer).
 	fail := func(err string) {
-		s.emit(map[string]any{"type": "edit_message_result", "hostId": s.host(), "sessionId": sessionID, "ok": false, "error": err})
+		s.emit(map[string]any{"type": "edit_message_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": false, "error": err})
 	}
 	rec := s.readRecord(sessionID)
 	if rec == nil {
@@ -1186,7 +1196,7 @@ func (s *wsServer) onEditMessage(sessionID string, index int, text, model string
 	if regen {
 		// Discard&resend rides the ATOMIC primitive: the turn id is the
 		// boundary row's turn (index -> TurnIndex).
-		s.onDiscardAndResend(sessionID, "", discardAndResendMsg{
+		s.onDiscardAndResend(sessionID, requestID, discardAndResendMsg{
 			TurnID: msg.TurnIndex, Text: text, AttachmentIDs: ids,
 			Model: model, YOLO: yolo,
 		})
@@ -1203,7 +1213,7 @@ func (s *wsServer) onEditMessage(sessionID string, index int, text, model string
 	case r := <-er:
 		if er2, ok := r.(editApplyResult); ok && er2.Error == "" {
 			s.notifyChange("sessions")
-			s.emit(map[string]any{"type": "edit_message_result", "hostId": s.host(), "sessionId": sessionID, "ok": true})
+			s.emit(map[string]any{"type": "edit_message_result", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID, "ok": true})
 		} else if ok && er2.Error != "" {
 			fail(er2.Error)
 		}
@@ -1552,20 +1562,35 @@ func (s *wsServer) onUndoTurnChanges(sessionID string, turnIndex int, path, requ
 
 func (s *wsServer) onUpdateConfig(raw []byte) {
 	var req struct {
-		RequestID string         `json:"requestId"`
-		Settings  map[string]any `json:"settings"`
+		RequestID        string         `json:"requestId"`
+		ExpectedRevision *string        `json:"expectedRevision"`
+		Settings         map[string]any `json:"settings"`
 	}
-	_ = json.Unmarshal(raw, &req)
+	if err := json.Unmarshal(raw, &req); err != nil {
+		s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": false, "error": "Invalid config update: " + err.Error()})
+		return
+	}
 	// v2: settings only (mcpServers/skills ignored — removed domains).
 	cfg := s.cfg.load()
 	if cfg == nil {
 		s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": false, "error": "no config"})
 		return
 	}
+	currentRevision := configRevision(cfg)
+	if req.ExpectedRevision != nil && *req.ExpectedRevision != currentRevision {
+		s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": false, "error": "Configuration changed; reload settings before saving"})
+		return
+	}
 	next := *cfg
-	applySettingsMap(&next.Settings, req.Settings)
+	if err := applySettingsMap(&next.Settings, req.Settings); err != nil {
+		s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": false, "error": "Invalid agent settings: " + err.Error()})
+		return
+	}
 	next.Settings = normalizedHarness(next.Settings)
-	s.cfg.store(&next)
+	if err := validateEditableConfig(&next); err != nil {
+		s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": false, "error": err.Error()})
+		return
+	}
 	cfgDir := s.configDir
 	if cfgDir == "" {
 		cfgDir = s.dataDir
@@ -1574,26 +1599,34 @@ func (s *wsServer) onUpdateConfig(raw []byte) {
 		s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": false, "error": err.Error()})
 		return
 	}
+	// Disk is the durable source of truth. Publish the new pointer only after
+	// the atomic save succeeds, so a failed write cannot leave RAM ahead of
+	// the next daemon restart.
+	s.cfg.store(&next)
 	s.emit(map[string]any{"type": "config_updated", "requestId": req.RequestID, "hostId": s.host(), "success": true, "revision": configRevision(&next)})
 	s.notifyChange("config")
 }
 
 // rememberSelection persists the last explicit model/options choice as the
 // default for new sessions (v1 parity: pull config exposes lastSelection).
-func (s *wsServer) rememberSelection(model string, options SessionOptions) {
+func (s *wsServer) rememberSelection(model string, options SessionOptions) error {
 	cfg := s.cfg.load()
 	if cfg == nil {
-		return
+		return errors.New("no config")
 	}
 	if model == "" && cfg.LastSelection != nil {
 		model = cfg.LastSelection.Model
 	}
 	next := *cfg
 	next.LastSelection = &ModelSelection{Model: model, SessionOptions: normalizedOptions(options)}
-	s.cfg.store(&next)
 	cfgDir := s.configDir
 	if cfgDir == "" {
 		cfgDir = s.dataDir
 	}
-	_ = saveDaemonConfig(cfgDir, &next)
+	if err := saveDaemonConfig(cfgDir, &next); err != nil {
+		return err
+	}
+	s.cfg.store(&next)
+	s.notifyChange("config")
+	return nil
 }

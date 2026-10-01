@@ -1,12 +1,6 @@
-// Browser regression tests using an existing Playwright installation.
-//
-// The settings pipeline (skills/mcpServers config edits, expectedRevision
-// saves, config_updated/mcp_status routing) is driven through the
-// createSettings hook surface — the Settings modal only renders the
-// General tab today (the Skills/MCP form sections were cut from the modal),
-// so the forms' DOM is gone but the full pipeline and its wire protocol
-// remain behind the hook. Modal-level interactions (Save/Cancel/reload
-// latest, the error alert, the Saving… state) stay real DOM.
+// Browser regression coverage for the remaining host settings pipeline:
+// general settings save/cancel/reload, expectedRevision conflicts, host and
+// request correlation, offline failures, and authoritative mirror acks.
 import assert from "node:assert/strict";
 import solidPlugin from "../plugins/solid-plugin";
 import iconifyPlugin from "../plugins/iconify-solid-plugin";
@@ -44,300 +38,90 @@ try {
   await page.goto(server.url.toString());
   await page.waitForFunction(() => (window as any).settingsUI.m);
 
-  // Add a skill through the editor pipeline.
-  await page.evaluate(() => {
-    const a = (window as any).settingsUI;
-    a.m.openSettings();
-    a.m.setNewSkillName("style");
-    a.m.setNewSkillBody("Use consistent formatting.");
-    a.m.handleAddSkill();
-  });
+  // Historical skills remain available to the composer as a read-only mirror.
+  await page.evaluate(() => (window as any).settingsUI.m.openSettings());
   assert.deepEqual(
-    await page.evaluate(() => {
-      const m = (window as any).settingsUI.m;
-      return [Object.keys(m.skills()).sort(), Object.keys(m.savedSkills())];
-    }),
-    [["review", "style"], ["review"]],
+    await page.evaluate(() => Object.keys((window as any).settingsUI.m.savedSkills())),
+    ["review"],
   );
 
-  // Edit the skill: the editor is anchored to it (the name is locked).
-  await page.evaluate(() => (window as any).settingsUI.m.editSkill("style"));
-  assert.equal(
-    await page.evaluate(() => (window as any).settingsUI.m.editingSkill()),
-    "style",
-  );
-  assert.equal(
-    await page.evaluate(() => (window as any).settingsUI.m.newSkillName()),
-    "style",
-  );
+  // General settings send only the supported settings map.
   await page.evaluate(() => {
     const a = (window as any).settingsUI;
-    a.m.setNewSkillBody("Edited instructions");
-    a.m.handleAddSkill();
+    a.m.setDaemonSettings({ ...a.m.daemonSettings(), autoCompactPercent: 90 });
   });
-  await page
-    .getByRole("button", { name: "Save changes", exact: true })
-    .click();
-  let request = await page.evaluate(() =>
-    (window as any).settingsUI.commands.at(-1),
-  );
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  let request = await page.evaluate(() => (window as any).settingsUI.commands.at(-1));
   assert.equal(request.expectedRevision, "v1");
-  assert.equal(request.skills.style.body, "Edited instructions");
+  assert.equal(request.settings.auto_compact_threshold, 90);
+  assert.equal("skills" in request, false);
+  assert.equal("mcpServers" in request, false);
   assert.equal(
     await page.getByRole("button", { name: "Saving…" }).isDisabled(),
     true,
   );
 
-  // config_updated routing: foreign host and foreign requestId never
-  // release the save; the matching one does.
+  // Foreign host/request acknowledgements cannot release a save.
   await page.evaluate((id: string) => {
-    const a = (window as any).settingsUI;
-    a.m.handleSettingsMessage({
-      type: "config_updated",
-      hostId: "other",
-      requestId: id,
-      success: true,
-      revision: "v2",
-    });
-    a.m.handleSettingsMessage({
-      type: "config_updated",
-      hostId: "host-a",
-      requestId: "other",
-      success: true,
-      revision: "v2",
-    });
+    const m = (window as any).settingsUI.m;
+    m.handleSettingsMessage({ type: "config_updated", hostId: "other", requestId: id, success: true, revision: "v2" });
+    m.handleSettingsMessage({ type: "config_updated", hostId: "host-a", requestId: "other", success: true, revision: "v2" });
   }, request.requestId);
-  assert.equal(
-    await page.evaluate(() => (window as any).settingsUI.m.savingSettings()),
-    true,
-  );
-  await page.evaluate(
-    (id: string) =>
-      (window as any).settingsUI.m.handleSettingsMessage({
-        type: "config_updated",
-        hostId: "host-a",
-        requestId: id,
-        success: false,
-        error: "Disk unavailable",
-      }),
-    request.requestId,
-  );
-  assert.equal(
-    await page
-      .getByRole("alert")
-      .textContent()
-      .then((s: string) => s.includes("Disk unavailable")),
-    true,
-  );
-  assert.equal(
-    await page.evaluate(() => (window as any).settingsUI.m.skills().style.body),
-    "Edited instructions",
-  );
-  await page
-    .getByRole("button", { name: "Save changes", exact: true })
-    .click();
-  request = await page.evaluate(() =>
-    (window as any).settingsUI.commands.at(-1),
-  );
-  await page.evaluate(
-    (id: string) =>
-      (window as any).settingsUI.m.handleSettingsMessage({
-        type: "config_updated",
-        hostId: "host-a",
-        requestId: id,
-        success: true,
-        revision: "v2",
-      }),
-    request.requestId,
-  );
-  assert.equal(
-    await page.evaluate(() => (window as any).settingsUI.m.showConfigModal()),
-    true,
-    "must wait for authoritative mirror",
-  );
+  assert.equal(await page.evaluate(() => (window as any).settingsUI.m.savingSettings()), true);
+
+  // A daemon failure leaves the draft in place and surfaces its message.
+  await page.evaluate((id: string) => (window as any).settingsUI.m.handleSettingsMessage({
+    type: "config_updated", hostId: "host-a", requestId: id, success: false, error: "Disk unavailable",
+  }), request.requestId);
+  assert.match((await page.getByRole("alert").textContent()) || "", /Disk unavailable/);
+  assert.equal(await page.evaluate(() => (window as any).settingsUI.m.daemonSettings().autoCompactPercent), 90);
+
+  // Successful acknowledgement still waits for the authoritative mirror.
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  request = await page.evaluate(() => (window as any).settingsUI.commands.at(-1));
+  await page.evaluate((id: string) => (window as any).settingsUI.m.handleSettingsMessage({
+    type: "config_updated", hostId: "host-a", requestId: id, success: true, revision: "v2",
+  }), request.requestId);
+  assert.equal(await page.evaluate(() => (window as any).settingsUI.m.showConfigModal()), true);
   await page.evaluate((request: any) => {
     const a = (window as any).settingsUI;
-    a.setDoc({ ...a.doc(), revision: "v2", skills: request.skills });
+    a.setDoc({ ...a.doc(), revision: "v2", settings: request.settings });
   }, request);
-  await page.waitForFunction(
-    () => !(window as any).settingsUI.m.showConfigModal(),
-  );
-  assert.equal(
-    await page.evaluate(() => (window as any).settingsUI.notices.at(-1)),
-    "Settings saved on the host",
-  );
+  await page.waitForFunction(() => !(window as any).settingsUI.m.showConfigModal());
+  assert.equal(await page.evaluate(() => (window as any).settingsUI.notices.at(-1)), "Settings saved on the host");
 
-  // A local unsaved edit survives a remote doc change (conflict state),
-  // "Reload latest" restores the authoritative doc, Cancel closes.
+  // A remote revision disables saving until the latest configuration is loaded.
   await page.evaluate(() => {
     const a = (window as any).settingsUI;
     a.m.openSettings();
-    a.m.editSkill("review");
-    a.m.setNewSkillBody("Unsaved edit");
-    a.setDoc({
-      ...a.doc(),
-      revision: "v3",
-      skills: {
-        ...a.doc().skills,
-        remote: { name: "remote", body: "Remote change", enabled: true },
-      },
-    });
+    a.m.setDaemonSettings({ ...a.m.daemonSettings(), autoCompactPercent: 70 });
+    a.setDoc({ ...a.doc(), revision: "v3", settings: { auto_compact_threshold: 80 } });
   });
-  assert.equal(
-    await page.evaluate(() => (window as any).settingsUI.m.newSkillBody()),
-    "Unsaved edit",
-  );
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Save changes", exact: true })
-      .isDisabled(),
-    true,
-  );
-  await page
-    .getByRole("button", {
-      name: "Reload latest settings (discard local edits)",
-    })
-    .click();
-  assert.equal(
-    await page.evaluate(
-      () => (window as any).settingsUI.m.skills().remote.body,
-    ),
-    "Remote change",
-  );
+  assert.equal(await page.getByRole("button", { name: "Save changes", exact: true }).isDisabled(), true);
+  await page.getByRole("button", { name: "Reload latest settings (discard local edits)" }).click();
+  assert.equal(await page.evaluate(() => (window as any).settingsUI.m.daemonSettings().autoCompactPercent), 80);
+
+  // Offline saves are rejected without creating a command; Cancel discards the draft.
+  await page.evaluate(() => {
+    const a = (window as any).settingsUI;
+    a.m.setDaemonSettings({ ...a.m.daemonSettings(), autoCompactPercent: 95 });
+    a.setOnline(false);
+  });
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  assert.match((await page.getByRole("alert").textContent()) || "", /Reconnect the host/);
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  assert.equal(await page.evaluate(() => (window as any).settingsUI.m.showConfigModal()), false);
 
-  // MCP edit pipeline: args are parsed from JSON, saved secrets stay
-  // omitted, and a duplicate name never overwrites an existing server.
+  // Host changes close the modal and clear the in-flight state.
   await page.evaluate(() => {
     const a = (window as any).settingsUI;
-    a.m.openSettings();
-    a.m.editMcpServer("local");
-  });
-  assert.equal(
-    await page.evaluate(() => (window as any).settingsUI.m.newMcpArgs()),
-    '["path with spaces"]',
-  );
-  await page.evaluate(() => {
-    const a = (window as any).settingsUI;
-    a.m.setNewMcpArgs('["-y", "/path with spaces"]');
-    a.m.handleAddMcpServer();
-  });
-  assert.deepEqual(
-    await page.evaluate(
-      () => (window as any).settingsUI.m.mcpServers().local.args,
-    ),
-    ["-y", "/path with spaces"],
-  );
-  assert.equal(
-    await page.evaluate(
-      () => (window as any).settingsUI.m.mcpServers().local.env,
-    ),
-    undefined,
-    "saved secrets must remain omitted",
-  );
-  await page.evaluate(() => {
-    const a = (window as any).settingsUI;
-    a.m.setNewMcpName("local");
-    a.m.setNewMcpCmd("overwrite");
-    a.m.handleAddMcpServer();
-  });
-  assert.equal(
-    await page.evaluate(
-      () => (window as any).settingsUI.m.mcpServers().local.command,
-    ),
-    "exe",
-    "duplicate name silently overwrote server",
-  );
-  await page.evaluate(() => (window as any).settingsUI.m.resetMcpEditor());
-
-  // test_mcp round trip: the result is scoped to the matching requestId
-  // and a config change clears the stale test result.
-  await page.evaluate(() => (window as any).settingsUI.m.testMcpServer("local"));
-  request = await page.evaluate(() =>
-    (window as any).settingsUI.commands.at(-1),
-  );
-  assert.equal(request.type, "test_mcp");
-  await page.evaluate(
-    (id: string) =>
-      (window as any).settingsUI.m.handleSettingsMessage({
-        type: "mcp_status",
-        hostId: "host-a",
-        requestId: id,
-        name: "local",
-        status: "tested",
-        toolCount: 3,
-        message: "No tool was invoked.",
-      }),
-    request.requestId,
-  );
-  assert.equal(
-    await page.evaluate(
-      () => (window as any).settingsUI.m.mcpTest("local").toolCount,
-    ),
-    3,
-  );
-  await page.evaluate(() => (window as any).settingsUI.m.toggleMcp("local"));
-  assert.equal(
-    await page.evaluate(() => (window as any).settingsUI.m.mcpTest("local")),
-    undefined,
-    "changed config kept stale test success",
-  );
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  assert.equal(
-    await page.evaluate(
-      () => (window as any).settingsUI.m.mcpServers().local.disabled,
-    ),
-    undefined,
-    "cancel did not restore server state",
-  );
-
-  // Host change clears drafts and closes the modal; foreign-host status
-  // events are ignored; invalid skill names (__proto__) are rejected.
-  await page.evaluate(() => {
-    const a = (window as any).settingsUI;
-    a.m.openSettings();
-    a.m.setNewMcpName("draft");
+    a.setOnline(true);
     a.setHost("host-b");
   });
-  assert.deepEqual(
-    await page.evaluate(() => {
-      const m = (window as any).settingsUI.m;
-      return [
-        m.showConfigModal(),
-        Object.keys(m.skills()),
-        Object.keys(m.mcpServers()),
-        m.newMcpName(),
-      ];
-    }),
-    [false, [], [], ""],
-  );
-  await page.evaluate(() => {
-    const a = (window as any).settingsUI;
-    a.setDoc({ id: "daemon", hostId: "host-b", revision: "b1" });
-    a.m.handleSettingsMessage({
-      type: "mcp_status",
-      hostId: "host-a",
-      name: "local",
-      status: "tested",
-    });
-    a.m.openSettings();
-    a.m.setNewSkillName("__proto__");
-    a.m.setNewSkillBody("Invalid name");
-    a.m.handleAddSkill();
-  });
-  assert.deepEqual(
-    await page.evaluate(() =>
-      Object.keys((window as any).settingsUI.m.skills()),
-    ),
-    [],
-  );
+  assert.equal(await page.evaluate(() => (window as any).settingsUI.m.showConfigModal()), false);
+
   await page.setViewportSize({ width: 390, height: 844 });
-  assert.equal(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-    true,
-  );
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   assert.deepEqual(errors, []);
   console.log("Indirect settings browser regressions passed");
 } finally {

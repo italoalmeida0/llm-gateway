@@ -12,7 +12,6 @@ import { prettyArgs, parseContentBlocks } from "../utils/wire";import {
   appendTextDelta as reduceTextDelta,
   appendToolArgsDelta as reduceToolArgs,
   appendToolResult as reduceToolResult,
-  cutTail,
   finishTurn,
   mergeAssistantMessage,
   mergeUsage,
@@ -649,12 +648,6 @@ export function createTranscript(opts: {
   function appendToolResult(callId: string, result: string | undefined, isError?: boolean, startedAt?: number, durationMs?: number, details?: any, messageId?:string) {
     setMessages((prev) => reduceToolResult(prev, callId, result, isError, startedAt, durationMs, details, messageId));
   }
-  // Drop rendered messages below a raw keep-index (optimistic edit/regen cut).
-  function cutLiveTail(keepRawIdx: number) {
-    setMessages((prev) => cutTail(prev, keepRawIdx));
-    showQuestion(null);
-  }
-
   function cancelTurnForSession(sessionId: string, e?: MouseEvent | KeyboardEvent) {
     e?.stopPropagation();
     if (!sessionId || !opts.isOpen()) return;
@@ -689,14 +682,26 @@ export function createTranscript(opts: {
 
   const [forking, setForking] = createSignal(false);
   let forkRequestId = "";
+  let forkHostId = "";
+  let forkSessionId = "";
+  let forkEditPending = false;
+  let forkEditSource: typeof editSource = null;
+  let forkEditFingerprint = "";
   function forkMessage(block: RenderBlock) {
-    if (!opts.getSessionId() || !opts.isOpen() || forking()) return;
+    const sid = opts.getSessionId();
+    const host = opts.getHostId();
+    if (!sid || !opts.isOpen() || forking()) return;
     const last = block.kind === "series" ? block.extras.at(-1) || block.msg : block.msg;
     if (last.srcIdx == null) return;
     forkRequestId = crypto.randomUUID();
+    forkHostId = host;
+    forkSessionId = sid;
+    forkEditPending = false;
+    forkEditSource = null;
+    forkEditFingerprint = "";
     setForking(true);
     opts.onForkKind?.("fork");
-    opts.send({ type: "fork_session", sessionId: opts.getSessionId(), index: last.srcIdx, requestId: forkRequestId });
+    opts.send({ type: "fork_session", sessionId: sid, index: last.srcIdx, requestId: forkRequestId });
   }
   // Regenerate from message idx: the daemon drops that message and everything
   // after it, then re-runs the turn (chatbot regenerateMessage semantics).
@@ -714,16 +719,13 @@ export function createTranscript(opts: {
     // Locate the user message that prompted this assistant turn.
     // Search backwards from idx in messages() for the preceding user message.
     let userMsg: ChatMessage | null = null;
-    let userIdx = -1;
     for (let k = msgs.length - 1; k >= 0; k--) {
       if (msgs[k]?.role === "user" && (msgs[k].srcIdx ?? k) <= idx) {
         userMsg = msgs[k];
-        userIdx = k;
         break;
       }
     }
     if (!userMsg) return;
-    const userRawIdx = typeof userMsg?.srcIdx === "number" ? userMsg.srcIdx : (userMsg ? userIdx : idx);
     const userText = userMsg ? messageText(userMsg) : "";
 
     const choice = await opts.showChoice({
@@ -737,6 +739,9 @@ export function createTranscript(opts: {
     if (!choice || opts.getHostId() !== host || opts.getSessionId() !== sid || !opts.isOpen() || sessionStatus() === "running") return;
     if (choice === "fork") {
       forkRequestId = crypto.randomUUID();
+      forkHostId = host;
+      forkSessionId = sid;
+      forkEditPending = false;
       setForking(true);
       opts.onForkKind?.("regenerate");
       opts.send({
@@ -752,9 +757,12 @@ export function createTranscript(opts: {
       return;
     }
     // ATOMIC discard&resend (empty text = regenerate: the daemon reuses
-    // the boundary row's original text). Cut on ACK only.
+    // the boundary row's original text).
     resendRequestId = crypto.randomUUID();
-    resendCutIdx = userRawIdx;
+    resendHostId = host;
+    resendSessionId = sid;
+    resendEditSource = null;
+    resendEditFingerprint = "";
     opts.onForkKind?.("regenerate");
     opts.send({
       type: "discard_and_resend",
@@ -770,31 +778,49 @@ export function createTranscript(opts: {
   }
 
   /** discard_and_resend / edit_message ACK: the daemon committed (or
-   * refused). On ok the edit buffer drops and the tail cuts (the daemon
-   * broadcasts session_truncated; this is the optimistic mirror). On
-   * error the text STAYS on screen — nothing was lost. */
+   * refused). On success the originating edit buffer may be cleared after
+   * the daemon ACK; transcript cuts remain event-driven. On error the text
+   * STAYS on screen — nothing was lost. */
   function noteResendResult(msg: any) {
-    if (msg.requestId && msg.requestId !== resendRequestId) return;
+    if (!resendRequestId || msg.requestId !== resendRequestId || msg.sessionId !== resendSessionId ||
+      opts.getSessionId() !== resendSessionId || (msg.hostId !== undefined && msg.hostId !== resendHostId) ||
+      opts.getHostId() !== resendHostId) return;
     if (msg.ok) {
-      // Optimistic mirror of the daemon's committed cut (it broadcasts
-      // session_truncated as the authoritative event).
-      if (resendCutIdx >= 0) cutLiveTail(resendCutIdx);
-      resendCutIdx = -1;
-      cancelEditMsg();
+      if (resendEditSource && editSource === resendEditSource && editingMsgIdx() === resendEditSource.idx &&
+        editFingerprint() === resendEditFingerprint) cancelEditMsg();
+      resendEditSource = null;
+      resendEditFingerprint = "";
+      resendRequestId = "";
+      resendHostId = "";
+      resendSessionId = "";
       return;
     }
-    resendCutIdx = -1;
+    resendEditSource = null;
+    resendEditFingerprint = "";
+    resendRequestId = "";
+    resendHostId = "";
+    resendSessionId = "";
     setSessionStatus("idle");
     opts.toast(msg.error || "Could not resend the message", "err");
   }
   let resendRequestId = "";
-  let resendCutIdx = -1;
+  let resendHostId = "";
+  let resendSessionId = "";
+  let resendEditSource: typeof editSource = null;
+  let resendEditFingerprint = "";
   let editSource: { host: string; sid: string; idx: number; source: string } | null = null;
   function editDraftPrefix() {
     return `llmgw-edit:${opts.getHostId()}:${opts.getSessionId()}:`;
   }
   function sourceOf(m: ChatMessage) {
     return JSON.stringify([m.role, messageText(m), (m.attachments || []).map((a) => a.id)]);
+  }
+  function editFingerprint() {
+    return JSON.stringify([
+      editingMsgText(),
+      editingAttachments().map((a) => a.id),
+      editAttachments.pendingAttachments().map((a) => a.key),
+    ]);
   }
 
   function persistEditDraft() {
@@ -875,6 +901,7 @@ export function createTranscript(opts: {
     const sid = opts.getSessionId();
     const host = opts.getHostId();
     const source = editSource;
+    const initialEditFingerprint = editFingerprint();
     const text = editingMsgText().trim();
     if (savingEdit()) return;
     if (editAttachments.preparingAttachments()) { opts.toast("Wait for files to finish extracting", "err"); return; }
@@ -901,26 +928,32 @@ export function createTranscript(opts: {
           { id: "fork", label: "Fork & resend", hint: "Preserves here, resends in a copy" },
         ],
       });
-      if (!choice || opts.getHostId() !== host || opts.getSessionId() !== sid || editSource !== source || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
+      if (!choice || editFingerprint() !== initialEditFingerprint || opts.getHostId() !== host || opts.getSessionId() !== sid || editSource !== source || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
       attachmentIds = [...editingAttachments().map((a) => a.id), ...await Promise.all(editAttachments.pendingAttachments().map((a) => editAttachments.uploadOneAttachment(sid, a)))];
-      if (opts.getHostId() !== host || opts.getSessionId() !== sid || editSource !== source || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
+      if (editFingerprint() !== initialEditFingerprint || opts.getHostId() !== host || opts.getSessionId() !== sid || editSource !== source || editingMsgIdx() !== idx || !opts.isOpen() || sessionStatus() === "running") return;
       if (choice === "fork") {
         // Fork at this message carrying the edited text: the daemon
         // applies it to the boundary user message and resends from there.
         forkRequestId = crypto.randomUUID();
+        forkHostId = host;
+        forkSessionId = sid;
+        forkEditPending = true;
+        forkEditSource = source;
+        forkEditFingerprint = editFingerprint();
         setForking(true);
         opts.onForkKind?.("resend");
-        opts.send({ type: "fork_session", sessionId: sid, index: targetRawIdx, requestId: forkRequestId, editText: text, editModel: getModel(), editYolo: getYolo(), attachmentIds });
-        cancelEditMsg();
+        opts.send({ type: "fork_session", sessionId: sid, index: targetRawIdx, requestId: forkRequestId, editText: text, model: getModel(), yolo: getYolo(), attachmentIds });
         return;
       }
       // ATOMIC discard&resend: the daemon cuts + inserts + starts in one
       // durable commit and ALWAYS answers (discard_and_resend_result).
-      // The optimistic cut + edit-buffer drop happen on the ACK — a
-      // failure keeps the edited text on screen (the daemon persists the
-      // row BEFORE the turn starts, so nothing can be lost).
+      // The editor is cleared only after a matching successful ACK; the
+      // daemon persists the row BEFORE the turn starts, so nothing can be lost.
       resendRequestId = crypto.randomUUID();
-      resendCutIdx = targetRawIdx;
+      resendHostId = host;
+      resendSessionId = sid;
+      resendEditSource = source;
+      resendEditFingerprint = editFingerprint();
       opts.send({
         type: "discard_and_resend",
         sessionId: sid,
@@ -936,9 +969,14 @@ export function createTranscript(opts: {
     }
     // Non-regen edit (save only): same ack contract (edit_message_result).
     resendRequestId = crypto.randomUUID();
+    resendHostId = host;
+    resendSessionId = sid;
+    resendEditSource = source;
+    resendEditFingerprint = editFingerprint();
     opts.send({
       type: "edit_message",
       sessionId: sid,
+      requestId: resendRequestId,
       index: targetRawIdx,
       text,
       model: getModel(),
@@ -1108,6 +1146,46 @@ export function createTranscript(opts: {
       });
     }
   }
+  function noteApprovalResolved(sessionId: string | undefined, callId: string) {
+    if (sessionId === opts.getSessionId() && pendingApproval()?.callId === callId) {
+      setPendingApproval(null);
+    }
+  }
+  function forkAckMatches(msg: any): boolean {
+    return !!forkRequestId && msg?.requestId === forkRequestId &&
+      (msg?.sessionId === undefined || msg.sessionId === forkSessionId) &&
+      (msg?.hostId === undefined || msg.hostId === forkHostId) &&
+      opts.getSessionId() === forkSessionId && opts.getHostId() === forkHostId;
+  }
+  function noteForkSessionResult(msg: any): boolean {
+    if (!forkAckMatches(msg)) return false;
+    setForking(false);
+    const origin = forkEditSource;
+    if (forkEditPending && msg?.session?.id && origin && origin === editSource &&
+      editingMsgIdx() === origin.idx && editFingerprint() === forkEditFingerprint) cancelEditMsg();
+    forkRequestId = "";
+    forkHostId = "";
+    forkSessionId = "";
+    forkEditPending = false;
+    forkEditSource = null;
+    forkEditFingerprint = "";
+    return true;
+  }
+  function noteForkAndResendResult(msg: any): boolean {
+    if (!forkAckMatches(msg)) return false;
+    setForking(false);
+    const origin = forkEditSource;
+    if (msg?.ok && forkEditPending && origin && origin === editSource &&
+      editingMsgIdx() === origin.idx && editFingerprint() === forkEditFingerprint) cancelEditMsg();
+    if (!msg?.ok) opts.toast(msg.error || "Could not fork and resend", "err");
+    forkRequestId = "";
+    forkHostId = "";
+    forkSessionId = "";
+    forkEditPending = false;
+    forkEditSource = null;
+    forkEditFingerprint = "";
+    return true;
+  }
   /** question_resolved event (with session/question guard). */
   function noteQuestionResolved(sessionId: string | undefined, questionId: string) {
     if (sessionId === opts.getSessionId() && pendingQuestion()?.id === questionId) showQuestion(null);
@@ -1126,6 +1204,18 @@ export function createTranscript(opts: {
     contextVersion++; transcriptOrder.reset();
     transcriptRequestId="";
     snapshotVersion++; pendingSnapshot = null;
+    forkRequestId = "";
+    forkHostId = "";
+    forkSessionId = "";
+    forkEditPending = false;
+    forkEditSource = null;
+    forkEditFingerprint = "";
+    setForking(false);
+    resendRequestId = "";
+    resendHostId = "";
+    resendSessionId = "";
+    resendEditSource = null;
+    resendEditFingerprint = "";
     editSource = null;
     editAttachments.clearAttachments();
     setEditingAttachments([]);
@@ -1199,12 +1289,14 @@ export function createTranscript(opts: {
     setWorkspaceSink, noteSessionDataRequestGuard,
     handleTruncated, handleStatusEvent, handleAgentEvent,
     noteApprovalRequest, noteQuestionResolved, noteQuestionError,
+    noteApprovalResolved,
     appendReasoningDelta,
     appendToolArgsDelta, appendToolResult,
     cancelTurnForSession, cancelCurrentTurn, respondApproval,
     forking, forkRequestId: () => forkRequestId,
-    clearForkRequest: () => { forkRequestId = ""; }, setForking,
-    forkMessage, regenerateMsg, startEditMsg, cancelEditMsg, saveEditMsg,
+    clearForkRequest: () => { forkRequestId = ""; forkHostId = ""; forkSessionId = ""; forkEditPending = false; forkEditSource = null; forkEditFingerprint = ""; }, setForking,
+    forkMessage, forkAckMatches, noteForkSessionResult, noteForkAndResendResult,
+    regenerateMsg, startEditMsg, cancelEditMsg, saveEditMsg,
     editAttachments, editingAttachments, setEditingAttachments, savingEdit, editMentions,
     noteResendResult,
     resetForSession, resetCaches, purgeSession, pushUserMessage, beginTurn,

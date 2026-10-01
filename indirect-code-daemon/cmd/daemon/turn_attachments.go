@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,6 +15,21 @@ import (
 	"llm-gateway/indirect-code-daemon/packages/filetrack"
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
+
+// attachmentUploadKey is a stable identity for one upload request. A name
+// and MIME type identify a UI label, not the bytes behind it; including the
+// effective name/MIME, content and extracted text prevents a changed file
+// from being mistaken for an idempotent retry.
+func attachmentUploadKey(name, mime string, data []byte, text string) string {
+	h := sha256.New()
+	for _, part := range [][]byte{[]byte(name), []byte(mime), data, []byte(text)} {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(part)))
+		_, _ = h.Write(n[:])
+		_, _ = h.Write(part)
+	}
+	return "sha256:" + fmt.Sprintf("%x", h.Sum(nil))
+}
 
 // Attachments: upload/get/validate/prune. v2: actor-local (no locks).
 // Uploads apply to the live record; running turns persist via WAL attach
@@ -126,9 +143,16 @@ func (a *sessionActor) onAttachUpload(m attachUploadMsg) attachUploadResult {
 	if mime == "" {
 		mime = detected
 	}
+	name := filepath.Base(strings.ReplaceAll(strings.TrimSpace(m.Name), "\\", "/"))
+	text := []rune(m.Text)
+	if len(text) > maxAttachmentTextRunes {
+		text = text[:maxAttachmentTextRunes]
+	}
+	textValue := string(text)
+	uploadKey := attachmentUploadKey(name, mime, data, textValue)
 	// Idempotent retry: same upload twice returns the first ref.
 	for _, at := range a.rec.Attachments {
-		if at.UploadKey == m.Name+m.Mime {
+		if at.UploadKey == uploadKey {
 			return attachUploadResult{Attachment: messageAttachment{at.ID, at.Name, at.Mime, at.Size}}
 		}
 	}
@@ -158,17 +182,13 @@ func (a *sessionActor) onAttachUpload(m attachUploadMsg) attachUploadResult {
 	if err := file.Close(); err != nil {
 		return fail("Could not store attachment")
 	}
-	ref := AttachmentRef{ID: filepath.Base(path), UploadKey: m.Name + m.Mime, Name: filepath.Base(strings.ReplaceAll(strings.TrimSpace(m.Name), "\\", "/")), Mime: mime, Size: int64(len(data)), Path: path}
-	if m.Text != "" {
-		text := []rune(m.Text)
-		if len(text) > maxAttachmentTextRunes {
-			text = text[:maxAttachmentTextRunes]
-		}
+	ref := AttachmentRef{ID: filepath.Base(path), UploadKey: uploadKey, Name: name, Mime: mime, Size: int64(len(data)), Path: path}
+	if textValue != "" {
 		textPath = path + "_extracted.md"
-		if err := os.WriteFile(textPath, []byte(string(text)), 0o600); err != nil {
+		if err := os.WriteFile(textPath, []byte(textValue), 0o600); err != nil {
 			return fail("Could not store extracted text")
 		}
-		ref.TextPath, ref.TextChars = textPath, len(text)
+		ref.TextPath, ref.TextChars = textPath, len([]rune(textValue))
 	}
 	previous := a.rec.Attachments
 	a.rec.Attachments = append(append([]AttachmentRef{}, previous...), ref)

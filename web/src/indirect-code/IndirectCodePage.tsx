@@ -336,6 +336,7 @@ export default function IndirectCodePage() {
   const turnChanges = createTurnChanges({
     send: (payload) => relay.send(payload),
     getSessionId: () => activeSessionId(),
+    getHostId: () => hosts.activeHostId(),
     toast: notice.toast,
     showConfirm: modals.showConfirm,
   });
@@ -649,6 +650,7 @@ export default function IndirectCodePage() {
   /** Removes local leftovers of a session that vanished from the mirror. */
   function purgeSessionTrace(id: string) {
     transcript.purgeSession(id);
+    background.purgeSession(id);
     review.purgeSessionFiles(id);
     queue.purgeQueue(id);
     // Local drafts (composer + inline edits) live only in this browser:
@@ -678,8 +680,8 @@ export default function IndirectCodePage() {
     turnNotify.noteMessage(msg);
     // The relay fans out every host; foreground events belong to the selected host only.
     if (msg.type !== "host_status" && msg.hostId && msg.hostId !== hosts.activeHostId()) return;
-    if (msg.type === "error" && msg.requestId === transcript.forkRequestId()) {
-      transcript.setForking(false);
+    if (msg.type === "error" && transcript.forkAckMatches(msg)) {
+      transcript.noteForkAndResendResult({ ...msg, ok: false });
       forkKind = null;
     }
     if (settings.handleSettingsMessage(msg)) return;
@@ -702,8 +704,8 @@ export default function IndirectCodePage() {
       // The events below are action acks that drive local continuation.
 
       case "session_forked": {
-        if (!transcript.forking() || msg.requestId !== transcript.forkRequestId() || !msg.session?.id) break;
-        transcript.setForking(false);
+        if (!transcript.forking() || !transcript.forkAckMatches(msg) || !msg.session?.id) break;
+        transcript.noteForkSessionResult(msg);
         mirror.dataLayer.storeFor(hosts.activeHostId()).syncAll().catch((e) => console.warn("[rc-sync] syncAll:", e));
         selectSession(msg.session.id);
         if (msg.resent) {
@@ -852,19 +854,20 @@ export default function IndirectCodePage() {
 
       case "discard_and_resend_result":
       case "edit_message_result": {
-        // Atomic resend/save ACK: on ok the daemon committed (tail cut +
-        // new row + turn). On error the user's edit text stays on screen —
-        // nothing is ever lost to a silent failure.
+        // Atomic resend/save ACK: on ok the daemon committed the operation;
+        // transcript replacement still arrives through its ordered events.
+        // On error the user's edit text stays on screen.
         transcript.noteResendResult(msg);
         break;
       }
       case "fork_and_resend_result": {
+        if (!transcript.noteForkAndResendResult(msg)) break;
         if (msg.ok && msg.newSessionId) {
           notice.toast("Fork created — resending with edited text", "ok");
           mirror.dataLayer.storeFor(hosts.activeHostId()).syncAll().catch(() => {});
           selectSession(msg.newSessionId);
-        } else if (!msg.ok) {
-          notice.toast(msg.error || "Could not fork and resend", "err");
+        } else if (msg.ok) {
+          notice.toast("Fork created", "ok");
         }
         break;
       }
@@ -897,7 +900,15 @@ export default function IndirectCodePage() {
       case "bg_output": {
         // Live stream: glued after the session tail in the bg card.
         // Scoped by sessionId so a stale chunk never lands on the open session.
-        if (typeof msg.jobId === "string") background.noteOutput(msg.jobId, typeof msg.text === "string" ? msg.text : "", msg.sessionId, typeof (msg as any).from === "number" ? (msg as any).from : undefined);
+        if (typeof msg.jobId === "string") background.noteOutput(
+          msg.jobId,
+          typeof msg.text === "string" ? msg.text : "",
+          msg.sessionId,
+          typeof (msg as any).fromByte === "number" ? (msg as any).fromByte : (typeof (msg as any).from === "number" ? (msg as any).from : undefined),
+          typeof (msg as any).seq === "number" ? (msg as any).seq : undefined,
+          typeof (msg as any).totalBytes === "number" ? (msg as any).totalBytes : undefined,
+          typeof (msg as any).fromByte === "number",
+        );
         break;
       }
 
@@ -950,6 +961,10 @@ export default function IndirectCodePage() {
       }
       case "tool_approval_request": {
         transcript.noteApprovalRequest(msg);
+        break;
+      }
+      case "approval_resolved": {
+        transcript.noteApprovalResolved(msg.sessionId, msg.callId);
         break;
       }
       case "convert_request": {
@@ -1114,6 +1129,7 @@ export default function IndirectCodePage() {
         turnChanges.reset();
         transcript.resetForSession();
         transcript.resetCaches();
+        background.reset();
         notice.setAppNotice(null);
         setActiveSessionId("");
         projects.setActiveProjectId("");

@@ -25,6 +25,8 @@ export interface SessionBgTask {
   exitCode?: number;
   content?: string;
   totalLines?: number;
+  totalBytes?: number;
+  seq?: number;
   droppedLines?: number;
   /** 1-indexed first line covered by content (tail may be shorter). */
   contentFrom?: number;
@@ -40,8 +42,8 @@ const JOBS_CAP = 50;
 interface JobLive {
   /** Concatenated live text (fallback for chunks without seq). */
   text: string;
-  /** Numbered segments by daemon seq: the join key with the tail. */
-  segs: { seq: number; from: number; text: string }[];
+  /** Numbered segments by daemon seq: byte offsets join live output to the snapshot tail. */
+  segs: { seq: number; from: number; totalBytes?: number; text: string; bytes: number; bytesMode: boolean }[];
 }
 
 export function createBackground(opts: {
@@ -91,6 +93,7 @@ export function createBackground(opts: {
       return { ...prev, [sid]: list };
     });
     if (msg.type === "bg_task_registered") ensureClock();
+    else if (msg.type === "bg_task_finished") maybeStopClock();
   }
 
   /** Authoritative session task list (from session payload bgTasks). */
@@ -113,35 +116,62 @@ export function createBackground(opts: {
         totalLines: typeof t.totalLines === "number" ? t.totalLines : undefined,
         droppedLines: typeof t.droppedLines === "number" ? t.droppedLines : undefined,
         contentFrom: typeof t.contentFrom === "number" ? t.contentFrom : undefined,
+        totalBytes: typeof t.totalBytes === "number" ? t.totalBytes : undefined,
+        seq: typeof t.seq === "number" ? t.seq : undefined,
       });
     }
     setBySession((prev) => ({ ...prev, [owner]: parsed }));
     pruneLive(owner, parsed);
     if (parsed.some((t) => t.status === "running")) ensureClock();
+    else maybeStopClock();
   }
 
   /** Live chunk from the daemon. Written into the OWNING session's
    * buffers (msg.sessionId), never the active one: a stale chunk after a
    * session switch lands where it belongs (or nowhere if unknown). */
-  function noteOutput(jobId: string, text: string, sid?: string, from?: number, seq?: number) {
+  function noteOutput(jobId: string, text: string, sid?: string, from?: number, seq?: number, totalBytes?: number, byteOffset = false) {
     if (typeof jobId !== "string" || typeof text !== "string" || !text) return;
     const owner = String(sid || opts.getSessionId() || "");
     if (!owner) return;
     const known = tasksOf(owner).some((t) => t.id === jobId);
     const hasBuf = !!liveBySession()[owner]?.[jobId];
     if (!known && !hasBuf) return; // foreign/stale: not ours
+    let accepted = false;
     setLiveBySession((prev) => {
       const sess = { ...(prev[owner] || {}) };
       const cur = sess[jobId] || { text: "", segs: [] };
       const segs = [...cur.segs];
-      // Only NUMBERED chunks (seq + first line) join by line math; an
-      // unnumbered chunk falls back to the text buffer below.
-      if (typeof seq === "number" && typeof from === "number" && from >= 1 && segs.every((s) => s.seq !== seq)) {
-        segs.push({ seq, from, text });
+      // Numbered chunks join to the authoritative snapshot; legacy chunks
+      // without offsets remain available through the text fallback.
+      const numbered = typeof seq === "number" && typeof from === "number" &&
+        (byteOffset ? from >= 0 : from >= 1);
+      if (numbered && segs.every((s) => s.seq !== seq)) {
+        const bytes = new TextEncoder().encode(text).byteLength;
+        segs.push({ seq: seq!, from: from!, totalBytes, text, bytes, bytesMode: byteOffset });
         segs.sort((a, b) => a.seq - b.seq);
         if (segs.length > 400) segs.splice(0, segs.length - 400);
+        let retainedBytes = segs.reduce((sum, segment) => sum + segment.bytes, 0);
+        while (segs.length > 1 && retainedBytes - segs[0].bytes >= OUTPUT_CAP) {
+          retainedBytes -= segs.shift()!.bytes;
+        }
+        if (retainedBytes > OUTPUT_CAP) {
+          const first = segs[0];
+          const encoded = new TextEncoder().encode(first.text);
+          let cut = retainedBytes - OUTPUT_CAP;
+          // Start the retained tail on a UTF-8 boundary.
+          while (cut < encoded.length && (encoded[cut] & 0xc0) === 0x80) cut++;
+          const removed = new TextDecoder().decode(encoded.subarray(0, cut));
+          segs[0] = { ...first,
+            text: new TextDecoder().decode(encoded.subarray(cut)),
+            bytes: encoded.length - cut,
+            from: first.from + (first.bytesMode ? cut : (removed.match(/\n/g)?.length || 0)),
+          };
+        }
+        accepted = true;
       }
-      const joined = cur.text + text;
+      // Duplicate numbered chunks are replayed after reconnect; do not
+      // append them to the unnumbered fallback buffer either.
+      const joined = (numbered && !accepted) ? cur.text : cur.text + text;
       sess[jobId] = {
         text: joined.length > OUTPUT_CAP ? joined.slice(-OUTPUT_CAP) : joined,
         segs,
@@ -211,20 +241,42 @@ export function createBackground(opts: {
   }
 
   /**
-   * Live tail for a job: the streamed lines the snapshot tail does NOT
-   * cover yet. The daemon numbers every chunk (seq + first line), so the
-   * cut is exact: keep lines whose absolute number is past the snapshot
-   * total. Chunks without numbering (legacy) fall back to the text buffer.
+   * Live tail for a job: streamed bytes/lines the snapshot does NOT cover
+   * yet. New daemons provide zero-based UTF-8 byte offsets and a snapshot
+   * sequence; older line-numbered chunks retain the legacy path.
    */
   function liveTail(jobId: string): string {
     const sid = opts.getSessionId();
     const task = tasksOf(sid).find((t) => t.id === jobId);
     const snapTotal = task && typeof task.totalLines === "number" ? task.totalLines : 0;
+    const snapBytes = task && typeof task.totalBytes === "number" ? task.totalBytes : undefined;
     const live = liveBySession()[sid]?.[jobId];
     if (!live) return "";
     if (live.segs.length > 0) {
+      const byteSegments = live.segs.some((s) => s.bytesMode);
+      const segments = byteSegments
+        ? live.segs.filter((s) => s.bytesMode)
+        : live.segs;
+      const fresh = typeof task?.seq === "number"
+        ? segments.filter((s) => s.seq > task.seq!)
+        : segments;
+      if (fresh.length === 0) return "";
+      if (byteSegments && snapBytes == null) return fresh.map((s) => s.text).join("");
+      if (byteSegments && snapBytes != null) {
+        const decoder = new TextDecoder();
+        const parts: string[] = [];
+        let covered = snapBytes;
+        for (const s of fresh) {
+          const bytes = new TextEncoder().encode(s.text);
+          const start = Math.max(0, covered - s.from);
+          if (start >= bytes.byteLength) continue;
+          parts.push(decoder.decode(bytes.slice(start)));
+          covered = Math.max(covered, s.from + bytes.byteLength);
+        }
+        return parts.join("");
+      }
       const parts: string[] = [];
-      for (const s of live.segs) {
+      for (const s of fresh) {
         const lines = s.text.split("\n");
         // Drop the phantom after a trailing newline (daemon countLines).
         if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
@@ -248,5 +300,29 @@ export function createBackground(opts: {
     return out;
   }
 
-  return { sessionJobs, sessionContent, liveTail, running, clock, output, noteOutput, noteSessionTasks, noteSessionTaskEvent, stop, maybeStopClock };
+  function purgeSession(sid: string) {
+    if (!sid) return;
+    setBySession((prev) => {
+      if (!(sid in prev)) return prev;
+      const next = { ...prev };
+      delete next[sid];
+      return next;
+    });
+    setLiveBySession((prev) => {
+      if (!(sid in prev)) return prev;
+      const next = { ...prev };
+      delete next[sid];
+      return next;
+    });
+    maybeStopClock();
+  }
+
+  function reset() {
+    setBySession({});
+    setLiveBySession({});
+    if (timer) clearInterval(timer);
+    timer = undefined;
+  }
+
+  return { sessionJobs, sessionContent, liveTail, running, clock, output, noteOutput, noteSessionTasks, noteSessionTaskEvent, stop, maybeStopClock, purgeSession, reset };
 }

@@ -31,6 +31,7 @@ const MIME: Record<string, string> = {
   ".sh": "text/plain; charset=utf-8",
   ".ps1": "text/plain; charset=utf-8",
   ".webmanifest": "application/manifest+json",
+  ".wasm": "application/wasm",
 };
 
 const IMMUTABLE_EXT = new Set([".js", ".css", ".woff", ".woff2", ".png", ".jpg", ".webp", ".svg", ".ico"]);

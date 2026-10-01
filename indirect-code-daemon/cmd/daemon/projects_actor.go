@@ -41,10 +41,10 @@ type projectsActor struct {
 	inbox   chan Envelope
 	control chan any
 
-	emit     func(any)
-	hostID   func() string
-	onEvent  func(string)
-	purgeSession func(id string) // session supervisor cascade
+	emit         func(any)
+	hostID       func() string
+	onEvent      func(string)
+	purgeSession func(id string) error // session supervisor cascade
 
 	list []ProjectEntry
 }
@@ -98,7 +98,7 @@ func (p *projectsActor) load() {
 	p.list = list
 }
 
-func (p *projectsActor) save(list []ProjectEntry) error {
+func (p *projectsActor) write(list []ProjectEntry) error {
 	if err := os.MkdirAll(p.dataDir, 0o700); err != nil {
 		return err
 	}
@@ -106,7 +106,14 @@ func (p *projectsActor) save(list []ProjectEntry) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(p.file(), data, 0o600); err != nil {
+	if err := writeAtomicFile(p.file(), data); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *projectsActor) save(list []ProjectEntry) error {
+	if err := p.write(list); err != nil {
 		return err
 	}
 	p.list = append([]ProjectEntry(nil), list...)
@@ -140,8 +147,9 @@ func (p *projectsActor) handle(env Envelope) {
 	case projCollapseMsg:
 		for i := range p.list {
 			if p.list[i].ID == m.ProjectID {
-				p.list[i].Collapsed = m.Collapsed
-				_ = p.save(p.list)
+				next := append([]ProjectEntry(nil), p.list...)
+				next[i].Collapsed = m.Collapsed
+				_ = p.save(next)
 				break
 			}
 		}
@@ -232,22 +240,39 @@ func (p *projectsActor) onDelete(m projDeleteMsg) {
 		m.Reply <- map[string]any{"type": "error", "hostId": p.host(), "message": "The default Home project cannot be deleted"}
 		return
 	}
+	// Identify sessions before replacing p.list, since projectForDirectory
+	// needs the doomed entry to resolve their owner.
+	var doomedSessions []string
 	// Cascade: purge sessions owned by this project. Purge is routed
 	// through the session supervisor callback (which passivates + deletes
 	// disk state); listed via disk scan to avoid depending on residency.
 	if doomed != nil && p.purgeSession != nil {
-		target := strings.TrimRight(resolvePath(doomed.Path), "/")
-		if len(target) > 1 {
-			for _, s := range listSessionSummaries(p.dataDir) {
-				owner := projectForDirectory(s.CWD, p.list)
-				if owner == nil || owner.ID != doomed.ID {
-					continue
-				}
-				p.purgeSession(s.ID)
+		for _, s := range listSessionSummaries(p.dataDir) {
+			owner := projectForDirectory(s.CWD, p.list)
+			if owner == nil || owner.ID != doomed.ID {
+				continue
 			}
+			doomedSessions = append(doomedSessions, s.ID)
 		}
 	}
-	_ = p.save(next)
+	// Check that the current project file is writable before deleting sessions.
+	// The project remains in memory and on disk if a purge fails, so the
+	// operation can be retried; the final replacement save is still checked
+	// after purging.
+	if err := p.write(p.list); err != nil {
+		m.Reply <- map[string]any{"type": "error", "hostId": p.host(), "message": "Failed to save project: " + err.Error()}
+		return
+	}
+	for _, id := range doomedSessions {
+		if err := p.purgeSession(id); err != nil {
+			m.Reply <- map[string]any{"type": "error", "hostId": p.host(), "message": "Failed to purge project session: " + err.Error()}
+			return
+		}
+	}
+	if err := p.save(next); err != nil {
+		m.Reply <- map[string]any{"type": "error", "hostId": p.host(), "message": "Failed to save project: " + err.Error()}
+		return
+	}
 	m.Reply <- map[string]any{"type": "project_deleted", "hostId": p.host(), "projectId": m.ProjectID}
 }
 

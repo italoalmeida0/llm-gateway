@@ -41,24 +41,12 @@ type queueOpMsg struct {
 	Reply         chan any // queueOpResult
 }
 
-// transcriptChunkMsg carries one streamed delta from the turn worker to the
-// frontend. Forwarded even while state is awaiting* — streaming is not
-// blocked by a pending human decision.
-type transcriptChunkMsg struct {
-	Delta any // opaque to the actor; serialized by the ws actor
-}
-
-// toolResultMsg feeds a finished tool batch back into the pending turn.
-type toolResultMsg struct {
-	CallID  string
-	Payload any
-}
-
 // approvalResponseMsg answers a pending tool approval. Correlated by id;
 // a stale id (turn moved on) is dropped.
 type approvalResponseMsg struct {
 	ID       string
 	Approved bool
+	Always   bool
 }
 
 // questionResponseMsg answers a pending question. Correlated by id.
@@ -77,13 +65,6 @@ type bgAckMsg struct {
 // session (V2-003): deletion is never undone by a late notice.
 type bgDropNoticesMsg struct {
 	SessionID string
-}
-
-// bgJobFinishedMsg is forwarded by the bg supervisor when a job of this
-// session terminates. Folded into the transcript; wakes a sleeping worker.
-type bgJobFinishedMsg struct {
-	JobID string
-	Exit  int
 }
 
 // stateTimeoutMsg fires when a 15-min approval/question timer elapses.
@@ -240,7 +221,7 @@ type readResult struct {
 // watchdogReport is the session actor's liveness answer.
 type watchdogReport struct {
 	Alive         bool
-	LastProgress  int64  // unix milli of last useful message
+	LastProgress  int64 // unix milli of last useful message
 	State         string
 	QueueDepth    int
 	ResidentBytes int64
@@ -378,11 +359,6 @@ type configureMsg struct {
 // promotes it (cancelling the running turn first, v1 semantics).
 type queueSendNowMsg struct {
 	QueueID string
-}
-
-// alwaysAllowMsg upgrades access to full (approval "always allow").
-type alwaysAllowMsg struct {
-	Reply chan any
 }
 
 // editApplyMsg applies a saved (non-regen) edit to message Index.

@@ -4,11 +4,12 @@ import (
 	"strings"
 	"testing"
 
+	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
-// Silent Execution Protocol: free assistant text is dropped at the client
-// boundary for workspace modes (build/plan/learning) and preserved in talk.
+// Legacy saved transcripts still need display filtering. New responses are
+// already text-free when core sends them to persistence and live events.
 func TestSanitizeMessagesForFrontendSilencesAssistantText(t *testing.T) {
 	msgs := []provider.Message{
 		{ID: "u1", Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "hi"}}},
@@ -103,4 +104,43 @@ func extractTestText(m provider.Message) string {
 		}
 	}
 	return b.String()
+}
+
+func TestModeCompletionTool(t *testing.T) {
+	for mode, want := range map[string]string{
+		"build": "mark_task_as_complete", "learning": "mark_task_as_complete",
+		"plan": "mark_plan_as_ready_to_execute", "talk": "", "": "mark_task_as_complete",
+	} {
+		if got := modeCompletionTool(mode); got != want {
+			t.Fatalf("%q completion tool = %q; want %q", mode, got, want)
+		}
+	}
+}
+
+func TestDiscardedTextMaintainsLivenessWithoutFrontendEvent(t *testing.T) {
+	inbox := make(chan Envelope, 8)
+	w := &turnBridge{
+		env: workerEnv{inbox: inbox}, snap: workerSnapshot{gen: 7},
+		live: &liveTracker{thinkingStartedAt: 1},
+	}
+	w.handleEvent(core.EvTextDiscarded{Characters: 42})
+	heartbeats := 0
+	for len(inbox) > 0 {
+		switch e := (<-inbox).Payload.(type) {
+		case workerHeartbeatMsg:
+			heartbeats++
+			if e.gen != 7 {
+				t.Fatalf("heartbeat lost generation: %+v", e)
+			}
+		case workerLiveMsg:
+			if e.live.ThinkingStartedAt != 0 {
+				t.Fatal("discarded speech left the thinking timer running")
+			}
+		default:
+			t.Fatalf("discarded text emitted a frontend event: %T", e)
+		}
+	}
+	if heartbeats != 1 || w.live.thinkingStartedAt != 0 {
+		t.Fatalf("heartbeats=%d thinking=%d", heartbeats, w.live.thinkingStartedAt)
+	}
 }

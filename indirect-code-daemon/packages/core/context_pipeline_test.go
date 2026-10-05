@@ -62,31 +62,6 @@ func TestBuildContextFiltersHidden(t *testing.T) {
 	}
 }
 
-func TestAssistantTextTransforms(t *testing.T) {
-	msg := testMsg(provider.RoleAssistant, "secret abc-123")
-	// Suppress.
-	out, suppressed := applyAssistantTextTransforms(msg, []AssistantTextTransform{
-		func(text string) (string, bool) { return "", false },
-	})
-	if !suppressed {
-		t.Fatalf("expected suppression")
-	}
-	_ = out
-	// Replace.
-	out, suppressed = applyAssistantTextTransforms(msg, []AssistantTextTransform{
-		func(text string) (string, bool) { return "redacted", true },
-	})
-	if suppressed {
-		t.Fatalf("unexpected suppression")
-	}
-	if extractText(out) != "redacted" {
-		t.Fatalf("expected replacement, got %q", extractText(out))
-	}
-	if extractText(msg) != "secret abc-123" {
-		t.Fatalf("transform mutated input")
-	}
-}
-
 func TestSnapCutToUserBoundary(t *testing.T) {
 	call, res := testToolTurn("c9")
 	msgs := []provider.Message{

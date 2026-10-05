@@ -84,7 +84,8 @@ export function withoutContinueNudges(messages: ChatMessage[]): ChatMessage[] {
     return !isSyntheticNudge(text);
   });
 }
-/** Keep canonical messages untouched; signal tools (todo checklist, mark_task_as_complete, mark_plan_as_ready_to_execute, summary) are hidden or extracted as text. */
+/** Keep canonical messages untouched. Signal calls and results are always
+ * internal; only successful summaries/completions become user-facing text. */
 export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
   const signalResults = new Map<string, ContentBlock>();
   for (const message of messages) {
@@ -108,15 +109,10 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
     const newBlocks: ContentBlock[] = [];
     for (const b of message.blocks) {
       if (b.type === "tool_call" && b.toolName && COMPLETION_TOOL_NAMES.has(b.toolName)) {
-        const result = b.toolId ? signalResults.get(b.toolId) : undefined;
-        if (!result || result.isError) {
-          // Keep pending/failed completion calls visible. They must not look
-          // like a successful turn, and their result carries the diagnostic.
-          newBlocks.push(b);
-          continue;
-        }
-        hadCompletion = true;
         mutated = true;
+        const result = b.toolId ? signalResults.get(b.toolId) : undefined;
+        if (!result || result.isError) continue;
+        hadCompletion = true;
         let summaryText = "";
         try {
           const parsed = JSON.parse(b.toolArgs || "{}");
@@ -132,14 +128,10 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
         continue;
       }
       if (b.type === "tool_call" && b.toolName === "summary") {
-        const result = b.toolId ? signalResults.get(b.toolId) : undefined;
-        if (!result || result.isError) {
-          // A progress update is user-visible only after the tool accepted it.
-          newBlocks.push(b);
-          continue;
-        }
-        hadSummary = true;
         mutated = true;
+        const result = b.toolId ? signalResults.get(b.toolId) : undefined;
+        if (!result || result.isError) continue;
+        hadSummary = true;
         let forUser = "";
         try {
           const parsed = JSON.parse(b.toolArgs || "{}");
@@ -157,10 +149,6 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
         (b.type === "tool_call" || b.type === "tool_result") &&
         ((b.toolName && SIGNAL_TOOL_NAMES.has(b.toolName)) || (b.toolId && ids.has(b.toolId)))
       ) {
-        if (b.type === "tool_result" && b.isError) {
-          newBlocks.push(b);
-          continue;
-        }
         mutated = true;
         continue;
       }

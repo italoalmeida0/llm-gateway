@@ -25,7 +25,7 @@ func terminalEvents(stop provider.StopReason, content ...provider.Content) <-cha
 }
 
 func TestPersistentTurnRespectsConsecutiveNudgeBudget(t *testing.T) {
-	for _, text := range []string{"", "Still working"} {
+	for _, text := range []string{"", " \t\n", "Still working"} {
 		t.Run(text, func(t *testing.T) {
 			calls := 0
 			c := persistentClient{stream: func(context.Context, provider.Request) (<-chan provider.Event, error) {
@@ -34,11 +34,21 @@ func TestPersistentTurnRespectsConsecutiveNudgeBudget(t *testing.T) {
 			}}
 			a := NewAgent(c, "m", "", NewRegistry(&dummyTool{name: "mark_task_as_complete"}))
 			a.PersistentTurns = true
-			if err := a.Prompt(context.Background(), "work", nil, nil); err != nil {
+			if err := a.Prompt(context.Background(), "work", nil, func(ev AgentEvent) {
+				if e, ok := ev.(EvUserMessage); ok && extractText(e.Message) != "work" {
+					want := CompletionNudgeTextBuild
+					if textCharacterCount(text) == 0 {
+						want = ContinueNudgeText
+					}
+					if got := extractText(e.Message); got != want {
+						t.Fatalf("wrong nudge for %q: %q", text, got)
+					}
+				}
+			}); err != nil {
 				t.Fatal(err)
 			}
 			limit := maxCompletionNudges
-			if text == "" {
+			if textCharacterCount(text) == 0 {
 				limit = maxContinueNudges
 			}
 			if calls != limit+1 {

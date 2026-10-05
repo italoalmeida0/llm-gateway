@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
@@ -22,12 +23,16 @@ import (
 const ContinueNudgeText = "<system-warn>Automated system notice (not from the user): Your previous response was empty or interrupted. Continue your work silently using tools.</system-warn>"
 
 // CompletionNudgeTextBuild and CompletionNudgeTextPlan prompt the model
-// when it returns visible text without calling a completion tool in build/plan modes.
+// when it returns discarded text without calling a completion tool in workspace modes.
 const (
-	CompletionNudgeTextBuild = "<system-warn>Automated system notice (not from the user): Do not send conversational text messages. If you have completed the task or answered the user's question, call mark_task_as_complete with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools.</system-warn>"
-	CompletionNudgeTextPlan  = "<system-warn>Automated system notice (not from the user): Do not send conversational text messages. If your plan is ready, call mark_plan_as_ready_to_execute with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools.</system-warn>"
+	CompletionNudgeTextBuild = "<system-warn>Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If you have completed the task or answered the user's question, call mark_task_as_complete with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools.</system-warn>"
+	CompletionNudgeTextPlan  = "<system-warn>Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If your plan is ready, call mark_plan_as_ready_to_execute with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools.</system-warn>"
 	SummaryWarnNudge         = "<system-warn>Automated system notice (not from the user): Multiple tools have been executed without a progress update. Call the summary tool now with 'for_user' (100-500 chars user-facing update) and 'for_me' (your private tracking of next steps/verified items). Do not send conversational text messages.</system-warn>"
+	DiscardedTextNudge       = "<system-warn>Automated system notice (not from the user): You are sending too much conversational text alongside tool calls. That text is discarded; the user cannot read it and it is not saved in your context. Use reasoning for private thoughts, summary for progress updates, question for user input, and the current mode's completion tool with comprehensive_summary for your final response. Continue silently through tools.</system-warn>"
 )
+
+// Count non-whitespace characters across tool responses, independent of chunking.
+const discardedTextNudgeThreshold = 500
 
 // maxContinueNudges caps consecutive empty-response nudges per turn so a
 // model stuck returning nothing cannot burn requests forever; the turn
@@ -137,11 +142,11 @@ type Agent struct {
 	// Kept as-is: it mutates runtime config, not message context.
 	BeforeRequest func(context.Context) error
 
-	// AssistantTextTransforms rewrites visible assistant text
-	// (suppress or replace) for UI emission. Replaces the removed
-	// BeforeAssistantMessage hook as a stackable transform: the
-	// transcript always keeps the model's original output.
-	AssistantTextTransforms []AssistantTextTransform
+	// CompletionTool selects the tool-only response protocol. When nonempty,
+	// free assistant text is discarded at ingress, before events or persistence.
+	// Thinking and tool content survive. Empty enables conversational text.
+	// Hosts refresh this alongside the tool registry before each request.
+	CompletionTool string
 
 	// RetrySchedule overrides the backoff between upstream attempts (nil
 	// selects the default schedule). The last entry repeats forever: a
@@ -239,6 +244,12 @@ func NewAgent(client provider.Client, model, system string, tools Registry) *Age
 		Model:  model,
 		System: system,
 		Tools:  tools,
+	}
+	for _, name := range []string{"mark_task_as_complete", "mark_plan_as_ready_to_execute"} {
+		if _, ok := tools[name]; ok {
+			a.CompletionTool = name
+			break
+		}
 	}
 	return a
 }
@@ -514,6 +525,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 	preparationAttempt := 0
 	lastSummaryAt := time.Now()
 	toolsSinceSummary := 0
+	discardedSinceNudge := 0
 	for step := 1; ; step++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -574,12 +586,13 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		}
 
 		var (
-			stop         provider.StopReason
-			assistantMsg provider.Message
-			err          error
+			stop           provider.StopReason
+			assistantMsg   provider.Message
+			discardedChars int
+			err            error
 		)
 		for attempt := 0; ; attempt++ {
-			stop, assistantMsg, err = a.oneTurn(ctx, sink)
+			stop, assistantMsg, discardedChars, err = a.oneTurn(ctx, sink)
 			sink(EvTurnEnd{Stop: stop, Err: err})
 			if err == nil {
 				break
@@ -630,11 +643,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			}
 			// Execute each client tool call, append a single tool-results message, continue.
 			toolMsg, hadError := a.executeTools(ctx, assistantMsg, sink)
-			if len(toolMsg.Content) == 0 {
-				// Provider-executed (server) tools need no client results.
-				continue
-			}
-			if !a.PersistentTurns {
+			if !a.PersistentTurns && len(toolMsg.Content) > 0 {
 				a.appendToolMessage(toolMsg)
 			}
 			// Note: the provider image mirror (openai/openai-codex) is
@@ -649,6 +658,11 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			if a.PersistentTurns && successfulCompletion(assistantMsg, toolMsg) {
 				sink(EvDone{})
 				return nil
+			}
+			discardedSinceNudge += discardedChars
+			if discardedSinceNudge >= discardedTextNudgeThreshold {
+				discardedSinceNudge = 0
+				a.appendNudge(DiscardedTextNudge, sink)
 			}
 
 			hadSummary := false
@@ -676,18 +690,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			if hasSummaryTool && ((time.Since(lastSummaryAt) >= 60*time.Second && toolsSinceSummary >= 15) || toolsSinceSummary >= 30) {
 				toolsSinceSummary = 0
 				lastSummaryAt = time.Now()
-				nudge := provider.Message{
-					Role:    provider.RoleUser,
-					Content: []provider.Content{provider.TextBlock{Text: SummaryWarnNudge}},
-					Time:    time.Now(),
-				}
-				a.stampTurn(&nudge)
-				a.mu.Lock()
-				a.messages = append(a.messages, nudge)
-				a.rev++
-				a.mu.Unlock()
-				a.fireMessageAppended(nudge)
-				sink(EvUserMessage{Message: nudge})
+				a.appendNudge(SummaryWarnNudge, sink)
 			}
 
 			continue
@@ -702,58 +705,34 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			return nil
 		}
 
-		trimmedText := strings.TrimSpace(extractText(assistantMsg))
+		hasText := discardedChars > 0 || strings.TrimSpace(extractText(assistantMsg)) != ""
 
 		// An empty terminal response — no tool calls and no visible text after trim,
 		// typically a thinking-only early stop — does NOT end the turn:
 		// append a hidden user nudge and ask the model again, so the
 		// turn only completes on real output. Capped per turn; cancelled
 		// and aborted turns still end immediately.
-		if trimmedText == "" && !completedInTurn && nudges < maxContinueNudges {
+		if !hasText && !completedInTurn && nudges < maxContinueNudges {
 			nudges++
-			nudge := provider.Message{
-				Role:    provider.RoleUser,
-				Content: []provider.Content{provider.TextBlock{Text: ContinueNudgeText}},
-				Time:    time.Now(),
-			}
-			a.stampTurn(&nudge)
-			a.mu.Lock()
-			a.messages = append(a.messages, nudge)
-			a.rev++
-			a.mu.Unlock()
-			a.fireMessageAppended(nudge)
-			sink(EvUserMessage{Message: nudge})
+			a.appendNudge(ContinueNudgeText, sink)
 			continue
 		}
 
-		// When the model returns visible text without calling any tools:
-		// check if a completion tool is configured in the registry and has not yet been called in this turn.
-		// If so, prompt the model to either mark completion or continue working.
-		if trimmedText != "" && !completedInTurn && completionNudges < maxCompletionNudges {
+		// Discarded speech is not an empty response: ask for the active mode's
+		// completion tool, without retaining the speech to make that decision.
+		if hasText && !completedInTurn && completionNudges < maxCompletionNudges {
 			completionNudgeText := ""
-			a.mu.Lock()
-			tools := a.Tools
-			a.mu.Unlock()
-			if _, err := tools.Get("mark_task_as_complete"); err == nil {
+			switch a.CompletionTool {
+			case "mark_task_as_complete":
 				completionNudgeText = CompletionNudgeTextBuild
-			} else if _, err := tools.Get("mark_plan_as_ready_to_execute"); err == nil {
+			case "mark_plan_as_ready_to_execute":
 				completionNudgeText = CompletionNudgeTextPlan
 			}
 
 			if completionNudgeText != "" {
 				completionNudges++
-				nudge := provider.Message{
-					Role:    provider.RoleUser,
-					Content: []provider.Content{provider.TextBlock{Text: completionNudgeText}},
-					Time:    time.Now(),
-				}
-				a.stampTurn(&nudge)
-				a.mu.Lock()
-				a.messages = append(a.messages, nudge)
-				a.rev++
-				a.mu.Unlock()
-				a.fireMessageAppended(nudge)
-				sink(EvUserMessage{Message: nudge})
+				discardedSinceNudge = 0
+				a.appendNudge(completionNudgeText, sink)
 				continue
 			}
 		}
@@ -761,6 +740,18 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		sink(EvDone{})
 		return nil
 	}
+}
+
+func (a *Agent) appendNudge(text string, sink func(AgentEvent)) {
+	nudge := provider.Message{Role: provider.RoleUser,
+		Content: []provider.Content{provider.TextBlock{Text: text}}, Time: time.Now()}
+	a.stampTurn(&nudge)
+	a.mu.Lock()
+	a.messages = append(a.messages, nudge)
+	a.rev++
+	a.mu.Unlock()
+	a.fireMessageAppended(nudge)
+	sink(EvUserMessage{Message: nudge})
 }
 
 // canRetryError reports whether a failed model call is worth another
@@ -875,8 +866,6 @@ func (a *Agent) BuildContext() []provider.Message {
 // BuildContextLocked share it so the pipeline exists in one place.
 func (a *Agent) buildContextFromLocked(msgs []provider.Message, clientName string) []provider.Message {
 	msgs = filterHidden(msgs)
-	msgs = stripIntermediateAssistantText(msgs)
-	msgs = stripNudgedAssistantText(msgs)
 	msgs = PruneOldToolResults(msgs)
 	msgs = repairToolUseResultPairs(msgs)
 	if mirror := mirrorImagesForProvider(clientName, msgs); mirror != nil {
@@ -898,31 +887,18 @@ func (a *Agent) BuildContextLocked() []provider.Message {
 	return a.buildContextFromLocked(msgs, clientName)
 }
 
-// AddAssistantTextTransform appends an AssistantTextTransform used
-// for visible-text emission (suppress/replace). The transcript
-// always keeps the model's original output.
-func (a *Agent) AddAssistantTextTransform(t AssistantTextTransform) {
-	if t == nil {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.AssistantTextTransforms = append(a.AssistantTextTransforms, t)
-	a.rev++
-}
-
 // oneTurn calls the LLM once, forwards events, returns the stop reason
 // and the assembled assistant message (already appended to the transcript).
-func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.StopReason, provider.Message, error) {
+func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.StopReason, provider.Message, int, error) {
 	if a.BeforeRequest != nil {
 		if err := a.BeforeRequest(ctx); err != nil {
-			return provider.StopError, provider.Message{}, err
+			return provider.StopError, provider.Message{}, 0, err
 		}
 	}
 	var req provider.Request
 	for {
 		if err := a.prepareStart(ctx); err != nil {
-			return provider.StopError, provider.Message{}, err
+			return provider.StopError, provider.Message{}, 0, err
 		}
 		a.mu.Lock()
 		// A reset can also arrive after runLoop's preparation, for example
@@ -950,13 +926,16 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		a.mu.Unlock()
 		break
 	}
+	// BeforeRequest selected the mode for this response. Keep it fixed while streaming.
+	discardText := a.CompletionTool != ""
+	discardedChars := 0
 	guard := NewLoopGuard()
 	reqCtx, cancelReq := context.WithCancel(ctx)
 	defer cancelReq()
 
 	stream, err := a.Client.Stream(reqCtx, req)
 	if err != nil {
-		return provider.StopError, provider.Message{}, err
+		return provider.StopError, provider.Message{}, 0, err
 	}
 
 	messageID := provider.NewMessageID()
@@ -990,7 +969,13 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 				cancelReq()
 				break
 			}
-			sink(EvTextDelta{Delta: e.Delta})
+			if discardText {
+				chars := textCharacterCount(e.Delta)
+				discardedChars += chars
+				sink(EvTextDiscarded{Characters: chars})
+			} else {
+				sink(EvTextDelta{Delta: e.Delta})
+			}
 		case provider.EventReasoningDelta:
 			hadThinking = true
 			if thinkingStart.IsZero() {
@@ -1020,6 +1005,20 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 			stop = e.Stop
 			finalErr = e.Err
 			finalMsg = e.Message
+			if discardText {
+				content := make([]provider.Content, 0, len(finalMsg.Content))
+				chars := 0
+				for _, c := range finalMsg.Content {
+					if text, ok := c.(provider.TextBlock); ok {
+						chars += textCharacterCount(text.Text)
+					} else {
+						content = append(content, c)
+					}
+				}
+				finalMsg.Content = content
+				// Final-only responses still count; streamed text must not count twice.
+				discardedChars = max(discardedChars, chars)
+			}
 		}
 	}
 	finalMsg.ID = messageID
@@ -1078,29 +1077,13 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 				finalMsg.Meta = meta
 			}
 		}
-		emit := finalMsg
-		suppress := false
-
-		// AssistantTextTransforms: extensions suppress or rewrite
-		// visible text as stackable transforms. The transcript keeps
-		// the model's original output so the model still sees what
-		// it said on subsequent turns.
-		a.mu.Lock()
-		textTransforms := append([]AssistantTextTransform(nil), a.AssistantTextTransforms...)
-		a.mu.Unlock()
-		emit, suppressed := applyAssistantTextTransforms(finalMsg, textTransforms)
-		suppress = suppressed
-
 		a.stampTurn(&finalMsg)
-		emit.TurnIndex = finalMsg.TurnIndex
 		a.mu.Lock()
 		a.messages = append(a.messages, finalMsg)
 		a.rev++
 		a.mu.Unlock()
 		a.fireMessageAppended(finalMsg)
-		if !suppress {
-			sink(EvAssistantMessage{Message: emit})
-		}
+		sink(EvAssistantMessage{Message: finalMsg})
 		// Now surface tool calls as EvToolCall events so UIs can render them
 		// in order before the tool results arrive.
 		for _, c := range finalMsg.Content {
@@ -1110,7 +1093,7 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		}
 	}
 
-	return stop, finalMsg, finalErr
+	return stop, finalMsg, discardedChars, finalErr
 }
 
 // executeTools runs every tool call in the assistant message and returns
@@ -1312,27 +1295,16 @@ func extractText(msg provider.Message) string {
 	return out
 }
 
-// replaceText returns a copy of msg with every TextBlock replaced by
-// a single TextBlock containing replacement. Non-text content (tool
-// calls, etc.) is preserved in order.
-func replaceText(msg provider.Message, replacement string) provider.Message {
-	out := provider.Message{Role: msg.Role}
-	out.Content = make([]provider.Content, 0, len(msg.Content))
-	replaced := false
-	for _, c := range msg.Content {
-		if _, ok := c.(provider.TextBlock); ok {
-			if !replaced {
-				out.Content = append(out.Content, provider.TextBlock{Text: replacement})
-				replaced = true
-			}
-			continue
+// textCharacterCount ignores whitespace so a blank response still uses the
+// empty-response nudge, even when the provider splits it into many deltas.
+func textCharacterCount(text string) int {
+	count := 0
+	for _, r := range text {
+		if !unicode.IsSpace(r) {
+			count++
 		}
-		out.Content = append(out.Content, c)
 	}
-	if !replaced {
-		out.Content = append(out.Content, provider.TextBlock{Text: replacement})
-	}
-	return out
+	return count
 }
 
 // A call alone is not completion: validation, approval, and execution must succeed.

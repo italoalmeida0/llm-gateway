@@ -159,14 +159,14 @@ func TestSanitizeUserText(t *testing.T) {
 	if got := SanitizeUserText("  " + ContinueNudgeText + "  "); got != wantContinue {
 		t.Fatalf("padded continue nudge = %q; want tags stripped", got)
 	}
-	wantBuild := "Automated system notice (not from the user): Do not send conversational text messages. If you have completed the task or answered the user's question, call mark_task_as_complete with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools."
+	wantBuild := "Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If you have completed the task or answered the user's question, call mark_task_as_complete with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools."
 	if got := SanitizeUserText(CompletionNudgeTextBuild); got != wantBuild {
 		t.Fatalf("build completion nudge = %q; want tags stripped", got)
 	}
 	if got := SanitizeUserText("  " + CompletionNudgeTextBuild + "  "); got != wantBuild {
 		t.Fatalf("padded build completion nudge = %q; want tags stripped", got)
 	}
-	wantPlan := "Automated system notice (not from the user): Do not send conversational text messages. If your plan is ready, call mark_plan_as_ready_to_execute with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools."
+	wantPlan := "Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If your plan is ready, call mark_plan_as_ready_to_execute with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools."
 	if got := SanitizeUserText(CompletionNudgeTextPlan); got != wantPlan {
 		t.Fatalf("plan completion nudge = %q; want tags stripped", got)
 	}

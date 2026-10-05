@@ -1233,7 +1233,48 @@ describe("completion signals and turn nudges", () => {
     }
   });
 
-  test("withoutTodoActivity keeps pending and failed signals visible and validates extracted strings", () => {
+  test.each(["todo", "summary", "mark_task_as_complete", "mark_plan_as_ready_to_execute"])("hides %s throughout streaming, failures and snapshots", (name) => {
+    const args = JSON.stringify({ for_user: "Progress for the user", for_me: "Private tracking", comprehensive_summary: "Completed work" });
+    const call: ChatMessage = { id: "a", role: "assistant", srcIdx: 4, streaming: true, blocks: [
+      { type: "tool_call", toolId: "signal", toolName: name, toolArgs: "" },
+    ] };
+    const result: ChatMessage = { id: "r", role: "tool", srcIdx: 5, blocks: [
+      { type: "tool_result", toolId: "signal", toolResult: "Internal validation failure", isError: true },
+    ] };
+    for (const toolArgs of ["", args.slice(0, 25), args]) {
+      const pending: ChatMessage = { ...call, blocks: [{ ...call.blocks[0], toolArgs }] };
+      expect(withoutTodoActivity([pending])).toEqual([]);
+      expect(buildRenderBlocks([pending])).toEqual([]);
+      expect(latestShortTurnMessage([pending])).toBe("");
+      expect(withoutTodoActivity([pending, result])).toEqual([]);
+      expect(buildRenderBlocks([pending, result])).toEqual([]);
+      expect(latestShortTurnMessage([pending, result])).toBe("");
+      // Real snapshots attach results to their original assistant carrier.
+      const restored = normalizeSessionMessages([
+        { id: "a", role: "assistant", content: [{ id: "signal", name, arguments: toolArgs }] },
+        { id: "r", role: "tool", content: [{ call_id: "signal", content: [{ text: "Internal validation failure" }], is_error: true }] },
+      ], [], 4);
+      expect(buildRenderBlocks(restored)).toEqual([]);
+      expect(latestShortTurnMessage(restored)).toBe("");
+      expect(restored[0].srcIdx).toBe(4);
+      expect(restored[0].blocks).toHaveLength(2);
+    }
+    // Tool-name-only results must also stay hidden, without hiding real errors.
+    expect(withoutTodoActivity([{ ...result, blocks: [{ ...result.blocks[0], toolName: name }] }])).toEqual([]);
+    const mixed: ChatMessage = { ...call, blocks: [
+      { type: "reasoning", reasoning: "Reasoning is still available" }, ...call.blocks,
+      { type: "tool_call", toolId: "read", toolName: "read", toolArgs: "{}" },
+      { type: "tool_result", toolId: "read", toolResult: "File not found", isError: true },
+    ] };
+    const [visible] = withoutTodoActivity([mixed, result]);
+    expect(visible.blocks).toEqual([mixed.blocks[0], ...mixed.blocks.slice(2)]);
+    expect(visible.srcIdx).toBe(4);
+    expect(visible.hasCompletion).not.toBe(true);
+    expect(visible.hasSummary).not.toBe(true);
+    expect(mixed.blocks).toHaveLength(4);
+  });
+
+  test("withoutTodoActivity ignores invalid summary and completion text", () => {
     const pending: ChatMessage = { id: "p", role: "assistant", blocks: [
       { type: "tool_call", toolId: "pending", toolName: "summary", toolArgs: JSON.stringify({ for_user: { bad: true } }) },
     ] };
@@ -1244,11 +1285,12 @@ describe("completion signals and turn nudges", () => {
       { type: "tool_result", toolId: "failed", toolResult: "permission denied", isError: true },
     ] };
     const cleaned = withoutTodoActivity([pending, failedCall, failedResult]);
-    expect(cleaned).toHaveLength(3);
-    expect(cleaned[0].blocks[0].type).toBe("tool_call");
-    expect(cleaned[1].blocks[0].type).toBe("tool_call");
-    expect(cleaned[2].blocks[0].type).toBe("tool_result");
-    expect(cleaned[1].hasCompletion).not.toBe(true);
+    expect(cleaned).toEqual([]);
+    const accepted: ChatMessage = { id: "accepted", role: "tool", blocks: [
+      { type: "tool_result", toolId: "pending", toolResult: "ok" },
+      { type: "tool_result", toolId: "failed", toolResult: "ok" },
+    ] };
+    expect(withoutTodoActivity([pending, failedCall, accepted])).toEqual([]);
   });
 
 
@@ -1276,7 +1318,11 @@ describe("completion signals and turn nudges", () => {
         toolArgs: JSON.stringify({ for_user: "Refactoring database connection pool and testing postgres.", for_me: "internal" }),
       }],
     };
-    expect(latestShortTurnMessage([mk("a1", "chatter", 50), summaryMsg])).toBe("Refactoring database connection pool and testing postgres.");
+    expect(latestShortTurnMessage([mk("a1", "chatter", 50), summaryMsg])).toBe("");
+    const summaryResult: ChatMessage = { id: "sum-result", role: "tool", turnIndex: 50,
+      blocks: [{ type: "tool_result", toolId: "s1", toolResult: "Progress summary recorded." }],
+    };
+    expect(latestShortTurnMessage([mk("a1", "chatter", 50), summaryMsg, summaryResult])).toBe("Refactoring database connection pool and testing postgres.");
     // In a tool turn without summary, suppresses conversational chatter:
     const bashMsg: ChatMessage = {
       id: "b1", role: "assistant", turnIndex: 50,

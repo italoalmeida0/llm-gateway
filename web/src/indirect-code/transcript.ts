@@ -113,19 +113,13 @@ export function latestShortTurnMessage(messages: ChatMessage[]): string {
     }
     turnMsgs = messages.slice(start);
   }
-  for (let i = turnMsgs.length - 1; i >= 0; i--) {
-    const m = turnMsgs[i];
-    for (const b of m.blocks) {
-      if (b.type === "tool_call" && b.toolName === "summary") {
-        try {
-          const parsed = JSON.parse(b.toolArgs || "{}");
-          const forUser = (parsed.for_user || "").replace(/\s+/g, " ").trim();
-          if (forUser) {
-            return forUser.length > TURN_HINT_MAX_CHARS ? forUser.slice(0, TURN_HINT_MAX_CHARS - 1) + "…" : forUser;
-          }
-        } catch {}
-      }
-    }
+  // Use the same successful-signal projection as the transcript. Pending or
+  // rejected summary arguments must not leak through the Working hint.
+  const visible = withoutTodoActivity(turnMsgs);
+  for (let i = visible.length - 1; i >= 0; i--) {
+    if (!visible[i].hasSummary) continue;
+    const text = assistantSingleLine(visible[i]);
+    if (text) return text.length > TURN_HINT_MAX_CHARS ? text.slice(0, TURN_HINT_MAX_CHARS - 1) + "…" : text;
   }
 
   // In tool turns without an explicit summary tool call, suppress conversational chatter hints.

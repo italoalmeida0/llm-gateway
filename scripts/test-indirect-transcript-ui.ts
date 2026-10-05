@@ -148,6 +148,59 @@ try {
  });
  assert.deepEqual(ghosts,[],"snapshot left result-only ghost tools");
  assert.equal(await page.locator('#actual').getByText("tool",{exact:true}).count(),0,"rendered unnamed tool rows");
+ for (const name of ["todo","summary","mark_task_as_complete","mark_plan_as_ready_to_execute"]) {
+  for (const failed of [false,true]) {
+   await page.evaluate(({name})=>{
+    const {t}=(window as any).transcriptTest;
+    t.resetForSession();
+    t.applySnapshot("other",{status:"running",messages:[],transcript:{stream:"signals",seq:0}});
+    let seq=0;
+    const send=(event:any)=>t.handleAgentEvent("other",event,{stream:"signals",seq:++seq});
+    const args={for_user:"Accepted progress update",for_me:"Private tracking must stay hidden",comprehensive_summary:"Accepted final answer"};
+    const message={id:"signal-message",role:"assistant",turnIndex:1,content:[{id:"signal-call",name,arguments:args}]};
+    (window as any).signalTest={send,args,message,cursor:()=>({stream:"signals",seq})};
+    send({type:"turn_start",step:1});
+    send({type:"assistant_start",messageId:message.id,index:0,turnIndex:1});
+    send({type:"tool_use_start",messageId:message.id,id:"signal-call",name});
+   },{name});
+   assert.equal(await page.locator('#actual [data-assistant-message]').count(),0,`${name}: tool start rendered a card`);
+   await page.evaluate(()=>{
+    const {send,args,message}=(window as any).signalTest;
+    send({type:"tool_use_args",messageId:message.id,id:"signal-call",delta:JSON.stringify(args).slice(0,30)});
+   });
+   assert.equal(await page.locator('#actual').textContent(),"",`${name}: partial arguments leaked`);
+   await page.evaluate(()=>{
+    const {send,args,message}=(window as any).signalTest;
+    send({type:"tool_use_args",messageId:message.id,id:"signal-call",delta:JSON.stringify(args).slice(30)});
+    send({type:"tool_use_end",messageId:message.id,id:"signal-call"});
+    send({type:"assistant_message",messageId:message.id,index:0,message});
+    send({type:"tool_call",messageId:message.id,id:"signal-call",name:message.content[0].name,args});
+    send({type:"turn_end",messageId:message.id,stop:"tool_use"});
+    send({type:"tool_execution_start",messageId:message.id,id:"signal-call",startedAt:Date.now()});
+    send({type:"tool_progress",messageId:message.id,id:"signal-call",text:"Internal tool feedback"});
+   });
+   assert.equal(await page.locator('#actual').textContent(),"",`${name}: execution details leaked`);
+   assert.equal(await page.evaluate(()=>(window as any).transcriptTest.t.turnHint()),"",`${name}: pending hint leaked`);
+   await page.evaluate(({failed})=>{
+    const {send,message}=(window as any).signalTest;
+    send({type:"tool_result",messageId:message.id,id:"signal-call",content:failed?"Internal validation failure":"Internal success feedback",isError:failed});
+   },{failed});
+   const expected=failed||name==="todo"?"":name==="summary"?"Accepted progress update":"Accepted final answer";
+   if(expected) await page.locator('#actual').getByText(expected,{exact:true}).waitFor({state:"visible"});
+   assert.equal((await page.locator('#actual').textContent())?.trim(),expected,`${name}: wrong result presentation (failed=${failed})`);
+   assert.equal(await page.locator('#actual [data-toolseg]').count(),0,`${name}: signal rendered as a tool`);
+   assert.equal(await page.evaluate(()=>(window as any).transcriptTest.t.turnHint()),!failed&&name==="summary"?expected:"",`${name}: wrong result hint`);
+   await page.evaluate(async({failed})=>{
+    const {t}=(window as any).transcriptTest;
+    const {message,cursor}=(window as any).signalTest;
+    await t.applySessionContent("other",[message,{id:"signal-result",role:"tool",turnIndex:1,content:[
+     {call_id:"signal-call",content:[{text:failed?"Internal validation failure":"Internal success feedback"}],is_error:failed},
+    ]}],undefined,undefined,{transcript:cursor()});
+   },{failed});
+   if(expected) await page.locator('#actual').getByText(expected,{exact:true}).waitFor({state:"visible"});
+   assert.equal((await page.locator('#actual').textContent())?.trim(),expected,`${name}: snapshot exposed internal activity`);
+  }
+ }
  assert.deepEqual(errors,[]);
- console.log("PASS: stable DOM identity, replayed tool results, async snapshot ordering, unpinned scroll anchor, stale history rejection, discard/index reuse, session isolation, unpinned turn-end disclosures");
+ console.log("PASS: stable DOM identity, replayed tool results, async snapshot ordering, unpinned scroll anchor, stale history rejection, discard/index reuse, session isolation, unpinned turn-end disclosures, hidden signal tools throughout streaming/results/snapshots");
 } finally {await browser.close();server.stop(true);}

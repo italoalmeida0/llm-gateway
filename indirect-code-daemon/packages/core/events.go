@@ -36,6 +36,14 @@ type EvTextDelta struct {
 
 func (EvTextDelta) Type() string { return "text_delta" }
 
+// EvTextDiscarded carries progress without the discarded text. Hosts use it
+// for liveness and thinking timers; it is never forwarded to the frontend.
+type EvTextDiscarded struct {
+	Characters int
+}
+
+func (EvTextDiscarded) Type() string { return "text_discarded" }
+
 // EvReasoningDelta is one live chunk of chain-of-thought. The full text is
 // also persisted in the final message as a ReasoningBlock.
 type EvReasoningDelta struct {

@@ -91,7 +91,7 @@ func (t *liveTracker) track(event core.AgentEvent) {
 			t.thinkingStartedAt = time.Now().UnixMilli()
 			t.dirty = true
 		}
-	case core.EvTextDelta, core.EvToolUseStart, core.EvToolCall, core.EvAssistantMessage, core.EvTurnEnd, core.EvRetry:
+	case core.EvTextDelta, core.EvTextDiscarded, core.EvToolUseStart, core.EvToolCall, core.EvAssistantMessage, core.EvTurnEnd, core.EvRetry:
 		if t.thinkingStartedAt != 0 {
 			t.thinkingStartedAt = 0
 			t.dirty = true
@@ -113,11 +113,9 @@ func (t *liveTracker) track(event core.AgentEvent) {
 	}
 }
 
-// assistantTextSilenced reports whether free assistant text is dropped at
-// the client boundary for this session mode. Talk is conversational and
-// streams its text; workspace modes (build/plan/learning) follow the Silent
-// Execution Protocol, where the only user-visible text is the completion
-// tool's comprehensive_summary (extracted by the frontend from tool args).
+// assistantTextSilenced keeps legacy transcripts (saved before ingress
+// suppression) display-compatible. New assistant messages are already clean
+// before persistence and live emission in core.Agent.
 func assistantTextSilenced(mode string) bool {
 	return normalizedOptions(SessionOptions{Mode: mode}).Mode != "talk"
 }

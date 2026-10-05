@@ -230,6 +230,7 @@ func (w *turnBridge) run() error {
 	w.agent = core.NewAgent(w.client, w.modelToUse, systemPromptWithBrain(cfg, w.sessionCWD, w.snap.options, brainDir), initTools)
 	w.agent.TurnIndex = w.snap.turnIndex
 	w.agent.PersistentTurns = true
+	w.agent.CompletionTool = modeCompletionTool(w.snap.options.Mode)
 	w.agent.Reasoning = w.snap.options.Effort
 	w.agent.BeforeRequest = w.beforeRequest
 	w.agent.Temperature = &cfg.Settings.Temperature
@@ -436,6 +437,7 @@ func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
 	w.agent.SetSystem(system)
 	restrictModeTools(available, rf.options.Mode)
 	w.agent.SetTools(available)
+	w.agent.CompletionTool = modeCompletionTool(rf.options.Mode)
 	return nil
 }
 
@@ -853,12 +855,6 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 	// long healthy stream never looks stale to the watchdog. Non-blocking:
 	// a full inbox means the actor is back-pressured, not dead.
 	w.heartbeat()
-	// Silent Execution Protocol output gate: workspace modes (build/plan/
-	// learning) never stream free assistant text to the client — the only
-	// user-visible text is the completion tool's comprehensive_summary.
-	// Talk streams normally. The WAL/context path (onMessageAppended) is
-	// untouched: the provider still sees the full transcript.
-	silentOut := assistantTextSilenced(w.snap.options.Mode)
 	payload := map[string]any{"type": "agent_event", "hostId": w.cfg.HostID, "sessionId": w.env.actorID}
 	switch e := ev.(type) {
 	case core.EvTurnStart:
@@ -867,17 +863,10 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 		payload["event"] = map[string]any{"type": "user_message", "message": sanitizeMessagesForFrontend(w.snap.options.Mode, []provider.Message{e.Message})[0]}
 	case core.EvAssistantMessage:
 		w.declareWait("", time.Time{}) // response arrived: provider wait over
-		msg := e.Message
-		if silentOut {
-			msg = stripAssistantText(msg)
-		}
-		payload["event"] = map[string]any{"type": "assistant_message", "message": msg}
+		payload["event"] = map[string]any{"type": "assistant_message", "message": e.Message}
 	case core.EvAssistantStart:
 		payload["event"] = map[string]any{"type": "assistant_start", "messageId": e.ID}
 	case core.EvTextDelta:
-		if silentOut {
-			return
-		}
 		payload["event"] = map[string]any{"type": "text_delta", "delta": e.Delta}
 	case core.EvReasoningDelta:
 		payload["event"] = map[string]any{"type": "reasoning_delta", "delta": e.Delta}

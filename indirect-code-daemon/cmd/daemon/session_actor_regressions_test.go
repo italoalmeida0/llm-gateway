@@ -110,8 +110,14 @@ func TestSeededResendClearsStaleCompactionAndAlwaysDirectives(t *testing.T) {
 		t.Fatal("edited boundary retained stale compaction")
 	}
 	last := a.rec.Messages[len(a.rec.Messages)-1]
-	if !strings.Contains(contentText(last), "Current date:") || !strings.Contains(contentText(last), "Operational mode: Plan") {
-		t.Fatalf("seeded row omitted current directives: %q", contentText(last))
+	text := contentText(last)
+	if !strings.Contains(text, "Current date:") {
+		t.Fatalf("seeded row omitted current directives: %q", text)
+	}
+	// Mode is never announced in the prompt stream: the per-mode system
+	// prompt is the single source of truth for the active mode.
+	if strings.Contains(text, "Operational mode") {
+		t.Fatalf("seeded row leaked mode directives: %q", text)
 	}
 }
 

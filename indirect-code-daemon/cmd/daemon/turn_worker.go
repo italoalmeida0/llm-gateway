@@ -203,7 +203,7 @@ func (w *turnBridge) run() error {
 	sleepTool := &tools.SleepTool{Host: w, SessionID: w.env.actorID}
 	questionTool := &tools.QuestionTool{Ask: w.askQuestions}
 	todoTool := &tools.TodoTool{Update: w.updateTodos}
-	markTaskTool := &tools.MarkTaskAsCompleteTool{}
+	markTaskTool := &tools.MarkTaskAsCompleteTool{Mode: normalizedOptions(w.snap.options).Mode}
 	markPlanTool := &tools.MarkPlanAsReadyToExecuteTool{}
 	summaryTool := &tools.SummaryTool{}
 	w.reg = core.NewRegistry(append(append(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool, summaryTool), bgCancelTool, sleepTool), bgCheckTool)...)
@@ -221,11 +221,7 @@ func (w *turnBridge) run() error {
 		}
 	}
 
-	initTools := core.Registry{}
-	for name, tool := range w.reg {
-		initTools[name] = tool
-	}
-	restrictModeTools(initTools, w.snap.options.Mode)
+	initTools := w.toolsForMode(w.snap.options.Mode)
 
 	w.agent = core.NewAgent(w.client, w.modelToUse, systemPromptWithBrain(cfg, w.sessionCWD, w.snap.options, brainDir), initTools)
 	w.agent.TurnIndex = w.snap.turnIndex
@@ -252,10 +248,11 @@ func (w *turnBridge) run() error {
 		}
 	}
 
-	// v1 turnPrompt parity: date/mode system directives are prepended to the
-	// opening prompt (and persisted via LastDate/LastMode, so they fire once
-	// per change — not on every turn). Without this the model never learns
-	// the date or its operational mode.
+	// v1 turnPrompt parity: the date system directive is prepended to the
+	// opening prompt (and persisted via LastDate, so it fires once per change —
+	// not on every turn). Without this the model never learns the date. Mode
+	// is not announced here: the per-mode system prompt is the single source
+	// of truth for the active mode (LastMode is still tracked for the wire).
 	sysBlock := buildTurnSystemDirectives(&w.snap, time.Now())
 	w.sendInbox(walAppendMsg{ev: walEvent{Type: walTypeMeta, LastDate: w.snap.lastDate, LastMode: w.snap.lastMode}})
 	sink := func(ev core.AgentEvent) { w.handleEvent(ev) }
@@ -430,15 +427,23 @@ func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
 	}
 	brainDir := w.env.brainDir(w.env.actorID)
 	system := systemPromptWithBrain(cfg, w.sessionCWD, rf.options, brainDir)
-	available := core.Registry{}
-	for name, tool := range w.reg {
-		available[name] = tool
-	}
 	w.agent.SetSystem(system)
-	restrictModeTools(available, rf.options.Mode)
-	w.agent.SetTools(available)
+	w.agent.SetTools(w.toolsForMode(rf.options.Mode))
 	w.agent.CompletionTool = modeCompletionTool(rf.options.Mode)
 	return nil
+}
+
+// toolsForMode returns the registry restricted to the active mode's
+// allowlist (modeRegistry) and refreshes the mode-dependent completion
+// tool description for that mode. The per-request registry is a fresh
+// map each time: a mode switch swaps the whole tool list so the model
+// only ever sees the active mode's tools.
+func (w *turnBridge) toolsForMode(mode string) core.Registry {
+	mode = normalizedOptions(SessionOptions{Mode: mode}).Mode
+	if t, ok := w.reg["mark_task_as_complete"].(*tools.MarkTaskAsCompleteTool); ok {
+		t.Mode = mode
+	}
+	return modeRegistry(w.reg, mode)
 }
 
 // approveTool blocks the worker until the human answers (or timeout/cancel).

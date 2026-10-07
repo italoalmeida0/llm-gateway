@@ -22,30 +22,30 @@ func estimateContext(agent *core.Agent, model provider.Model) *SessionContext {
 	}
 }
 
-// modeToolRestriction rejects tools disallowed by the session mode.
-// v2: mcp__ branch removed (MCP deleted).
+// modeToolRestriction rejects tools disallowed by the session mode. It is a
+// defense-in-depth guard for the approval path (the per-mode registry already
+// keeps such tools out of the model's tool list): a mode change racing an
+// approval must not let a stale approval execute a tool the active mode does
+// not have. Messages stay generic — they never describe other modes.
 func modeToolRestriction(mode, tool string) string {
 	mode = normalizedOptions(SessionOptions{Mode: mode}).Mode
-	if mode == "talk" {
-		for _, name := range []string{"read", "write", "edit", "search", "inspect", "bash", "python", "glob", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "patch", "sleep", "bg_cancel", "bg_check", "summary"} {
-			if tool == name {
-				return "The session is in talk mode. Workspace tools are disabled."
-			}
+	// "patch" is an alias of "edit" (Registry.Get resolves it), so it follows
+	// edit's allowlist entry instead of being treated as a foreign tool.
+	if tool == "patch" {
+		tool = "edit"
+	}
+	for _, name := range modeTools[mode] {
+		if name == tool {
+			return ""
 		}
 	}
-	if (tool == "sleep" || tool == "bg_cancel" || tool == "bg_check") && mode != "plan" && mode != "build" && mode != "learning" {
-		return tool + " is only available in plan, build and learning modes."
+	if tool == "mark_task_as_complete" || tool == "mark_plan_as_ready_to_execute" {
+		return tool + " is not the completion signal of the current mode."
 	}
-	if (mode == "plan" || mode == "learning") && (tool == "write" || tool == "edit" || tool == "patch") {
-		return "The session is now in " + mode + " mode. Edit and create tools are disabled."
+	if tool == "write" || tool == "edit" || tool == "patch" {
+		return "Edit and create tools are disabled in the current mode."
 	}
-	if mode != "plan" && tool == "mark_plan_as_ready_to_execute" {
-		return "mark_plan_as_ready_to_execute is only available in plan mode."
-	}
-	if mode != "build" && mode != "learning" && tool == "mark_task_as_complete" {
-		return "mark_task_as_complete is only available in build and learning modes."
-	}
-	return ""
+	return tool + " is not available in the current mode."
 }
 
 func isTextMime(mime, name string) bool {
@@ -157,10 +157,15 @@ func randomConvertID() []byte {
 	return id
 }
 
-// buildTurnSystemDirectives prepends date/mode directives to the opening
-// prompt (v1 turnPrompt parity). It mutates the WORKER snapshot copy
+// buildTurnSystemDirectives prepends date directives to the opening prompt
+// (v1 turnPrompt parity). It mutates the WORKER snapshot copy
 // (LastDate/LastMode); the actor persists them via the walTypeMeta append
 // the caller sends right after. Fires once per change, not every turn.
+//
+// Mode is deliberately NOT announced here: the system prompt is rebuilt
+// per mode and is the single source of truth for the active mode. LastMode
+// is still tracked and persisted (frozen wire/WAL field) but no longer
+// produces prompt text.
 func buildTurnSystemDirectives(snap *workerSnapshot, now time.Time) string {
 	today := now.Format("2006-01-02")
 	todayDisplay := now.Format("Monday, 2006-01-02")
@@ -173,19 +178,7 @@ func buildTurnSystemDirectives(snap *workerSnapshot, now time.Time) string {
 		sysParts = append(sysParts, fmt.Sprintf("Current date: %s", todayDisplay))
 		snap.lastDate = today
 	}
-	if snap.lastMode != mode {
-		switch mode {
-		case "plan":
-			sysParts = append(sysParts, "Operational mode: Plan. You are in READ-ONLY phase. Inspect, read, and plan; file modifications (write/edit) are disabled. When your plan is ready, call mark_plan_as_ready_to_execute.")
-		case "build":
-			sysParts = append(sysParts, "Operational mode: Build. You are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed. When finished, call mark_task_as_complete.")
-		case "learning":
-			sysParts = append(sysParts, "Operational mode: Learning. You are a patient Socratic programming tutor. GUIDE the user to find the answer themselves — never give the solution, direct answers or code that solves the task. Never modify the user's project files (write, edit, patch are disabled). Read code and run terminal commands, tests and inline python to inspect and verify behavior; scratch/test files go only in your private brain workspace. State observations, offer conceptual hints, ask one guiding question at a time via the question tool. Conclude by calling mark_task_as_complete with your report: what you read, tested and verified, hints and the next guiding question — never the solution.")
-		case "talk":
-			sysParts = append(sysParts, "Operational mode: Talk. Conversational mode. No workspace modifications or executions.")
-		}
-		snap.lastMode = mode
-	}
+	snap.lastMode = mode
 	if len(sysParts) == 0 {
 		return ""
 	}

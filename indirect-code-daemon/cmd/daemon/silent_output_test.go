@@ -82,11 +82,23 @@ func TestModeToolRestrictionLearningCompletes(t *testing.T) {
 	if reason := modeToolRestriction("build", "mark_task_as_complete"); reason != "" {
 		t.Fatalf("build must allow mark_task_as_complete, got %q", reason)
 	}
-	if reason := modeToolRestriction("plan", "mark_task_as_complete"); !strings.Contains(reason, "build and learning") {
-		t.Fatalf("plan must reject mark_task_as_complete, got %q", reason)
+	if reason := modeToolRestriction("plan", "mark_task_as_complete"); reason == "" {
+		t.Fatalf("plan must reject mark_task_as_complete")
 	}
 	if reason := modeToolRestriction("learning", "mark_plan_as_ready_to_execute"); reason == "" {
 		t.Fatalf("learning must reject mark_plan_as_ready_to_execute")
+	}
+	// Rejection messages must not describe other modes.
+	for _, reason := range []string{
+		modeToolRestriction("plan", "mark_task_as_complete"),
+		modeToolRestriction("talk", "read"),
+		modeToolRestriction("learning", "write"),
+	} {
+		for _, leak := range []string{"build", "plan mode", "learning", "talk"} {
+			if strings.Contains(strings.ToLower(reason), leak) {
+				t.Fatalf("restriction reason %q leaks other modes (%q)", reason, leak)
+			}
+		}
 	}
 	// Learning keeps its read-only guarantee on project files.
 	for _, tool := range []string{"write", "edit", "patch"} {

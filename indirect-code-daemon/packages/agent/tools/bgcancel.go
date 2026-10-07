@@ -34,8 +34,8 @@ type BgCancelHost interface {
 }
 
 // BgCancelTool force-stops one of this session's background tasks — a
-// detached bash/python process. Available in plan, build and learning
-// modes only (same gating as sleep).
+// detached bash/python process. Only registered in modes whose allowlist
+// includes it (see modeRegistry in the daemon).
 type BgCancelTool struct {
 	Host      BgCancelHost
 	SessionID string
@@ -43,7 +43,7 @@ type BgCancelTool struct {
 
 func (*BgCancelTool) Name() string { return "bg_cancel" }
 func (*BgCancelTool) Description() string {
-	return `Force-stop one of YOUR background tasks: a bash/python command that went to the background (it gave you its job_id when it detached). The process is killed and the job is marked cancelled; no completion notice is delivered — re-run the command differently instead of waiting. Already-finished jobs cannot be cancelled. Unknown or foreign ids are refused. Available in plan, build and learning modes only.`
+	return `Force-stop one of YOUR background tasks: a bash/python command that went to the background (it gave you its job_id when it detached). The process is killed and the job is marked cancelled; no completion notice is delivered — re-run the command differently instead of waiting. Already-finished jobs cannot be cancelled. Unknown or foreign ids are refused.`
 }
 func (*BgCancelTool) Schema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string","description":"Background job id (bg_…)."}},"required":["job_id"]}`)

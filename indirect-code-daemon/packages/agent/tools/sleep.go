@@ -55,7 +55,7 @@ type SleepTool struct {
 func (*SleepTool) Name() string { return "sleep" }
 
 func (*SleepTool) Description() string {
-	return `Wait for a bounded number of seconds while a background task runs. REQUIRED args: waitingFor (the bg task id from the detach placeholder) and summary (≤100 chars describing what you are waiting for, shown in the UI). The wait ends EARLY — with a notice — as soon as one of your background tasks finishes. If the pinned task already finished, sleep returns immediately (no dead-wait, never fails). Prefer overestimating: sleep(120) returns immediately when the task completes after 5s. Available in plan, build and learning modes only.`
+	return `Wait for a bounded number of seconds while a background task runs. REQUIRED args: waitingFor (the bg task id from the detach placeholder) and summary (≤100 chars describing what you are waiting for, shown in the UI). The wait ends EARLY — with a notice — as soon as one of your background tasks finishes. If the pinned task already finished, sleep returns immediately (no dead-wait, never fails). Prefer overestimating: sleep(120) returns immediately when the task completes after 5s.`
 }
 
 func (*SleepTool) Schema() json.RawMessage {

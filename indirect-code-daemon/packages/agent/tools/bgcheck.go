@@ -55,7 +55,7 @@ type BgCheckTool struct {
 
 func (*BgCheckTool) Name() string { return "bg_check" }
 func (*BgCheckTool) Description() string {
-	return `Read a background task's log (one of YOUR session's bg tasks that went to the background after 10s). Works like read but for task output: paged by lines, tail by default. Pass the job_id from the detach placeholder; use offset/limit for large logs. The result shows lines From–To of Total plus whether the task is still running. Available in plan, build and learning modes only.`
+	return `Read a background task's log (one of YOUR session's bg tasks that went to the background after 10s). Works like read but for task output: paged by lines, tail by default. Pass the job_id from the detach placeholder; use offset/limit for large logs. The result shows lines From–To of Total plus whether the task is still running.`
 }
 func (*BgCheckTool) Schema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string","description":"Background task id (bg_…)."},"offset":{"type":"integer","description":"1-indexed first line to read (over total lines); <=0 reads the tail (default)"},"limit":{"type":"integer","description":"Maximum lines to return (default 50, max 500)"}},"required":["job_id"]}`)

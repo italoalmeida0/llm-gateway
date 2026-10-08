@@ -1,3 +1,12 @@
+diff --git a/node_modules/streaming-markdown/.bun-tag-4674a86b4751941e b/.bun-tag-4674a86b4751941e
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/streaming-markdown/.bun-tag-61e1261f0f022d6a b/.bun-tag-61e1261f0f022d6a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/streaming-markdown/.bun-tag-aff92907b58d7d36 b/.bun-tag-aff92907b58d7d36
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/smd.d.ts b/smd.d.ts
 index cc589fed84ee0cf97ef0fafefbb4c3cd930e5e90..92c482422b03db2e0374e3a217f926e77ebcf3ab 100644
 --- a/smd.d.ts
@@ -11,7 +20,7 @@ index cc589fed84ee0cf97ef0fafefbb4c3cd930e5e90..92c482422b03db2e0374e3a217f926e7
  //# sourceMappingURL=smd.d.ts.map
 \ No newline at end of file
 diff --git a/smd.js b/smd.js
-index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..bc8830163520452590081ecdb7a5a150e7857afa 100644
+index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f04c8cf25 100644
 --- a/smd.js
 +++ b/smd.js
 @@ -192,6 +192,7 @@ export const heading_to_level = (token) => {
@@ -30,7 +39,41 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..bc8830163520452590081ecdb7a5a150
      }
  }
  
-@@ -909,19 +911,27 @@ export function parser_write(p, chunk) {
+@@ -459,6 +461,10 @@ function is_delimeter_or_number(charcode) {
+ /**
+  * @param   {number} charcode
+  * @returns {boolean} */
++function is_word_char(ch) {
++    return ch !== "" && /[\p{L}\p{N}]/u.test(ch)
++}
++
+ function is_alnum(charcode) {
+     return is_digit(charcode)                 || // 0-9
+            (charcode >= 65 && charcode <= 90) || // A-Z
+@@ -472,6 +478,22 @@ function is_alnum(charcode) {
+  * @returns {void  } */
+ export function parser_write(p, chunk) {
+     for (const char of chunk) {
++        // Track the character before each pending run so the '_' guard
++        // below sees the letter in front of `var_` even after text flushes.
++        // hist: recent characters, current one last. When a pending '_' is
++        // being judged, the character before it is hist[len-3].
++        const hist = p.hist ?? (p.hist = [])
++        hist.push(char)
++        if (hist.length > 4) hist.shift()
++
++        // A doubled underscore not followed by another one is a dunder
++        // (__init__, __aa__), not bold. Emit it literally and go on.
++        if (p.pending === '__' && char !== '_' && p.token !== ITALIC_UND && p.token !== STRONG_UND) {
++            ensure_paragraph(p)
++            p.text += '__'
++            p.pending = ''
++        }
++
+ 
+         /*
+          Handle newlines
+@@ -909,19 +931,27 @@ export function parser_write(p, chunk) {
              p.fence_end = 1
              continue
          case CODE_INLINE:
@@ -66,7 +109,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..bc8830163520452590081ecdb7a5a150
              case '\n':
                  p.text += p.pending
                  p.pending = ""
-@@ -935,7 +945,7 @@ export function parser_write(p, chunk) {
+@@ -935,7 +965,7 @@ export function parser_write(p, chunk) {
                  p.pending = char
                  continue
              default:
@@ -75,7 +118,20 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..bc8830163520452590081ecdb7a5a150
                  p.pending = ""
                  continue
              }
-@@ -1062,46 +1072,44 @@ export function parser_write(p, chunk) {
+@@ -1030,6 +1060,12 @@ export function parser_write(p, chunk) {
+                        ^
+                 */
+                 else {
++                    // An underscore closer followed by a word char is not a closer (var_a_b).
++                    if (symbol === '_' && is_word_char(char)) {
++                        p.text += p.pending
++                        p.pending = char
++                        continue
++                    }
+                     add_text(p)
+                     end_token(p)
+                     p.pending = char
+@@ -1062,46 +1098,44 @@ export function parser_write(p, chunk) {
              }
              break
          case MAYBE_EQ_BLOCK:
@@ -148,7 +204,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..bc8830163520452590081ecdb7a5a150
          /* Raw URLs */
          case MAYBE_URL:
              if ("http://"  === pending_with_char ||
-@@ -1220,6 +1228,7 @@ export function parser_write(p, chunk) {
+@@ -1220,6 +1254,7 @@ export function parser_write(p, chunk) {
  
              switch (char) {
              case '(':
@@ -156,7 +212,38 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..bc8830163520452590081ecdb7a5a150
                  add_text(p)
                  add_token(p, EQUATION_INLINE)
                  p.pending = ""
-@@ -1402,6 +1411,7 @@ export function parser_write(p, chunk) {
+@@ -1303,6 +1338,30 @@ export function parser_write(p, chunk) {
+                 p.token === STRONG_AST)
+              break
+ 
++            // Underscore emphasis (_x_ and __x__) is disabled: identifiers such
++            // as snake_case, __init__ and var_a_b are far more common than
++            // intended emphasis. Asterisks still work.
++            if (p.pending[0] === '_')
++             break
++
++            // Underscore emphasis is word-bound: `snake_case` and `var_name`
++            // are identifiers. An opener cannot follow a letter or digit.
++            if (p.pending[0] === '_') {
++                const inside_und = p.token === ITALIC_UND || p.token === STRONG_UND
++                if (!inside_und && is_word_char(hist.length >= 3 ? hist[hist.length - 3] : "")) {
++                    // `snake__case`: a doubled underscore after a letter is literal.
++                    if (p.pending === '_' && char === '_') {
++                        p.text += '__'
++                        p.pending = ''
++                        continue
++                    }
++                    break
++                }
++            }
++
++            // Double underscore is almost always a Python dunder (__init__,
++            // __aa__), not bold. Leave it literal; `**` still bolds.
++
+             /** @type {Token} */ let italic = ITALIC_AST
+             /** @type {Token} */ let strong = STRONG_AST
+             const symbol = p.pending[0]
+@@ -1402,6 +1461,7 @@ export function parser_write(p, chunk) {
                  */
                  else {
                      add_text(p)

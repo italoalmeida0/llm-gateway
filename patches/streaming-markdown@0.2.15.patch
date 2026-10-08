@@ -4,13 +4,28 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/streaming-markdown/.bun-tag-61e1261f0f022d6a b/.bun-tag-61e1261f0f022d6a
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/streaming-markdown/.bun-tag-64c46cf16586ac66 b/.bun-tag-64c46cf16586ac66
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/streaming-markdown/.bun-tag-848de183696a64b8 b/.bun-tag-848de183696a64b8
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/streaming-markdown/.bun-tag-aff92907b58d7d36 b/.bun-tag-aff92907b58d7d36
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/smd.d.ts b/smd.d.ts
-index cc589fed84ee0cf97ef0fafefbb4c3cd930e5e90..92c482422b03db2e0374e3a217f926e77ebcf3ab 100644
+index cc589fed84ee0cf97ef0fafefbb4c3cd930e5e90..21d788c7de418bd296aafac9aa092c9d7eb450e8 100644
 --- a/smd.d.ts
 +++ b/smd.d.ts
+@@ -10,7 +10,7 @@ export function attr_to_html_attr(type: Attr): string;
+  * Makes a new Parser object.
+  * @param   {Any_Renderer} renderer
+  * @returns {Parser      } */
+-export function parser(renderer: Any_Renderer): Parser;
++export function parser(renderer: Any_Renderer, opts?: { basic?: boolean }): Parser;
+ /**
+  * Finish rendering the markdown - flushes any remaining text.
+  * @param   {Parser} p
 @@ -268,5 +268,6 @@ export type Parser = {
       */
      hr_chars: number;
@@ -20,7 +35,7 @@ index cc589fed84ee0cf97ef0fafefbb4c3cd930e5e90..92c482422b03db2e0374e3a217f926e7
  //# sourceMappingURL=smd.d.ts.map
 \ No newline at end of file
 diff --git a/smd.js b/smd.js
-index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f04c8cf25 100644
+index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d04936bc5fbcf6259cc8bdd7184da3a59a249362 100644
 --- a/smd.js
 +++ b/smd.js
 @@ -192,6 +192,7 @@ export const heading_to_level = (token) => {
@@ -31,7 +46,22 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
   * @property {number      } table_state
   */
  
-@@ -220,6 +221,7 @@ export function parser(renderer) {
+@@ -201,10 +202,13 @@ const TOKEN_ARRAY_CAP = 24
+  * Makes a new Parser object.
+  * @param   {Any_Renderer} renderer
+  * @returns {Parser      } */
+-export function parser(renderer) {
++export function parser(renderer, opts) {
+     const tokens = new Uint32Array(TOKEN_ARRAY_CAP)
+     tokens[0] = DOCUMENT
+     return {
++        // basic: only headings, lists, inline code and fenced code are parsed.
++        // Links, images, LaTeX, emphasis, html, tables and strike stay literal.
++        basic: !!(opts && opts.basic),
+         renderer   : renderer,
+         text       : "",
+         pending    : "",
+@@ -220,6 +224,7 @@ export function parser(renderer) {
          indent     : "",
          indent_len : 0,
          table_state: 0,
@@ -39,7 +69,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
      }
  }
  
-@@ -459,6 +461,10 @@ function is_delimeter_or_number(charcode) {
+@@ -459,6 +464,10 @@ function is_delimeter_or_number(charcode) {
  /**
   * @param   {number} charcode
   * @returns {boolean} */
@@ -50,7 +80,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
  function is_alnum(charcode) {
      return is_digit(charcode)                 || // 0-9
             (charcode >= 65 && charcode <= 90) || // A-Z
-@@ -472,6 +478,22 @@ function is_alnum(charcode) {
+@@ -472,6 +481,22 @@ function is_alnum(charcode) {
   * @returns {void  } */
  export function parser_write(p, chunk) {
      for (const char of chunk) {
@@ -73,7 +103,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
  
          /*
           Handle newlines
-@@ -909,19 +931,27 @@ export function parser_write(p, chunk) {
+@@ -909,19 +934,27 @@ export function parser_write(p, chunk) {
              p.fence_end = 1
              continue
          case CODE_INLINE:
@@ -109,7 +139,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
              case '\n':
                  p.text += p.pending
                  p.pending = ""
-@@ -935,7 +965,7 @@ export function parser_write(p, chunk) {
+@@ -935,7 +968,7 @@ export function parser_write(p, chunk) {
                  p.pending = char
                  continue
              default:
@@ -118,7 +148,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
                  p.pending = ""
                  continue
              }
-@@ -1030,6 +1060,12 @@ export function parser_write(p, chunk) {
+@@ -1030,6 +1063,12 @@ export function parser_write(p, chunk) {
                         ^
                  */
                  else {
@@ -131,7 +161,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
                      add_text(p)
                      end_token(p)
                      p.pending = char
-@@ -1062,46 +1098,44 @@ export function parser_write(p, chunk) {
+@@ -1062,46 +1101,44 @@ export function parser_write(p, chunk) {
              }
              break
          case MAYBE_EQ_BLOCK:
@@ -204,7 +234,15 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
          /* Raw URLs */
          case MAYBE_URL:
              if ("http://"  === pending_with_char ||
-@@ -1220,6 +1254,7 @@ export function parser_write(p, chunk) {
+@@ -1213,6 +1250,7 @@ export function parser_write(p, chunk) {
+         switch (p.pending[0]) {
+         /* Escape character */
+         case '\\':
++            if (p.basic) break
+             if (p.token === IMAGE ||
+                 p.token === EQUATION_BLOCK ||
+                 p.token === EQUATION_INLINE)
+@@ -1220,11 +1258,13 @@ export function parser_write(p, chunk) {
  
              switch (char) {
              case '(':
@@ -212,7 +250,28 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
                  add_text(p)
                  add_token(p, EQUATION_INLINE)
                  p.pending = ""
-@@ -1303,6 +1338,30 @@ export function parser_write(p, chunk) {
+                 continue
+             case '[':
++            if (p.basic) break
+                 p.token = MAYBE_EQ_BLOCK
+                 p.pending = pending_with_char
+                 continue
+@@ -1270,6 +1310,7 @@ export function parser_write(p, chunk) {
+             break
+         /* <br> */
+         case '<':
++            if (p.basic) break
+             if (p.token !== IMAGE &&
+                 p.token !== EQUATION_BLOCK &&
+                 p.token !== EQUATION_INLINE
+@@ -1297,12 +1338,37 @@ export function parser_write(p, chunk) {
+             continue
+         case '_':
+         case '*': {
++            if (p.basic) break
+             if (p.token === IMAGE ||
+                 p.token === EQUATION_BLOCK ||
+                 p.token === EQUATION_INLINE ||
                  p.token === STRONG_AST)
               break
  
@@ -243,7 +302,23 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
              /** @type {Token} */ let italic = ITALIC_AST
              /** @type {Token} */ let strong = STRONG_AST
              const symbol = p.pending[0]
-@@ -1402,6 +1461,7 @@ export function parser_write(p, chunk) {
+@@ -1353,6 +1419,7 @@ export function parser_write(p, chunk) {
+             break
+         }
+         case '~':
++            if (p.basic) break
+             if (p.token !== IMAGE &&
+                 p.token !== STRIKE
+             ) {
+@@ -1379,6 +1446,7 @@ export function parser_write(p, chunk) {
+             break
+         /* $eq$ | $$eq$$ */
+         case '$':
++            if (p.basic) break
+             if (p.token !== IMAGE &&
+                 p.token !== STRIKE &&
+                 "$" === p.pending
+@@ -1402,6 +1470,7 @@ export function parser_write(p, chunk) {
                  */
                  else {
                      add_text(p)
@@ -251,3 +326,19 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d8032ecd7aa60e21967d6b6957ac721f
                      add_token(p, EQUATION_INLINE)
                      p.pending = char
                      continue
+@@ -1424,6 +1493,7 @@ export function parser_write(p, chunk) {
+             break
+         /* ![Image](url) */
+         case '!':
++            if (p.basic) break
+             if (!(p.token === IMAGE) &&
+                 '[' === char
+             ) {
+@@ -1448,6 +1518,7 @@ export function parser_write(p, chunk) {
+             p.token !== LINK &&
+             p.token !== EQUATION_BLOCK &&
+             p.token !== EQUATION_INLINE &&
++            !p.basic &&
+             'h' === char &&
+            (" " === p.pending ||
+             ""  === p.pending)

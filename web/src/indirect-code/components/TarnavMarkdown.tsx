@@ -586,8 +586,8 @@ export interface TarnavMarkdownProps {
   class?: string;
   /** The transcript already owns the rc-markdown typography container. */
   embedded?: boolean;
-  /** "plain" skips the markdown parser entirely and shows the text verbatim. */
-  mode?: "full" | "mini" | "toolsearch" | "compact" | "plain";
+  /** "basic" keeps only headings, lists and code; links, LaTeX and emphasis stay literal. */
+  mode?: "full" | "mini" | "toolsearch" | "compact" | "basic";
   streaming?: boolean;
   active?: boolean;
 }
@@ -609,19 +609,13 @@ export function TarnavMarkdown(props: TarnavMarkdownProps) {
   function disposeView() { for (const dispose of view?.data.cleanup ?? []) dispose(); }
   function reset() {
     disposeView(); host.replaceChildren();
-    view = makeRenderer(host, opts); p = parser(view); view.data.parser = p; fed = ""; previousCR = false; sourceLine = ""; ended = false;
+    view = makeRenderer(host, opts); p = parser(view, { basic: props.mode === "basic" }); view.data.parser = p; fed = ""; previousCR = false; sourceLine = ""; ended = false;
   }
   function update() {
     frame = 0;
     clearTimeout(highlightTimer); highlightTimer = undefined;
     if (!mounted || !visible()) return;
     const full = props.children || "";
-    if (props.mode === "plain") {
-      // Thinking text is often full of regex, LaTeX and code-like fragments
-      // that break markdown. Show it as-is; textContent never parses markup.
-      host.textContent = full;
-      return;
-    }
     if (!p || !full.startsWith(fed) || (ended && full !== fed)) reset();
     const end = Math.min(full.length, fed.length + 8192);
     if (end > fed.length) {
@@ -671,6 +665,6 @@ export function TarnavMarkdown(props: TarnavMarkdownProps) {
     mounted = false; cancelAnimationFrame(frame); clearTimeout(highlightTimer); disposeView();
     document.removeEventListener("visibilitychange", schedule);
   });
-  return <div ref={(el) => (host = el)} class={cn(!props.embedded && "rc-markdown", props.mode === "plain" && "whitespace-pre-wrap", props.class)}
+  return <div ref={(el) => (host = el)} class={cn(!props.embedded && "rc-markdown", props.class)}
     data-tarnav-markdown={props.mode ?? "full"} data-streaming-markdown />;
 }

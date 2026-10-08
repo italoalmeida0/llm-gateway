@@ -13,6 +13,9 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/streaming-markdown/.bun-tag-aff92907b58d7d36 b/.bun-tag-aff92907b58d7d36
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/streaming-markdown/.bun-tag-cd1bd96cc2915c19 b/.bun-tag-cd1bd96cc2915c19
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/smd.d.ts b/smd.d.ts
 index cc589fed84ee0cf97ef0fafefbb4c3cd930e5e90..21d788c7de418bd296aafac9aa092c9d7eb450e8 100644
 --- a/smd.d.ts
@@ -35,7 +38,7 @@ index cc589fed84ee0cf97ef0fafefbb4c3cd930e5e90..21d788c7de418bd296aafac9aa092c9d
  //# sourceMappingURL=smd.d.ts.map
 \ No newline at end of file
 diff --git a/smd.js b/smd.js
-index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d04936bc5fbcf6259cc8bdd7184da3a59a249362 100644
+index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..e1fb16931697150788cd0ebac622b5e09f4ba790 100644
 --- a/smd.js
 +++ b/smd.js
 @@ -192,6 +192,7 @@ export const heading_to_level = (token) => {
@@ -326,7 +329,17 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d04936bc5fbcf6259cc8bdd7184da3a5
                      add_token(p, EQUATION_INLINE)
                      p.pending = char
                      continue
-@@ -1424,6 +1493,7 @@ export function parser_write(p, chunk) {
+@@ -1410,7 +1479,8 @@ export function parser_write(p, chunk) {
+             break
+         /* [Image](url) */
+         case '[':
+-            if (p.token !== IMAGE &&
++            if (!p.basic &&
++                p.token !== IMAGE &&
+                 p.token !== LINK &&
+                 p.token !== EQUATION_BLOCK &&
+                 p.token !== EQUATION_INLINE &&
+@@ -1424,6 +1494,7 @@ export function parser_write(p, chunk) {
              break
          /* ![Image](url) */
          case '!':
@@ -334,7 +347,7 @@ index f7ad270f0172e7b2a9ce07b3c3bd95d3207083ca..d04936bc5fbcf6259cc8bdd7184da3a5
              if (!(p.token === IMAGE) &&
                  '[' === char
              ) {
-@@ -1448,6 +1518,7 @@ export function parser_write(p, chunk) {
+@@ -1448,6 +1519,7 @@ export function parser_write(p, chunk) {
              p.token !== LINK &&
              p.token !== EQUATION_BLOCK &&
              p.token !== EQUATION_INLINE &&

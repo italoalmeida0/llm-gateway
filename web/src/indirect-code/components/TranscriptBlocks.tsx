@@ -11,6 +11,7 @@ import { groupTitle, specialTitle } from "../utils/titles";
 import { formatDurationSecs } from "../utils/format";
 import { useToolUnitModel } from "./tool/toolUnitModel";
 import { ToolUnitHeader } from "./tool/ToolUnitHeader";
+import { ToolFooter } from "./tool/ToolFooter";
 import { ToolEditBodies } from "./tool/ToolEditBodies";
 import { ToolSearchBodies } from "./tool/ToolSearchBodies";
 import { ToolQuestionBodies } from "./tool/ToolQuestionBodies";
@@ -347,6 +348,7 @@ function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui
           <ToolEditBodies {...part} />
           <ToolSearchBodies {...part} />
           <ToolQuestionBodies {...part} />
+          <ToolFooter facts={m.footer()} />
         </div>
       </DisclosureBody>
     </div>

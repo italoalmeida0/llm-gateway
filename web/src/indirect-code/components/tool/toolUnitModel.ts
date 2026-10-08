@@ -4,7 +4,7 @@ import { tryParseArgs } from "../../utils/tools";
 import { isHeaderOnlySleep, toolSummary, terminalPresentation } from "../../transcript";
 import { toolRowKey } from "../../utils/titles";
 import { formatDurationSecs } from "../../utils/format";
-import { bodyWithoutFooter } from "../../utils/envelope";
+import { bodyWithoutFooter, type FooterFact } from "../../utils/envelope";
 import type { ToolUnit } from "../../types";
 import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 
@@ -54,9 +54,15 @@ const bashHeaderCmd = () => {
 };
 const terminal = createMemo(() => terminalPresentation((u.result?.toolDetails?.display ?? u.result?.toolResult) || ""));
 /** Tool output with the envelope footer removed; the footer lives in footer(). */
-const output = () => bodyWithoutFooter(u.result?.toolResult || "", (u.result?.toolDetails as any)?.footer);
-/** Envelope facts as a single status line (exit, page, next...). */
-const footer = () => String((u.result?.toolDetails as any)?.footer || "");
+const output = () => bodyWithoutFooter(u.result?.toolResult || "");
+/** Envelope facts as structured chips (exit, page, next...). */
+const footer = (): FooterFact[] => {
+  const f = (u.result?.toolDetails as any)?.footer;
+  const facts: FooterFact[] = Array.isArray(f) ? f : [];
+  // A fact that just repeats the body (e.g. summary's info line) adds nothing.
+  const first = (u.result?.toolResult || "").split("\n").map((l) => l.trim()).find((l) => l) || "";
+  return facts.filter((fact) => fact.label !== first);
+};
 /** Non-zero exit code for shell rows (drives the failure hint). */
 const exitCode = () => String((u.result?.toolDetails as any)?.env?.exit ?? "");
 const webDetails = () => {

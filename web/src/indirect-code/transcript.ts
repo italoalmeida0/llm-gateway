@@ -572,8 +572,25 @@ export function toolSummary(u: ToolUnit): ToolSummary {
         stat: n > 0 ? `${n} lines` : undefined,
       };
     }
-    default:
-      return { icon: "lucide:wrench", verb: name, target: "" };
+    default: {
+      // Result without its call (a late or replayed tool_result): label it as
+      // a result and let the body carry the text. The target repeats the
+      // daemon's command label when it knows one; never echo body lines.
+      if (!u.call?.toolName) {
+        const env = (u.result?.toolDetails as any)?.env || {};
+        return { icon: "lucide:file-text", verb: "Result", target: String(env.command || "") };
+      }
+      // Session meta tools: friendly labels instead of the raw tool name.
+      switch (name) {
+        case "summary":
+        case "mark_task_as_complete":
+          return { icon: "lucide:check-circle-2", verb: "Summary", target: "" };
+        case "todo":
+          return { icon: "lucide:list-checks", verb: "Tasks", target: "" };
+        default:
+          return { icon: "lucide:wrench", verb: name, target: "" };
+      }
+    }
   }
 }
 

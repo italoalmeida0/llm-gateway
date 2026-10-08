@@ -55,6 +55,9 @@ export function parseToolEnvelope(text: string): ToolEnvelope | null {
     if (i >= text.length) return null;
     const val = unescapeAttr(text.slice(valStart, i));
     i++;
+    // Unknown attributes (duration, started_at, ...) are kept for toolDetails
+    // but never break parsing: a stray attr must not leak the envelope text
+    // into the rendered body.
     if (key === "type") type = val === "error" ? "error" : "ok";
     else if (key) attrs[key] = val;
   }
@@ -63,19 +66,28 @@ export function parseToolEnvelope(text: string): ToolEnvelope | null {
   return { type, attrs, body: unescapeBody(text.slice(i, end)) };
 }
 
-/** Human-readable footer line for the facts the UI shows (exit/status/
+/** One fact about the tool call (exit code, page range, …) for the footer. */
+export interface FooterFact {
+  label: string;
+  tone?: "ok" | "fail" | "muted";
+}
+
+/** Structured footer facts for the facts the UI shows (exit/status/
  * duration/…). Empty when there is nothing worth showing. */
-function envelopeFooter(e: ToolEnvelope): string {
-  const parts: string[] = [];
-  const a = e.attrs;
-  if (a.exit !== undefined) parts.push(`[exit ${a.exit}]`);
-  else if (a.status) parts.push(`[${a.status}]`);
-  if (a.duration) parts.push(`Took ${a.duration}`);
-  if (a.truncated === "true" && a.page) parts.push(`[${a.page} truncated]`);
-  else if (a.page) parts.push(`[${a.page}]`);
-  if (a.next) parts.push(`[more lines: offset ${a.next}]`);
-  if (a.info) parts.push(`[${a.info}]`);
-  return parts.join("  ");
+export function footerFromAttrs(a: Record<string, string>): FooterFact[] {
+  const parts: FooterFact[] = [];
+  if (a.exit !== undefined) parts.push({ label: `exit ${a.exit}`, tone: a.exit === "0" ? "muted" : "fail" });
+  else if (a.status) parts.push({ label: a.status, tone: a.status === "running" ? "ok" : "muted" });
+  if (a.duration) parts.push({ label: `Took ${a.duration}`, tone: "muted" });
+  if (a.truncated === "true" && a.page) parts.push({ label: `${a.page} truncated`, tone: "muted" });
+  else if (a.page) parts.push({ label: a.page, tone: "muted" });
+  if (a.next) parts.push({ label: `more lines: offset ${a.next}`, tone: "muted" });
+  if (a.info) parts.push({ label: a.info, tone: "muted" });
+  return parts;
+}
+
+function envelopeFooter(e: ToolEnvelope): FooterFact[] {
+  return footerFromAttrs(e.attrs);
 }
 
 /**
@@ -86,22 +98,25 @@ function envelopeFooter(e: ToolEnvelope): string {
 export function stripToolEnvelopeDetailed(text: string): {
   body: string;
   attrs: Record<string, string>;
-  footer: string;
+  footer: FooterFact[];
 } {
   const e = parseToolEnvelope(text);
-  if (!e) return { body: text, attrs: {}, footer: "" };
-  const footer = envelopeFooter(e);
-  return {
-    body: footer ? (e.body ? `${e.body}\n\n${footer}` : footer) : e.body,
-    attrs: e.attrs,
-    footer,
-  };
+  if (!e) return { body: text, attrs: {}, footer: [] };
+  return { body: e.body, attrs: e.attrs, footer: envelopeFooter(e) };
 }
 
-/** Body without the trailing footer line: the tool's own output only. */
-export function bodyWithoutFooter(text: string, footer: string | undefined): string {
-  if (!footer) return text;
-  const tail = `\n\n${footer}`;
-  if (text.endsWith(tail)) return text.slice(0, -tail.length);
-  return text === footer ? "" : text;
+/** Body without a trailing footer line: the tool's own output only. Older
+ * transcripts appended "[exit 0]  [page …]" to the body; that line is stripped
+ * so it never renders as output. */
+export function bodyWithoutFooter(text: string): string {
+  // Only footer-shaped facts (exit/status/duration/page/…) are stripped: a
+  // legitimate last output line like "[done]" must survive.
+  const fact = String.raw`\[(?:exit \d+|running|ok|error|canceled|completed|Took [^\]]+|[\d.\-–/]+ truncated|[\d.\-–/]+|more lines: offset \d+|No output yet\.)\]`;
+  const m = new RegExp(`(?:\\n|^)(${fact}(?:  ${fact})*)\\s*$`).exec(text);
+  return m ? text.slice(0, m.index + (m.index > 0 ? 1 : 0)) : text;
+}
+
+/** Compact footer text (used by tests and legacy callers). */
+export function footerText(facts: FooterFact[]): string {
+  return facts.map((f) => `[${f.label}]`).join("  ");
 }

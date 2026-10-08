@@ -1,5 +1,5 @@
 import type { ContentBlock } from "../types";
-import { stripToolEnvelopeDetailed } from "./envelope";
+import { stripToolEnvelopeDetailed, footerFromAttrs } from "./envelope";
 
 export function prettyArgs(v: any): string {
   if (v == null) return "";
@@ -96,13 +96,16 @@ export function parseContentBlocks(m: any): ContentBlock[] {
     ) {
       const envAttrs = toolResultEnvAttrs(c);
       const details = parseToolDetails(c.details);
+      const footer = footerFromAttrs(envAttrs);
       blocks.push({
         type: "tool_result",
         toolId: c.tool_use_id || c.call_id || c.id,
         toolResult: toolResultText(c),
         toolStartedAt:c.started_at, toolDurationMs:c.started_at ? (c.duration_ms || 0) : undefined,
         isError: !!(c.is_error ?? c.isError ?? c.is_error === true),
-        toolDetails: Object.keys(envAttrs).length ? { ...details, env: envAttrs } : details,
+        toolDetails: Object.keys(envAttrs).length
+          ? { ...details, env: envAttrs, footer: [...(Array.isArray((details as any)?.footer) ? (details as any).footer : []), ...footer] }
+          : details,
       });
       return;
     }

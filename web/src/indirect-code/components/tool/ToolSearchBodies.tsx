@@ -220,9 +220,6 @@ export function ToolSearchBodies(props: ToolPartProps) {
           >
             {/* Log output: numbered, plain, unwrapped. Metadata sits in the footer. */}
             <CodeBlock follow={() => props.m.open() && props.running} text={props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
-            <Show when={props.m.footer()}>
-              <div class="px-3 pb-2 pt-1 font-mono text-[10px] text-ink-500 tabular-nums">{props.m.footer()}</div>
-            </Show>
           </Show>
         </Show>
         <Show when={props.m.name() === "bg_cancel" && !!props.m.output()}>
@@ -247,9 +244,6 @@ export function ToolSearchBodies(props: ToolPartProps) {
               wrap={false}
               scrollKey={`${props.m.key()}:out`}
             />
-            <Show when={props.m.footer() && !props.m.bgRunning()}>
-              <div class="px-3 pb-2 pt-1 font-mono text-[10px] text-ink-500 tabular-nums">{props.m.footer()}</div>
-            </Show>
           </Show>
         </Show>
         <Show when={!(props.m.name() === "bash" || props.m.name() === "sleep" || props.m.name() === "bg_check" || props.m.name() === "bg_cancel" || props.m.name() === "edit" || props.m.name() === "read" || props.m.name() === "write" || props.m.name() === "python" || props.m.name() === "search" || props.m.name() === "inspect" || props.m.name() === "glob" || props.m.name() === "question" || props.m.name() === "patch" || props.m.name() === "search_web" || props.m.name() === "fetch_url")}>
@@ -264,13 +258,9 @@ export function ToolSearchBodies(props: ToolPartProps) {
                 onCleanup(followTail(el, () => props.m.open() && props.running));
               }}
               onScroll={(e) => recordToolScroll(props.m.key(), e.currentTarget)}
-              class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-56 whitespace-pre-wrap"
+              class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-56 whitespace-pre"
             >
-              {props.m.name() === "bash" && props.u.result
-                ? (props.m.bgRunning() || props.m.isDetachedBg()
-                  ? (props.m.bgStream() || props.m.prog() || "Running in background…")
-                  : props.m.terminal().output || "No output")
-                : props.m.output() || props.m.prog() || ""}
+              {props.m.output() || props.m.prog() || ""}
             </pre>
           </Show>
         </Show>

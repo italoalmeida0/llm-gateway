@@ -166,9 +166,6 @@ export function ToolEditBodies(props: ToolPartProps) {
             <div class="border-t border-line/40">
               <CodeBlock follow={() => props.m.open() && props.running} text={props.m.bgRunning() || props.m.isDetachedBg() ? (props.m.bgStream() || props.m.prog() || "Running in background…") : props.m.output() || "No output"} language={undefined} plain wrap={false} scrollKey={`${props.m.key()}:out`} />
             </div>
-            <Show when={props.m.footer() && !props.m.bgRunning()}>
-              <div class="px-3 pb-2 pt-1 font-mono text-[10px] text-ink-500 tabular-nums">{props.m.footer()}</div>
-            </Show>
           </Show>
         </Show>
 </>

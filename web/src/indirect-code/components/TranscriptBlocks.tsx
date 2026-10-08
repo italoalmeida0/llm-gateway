@@ -85,7 +85,7 @@ function renderThinkingRow(
           ref={(el) => onCleanup(followTail(el, () => open() && streaming()))}
           class="rc-markdown w-full text-xs leading-relaxed break-words overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-64 pl-1 pb-1 text-ink-400"
         >
-          <StreamingMarkdown streaming={streaming()} active={open() && !hidden()}>
+          <StreamingMarkdown plain streaming={streaming()} active={open() && !hidden()}>
             {entry.block.reasoning || "(thinking…)"}
           </StreamingMarkdown>
         </div>

@@ -89,10 +89,13 @@ for (const [name, vp] of [
       const text = (row.textContent || "").replace(/\s+/g, " ").trim();
       return { name: hdr.slice(0, 60), text: text.slice(0, 400) };
     });
+    const scrollContainers = (row: Element) =>
+      [...row.querySelectorAll("*")].filter((el) => /(auto|scroll)/.test(getComputedStyle(el).overflowY)).length;
     return {
       rows,
       body: (document.body.textContent || "").replace(/\s+/g, " "),
       footerChips: document.querySelectorAll("[data-tool-footer] span").length,
+      nestedScroll: [...document.querySelectorAll('[data-toolseg^="u:"]')].filter((row) => scrollContainers(row) > 1).length,
       overflow: document.documentElement.scrollWidth <= innerWidth + 1,
     };
   });
@@ -118,6 +121,7 @@ for (const [name, vp] of [
   if (report.rows.length === 0) throw new Error(`${name}: no tool rows rendered`);
   if (report.rows.some((r) => /^tool$/i.test(r.name))) throw new Error(`${name}: generic "tool" header rendered`);
   if (report.footerChips === 0) throw new Error(`${name}: no footer chips rendered`);
+  if (report.nestedScroll > 0) throw new Error(`${name}: ${report.nestedScroll} tool rows have nested scroll containers`);
 
   await page.screenshot({ path: `${out}/real-${name}.png`, fullPage: true });
   await page.close();

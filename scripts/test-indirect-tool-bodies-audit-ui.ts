@@ -40,11 +40,17 @@ try {
       const pres = [...document.querySelectorAll("pre")].map((el) => ({
         wrap: getComputedStyle(el).whiteSpace,
         text: (el.textContent || "").slice(0, 60),
+        numbered: !!el.closest("[data-code-gutter]"),
       }));
+      const scrollContainers = (row: Element) =>
+        [...row.querySelectorAll("*")].filter((el) => /(auto|scroll)/.test(getComputedStyle(el).overflowY)).length;
+      const nestedScroll = [...document.querySelectorAll("[data-audit-row]")].filter((row) => scrollContainers(row) > 1).length;
       return {
         body: document.body.textContent || "",
         pres,
+        numbered: document.querySelectorAll("[data-code-gutter]").length,
         footerChips: document.querySelectorAll("[data-tool-footer] span").length,
+        nestedScroll,
         overflow: document.documentElement.scrollWidth <= innerWidth + 1,
       };
     });
@@ -54,12 +60,18 @@ try {
     assert.ok(report.pres.every((p) => !/^\[exit \d+\]/m.test(p.text)), `width ${width}: footer line is not inside output blocks`);
     assert.ok(/exit 0/.test(report.body), `width ${width}: footer chips render the exit code`);
     assert.ok(/done \[done\]/.test(report.body), `width ${width}: a real bracketed output line is kept`);
+    // Gutter only where the daemon numbers lines (read/write/bg_check): a
+    // bash output with literal "N:" prefixes must render as plain text.
+    // The bash "1:epoch …" output keeps its literal prefixes (no gutter).
+    assert.ok(report.pres.some((p) => p.text.startsWith("1:epoch") && !p.numbered), `width ${width}: literal "N:" output has no gutter`);
+    assert.ok(report.numbered >= 3, `width ${width}: read/write/bg_check keep their line gutter`);
     // Envelope metadata must never sit inside an output block.
     assert.ok(report.pres.every((p) => !/\bpage \d+[–-]\d+( of \d+|\/\d+)?\b|\bnext \d+\b|more lines: offset/.test(p.text)), `width ${width}: footer is not inside output blocks`);
     assert.ok(/page 1-5\/12/.test(report.body), `width ${width}: bg_check footer is rendered as its own chips`);
     assert.ok(report.footerChips > 0, `width ${width}: footer chips rendered`);
     assert.ok(report.pres.every((p) => p.wrap === "pre"), `width ${width}: output blocks do not auto-wrap`);
     assert.ok(report.overflow, `width ${width}: no horizontal page overflow`);
+    assert.equal(report.nestedScroll, 0, `width ${width}: no nested scroll containers (single scroll surface)`);
     await page.screenshot({ path: `dist/tool-bodies-${width}.png`, fullPage: true });
     await page.close();
     console.log(`PASS ${width}px: tool bodies, footers, wrap and overflow`);

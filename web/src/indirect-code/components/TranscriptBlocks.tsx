@@ -11,10 +11,8 @@ import { groupTitle, specialTitle } from "../utils/titles";
 import { formatDurationSecs } from "../utils/format";
 import { useToolUnitModel } from "./tool/toolUnitModel";
 import { ToolUnitHeader } from "./tool/ToolUnitHeader";
-import { ToolFooter } from "./tool/ToolFooter";
-import { ToolEditBodies } from "./tool/ToolEditBodies";
-import { ToolSearchBodies } from "./tool/ToolSearchBodies";
-import { ToolQuestionBodies } from "./tool/ToolQuestionBodies";
+import { ToolBody } from "./tool/ToolBody";
+
 
 /** Reactive transcript state shared by aggregate rows. */
 export interface TranscriptRenderCtx {
@@ -344,12 +342,7 @@ function renderToolUnit(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui
     <div class="w-full">
       <ToolUnitHeader {...part} />
       <DisclosureBody open={m.openBody()}>
-        <div class="mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 max-h-96 overflow-auto overscroll-contain [scrollbar-gutter:stable]">
-          <ToolEditBodies {...part} />
-          <ToolSearchBodies {...part} />
-          <ToolQuestionBodies {...part} />
-          <ToolFooter facts={m.footer()} />
-        </div>
+        <ToolBody {...part} />
       </DisclosureBody>
     </div>
   );

@@ -94,9 +94,9 @@ import assert from "node:assert/strict";
  await firstGroup.locator('.group\\/tool').first().click();
  const longCommands=commands.map((b:any)=>b.type==='tool_result' && b.toolId==='cmd0' ? {...b,toolResult:'Command output\n'.repeat(300)} : b);
  await send(longCommands);
- await firstGroup.locator('.max-h-56').first().evaluate((el:HTMLElement)=>{el.scrollTop=80;(window as any).commandBody=el;});
+ await firstGroup.locator('.max-h-96').first().evaluate((el:HTMLElement)=>{el.scrollTop=80;(window as any).commandBody=el;});
  await send([...longCommands,{type:'tool_call',toolName:'bash',toolId:'cmd12',toolArgs:'{}'}]);
- assert(await firstGroup.locator('.max-h-56').first().evaluate((el:HTMLElement)=>el===(window as any).commandBody && el.scrollTop===80),'appending tools retains an inspected body and its scroll');
+ assert(await firstGroup.locator('.max-h-96').first().evaluate((el:HTMLElement)=>el===(window as any).commandBody && el.scrollTop===80),'appending tools retains an inspected body and its scroll');
  // A reconciled carrier must switch from plain text to aggregate without a reload.
  await send([{type:'text',text:'First progress note'}]);
  assert.equal(await page.locator('[data-turn-final]').count(),0);

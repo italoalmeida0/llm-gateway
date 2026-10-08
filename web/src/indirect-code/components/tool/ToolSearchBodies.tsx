@@ -47,7 +47,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               {props.m.args().count ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">count</span> : null}
               {props.m.args().filesOnly ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">files-only</span> : null}
             </div>
-            <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
+            <CodeBlock embedded follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
           </Show>
         </Show>
         <Show when={props.m.name() === "inspect"}>
@@ -58,7 +58,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
             <Show
               when={inspectTree()}
               fallback={
-                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
+                <CodeBlock embedded follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
               }
             >
               {(t) => (
@@ -111,7 +111,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
             <Show
               when={globList()}
               fallback={
-                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
+                <CodeBlock embedded follow={() => props.m.open() && props.running} text={props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
               }
             >
               {(g) => (
@@ -123,7 +123,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
                     <div class="px-3 pt-2 pb-1 font-mono text-[11px] text-ink-500">
                       {g().files.length} {g().files.length === 1 ? "file" : "files"}
                     </div>
-                    <ul ref={(el) => onCleanup(followTail(el, () => props.m.open() && props.running))} class="px-1.5 pb-1.5 max-h-64 overflow-y-auto [scrollbar-gutter:stable]">
+                    <ul ref={(el) => onCleanup(followTail(el, () => props.m.open() && props.running))} class="px-1.5 pb-1.5">
                       <For each={g().files}>
                         {(f) => (
                           <li class="flex items-center gap-1.5 rounded-md px-1.5 py-[3px] hover:bg-ink-900/70 text-[12px]">
@@ -154,7 +154,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               <Show when={props.m.webDetails()?.cached}><span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">cached</span></Show>
             </div>
             <Show when={(props.m.webDetails()?.results || []).length > 0} fallback={
-              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={`${props.m.key()}:results`} />
+              <CodeBlock embedded follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={`${props.m.key()}:results`} />
             }>
               <ol class="px-3 pb-2 space-y-1.5">
                 <For each={(props.m.webDetails()?.results || []).slice(0, 10)}>{(r: any, i: () => number) =>
@@ -193,7 +193,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
             </a>
             <Show when={props.m.fetchDetails()?.content} fallback={
               <div class="border-t border-line/50 mt-2">
-                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language="markdown" plain wrap={false} scrollKey={`${props.m.key()}:content`} />
+                <CodeBlock embedded follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language="markdown" plain wrap={false} scrollKey={`${props.m.key()}:content`} />
               </div>
             }>
               <div
@@ -203,7 +203,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
                   onCleanup(followTail(el, () => props.m.open() && props.running));
                 }}
                 onScroll={(e) => recordToolScroll(props.m.key(), e.currentTarget)}
-                class="px-3 py-2 max-h-96 overflow-y-auto [scrollbar-gutter:stable] text-[12.5px] leading-relaxed text-ink-200 article-body"
+                class="px-3 py-2 text-[12.5px] leading-relaxed text-ink-200 article-body"
               >
                 <StreamingMarkdown>{String(props.m.fetchDetails()?.content || "")}</StreamingMarkdown>
               </div>
@@ -219,7 +219,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Reading background task…" : null}</div>}
           >
             {/* Log output: numbered, plain, unwrapped. Metadata sits in the footer. */}
-            <CodeBlock follow={() => props.m.open() && props.running} text={props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
+            <CodeBlock embedded numbered follow={() => props.m.open() && props.running} text={props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
           </Show>
         </Show>
         <Show when={props.m.name() === "bg_cancel" && !!props.m.output()}>
@@ -228,13 +228,13 @@ export function ToolSearchBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "bash"}>
           <div class="border-b border-line/40">
-            <CodeBlock text={props.m.bashHeaderCmd()} language="bash" wrap={false} maxH="max-h-40" scrollKey={`${props.m.key()}:cmd`} />
+            <CodeBlock embedded text={props.m.bashHeaderCmd()} language="bash" wrap={false} maxH="max-h-40" scrollKey={`${props.m.key()}:cmd`} />
           </div>
           <Show
             when={props.m.output() || props.m.prog() || props.m.bgRunning() || props.m.bgStream()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Running…" : null}</div>}
           >
-            <CodeBlock
+            <CodeBlock embedded
               follow={() => props.m.open() && props.running}
               text={props.m.bgRunning() || props.m.isDetachedBg()
                 ? (props.m.bgStream() || props.m.prog() || "Running in background…")
@@ -258,7 +258,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
                 onCleanup(followTail(el, () => props.m.open() && props.running));
               }}
               onScroll={(e) => recordToolScroll(props.m.key(), e.currentTarget)}
-              class="px-3 py-2 text-[11px] text-ink-300 overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-56 whitespace-pre"
+              class="px-3 py-2 text-[11px] text-ink-300 whitespace-pre"
             >
               {props.m.output() || props.m.prog() || ""}
             </pre>

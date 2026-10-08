@@ -2,10 +2,7 @@ import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { createBackground } from "../../web/src/indirect-code/hooks/useBackground";
 import { BackgroundCard } from "../../web/src/indirect-code/components/BackgroundCard";
-import { ToolSearchBodies } from "../../web/src/indirect-code/components/tool/ToolSearchBodies";
-import { ToolEditBodies } from "../../web/src/indirect-code/components/tool/ToolEditBodies";
-import { ToolQuestionBodies } from "../../web/src/indirect-code/components/tool/ToolQuestionBodies";
-import { ToolFooter } from "../../web/src/indirect-code/components/tool/ToolFooter";
+import { ToolBody } from "../../web/src/indirect-code/components/tool/ToolBody";
 import { ToolUnitHeader } from "../../web/src/indirect-code/components/tool/ToolUnitHeader";
 import { useToolUnitModel } from "../../web/src/indirect-code/components/tool/toolUnitModel";
 import { BackgroundCtx, UICtx } from "../../web/src/indirect-code/ctx";
@@ -55,10 +52,7 @@ function ToolRow(props: { unit: any }) {
     <div class="border border-line/60 rounded-lg overflow-hidden mb-3 bg-card" data-audit-row={props.unit.call.toolName}>
       <ToolUnitHeader ctx={renderCtx} msgId="msg1" u={props.unit} m={m} running={false} active={false} />
       <div class="border-t border-line/40">
-        <ToolSearchBodies ctx={renderCtx} msgId="msg1" u={props.unit} m={m} running={false} active={false} />
-        <ToolEditBodies ctx={renderCtx} msgId="msg1" u={props.unit} m={m} running={false} active={false} />
-        <ToolQuestionBodies ctx={renderCtx} msgId="msg1" u={props.unit} m={m} running={false} active={false} />
-        <ToolFooter facts={m.footer()} />
+        <ToolBody ctx={renderCtx} msgId="msg1" u={props.unit} m={m} running={false} active={false} />
       </div>
     </div>
   );
@@ -71,6 +65,14 @@ const units: any[] = [
     result: {
       toolResult: "uploading assets...\ndone [done]\n\n[exit 0]",
       toolDetails: { env: { exit: "0", command: "deploy.sh" }, footer: facts("exit 0") },
+    },
+  },
+  {
+    // Literal "N:" prefixes in arbitrary output are NOT line numbers: no gutter.
+    call: { toolId: "bash0b", toolName: "bash", toolArgs: JSON.stringify({ command: "cat /tmp/train.log" }) },
+    result: {
+      toolResult: "1:epoch 1/10 loss 2.41\n2:epoch 2/10 loss 1.87\n3:epoch 3/10 loss 1.32",
+      toolDetails: { env: { exit: "0", command: "cat /tmp/train.log" }, footer: facts("exit 0") },
     },
   },
   {

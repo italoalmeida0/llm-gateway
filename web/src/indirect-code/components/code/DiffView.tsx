@@ -25,7 +25,14 @@ export interface DiffRow {
  * isolated line-number gutter; the line BODY is syntax-highlighted per the
  * file extension without marker/number interference.
  */
-export function DiffView(props: { text: string; max?: number; name?: string; scrollKey?: string }) {
+export function DiffView(props: {
+  text: string;
+  max?: number;
+  name?: string;
+  scrollKey?: string;
+  /** Embedded in a scrolling tool body: no own cap or scrollbar. */
+  embedded?: boolean;
+}) {
   let containerRef: HTMLDivElement | null = null;
   const [expanded, setExpanded] = createSignal(false);
   const [rows, setRows] = createSignal<DiffRow[] | null>(null);
@@ -89,11 +96,16 @@ export function DiffView(props: { text: string; max?: number; name?: string; scr
     <div
       ref={(el) => {
         containerRef = el;
+        if (props.embedded) return;
         restoreToolScroll(props.scrollKey, el);
         requestAnimationFrame(() => restoreToolScroll(props.scrollKey, el));
       }}
-      onScroll={(e) => recordToolScroll(props.scrollKey, e.currentTarget)}
-      class="font-mono text-[11px] leading-relaxed overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-96 select-text"
+      onScroll={props.embedded ? undefined : (e) => recordToolScroll(props.scrollKey, e.currentTarget)}
+      class={`font-mono text-[11px] leading-relaxed select-text ${
+        props.embedded
+          ? "overflow-visible"
+          : "overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] max-h-96"
+      }`}
     >
       <div class="min-w-full w-fit">
         <Show

@@ -41,6 +41,13 @@ export function CodeBlock(props: {
   wrap?: boolean;
   /** Plain text: no syntax highlighting (command output, logs). */
   plain?: boolean;
+  /** Embedded in a scrolling tool body: no own cap or scrollbar — the body
+   * wrapper is the single scroll surface (avoids nested double scrolls). */
+  embedded?: boolean;
+  /** Render the daemon's "N:line" numbering as a gutter. Opt-in: only file
+   * reads and numbered logs are numbered — in arbitrary output (bash,
+   * python, results) a leading "N:" is literal text, not a line number. */
+  numbered?: boolean;
 }) {
   const disclosureActive = useDisclosureActive();
   let containerRef: HTMLDivElement | null = null;
@@ -51,7 +58,7 @@ export function CodeBlock(props: {
   // Strip a trailing `\r` per line (CRLF file read on a Windows host):
   // it would otherwise leak into highlight/copy and break gutter parsing.
   const rawLines = () => clean().split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
-  const hasGutter = () => !props.bare && rawLines().some((l) => /^\d+:/.test(l));
+  const hasGutter = () => props.numbered && !props.bare && rawLines().some((l) => /^\d+:/.test(l));
 
   createEffect(() => {
     if (!disclosureActive()) return;
@@ -118,13 +125,17 @@ export function CodeBlock(props: {
     <div
       ref={(el) => {
         containerRef = el;
+        if (props.embedded) return;
         restoreToolScroll(props.scrollKey, el);
         requestAnimationFrame(() => restoreToolScroll(props.scrollKey, el));
         if (props.follow) onCleanup(followTail(el, props.follow));
       }}
-      onScroll={(e) => recordToolScroll(props.scrollKey, e.currentTarget)}
-      class={`font-mono text-[11px] text-ink-300 overflow-x-auto overflow-y-auto select-text [scrollbar-gutter:stable] ${
-        props.maxH || "max-h-56"
+      onScroll={props.embedded ? undefined : (e) => recordToolScroll(props.scrollKey, e.currentTarget)}
+      data-code-gutter={hasGutter() ? "true" : undefined}
+      class={`font-mono text-[11px] text-ink-300 select-text ${
+        props.embedded
+          ? "overflow-visible"
+          : `overflow-x-auto overflow-y-auto [scrollbar-gutter:stable] ${props.maxH || "max-h-56"}`
       }`}
     >
       <Show

@@ -66,7 +66,7 @@ function FileEditCard(props: { sec: FileEditSection; scrollKey?: string }) {
         </Show>
         <Show when={props.sec.diff}>
           <div class="border-t border-line/20">
-            <DiffView text={props.sec.diff} max={60} name={props.sec.file} scrollKey={props.scrollKey} />
+            <DiffView text={props.sec.diff} max={60} name={props.sec.file} scrollKey={props.scrollKey} embedded />
           </div>
         </Show>
       </Show>
@@ -131,7 +131,7 @@ export function ToolEditBodies(props: ToolPartProps) {
             when={props.u.result?.toolDetails?.display || props.m.output() || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Reading file…" : null}</div>}
           >
-            <CodeBlock
+            <CodeBlock embedded numbered
               follow={() => props.m.open() && props.running}
               text={(props.u.result?.toolDetails?.display ?? props.m.output()) || props.m.prog() || ""}
               language={languageForPath(String(props.m.args().path || ""))}
@@ -141,7 +141,7 @@ export function ToolEditBodies(props: ToolPartProps) {
           </Show>
         </Show>
         <Show when={props.m.name() === "write"}>
-          <CodeBlock
+          <CodeBlock embedded numbered
             follow={() => props.m.open() && props.running}
             text={String((props.u.result?.toolDetails?.display ?? props.m.output()) || props.m.args().content || "")}
             language={languageForPath(String(props.m.args().path || ""))}
@@ -161,10 +161,10 @@ export function ToolEditBodies(props: ToolPartProps) {
               </div>
             </Show>
             <Show when={props.m.args().code}>
-              <CodeBlock follow={() => props.m.open() && props.running} text={String(props.m.args().code || "")} language="python" wrap={false} scrollKey={`${props.m.key()}:code`} />
+              <CodeBlock embedded follow={() => props.m.open() && props.running} text={String(props.m.args().code || "")} language="python" wrap={false} scrollKey={`${props.m.key()}:code`} />
             </Show>
             <div class="border-t border-line/40">
-              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.bgRunning() || props.m.isDetachedBg() ? (props.m.bgStream() || props.m.prog() || "Running in background…") : props.m.output() || "No output"} language={undefined} plain wrap={false} scrollKey={`${props.m.key()}:out`} />
+              <CodeBlock embedded follow={() => props.m.open() && props.running} text={props.m.bgRunning() || props.m.isDetachedBg() ? (props.m.bgStream() || props.m.prog() || "Running in background…") : props.m.output() || "No output"} language={undefined} plain wrap={false} scrollKey={`${props.m.key()}:out`} />
             </div>
           </Show>
         </Show>

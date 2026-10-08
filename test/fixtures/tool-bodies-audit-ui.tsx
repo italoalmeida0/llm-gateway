@@ -12,7 +12,7 @@ import { BackgroundCtx, UICtx } from "../../web/src/indirect-code/ctx";
 
 const sent: unknown[] = [];
 (window as any).__sent = sent;
-const [sessionId, setSessionId] = createSignal("s1");
+const [sessionId] = createSignal("s1");
 const bg = createBackground({
   send: (p) => sent.push(p),
   isOpen: () => true,
@@ -48,8 +48,6 @@ const renderCtx: any = {
 };
 
 const facts = (...labels: string[]) => labels.map((label) => ({ label, tone: "muted" as const }));
-const envelope = (attrs: string, body: string, footer: string) =>
-  ({ toolResult: body, toolDetails: { env: Object.fromEntries(attrs.split(" ").filter(Boolean).map((kv) => kv.split("="))), footer: facts(...footer.split(" · ").filter(Boolean)) } });
 
 function ToolRow(props: { unit: any }) {
   const m = useToolUnitModel(renderCtx, "msg1", props.unit, 0, () => false, () => false);

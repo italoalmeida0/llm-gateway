@@ -37,7 +37,6 @@ try {
     await page.waitForTimeout(250);
     // Structural invariants: no XML leaks, no raw metadata lines, no auto-wrap on output.
     const report = await page.evaluate(() => {
-      const text = (sel: string) => [...document.querySelectorAll(sel)].map((el) => el.textContent || "").join("\n");
       const pres = [...document.querySelectorAll("pre")].map((el) => ({
         wrap: getComputedStyle(el).whiteSpace,
         text: (el.textContent || "").slice(0, 60),

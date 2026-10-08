@@ -115,8 +115,3 @@ export function bodyWithoutFooter(text: string): string {
   const m = new RegExp(`(?:\\n|^)(${fact}(?:  ${fact})*)\\s*$`).exec(text);
   return m ? text.slice(0, m.index + (m.index > 0 ? 1 : 0)) : text;
 }
-
-/** Compact footer text (used by tests and legacy callers). */
-export function footerText(facts: FooterFact[]): string {
-  return facts.map((f) => `[${f.label}]`).join("  ");
-}

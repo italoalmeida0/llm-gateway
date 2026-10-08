@@ -62,7 +62,7 @@ for (const [name, vp] of [
   try {
     await page.waitForFunction(() => (window as any).realSessionReady, undefined, { timeout: 20000 });
   } catch (e) {
-    throw new Error(`${name}: session never became ready: ${errors.join(" | ") || String(e)}`);
+    throw new Error(`${name}: session never became ready: ${errors.join(" | ") || String(e)}`, { cause: e });
   }
   await page.evaluate(() => {
     document.documentElement.classList.toggle("mobile", navigator.maxTouchPoints > 0);

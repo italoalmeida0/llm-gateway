@@ -9,7 +9,7 @@ import { BackgroundCtx, UICtx } from "../../web/src/indirect-code/ctx";
 const sent: unknown[] = [];
 (window as any).__sent = sent;
 const [sid, setSid] = createSignal("real");
-const [host, setHost] = createSignal("h");
+const [host] = createSignal("h");
 const bg = createBackground({ send: (p) => sent.push(p), isOpen: () => true, getSessionId: () => sid(), toast: () => {} });
 const uiStub = { convWidthClass: () => "max-w-3xl" } as any;
 

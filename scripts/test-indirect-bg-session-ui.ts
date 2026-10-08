@@ -128,9 +128,8 @@ try {
   await page.getByRole("button", { name: /^(Show|Hide) logs$/ }).last().click();
   await page.waitForTimeout(500);
   const seqCode = await page.evaluate(() => {
-    const rows = [...document.querySelectorAll("div")].filter((d) => (d.textContent || "").includes("uniqueseqlabel"));
-    const row = rows[rows.length - 1];
-    const pre = row?.parentElement?.querySelector("pre") || document.querySelector("pre");
+    // The expanded area shows the command block first, then the log.
+    const pre = document.querySelector("[data-bg-log] pre");
     return (pre?.textContent || "").trim();
   });
   const seqLines = seqCode.split("\n").map((l) => l.trim()).filter((l) => l !== "");
@@ -145,9 +144,8 @@ try {
   ]));
   await page.waitForTimeout(200);
   const seqCodeAfter = await page.evaluate(() => {
-    const rows = [...document.querySelectorAll("div")].filter((d) => (d.textContent || "").includes("uniqueseqlabel"));
-    const row = rows[rows.length - 1];
-    const pre = row?.parentElement?.querySelector("pre") || document.querySelector("pre");
+    // The expanded area shows the command block first, then the log.
+    const pre = document.querySelector("[data-bg-log] pre");
     return (pre?.textContent || "").trim();
   });
   assert.equal(seqCodeAfter.split("\n").map((l) => l.trim()).filter((l) => l === "ok").length, 1, '"ok" must stay single after snapshot refresh');

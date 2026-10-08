@@ -23,10 +23,15 @@ export function ToolBody(props: ToolPartProps) {
       onScroll={(e) => recordToolScroll(props.m.key(), e.currentTarget)}
       class="mt-0.5 mb-1.5 rounded-lg border border-line/50 bg-ink-950/60 max-h-96 overflow-auto overscroll-contain [scrollbar-gutter:stable]"
     >
-      <ToolEditBodies {...props} />
-      <ToolSearchBodies {...props} />
-      <ToolQuestionBodies {...props} />
-      <ToolFooter facts={props.m.footer()} />
+      {/* min-w-full w-fit column: block children (and their borders) stretch
+          to the widest sibling, so a horizontal overflow never truncates a
+          separator line at the visible edge. */}
+      <div class="min-w-full w-fit">
+        <ToolEditBodies {...props} />
+        <ToolSearchBodies {...props} />
+        <ToolQuestionBodies {...props} />
+        <ToolFooter facts={props.m.footer()} />
+      </div>
     </div>
   );
 }

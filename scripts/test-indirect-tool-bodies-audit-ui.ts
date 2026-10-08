@@ -45,12 +45,30 @@ try {
       const scrollContainers = (row: Element) =>
         [...row.querySelectorAll("*")].filter((el) => /(auto|scroll)/.test(getComputedStyle(el).overflowY)).length;
       const nestedScroll = [...document.querySelectorAll("[data-audit-row]")].filter((row) => scrollContainers(row) > 1).length;
+      // Block children of the body column share one width: a separator border
+      // spans the FULL scroll width, never stopping at the visible edge.
+      const borderReports: string[] = [];
+      const bordersStretch = [...document.querySelectorAll("[data-audit-row]")].every((row) => {
+        const col = row.querySelector("div.min-w-full");
+        if (!col) return true;
+        const kids = [...col.children].filter((el) => (el as HTMLElement).offsetWidth > 0);
+        const ok = kids.every((el) => Math.abs((el as HTMLElement).offsetWidth - (kids[0] as HTMLElement).offsetWidth) < 1);
+        if (!ok) borderReports.push(`${row.getAttribute("data-audit-row")}: ` + kids.map((el) => `${el.tagName}.${(el.className||"").toString().split(" ")[0]}=${(el as HTMLElement).offsetWidth}`).join(" "));
+        return ok;
+      });
+      // bg_check row: the command/code block sits above the (guttered) log.
+      const bgRow = document.querySelector('[data-audit-row="bg_check"]');
+      const bgText = (bgRow?.textContent || "").replace(/\s+/g, " ");
+      const bgHasCommand = !!bgRow?.querySelector("[data-code-gutter]") && bgText.includes("train.py");
       return {
         body: document.body.textContent || "",
         pres,
         numbered: document.querySelectorAll("[data-code-gutter]").length,
         footerChips: document.querySelectorAll("[data-tool-footer] span").length,
         nestedScroll,
+        bordersStretch,
+        borderReports,
+        bgHasCommand,
         overflow: document.documentElement.scrollWidth <= innerWidth + 1,
       };
     });
@@ -72,6 +90,9 @@ try {
     assert.ok(report.pres.every((p) => p.wrap === "pre"), `width ${width}: output blocks do not auto-wrap`);
     assert.ok(report.overflow, `width ${width}: no horizontal page overflow`);
     assert.equal(report.nestedScroll, 0, `width ${width}: no nested scroll containers (single scroll surface)`);
+    if (!report.bordersStretch) console.log("  BORDER WIDTHS", (report as any).borderReports);
+    assert.ok(report.bordersStretch, `width ${width}: separator borders span the full scroll width`);
+    assert.ok(report.bgHasCommand, `width ${width}: bg_check shows the task command/code above the log`);
     await page.screenshot({ path: `dist/tool-bodies-${width}.png`, fullPage: true });
     await page.close();
     console.log(`PASS ${width}px: tool bodies, footers, wrap and overflow`);

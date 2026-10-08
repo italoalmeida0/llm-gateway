@@ -76,6 +76,15 @@ const units: any[] = [
     },
   },
   {
+    // Very long command: horizontal overflow — the border under it must span
+    // the full scroll width instead of stopping at the visible edge.
+    call: { toolId: "bashWide", toolName: "bash", toolArgs: JSON.stringify({ command: "python3 -c \"import numpy as np; print(np.arange(1000).reshape(50, 20).sum(axis=1))\" --flag value --other flag --more args --even more arguments here to force overflow" }) },
+    result: {
+      toolResult: "[  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49]",
+      toolDetails: { env: { exit: "0", command: "python3 -c ..." }, footer: facts("exit 0") },
+    },
+  },
+  {
     call: { toolId: "bash1", toolName: "bash", toolArgs: JSON.stringify({ command: "git log --oneline -20 -- web/src/indirect-code/components" }) },
     result: {
       toolResult: "02e46d6 feat(web): plain-text tool output and integrated background logs\n76a6b5b fix(web): keep pipe tables literal in basic thinking mode\ne6affd8 fix(web): keep bracketed text literal in basic thinking mode\n924b8de feat(web): basic markdown mode for model thinking\n45add8f feat(web): render thinking text as plain text\ncdb52f5 fix(web): stop underscore markdown from treating identifiers as emphasis\n\n[exit 0]  [6 lines]",

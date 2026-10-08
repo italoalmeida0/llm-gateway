@@ -214,6 +214,20 @@ export function ToolSearchBodies(props: ToolPartProps) {
           </Show>
         </Show>
         <Show when={props.m.name() === "bg_check"}>
+          {/* The task's command/code above the log (envelope command=): the
+              label is the raw command for bash and the code/script for
+              python — same two-part layout as the bash body. */}
+          <Show when={String(((props.u.result?.toolDetails as any)?.env?.command || "") as string)}>
+            <div class="border-b border-line/40">
+              <CodeBlock
+                embedded
+                text={String(((props.u.result?.toolDetails as any)?.env?.command || "") as string)}
+                language={String(((props.u.result?.toolDetails as any)?.env?.kind || "") as string) === "python" ? "python" : "bash"}
+                wrap={false}
+                scrollKey={`${props.m.key()}:cmd`}
+              />
+            </div>
+          </Show>
           <Show
             when={props.m.output() || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Reading background task…" : null}</div>}

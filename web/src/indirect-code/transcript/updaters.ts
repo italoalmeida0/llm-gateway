@@ -272,7 +272,7 @@ export function appendToolResult(
   const index = target >= 0 ? target : prev.length - 1;
   const carrier = prev[index];
   const detailed = result == null ? null : stripToolEnvelopeDetailed(result);
-  const env = detailed && Object.keys(detailed.attrs).length ? { ...(details as any), env: detailed.attrs } : details;
+  const env = detailed && Object.keys(detailed.attrs).length ? { ...(details as any), env: detailed.attrs, footer: detailed.footer } : details;
   const resBlock: ContentBlock = {
     type: "tool_result", toolId: callId,
     toolResult: detailed ? detailed.body : result,

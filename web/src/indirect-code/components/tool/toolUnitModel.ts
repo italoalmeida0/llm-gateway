@@ -4,6 +4,7 @@ import { tryParseArgs } from "../../utils/tools";
 import { isHeaderOnlySleep, toolSummary, terminalPresentation } from "../../transcript";
 import { toolRowKey } from "../../utils/titles";
 import { formatDurationSecs } from "../../utils/format";
+import { bodyWithoutFooter } from "../../utils/envelope";
 import type { ToolUnit } from "../../types";
 import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 
@@ -52,6 +53,12 @@ const bashHeaderCmd = () => {
   return String(a.command || sum().target || "");
 };
 const terminal = createMemo(() => terminalPresentation((u.result?.toolDetails?.display ?? u.result?.toolResult) || ""));
+/** Tool output with the envelope footer removed; the footer lives in footer(). */
+const output = () => bodyWithoutFooter(u.result?.toolResult || "", (u.result?.toolDetails as any)?.footer);
+/** Envelope facts as a single status line (exit, page, next...). */
+const footer = () => String((u.result?.toolDetails as any)?.footer || "");
+/** Non-zero exit code for shell rows (drives the failure hint). */
+const exitCode = () => String((u.result?.toolDetails as any)?.env?.exit ?? "");
 const webDetails = () => {
   const d: any = u.result?.toolDetails;
   if (!d || !Array.isArray(d.results)) return undefined;
@@ -120,7 +127,7 @@ const bgStream = () => {
 /** True once the call carries a background job — the row renders as a
  * background run (badge, spinner while running). */
 const isDetachedBg = () => bgJobId() !== "";
-  return { key, open, openBody, expandable, toggle, sum, prog, args, name, sleepLabel, bashHeaderCmd, terminal, webDetails, fetchDetails, elapsed, sleepRemaining, bgJobId, bgRunning, bgStream, isDetachedBg };
+  return { key, open, openBody, expandable, toggle, sum, prog, args, name, sleepLabel, bashHeaderCmd, terminal, output, footer, exitCode, webDetails, fetchDetails, elapsed, sleepRemaining, bgJobId, bgRunning, bgStream, isDetachedBg };
 }
 
 export type ToolModel = ReturnType<typeof useToolUnitModel>;

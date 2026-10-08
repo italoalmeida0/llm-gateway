@@ -46,7 +46,8 @@ try {
   const archiveToggle = page.locator("[data-bg-archive-toggle]");
   assert.equal(await archiveToggle.count(), 1, "archive toggle renders");
   assert.equal(await archiveToggle.getAttribute("aria-pressed"), "false", "running view is selected by default");
-  assert.ok((await archiveToggle.textContent())?.includes("Archived") && (await archiveToggle.textContent())?.includes("1"), "archive toggle includes terminal count");
+  assert.ok((await archiveToggle.textContent())?.includes("1"), "archive toggle includes terminal count");
+  assert.equal(await archiveToggle.getAttribute("aria-label"), "Archived tasks (1)", "archive toggle is icon-only with an accessible label");
   await archiveToggle.click();
   await page.waitForFunction(() => document.body.textContent?.includes("train.py"));
   assert.equal(await archiveToggle.getAttribute("aria-pressed"), "true", "archive view selected");
@@ -66,11 +67,11 @@ try {
   await peer.close();
 
   // 3. Live chunks glue after the session tail: open the Logs and read.
-  assert.equal(await page.getByRole("button", { name: "Logs" }).count(), 1, "one Logs toggle in archived view");
-  await page.getByRole("button", { name: "Logs" }).click();
+  assert.equal(await page.getByRole("button", { name: /^(Show|Hide) logs$/ }).count(), 1, "one Logs toggle in archived view");
+  await page.getByRole("button", { name: /^(Show|Hide) logs$/ }).click();
   await page.locator("[data-bg-archive-toggle]").click();
   await page.evaluate(() => (window as any).bgTest.output("bg_1", "live-1"));
-  const logButtons = page.getByRole("button", { name: "Logs" });
+  const logButtons = page.getByRole("button", { name: /^(Show|Hide) logs$/ });
   assert.equal(await logButtons.count(), 1, "one Logs toggle in running view");
   await logButtons.first().click();
   await page.waitForFunction(() => {
@@ -124,7 +125,7 @@ try {
   if ((rendered as any).error) throw new Error((rendered as any).error);
   assert.ok(((rendered as any).sessTail || "").includes("29\n30"), `session tail wrong: ${JSON.stringify(rendered)}`);
   assert.equal((rendered as any).live, "31\nok", `live must be exactly the new lines: ${JSON.stringify(rendered)}`);
-  await page.getByRole("button", { name: "Logs" }).last().click();
+  await page.getByRole("button", { name: /^(Show|Hide) logs$/ }).last().click();
   await page.waitForTimeout(500);
   const seqCode = await page.evaluate(() => {
     const rows = [...document.querySelectorAll("div")].filter((d) => (d.textContent || "").includes("uniqueseqlabel"));
@@ -175,7 +176,7 @@ try {
   ]));
   await page.waitForFunction(() => document.body.textContent?.includes("stoppable"));
   const sentBefore = await page.evaluate(() => ((window as any).__sent ?? []).length);
-  await page.getByRole("button", { name: "Stop" }).first().click();
+  await page.getByRole("button", { name: "Stop task" }).first().click();
   await page.waitForFunction((n) => ((window as any).__sent ?? []).length > n, sentBefore as any).catch(() => {});
   // 7b. Dynamic detach transition: empty -> registered placeholder ->
   // snapshot. The live time must exist in every frame (this is the
@@ -217,11 +218,12 @@ try {
     clock: (window as any).bgTest.bg.clock(),
     now: Date.now(),
   }));
-  if (!/\d+[smh]/.test(winText || "")) {
-    throw new Error(`detached row keeps ticking in the window: ${JSON.stringify((winText || "").slice(0, 200))} dbg=${JSON.stringify(winDbg)}`);
+  if (!(winText || "").trim()) {
+    throw new Error(`detached row renders blank in the window: dbg=${JSON.stringify(winDbg)}`);
   }
+  // Detached tool rows hide their elapsed timer; the background card owns duration.
   const winDur = await page.locator('[data-testid="row-detach"] [data-tool-duration]').count();
-  assert.ok(winDur >= 1, "detached row renders its duration element");
+  assert.equal(winDur, 0, "detached row hides the tool timer");
   assert.ok(!/No output/.test(winText || ""), `detached row must not claim "No output": ${JSON.stringify((winText || "").slice(0, 200))}`);
 
   // 8. Full-scene review: running and archived views are separate, ordered
@@ -240,8 +242,8 @@ try {
     const rows = [...document.querySelectorAll("[data-bg-row]")].map((r) => ({
       html: (r as HTMLElement).innerText || "",
       spinner: !!r.querySelector(".animate-spin"),
-      stop: [...r.querySelectorAll("button")].some((b) => b.textContent === "Stop"),
-      logs: [...r.querySelectorAll("button")].some((b) => b.textContent === "Logs" || b.textContent === "Hide logs"),
+      stop: [...r.querySelectorAll("button")].some((b) => b.hasAttribute("data-bg-stop")),
+      logs: [...r.querySelectorAll("button")].some((b) => /logs$/.test(b.getAttribute("aria-label") || "")),
     }));
     return { header: body.slice(body.indexOf("Background tasks"), body.indexOf("Background tasks") + 60), rows };
   });
@@ -259,7 +261,7 @@ try {
     status: r.querySelector("[data-bg-status]")?.getAttribute("aria-label"),
     duration: r.querySelector("[data-bg-duration]")?.textContent || "",
     stop: !!r.querySelector("[data-bg-stop]"),
-    logs: [...r.querySelectorAll("button")].some((b) => /Logs/.test(b.textContent || "")),
+    logs: [...r.querySelectorAll("button")].some((b) => /logs$/.test(b.getAttribute("aria-label") || "")),
   })));
   assert.deepEqual(archived.map((r) => r.id), ["bg_cancel", "bg_err", "bg_done"], "archived rows newest first");
   assert.ok(archived.every((r) => !r.stop && r.logs), "archived rows have Logs and no Stop");
@@ -333,8 +335,8 @@ try {
           id: r.getAttribute("data-bg-row"),
           hasTime: /\d+[smh]/.test(h),
           spinner: !!r.querySelector(".animate-spin"),
-          stop: [...r.querySelectorAll("button")].some((b) => b.textContent === "Stop"),
-          logs: [...r.querySelectorAll("button")].some((b) => b.textContent === "Logs" || b.textContent === "Hide logs"),
+          stop: [...r.querySelectorAll("button")].some((b) => b.hasAttribute("data-bg-stop")),
+          logs: [...r.querySelectorAll("button")].some((b) => /logs$/.test(b.getAttribute("aria-label") || "")),
           badge: /done|error|cancelled/.test(h),
         };
       });

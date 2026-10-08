@@ -24,10 +24,12 @@ try {
     const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch: touch, isMobile: width < 600 });
     page.on("pageerror", (e: Error) => errors.push(e.message));
     await page.goto(`${server.url}?responsive`);
-    await page.evaluate((theme: string) => {
+    await page.evaluate(({ theme, touch }: { theme: string; touch: boolean }) => {
       document.documentElement.dataset.theme = theme;
+      // Real pages set html.mobile from index.html; this fixture serves its own HTML.
+      document.documentElement.classList.toggle("mobile", touch);
       Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { (window as any).copiedText = text; } } });
-    }, theme);
+    }, { theme, touch });
     await page.evaluate(async (text: string) => {
       const a = (window as any).streamUI;
       for (let end = 1; end < text.length + 80; end += 80) {

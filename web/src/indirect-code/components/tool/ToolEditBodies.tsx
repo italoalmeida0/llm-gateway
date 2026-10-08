@@ -89,7 +89,7 @@ export function ToolEditBodies(props: ToolPartProps) {
     // The daemon now sends the rich rendering in details.display (the
     // AI-visible text is a one-line confirmation); fall back to parsing
     // the result text for sessions recorded before the split.
-    const res = (props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || "";
+    const res = (props.u.result?.toolDetails?.display ?? props.m.output()) || "";
     return parseEditResults(res, defaultPath());
   });
 
@@ -128,13 +128,14 @@ export function ToolEditBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "read"}>
           <Show
-            when={props.u.result?.toolDetails?.display || props.u.result?.toolResult || props.m.prog()}
+            when={props.u.result?.toolDetails?.display || props.m.output() || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Reading file…" : null}</div>}
           >
             <CodeBlock
               follow={() => props.m.open() && props.running}
-              text={(props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || props.m.prog() || ""}
+              text={(props.u.result?.toolDetails?.display ?? props.m.output()) || props.m.prog() || ""}
               language={languageForPath(String(props.m.args().path || ""))}
+              wrap={false}
               scrollKey={props.m.key()}
             />
           </Show>
@@ -142,14 +143,15 @@ export function ToolEditBodies(props: ToolPartProps) {
         <Show when={props.m.name() === "write"}>
           <CodeBlock
             follow={() => props.m.open() && props.running}
-            text={String((props.u.result?.toolDetails?.display ?? props.u.result?.toolResult) || props.m.args().content || "")}
+            text={String((props.u.result?.toolDetails?.display ?? props.m.output()) || props.m.args().content || "")}
             language={languageForPath(String(props.m.args().path || ""))}
+            wrap={false}
             scrollKey={props.m.key()}
           />
         </Show>
         <Show when={props.m.name() === "python"}>
           <Show
-            when={props.u.result?.toolResult || props.m.prog() || props.m.bgRunning() || props.m.bgStream()}
+            when={props.m.output() || props.m.prog() || props.m.bgRunning() || props.m.bgStream()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.m.bgRunning() ? "Running in background…" : props.active ? "Running Python…" : null}</div>}
           >
             <Show when={props.m.args().script}>
@@ -159,11 +161,14 @@ export function ToolEditBodies(props: ToolPartProps) {
               </div>
             </Show>
             <Show when={props.m.args().code}>
-              <CodeBlock follow={() => props.m.open() && props.running} text={String(props.m.args().code || "")} language="python" scrollKey={`${props.m.key()}:code`} />
+              <CodeBlock follow={() => props.m.open() && props.running} text={String(props.m.args().code || "")} language="python" wrap={false} scrollKey={`${props.m.key()}:code`} />
             </Show>
-            <div class="border-t border-line/50">
-              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.bgRunning() || props.m.isDetachedBg() ? (props.m.bgStream() || props.m.prog() || "Running in background…") : props.m.terminal().output || "No output"} language={undefined} scrollKey={props.m.key()} />
+            <div class="border-t border-line/40">
+              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.bgRunning() || props.m.isDetachedBg() ? (props.m.bgStream() || props.m.prog() || "Running in background…") : props.m.output() || "No output"} language={undefined} plain wrap={false} scrollKey={`${props.m.key()}:out`} />
             </div>
+            <Show when={props.m.footer() && !props.m.bgRunning()}>
+              <div class="px-3 pb-2 pt-1 font-mono text-[10px] text-ink-500 tabular-nums">{props.m.footer()}</div>
+            </Show>
           </Show>
         </Show>
 </>

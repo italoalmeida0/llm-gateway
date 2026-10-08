@@ -86,12 +86,22 @@ function envelopeFooter(e: ToolEnvelope): string {
 export function stripToolEnvelopeDetailed(text: string): {
   body: string;
   attrs: Record<string, string>;
+  footer: string;
 } {
   const e = parseToolEnvelope(text);
-  if (!e) return { body: text, attrs: {} };
+  if (!e) return { body: text, attrs: {}, footer: "" };
   const footer = envelopeFooter(e);
   return {
     body: footer ? (e.body ? `${e.body}\n\n${footer}` : footer) : e.body,
     attrs: e.attrs,
+    footer,
   };
+}
+
+/** Body without the trailing footer line: the tool's own output only. */
+export function bodyWithoutFooter(text: string, footer: string | undefined): string {
+  if (!footer) return text;
+  const tail = `\n\n${footer}`;
+  if (text.endsWith(tail)) return text.slice(0, -tail.length);
+  return text === footer ? "" : text;
 }

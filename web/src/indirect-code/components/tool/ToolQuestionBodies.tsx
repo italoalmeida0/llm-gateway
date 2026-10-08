@@ -8,7 +8,7 @@ import type { ToolPartProps } from "./toolUnitModel";
  * asking happens in QuestionModal; this is the collapsible record. */
 export function ToolQuestionBodies(props: ToolPartProps) {
   const items = createMemo(() =>
-    parseQuestionQA(props.m.args(), props.u.result?.toolResult || "", props.u.result?.toolDetails),
+    parseQuestionQA(props.m.args(), props.m.output() || "", props.u.result?.toolDetails),
   );
   const answered = () => !!props.u.result;
 

@@ -26,17 +26,17 @@ function flagBadge(flag: string) {
 export function ToolSearchBodies(props: ToolPartProps) {
   const inspectTree = createMemo(() => {
     if (props.m.name() !== "inspect") return null;
-    return parseInspectTree(props.m.terminal().output || props.u.result?.toolResult || "");
+    return parseInspectTree(props.m.terminal().output || props.m.output() || "");
   });
   const globList = createMemo(() => {
     if (props.m.name() !== "glob") return null;
-    return parseGlobList(props.u.result?.toolResult || "");
+    return parseGlobList(props.m.output() || "");
   });
   return (
 <>
         <Show when={props.m.name() === "search"}>
           <Show
-            when={props.u.result?.toolResult || props.m.prog()}
+            when={props.m.output() || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Searching…" : null}</div>}
           >
             <div class="px-3 py-1.5 text-[11px] text-ink-500 font-mono">
@@ -47,18 +47,18 @@ export function ToolSearchBodies(props: ToolPartProps) {
               {props.m.args().count ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">count</span> : null}
               {props.m.args().filesOnly ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">files-only</span> : null}
             </div>
-            <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+            <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
           </Show>
         </Show>
         <Show when={props.m.name() === "inspect"}>
           <Show
-            when={props.u.result?.toolResult || props.m.prog()}
+            when={props.m.output() || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Listing…" : null}</div>}
           >
             <Show
               when={inspectTree()}
               fallback={
-                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
               }
             >
               {(t) => (
@@ -105,13 +105,13 @@ export function ToolSearchBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "glob"}>
           <Show
-            when={props.u.result?.toolResult || props.m.prog()}
+            when={props.m.output() || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Finding files…" : null}</div>}
           >
             <Show
               when={globList()}
               fallback={
-                <CodeBlock follow={() => props.m.open() && props.running} text={props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
               }
             >
               {(g) => (
@@ -146,7 +146,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "search_web"}>
           <Show
-            when={props.u.result?.toolResult || props.m.prog()}
+            when={props.m.output() || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Searching the web…" : null}</div>}
           >
             <div class="px-3 pt-2 pb-1 text-[11px] text-ink-500">
@@ -154,7 +154,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
               <Show when={props.m.webDetails()?.cached}><span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">cached</span></Show>
             </div>
             <Show when={(props.m.webDetails()?.results || []).length > 0} fallback={
-              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={`${props.m.key()}:results`} />
+              <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={`${props.m.key()}:results`} />
             }>
               <ol class="px-3 pb-2 space-y-1.5">
                 <For each={(props.m.webDetails()?.results || []).slice(0, 10)}>{(r: any, i: () => number) =>
@@ -177,7 +177,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "fetch_url"}>
           <Show
-            when={props.u.result?.toolResult || props.m.prog()}
+            when={props.m.output() || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">Fetching {String(props.m.args().url || "URL")}{props.active ? "…" : ""}</div>}
           >
             <a href={String(props.m.fetchDetails()?.url || props.m.args().url || "")} target="_blank" rel="noreferrer"
@@ -193,7 +193,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
             </a>
             <Show when={props.m.fetchDetails()?.content} fallback={
               <div class="border-t border-line/50 mt-2">
-                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.u.result?.toolResult || props.m.prog() || ""} language="markdown" scrollKey={`${props.m.key()}:content`} />
+                <CodeBlock follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language="markdown" plain wrap={false} scrollKey={`${props.m.key()}:content`} />
               </div>
             }>
               <div
@@ -215,20 +215,46 @@ export function ToolSearchBodies(props: ToolPartProps) {
         </Show>
         <Show when={props.m.name() === "bg_check"}>
           <Show
-            when={props.u.result?.toolResult || props.m.prog()}
+            when={props.m.output() || props.m.prog()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Reading background task…" : null}</div>}
           >
-            {/* Reads like a file: numbered lines in a CodeBlock. */}
-            <CodeBlock follow={() => props.m.open() && props.running} text={props.u.result?.toolResult || props.m.prog() || ""} language={undefined} scrollKey={props.m.key()} />
+            {/* Log output: numbered, plain, unwrapped. Metadata sits in the footer. */}
+            <CodeBlock follow={() => props.m.open() && props.running} text={props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
+            <Show when={props.m.footer()}>
+              <div class="px-3 pb-2 pt-1 font-mono text-[10px] text-ink-500 tabular-nums">{props.m.footer()}</div>
+            </Show>
           </Show>
         </Show>
-        <Show when={props.m.name() === "bg_cancel" && !!props.u.result?.toolResult}>
+        <Show when={props.m.name() === "bg_cancel" && !!props.m.output()}>
           <div class="px-3 py-2 text-[11px] text-ink-500">Background task canceled.</div>
           {/* Canceled body stays minimal — the header says it all. */}
         </Show>
-        <Show when={!(props.m.name() === "sleep" || props.m.name() === "bg_check" || props.m.name() === "bg_cancel" || props.m.name() === "edit" || props.m.name() === "read" || props.m.name() === "write" || props.m.name() === "python" || props.m.name() === "search" || props.m.name() === "inspect" || props.m.name() === "glob" || props.m.name() === "question" || props.m.name() === "patch" || props.m.name() === "search_web" || props.m.name() === "fetch_url")}>
+        <Show when={props.m.name() === "bash"}>
+          <div class="border-b border-line/40">
+            <CodeBlock text={props.m.bashHeaderCmd()} language="bash" wrap={false} maxH="max-h-40" scrollKey={`${props.m.key()}:cmd`} />
+          </div>
           <Show
-            when={props.u.result?.toolResult || props.m.prog() || props.m.bgRunning() || props.m.bgStream()}
+            when={props.m.output() || props.m.prog() || props.m.bgRunning() || props.m.bgStream()}
+            fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.active ? "Running…" : null}</div>}
+          >
+            <CodeBlock
+              follow={() => props.m.open() && props.running}
+              text={props.m.bgRunning() || props.m.isDetachedBg()
+                ? (props.m.bgStream() || props.m.prog() || "Running in background…")
+                : props.m.output() || props.m.prog() || "No output"}
+              language={undefined}
+              plain
+              wrap={false}
+              scrollKey={`${props.m.key()}:out`}
+            />
+            <Show when={props.m.footer() && !props.m.bgRunning()}>
+              <div class="px-3 pb-2 pt-1 font-mono text-[10px] text-ink-500 tabular-nums">{props.m.footer()}</div>
+            </Show>
+          </Show>
+        </Show>
+        <Show when={!(props.m.name() === "bash" || props.m.name() === "sleep" || props.m.name() === "bg_check" || props.m.name() === "bg_cancel" || props.m.name() === "edit" || props.m.name() === "read" || props.m.name() === "write" || props.m.name() === "python" || props.m.name() === "search" || props.m.name() === "inspect" || props.m.name() === "glob" || props.m.name() === "question" || props.m.name() === "patch" || props.m.name() === "search_web" || props.m.name() === "fetch_url")}>
+          <Show
+            when={props.m.output() || props.m.prog() || props.m.bgRunning() || props.m.bgStream()}
             fallback={<div class="px-3 py-2 text-[11px] text-ink-600">{props.m.name() === "question" ? "Waiting for your answers…" : props.ctx.pendingApproval()?.callId === props.u.call?.toolId ? "Waiting for approval…" : props.active ? "Running…" : null}</div>}
           >
             <pre
@@ -244,7 +270,7 @@ export function ToolSearchBodies(props: ToolPartProps) {
                 ? (props.m.bgRunning() || props.m.isDetachedBg()
                   ? (props.m.bgStream() || props.m.prog() || "Running in background…")
                   : props.m.terminal().output || "No output")
-                : props.u.result?.toolResult || props.m.prog() || ""}
+                : props.m.output() || props.m.prog() || ""}
             </pre>
           </Show>
         </Show>

@@ -148,7 +148,7 @@ export function BackgroundCard(props: { contextKey?: string }) {
                 </div>
                 <Show when={isOpen(job.id)}>
                   <div class="border-t border-line/50 rounded-b-lg overflow-hidden">
-                    <CodeBlock text={logText(job) || "No output yet."} language={undefined} scrollKey={`bg:${job.id}`} />
+                    <CodeBlock text={logText(job) || "No output yet."} language={undefined} plain wrap={false} scrollKey={`bg:${job.id}`} />
                     <Show when={(job.droppedLines || 0) > 0}>
                       <p class="px-3 pb-1.5 text-[10px] text-ink-600">
                         {job.droppedLines} earlier lines discarded by the tail cap — use bg_check for full paging.

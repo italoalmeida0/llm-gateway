@@ -37,6 +37,10 @@ export function CodeBlock(props: {
   scrollKey?: string;
   /** Pin to the tail while growing (streaming). Omit for static views. */
   follow?: () => boolean;
+  /** false keeps every source line intact (terminal/code); scroll sideways. */
+  wrap?: boolean;
+  /** Plain text: no syntax highlighting (command output, logs). */
+  plain?: boolean;
 }) {
   const disclosureActive = useDisclosureActive();
   let containerRef: HTMLDivElement | null = null;
@@ -57,7 +61,7 @@ export function CodeBlock(props: {
     onCleanup(() => { cancelled = true; });
 
     if (!hasGutter()) {
-      void highlightCode(text, lang)
+      void (props.plain ? Promise.resolve(escapeHtml(text)) : highlightCode(text, lang))
         .then((h) => {
           if (!cancelled) {
             setRawHtml(h);
@@ -83,7 +87,7 @@ export function CodeBlock(props: {
     });
 
     const cleanCode = parsed.map((p) => p.code).join("\n");
-    void highlightCode(cleanCode, lang)
+    void (props.plain ? Promise.resolve(escapeHtml(cleanCode)) : highlightCode(cleanCode, lang))
       .then((h) => {
         if (cancelled) return;
         const htmlLines = h.split("\n");
@@ -126,7 +130,7 @@ export function CodeBlock(props: {
       <Show
         when={hasGutter()}
         fallback={
-          <pre class="px-3 py-2 whitespace-pre-wrap">
+          <pre class={props.wrap === false ? "px-3 py-2 whitespace-pre" : "px-3 py-2 whitespace-pre-wrap"}>
             <Show
               when={rawHtml() !== null}
               // eslint-disable-next-line solid/no-innerhtml

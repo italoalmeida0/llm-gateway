@@ -137,6 +137,20 @@ try {
     assert.equal(seqLines.filter((l) => l === n).length, 1, `line ${n} exactly once (code=${JSON.stringify(seqCode.slice(0, 200))})`);
   }
   assert.equal(seqLines.filter((l) => l === "ok").length, 1, '"ok" exactly once');
+  // Single scroll surface: the expanded task body (command + log) exposes
+  // exactly one scroller — never one scrollbar per block.
+  // Class-based (the fixture serves no CSS): exactly one scroll container in
+  // the expanded body, and the blocks inside it are embedded (no own cap).
+  const scroll = await page.evaluate(() => {
+    const log = document.querySelector("[data-bg-log]");
+    const body = log?.closest(".rounded-b-lg") || log?.parentElement?.parentElement;
+    const all = body ? [body, ...body.querySelectorAll("*")] : [];
+    const scrollers = all.filter((el) => /overflow-(auto|y-auto)/.test(el.className || ""));
+    const capped = all.filter((el) => /max-h-/.test(el.className || ""));
+    return { scrollers: scrollers.length, capped: capped.length };
+  });
+  assert.equal(scroll.scrollers, 1, `expanded bg body must have exactly one scroll container (got ${scroll.scrollers})`);
+  assert.equal(scroll.capped, 1, `only the body wrapper is height-capped (got ${scroll.capped})`);
   // Refresh with the full tail: live collapses, "ok" stays single.
   await page.locator("[data-bg-archive-toggle]").click();
   await page.evaluate(() => (window as any).bgTest.seed([

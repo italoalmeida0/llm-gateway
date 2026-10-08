@@ -1,9 +1,10 @@
-import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { useBackground, useUI } from "../ctx";
 import type { SessionBgTask } from "../hooks/useBackground";
 import { elapsedLabel } from "../utils/format";
 import { Icon as Iconify } from "../../components/icon";
 import { CodeBlock, ShellCmd } from "./CodeBlock";
+import { followTail, recordToolScroll, restoreToolScroll } from "../utils/scrollMemory";
 
 /** Middle-truncated one-line command for the card row. */
 function shortLabel(cmd: string, max = 64) {
@@ -148,19 +149,34 @@ export function BackgroundCard(props: { contextKey?: string }) {
                 </div>
                 <Show when={isOpen(job.id)}>
                   <div class="border-t border-line/50 rounded-b-lg overflow-hidden">
-                    <Show when={job.label}>
-                      <div class="border-b border-line/40">
-                        <CodeBlock text={job.label} language={job.kind === "python" ? "python" : "bash"} wrap={false} scrollKey={`bg:${job.id}:cmd`} />
+                    {/* Single scroll surface for the expanded task body: the
+                        command block and the log share one scroller (same
+                        contract as ToolBody), never one scrollbar each. */}
+                    <div
+                      ref={(el) => {
+                        restoreToolScroll(`bg:${job.id}`, el);
+                        requestAnimationFrame(() => restoreToolScroll(`bg:${job.id}`, el));
+                        onCleanup(followTail(el, () => isOpen(job.id) && job.status === "running"));
+                      }}
+                      onScroll={(e) => recordToolScroll(`bg:${job.id}`, e.currentTarget)}
+                      class="max-h-96 overflow-auto overscroll-contain [scrollbar-gutter:stable]"
+                    >
+                      <div class="min-w-full w-fit">
+                        <Show when={job.label}>
+                          <div class="border-b border-line/40">
+                            <CodeBlock embedded text={job.label} language={job.kind === "python" ? "python" : "bash"} wrap={false} scrollKey={`bg:${job.id}:cmd`} />
+                          </div>
+                        </Show>
+                        <div data-bg-log>
+                          <CodeBlock embedded text={logText(job) || "No output yet."} language={undefined} plain wrap={false} scrollKey={`bg:${job.id}`} />
+                        </div>
+                        <Show when={(job.droppedLines || 0) > 0}>
+                          <p class="px-3 pb-1.5 text-[10px] text-ink-600">
+                            {job.droppedLines} earlier lines discarded by the tail cap — use bg_check for full paging.
+                          </p>
+                        </Show>
                       </div>
-                    </Show>
-                    <div data-bg-log>
-                      <CodeBlock text={logText(job) || "No output yet."} language={undefined} plain wrap={false} scrollKey={`bg:${job.id}`} />
                     </div>
-                    <Show when={(job.droppedLines || 0) > 0}>
-                      <p class="px-3 pb-1.5 text-[10px] text-ink-600">
-                        {job.droppedLines} earlier lines discarded by the tail cap — use bg_check for full paging.
-                      </p>
-                    </Show>
                   </div>
                 </Show>
               </div>

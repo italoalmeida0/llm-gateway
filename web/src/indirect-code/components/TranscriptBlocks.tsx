@@ -44,7 +44,7 @@ export interface TranscriptRenderCtx {
   bgClock: () => number;
 }
 
-/** Thinking as a tool-style row: header (bot icon + timer) with an
+/** Thinking as a tool-style row: header (label + timer, no icon) with an
  * incremental Markdown body. Open by default while the turn runs, closed after —
  * unless the user toggled it explicitly. */
 function renderThinkingRow(
@@ -72,14 +72,6 @@ function renderThinkingRow(
         onClick={toggle}
         class="group/tool w-full flex items-center gap-2 pl-1 pr-1.5 py-1 rounded-lg cursor-pointer hover:bg-ink-900/70 text-[13px]"
       >
-        <Show
-          when={!live()}
-          fallback={
-            <span class="w-3.5 h-3.5 border-2 border-ink-500 border-t-transparent rounded-full animate-spin shrink-0" />
-          }
-        >
-          <Iconify icon="lucide:bot" size={14} class="shrink-0 text-ink-500" />
-        </Show>
         <span class="text-ink-500 shrink-0">{label()}</span>
         <span class="flex-1" />
         <Iconify

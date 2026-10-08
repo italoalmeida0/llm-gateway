@@ -91,21 +91,17 @@ export function BackgroundCard(props: { contextKey?: string }) {
             data-bg-archive-toggle
           >
             <Iconify icon="lucide:archive" size={12} />
-            Archived
-            <span class="tabular-nums opacity-80">({archived().length})</span>
+            <span class="tabular-nums opacity-80">{archived().length}</span>
           </button>
           <span class="ml-auto text-[10px] uppercase tracking-wide text-ink-500 tabular-nums whitespace-nowrap" data-bg-running-count>
             {running().length} running
           </span>
         </div>
+        <Show when={selected().length > 0}>
         <div class="flex flex-col gap-1.5">
-          <For each={visible()} fallback={
-            <p class="px-2.5 py-3 text-xs text-ink-500">
-              {showArchived() ? "No archived tasks yet." : "No tasks running."}
-            </p>
-          }>
+          <For each={visible()}>
             {(job) => (
-              <div class="rounded-lg border border-line/60 bg-card" data-bg-row={job.id}>
+              <div class="rounded-lg bg-card" data-bg-row={job.id}>
                 <div class="flex items-center gap-2 px-2.5 py-1.5">
                   <span
                     class={`inline-flex shrink-0 ${taskState(job.status).color}`}
@@ -130,24 +126,28 @@ export function BackgroundCard(props: { contextKey?: string }) {
                   <Show when={job.status === "running"}>
                     <button
                       type="button"
-                      class="shrink-0 rounded border border-line px-1.5 py-0.5 text-[11px] text-ink-400 hover:text-ink-100 hover:border-ink-500 cursor-pointer"
+                      class="shrink-0 inline-flex items-center justify-center rounded p-1 text-ink-500 hover:text-ink-100 hover:bg-elev cursor-pointer"
                       onClick={() => bg.stop(job.id)}
+                      aria-label="Stop task"
+                      title="Stop task"
                       data-bg-stop={job.id}
                     >
-                      Stop
+                      <Iconify icon="lucide:square" size={12} />
                     </button>
                   </Show>
                   <button
                     type="button"
-                    class="shrink-0 rounded border border-line px-1.5 py-0.5 text-[11px] text-ink-400 hover:text-ink-100 hover:border-ink-500 cursor-pointer"
+                    class="shrink-0 inline-flex items-center justify-center rounded p-1 text-ink-500 hover:text-ink-100 hover:bg-elev cursor-pointer"
                     onClick={() => toggle(job.id)}
                     aria-expanded={isOpen(job.id)}
+                    aria-label={isOpen(job.id) ? "Hide logs" : "Show logs"}
+                    title={isOpen(job.id) ? "Hide logs" : "Show logs"}
                   >
-                    {isOpen(job.id) ? "Hide logs" : "Logs"}
+                    <Iconify icon="lucide:chevron-down" size={14} class={`transition-transform ${isOpen(job.id) ? "rotate-180" : ""}`} />
                   </button>
                 </div>
                 <Show when={isOpen(job.id)}>
-                  <div class="border-t border-line/50">
+                  <div class="border-t border-line/50 rounded-b-lg overflow-hidden">
                     <CodeBlock text={logText(job) || "No output yet."} language={undefined} scrollKey={`bg:${job.id}`} />
                     <Show when={(job.droppedLines || 0) > 0}>
                       <p class="px-3 pb-1.5 text-[10px] text-ink-600">
@@ -171,6 +171,7 @@ export function BackgroundCard(props: { contextKey?: string }) {
             </button>
           </Show>
         </div>
+        </Show>
       </div>
     </Show>
   );

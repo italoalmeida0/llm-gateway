@@ -85,6 +85,15 @@ const units: any[] = [
     },
   },
   {
+    // Envelope embedded mid-text (concatenated/streamed result): the XML
+    // must never render, at any width.
+    call: { toolId: "bashEmbed", toolName: "bash", toolArgs: JSON.stringify({ command: "run.sh" }) },
+    result: {
+      toolResult: "step 1 done\n<tool_result type=\"ok\" exit=\"0\">inner payload</tool_result>\nstep 2 done\n<tool_result type=\"ok\">tail fragment",
+      toolDetails: { env: { exit: "0", command: "run.sh" }, footer: facts("exit 0") },
+    },
+  },
+  {
     call: { toolId: "bash1", toolName: "bash", toolArgs: JSON.stringify({ command: "git log --oneline -20 -- web/src/indirect-code/components" }) },
     result: {
       toolResult: "02e46d6 feat(web): plain-text tool output and integrated background logs\n76a6b5b fix(web): keep pipe tables literal in basic thinking mode\ne6affd8 fix(web): keep bracketed text literal in basic thinking mode\n924b8de feat(web): basic markdown mode for model thinking\n45add8f feat(web): render thinking text as plain text\ncdb52f5 fix(web): stop underscore markdown from treating identifiers as emphasis\n\n[exit 0]  [6 lines]",

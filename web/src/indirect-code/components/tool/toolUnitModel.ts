@@ -4,7 +4,7 @@ import { tryParseArgs } from "../../utils/tools";
 import { isHeaderOnlySleep, toolSummary, terminalPresentation } from "../../transcript";
 import { toolRowKey } from "../../utils/titles";
 import { formatDurationSecs } from "../../utils/format";
-import { bodyWithoutFooter, type FooterFact } from "../../utils/envelope";
+import { bodyWithoutFooter, stripToolEnvelopeDetailed, type FooterFact } from "../../utils/envelope";
 import type { ToolUnit } from "../../types";
 import type { TranscriptRenderCtx } from "../TranscriptBlocks";
 
@@ -52,9 +52,12 @@ const bashHeaderCmd = () => {
   }
   return String(a.command || sum().target || "");
 };
-const terminal = createMemo(() => terminalPresentation((u.result?.toolDetails?.display ?? u.result?.toolResult) || ""));
+const terminal = createMemo(() => terminalPresentation(stripToolEnvelopeDetailed(String(u.result?.toolDetails?.display ?? u.result?.toolResult ?? "")).body));
 /** Tool output with the envelope footer removed; the footer lives in footer(). */
-const output = () => bodyWithoutFooter(u.result?.toolResult || "");
+// Strip at the model too: ingestion normally removes the envelope, but any
+// path that lands raw text in toolResult (replay, fixture, late snapshot)
+// must never render <tool_result …> XML in a body.
+const output = () => bodyWithoutFooter(stripToolEnvelopeDetailed(u.result?.toolResult || "").body);
 /** Envelope facts as structured chips (exit, page, next...). */
 const footer = (): FooterFact[] => {
   const f = (u.result?.toolDetails as any)?.footer;

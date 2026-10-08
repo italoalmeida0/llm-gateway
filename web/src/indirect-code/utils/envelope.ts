@@ -94,15 +94,51 @@ function envelopeFooter(e: ToolEnvelope): FooterFact[] {
  * Strip the envelope for human display: returns the body plus a footer line
  * of the notable facts. Legacy text (no envelope) is returned unchanged.
  */
-/** Strip for display but keep the envelope facts (for UI labels). */
+/** Strip for display but keep the envelope facts (for UI labels).
+ *
+ * The envelope may appear ANYWHERE in the text, not just at position 0:
+ * streamed/concatenated progress, replayed results and whitespace-prefixed
+ * payloads can embed one (or a trailing unclosed fragment). Every segment
+ * is removed from the display body so raw XML never leaks into a tool
+ * body on any device; the first complete envelope supplies the facts. */
 export function stripToolEnvelopeDetailed(text: string): {
   body: string;
   attrs: Record<string, string>;
   footer: FooterFact[];
 } {
-  const e = parseToolEnvelope(text);
-  if (!e) return { body: text, attrs: {}, footer: [] };
-  return { body: e.body, attrs: e.attrs, footer: envelopeFooter(e) };
+  if (typeof text !== "string") return { body: text, attrs: {}, footer: [] };
+  // HTML-escaped envelopes (replayed/echoed results) render as literal
+  // "&lt;tool_result…&gt;" text: strip them the same way, keeping the body.
+  let work = text.replace(
+    /&lt;tool_result([\s\S]*?)(?:&lt;\/tool_result&gt;|$)/g,
+    (matched: string, inner: string) => {
+      const gt = inner.indexOf("&gt;");
+      if (gt < 0) return "";
+      const close = matched.indexOf("&lt;/tool_result&gt;");
+      return close < 0 ? "" : inner.slice(gt + 4);
+    },
+  );
+  if (!work.includes(OPEN)) return { body: work, attrs: {}, footer: [] };
+  let attrs: Record<string, string> = {};
+  let footer: FooterFact[] = [];
+  let seen = false;
+  // Closed segments first (body between the tags), then any trailing
+  // unclosed fragment (a partial stream) is dropped entirely.
+  const body = work.replace(
+    new RegExp(`${OPEN}([\\s\\S]*?)(?:${CLOSE}|$)`, "g"),
+    (matched: string, inner: string) => {
+      if (seen) return "";
+      seen = true;
+      // Unclosed opening fragment (partial stream): nothing displayable.
+      if (inner.indexOf(">") < 0) return "";
+      const e = parseToolEnvelope(matched.endsWith(CLOSE) ? matched : `${matched}${CLOSE}`);
+      if (!e) return "";
+      attrs = e.attrs;
+      footer = envelopeFooter(e);
+      return e.body;
+    },
+  );
+  return { body, attrs, footer };
 }
 
 /** Body without a trailing footer line: the tool's own output only. Older

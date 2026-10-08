@@ -7,7 +7,9 @@ import { clearToolScrolls } from "../utils/scrollMemory";
 import { createTranscriptScroll } from "../scroll";
 import { createRenderBlockBuilder, latestShortTurnMessage } from "../transcript";
 import { elapsedLabel, messageText } from "../utils/format";
-import { prettyArgs, parseContentBlocks } from "../utils/wire";import {
+import { prettyArgs, parseContentBlocks } from "../utils/wire";
+import { stripToolEnvelopeDetailed } from "../utils/envelope";
+import {
   appendReasoningDelta as reduceReasoningDelta,
   appendTextDelta as reduceTextDelta,
   appendToolArgsDelta as reduceToolArgs,
@@ -609,7 +611,9 @@ export function createTranscript(opts: {
     if (typeof r.todosOpen === "boolean") applyTodosOpenFromRemote(r.todosOpen);
 
     showQuestion(r.question || null);
-    setToolProgress(r.toolProgress || {});
+    // Progress text may embed raw envelope XML (streamed/replayed
+    // snapshots): strip it at ingestion so it never renders in a body.
+    setToolProgress(Object.fromEntries(Object.entries(r.toolProgress || {}).map(([k, v]) => [k, stripToolEnvelopeDetailed(String(v)).body])));
     setToolStarts(r.toolStarts || {});
     setPendingApproval(r.pendingApproval ? { ...r.pendingApproval, args: prettyArgs(r.pendingApproval.args) } : null);
     if (r.thinkingStartedAt && r.status === "running") startThinkingTimer(r.thinkingStartedAt);
@@ -1085,7 +1089,7 @@ export function createTranscript(opts: {
       if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
       setToolStarts((prev) => ({ ...prev, [ev.id]: ev.startedAt }));
     } else if (ev.type === "tool_progress") {
-      setToolProgress((prev) => ({ ...prev, [ev.id]: ((prev[ev.id] || "") + (ev.text || "")).slice(-65536) }));
+      setToolProgress((prev) => ({ ...prev, [ev.id]: ((prev[ev.id] || "") + stripToolEnvelopeDetailed(String(ev.text || "")).body).slice(-65536) }));
     } else if (ev.type === "tool_call") {
       if (thinkingStart() !== null) stampThinkingDuration(stopThinkingTimer());
       setMessages(prev=>reduceToolCall(prev,ev.id,ev.name,ev.args,ev.messageId));

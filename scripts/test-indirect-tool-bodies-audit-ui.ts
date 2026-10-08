@@ -74,6 +74,8 @@ try {
     });
     console.log("  report", JSON.stringify({ chips: report.footerChips, body: report.body.slice(0, 120) }));
     assert.ok(!/<tool_result|&lt;tool_result/.test(report.body), `width ${width}: no tool_result XML leaks`);
+    // Embedded/fragmented envelopes are stripped from the body entirely.
+    assert.ok(/step 1 done/.test(report.body) && /inner payload/.test(report.body) && /step 2 done/.test(report.body), `width ${width}: embedded envelope keeps only its body text`);
     // Legacy footer lines are stripped from the body and rendered as chips.
     assert.ok(report.pres.every((p) => !/^\[exit \d+\]/m.test(p.text)), `width ${width}: footer line is not inside output blocks`);
     assert.ok(/exit 0/.test(report.body), `width ${width}: footer chips render the exit code`);

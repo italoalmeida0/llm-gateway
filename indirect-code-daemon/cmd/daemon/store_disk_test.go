@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"llm-gateway/indirect-code-daemon/packages/provider"
 )
 
 func writeRaw(t *testing.T, path, content string) *os.File {
@@ -231,3 +233,87 @@ func TestSessionFileRejectsCorruptMiddleLine(t *testing.T) {
 		t.Error("corrupt middle line must be an error, never silently dropped")
 	}
 }
+
+func TestAssembleRecordDeduplicates(t *testing.T) {
+	turn1 := turnLine{
+		Kind: "turn", Turn: 1,
+		Messages: []json.RawMessage{json.RawMessage(`{"id":"m1","role":"user","turn_index":1,"content":[]}`)},
+	}
+	turn2Partial := turnLine{
+		Kind: "turn", Turn: 2,
+		Messages: []json.RawMessage{json.RawMessage(`{"id":"m2","role":"assistant","turn_index":2,"content":[]}`)},
+	}
+	turn2Complete := turnLine{
+		Kind: "turn", Turn: 2,
+		Messages: []json.RawMessage{
+			json.RawMessage(`{"id":"m2","role":"assistant","turn_index":2,"content":[]}`),
+			json.RawMessage(`{"id":"m3","role":"tool","turn_index":2,"content":[]}`),
+		},
+	}
+	meta := metaLine{ID: "s1", TurnSeq: 2}
+	rec := assembleRecord([]turnLine{turn1, turn2Partial, turn2Complete}, meta)
+	if len(rec.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(rec.Messages))
+	}
+	if rec.Messages[0].ID != "m1" || rec.Messages[1].ID != "m2" || rec.Messages[2].ID != "m3" {
+		t.Errorf("unexpected message IDs: %+v", rec.Messages)
+	}
+}
+
+func TestCommitWALReplacesTurnWithoutDuplicating(t *testing.T) {
+	dir := t.TempDir()
+	st := newDiskStore(dir)
+	sessID := "s_test_wal"
+
+	// Create initial record with Turn 1 (1 message)
+	m1 := provider.Message{ID: "m1", Role: provider.RoleUser, Content: []provider.Content{provider.TextBlock{Text: "hi"}}, TurnIndex: 1}
+	rec := &SessionRecord{
+		ID: sessID, CWD: "/tmp", Status: "idle", TurnSeq: 1,
+		Messages: []provider.Message{m1},
+	}
+	if err := st.commitWAL(sessID, rec, nil); err != nil {
+		t.Fatalf("first commit: %v", err)
+	}
+
+	lines, meta, err := st.readSessionFile(sessID)
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 turn line, got %d", len(lines))
+	}
+	if meta.TurnSeq != 1 {
+		t.Fatalf("expected TurnSeq 1, got %d", meta.TurnSeq)
+	}
+
+	// Now Turn 1 gets an assistant message
+	m2 := provider.Message{ID: "m2", Role: provider.RoleAssistant, Content: []provider.Content{provider.TextBlock{Text: "hello"}}, TurnIndex: 1}
+	rec.Messages = append(rec.Messages, m2)
+
+	// Commit WAL again for Turn 1 with 2 messages
+	if err := st.commitWAL(sessID, rec, nil); err != nil {
+		t.Fatalf("second commit: %v", err)
+	}
+
+	// Session file must still have EXACTLY 1 turn line, not 2!
+	lines, meta, err = st.readSessionFile(sessID)
+	if err != nil {
+		t.Fatalf("read session after update: %v", err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("expected EXACTLY 1 turn line after update, got %d (duplicated!)", len(lines))
+	}
+	if len(lines[0].Messages) != 2 {
+		t.Fatalf("expected 2 messages in turn 1 line, got %d", len(lines[0].Messages))
+	}
+
+	// Loading the session should yield exactly 2 messages
+	loaded, err := st.loadSession(sessID)
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if len(loaded.Messages) != 2 {
+		t.Fatalf("expected 2 messages loaded, got %d", len(loaded.Messages))
+	}
+}
+

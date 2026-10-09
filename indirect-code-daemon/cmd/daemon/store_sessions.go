@@ -373,15 +373,42 @@ func assembleRecord(lines []turnLine, meta metaLine) *SessionRecord {
 		ApprovalDeadlineUnix: meta.ApprovalDeadlineUnix,
 		BgTasks: meta.BgTasks,
 	}
-	for _, tl := range lines {
+	// Defensively deduplicate turn lines by Turn number if Turn > 0:
+	// if multiple lines share the same turn, the last one wins.
+	var dedupedLines []turnLine
+	lastIdxByTurn := make(map[int]int)
+	for i, tl := range lines {
+		if tl.Turn > 0 {
+			lastIdxByTurn[tl.Turn] = i
+		}
+	}
+	for i, tl := range lines {
+		if tl.Turn > 0 && lastIdxByTurn[tl.Turn] != i {
+			continue
+		}
+		dedupedLines = append(dedupedLines, tl)
+	}
+
+	seenMsgIDs := make(map[string]struct{})
+	seenBalloons := make(map[int]struct{})
+	for _, tl := range dedupedLines {
 		for _, raw := range tl.Messages {
 			if msg, err := core.HydrateMessageObject(raw); err == nil {
+				if msg.ID != "" {
+					if _, seen := seenMsgIDs[msg.ID]; seen {
+						continue
+					}
+					seenMsgIDs[msg.ID] = struct{}{}
+				}
 				rec.Messages = append(rec.Messages, msg)
 			}
 		}
 		if tl.Balloon != nil {
-			cp := *tl.Balloon
-			rec.FileBalloons = append(rec.FileBalloons, cp)
+			if _, seen := seenBalloons[tl.Balloon.TurnIndex]; !seen {
+				seenBalloons[tl.Balloon.TurnIndex] = struct{}{}
+				cp := *tl.Balloon
+				rec.FileBalloons = append(rec.FileBalloons, cp)
+			}
 		}
 	}
 	// Commit-window reconcile: torn meta rewrite after a turn append
@@ -397,8 +424,8 @@ func assembleRecord(lines []turnLine, meta metaLine) *SessionRecord {
 		}
 	}
 	if hasIndexed {
-		if n := len(lines); n > 0 && rec.TurnSeq < lines[n-1].Turn {
-			rec.TurnSeq = lines[n-1].Turn
+		if n := len(dedupedLines); n > 0 && rec.TurnSeq < dedupedLines[n-1].Turn {
+			rec.TurnSeq = dedupedLines[n-1].Turn
 		}
 	}
 	ensureTranscriptIDs(rec)
@@ -556,8 +583,20 @@ func (s *diskStore) appendTurnLine(id string, tl turnLine, meta metaLine) error 
 		return err
 	}
 	_ = oldMeta
-	lines = append(lines, tl)
-	return s.writeSessionFile(id, lines, meta)
+	cleanLines := make([]turnLine, 0, len(lines)+1)
+	replaced := false
+	for _, l := range lines {
+		if l.Turn == tl.Turn && tl.Turn > 0 {
+			cleanLines = append(cleanLines, tl)
+			replaced = true
+		} else {
+			cleanLines = append(cleanLines, l)
+		}
+	}
+	if !replaced {
+		cleanLines = append(cleanLines, tl)
+	}
+	return s.writeSessionFile(id, cleanLines, meta)
 }
 
 // hasMetaTail checks the file ends with a valid meta line, returning its

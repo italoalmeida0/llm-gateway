@@ -570,14 +570,28 @@ func (s *diskStore) commitWAL(id string, rec *SessionRecord, wal *walWriter) err
 	// this is the newest turn on disk.
 	turnMsgs = sliceTurnMessages(rec.Messages, turnIdx)
 	// Zero-index notices at the very head belong to turn 1's line.
-	already := false
-	for _, tl := range lines {
-		if tl.Turn == turnIdx && len(tl.Messages) == len(turnMsgs) {
-			already = true
+	existingIdx := -1
+	for i, tl := range lines {
+		if tl.Turn == turnIdx {
+			existingIdx = i
 			break
 		}
 	}
-	if !already && (len(turnMsgs) > 0 || turnIdx > 0) {
+	if existingIdx >= 0 && len(lines[existingIdx].Messages) == len(turnMsgs) {
+		// Turn line present with matching message count (commit-window retry):
+		// just rewrite meta.
+		if err := s.rewriteMetaOnly(id, recordMeta(rec)); err != nil {
+			// Fresh session with no lines yet (turn produced no messages):
+			// full write.
+			if os.IsNotExist(err) {
+				if werr := s.saveSessionSync(rec); werr != nil {
+					return werr
+				}
+			} else {
+				return err
+			}
+		}
+	} else if len(turnMsgs) > 0 || turnIdx > 0 {
 		raw := make([]json.RawMessage, 0, len(turnMsgs))
 		for _, m := range turnMsgs {
 			data, err := json.Marshal(m)
@@ -595,15 +609,35 @@ func (s *diskStore) commitWAL(id string, rec *SessionRecord, wal *walWriter) err
 			}
 		}
 		tl := turnLine{V: storeVersion, Kind: "turn", Turn: turnIdx, Messages: raw, Balloon: balloon, Usage: rec.Usage, Context: rec.Context}
-		if err := s.appendTurnLine(id, tl, recordMeta(rec)); err != nil {
-			return err
+		if existingIdx >= 0 {
+			// Replace existing turn line on disk instead of appending a duplicate.
+			// Also deduplicate any other duplicate lines for this turn index.
+			cleanLines := make([]turnLine, 0, len(lines))
+			replaced := false
+			for _, l := range lines {
+				if l.Turn == turnIdx {
+					if !replaced {
+						cleanLines = append(cleanLines, tl)
+						replaced = true
+					}
+				} else {
+					cleanLines = append(cleanLines, l)
+				}
+			}
+			if !replaced {
+				cleanLines = append(cleanLines, tl)
+			}
+			if err := s.writeSessionFile(id, cleanLines, recordMeta(rec)); err != nil {
+				return err
+			}
+		} else {
+			if err := s.appendTurnLine(id, tl, recordMeta(rec)); err != nil {
+				return err
+			}
 		}
 	} else {
-		// Turn line present (commit-window retry) or nothing to append:
-		// just rewrite meta.
+		// Nothing to append: just rewrite meta.
 		if err := s.rewriteMetaOnly(id, recordMeta(rec)); err != nil {
-			// Fresh session with no lines yet (turn produced no messages):
-			// full write.
 			if os.IsNotExist(err) {
 				if werr := s.saveSessionSync(rec); werr != nil {
 					return werr

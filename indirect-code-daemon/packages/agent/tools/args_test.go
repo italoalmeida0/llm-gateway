@@ -11,7 +11,7 @@ import (
 // inspect depth: 2.0 failure).
 func TestUnmarshalArgsWholeFloats(t *testing.T) {
 	var ia InspectArgs
-	if err := unmarshalArgs(json.RawMessage(`{"path":".","depth":2.0,"maxEntries":200.0}`), &ia); err != nil {
+	if err := unmarshalArgs(json.RawMessage(`{"path":".","depth":2.0,"max_entries":200.0}`), &ia); err != nil {
 		t.Fatalf("unmarshalArgs inspect: %v", err)
 	}
 	if ia.Depth != 2 || ia.MaxEntries != 200 {
@@ -40,7 +40,7 @@ func TestUnmarshalArgsFractionalRejected(t *testing.T) {
 func TestUnmarshalArgsBasics(t *testing.T) {
 	// ints, strings, bools, nulls and unknown fields behave like encoding/json.
 	var ia InspectArgs
-	if err := unmarshalArgs(json.RawMessage(`{"path":".","depth":2,"showHidden":true,"unknownField":123}`), &ia); err != nil {
+	if err := unmarshalArgs(json.RawMessage(`{"path":".","depth":2,"show_hidden":true,"unknownField":123}`), &ia); err != nil {
 		t.Fatalf("unmarshalArgs: %v", err)
 	}
 	if ia.Path != "." || ia.Depth != 2 || !ia.ShowHidden {

@@ -74,7 +74,7 @@ frontend + daemon. Run checks from the appropriate project root.
   transcript fold is acknowledged; `background_delivery` deduplicates retries.
 - At `AutoBackgroundAfter` (10s), return a placeholder naming the brain log;
   completion notices contain NO result text. Model `bg_cancel` stays silent;
-  dashboard Stop delivers a cancellation notice. `sleep` wakes on transitions.
+  dashboard Stop delivers a cancellation notice. `bg_await` wakes on transitions.
   Frontend folds terminal snapshots into the original row;
   `normalizeSessionMessages` preserves folds across snapshots. Session deletion
   drops pending notices; late delivery must never resurrect a session.

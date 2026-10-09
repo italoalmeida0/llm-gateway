@@ -39,13 +39,13 @@ func TestSummaryNudgeTriggerOn30Tools(t *testing.T) {
 	})
 	// 32nd response: mark completion
 	responses = append(responses, []provider.Event{
-		provider.EventToolStart{ID: "call_done", Name: "mark_task_as_complete"},
+		provider.EventToolStart{ID: "call_done", Name: "finish_entire_request"},
 		provider.EventToolEnd{ID: "call_done"},
 		provider.EventDone{
 			Stop: provider.StopToolUse,
 			Message: provider.Message{
 				Role:    provider.RoleAssistant,
-				Content: []provider.Content{provider.ToolCallBlock{ID: "call_done", Name: "mark_task_as_complete"}},
+				Content: []provider.Content{provider.ToolCallBlock{ID: "call_done", Name: "finish_entire_request"}},
 			},
 		},
 	})
@@ -54,7 +54,7 @@ func TestSummaryNudgeTriggerOn30Tools(t *testing.T) {
 	tools := NewRegistry(
 		&dummyTool{name: "bash"},
 		&dummyTool{name: "summary"},
-		&dummyTool{name: "mark_task_as_complete"},
+		&dummyTool{name: "finish_entire_request"},
 	)
 	agent := NewAgent(client, "test-model", "system", tools)
 	agent.PersistentTurns = true

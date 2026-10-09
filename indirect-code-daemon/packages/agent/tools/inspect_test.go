@@ -84,7 +84,7 @@ func TestInspectHiddenAndDepth(t *testing.T) {
 	if got := toolResultText(t, res); strings.Contains(got, ".hidden") {
 		t.Fatalf("hidden should be excluded by default, got:\n%s", got)
 	}
-	res, _ = tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": ".", "showHidden": true}), nil)
+	res, _ = tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": ".", "show_hidden": true}), nil)
 	if got := toolResultText(t, res); !strings.Contains(got, ".hidden") {
 		t.Fatalf("hidden should show with flag, got:\n%s", got)
 	}
@@ -128,7 +128,7 @@ func TestInspectMtimeDirSizeType(t *testing.T) {
 	if got := toolResultText(t, res); strings.Contains(got, "UPPER.TXT") {
 		t.Fatalf("sensitive include should miss UPPER.TXT, got:\n%s", got)
 	}
-	res, _ = tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": ".", "include": []string{"*.txt"}, "caseInsensitive": true}), nil)
+	res, _ = tool.Execute(context.Background(), mustJSON(t, map[string]any{"path": ".", "include": []string{"*.txt"}, "case_insensitive": true}), nil)
 	if got := toolResultText(t, res); !strings.Contains(got, "UPPER.TXT") {
 		t.Fatalf("insensitive include should find UPPER.TXT, got:\n%s", got)
 	}

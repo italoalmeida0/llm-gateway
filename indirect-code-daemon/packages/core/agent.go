@@ -22,14 +22,21 @@ import (
 // (same idea as TODO activity, which is also transcript-real but display-hidden).
 const ContinueNudgeText = "<system-warn>Automated system notice (not from the user): Your previous response was empty or interrupted. Continue your work silently using tools.</system-warn>"
 
-// CompletionNudgeTextBuild and CompletionNudgeTextPlan prompt the model
-// when it returns discarded text without calling a completion tool in workspace modes.
+// completionNudgeTemplate is the discarded-text nudge. The turn-ending tool
+// name is spliced in by the loop (a.CompletionTool), so the nudge always
+// names the tool the model can actually call.
+const completionNudgeTemplate = "<system-warn>Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If the ENTIRE request is finished (every requested change implemented and validated) or the user only asked a question, call %s with final_message_to_user — that parameter is the only text the user reads. Never call it after an intermediate step. If you need user input, call question. Otherwise, keep working silently through tools, using the summary tool for progress updates.</system-warn>"
+
 const (
-	CompletionNudgeTextBuild = "<system-warn>Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If you have completed the task or answered the user's question, call mark_task_as_complete with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools.</system-warn>"
-	CompletionNudgeTextPlan  = "<system-warn>Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If your plan is ready, call mark_plan_as_ready_to_execute with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools.</system-warn>"
-	SummaryWarnNudge         = "<system-warn>Automated system notice (not from the user): Multiple tools have been executed without a progress update. Call the summary tool now with 'for_user' (100-500 chars user-facing update) and 'for_me' (your private tracking of next steps/verified items). Do not send conversational text messages.</system-warn>"
-	DiscardedTextNudge       = "<system-warn>Automated system notice (not from the user): You are sending too much conversational text alongside tool calls. That text is discarded; the user cannot read it and it is not saved in your context. Use reasoning for private thoughts, summary for progress updates, question for user input, and the current mode's completion tool with comprehensive_summary for your final response. Continue silently through tools.</system-warn>"
+	SummaryWarnNudge   = "<system-warn>Automated system notice (not from the user): Multiple tools have been executed without a progress update. Call the summary tool now with 'for_user' (100-500 chars user-facing update) and 'for_me' (your private tracking of next steps/verified items). Do not send conversational text messages.</system-warn>"
+	DiscardedTextNudge = "<system-warn>Automated system notice (not from the user): You are sending too much conversational text alongside tool calls. That text is discarded; the user cannot read it and it is not saved in your context. Use reasoning for private thoughts, summary for progress updates, question for user input, and the current mode's completion tool with final_message_to_user for your final response. Continue silently through tools.</system-warn>"
 )
+
+// CompletionNudgeText returns the discarded-text nudge naming toolName as the
+// turn-ending tool.
+func CompletionNudgeText(toolName string) string {
+	return fmt.Sprintf(completionNudgeTemplate, toolName)
+}
 
 // Count non-whitespace characters across tool responses, independent of chunking.
 const discardedTextNudgeThreshold = 500
@@ -245,11 +252,10 @@ func NewAgent(client provider.Client, model, system string, tools Registry) *Age
 		System: system,
 		Tools:  tools,
 	}
-	for _, name := range []string{"mark_task_as_complete", "mark_plan_as_ready_to_execute"} {
-		if _, ok := tools[name]; ok {
-			a.CompletionTool = name
-			break
-		}
+	// NewAgent enables the tool-only protocol when the registry carries the
+	// single turn-ending tool. Without it the agent keeps conversational text.
+	if _, ok := tools["finish_entire_request"]; ok {
+		a.CompletionTool = "finish_entire_request"
 	}
 	return a
 }
@@ -491,7 +497,7 @@ func (a *Agent) Continue(ctx context.Context, sink func(AgentEvent)) error {
 					return nil
 				}
 			}
-			if msg.Role == provider.RoleTool && successfulCompletion(assistant, msg) {
+			if msg.Role == provider.RoleTool && successfulCompletion(a.completionNames(), assistant, msg) {
 				sink(EvDone{})
 				return nil
 			}
@@ -636,7 +642,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			completionNudges = 0
 			for _, c := range assistantMsg.Content {
 				if tc, ok := c.(provider.ToolCallBlock); ok {
-					if !a.PersistentTurns && (tc.Name == "mark_task_as_complete" || tc.Name == "mark_plan_as_ready_to_execute") {
+					if !a.PersistentTurns && a.isCompletionCall(tc.Name) {
 						completedInTurn = true
 					}
 				}
@@ -655,7 +661,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 				return err
 			}
 			_ = hadError
-			if a.PersistentTurns && successfulCompletion(assistantMsg, toolMsg) {
+			if a.PersistentTurns && successfulCompletion(a.completionNames(), assistantMsg, toolMsg) {
 				sink(EvDone{})
 				return nil
 			}
@@ -721,12 +727,11 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 		// Discarded speech is not an empty response: ask for the active mode's
 		// completion tool, without retaining the speech to make that decision.
 		if hasText && !completedInTurn && completionNudges < maxCompletionNudges {
+			// One turn-ending tool in every mode: the nudge names it
+			// directly instead of switching on a mode-specific name.
 			completionNudgeText := ""
-			switch a.CompletionTool {
-			case "mark_task_as_complete":
-				completionNudgeText = CompletionNudgeTextBuild
-			case "mark_plan_as_ready_to_execute":
-				completionNudgeText = CompletionNudgeTextPlan
+			if a.CompletionTool != "" {
+				completionNudgeText = CompletionNudgeText(a.CompletionTool)
 			}
 
 			if completionNudgeText != "" {
@@ -1065,10 +1070,9 @@ func (a *Agent) oneTurn(ctx context.Context, sink func(AgentEvent)) (provider.St
 		// not ask for another response if the process dies before finalization.
 		if a.PersistentTurns && finalErr == nil && ctx.Err() == nil && stop != provider.StopToolUse && strings.TrimSpace(extractText(finalMsg)) != "" {
 			a.mu.Lock()
-			_, taskSignal := a.Tools["mark_task_as_complete"]
-			_, planSignal := a.Tools["mark_plan_as_ready_to_execute"]
+			_, toolOnly := a.Tools["finish_entire_request"]
 			a.mu.Unlock()
-			if !taskSignal && !planSignal {
+			if !toolOnly {
 				meta := map[string]string{}
 				for key, value := range finalMsg.Meta {
 					meta[key] = value
@@ -1131,7 +1135,7 @@ func (a *Agent) executeTools(ctx context.Context, msg provider.Message, sink fun
 				Content: []provider.Content{results[len(results)-1]}, Time: time.Now(), AddedToolNames: addedTools})
 		}
 		sink(EvToolResult{ID: tc.ID, Result: res, Details: res.Details})
-		if a.PersistentTurns && !res.IsError && (tc.Name == "mark_task_as_complete" || tc.Name == "mark_plan_as_ready_to_execute") {
+		if a.PersistentTurns && !res.IsError && a.isCompletionCall(tc.Name) {
 			break
 		}
 	}
@@ -1307,12 +1311,17 @@ func textCharacterCount(text string) int {
 	return count
 }
 
-// A call alone is not completion: validation, approval, and execution must succeed.
-func successfulCompletion(assistant, results provider.Message) bool {
+// successfulCompletion reports whether the assistant called the turn-ending
+// tool and its result succeeded. The accepted name is passed in
+// (Agent.CompletionTool) so a rename cannot silently stop ending turns.
+func successfulCompletion(names []string, assistant, results provider.Message) bool {
+	wanted := map[string]bool{}
+	for _, name := range names {
+		wanted[name] = true
+	}
 	ids := map[string]bool{}
 	for _, content := range assistant.Content {
-		if call, ok := content.(provider.ToolCallBlock); ok &&
-			(call.Name == "mark_task_as_complete" || call.Name == "mark_plan_as_ready_to_execute") {
+		if call, ok := content.(provider.ToolCallBlock); ok && wanted[call.Name] {
 			ids[call.ID] = true
 		}
 	}
@@ -1322,6 +1331,20 @@ func successfulCompletion(assistant, results provider.Message) bool {
 		}
 	}
 	return false
+}
+
+// completionNames lists the tool names that end a turn. It is exactly
+// Agent.CompletionTool: one name in every mode.
+func (a *Agent) completionNames() []string {
+	if a.CompletionTool == "" {
+		return nil
+	}
+	return []string{a.CompletionTool}
+}
+
+// isCompletionCall reports whether name is the turn-ending tool.
+func (a *Agent) isCompletionCall(name string) bool {
+	return a.CompletionTool != "" && name == a.CompletionTool
 }
 
 func (a *Agent) appendToolMessage(message provider.Message) {

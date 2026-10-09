@@ -120,7 +120,7 @@ func TestFetchURLMaxChars(t *testing.T) {
 	defer srv.Close()
 	dir := t.TempDir()
 	tool := &FetchURLTool{CWD: dir, Sandbox: NewSandbox(dir), Client: srv.Client(), TestAllowLoopback: true}
-	res, err := tool.Execute(context.Background(), json.RawMessage(`{"url":"`+srv.URL+`","maxChars":100}`), nil)
+	res, err := tool.Execute(context.Background(), json.RawMessage(`{"url":"`+srv.URL+`","max_chars":100}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

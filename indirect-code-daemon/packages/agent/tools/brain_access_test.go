@@ -58,8 +58,8 @@ func TestBrainAccessAllowedInJail(t *testing.T) {
 		"path": notesFile,
 		"edits": []map[string]string{
 			{
-				"oldText": "- Initial observation",
-				"newText": "- Initial observation\n- Second observation",
+				"old_text": "- Initial observation",
+				"new_text": "- Initial observation\n- Second observation",
 			},
 		},
 	})

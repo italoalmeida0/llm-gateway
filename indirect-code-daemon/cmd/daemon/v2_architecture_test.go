@@ -144,7 +144,7 @@ func TestV2ToolEventsDeclareAndClearWait(t *testing.T) {
 		t.Fatalf("wait must be stamped with the turn generation: %+v", waits[0])
 	}
 
-	w.handleEvent(core.EvToolExecutionStart{ID: "sleep", Name: "sleep", Args: json.RawMessage(`{"seconds":360}`), StartedAt: time.Now().UnixMilli()})
+	w.handleEvent(core.EvToolExecutionStart{ID: "bg_await", Name: "bg_await", Args: json.RawMessage(`{"max_wait_seconds":360,"waiting_for":"bg_1","reason":"waiting for build"}`), StartedAt: time.Now().UnixMilli()})
 	waits = drain()
 	if len(waits) != 1 || waits[0].until < time.Now().Add(6*time.Minute).UnixMilli() {
 		t.Fatalf("six-minute sleep inherited a shorter watchdog budget: %+v", waits)

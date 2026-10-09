@@ -13,7 +13,7 @@ import (
 )
 
 // EditTool edits a single file using exact text replacement: every
-// edits[].oldText must match a unique, non-overlapping region of the
+// edits[].old_text must match a unique, non-overlapping region of the
 // ORIGINAL file (edits are not applied incrementally), with fuzzy matching
 // (trailing whitespace / smart quotes / dashes / special spaces
 // normalization) as a fallback when an exact match fails.
@@ -28,8 +28,8 @@ type EditTool struct {
 
 // textEdit is one targeted replacement.
 type textEdit struct {
-	OldText string `json:"oldText"`
-	NewText string `json:"newText"`
+	OldText string `json:"old_text"`
+	NewText string `json:"new_text"`
 }
 
 type editArgs struct {
@@ -37,11 +37,11 @@ type editArgs struct {
 	Edits []textEdit `json:"edits"`
 }
 
-const editSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},"newText":{"type":"string","description":"Replacement text for this targeted edit."}},"required":["oldText","newText"]}}},"required":["path","edits"]}`
+const editSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"old_text":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].old_text in the same call."},"new_text":{"type":"string","description":"Replacement text for this targeted edit."}},"required":["old_text","new_text"]}}},"required":["path","edits"]}`
 
 func (t *EditTool) Name() string { return "edit" }
 func (t *EditTool) Description() string {
-	return "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes."
+	return "Edit a single file using exact text replacement. Every edits[].old_text must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes."
 }
 func (t *EditTool) Schema() json.RawMessage { return json.RawMessage(editSchema) }
 
@@ -148,7 +148,7 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 	}
 
 	// Strip BOM before matching. The model will not include an invisible BOM
-	// in oldText.
+	// in old_text.
 	bom := ""
 	content := string(data)
 	if strings.HasPrefix(content, "\uFEFF") {
@@ -193,7 +193,7 @@ func (t *EditTool) executeInternal(ctx context.Context, raw json.RawMessage, isP
 			"path":    abs,
 			"files":   []string{path},
 			"edits":   len(a.Edits),
-			"dryRun":  isPreview,
+			"dry_run": isPreview,
 		},
 	}, nil
 }
@@ -332,21 +332,21 @@ func getNotFoundError(path string, editIndex, totalEdits int) error {
 	if totalEdits == 1 {
 		return fmt.Errorf("Could not find the exact text in %s. The old text must match exactly including all whitespace and newlines.", path)
 	}
-	return fmt.Errorf("Could not find edits[%d] in %s. The oldText must match exactly including all whitespace and newlines.", editIndex, path)
+	return fmt.Errorf("Could not find edits[%d] in %s. The old_text must match exactly including all whitespace and newlines.", editIndex, path)
 }
 
 func getDuplicateError(path string, editIndex, totalEdits, occurrences int) error {
 	if totalEdits == 1 {
 		return fmt.Errorf("Found %d occurrences of the text in %s. The text must be unique. Please provide more context to make it unique.", occurrences, path)
 	}
-	return fmt.Errorf("Found %d occurrences of edits[%d] in %s. Each oldText must be unique. Please provide more context to make it unique.", occurrences, editIndex, path)
+	return fmt.Errorf("Found %d occurrences of edits[%d] in %s. Each old_text must be unique. Please provide more context to make it unique.", occurrences, editIndex, path)
 }
 
 func getEmptyOldTextError(path string, editIndex, totalEdits int) error {
 	if totalEdits == 1 {
-		return fmt.Errorf("oldText must not be empty in %s.", path)
+		return fmt.Errorf("old_text must not be empty in %s.", path)
 	}
-	return fmt.Errorf("edits[%d].oldText must not be empty in %s.", editIndex, path)
+	return fmt.Errorf("edits[%d].old_text must not be empty in %s.", editIndex, path)
 }
 
 func getNoChangeError(path string, totalEdits int) error {

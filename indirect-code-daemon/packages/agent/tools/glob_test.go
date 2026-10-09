@@ -390,7 +390,7 @@ func TestGlobCaseInsensitiveAndType(t *testing.T) {
 		t.Fatalf("case-sensitive should miss Main.GO, got:\n%s", text)
 	}
 	// caseInsensitive finds it (find -iname).
-	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "*.go", "caseInsensitive": true}), nil)
+	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "*.go", "case_insensitive": true}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +398,7 @@ func TestGlobCaseInsensitiveAndType(t *testing.T) {
 		t.Fatalf("caseInsensitive should find Main.GO, got:\n%s", text)
 	}
 	// type=d lists matching directories with trailing slash.
-	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "pkg", "type": "d", "caseInsensitive": true}), nil)
+	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "pkg", "type": "d", "case_insensitive": true}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

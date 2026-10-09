@@ -98,7 +98,7 @@ export function ToolEditBodies(props: ToolPartProps) {
       {/* Context body per tool kind (scrollable, always inline — the
           collapsible rows already are the "open file/diff" view). */}
       <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && props.u.result}>
-        <Show when={props.m.args().dryRun === true}>
+        <Show when={props.u.result?.toolDetails?.dry_run === true}>
           <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
             <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
           </div>
@@ -117,13 +117,13 @@ export function ToolEditBodies(props: ToolPartProps) {
         </Show>
       </Show>
         <Show when={(props.m.name() === "edit" || props.m.name() === "patch") && !props.u.result}>
-          <Show when={props.m.args().dryRun === true}>
+          <Show when={props.u.result?.toolDetails?.dry_run === true}>
             <div class="mx-3 mt-2 mb-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
               <Iconify icon="lucide:eye" size={12} /> Dry run — no files written
             </div>
           </Show>
           <div class="px-3 py-2 text-[11px] text-ink-600">
-            {props.active ? (props.m.args().dryRun === true ? "Previewing edit…" : "Applying edit…") : null}
+            {props.active ? (props.u.result?.toolDetails?.dry_run === true ? "Previewing edit…" : "Applying edit…") : null}
           </div>
         </Show>
         <Show when={props.m.name() === "read"}>

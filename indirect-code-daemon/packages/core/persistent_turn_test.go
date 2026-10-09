@@ -32,11 +32,11 @@ func TestPersistentTurnRespectsConsecutiveNudgeBudget(t *testing.T) {
 				calls++
 				return terminalEvents(provider.StopEnd, provider.TextBlock{Text: text}), nil
 			}}
-			a := NewAgent(c, "m", "", NewRegistry(&dummyTool{name: "mark_task_as_complete"}))
+			a := NewAgent(c, "m", "", NewRegistry(&dummyTool{name: "finish_entire_request"}))
 			a.PersistentTurns = true
 			if err := a.Prompt(context.Background(), "work", nil, func(ev AgentEvent) {
 				if e, ok := ev.(EvUserMessage); ok && extractText(e.Message) != "work" {
-					want := CompletionNudgeTextBuild
+					want := CompletionNudgeText("finish_entire_request")
 					if textCharacterCount(text) == 0 {
 						want = ContinueNudgeText
 					}
@@ -138,9 +138,9 @@ func TestPersistentCompletionNeedsSuccessfulToolAndSurvivesRestart(t *testing.T)
 	calls := 0
 	c := persistentClient{stream: func(context.Context, provider.Request) (<-chan provider.Event, error) {
 		calls++
-		return terminalEvents(provider.StopToolUse, provider.TextBlock{Text: "Done"}, provider.ToolCallBlock{ID: "finish", Name: "mark_task_as_complete"}), nil
+		return terminalEvents(provider.StopToolUse, provider.TextBlock{Text: "Done"}, provider.ToolCallBlock{ID: "finish", Name: "finish_entire_request"}), nil
 	}}
-	a := NewAgent(c, "m", "", NewRegistry(&dummyTool{name: "mark_task_as_complete"}))
+	a := NewAgent(c, "m", "", NewRegistry(&dummyTool{name: "finish_entire_request"}))
 	a.PersistentTurns = true
 	a.TurnIndex = 7
 	if err := a.Prompt(context.Background(), "work", nil, nil); err != nil {
@@ -159,9 +159,9 @@ func TestPersistentCompletionNeedsSuccessfulToolAndSurvivesRestart(t *testing.T)
 	if calls != 1 {
 		t.Fatal("restart repeated an already committed completion")
 	}
-	assistant := provider.Message{Content: []provider.Content{provider.ToolCallBlock{ID: "finish", Name: "mark_task_as_complete"}}}
+	assistant := provider.Message{Content: []provider.Content{provider.ToolCallBlock{ID: "finish", Name: "finish_entire_request"}}}
 	rejected := provider.Message{Content: []provider.Content{provider.ToolResultBlock{CallID: "finish", IsError: true}}}
-	if successfulCompletion(assistant, rejected) {
+	if successfulCompletion([]string{"finish_entire_request"}, assistant, rejected) {
 		t.Fatal("rejected tool concluded the task")
 	}
 }

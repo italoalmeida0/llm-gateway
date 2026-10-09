@@ -11,7 +11,8 @@ import (
 )
 
 func TestAssistantTextDiscardedBeforePersistenceAndNextRequest(t *testing.T) {
-	for _, completion := range []string{"mark_task_as_complete", "mark_plan_as_ready_to_execute"} {
+	// One turn-ending tool serves every mode: only the description differs.
+	for _, completion := range []string{"finish_entire_request"} {
 		t.Run(completion, func(t *testing.T) {
 			const speech = "This speech must never enter the transcript."
 			const thinking = "Private reasoning survives."
@@ -26,10 +27,7 @@ func TestAssistantTextDiscardedBeforePersistenceAndNextRequest(t *testing.T) {
 					if len(req.Messages) != 3 || extractText(req.Messages[1]) != "" {
 						t.Fatalf("next request retained speech or lost reasoning: %+v", req.Messages)
 					}
-					want := CompletionNudgeTextBuild
-					if completion == "mark_plan_as_ready_to_execute" {
-						want = CompletionNudgeTextPlan
-					}
+					want := CompletionNudgeText("finish_entire_request")
 					if got := extractText(req.Messages[2]); got != want {
 						t.Fatalf("discarded speech selected the wrong nudge: %q", got)
 					}
@@ -48,7 +46,7 @@ func TestAssistantTextDiscardedBeforePersistenceAndNextRequest(t *testing.T) {
 				return ch, nil
 			}}
 			// Both completion tools remain registered in all workspace modes.
-			a := NewAgent(client, "m", "", NewRegistry(&dummyTool{name: "mark_task_as_complete"}, &dummyTool{name: "mark_plan_as_ready_to_execute"}))
+			a := NewAgent(client, "m", "", NewRegistry(&dummyTool{name: "finish_entire_request"}, &dummyTool{name: "finish_entire_request"}))
 			a.CompletionTool = completion
 			a.PersistentTurns = true
 			a.TurnIndex = 7
@@ -120,8 +118,8 @@ func TestDiscardedTextNudgeCountsOnceAcrossToolResponses(t *testing.T) {
 				})
 			}
 			responses = append(responses, []provider.Event{provider.EventDone{Stop: provider.StopToolUse, Message: provider.Message{
-				Role: provider.RoleAssistant, Content: []provider.Content{provider.ToolCallBlock{ID: "done", Name: "mark_task_as_complete"}}}}})
-			a := NewAgent(&scriptedClient{responses: responses}, "m", "", NewRegistry(nudgePingTool{}, &dummyTool{name: "mark_task_as_complete"}))
+				Role: provider.RoleAssistant, Content: []provider.Content{provider.ToolCallBlock{ID: "done", Name: "finish_entire_request"}}}}})
+			a := NewAgent(&scriptedClient{responses: responses}, "m", "", NewRegistry(nudgePingTool{}, &dummyTool{name: "finish_entire_request"}))
 			a.PersistentTurns = true
 			steps, warnings, starts, args, ends := 0, 0, 0, 0, 0
 			if err := a.Continue(context.Background(), func(ev AgentEvent) {
@@ -170,7 +168,7 @@ func TestDiscardedTextCountingAndAbortedResponses(t *testing.T) {
 				provider.EventDone{Stop: tc.stop, Message: provider.Message{Role: provider.RoleAssistant,
 					Content: []provider.Content{provider.TextBlock{Text: tc.final}, provider.ReasoningBlock{Summary: "thinking"}}}},
 			}}}
-			a := NewAgent(client, "m", "", NewRegistry(&dummyTool{name: "mark_task_as_complete"}))
+			a := NewAgent(client, "m", "", NewRegistry(&dummyTool{name: "finish_entire_request"}))
 			_, msg, count, err := a.oneTurn(context.Background(), func(ev AgentEvent) {
 				if _, ok := ev.(EvTextDelta); ok {
 					t.Fatal("speech escaped during streaming")
@@ -192,7 +190,7 @@ func TestTalkTextAndModeRefresh(t *testing.T) {
 		})
 	}
 	a := NewAgent(client, "m", "", Registry{})
-	for _, completion := range []string{"", "mark_task_as_complete", ""} {
+	for _, completion := range []string{"", "finish_entire_request", ""} {
 		a.BeforeRequest = func(context.Context) error { a.CompletionTool = completion; return nil }
 		var streamed string
 		_, msg, discarded, err := a.oneTurn(context.Background(), func(ev AgentEvent) {

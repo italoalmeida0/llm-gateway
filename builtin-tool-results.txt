@@ -43,7 +43,7 @@ Onde os exemplos antigos abaixo viram atributos (mapeamento):
 - write/edit "Successfully wrote/replaced …" -> info= (corpo vazio)
 - python "[exit N]  Took X" -> exit="N" duration="X" (corpo = stdout+stderr)
 - python "(no output)" -> info="no output"
-- sleep "Slept X." / "Woken early…" / "[Note: …]" -> status= waited= info=
+- bg_await "Waited X." / "Woken early…" / "[Note: …]" -> status= waited= info=
 - completion "Task marked as complete." -> info= (corpo vazio)
 - fetch_url "fetched URL" + "…(truncated, N chars)" -> url= chars= truncated=
 - web_search "(cached)" / "N results for Q" / "(no results)" -> cached= query= total= info=
@@ -259,7 +259,7 @@ BACKGROUND PLACEHOLDER (after ~10s, IsError=false)
     To read the output, call bg_check with job_id "bg_7f3a…" (paged log: tail by default, offset/limit for more).
     To force-stop it early, call bg_cancel with job_id "bg_7f3a…".
     You are woken automatically when the task finishes — its completion notice is delivered to you then.
-    While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.
+    While waiting, use your bg_await tool with waiting_for=job_id and a reason - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.
     (bash.go:281-290)
 
 TOOL ERRORS
@@ -307,7 +307,7 @@ BACKGROUND PLACEHOLDER (after ~10s)
     To read the output, call bg_check with job_id "bg_…" (paged log: tail by default, offset/limit for more).
     To force-stop it early, call bg_cancel with job_id "bg_…".
     You are woken automatically when the task finishes — its completion notice is delivered to you then.
-    While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.
+    While waiting, use your bg_await tool with waiting_for=job_id and a reason - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.
     (python.go:357-365)
 
 TOOL ERRORS
@@ -579,41 +579,41 @@ ERRORS
     bg supervisor unreachable                       bg_supervisor.go:503/512/524/532
 
 ================================================================================
-sleep  (packages/agent/tools/sleep.go)
+bg_await  (packages/agent/tools/bgawait.go)
 ================================================================================
 Args: {seconds (1–3600), waitingFor (required bg_…), summary (required, ≤100 chars)}
 
 SUCCESS (full duration)
 -----------------------
     compiling the daemon
-    Slept 2m 30s.                                     sleep.go:122
+    Waited 2m 30s.                                    bgawait.go:122
 
 SUCCESS (woken early by a finishing background task)
 ----------------------------------------------------
     compiling the daemon
-    Woken early after 12s: a background task finished — its completion notice is now in context.   sleep.go:124
+    Woken early after 12s: a background task finished — its completion notice is now in context.   bgawait.go:124
 
 PINNED TASK UNKNOWN (NOT an error)
 ----------------------------------
     compiling the daemon
-    [Note: background task bg_xyz is unknown in this session — nothing to wait for. Use bg_check with a valid id.]   sleep.go:92
+    [Note: background task bg_xyz is unknown in this session — nothing to wait for. Use bg_check with a valid id.]   bgawait.go:92
 
 PINNED TASK ALREADY TERMINAL (NOT an error, returns immediately)
 -----------------------------------------------------------------
     compiling the daemon
-    [Note: background task bg_xyz (go test ./...) already done — its completion notice is in context above. Use bg_check with job_id bg_xyz to read the output.]   sleep.go:95
+    [Note: background task bg_xyz (go test ./...) already done — its completion notice is in context above. Use bg_check with job_id bg_xyz to read the output.]   bgawait.go:95
 
 CANCELLED (turn cancelled)
 --------------------------
     compiling the daemon
-    Sleep cancelled.                                  sleep.go:120
+    Await cancelled.                                  bgawait.go:120
 
 ERRORS
 ------
-    invalid args: <json err>                        sleep.go:68
-    seconds must be between 1 and 3600              sleep.go:71
-    waitingFor is required: pass the background task id (bg_…) this sleep waits on   sleep.go:75
-    summary is required: describe in ≤100 chars what you are waiting for   sleep.go:79
+    invalid args: <json err>                        bgawait.go:68
+    seconds must be between 1 and 3600              bgawait.go:71
+    waiting_for is required: pass the background task id (bg_…) this bg_await waits on   bgawait.go:75
+    reason is required: describe in ≤100 chars what you are waiting for   bgawait.go:79
 
 ================================================================================
 question  (packages/agent/tools/question.go)
@@ -658,7 +658,7 @@ ERRORS
     only one item can be in_progress                todo.go:57
 
 ================================================================================
-mark_task_as_complete / mark_plan_as_ready_to_execute  (packages/agent/tools/completion.go)
+finish_entire_request  (packages/agent/tools/completion.go)
 ================================================================================
 Args: {notes (optional)}
 
@@ -810,11 +810,11 @@ bg_cancel:
   tool errors ................................ packages/agent/tools/bgcancel.go:57-62, bg_supervisor.go:497-532
   "[cancelled by %s]" log line ............... bg_supervisor.go:383-385
 
-sleep:
-  "Slept %s." / "Woken early after %s: ..." ... packages/agent/tools/sleep.go:122, 124
-  "Sleep cancelled." ......................... sleep.go:120
-  unknown-task / already-terminal notes ...... sleep.go:92, 95
-  errors ..................................... sleep.go:68, 71, 75, 79
+bg_await:
+  "Waited %s." / "Woken early after %s: ..." ... packages/agent/tools/bgawait.go:122, 124
+  "Await cancelled." ......................... bgawait.go:120
+  unknown-task / already-terminal notes ...... bgawait.go:92, 95
+  errors ..................................... bgawait.go:68, 71, 75, 79
 
 question:
   {"answers":[[...]]} ........................ packages/agent/tools/question.go:135-139

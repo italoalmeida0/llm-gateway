@@ -23,18 +23,18 @@ type InspectArgs struct {
 	// Depth limits recursion (default 1, max 5).
 	Depth int `json:"depth,omitempty"`
 	// ShowHidden includes dotfiles (default false).
-	ShowHidden bool `json:"showHidden,omitempty"`
+	ShowHidden bool `json:"show_hidden,omitempty"`
 	// GitStatus annotates files with git status flags (default true).
-	GitStatus *bool `json:"gitStatus,omitempty"`
+	GitStatus *bool `json:"git_status,omitempty"`
 	// MaxEntries caps returned entries (default 200, max 1000).
-	MaxEntries int `json:"maxEntries,omitempty"`
+	MaxEntries int `json:"max_entries,omitempty"`
 	// Include limits entries by glob(s).
 	Include []string `json:"include,omitempty"`
 	// Exclude skips entries by glob(s).
 	Exclude []string `json:"exclude,omitempty"`
 	// CaseInsensitive matches include/exclude globs case-insensitively
 	// (find -iname semantics for the name filters).
-	CaseInsensitive bool `json:"caseInsensitive,omitempty"`
+	CaseInsensitive bool `json:"case_insensitive,omitempty"`
 	// Type filters entries: "f" files only, "d" directories only
 	// (find -type). Empty means both.
 	Type string `json:"type,omitempty"`
@@ -61,7 +61,7 @@ func (t *InspectTool) Description() string {
 	return "List a directory tree with sizes, line counts, mtimes and git status flags. Params: `path` (default '.'), `depth` (default 1, max 5), `showHidden` (default false), `gitStatus` (default true), `maxEntries` (default 200, max 1000), `include`/`exclude` globs, `caseInsensitive` (iname-style name filters), `type` (\"f\" files / \"d\" dirs). Single files report size + line count + git flag."
 }
 
-const inspectSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Directory or file path to inspect (defaults to '.')."},"depth":{"type":"number","description":"Maximum directory recursion depth (default 1, max 5)."},"showHidden":{"type":"boolean","description":"Include hidden files and dotfiles (default false)."},"gitStatus":{"type":"boolean","description":"Annotate files with git status flags (M/A/D/??) (default true)."},"maxEntries":{"type":"number","description":"Maximum entries to return (default 200, max 1000)."},"include":{"type":"array","items":{"type":"string"},"description":"Glob patterns to include."},"exclude":{"type":"array","items":{"type":"string"},"description":"Glob patterns to exclude."},"caseInsensitive":{"type":"boolean","description":"Match include/exclude globs case-insensitively (default false)."},"type":{"type":"string","description":"Entry type filter: \"f\" files only, \"d\" directories only (default both)."}}}`
+const inspectSchema = `{"type":"object","properties":{"path":{"type":"string","description":"Directory or file path to inspect (defaults to '.')."},"depth":{"type":"number","description":"Maximum directory recursion depth (default 1, max 5)."},"_showHidden_":{"type":"boolean","description":"Include hidden files and dotfiles (default false)."},"_gitStatus_":{"type":"boolean","description":"Annotate files with git status flags (M/A/D/??) (default true)."},"_maxEntries_":{"type":"number","description":"Maximum entries to return (default 200, max 1000)."},"include":{"type":"array","items":{"type":"string"},"description":"Glob patterns to include."},"exclude":{"type":"array","items":{"type":"string"},"description":"Glob patterns to exclude."},"_caseInsensitive_":{"type":"boolean","description":"Match include/exclude globs case-insensitively (default false)."},"type":{"type":"string","description":"Entry type filter: \"f\" files only, \"d\" directories only (default both)."}}}`
 
 func (t *InspectTool) Schema() json.RawMessage { return json.RawMessage(inspectSchema) }
 

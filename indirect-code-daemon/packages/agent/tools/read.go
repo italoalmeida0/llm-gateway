@@ -231,7 +231,6 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 			"lines_truncated": truncation.truncated && truncation.truncatedBy == "lines",
 			"bytes_truncated": truncation.truncated && truncation.truncatedBy == "bytes",
 			"total_lines":     totalFileLines,
-			"totalLines":      totalFileLines,
 		},
 	}, nil
 }

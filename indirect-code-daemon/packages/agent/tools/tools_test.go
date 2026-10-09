@@ -310,7 +310,7 @@ func TestReadEditBrainSkipChangeTracking(t *testing.T) {
 	}
 	if _, err := editTool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  brainFile,
-		"edits": []map[string]any{{"oldText": "brain", "newText": "memory"}},
+		"edits": []map[string]any{{"old_text": "brain", "new_text": "memory"}},
 	}), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestEditSingle(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "a.txt",
-		"edits": []map[string]any{{"oldText": "world", "newText": "gopher"}},
+		"edits": []map[string]any{{"old_text": "world", "new_text": "gopher"}},
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -351,8 +351,8 @@ func TestEditMultiple(t *testing.T) {
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path": "a.txt",
 		"edits": []map[string]any{
-			{"oldText": "a", "newText": "A"},
-			{"oldText": "c", "newText": "C"},
+			{"old_text": "a", "new_text": "A"},
+			{"old_text": "c", "new_text": "C"},
 		},
 	}), nil)
 	if err != nil {
@@ -380,9 +380,9 @@ func TestEditGuidance(t *testing.T) {
 	edits := properties["edits"].(map[string]any)
 	items := edits["items"].(map[string]any)
 	editProperties := items["properties"].(map[string]any)
-	oldText := editProperties["oldText"].(map[string]any)
-	if got, _ := oldText["description"].(string); !strings.Contains(got, "must be unique in the original file") {
-		t.Fatalf("oldText schema description missing guidance: %q", got)
+	oldTextProp := editProperties["old_text"].(map[string]any)
+	if got, _ := oldTextProp["description"].(string); !strings.Contains(got, "must be unique in the original file") {
+		t.Fatalf("old_text schema description missing guidance: %q", got)
 	}
 	// Schema: only path and edits, nothing else.
 	if len(properties) != 2 {
@@ -615,7 +615,7 @@ func TestEditLineNumbers(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "e.txt",
-		"edits": []map[string]any{{"oldText": "line2", "newText": "replaced"}},
+		"edits": []map[string]any{{"old_text": "line2", "new_text": "replaced"}},
 	}), nil)
 	if err != nil {
 		t.Fatal(err)

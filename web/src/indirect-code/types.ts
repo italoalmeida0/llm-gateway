@@ -89,7 +89,7 @@ export interface ChatMessage {
   turnDurationMs?: number;
   /** True only while this model response is streaming. */
   streaming?: boolean;
-  /** True when this message included a completion signal (mark_task_as_complete / mark_plan_as_ready_to_execute). */
+  /** True when this message included a completion signal (finish_entire_request). */
   hasCompletion?: boolean;
   /** True when this message included a progress summary signal. */
   hasSummary?: boolean;

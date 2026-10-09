@@ -90,7 +90,7 @@ func TestMaxCompletionNudgesCap(t *testing.T) {
 		},
 	}
 
-	tools := NewRegistry(&dummyTool{name: "mark_task_as_complete"})
+	tools := NewRegistry(&dummyTool{name: "finish_entire_request"})
 	agent := NewAgent(client, "test-model", "system", tools)
 
 	err := agent.Continue(context.Background(), nil)

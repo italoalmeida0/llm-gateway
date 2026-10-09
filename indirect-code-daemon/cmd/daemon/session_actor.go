@@ -1824,7 +1824,7 @@ func (a *sessionActor) onWorkerApprovalReq(m workerApprovalReqMsg) {
 		m.reply <- approvalOutcome{reason: reason}
 		return
 	}
-	if options.Access == "full" || m.tool == "question" || m.tool == "todo" || m.tool == "mark_task_as_complete" || m.tool == "mark_plan_as_ready_to_execute" {
+	if options.Access == "full" || m.tool == "question" || m.tool == "todo" || m.tool == "finish_entire_request" {
 		m.reply <- approvalOutcome{approved: true}
 		return
 	}

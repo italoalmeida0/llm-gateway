@@ -25,7 +25,7 @@ export function specialTitle(units: ToolUnit[], extra?: { texts?: number; though
   const count = (...ns: string[]) => names.filter((n) => ns.includes(n)).length;
   const files = count("read");
   const searches = count("glob", "search");
-  const commands = count("bash", "python", "sleep");
+  const commands = count("bash", "python", "bg_await");
   const edits = count("edit", "write", "patch");
   const questions = count("question");
   const web = count("fetch_url", "search_web");

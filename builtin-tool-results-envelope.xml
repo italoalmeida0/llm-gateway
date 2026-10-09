@@ -134,7 +134,7 @@ threshold). Body is pure tool content; the id/status are attrs:
 To read the output, call bg_check with job_id "bg_8ed0b469015841a2" (paged log: tail by default, offset/limit for more).
 To force-stop it early, call bg_cancel with job_id "bg_8ed0b469015841a2".
 You are woken automatically when the task finishes — its completion notice is delivered to you then.
-While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.</result>
+While waiting, use your bg_await tool with waiting_for=job_id and a reason - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.</result>
 
 Invalid args (tool misuse -> error):
     <tool_result type="error">invalid args: json: cannot unmarshal string into Go struct field bashArgs.command of type string</result>
@@ -167,7 +167,7 @@ Background detach placeholder (identical text to bash):
 To read the output, call bg_check with job_id "bg_5e26275b4c989fb6" (paged log: tail by default, offset/limit for more).
 To force-stop it early, call bg_cancel with job_id "bg_5e26275b4c989fb6".
 You are woken automatically when the task finishes — its completion notice is delivered to you then.
-While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.</result>
+While waiting, use your bg_await tool with waiting_for=job_id and a reason - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.</result>
 
 Invalid args (error):
     <tool_result type="error">invalid args: json: cannot unmarshal number into Go struct field pythonArgs.code of type string</result>
@@ -369,10 +369,10 @@ Errors:
     <tool_result type="error">bg_cancel: host not configured</result>
 
 --------------------------------------------------------------------------------
-13. sleep
+13. bg_await
 --------------------------------------------------------------------------------
 Slept the full duration:
-    <tool_result type="ok" summary="waiting for build" status="slept" job_id="bg_8ed0b469015841a2" waited="30s"></result>
+    <tool_result type="ok" reason="waiting for build" status="timeout" job_id="bg_8ed0b469015841a2" waited="30s"></result>
 
 Woken early (a bg task finished):
     <tool_result type="ok" summary="waiting for build" status="woken_early" job_id="bg_8ed0b469015841a2" waited="4.2s" info="a background task finished — its completion notice is now in context."></result>
@@ -407,7 +407,7 @@ Body = the items JSON (data); done/total/progress are attrs:
     <tool_result type="ok" done="1" total="3" progress="33">[{"text":"Read code","status":"completed"},{"text":"Write doc","status":"in_progress"},{"text":"Ship","status":"pending"}]</result>
 
 --------------------------------------------------------------------------------
-16. mark_task_as_complete / mark_plan_as_ready_to_execute
+16. finish_entire_request
 --------------------------------------------------------------------------------
 Success — body EMPTY, confirmation is an info attr:
     <tool_result type="ok" info="Task marked as complete."></result>
@@ -522,8 +522,8 @@ bg_check
   packages/agent/tools/bgcheck.go ~114-126      numberedLines -> "N:line" body
 bg_cancel
   packages/agent/tools/bgcancel.go ~58/61/67-73 job_id required | host not configured | job_id= cancelled= status= (+info=)
-sleep
-  packages/agent/tools/sleep.go ~92-148         summary= status= job_id= waited= command= info=
+bg_await
+  packages/agent/tools/bgawait.go ~92-148         summary= status= job_id= waited= command= info=
 question
   packages/agent/tools/question.go ~43          {"answers":[[...]]} | "ask between 1 and 4 questions"
 todo

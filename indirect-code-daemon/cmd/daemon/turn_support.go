@@ -39,7 +39,7 @@ func modeToolRestriction(mode, tool string) string {
 			return ""
 		}
 	}
-	if tool == "mark_task_as_complete" || tool == "mark_plan_as_ready_to_execute" {
+	if tool == "finish_entire_request" {
 		return tool + " is not the completion signal of the current mode."
 	}
 	if tool == "write" || tool == "edit" || tool == "patch" {

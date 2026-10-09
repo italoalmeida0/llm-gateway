@@ -13,7 +13,7 @@ import type { TranscriptRenderCtx } from "../TranscriptBlocks";
  * so createMemo instances belong to the row and dispose with it.
  * Rows start open only while active (the turn's live tail) with
  * non-blank content, and closed otherwise — unless the user toggled
- * them explicitly. Sleep is never expandable: its row is header-only in
+ * them explicitly. bg_await is never expandable: its row is header-only in
  * every state (see expandable). */
 export function useToolUnitModel(ctx: TranscriptRenderCtx, msgId: string, u: ToolUnit, ui: number, running: () => boolean, active: () => boolean) {
 const key = () => toolRowKey(msgId, u, ui);
@@ -24,14 +24,14 @@ const args = createMemo(() => tryParseArgs(u.call?.toolArgs));
  * calling name() before this const initializes throws a TDZ
  * ReferenceError and breaks every tool row on expand. */
 const name = () => u.call?.toolName || "tool";
-/** Sleep rows are header-only (live counter in the label while running,
+/** bg_await rows are header-only (live counter in the label while running,
  * plain summary once finished): no body and no chevron, ever. */
 const expandable = () => !isHeaderOnlySleep(name(), !!u.result);
 /** Anything worth showing: result output, streamed args/progress. Rows
  * with nothing (pre-created card, empty call) stay shut until content
  * lands — the chevron still opens them manually. */
 const hasContent = createMemo(() => {
-  // Sleep never renders a body, finished or not.
+  // bg_await never renders a body, finished or not.
   if (!expandable()) return false;
   if (((u.result?.toolDetails?.display ?? u.result?.toolResult) || "").trim() !== "") return true;
   if ((prog() || "").trim() !== "") return true;
@@ -78,23 +78,23 @@ const fetchDetails = () => {
   if (!d || typeof d.url !== "string") return undefined;
   return d as { url: string; host?: string; title?: string; content?: string; truncated?: boolean };
 };
-/** Live remaining counter for a running sleep ("42s left" / "1m 30s left"),
+/** Live remaining counter for a running bg_await ("42s left" / "1m 30s left"),
  * computed from the tool start + the turn clock — no progress spam needed. */
 const sleepRemaining = () => {
-  if (name() !== "sleep" || u.result) return "";
-  const total = Number((args() as any)?.seconds);
+  if (name() !== "bg_await" || u.result) return "";
+  const total = Number((args() as any)?.max_wait_seconds);
   if (!Number.isFinite(total) || total <= 0) return "";
   const start = ctx.toolStarts()[u.call?.toolId || ""];
   if (!start) return "";
   return `${formatDurationSecs(Math.max(0, Math.ceil(total - (ctx.turnClock() - start) / 1000)))} left`;
 };
-/** Header label for a sleep row (the row is header-only): the time/counter
- * followed by the human summary when the model passed one, e.g.
- * "1m 30s left · waiting for build" or "Slept 1m 30s · waiting for build".
- * The summary must stay visible now that no body renders it. */
+/** Header label for a bg_await row (the row is header-only): the time/counter
+ * followed by the human-readable reason when the model passed one, e.g.
+ * "1m 30s left · waiting for build" or "Waited 1m 30s · waiting for build".
+ * The reason must stay visible now that no body renders it. */
 const sleepLabel = () => {
   const when = sleepRemaining() || sum().target;
-  const summary = String((args() as any)?.summary || "").replace(/\s+/g, " ").trim();
+  const summary = String((args() as any)?.reason || "").replace(/\s+/g, " ").trim();
   if (!summary || summary === when) return when;
   return when ? `${when} · ${summary}` : summary;
 };

@@ -22,15 +22,15 @@ export function displayToolArgs(raw?: string): Record<string, any> {
   if (!raw) return {};
   try { const parsed = JSON.parse(raw); return parsed && typeof parsed === "object" ? parsed : {}; } catch { /* incomplete argument stream */ }
   const values: Record<string, any> = { _raw: raw };
-  for (const field of ["path", "command", "content", "pattern", "oldText", "newText"]) {
+  for (const field of ["path", "command", "content", "pattern", "old_text", "new_text"]) {
     const text = partialString(raw, field);
     if (text !== undefined) values[field] = text;
   }
-  if (values.oldText !== undefined || values.newText !== undefined) values.edits = [{oldText:values.oldText || "", newText:values.newText || ""}];
+  if (values.old_text !== undefined || values.new_text !== undefined) values.edits = [{old_text:values.old_text || "", new_text:values.new_text || ""}];
   return values;
 }
-export const SIGNAL_TOOL_NAMES = new Set(["todo", "mark_task_as_complete", "mark_plan_as_ready_to_execute", "summary"]);
-export const COMPLETION_TOOL_NAMES = new Set(["mark_task_as_complete", "mark_plan_as_ready_to_execute"]);
+export const SIGNAL_TOOL_NAMES = new Set(["todo", "finish_entire_request", "summary"]);
+export const COMPLETION_TOOL_NAMES = new Set(["finish_entire_request"]);
 
 /** Detects synthetic system prompt nudges. Transcript-real (sent to the provider)
  * but never shown as a user bubble in the chat UI. */
@@ -116,7 +116,7 @@ export function withoutTodoActivity(messages: ChatMessage[]): ChatMessage[] {
         let summaryText = "";
         try {
           const parsed = JSON.parse(b.toolArgs || "{}");
-          const candidate = parsed?.comprehensive_summary || parsed?.summary || parsed?.notes;
+          const candidate = parsed?.final_message_to_user;
           summaryText = typeof candidate === "string" ? candidate : "";
         } catch {}
         if (summaryText.trim()) {

@@ -200,13 +200,12 @@ func (w *turnBridge) run() error {
 	}
 	bgCancelTool := &tools.BgCancelTool{Host: w, SessionID: w.env.actorID}
 	bgCheckTool := &tools.BgCheckTool{Host: w, SessionID: w.env.actorID}
-	sleepTool := &tools.SleepTool{Host: w, SessionID: w.env.actorID}
+	bgAwaitTool := &tools.BgAwaitTool{Host: w, SessionID: w.env.actorID}
 	questionTool := &tools.QuestionTool{Ask: w.askQuestions}
 	todoTool := &tools.TodoTool{Update: w.updateTodos}
-	markTaskTool := &tools.MarkTaskAsCompleteTool{Mode: normalizedOptions(w.snap.options).Mode}
-	markPlanTool := &tools.MarkPlanAsReadyToExecuteTool{}
+	finishTool := &tools.FinishEntireRequestTool{Mode: normalizedOptions(w.snap.options).Mode, OnFinish: func() error { return nil }}
 	summaryTool := &tools.SummaryTool{}
-	w.reg = core.NewRegistry(append(append(append(append(baseTools, questionTool), todoTool, markTaskTool, markPlanTool, summaryTool), bgCancelTool, sleepTool), bgCheckTool)...)
+	w.reg = core.NewRegistry(append(append(append(append(baseTools, questionTool), todoTool, finishTool, summaryTool), bgCancelTool, bgAwaitTool), bgCheckTool)...)
 
 	if w.env.store != nil {
 		header, err := w.env.store.readWALHeader(w.env.actorID)
@@ -440,7 +439,7 @@ func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
 // only ever sees the active mode's tools.
 func (w *turnBridge) toolsForMode(mode string) core.Registry {
 	mode = normalizedOptions(SessionOptions{Mode: mode}).Mode
-	if t, ok := w.reg["mark_task_as_complete"].(*tools.MarkTaskAsCompleteTool); ok {
+	if t, ok := w.reg["finish_entire_request"].(*tools.FinishEntireRequestTool); ok {
 		t.Mode = mode
 	}
 	return modeRegistry(w.reg, mode)
@@ -562,7 +561,8 @@ func (w *turnBridge) updateTodos(items []tools.TodoItem) error {
 	return nil
 }
 
-// SleepHost: wake early when any session job finishes (push from bg supervisor).
+// BgAwaitHost: wake an bg_await early when any session job finishes (push
+// from the bg supervisor).
 func (w *turnBridge) WaitForAnyJob(sessionID string, done <-chan struct{}) <-chan struct{} {
 	if w.env.bg == nil {
 		return nil
@@ -570,9 +570,9 @@ func (w *turnBridge) WaitForAnyJob(sessionID string, done <-chan struct{}) <-cha
 	return w.env.bg.subscribeFinish(sessionID, done)
 }
 
-// BgTaskStatus implements tools.BgSleepCheckHost: the session actor owns
+// BgTaskStatus implements tools.BgAwaitCheckHost: the session actor owns
 // the BgTasks, so this asks it (fast mailbox round-trip). Unknown ids
-// report ok=false — sleep warns, never fails.
+// report ok=false — bg_await warns, never fails.
 func (w *turnBridge) BgTaskStatus(sessionID, jobID string) (string, string, bool) {
 	if sessionID != "" && sessionID != w.env.actorID {
 		return "", "", false
@@ -909,10 +909,10 @@ func (w *turnBridge) handleEvent(ev core.AgentEvent) {
 		// V2-001: foreground tool execution is a declared wait (bounded by
 		// its own deadline; long commands detach to the BG supervisor).
 		wait := tuneWaitTool
-		if e.Name == "sleep" {
-			var args tools.SleepArgs
+		if e.Name == "bg_await" {
+			var args tools.BgAwaitArgs
 			if json.Unmarshal(e.Args, &args) == nil {
-				wait = max(wait, time.Duration(min(max(args.Seconds, 1), 3600)*float64(time.Second))+2*tuneWatchEvery)
+				wait = max(wait, time.Duration(min(max(args.MaxWaitSeconds, 1), 3600)*float64(time.Second))+2*tuneWatchEvery)
 			}
 		}
 		if e.Name == "bash" || e.Name == "python" {

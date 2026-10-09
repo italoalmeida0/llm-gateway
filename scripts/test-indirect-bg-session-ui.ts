@@ -1,404 +1,174 @@
-// Deterministic browser gate for session-owned background tasks.
-// PLAYWRIGHT_MODULE=... CHROMIUM_PATH=... bun scripts/test-indirect-bg-session-ui.ts
-//
-// No model, no daemon: drives the real useBackground hook + BackgroundCard
-// + toolSummary in a real Chromium and asserts what a user actually sees:
-//  - session tasks render in running and Archived views (terminal rows persist)
-//  - live bg_output chunks glue after the session tail
-//  - register/finish events touch the list without a full refresh
-//  - toolSummary: bg_check reads like a file, bg_cancel never shows the id,
-//    sleep keeps its header/body contract
-import assert from "node:assert/strict";
-import solidPlugin from "../plugins/solid-plugin";
-import iconifyPlugin from "../plugins/iconify-solid-plugin";
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
-const bundle = await Bun.build({ entrypoints: [new URL("../test/fixtures/bg-session-ui.tsx", import.meta.url).pathname], target: "browser", plugins: [iconifyPlugin, solidPlugin] });
-if (!bundle.success) throw new Error(bundle.logs.join("\n"));
-const server = Bun.serve({
-  hostname: "127.0.0.1", port: 0,
-  fetch(req) {
-    const path = new URL(req.url).pathname;
-    if (path === "/bundle.js") return new Response(bundle.outputs[0]);
-    return new Response('<!doctype html><div id="root"></div><script type="module" src="/bundle.js"></script>', { headers: { "Content-Type": "text/html" } });
-  },
-});
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true });
-try {
-  const page = await browser.newPage();
-  const errors: string[] = [];
-  page.on("pageerror", (e: Error) => errors.push(String(e)));
-  await page.goto(server.url.toString());
-  await page.waitForFunction(() => (window as any).bgTest);
+import { mkdirSync, writeFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import assert from 'node:assert/strict';
 
-  // 1. Empty session: no card.
-  assert.equal(await page.locator("text=Background tasks").count(), 0, "card renders with zero tasks");
-
-  // 2. Seed session tasks (as mirrored from session_data bgTasks).
-  await page.evaluate(() => (window as any).bgTest.seed([
-    { id: "bg_1", kind: "bash", label: "sleep 30", status: "running", startedAt: Date.now() - 5000, content: "history-" },
-    { id: "bg_2", kind: "python", label: "train.py", status: "done", startedAt: 1, endedAt: 2, exitCode: 0, content: "epoch 1\nloss 0.5" },
-  ]));
-  await page.waitForFunction(() => document.body.textContent?.includes("Background tasks"));
-  const cardText = await page.textContent("body");
-  assert.ok(cardText?.includes("1 running"), "running counter");
-  assert.ok(cardText?.includes("sleep 30"), "bash label renders");
-  assert.ok(!cardText?.includes("train.py"), "finished task stays out of the running list");
-  const archiveToggle = page.locator("[data-bg-archive-toggle]");
-  assert.equal(await archiveToggle.count(), 1, "archive toggle renders");
-  assert.equal(await archiveToggle.getAttribute("aria-pressed"), "false", "running view is selected by default");
-  assert.ok((await archiveToggle.textContent())?.includes("1"), "archive toggle includes terminal count");
-  assert.equal(await archiveToggle.getAttribute("aria-label"), "Archived tasks (1)", "archive toggle is icon-only with an accessible label");
-  await archiveToggle.click();
-  await page.waitForFunction(() => document.body.textContent?.includes("train.py"));
-  assert.equal(await archiveToggle.getAttribute("aria-pressed"), "true", "archive view selected");
-  // A second client receiving the same daemon snapshot starts in running
-  // view; archive selection is UI state, never mirrored session authority.
-  const peer = await browser.newPage();
-  await peer.goto(server.url.toString());
-  await peer.waitForFunction(() => (window as any).bgTest);
-  await peer.evaluate(() => (window as any).bgTest.seed([
-    { id: "bg_1", kind: "bash", label: "sleep 30", status: "running", startedAt: Date.now() - 5000, content: "history-" },
-    { id: "bg_2", kind: "python", label: "train.py", status: "done", startedAt: 1, endedAt: 2, exitCode: 0, content: "epoch 1" },
-  ]));
-  await peer.waitForFunction(() => document.body.textContent?.includes("sleep 30"));
-  assert.ok(!(await peer.textContent("body"))?.includes("train.py"), "peer snapshot defaults to running view");
-  await peer.locator("[data-bg-archive-toggle]").click();
-  assert.ok((await peer.textContent("body"))?.includes("train.py"), "peer can derive archived view from same snapshot");
-  await peer.close();
-
-  // 3. Live chunks glue after the session tail: open the Logs and read.
-  assert.equal(await page.getByRole("button", { name: /^(Show|Hide) logs$/ }).count(), 1, "one Logs toggle in archived view");
-  await page.getByRole("button", { name: /^(Show|Hide) logs$/ }).click();
-  await page.locator("[data-bg-archive-toggle]").click();
-  await page.evaluate(() => (window as any).bgTest.output("bg_1", "live-1"));
-  const logButtons = page.getByRole("button", { name: /^(Show|Hide) logs$/ });
-  assert.equal(await logButtons.count(), 1, "one Logs toggle in running view");
-  await logButtons.first().click();
-  await page.waitForFunction(() => {
-    const b = document.body.textContent || "";
-    return b.includes("history-") && b.includes("live-1");
-  });
-  const logText = await page.textContent("body");
-  assert.ok(logText?.includes("history-") && logText?.includes("live-1"), "session tail + live stream glued");
-
-  // 4. Register/finish events touch the list without a full refresh.
-  await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_registered", sessionId: "s1", jobId: "bg_9", kind: "bash", label: "make build" }));
-  await page.waitForFunction(() => document.body.textContent?.includes("make build"));
-  await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_finished", sessionId: "s1", jobId: "bg_9", status: "done" }));
-  await page.waitForFunction(() => document.body.textContent?.includes("2 running") === false);
-  // Foreign sessions never leak in.
-  await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_registered", sessionId: "other", jobId: "bg_x", kind: "bash", label: "evil" }));
-  await page.waitForTimeout(150);
-  assert.ok(!(await page.textContent("body"))?.includes("evil"), "foreign session task leaked");
-
-  // 5. toolSummary contracts (pure).
-  const bgCheck = await page.evaluate(() => (window as any).bgTest.summary("bg_check", { job_id: "bg_1" }, "Background Task (bash) — running\nCommand: sleep 30\nLines 1–10 of 100\n1:hi"));
-  assert.equal(bgCheck.verb, "Read", "bg_check verb");
-  assert.ok(String(bgCheck.target).includes("Background Task"), "bg_check target");
-  assert.ok(String(bgCheck.target).includes("L1-10"), "bg_check range in header");
-  assert.equal(bgCheck.icon, "lucide:terminal", "bash kind icon");
-  const bgCheckPy = await page.evaluate(() => (window as any).bgTest.summary("bg_check", { job_id: "bg_2" }, "Background Task (python) — done\nLines 1–2 of 2"));
-  assert.equal(bgCheckPy.icon, "mdi:language-python", "python kind icon");
-  const bgCancel = await page.evaluate(() => (window as any).bgTest.summary("bg_cancel", { job_id: "bg_9abcdef1234567890" }, "cancelled"));
-  assert.equal(bgCancel.verb, "Canceled", "bg_cancel verb");
-  assert.ok(!String(bgCancel.target).includes("bg_9abcdef"), "bg_cancel never shows the id");
-  assert.ok(String(bgCancel.target).includes("Background Task"), "bg_cancel target");
-  const sleep = await page.evaluate(() => (window as any).bgTest.summary("sleep", { seconds: 90, waitingFor: "bg_1", summary: "waiting for build" }, "waiting for build\nSlept 1m30s."));
-  assert.ok(String(sleep.target).includes("1m") || String(sleep.verb).toLowerCase().includes("sleep"), "sleep header");
-
-  // 5b. No-cut, no-dup: tail 21..30 (total 30) + live "31, ok" (from=31).
-  // Then a refresh with the full tail collapses live. "ok" exactly once.
-  await page.evaluate(() => {
-    const t = (window as any).bgTest;
-    t.seed([{ id: "bg_seq", kind: "bash", label: "uniqueseqlabel", status: "running", startedAt: 1, content: "21\n22\n23\n24\n25\n26\n27\n28\n29\n30", totalLines: 30, droppedLines: 20, contentFrom: 21 }]);
-    t.output("bg_seq", "31\nok", 31);
-  });
-  await page.waitForFunction(() => document.body.textContent?.includes("uniqueseqlabel"), null, { timeout: 10000 });
-  const rendered = await page.evaluate(() => {
-    const bg: any = (window as any).bgTest.bg;
-    const task = bg.sessionJobs().find((t: any) => t.id === "bg_seq");
-    if (!task) return { error: "bg_seq missing from sessionJobs" };
-    const sess: string = task.content || "";
-    const live: string = bg.liveTail("bg_seq");
-    return { sessTail: sess.slice(-40), live };
-  });
-  if ((rendered as any).error) throw new Error((rendered as any).error);
-  assert.ok(((rendered as any).sessTail || "").includes("29\n30"), `session tail wrong: ${JSON.stringify(rendered)}`);
-  assert.equal((rendered as any).live, "31\nok", `live must be exactly the new lines: ${JSON.stringify(rendered)}`);
-  await page.getByRole("button", { name: /^(Show|Hide) logs$/ }).last().click();
-  await page.waitForTimeout(500);
-  const seqCode = await page.evaluate(() => {
-    // The expanded area shows the command block first, then the log.
-    const pre = document.querySelector("[data-bg-log] pre");
-    return (pre?.textContent || "").trim();
-  });
-  const seqLines = seqCode.split("\n").map((l) => l.trim()).filter((l) => l !== "");
-  for (const n of ["21", "29", "30", "31"]) {
-    assert.equal(seqLines.filter((l) => l === n).length, 1, `line ${n} exactly once (code=${JSON.stringify(seqCode.slice(0, 200))})`);
-  }
-  assert.equal(seqLines.filter((l) => l === "ok").length, 1, '"ok" exactly once');
-  // Single scroll surface: the expanded task body (command + log) exposes
-  // exactly one scroller — never one scrollbar per block.
-  // Class-based (the fixture serves no CSS): exactly one scroll container in
-  // the expanded body, and the blocks inside it are embedded (no own cap).
-  const scroll = await page.evaluate(() => {
-    const log = document.querySelector("[data-bg-log]");
-    const body = log?.closest(".rounded-b-lg") || log?.parentElement?.parentElement;
-    const all = body ? [body, ...body.querySelectorAll("*")] : [];
-    const scrollers = all.filter((el) => /overflow-(auto|y-auto)/.test(el.className || ""));
-    const capped = all.filter((el) => /max-h-/.test(el.className || ""));
-    return { scrollers: scrollers.length, capped: capped.length };
-  });
-  assert.equal(scroll.scrollers, 1, `expanded bg body must have exactly one scroll container (got ${scroll.scrollers})`);
-  assert.equal(scroll.capped, 1, `only the body wrapper is height-capped (got ${scroll.capped})`);
-  // Refresh with the full tail: live collapses, "ok" stays single.
-  await page.locator("[data-bg-archive-toggle]").click();
-  await page.evaluate(() => (window as any).bgTest.seed([
-    { id: "bg_seq", kind: "bash", label: "uniqueseqlabel", status: "done", startedAt: 1, endedAt: 2, exitCode: 0, content: "21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\nok", totalLines: 32, droppedLines: 20, contentFrom: 21 },
-  ]));
-  await page.waitForTimeout(200);
-  const seqCodeAfter = await page.evaluate(() => {
-    // The expanded area shows the command block first, then the log.
-    const pre = document.querySelector("[data-bg-log] pre");
-    return (pre?.textContent || "").trim();
-  });
-  assert.equal(seqCodeAfter.split("\n").map((l) => l.trim()).filter((l) => l === "ok").length, 1, '"ok" must stay single after snapshot refresh');
-
-  // 6. Row bodies: sleep is header-only (summary in the header, never a
-  // body/chevron), bg_check reads like a file, bg_cancel stays minimal.
-  const sleepBody = await page.textContent('[data-testid="row-sleep"]');
-  assert.ok(sleepBody?.includes("waiting for build"), `sleep row must show the summary in the header: ${sleepBody?.slice(0, 200)}`);
-  assert.ok(!sleepBody?.includes("bg_1"), "sleep row must not show the task id");
-  // Header-only contract: no disclosure body mount and no chevron.
-  const sleepBodies = await page.locator('[data-testid="row-sleep"] .article-body, [data-testid="row-sleep"] pre, [data-testid="row-sleep"] .max-h-96').count();
-  assert.equal(sleepBodies, 0, "sleep row must never render a body");
-  const sleepChevrons = await page.locator('[data-testid="row-sleep"] svg path[d="m6 9l6 6l6-6"]').count();
-  assert.equal(sleepChevrons, 0, "sleep row must not render a chevron");
-  const checkBody = await page.textContent('[data-testid="row-bgcheck"]');
-  assert.ok(checkBody?.includes("hello"), "bg_check body must show the log content");
-  assert.ok(checkBody?.includes("Background Task#L1-2") || checkBody?.includes("Background Task"), "bg_check header must name the task");
-  const cancelBody = await page.textContent('[data-testid="row-bgcancel"]');
-  assert.ok(!cancelBody?.includes("bg_9"), "bg_cancel body must not show the task id");
-
-  // 7. Stop button sends bg_cancel (no id in UI, id on the wire).
-  // Re-seed a running task (5b left only a finished one: no Stop button).
-  if (await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed") === "true") await page.locator("[data-bg-archive-toggle]").click();
-  await page.evaluate(() => (window as any).bgTest.seed([
-    { id: "bg_stop", kind: "bash", label: "stoppable", status: "running", startedAt: Date.now(), content: "working" },
-  ]));
-  await page.waitForFunction(() => document.body.textContent?.includes("stoppable"));
-  const sentBefore = await page.evaluate(() => ((window as any).__sent ?? []).length);
-  await page.getByRole("button", { name: "Stop task" }).first().click();
-  await page.waitForFunction((n) => ((window as any).__sent ?? []).length > n, sentBefore as any).catch(() => {});
-  // 7b. Dynamic detach transition: empty -> registered placeholder ->
-  // snapshot. The live time must exist in every frame (this is the
-  // reported "time vanishes on detach" bug: placeholder rows once lost it).
-  await page.evaluate(() => (window as any).bgTest.seed([]));
-  await page.waitForTimeout(200);
-  await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_registered", sessionId: "s1", jobId: "bg_dyn", kind: "bash", label: "dynamic-cmd" }));
-  await page.waitForFunction(() => (document.body.textContent || "").includes("dynamic-cmd"));
-  for (let f = 0; f < 3; f++) {
-    await page.waitForTimeout(1100);
-    const frame = await page.evaluate(() => {
-      const rows = [...document.querySelectorAll("[data-bg-row]")].map((r) => (r as HTMLElement).innerText || "");
-      return rows.find((h) => h.includes("dynamic-cmd")) || "";
-    });
-    if (!/\d+[smh]/.test(frame)) throw new Error(`frame ${f}: live time missing on placeholder row: ${JSON.stringify(frame.slice(0, 200))}`);
-  }
-  await page.evaluate(() => (window as any).bgTest.seed([
-    { id: "bg_dyn", kind: "bash", label: "dynamic-cmd", status: "running", startedAt: Date.now() - 3000, content: "hi" },
-  ]));
-  await page.waitForTimeout(1100);
-  const afterSnap = await page.evaluate(() => {
-    const rows = [...document.querySelectorAll("[data-bg-row]")].map((r) => (r as HTMLElement).innerText || "");
-    return rows.find((h) => h.includes("dynamic-cmd")) || "";
-  });
-  if (!/\d+[smh]/.test(afterSnap)) throw new Error(`live time missing after snapshot: ${JSON.stringify(afterSnap.slice(0, 200))}`);
-
-  // 7c. Tool-row detach window: placeholder without a listed job yet.
-  // Time must tick, spinner must spin, body must read running — never blank.
-  await page.evaluate(() => (window as any).bgTest.seed([]));
-  await page.waitForTimeout(200);
-  const win = await page.evaluate(() => {
-    const bg: any = (window as any).bgTest.bg;
-    return bg.sessionJobs().length;
-  });
-  assert.equal(win, 0, "window starts with no listed jobs");
-  const winText = await page.textContent('[data-testid="row-detach"]');
-  const winDbg = await page.evaluate(() => ({
-    jobs: (window as any).bgTest.bg.sessionJobs().map((t: any) => t.id),
-    clock: (window as any).bgTest.bg.clock(),
-    now: Date.now(),
-  }));
-  if (!(winText || "").trim()) {
-    throw new Error(`detached row renders blank in the window: dbg=${JSON.stringify(winDbg)}`);
-  }
-  // Detached tool rows hide their elapsed timer; the background card owns duration.
-  const winDur = await page.locator('[data-testid="row-detach"] [data-tool-duration]').count();
-  assert.equal(winDur, 0, "detached row hides the tool timer");
-  assert.ok(!/No output/.test(winText || ""), `detached row must not claim "No output": ${JSON.stringify((winText || "").slice(0, 200))}`);
-
-  // 8. Full-scene review: running and archived views are separate, ordered
-  // lists. Terminal rows keep a frozen duration and accessible status icon.
-  await page.evaluate(() => (window as any).bgTest.seed([
-    { id: "bg_run", kind: "bash", label: "run-cmd", status: "running", startedAt: Date.now() - 65000, content: "out" },
-    { id: "bg_done", kind: "python", label: "done-cmd", status: "done", startedAt: 1000, endedAt: 61001, exitCode: 0, content: "ok" },
-    { id: "bg_err", kind: "bash", label: "err-cmd", status: "error", startedAt: 2000, endedAt: 5000, exitCode: 1, content: "boom" },
-    { id: "bg_cancel", kind: "bash", label: "cancel-cmd", status: "cancelled", startedAt: 3000, endedAt: 9000, content: "cancelled" },
-  ]));
-  await page.waitForFunction(() => (document.body.textContent || "").includes("run-cmd"));
-  if (await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed") === "true") await page.locator("[data-bg-archive-toggle]").click();
-  await page.waitForTimeout(1200);
-  const scene = await page.evaluate(() => {
-    const body = document.body.textContent || "";
-    const rows = [...document.querySelectorAll("[data-bg-row]")].map((r) => ({
-      html: (r as HTMLElement).innerText || "",
-      spinner: !!r.querySelector(".animate-spin"),
-      stop: [...r.querySelectorAll("button")].some((b) => b.hasAttribute("data-bg-stop")),
-      logs: [...r.querySelectorAll("button")].some((b) => /logs$/.test(b.getAttribute("aria-label") || "")),
-    }));
-    return { header: body.slice(body.indexOf("Background tasks"), body.indexOf("Background tasks") + 60), rows };
-  });
-  assert.equal(scene.rows.length, 1, `running view shows only running rows, got ${scene.rows.length}`);
-  assert.ok(/1 running/.test(scene.header), `header counts running: ${scene.header}`);
-  const run = scene.rows.find((r) => r.html.includes("run-cmd"))!;
-  assert.ok(run.spinner, "running row needs the spinner");
-  assert.ok(run.stop, "running row needs Stop");
-  assert.ok(run.logs, "running row needs Logs toggle");
-  assert.ok(/\d+[smh]/.test(run.html), `running row needs a live time, got: ${JSON.stringify(run.html.slice(0, 200))}`);
-  await page.locator("[data-bg-archive-toggle]").click();
-  await page.waitForFunction(() => (document.body.textContent || "").includes("cancel-cmd"));
-  const archived = await page.evaluate(() => [...document.querySelectorAll("[data-bg-row]")].map((r) => ({
-    id: r.getAttribute("data-bg-row"),
-    status: r.querySelector("[data-bg-status]")?.getAttribute("aria-label"),
-    duration: r.querySelector("[data-bg-duration]")?.textContent || "",
-    stop: !!r.querySelector("[data-bg-stop]"),
-    logs: [...r.querySelectorAll("button")].some((b) => /logs$/.test(b.getAttribute("aria-label") || "")),
-  })));
-  assert.deepEqual(archived.map((r) => r.id), ["bg_cancel", "bg_err", "bg_done"], "archived rows newest first");
-  assert.ok(archived.every((r) => !r.stop && r.logs), "archived rows have Logs and no Stop");
-  assert.equal(archived.find((r) => r.id === "bg_done")?.status, "Completed", "done status icon is accessible");
-  assert.equal(archived.find((r) => r.id === "bg_err")?.status, "Failed", "error status icon is accessible");
-  assert.equal(archived.find((r) => r.id === "bg_cancel")?.status, "Cancelled", "cancelled status icon is accessible");
-  assert.equal(archived.find((r) => r.id === "bg_done")?.duration, "1m", "completed duration is rendered");
-  assert.equal(archived.find((r) => r.id === "bg_err")?.duration, "3s", "failed duration is rendered");
-  assert.equal(archived.find((r) => r.id === "bg_cancel")?.duration, "6s", "cancelled duration is rendered");
-  const doneDuration = archived.find((r) => r.id === "bg_done")?.duration;
-  await page.waitForTimeout(1200);
-  assert.equal(await page.locator('[data-bg-row="bg_done"] [data-bg-duration]').textContent(), doneDuration, "terminal duration is frozen");
-  // Both lists cap at three until expanded; changing views resets expansion.
-  await page.evaluate(() => (window as any).bgTest.seed([
-    ...Array.from({ length: 5 }, (_, i) => ({ id: `arc_${i}`, kind: "bash", label: `archived-${i}`, status: "done", startedAt: 10000 + i, endedAt: 11000 + i, content: "x" })),
-    ...Array.from({ length: 5 }, (_, i) => ({ id: `run_${i}`, kind: "bash", label: `running-${i}`, status: "running", startedAt: 20000 + i, content: "x" })),
-  ]));
-  await page.waitForFunction(() => (document.body.textContent || "").includes("archived-2"));
-  assert.equal(await page.locator("[data-bg-row]").count(), 3, "archived list initially shows three rows");
-  const listToggle = page.locator("[data-bg-list-toggle]");
-  assert.equal(await listToggle.count(), 1, "archived list has expansion toggle");
-  assert.match((await listToggle.textContent()) || "", /See all \(5\)/, "archived See all count");
-  await listToggle.click();
-  assert.equal(await page.locator("[data-bg-row]").count(), 5, "archived list expands");
-  assert.deepEqual(await page.locator("[data-bg-row]").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-bg-row"))), ["arc_4", "arc_3", "arc_2", "arc_1", "arc_0"], "archived expansion newest first");
-  assert.match((await page.locator("[data-bg-list-toggle]").textContent()) || "", /Show less/, "archived Show less");
-  await page.locator("[data-bg-list-toggle]").click();
-  assert.equal(await page.locator("[data-bg-row]").count(), 3, "Show less collapses archived list");
-  await page.locator("[data-bg-archive-toggle]").click();
-  assert.equal(await page.locator("[data-bg-row]").count(), 3, "switching to running resets expansion");
-  assert.match((await page.locator("[data-bg-list-toggle]").textContent()) || "", /See all \(5\)/, "running See all count");
-  await page.locator("[data-bg-list-toggle]").click();
-  assert.deepEqual(await page.locator("[data-bg-row]").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-bg-row"))), ["run_4", "run_3", "run_2", "run_1", "run_0"], "running expansion newest first");
-  await page.locator("[data-bg-list-toggle]").click();
-  await page.locator("[data-bg-archive-toggle]").click();
-  assert.equal(await page.locator("[data-bg-row]").count(), 3, "switching back to archived resets expansion");
-
-  // A session switch resets archive/expansion state and derives rows from the
-  // new session snapshot.
-  await page.locator("[data-bg-list-toggle]").click();
-  assert.equal(await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed"), "true", "switch starts from archived view");
-  assert.equal(await page.locator("[data-bg-row]").count(), 5, "switch starts from expanded list");
-  await page.evaluate(() => (window as any).bgTest.switchSession("s2"));
-  await page.evaluate(() => (window as any).bgTest.seed([
-    ...Array.from({ length: 5 }, (_, i) => ({ id: `s2_run_${i}`, kind: "bash", label: `session-two-running-${i}`, status: "running", startedAt: 30000 + i, content: "x" })),
-    { id: "s2_done", kind: "bash", label: "session-two-done", status: "done", startedAt: 29000, endedAt: 30000, content: "x" },
-  ]));
-  await page.waitForFunction(() => (document.body.textContent || "").includes("session-two-running"));
-  assert.equal(await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed"), "false", "session switch resets to running view");
-  assert.deepEqual(await page.locator("[data-bg-row]").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-bg-row"))), ["s2_run_4", "s2_run_3", "s2_run_2"], "session switch resets expansion and shows only the new session's latest running tasks");
-  assert.equal(await page.locator("[data-bg-list-toggle]").getAttribute("aria-expanded"), "false", "session switch collapses list");
-
-  // Empty again: card disappears entirely (no orphan header).
-  // Return to the running view before clearing the snapshot; the card stays
-  // mounted while archived tasks still exist.
-  await page.evaluate(() => (window as any).bgTest.switchSession("s1"));
-  if (await page.locator("[data-bg-archive-toggle]").getAttribute("aria-pressed") === "true") await page.locator("[data-bg-archive-toggle]").click();
-  await page.evaluate(() => (window as any).bgTest.seed([]));
-  await page.waitForTimeout(300);
-  assert.equal(await page.locator("text=Background tasks").count(), 0, "card must vanish with zero tasks");
-
-  // 9. Harmony audit: detach timeline frame by frame. Every frame must
-  // be self-consistent (no missing time, no missing toggle, no ghost rows).
-  async function frame() {
-    return page.evaluate(() => {
-      const body = document.body.textContent || "";
-      const hasCard = body.includes("Background tasks");
-      const rows = [...document.querySelectorAll("[data-bg-row]")].map((r) => {
-        const h = (r as HTMLElement).innerText || "";
-        return {
-          id: r.getAttribute("data-bg-row"),
-          hasTime: /\d+[smh]/.test(h),
-          spinner: !!r.querySelector(".animate-spin"),
-          stop: [...r.querySelectorAll("button")].some((b) => b.hasAttribute("data-bg-stop")),
-          logs: [...r.querySelectorAll("button")].some((b) => /logs$/.test(b.getAttribute("aria-label") || "")),
-          badge: /done|error|cancelled/.test(h),
-        };
-      });
-      return { hasCard, header: body.slice(body.indexOf("Background tasks"), body.indexOf("Background tasks") + 50), rows };
-    });
-  }
-  function checkFrame(f: any, want: { card: boolean; rows?: Record<string, Partial<{ hasTime: boolean; spinner: boolean; stop: boolean; logs: boolean; badge: boolean }>> }) {
-    assert.equal(f.hasCard, want.card, `card presence (header=${JSON.stringify(f.header)})`);
-    for (const [id, w] of Object.entries(want.rows || {})) {
-      const r = f.rows.find((x: any) => x.id === id);
-      assert.ok(r, `row ${id} present (rows=${JSON.stringify(f.rows.map((x: any) => x.id))})`);
-      for (const [k, v] of Object.entries(w)) {
-        assert.equal((r as any)[k], v, `row ${id}.${k} (row=${JSON.stringify(r)})`);
+// Real daemon + WebSocket relay + fake Anthropic provider. No credentials or external network.
+const binary = process.env.DAEMON_BINARY || join(import.meta.dir, '../indirect-code-daemon/bin/indirect-code');
+async function run(label: string) {
+  const dir = mkdtempSync(join(tmpdir(), `daemon-boundary-${label}-`));
+  const work = join(dir, 'work'); mkdirSync(work);
+  writeFileSync(join(work,'hello.txt'),'review fixture');
+  const events:any[]=[]; const requests:any[]=[];
+  let socket:any; let scenario='text'; let toolIssued=false; let awaitCalls=0; let cancelBgId=''; let cancelBashed=false;
+  const sse=(name:string,input:unknown)=>{
+    const items=[{type:'message_start',message:{id:'msg-review',model:'m',role:'assistant',usage:{input_tokens:10,output_tokens:0}}}];
+    if(name){items.push({type:'content_block_start',index:0,content_block:{type:'tool_use',id:'tool-review',name,input:{}}} as any);items.push({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify(input)}} as any);}
+    else{items.push({type:'content_block_start',index:0,content_block:{type:'text',text:''}} as any);items.push({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'review answer'}} as any);}
+    items.push({type:'content_block_stop',index:0} as any,{type:'message_delta',delta:{stop_reason:name?'tool_use':'end_turn'},usage:{output_tokens:5}} as any,{type:'message_stop'} as any);
+    return new Response(items.map(e=>`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),{headers:{'Content-Type':'text/event-stream'}});
+  };
+  const server=Bun.serve({hostname:'127.0.0.1',port:0,
+    async fetch(req,server){const u=new URL(req.url);
+      if(u.pathname.endsWith('/daemon/ws')){if(server.upgrade(req))return;return new Response('bad ws',{status:400});}
+      if(u.pathname==='/api/indirect-code/models')return Response.json({models:[{id:'m',limit:{context:1000000,output:1024}}]});
+      if(req.method==='POST'&&u.pathname.endsWith('/messages')){
+        const body=await req.json();requests.push({scenario,body});
+        if(scenario==='bg_await') {
+          awaitCalls++;
+          if(awaitCalls===1)return sse('bg_await',{max_wait_seconds:1,waiting_for:'bg_test',reason:'test wait'});
+          if(awaitCalls===2)return new Response('temporary failure after bg_await',{status:503});
+          return sse('finish_entire_request',{final_message_to_user:'Recovered after bg_await'});
+        }
+        if(scenario==='bg_await_cancel'){
+          // bg_await only blocks on a RUNNING bg task. Detach a real one
+          // first (10s foreground window), then await it.
+          // Explicit phase flag: the history contains bg_test (unknown-id
+          // warning) from the earlier bg_await scenario, so a regex would
+          // match the wrong id and loop on immediate warnings.
+          if(!cancelBashed){cancelBashed=true;return sse('bash',{command:'sleep 300'});}
+          if(!cancelBgId){
+            const hist=JSON.stringify(body?.messages||[]);
+            const m=hist.match(/bg_[A-Za-z0-9]{8,}/);
+            if(m){cancelBgId=m[0];return sse('bg_await',{max_wait_seconds:360,waiting_for:cancelBgId,reason:'test wait'});}
+            return sse('bash',{command:'sleep 30'});
+          }
+          return sse('bg_await',{max_wait_seconds:360,waiting_for:cancelBgId,reason:'test wait'});
+        }
+        if((scenario==='approval'||scenario==='question')&&!toolIssued){toolIssued=true;return scenario==='approval'?sse('read',{path:join(work,'hello.txt')}):sse('question',{questions:[{header:'Choice',question:'Pick?',options:[{label:'One'}]}]});}
+        if(scenario==='approval'||scenario==='question')return sse('finish_entire_request',{final_message_to_user:'Done'});
+        return sse('',null);
       }
+      return Response.json({success:true});
+    },
+    websocket:{open(ws){socket=ws},message(_ws,data){try{events.push(JSON.parse(String(data)))}catch{}}}
+  });
+  writeFileSync(join(dir,'config.json'),JSON.stringify({gateway_url:`http://127.0.0.1:${server.port}`,daemon_token:'local-review-token',api_key:'local-review-key',host_id:'review-host',name:'Review',auto_update:false,settings:{no_auto_title:true,reasoning:'none',auto_compact_threshold:0}}));
+  const proc=Bun.spawn([binary,'--slot','a','--data-dir',dir],{env:{...process.env,ICD_WAIT_TOOL:'200ms',ICD_WATCH_EVERY:'5s',ICD_AUTOBG_AFTER:'1s'},stdout:Bun.file(join(dir,'stdout.log')),stderr:Bun.file(join(dir,'stderr.log'))});
+  const wait=async(pred:()=>any,ms=4000)=>{const deadline=Date.now()+ms;while(Date.now()<deadline){const v=pred();if(v)return v;await Bun.sleep(10)}return null};
+  const send=(m:any)=>socket.send(JSON.stringify({...m,hostId:'review-host'}));
+  const create=async(id:string,mode='talk',access='full')=>{send({type:'create_session',requestId:id,cwd:work,title:'original',model:'m',options:{mode,access,effort:'none'}});const ev=await wait(()=>events.find(e=>e.type==='session_created'&&e.requestId===id));if(!ev)throw Error('create timeout');return ev.session.id;};
+  const prompt=async(sid:string,text:string,extra={})=>{
+    const from=events.length;
+    send({type:'prompt',sessionId:sid,text,...extra});
+    // A cancelled turn's final snapshot/idle can arrive after this send.
+    // Observe the NEW running activity, then its own completed snapshot.
+    const started=await wait(()=>events.slice(from).find(e=>e.type==='session_status'&&e.sessionId===sid&&e.status==='running'));
+    assert.ok(started,'new turn did not start');
+    const result=await wait(()=>events.slice(from).find(e=>e.type==='session_data'&&e.session?.id===sid&&e.session.turn?.startedAt===started.turn.startedAt&&e.session.turn?.endedAt));
+    assert.ok(result,'new turn did not finish');
+    assert.equal(result.session.turn.status,'completed','new turn did not complete normally');
+    const finalIndex=events.indexOf(result);
+    assert(await wait(()=>events.slice(finalIndex).find(e=>e.type==='session_status'&&e.sessionId===sid&&e.status==='idle')),'completed turn did not become idle');
+    return result;
+  };
+  try{
+    if(!await wait(()=>socket,12000))throw Error('daemon did not connect: '+readFileSync(join(dir,'stderr.log'),'utf8'));
+    const sid=await create('simple');
+    send({type:'rename_session',sessionId:sid,title:'renamed'});
+    await wait(()=>events.find(e=>e.type==='session_renamed'&&e.title==='renamed'));
+    send({type:'pull',id:'pull-rename',collection:'sessions'});
+    const mirror=await wait(()=>events.find(e=>e.type==='pull-response'&&e.id==='pull-rename'));
+    const renamed=mirror?.items?.find((x:any)=>x.id===sid)?.title;
+    send({type:'upload_attachment',sessionId:sid,requestId:'upload',name:'notes.txt',mime:'text/plain',data:Buffer.from('REVIEW_ATTACHMENT_SENTINEL').toString('base64')});
+    const att=await wait(()=>events.find(e=>e.type==='attachment_uploaded'&&e.requestId==='upload'));
+    if(!att)throw Error('upload timeout');
+    await prompt(sid,'Read the attachment',{attachmentIds:[att.attachment.id]});
+    const attachmentPresent=JSON.stringify(requests.at(-1)?.body).includes('REVIEW_ATTACHMENT_SENTINEL');
+    for(let i=0;i<5;i++)await prompt(sid,`Next message ${i}`);
+    const from=events.length;const fromReq=requests.length;
+    send({type:'prompt',sessionId:sid,text:'/compact'});
+    const compacted=!!await wait(()=>events.slice(from).find(e=>e.type==='session_compacted'&&e.sessionId===sid),4000);
+    const compactSentAsPrompt=requests.slice(fromReq).some(r=>JSON.stringify(r.body.messages).includes('/compact'));
+    scenario='approval';toolIssued=false;
+    const approvalSID=await create('approval','build','ask');
+    send({type:'prompt',sessionId:approvalSID,text:'Read hello.txt'});
+    const approval=await wait(()=>events.find(e=>e.type==='tool_approval_request'&&e.sessionId===approvalSID));
+    if(!approval)throw Error('approval not emitted');
+    const n=requests.length;
+    send({type:'tool_approval_response',sessionId:approvalSID,callId:approval.callId,approved:true});
+    const approvalAdvanced=!!await wait(()=>requests.length>n,700);
+    send({type:'cancel',sessionId:approvalSID});
+    scenario='question';toolIssued=false;
+    const questionSID=await create('question','build','full');
+    send({type:'prompt',sessionId:questionSID,text:'Ask a question'});
+    const question=await wait(()=>events.find(e=>e.type==='question_request'&&e.sessionId===questionSID));
+    if(!question)throw Error('question not emitted');
+    const questionHasID=typeof question.question?.id==='string';
+    const questionRequests = requests.length;
+    send({type:'question_response',sessionId:questionSID,questionId:question.question?.id,answers:[['One']]});
+    const questionAdvanced = !!await wait(()=>requests.length > questionRequests);
+    send({type:'cancel',sessionId:questionSID});
+    await wait(()=>events.find(e=>e.type==='session_status'&&e.sessionId===questionSID&&e.status==='idle'));
+    scenario='bg_await';
+    const sleepSID=await create('bg_await','build','full');
+    const sleepFrom=events.length;
+    await prompt(sleepSID,'Await the background task, then finish',{requestId:'sleep-send'});
+    assert(events.slice(sleepFrom).some(e=>e.type==='prompt_accepted'&&e.requestId==='sleep-send'),'prompt admission not acknowledged');
+    assert.equal(awaitCalls,3,'natural bg_await completion and a provider error must continue the same turn');
+    const sleepFinal=events.slice(sleepFrom).filter(e=>e.type==='session_data'&&e.session?.id===sleepSID).at(-1)?.session;
+    assert.equal(sleepFinal?.turn?.status,'completed');
+    assert(!sleepFinal?.pendingToolResults?.length,'committed tools leaked into final snapshot');
+    const running=events.slice(sleepFrom).find(e=>e.type==='session_status'&&e.sessionId===sleepSID&&e.status==='running');
+    assert.equal(running?.turn?.status,'running','running activity missing its status');
+    scenario='bg_await_cancel';
+    const cancelFrom=events.length;
+    send({type:'prompt',sessionId:sleepSID,text:'Await again',requestId:'cancel-send'});
+    // bg_await model: detach (10s) + bg_await(waiting_for) start lands ~11s in.
+    // Two tool_execution_starts fire (bash, then the blocking bg_await) —
+    // cancelling on the first would kill the foreground bash pre-detach.
+    assert(await wait(()=>events.slice(cancelFrom).filter(e=>e.type==='agent_event'&&e.event?.type==='tool_execution_start').length>=2,30000),'bg_await did not start');
+    send({type:'cancel',sessionId:sleepSID});
+    assert(await wait(()=>events.slice(cancelFrom).find(e=>e.type==='session_status'&&e.status==='idle')),'explicit Stop did not end bg_await');
+    const cancelFinal=events.slice(cancelFrom).filter(e=>e.type==='session_data'&&e.session?.id===sleepSID).at(-1)?.session;
+    assert.equal(cancelFinal?.turn?.status,'cancelled');
+    send({type:'get_session',sessionId:sleepSID,requestId:'after-cancel'});
+    const restored=await wait(()=>events.find(e=>e.type==='session_data'&&e.requestId==='after-cancel'));
+    assert.equal(restored?.session?.turn?.status,'cancelled','reload lost cancellation outcome');
+    // User reproduction: cancel an active bg_await, then send again 1–5s later.
+    // Assert provider receipt and a durable transcript, not merely a spinner.
+    for (const delay of [1000, 5000]) {
+      scenario='bg_await_cancel';
+      const start=events.length;
+      send({type:'prompt',sessionId:sleepSID,text:`Await before ${delay}`,requestId:`before-${delay}`,options:{mode:'build',access:'full',effort:'none'}});
+      assert(await wait(()=>events.slice(start).filter(e=>e.sessionId===sleepSID&&e.type==='agent_event'&&e.event?.type==='tool_execution_start').length>=2,30000));
+      send({type:'cancel',sessionId:sleepSID});
+      // Wait for idle BEFORE the follow-up: a cancelled turn never drains
+      // the queue, and stopping the detached runner takes a moment.
+      assert(await wait(()=>events.slice(start).find(e=>e.sessionId===sleepSID&&e.type==='session_status'&&e.status==='idle'),30000),'cancelled turn did not become idle');
+      await Bun.sleep(delay);
+      scenario='text';
+      const marker=`Follow-up ${delay}ms after Stop`;
+      const sent=events.length;
+      await prompt(sleepSID,marker,{requestId:`after-${delay}`,options:{mode:'talk',access:'full',effort:'none'}});
+      assert(events.slice(sent).some(e=>e.type==='prompt_accepted'&&e.requestId===`after-${delay}`&&!e.queued),'follow-up was not admitted as a new turn');
+      assert(!events.slice(start).some(e=>e.type==='error'&&e.sessionId===sleepSID),'Stop then send emitted a storage error');
+      assert(requests.some(r=>r.scenario==='text'&&JSON.stringify(r.body.messages).includes(marker)),'follow-up never reached provider');
+      send({type:'get_session',sessionId:sleepSID,requestId:`reload-${delay}`});
+      const reloaded=await wait(()=>events.find(e=>e.type==='session_data'&&e.requestId===`reload-${delay}`));
+      assert.equal(reloaded?.session?.turn?.status,'completed');
+      assert.equal(reloaded.session.messages.filter((m:any)=>m.role==='user'&&JSON.stringify(m.content).includes(marker)).length,1,'follow-up missing or duplicated after reload');
     }
-  }
-  await page.evaluate(() => (window as any).bgTest.seed([]));
-  await page.waitForTimeout(200);
-  checkFrame(await frame(), { card: false });
-  // Detach: event first (placeholder, exactly like the daemon emits).
-  await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_registered", sessionId: "s1", jobId: "bg_h", kind: "bash", label: "harmony-cmd" }));
-  await page.waitForTimeout(300);
-  checkFrame(await frame(), { card: true, rows: { bg_h: { hasTime: true, spinner: true, stop: true, logs: true, badge: false } } });
-  // Snapshot WITHOUT bgTasks (stale/other payload shape) must not wipe it.
-  await page.evaluate(() => (window as any).bgTest.bg.noteSessionTasks(undefined as any));
-  await page.waitForTimeout(200);
-  checkFrame(await frame(), { card: true, rows: { bg_h: { hasTime: true, spinner: true, stop: true, logs: true } } });
-  // Snapshot WITH the task (content arrives): time keeps ticking, no dup row.
-  await page.evaluate(() => (window as any).bgTest.seed([
-    { id: "bg_h", kind: "bash", label: "harmony-cmd", status: "running", startedAt: Date.now() - 2000, content: "hi", totalLines: 1 },
-  ]));
-  await page.waitForTimeout(1200);
-  {
-    const f1 = await frame();
-    checkFrame(f1, { card: true, rows: { bg_h: { hasTime: true, spinner: true, stop: true, logs: true, badge: false } } });
-    await page.waitForTimeout(1100);
-    const f2 = await frame();
-    checkFrame(f2, { card: true, rows: { bg_h: { hasTime: true, spinner: true, stop: true, logs: true } } });
-  }
-  // Finish: the running row leaves this view atomically; Archived retains it.
-  await page.evaluate(() => (window as any).bgTest.event({ type: "bg_task_finished", sessionId: "s1", jobId: "bg_h", status: "done" }));
-  await page.waitForTimeout(300);
-  checkFrame(await frame(), { card: true });
-  assert.equal((await page.locator("[data-bg-row]").count()), 0, "running view has no visible rows after finish");
-  await page.locator("[data-bg-archive-toggle]").click();
-  checkFrame(await frame(), { card: true, rows: { bg_h: { hasTime: true, spinner: false, stop: false, logs: true, badge: false } } });
-
-  assert.deepEqual(errors, [], `page errors: ${errors.join("\n")}`);
-  console.log("bg-session-ui: OK (card, live glue, events, summaries, no page errors)");
-} finally {
-  await browser.close();
-  server.stop(true);
+    send({type:'prompt',sessionId:'missing-session',text:'do not pretend this started',requestId:'rejected-send'});
+    assert(await wait(()=>events.find(e=>e.type==='error'&&e.requestId==='rejected-send')),'rejected prompt has no correlated response');
+    const result = {renameMirror:renamed,attachmentPresent,compacted,compactSentAsPrompt,approvalAdvanced,questionHasID,questionAdvanced};
+    console.log(JSON.stringify(result));
+    assert.deepEqual(result, {renameMirror:'renamed',attachmentPresent:true,compacted:true,compactSentAsPrompt:false,approvalAdvanced:true,questionHasID:true,questionAdvanced:true});
+  }catch(error){
+    // Local fixture data only. Preserve lifecycle evidence in CI output so
+    // failures distinguish admission, turn identity, provider I/O and commit.
+    console.error(JSON.stringify({events:events.slice(-100).map(e=>({type:e.type,sessionId:e.sessionId||e.session?.id,requestId:e.requestId,status:e.status||e.session?.status,turn:e.turn||e.session?.turn,queued:e.queued,event:e.event?.type,error:e.message||e.event?.error})),requests:requests.slice(-12).map(r=>({scenario:r.scenario,messages:r.body.messages})),stdout:readFileSync(join(dir,'stdout.log'),'utf8'),stderr:readFileSync(join(dir,'stderr.log'),'utf8')},null,2));
+    throw error;
+  }finally{proc.kill('SIGKILL');await proc.exited;server.stop(true);for(let i=0;i<3;i++){try{rmSync(dir,{recursive:true,force:true});break;}catch(e){if(i===2)console.warn('[fixture] temp cleanup failed (handles still open):',String(e).slice(0,200));else await Bun.sleep(2000);}}}
 }
+await run('current');

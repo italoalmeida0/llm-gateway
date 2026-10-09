@@ -69,8 +69,8 @@ func TestMigrateV1ToV2SweepsBgFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(applied) != 2 || applied[0] != 2 || applied[1] != 3 {
-		t.Fatalf("applied = %v, want [2 3]", applied)
+	if len(applied) != 3 || applied[0] != 2 || applied[1] != 3 || applied[2] != 4 {
+		t.Fatalf("applied = %v, want [2 3 4]", applied)
 	}
 	for _, p := range []string{
 		"runners/j1.state.json", "runners/j1.disposition", "runners/j1.launch",
@@ -110,8 +110,8 @@ func TestMigrateV3WrapsLegacyToolResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(applied) != 1 || applied[0] != 3 {
-		t.Fatalf("applied = %v, want [3]", applied)
+	if len(applied) != 2 || applied[0] != 3 || applied[1] != 4 {
+		t.Fatalf("applied = %v, want [3 4]", applied)
 	}
 	got, err := os.ReadFile(sessPath)
 	if err != nil {

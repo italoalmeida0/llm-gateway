@@ -45,12 +45,12 @@ export function ApprovalCard(props: ApprovalCardProps) {
                   <div class="mt-1 text-[11px] text-ink-600">Still running after 10s → moves to the background automatically.</div>
                 </div>
               </Show>
-              <Show when={name === "sleep"}>
+              <Show when={name === "bg_await"}>
                 <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
                   <Iconify icon="lucide:timer" size={14} class="text-ink-400 shrink-0" />
                   <span class="text-ink-500">Wait</span>
-                  <span class="font-mono text-ink-100">{args.seconds ? formatDurationSecs(Number(args.seconds)) : ""}</span>
-                  <span class="text-[11px] text-ink-600">ends early when a background task finishes</span>
+                  <span class="font-mono text-ink-100">{args.max_wait_seconds ? formatDurationSecs(Number(args.max_wait_seconds)) : ""}</span>
+                  <span class="text-[11px] text-ink-600">{args.reason ? String(args.reason) : "ends early when a background task finishes"}</span>
                 </div>
               </Show>
               <Show when={name === "bg_cancel"}>
@@ -134,7 +134,7 @@ export function ApprovalCard(props: ApprovalCardProps) {
               <Show when={name === "todo"}>
                 <div class="px-3.5 py-2.5 text-xs"><p class="font-medium text-ink-200 mb-2">Update task plan</p><ul class="space-y-1 text-ink-400"><For each={args.items || []}>{(item) => <li class="flex gap-2"><span class="text-ink-500">{String(item.status).replaceAll("_", " ")}</span><span>{item.text}</span></li>}</For></ul></div>
               </Show>
-              <Show when={!["bash", "python", "sleep", "bg_cancel", "read", "write", "edit", "glob", "todo"].includes(name)}>
+              <Show when={!["bash", "python", "bg_await", "bg_cancel", "read", "write", "edit", "glob", "todo"].includes(name)}>
                 <div class="px-3.5 py-2.5 flex items-center gap-2 text-[13px]">
                   <Iconify icon="lucide:wrench" size={14} class="text-ink-400 shrink-0" />
                   <span class="font-mono text-ink-100">{name}</span>

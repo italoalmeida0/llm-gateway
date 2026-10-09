@@ -134,9 +134,9 @@ func TestPythonSandboxJail(t *testing.T) {
 	// Workdir outside the jail must be rejected.
 	if _, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"code":    "print(1)",
-		"workdir": "..",
+		"work_dir": "..",
 	}), nil); err == nil {
-		t.Fatal("expected jail rejection for workdir ..")
+		t.Fatal("expected jail rejection for work_dir ..")
 	}
 }
 

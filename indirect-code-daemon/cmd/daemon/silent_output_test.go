@@ -74,23 +74,19 @@ func TestStripAssistantTextPreservesStructure(t *testing.T) {
 	}
 }
 
-// mark_task_as_complete is the turn closer for build AND learning.
+// finish_entire_request is the ONE turn closer in every workspace mode.
 func TestModeToolRestrictionLearningCompletes(t *testing.T) {
-	if reason := modeToolRestriction("learning", "mark_task_as_complete"); reason != "" {
-		t.Fatalf("learning must allow mark_task_as_complete, got %q", reason)
+	for _, mode := range []string{"build", "plan", "learning"} {
+		if reason := modeToolRestriction(mode, "finish_entire_request"); reason != "" {
+			t.Fatalf("mode %q must allow finish_entire_request, got %q", mode, reason)
+		}
 	}
-	if reason := modeToolRestriction("build", "mark_task_as_complete"); reason != "" {
-		t.Fatalf("build must allow mark_task_as_complete, got %q", reason)
-	}
-	if reason := modeToolRestriction("plan", "mark_task_as_complete"); reason == "" {
-		t.Fatalf("plan must reject mark_task_as_complete")
-	}
-	if reason := modeToolRestriction("learning", "mark_plan_as_ready_to_execute"); reason == "" {
-		t.Fatalf("learning must reject mark_plan_as_ready_to_execute")
+	if reason := modeToolRestriction("talk", "finish_entire_request"); reason == "" {
+		t.Fatalf("talk must reject finish_entire_request")
 	}
 	// Rejection messages must not describe other modes.
 	for _, reason := range []string{
-		modeToolRestriction("plan", "mark_task_as_complete"),
+		modeToolRestriction("talk", "finish_entire_request"),
 		modeToolRestriction("talk", "read"),
 		modeToolRestriction("learning", "write"),
 	} {
@@ -120,8 +116,8 @@ func extractTestText(m provider.Message) string {
 
 func TestModeCompletionTool(t *testing.T) {
 	for mode, want := range map[string]string{
-		"build": "mark_task_as_complete", "learning": "mark_task_as_complete",
-		"plan": "mark_plan_as_ready_to_execute", "talk": "", "": "mark_task_as_complete",
+		"build": "finish_entire_request", "learning": "finish_entire_request",
+		"plan": "finish_entire_request", "talk": "", "": "finish_entire_request",
 	} {
 		if got := modeCompletionTool(mode); got != want {
 			t.Fatalf("%q completion tool = %q; want %q", mode, got, want)

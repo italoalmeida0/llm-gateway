@@ -452,11 +452,11 @@ export function toolSummary(u: ToolUnit): ToolSummary {
         target: cmd.length > 90 ? cmd.slice(0, 90) + "…" : cmd,
       };
     }
-    case "sleep": {
-      const s = Number(args.seconds);
+    case "bg_await": {
+      const s = Number(args.max_wait_seconds);
       return {
         icon: "lucide:timer",
-        verb: u.result ? "Slept" : "Sleeping",
+        verb: u.result ? "Waited" : "Awaiting",
         target: Number.isFinite(s) ? formatDurationSecs(s) : "",
       };
     }
@@ -504,7 +504,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
         ...edits.map((e: any) => baseNameOf(e?.file || e?.path) || e?.file || e?.path),
       ].filter(Boolean))];
       const shown = files.slice(0, 3).join(", ") + (files.length > 3 ? ` +${files.length - 3}` : "");
-      const isPreview = args.dryRun === true;
+      const isPreview = u.result?.toolDetails?.dry_run === true;
       const verb = isPreview ? (name === "patch" ? "Preview patch" : "Preview edit") : (name === "patch" ? "Patch" : "Edited");
       // Prefer the frontend-only display rendering (details.display); the
       // AI-visible text is a one-line confirmation with no diff.
@@ -583,7 +583,7 @@ export function toolSummary(u: ToolUnit): ToolSummary {
       // Session meta tools: friendly labels instead of the raw tool name.
       switch (name) {
         case "summary":
-        case "mark_task_as_complete":
+        case "finish_entire_request":
           return { icon: "lucide:check-circle-2", verb: "Summary", target: "" };
         case "todo":
           return { icon: "lucide:list-checks", verb: "Tasks", target: "" };
@@ -594,14 +594,14 @@ export function toolSummary(u: ToolUnit): ToolSummary {
   }
 }
 
-/** Sleep rows are header-only in every state: while the timer runs the
+/** bg_await rows are header-only in every state: while the timer runs the
  * live remaining counter renders in the label, and once the result lands
- * ("Slept …" / "Woken early …") the header summary carries the outcome.
+ * ("Woken early …" / "Timed out …") the header summary carries the outcome.
  * No body and no chevron, ever. Single source of truth for the row model
- * and the body gate — they must agree, or expanding a sleep shows an
+ * and the body gate — they must agree, or expanding a bg_await shows an
  * empty body. */
 export function isHeaderOnlySleep(toolName: string, _hasResult: boolean): boolean {
-  return toolName === "sleep";
+  return toolName === "bg_await";
 }
 
 /** Determines if a chat message marks the beginning of an agent turn.

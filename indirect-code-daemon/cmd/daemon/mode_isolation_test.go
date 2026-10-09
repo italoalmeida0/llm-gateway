@@ -16,8 +16,8 @@ func registryForTest() core.Registry {
 		&tools.BashTool{}, &tools.PythonTool{}, &tools.GlobTool{}, &tools.SearchTool{},
 		&tools.InspectTool{}, &tools.SearchWebTool{}, &tools.FetchURLTool{},
 		&tools.QuestionTool{}, &tools.TodoTool{}, &tools.SummaryTool{},
-		&tools.MarkTaskAsCompleteTool{}, &tools.MarkPlanAsReadyToExecuteTool{},
-		&tools.SleepTool{}, &tools.BgCheckTool{}, &tools.BgCancelTool{},
+		&tools.FinishEntireRequestTool{},
+		&tools.BgAwaitTool{}, &tools.BgCheckTool{}, &tools.BgCancelTool{},
 	)
 }
 
@@ -37,17 +37,17 @@ func TestModeRegistryAllowlistPerMode(t *testing.T) {
 		"build": {
 			"read", "write", "edit", "bash", "python", "glob", "search", "inspect",
 			"search_web", "fetch_url", "question", "todo", "summary",
-			"sleep", "bg_check", "bg_cancel", "mark_task_as_complete",
+			"bg_await", "bg_check", "bg_cancel", "finish_entire_request",
 		},
 		"plan": {
 			"read", "bash", "python", "glob", "search", "inspect",
 			"search_web", "fetch_url", "question", "todo", "summary",
-			"sleep", "bg_check", "bg_cancel", "mark_plan_as_ready_to_execute",
+			"bg_await", "bg_check", "bg_cancel", "finish_entire_request",
 		},
 		"learning": {
 			"read", "bash", "python", "glob", "search", "inspect",
 			"search_web", "fetch_url", "question", "todo", "summary",
-			"sleep", "bg_check", "bg_cancel", "mark_task_as_complete",
+			"bg_await", "bg_check", "bg_cancel", "finish_entire_request",
 		},
 		"talk": {
 			"search_web", "fetch_url", "question", "todo",
@@ -78,20 +78,15 @@ func TestModeRegistryExcludesForeignModeTools(t *testing.T) {
 		}
 	}
 	talk := registryNames(modeRegistry(full, "talk"))
-	for _, banned := range []string{"read", "bash", "python", "glob", "search", "inspect", "summary", "sleep", "bg_check", "bg_cancel", "mark_task_as_complete", "mark_plan_as_ready_to_execute"} {
+	for _, banned := range []string{"read", "bash", "python", "glob", "search", "inspect", "summary", "bg_await", "bg_check", "bg_cancel", "finish_entire_request"} {
 		if talk[banned] {
 			t.Errorf("talk must not advertise %q", banned)
 		}
 	}
-	// The completion signal is unique per mode.
-	plan := registryNames(modeRegistry(full, "plan"))
-	if plan["mark_task_as_complete"] {
-		t.Error("plan must not advertise mark_task_as_complete")
-	}
-	for _, mode := range []string{"build", "learning"} {
-		names := registryNames(modeRegistry(full, mode))
-		if names["mark_plan_as_ready_to_execute"] {
-			t.Errorf("%q must not advertise mark_plan_as_ready_to_execute", mode)
+	// The completion signal is the SAME tool in every workspace mode.
+	for _, mode := range []string{"build", "plan", "learning"} {
+		if !registryNames(modeRegistry(full, mode))["finish_entire_request"] {
+			t.Errorf("mode %q must advertise finish_entire_request", mode)
 		}
 	}
 }
@@ -105,8 +100,8 @@ func TestSessionSystemPromptIsModeClean(t *testing.T) {
 		"learning": "Learning mode", "talk": "Talk mode",
 	}
 	completionTools := map[string]string{
-		"build": "mark_task_as_complete", "plan": "mark_plan_as_ready_to_execute",
-		"learning": "mark_task_as_complete", "talk": "",
+		"build": "finish_entire_request", "plan": "finish_entire_request",
+		"learning": "finish_entire_request", "talk": "",
 	}
 	for _, mode := range []string{"build", "plan", "learning", "talk"} {
 		prompt := sessionSystemPrompt(cfg, "/tmp/work", SessionOptions{Mode: mode})
@@ -124,7 +119,7 @@ func TestSessionSystemPromptIsModeClean(t *testing.T) {
 				t.Errorf("prompt for mode %q leaks sibling mode %q", mode, name)
 			}
 		}
-		// Only the active mode's completion tool may be named.
+		// No legacy completion tool name may ever appear again.
 		for _, name := range []string{"mark_task_as_complete", "mark_plan_as_ready_to_execute"} {
 			if name == completionTools[mode] {
 				continue
@@ -142,8 +137,8 @@ func TestSessionSystemPromptIsModeClean(t *testing.T) {
 // The completion tool description is mode-specific: the learning variant
 // carries the tutoring contract, the build variant does not mention it.
 func TestMarkTaskDescriptionPerMode(t *testing.T) {
-	build := (&tools.MarkTaskAsCompleteTool{Mode: "build"}).Description()
-	learning := (&tools.MarkTaskAsCompleteTool{Mode: "learning"}).Description()
+	build := (&tools.FinishEntireRequestTool{Mode: "build"}).Description()
+	learning := (&tools.FinishEntireRequestTool{Mode: "learning"}).Description()
 	if build == learning {
 		t.Fatalf("build and learning descriptions must differ")
 	}
@@ -160,9 +155,13 @@ func TestMarkTaskDescriptionPerMode(t *testing.T) {
 			}
 		}
 	}
-	plan := (&tools.MarkPlanAsReadyToExecuteTool{}).Description()
+	plan := (&tools.FinishEntireRequestTool{Mode: "plan"}).Description()
 	if strings.Contains(plan, "Plan mode") {
 		t.Errorf("plan description leaks mode name: %q", plan)
+	}
+	// One tool, one name: only the description varies with the mode.
+	if (&tools.FinishEntireRequestTool{Mode: "plan"}).Name() != (&tools.FinishEntireRequestTool{Mode: "build"}).Name() {
+		t.Errorf("plan and build must expose the same tool name")
 	}
 }
 
@@ -174,8 +173,8 @@ func TestToolDescriptionsDoNotEnumerateModes(t *testing.T) {
 		&tools.BashTool{}, &tools.GlobTool{}, &tools.SearchTool{},
 		&tools.InspectTool{}, &tools.SearchWebTool{}, &tools.FetchURLTool{},
 		&tools.QuestionTool{}, &tools.TodoTool{}, &tools.SummaryTool{},
-		&tools.MarkTaskAsCompleteTool{Mode: "build"}, &tools.MarkPlanAsReadyToExecuteTool{},
-		&tools.SleepTool{}, &tools.BgCheckTool{}, &tools.BgCancelTool{},
+		&tools.FinishEntireRequestTool{Mode: "build"}, &tools.FinishEntireRequestTool{Mode: "plan"},
+		&tools.BgAwaitTool{}, &tools.BgCheckTool{}, &tools.BgCancelTool{},
 	}
 	for _, tool := range all {
 		desc := tool.Description()

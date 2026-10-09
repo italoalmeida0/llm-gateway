@@ -37,7 +37,7 @@ describe("Indirect Code file presentation", () => {
   test("decodes partial tool content without leaking incomplete JSON escapes", () => {
     expect(displayToolArgs('{"path":"src/example.py","content":"print(\\"hello\\")\\nnext\\u00').content).toBe('print("hello")\nnext');
     expect(displayToolArgs('{"path":"src/example.py","content":"hello\\').content).toBe("hello");
-    expect(displayToolArgs('{"path":"example.py","edits":[{"oldText":"old","newText":"new').edits).toEqual([{oldText:"old",newText:"new"}]);
+    expect(displayToolArgs('{"path":"example.py","edits":[{"old_text":"old","new_text":"new').edits).toEqual([{old_text:"old",new_text:"new"}]);
     expect(displayToolArgs('null')).toEqual({});
   });
   test("supports language, document and project-specific filenames on both path styles", () => {
@@ -489,17 +489,23 @@ describe("Indirect Code toolSummary", () => {
     expect(toolSummary({
       call: { type: "tool_call", toolId: "i2", toolName: "inspect", toolArgs: "{}" }
     })).toEqual({ icon: "lucide:folder-tree", verb: "Inspect", target: "workspace" });
+    // Verb/target come from the details.dry_run flag (a planned/approved edit),
+    // never from an argument the model could send.
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "p1", toolName: "patch", toolArgs: JSON.stringify({ dryRun: true, edits: [{ file: "a.ts", old: "x", new: "y" }, { file: "b.ts", old: "1", new: "2" }] }) }
+      call: { type: "tool_call", toolId: "p1", toolName: "patch", toolArgs: JSON.stringify({ edits: [{ file: "a.ts", old: "x", new: "y" }, { file: "b.ts", old: "1", new: "2" }] }) },
+      result: { type: "tool_result", toolId: "p1", toolDetails: { dry_run: true } },
     })).toEqual({ icon: "lucide:file-diff", verb: "Preview patch", target: "a.ts, b.ts" });
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "p2", toolName: "patch", toolArgs: JSON.stringify({ dryRun: false, edits: [{ file: "a.ts", old: "x", new: "y" }] }) }
+      call: { type: "tool_call", toolId: "p2", toolName: "patch", toolArgs: JSON.stringify({ edits: [{ file: "a.ts", old: "x", new: "y" }] }) },
+      result: { type: "tool_result", toolId: "p2", toolDetails: { dry_run: false } },
     })).toEqual({ icon: "lucide:file-diff", verb: "Patch", target: "a.ts" });
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "e1", toolName: "edit", toolArgs: JSON.stringify({ dryRun: true, edits: [{ file: "a.ts", old: "x", new: "y" }] }) }
+      call: { type: "tool_call", toolId: "e1", toolName: "edit", toolArgs: JSON.stringify({ edits: [{ file: "a.ts", old: "x", new: "y" }] }) },
+      result: { type: "tool_result", toolId: "e1", toolDetails: { dry_run: true } },
     })).toEqual({ icon: "lucide:file-diff", verb: "Preview edit", target: "a.ts" });
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "e2", toolName: "edit", toolArgs: JSON.stringify({ edits: [{ file: "a.ts", old: "x", new: "y" }] }) }
+      call: { type: "tool_call", toolId: "e2", toolName: "edit", toolArgs: JSON.stringify({ edits: [{ file: "a.ts", old: "x", new: "y" }] }) },
+      result: { type: "tool_result", toolId: "e2", toolDetails: { dry_run: false } },
     })).toEqual({ icon: "lucide:file-diff", verb: "Edited", target: "a.ts" });
   });
   test("summarizes search_web and fetch_url calls", () => {
@@ -829,9 +835,9 @@ describe("Tool mini-UI parsers", () => {
     expect(backslash).toHaveLength(1);
     expect(backslash[0]).toMatchObject({ file: "C:\\work\\TAP\\src\\foo.ts", status: "applied", matches: 1 });
     // A real error (`path: message`, colon + space) still splits.
-    const failed = parseEditResults("✗ src/foo.ts: oldText not found");
+    const failed = parseEditResults("✗ src/foo.ts: old_text not found");
     expect(failed).toHaveLength(1);
-    expect(failed[0]).toMatchObject({ file: "src/foo.ts", status: "error", error: "oldText not found" });
+    expect(failed[0]).toMatchObject({ file: "src/foo.ts", status: "error", error: "old_text not found" });
   });
 
   test("parseQuestionQA joins questions with recorded answers", () => {
@@ -1072,8 +1078,8 @@ describe("completion signals and turn nudges", () => {
     const msgs: ChatMessage[] = [
       { id: "u1", role: "user", blocks: [{ type: "text", text: "Regular message" }] },
       { id: "u2", role: "user", blocks: [{ type: "text", text: "<system-reminder>You should continue what you are doing.</system-reminder>" }] },
-      { id: "u3", role: "user", blocks: [{ type: "text", text: "<system-reminder>If you have completed the task, call mark_task_as_complete...</system-reminder>" }] },
-      { id: "u4", role: "user", blocks: [{ type: "text", text: "<system-reminder>If your plan is ready, call mark_plan_as_ready_to_execute...</system-reminder>" }] },
+      { id: "u3", role: "user", blocks: [{ type: "text", text: "<system-reminder>If you have finished all requested work, call finish_entire_request...</system-reminder>" }] },
+      { id: "u4", role: "user", blocks: [{ type: "text", text: "<system-reminder>The turn ends with exactly one call to finish_entire_request...</system-reminder>" }] },
       { id: "u5", role: "user", blocks: [{ type: "text", text: "  <system-reminder>custom anything</system-reminder>  " }] },
       { id: "u6", role: "user", blocks: [{ type: "text", text: "<system-reminder>## Context Summary (compacted)\n\nDid things.</system-reminder>" }] },
       { id: "a1", role: "assistant", blocks: [{ type: "text", text: "Done" }] },
@@ -1086,8 +1092,8 @@ describe("completion signals and turn nudges", () => {
     expect(isSyntheticNudge("<system-reminder>hello</system-reminder>")).toBe(true);
     expect(isSyntheticNudge("  <system-reminder>anything here</system-reminder>  ")).toBe(true);
     expect(isSyntheticNudge("<system-reminder>You should continue what you are doing.</system-reminder>")).toBe(true);
-    expect(isSyntheticNudge("<system-reminder>If you have completed the task, call mark_task_as_complete.</system-reminder>")).toBe(true);
-    expect(isSyntheticNudge("<system-reminder>If your plan is ready, call mark_plan_as_ready_to_execute.</system-reminder>")).toBe(true);
+    expect(isSyntheticNudge("<system-reminder>If you have finished all requested work, call finish_entire_request.</system-reminder>")).toBe(true);
+    expect(isSyntheticNudge("<system-reminder>The turn ends with exactly one call to finish_entire_request.</system-reminder>")).toBe(true);
     expect(isSyntheticNudge("<system-reminder>## Context Summary (compacted)\n\nDid things.</system-reminder>")).toBe(true);
     expect(isSyntheticNudge("Regular user message")).toBe(false);
     expect(isSyntheticNudge("hello <system-reminder>mid</system-reminder>")).toBe(false);
@@ -1113,7 +1119,7 @@ describe("completion signals and turn nudges", () => {
         role: "assistant",
         blocks: [
           { type: "text", text: "I have finished all tasks." },
-          { type: "tool_call", toolId: "call_done", toolName: "mark_task_as_complete", toolArgs: "{}" },
+          { type: "tool_call", toolId: "call_done", toolName: "finish_entire_request", toolArgs: "{}" },
         ],
       },
       {
@@ -1134,7 +1140,7 @@ describe("completion signals and turn nudges", () => {
     expect(result[0].hasCompletion).toBe(true);
   });
 
-  test("withoutTodoActivity extracts comprehensive_summary from mark_task_as_complete args into text block", () => {
+  test("withoutTodoActivity extracts final_message_to_user from finish_entire_request args into text block", () => {
     const msgs: ChatMessage[] = [
       {
         id: "a1",
@@ -1143,8 +1149,8 @@ describe("completion signals and turn nudges", () => {
           {
             type: "tool_call",
             toolId: "call_done",
-            toolName: "mark_task_as_complete",
-            toolArgs: JSON.stringify({ comprehensive_summary: "All 5 endpoints implemented and tested." }),
+            toolName: "finish_entire_request",
+            toolArgs: JSON.stringify({ final_message_to_user: "All 5 endpoints implemented and tested." }),
           },
         ],
       },
@@ -1210,7 +1216,7 @@ describe("completion signals and turn nudges", () => {
       role: "assistant",
       blocks: [
         { type: "text", text: "Everything fixed and verified." },
-        { type: "tool_call", toolId: "call_done", toolName: "mark_task_as_complete", toolArgs: "{}" },
+        { type: "tool_call", toolId: "call_done", toolName: "finish_entire_request", toolArgs: "{}" },
       ],
     };
     const doneResult: ChatMessage = {
@@ -1233,8 +1239,8 @@ describe("completion signals and turn nudges", () => {
     }
   });
 
-  test.each(["todo", "summary", "mark_task_as_complete", "mark_plan_as_ready_to_execute"])("hides %s throughout streaming, failures and snapshots", (name) => {
-    const args = JSON.stringify({ for_user: "Progress for the user", for_me: "Private tracking", comprehensive_summary: "Completed work" });
+  test.each(["todo", "summary", "finish_entire_request"])("hides %s throughout streaming, failures and snapshots", (name) => {
+    const args = JSON.stringify({ for_user: "Progress for the user", for_me: "Private tracking", final_message_to_user: "Completed work" });
     const call: ChatMessage = { id: "a", role: "assistant", srcIdx: 4, streaming: true, blocks: [
       { type: "tool_call", toolId: "signal", toolName: name, toolArgs: "" },
     ] };
@@ -1279,7 +1285,7 @@ describe("completion signals and turn nudges", () => {
       { type: "tool_call", toolId: "pending", toolName: "summary", toolArgs: JSON.stringify({ for_user: { bad: true } }) },
     ] };
     const failedCall: ChatMessage = { id: "f", role: "assistant", blocks: [
-      { type: "tool_call", toolId: "failed", toolName: "mark_task_as_complete", toolArgs: JSON.stringify({ comprehensive_summary: 42 }) },
+      { type: "tool_call", toolId: "failed", toolName: "finish_entire_request", toolArgs: JSON.stringify({ final_message_to_user: 42 }) },
     ] };
     const failedResult: ChatMessage = { id: "fr", role: "tool", blocks: [
       { type: "tool_result", toolId: "failed", toolResult: "permission denied", isError: true },
@@ -1702,7 +1708,7 @@ describe("Background tasks (bash/python detach)", () => {
     expect(normalizeSessionMessages(withTool)).toHaveLength(1);
   });
 
-  test("toolSummary reads detached runs as Background, plus sleep/bg_cancel", () => {
+  test("toolSummary reads detached runs as Background, plus bg_await/bg_cancel", () => {
     const bashBg = toolSummary({
       call: { type: "tool_call", toolId: "t", toolName: "bash", toolArgs: JSON.stringify({ command: "sleep 30" }) },
       result: { type: "tool_result", toolId: "t", toolResult: "moved to background", toolDetails: { background_job_id: "bg_1" } },
@@ -1714,30 +1720,30 @@ describe("Background tasks (bash/python detach)", () => {
     } as any);
     expect(bashSync.verb).toBe("Ran");
     expect(toolSummary({
-      call: { type: "tool_call", toolId: "t", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 120 }) },
-    } as any).verb).toBe("Sleeping");
+      call: { type: "tool_call", toolId: "t", toolName: "bg_await", toolArgs: JSON.stringify({ max_wait_seconds: 120, waiting_for: "bg_1", reason: "waiting" }) },
+    } as any).verb).toBe("Awaiting");
     expect(toolSummary({
       call: { type: "tool_call", toolId: "t", toolName: "bg_cancel", toolArgs: JSON.stringify({ job_id: "bg_9" }) },
       result: { type: "tool_result", toolId: "t", toolResult: "cancelled" },
     } as any).verb).toBe("Canceled");
   });
 
-  test("sleep rows are header-only in every state (no body, no chevron)", () => {
-    expect(isHeaderOnlySleep("sleep", false)).toBe(true);
-    // A finished sleep is still header-only: the outcome lives in the header
-    // summary ("Slept 30s" / "Woken early …"), never in a body.
-    expect(isHeaderOnlySleep("sleep", true)).toBe(true);
+  test("bg_await rows are header-only in every state (no body, no chevron)", () => {
+    expect(isHeaderOnlySleep("bg_await", false)).toBe(true);
+    // A finished await is still header-only: the outcome lives in the header
+    // summary ("Awaited 30s" / "Woken early …"), never in a body.
+    expect(isHeaderOnlySleep("bg_await", true)).toBe(true);
     expect(isHeaderOnlySleep("bash", false)).toBe(false);
     expect(isHeaderOnlySleep("bash", true)).toBe(false);
     expect(isHeaderOnlySleep("python", false)).toBe(false);
   });
 
-  test("aggregate keeps detached bash and finished sleep units with their results", () => {
+  test("aggregate keeps detached bash and finished bg_await units with their results", () => {
     const list: ChatMessage[] = [
       { id: "one", role: "assistant", srcIdx: 1, blocks: [
         { type: "tool_call", toolId: "b", toolName: "bash", toolArgs: JSON.stringify({ command: "sleep 30 && echo done" }) },
         { type: "tool_result", toolId: "b", toolResult: "moved to background", toolDetails: { background_job_id: "bg_1" } },
-        { type: "tool_call", toolId: "s", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 30 }) },
+        { type: "tool_call", toolId: "s", toolName: "bg_await", toolArgs: JSON.stringify({ max_wait_seconds: 30, waiting_for: "bg_1", reason: "waiting for build" }) },
         { type: "tool_result", toolId: "s", toolResult: "Woken early after 12s: a background task finished — its completion notice is now in context." },
       ]},
     ];
@@ -1746,12 +1752,12 @@ describe("Background tasks (bash/python detach)", () => {
     expect(blocks[0].kind).toBe("series");
     if (blocks[0].kind === "series") {
       expect(blocks[0].units.map((u) => u.call?.toolId)).toEqual(["b", "s"]);
-      // The finished sleep keeps its result text in the unit, but the row
+      // The finished await keeps its result text in the unit, but the row
       // stays header-only: the summary carries the outcome, the body gate
       // keeps it shut (no chevron, nothing to expand).
-      const sleep = blocks[0].units.find((u) => u.call?.toolId === "s");
-      expect(sleep?.result?.toolResult).toContain("Woken early");
-      expect(isHeaderOnlySleep(sleep?.call?.toolName || "", !!sleep?.result)).toBe(true);
+      const awaited = blocks[0].units.find((u) => u.call?.toolId === "s");
+      expect(awaited?.result?.toolResult).toContain("Woken early");
+      expect(isHeaderOnlySleep(awaited?.call?.toolName || "", !!awaited?.result)).toBe(true);
     }
   });
 });
@@ -1854,7 +1860,7 @@ describe("Tool row model", () => {
       bgClock: () => 0,
     };
     const sleepUnit: any = {
-      call: { type: "tool_call", toolId: "s1", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 30 }) },
+      call: { type: "tool_call", toolId: "s1", toolName: "bg_await", toolArgs: JSON.stringify({ max_wait_seconds: 30, waiting_for: "bg_1", reason: "waiting for build" }) },
     };
     const bashUnit: any = {
       call: { type: "tool_call", toolId: "b1", toolName: "bash", toolArgs: JSON.stringify({ command: "echo hi" }) },
@@ -1865,27 +1871,25 @@ describe("Tool row model", () => {
       // before initialization` out of the hook — the eager hasContent memo
       // read a const declared below it, breaking every tool row on expand.
       const sleep = useToolUnitModel(ctx, "m1", sleepUnit, 0, () => true, () => true);
-      expect(sleep.name()).toBe("sleep");
+      expect(sleep.name()).toBe("bg_await");
       expect(sleep.open()).toBe(false); // header-only while running
-      expect(sleep.expandable()).toBe(false); // no chevron for sleep
+      expect(sleep.expandable()).toBe(false); // no chevron for bg_await
       expect(sleep.openBody()).toBe(false); // ...and never a body
       expect(sleep.sleepRemaining()).toBe("25s left");
       const bash = useToolUnitModel(ctx, "m1", bashUnit, 1, () => false, () => false);
       expect(bash.sum().verb).toBe("Ran");
       expect(bash.open()).toBe(false);
       expect(bash.expandable()).toBe(true); // normal rows keep the chevron
-      // A finished sleep is header-only too: no chevron, no body, ever.
+      // A finished await is header-only too: no chevron, no body, ever.
       const sleptUnit: any = {
-        call: { type: "tool_call", toolId: "s2", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 30 }) },
+        call: { type: "tool_call", toolId: "s2", toolName: "bg_await", toolArgs: JSON.stringify({ max_wait_seconds: 30, waiting_for: "bg_1", reason: "waiting for build" }) },
         result: { type: "tool_result", toolId: "s2", toolResult: "Woken early after 12s: a background task finished." },
       };
-      // give the finished sleep a summary so the header carries it
-      sleptUnit.call.toolArgs = JSON.stringify({ seconds: 30, summary: "waiting for build" });
       const slept = useToolUnitModel(ctx, "m1", sleptUnit, 2, () => false, () => false);
-      expect(slept.name()).toBe("sleep");
+      expect(slept.name()).toBe("bg_await");
       expect(slept.expandable()).toBe(false);
       expect(slept.openBody()).toBe(false);
-      // The summary arg stays visible in the header now that no body renders it.
+      // The reason arg stays visible in the header now that no body renders it.
       expect(slept.sleepLabel()).toBe("30s · waiting for build");
       // Clicking the row toggles the disclosure state but reveals nothing.
       slept.toggle();

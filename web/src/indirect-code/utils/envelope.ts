@@ -107,9 +107,13 @@ export function stripToolEnvelopeDetailed(text: string): {
   footer: FooterFact[];
 } {
   if (typeof text !== "string") return { body: text, attrs: {}, footer: [] };
-  // HTML-escaped envelopes (replayed/echoed results) render as literal
-  // "&lt;tool_result…&gt;" text: strip them the same way, keeping the body.
-  let work = text.replace(
+  // Defense in depth, NOT the escape contract: the daemon escapes only the
+  // two sequences that could close/spoof the envelope (<tool_result and
+  // </tool_result) and unescapes them before display, so a replayed body
+  // never arrives as a whole escaped envelope. This branch only handles a
+  // legacy/hand-copied "&lt;tool_result…&gt;" blob pasted into markdown, and
+  // it is idempotent for already-unescaped bodies.
+  const work = text.replace(
     /&lt;tool_result([\s\S]*?)(?:&lt;\/tool_result&gt;|$)/g,
     (matched: string, inner: string) => {
       const gt = inner.indexOf("&gt;");

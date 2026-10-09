@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"strings"
 	"encoding/json"
 	"sync/atomic"
 	"testing"
@@ -159,19 +160,15 @@ func TestSanitizeUserText(t *testing.T) {
 	if got := SanitizeUserText("  " + ContinueNudgeText + "  "); got != wantContinue {
 		t.Fatalf("padded continue nudge = %q; want tags stripped", got)
 	}
-	wantBuild := "Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If you have completed the task or answered the user's question, call mark_task_as_complete with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools."
-	if got := SanitizeUserText(CompletionNudgeTextBuild); got != wantBuild {
-		t.Fatalf("build completion nudge = %q; want tags stripped", got)
+	wantCompletion := "Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If the ENTIRE request is finished (every requested change implemented and validated) or the user only asked a question, call finish_entire_request with final_message_to_user — that parameter is the only text the user reads. Never call it after an intermediate step. If you need user input, call question. Otherwise, keep working silently through tools, using the summary tool for progress updates."
+	if got := SanitizeUserText(CompletionNudgeText("finish_entire_request")); got != wantCompletion {
+		t.Fatalf("completion nudge = %q; want tags stripped", got)
 	}
-	if got := SanitizeUserText("  " + CompletionNudgeTextBuild + "  "); got != wantBuild {
-		t.Fatalf("padded build completion nudge = %q; want tags stripped", got)
+	if got := SanitizeUserText("  " + CompletionNudgeText("finish_entire_request") + "  "); got != wantCompletion {
+		t.Fatalf("padded completion nudge = %q; want tags stripped", got)
 	}
-	wantPlan := "Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If your plan is ready, call mark_plan_as_ready_to_execute with comprehensive_summary. If you need user input, call question. Otherwise, continue your work silently using tools."
-	if got := SanitizeUserText(CompletionNudgeTextPlan); got != wantPlan {
-		t.Fatalf("plan completion nudge = %q; want tags stripped", got)
-	}
-	if got := SanitizeUserText("  " + CompletionNudgeTextPlan + "  "); got != wantPlan {
-		t.Fatalf("padded plan completion nudge = %q; want tags stripped", got)
+	if got := SanitizeUserText(CompletionNudgeText("other_tool")); !strings.Contains(got, "call other_tool with final_message_to_user") {
+		t.Fatalf("nudge must name the tool passed in: %q", got)
 	}
 	if got := SanitizeUserText("<system-reminder>qualquer coisa</system-reminder>"); got != "qualquer coisa" {
 		t.Fatalf("custom system-reminder = %q; want tags stripped", got)

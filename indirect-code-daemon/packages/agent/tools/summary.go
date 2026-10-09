@@ -11,28 +11,37 @@ import (
 )
 
 // SummaryTool allows the agent to report progress during long turns.
-// It requires for_user (user-facing progress message) and for_me (internal scratchpad/tracking).
+// It carries for_user (the visible progress message) and for_me (the model's
+// private note, kept in its own transcript and never shown to the user).
 type SummaryTool struct {
 	OnSummary func(forUser, forMe string) error
 }
 
-type summaryArgs struct {
+// SummaryArgs are the model-facing arguments of the summary tool.
+type SummaryArgs struct {
+	// ForUser is the user-facing progress update (100–500 chars). The
+	// frontend extracts it from the tool call and renders it as a visible
+	// text bubble; it is what the user reads mid-turn.
 	ForUser string `json:"for_user"`
-	ForMe   string `json:"for_me"`
+	// ForMe is a private note for the model itself: what it is doing, the
+	// next steps, what it already verified. The daemon does NOT consume it
+	// (no state, no event, no UI) — it stays in the transcript so the model
+	// can re-read how it framed the work earlier. Never shown to the user.
+	ForMe string `json:"for_me"`
 }
 
 func (*SummaryTool) Name() string { return "summary" }
 
 func (*SummaryTool) Description() string {
-	return "Report a progress summary when requested by an automated system notification. Requires 'for_user' (~500 chars, min 100 chars) as a user-facing update, and 'for_me' for internal tracking of next steps, hypotheses, and what was already tested."
+	return "Report a progress summary when requested by an automated system notification. Two args: 'for_user' — the visible progress update for the user (100-500 chars; the UI renders it as a text bubble) — and 'for_me' — a private note for your own future reference (what you are doing, next steps, what you already verified). 'for_me' is never shown to the user, never acted on, and simply stays in your transcript so you can re-read it later."
 }
 
 func (*SummaryTool) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"for_user":{"type":"string","description":"Progress update written for the user (minimum 100 characters, around 500 characters)."},"for_me":{"type":"string","description":"Internal tracking for yourself: explain what you are currently doing, your planned next steps, and what you have already verified/tested."}},"required":["for_user","for_me"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"for_user":{"type":"string","description":"Progress update written for the user; rendered as a visible text bubble. Minimum 100 characters, around 500."},"for_me":{"type":"string","description":"Private note for your own future reference: what you are doing, next steps, what you already verified. Never shown to the user and never acted on; it only stays in your transcript."}},"required":["for_user","for_me"]}`)
 }
 
 func (t *SummaryTool) Execute(ctx context.Context, raw json.RawMessage, _ func(string)) (core.ToolResult, error) {
-	var args summaryArgs
+	var args SummaryArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return core.ToolResult{
 			IsError: true,

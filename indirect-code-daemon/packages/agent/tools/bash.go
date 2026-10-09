@@ -42,7 +42,7 @@ const bashSchema = `{"type":"object","properties":{"command":{"type":"string","d
 
 func (t *BashTool) Name() string { return "bash" }
 func (t *BashTool) Description() string {
-	return "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). There is no timeout: if the command still runs after 10 seconds it automatically moves to the background (you are notified with a job id; read the output with bg_check, wait with the sleep tool, stop it with bg_cancel)."
+	return fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). There is no timeout: if the command still runs after %s it automatically moves to the background (you are notified with a job id; read the output with bg_check, wait with bg_await, stop it with bg_cancel).", humanDuration(AutoBackgroundAfter))
 }
 func (t *BashTool) Schema() json.RawMessage { return json.RawMessage(bashSchema) }
 
@@ -285,7 +285,7 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage, progress fu
 }
 
 // bashBackgroundNotice is the placeholder the model sees when a command
-// detaches: the job id (read output with bg_check, wait with sleep,
+// detaches: the job id (read output with bg_check, wait with bg_await,
 // force-stop with bg_cancel) and that the daemon wakes the turn with a
 // completion notice when the process ends.
 func bashBackgroundNotice(jobID, cmd string, fullLog ...string) string {
@@ -297,7 +297,7 @@ func bashBackgroundNotice(jobID, cmd string, fullLog ...string) string {
 	fmt.Fprintf(&b, "To read the output, call bg_check with job_id %q (paged log: tail by default, offset/limit for more).\n", jobID)
 	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q.\n", jobID)
 	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then.\n")
-	b.WriteString("While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.")
+	b.WriteString("While waiting, call bg_await with waiting_for=<job_id> and a reason - it ends early the moment this task finishes. Do not use a shell sleep command to wait: inside a command it would detach into yet another background task and only add noise.")
 	return b.String()
 }
 
@@ -360,7 +360,7 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 		Attrs:   attrs,
 		Details: map[string]any{
 			"display":   display,
-			"exitCode":  exitCode,
+			"exit_code": exitCode,
 			"stdout":    head.String(),
 			"stderr":    "",
 			"truncated": snapshot.truncated,
@@ -371,7 +371,7 @@ func finishBashCommand(a bashArgs, cwd string, start time.Time, output *outputAc
 			"lines_truncated":  snapshot.truncated && snapshot.truncatedBy == "lines",
 			"bytes_truncated":  snapshot.truncated && snapshot.truncatedBy == "bytes",
 			"duration_ms":      elapsed.Milliseconds(),
-			"workdir":          cwd,
+			"work_dir":         cwd,
 			"steps":            1,
 		},
 	}, nil

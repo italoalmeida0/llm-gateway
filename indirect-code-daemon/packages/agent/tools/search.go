@@ -27,25 +27,25 @@ type SearchArgs struct {
 	// Exclude skips files by glob(s), e.g. ["dist/**", "*.min.js"].
 	Exclude []string `json:"exclude,omitempty"`
 	// MaxResults caps returned matches (default 50, max 200).
-	MaxResults int `json:"maxResults,omitempty"`
+	MaxResults int `json:"max_results,omitempty"`
 	// ContextLines includes N lines before/after each match (default 0, max 20).
-	ContextLines int `json:"contextLines,omitempty"`
+	ContextLines int `json:"context_lines,omitempty"`
 	// CaseSensitive enables case-sensitive matching (default false).
-	CaseSensitive bool `json:"caseSensitive,omitempty"`
+	CaseSensitive bool `json:"case_sensitive,omitempty"`
 	// OnlyMatching returns only the matched substrings per line (grep -o):
 	// one entry per match with col pointing at the match start instead of
 	// one entry per matching line.
-	OnlyMatching bool `json:"onlyMatching,omitempty"`
+	OnlyMatching bool `json:"only_matching,omitempty"`
 	// Count returns per-file match counts instead of individual matches
 	// (grep -c): one "file: N matches" line per file with matches.
 	Count bool `json:"count,omitempty"`
 	// FilesOnly returns only file paths with at least one match (grep -l),
 	// one path per line, no line/col/text.
-	FilesOnly bool `json:"filesOnly,omitempty"`
+	FilesOnly bool `json:"files_only,omitempty"`
 	// RespectGitignore skips gitignored files (default true).
-	RespectGitignore *bool `json:"respectGitignore,omitempty"`
+	RespectGitignore *bool `json:"respect_gitignore,omitempty"`
 	// MaxFileBytes skips files larger than this (default 1MB).
-	MaxFileBytes int64 `json:"maxFileBytes,omitempty"`
+	MaxFileBytes int64 `json:"max_file_bytes,omitempty"`
 }
 
 type SearchMatch struct {
@@ -67,10 +67,10 @@ type SearchTool struct {
 func (t *SearchTool) Name() string { return "search" }
 
 func (t *SearchTool) Description() string {
-	return "Search file contents with an RE2 regular expression. Params: `pattern` (required regex), `path` (file/dir scope, default '.'), `include`/`exclude` globs, `maxResults` (default 50, max 200), `contextLines` (default 0, max 20), `caseSensitive` (default false), `onlyMatching` (grep -o: one entry per match), `count` (grep -c: per-file counts), `filesOnly` (grep -l: paths only), `respectGitignore` (default true). Returns structured matches [{file, line, col, text}] — open hits with read."
+	return "Search file contents with an RE2 regular expression. Params: `pattern` (required regex), `path` (file/dir scope, default '.'), `include`/`exclude` globs, `max_results` (default 50, max 200), `context_lines` (default 0, max 20), `case_sensitive` (default false), `only_matching` (grep -o: one entry per match), `count` (grep -c: per-file counts), `files_only` (grep -l: paths only), `respect_gitignore` (default true). Returns structured matches [{file, line, col, text}] — open hits with read."
 }
 
-const searchSchema = `{"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"RE2 regular expression to find."},"path":{"type":"string","description":"Workspace-relative file or dir scope (default '.')."},"include":{"type":"array","items":{"type":"string"},"description":"File glob patterns to include (e.g. ['*.ts', '*.tsx'])."},"exclude":{"type":"array","items":{"type":"string"},"description":"File glob patterns to exclude (e.g. ['dist/**', '*.min.js'])."},"maxResults":{"type":"number","description":"Maximum number of matches to return (default 50, max 200)."},"contextLines":{"type":"number","description":"Number of context lines before and after each match (default 0, max 20)."},"caseSensitive":{"type":"boolean","description":"Case-sensitive search (default false)."},"onlyMatching":{"type":"boolean","description":"Return only the matched substrings, one entry per match (grep -o)."},"count":{"type":"boolean","description":"Return per-file match counts instead of matches (grep -c)."},"filesOnly":{"type":"boolean","description":"Return only matching file paths, one per line (grep -l)."},"respectGitignore":{"type":"boolean","description":"Skip files ignored by git (default true)."},"maxFileBytes":{"type":"number","description":"Skip files larger than this size in bytes (default 1MB)."}}}`
+const searchSchema = `{"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"RE2 regular expression to find."},"path":{"type":"string","description":"Workspace-relative file or dir scope (default '.')."},"include":{"type":"array","items":{"type":"string"},"description":"File glob patterns to include (e.g. ['*.ts', '*.tsx'])."},"exclude":{"type":"array","items":{"type":"string"},"description":"File glob patterns to exclude (e.g. ['dist/**', '*.min.js'])."},"_max_results_":{"type":"number","description":"Maximum number of matches to return (default 50, max 200)."},"_context_lines_":{"type":"number","description":"Number of context lines before and after each match (default 0, max 20)."},"_case_sensitive_":{"type":"boolean","description":"Case-sensitive search (default false)."},"_only_matching_":{"type":"boolean","description":"Return only the matched substrings, one entry per match (grep -o)."},"count":{"type":"boolean","description":"Return per-file match counts instead of matches (grep -c)."},"_files_only_":{"type":"boolean","description":"Return only matching file paths, one per line (grep -l)."},"_respect_gitignore_":{"type":"boolean","description":"Skip files ignored by git (default true)."},"_max_file_bytes_":{"type":"number","description":"Skip files larger than this size in bytes (default 1MB)."}}}`
 
 func (t *SearchTool) Schema() json.RawMessage { return json.RawMessage(searchSchema) }
 

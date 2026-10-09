@@ -44,7 +44,7 @@ func TestSearchCountCapRetainsRows(t *testing.T) {
 		}
 	}
 	tool := &SearchTool{CWD: dir}
-	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "hit", "count": true, "maxResults": 2}), nil)
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "hit", "count": true, "max_results": 2}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestSearchNestedGlobUnicodeAndFileLimit(t *testing.T) {
 	if !strings.Contains(got, "src/deep/nested/ação.ts") || !utf8.ValidString(got) {
 		t.Fatalf("glob/Unicode failure: %s", got)
 	}
-	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "hit", "path": path, "maxFileBytes": 10}), nil)
+	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{"pattern": "hit", "path": path, "max_file_bytes": 10}), nil)
 	if err != nil || envAttr(res, "info") != "no matches" {
 		t.Fatal("explicit file bypasses size limit")
 	}
@@ -155,7 +155,7 @@ func TestSearchContextAndCap(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "f.txt"), []byte(sb.String()), 0o644)
 	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
 	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"pattern": "TARGET", "contextLines": 1,
+		"pattern": "TARGET", "context_lines": 1,
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestSearchContextAndCap(t *testing.T) {
 		t.Fatalf("context lines missing, got:\n%s", got)
 	}
 	res, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"pattern": "filler", "maxResults": 3,
+		"pattern": "filler", "max_results": 3,
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +193,7 @@ func TestSearchOnlyMatching(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("foo one foo two\nnothing\nfoo three foo four\n"), 0o644)
 	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
 	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"pattern": "foo", "onlyMatching": true,
+		"pattern": "foo", "only_matching": true,
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +238,7 @@ func TestSearchFilesOnly(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("nothing\n"), 0o644)
 	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
 	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"pattern": "foo", "filesOnly": true,
+		"pattern": "foo", "files_only": true,
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +248,7 @@ func TestSearchFilesOnly(t *testing.T) {
 		t.Fatalf("expected files-only listing, got:\n%s", got)
 	}
 	if strings.Contains(got, "b.txt") || strings.Contains(got, ":1:") {
-		t.Fatalf("no line/col expected in filesOnly, got:\n%s", got)
+		t.Fatalf("no line/col expected in files_only, got:\n%s", got)
 	}
 }
 
@@ -265,7 +265,7 @@ func TestSearchWideContext(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "f.txt"), []byte(sb.String()), 0o644)
 	tool := &SearchTool{CWD: dir, Sandbox: NewSandbox(dir)}
 	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
-		"pattern": "TARGET", "contextLines": 10,
+		"pattern": "TARGET", "context_lines": 10,
 	}), nil)
 	if err != nil {
 		t.Fatal(err)

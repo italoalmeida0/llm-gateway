@@ -30,7 +30,7 @@ func TestEditPreviewReturnsDiffWithoutWriting(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	args := mustJSON(t, map[string]any{
 		"path":  "a.txt",
-		"edits": []map[string]any{{"oldText": "world", "newText": "gopher"}},
+		"edits": []map[string]any{{"old_text": "world", "new_text": "gopher"}},
 	})
 	preview, err := tool.Preview(context.Background(), args)
 	if err != nil {
@@ -70,8 +70,8 @@ func TestEditMultipleAgainstOriginal(t *testing.T) {
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path": "a.txt",
 		"edits": []map[string]any{
-			{"oldText": "a", "newText": "A"},
-			{"oldText": "c", "newText": "C"},
+			{"old_text": "a", "new_text": "A"},
+			{"old_text": "c", "new_text": "C"},
 		},
 	}), nil)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestEditAmbiguous(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "a.txt",
-		"edits": []map[string]any{{"oldText": "x", "newText": "y"}},
+		"edits": []map[string]any{{"old_text": "x", "new_text": "y"}},
 	}), nil)
 	if err == nil {
 		t.Fatal("want ambiguous error")
@@ -108,10 +108,10 @@ func TestEditNotFoundPiError(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "destination.txt",
-		"edits": []map[string]any{{"oldText": "content from another file", "newText": "replacement"}},
+		"edits": []map[string]any{{"old_text": "content from another file", "new_text": "replacement"}},
 	}), nil)
 	if err == nil {
-		t.Fatal("want oldText not found error")
+		t.Fatal("want old_text not found error")
 	}
 	want := "Could not find the exact text in destination.txt. The old text must match exactly including all whitespace and newlines."
 	if !strings.Contains(err.Error(), want) {
@@ -127,8 +127,8 @@ func TestEditOverlapPiError(t *testing.T) {
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path": "a.txt",
 		"edits": []map[string]any{
-			{"oldText": "alpha beta", "newText": "one"},
-			{"oldText": "beta gamma", "newText": "two"},
+			{"old_text": "alpha beta", "new_text": "one"},
+			{"old_text": "beta gamma", "new_text": "two"},
 		},
 	}), nil)
 	if err == nil {
@@ -147,7 +147,7 @@ func TestEditNoChangePiError(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "a.txt",
-		"edits": []map[string]any{{"oldText": "same", "newText": "same"}},
+		"edits": []map[string]any{{"old_text": "same", "new_text": "same"}},
 	}), nil)
 	if err == nil {
 		t.Fatal("want no-change error")
@@ -165,18 +165,18 @@ func TestEditEmptyOldTextPiError(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "a.txt",
-		"edits": []map[string]any{{"oldText": "", "newText": "y"}},
+		"edits": []map[string]any{{"old_text": "", "new_text": "y"}},
 	}), nil)
 	if err == nil {
-		t.Fatal("want empty oldText error")
+		t.Fatal("want empty old_text error")
 	}
-	if !strings.Contains(err.Error(), "oldText must not be empty in a.txt.") {
-		t.Fatalf("want empty-oldText error, got %q", err)
+	if !strings.Contains(err.Error(), "old_text must not be empty in a.txt.") {
+		t.Fatalf("want empty-old_text error, got %q", err)
 	}
 }
 
 func TestEditFuzzyMatchTrailingWhitespace(t *testing.T) {
-	// The model's oldText omits the trailing whitespace the file has.
+	// The model's old_text omits the trailing whitespace the file has.
 	// Fuzzy match (per-line trailing-whitespace trim) must recover.
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
@@ -184,7 +184,7 @@ func TestEditFuzzyMatchTrailingWhitespace(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "f.txt",
-		"edits": []map[string]any{{"oldText": "\tfmt.Println(\"hi\")", "newText": "\tfmt.Println(\"bye\")"}},
+		"edits": []map[string]any{{"old_text": "\tfmt.Println(\"hi\")", "new_text": "\tfmt.Println(\"bye\")"}},
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -203,7 +203,7 @@ func TestEditFuzzyMatchSmartQuotes(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "q.txt",
-		"edits": []map[string]any{{"oldText": "msg := \"hello\"", "newText": "msg := \"bye\""}},
+		"edits": []map[string]any{{"old_text": "msg := \"hello\"", "new_text": "msg := \"bye\""}},
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +221,7 @@ func TestEditPreservesCRLF(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "a.txt",
-		"edits": []map[string]any{{"oldText": "world", "newText": "gopher"}},
+		"edits": []map[string]any{{"old_text": "world", "new_text": "gopher"}},
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +239,7 @@ func TestEditPreservesBOM(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "bom.txt",
-		"edits": []map[string]any{{"oldText": "hello", "newText": "world"}},
+		"edits": []map[string]any{{"old_text": "hello", "new_text": "world"}},
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -258,7 +258,7 @@ func TestEditPrepareArgumentsNormalizations(t *testing.T) {
 
 	// edits sent as a JSON string (degenerate model input).
 	os.WriteFile(p, []byte("hello world\n"), 0o644)
-	editsJSON := `[{"oldText":"world","newText":"gopher"}]`
+	editsJSON := `[{"old_text":"world","new_text":"gopher"}]`
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "n.txt",
 		"edits": editsJSON,
@@ -274,7 +274,7 @@ func TestEditPrepareArgumentsNormalizations(t *testing.T) {
 	os.WriteFile(p, []byte("hello world\n"), 0o644)
 	_, err = tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "n.txt",
-		"edits": map[string]any{"oldText": "world", "newText": "gopher"},
+		"edits": map[string]any{"old_text": "world", "new_text": "gopher"},
 	}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +298,7 @@ func TestEditMissingFilePiError(t *testing.T) {
 	tool := &EditTool{CWD: dir}
 	_, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":  "nope.txt",
-		"edits": []map[string]any{{"oldText": "a", "newText": "b"}},
+		"edits": []map[string]any{{"old_text": "a", "new_text": "b"}},
 	}), nil)
 	if err == nil {
 		t.Fatal("want missing file error")

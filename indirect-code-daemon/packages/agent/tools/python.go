@@ -91,7 +91,7 @@ type PythonArgs struct {
 	// Env adds extra environment variables (SANDBOX-safe keys only).
 	Env map[string]string `json:"env,omitempty"`
 	// Workdir overrides the run directory (jailed to CWD when sandboxed).
-	Workdir string `json:"workdir,omitempty"`
+	Workdir string `json:"work_dir,omitempty"`
 }
 
 // PythonTool executes Python 3 code or scripts. Like BashTool it is a
@@ -115,14 +115,14 @@ type PythonTool struct {
 func (t *PythonTool) Name() string { return "python" }
 
 func (t *PythonTool) Description() string {
-	return "Run Python 3 code (`code`) or a workspace script (`script` + `args`), with optional `stdin`, `env` and `workdir`. " +
-		"Use for data analysis, quick calculations, file transforms, or running project scripts. " +
-		"Stdout/stderr are captured separately; a non-zero exit is reported with the exit code. " +
-		"There is no timeout: if the execution still runs after 10 seconds it automatically moves to the background (you are notified with a job id; read the output with bg_check, wait with the sleep tool, stop it with bg_cancel). " +
-		"Only available when a Python 3 interpreter exists on this machine."
+	return fmt.Sprintf("Run Python 3 code (`code`) or a workspace script (`script` + `args`), with optional `stdin`, `env` and `work_dir`. "+
+		"Use for data analysis, quick calculations, file transforms, or running project scripts. "+
+		"Stdout/stderr are captured separately; a non-zero exit is reported with the exit code. "+
+		"There is no timeout: if the execution still runs after %s it automatically moves to the background (you are notified with a job id; read the output with bg_check, wait with bg_await, stop it with bg_cancel). "+
+		"Only available when a Python 3 interpreter exists on this machine.", humanDuration(AutoBackgroundAfter))
 }
 
-const pythonSchema = `{"type":"object","properties":{"code":{"type":"string","description":"Python snippet to run as python3 -c <code>. Mutually exclusive with script."},"script":{"type":"string","description":"Workspace-relative path to a .py file to run."},"args":{"type":"array","items":{"type":"string"},"description":"Arguments appended after the script path."},"stdin":{"type":"string","description":"Text piped to the process stdin."},"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra environment variables."},"workdir":{"type":"string","description":"Run directory (defaults to session CWD; jailed when sandboxed)."}}}`
+const pythonSchema = `{"type":"object","properties":{"code":{"type":"string","description":"Python snippet to run as python3 -c <code>. Mutually exclusive with script."},"script":{"type":"string","description":"Workspace-relative path to a .py file to run."},"args":{"type":"array","items":{"type":"string"},"description":"Arguments appended after the script path."},"stdin":{"type":"string","description":"Text piped to the process stdin."},"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra environment variables."},"work_dir":{"type":"string","description":"Run directory (defaults to session CWD; jailed when sandboxed)."}}}`
 
 func (t *PythonTool) Schema() json.RawMessage { return json.RawMessage(pythonSchema) }
 
@@ -152,7 +152,7 @@ func (t *PythonTool) Execute(ctx context.Context, raw json.RawMessage, progress 
 	if w := strings.TrimSpace(a.Workdir); w != "" {
 		dir = resolvePath(t.CWD, w)
 		if err := t.Sandbox.CheckPath(dir); err != nil {
-			return core.ToolResult{}, fmt.Errorf("python: invalid workdir: %v", err)
+			return core.ToolResult{}, fmt.Errorf("python: invalid work_dir: %v", err)
 		}
 	}
 
@@ -366,7 +366,7 @@ func pythonBackgroundNotice(jobID, label string, fullLog ...string) string {
 	fmt.Fprintf(&b, "To read the output, call bg_check with job_id %q (paged log: tail by default, offset/limit for more).\n", jobID)
 	fmt.Fprintf(&b, "To force-stop it early, call bg_cancel with job_id %q.\n", jobID)
 	b.WriteString("You are woken automatically when the task finishes — its completion notice is delivered to you then.\n")
-	b.WriteString("While waiting, use your sleep tool with waitingFor=job_id and a short summary - it ends early the moment this task finishes. Never wait with a terminal 'sleep N' command: that would itself detach into another background task and just add noise.")
+	b.WriteString("While waiting, call bg_await with waiting_for=<job_id> and a reason - it ends early the moment this task finishes. Do not use a shell sleep command to wait: inside a command it would detach into yet another background task and only add noise.")
 	return b.String()
 }
 

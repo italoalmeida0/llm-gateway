@@ -438,11 +438,11 @@ func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
 // map each time: a mode switch swaps the whole tool list so the model
 // only ever sees the active mode's tools.
 func (w *turnBridge) toolsForMode(mode string) core.Registry {
-	mode = normalizedOptions(SessionOptions{Mode: mode}).Mode
+	normalized := normalizedOptions(SessionOptions{Mode: mode}).Mode
 	if t, ok := w.reg["finish_entire_request"].(*tools.FinishEntireRequestTool); ok {
-		t.Mode = mode
+		t.Mode = normalized
 	}
-	return modeRegistry(w.reg, mode)
+	return modeRegistry(w.reg, normalized)
 }
 
 // approveTool blocks the worker until the human answers (or timeout/cancel).

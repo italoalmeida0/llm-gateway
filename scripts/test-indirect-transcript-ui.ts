@@ -148,7 +148,7 @@ try {
  });
  assert.deepEqual(ghosts,[],"snapshot left result-only ghost tools");
  assert.equal(await page.locator('#actual').getByText("tool",{exact:true}).count(),0,"rendered unnamed tool rows");
- for (const name of ["todo","summary","mark_task_as_complete","mark_plan_as_ready_to_execute"]) {
+ for (const name of ["todo","summary","finish_entire_request"]) {
   for (const failed of [false,true]) {
    await page.evaluate(({name})=>{
     const {t}=(window as any).transcriptTest;
@@ -156,7 +156,7 @@ try {
     t.applySnapshot("other",{status:"running",messages:[],transcript:{stream:"signals",seq:0}});
     let seq=0;
     const send=(event:any)=>t.handleAgentEvent("other",event,{stream:"signals",seq:++seq});
-    const args={for_user:"Accepted progress update",for_me:"Private tracking must stay hidden",comprehensive_summary:"Accepted final answer"};
+    const args={for_user:"Accepted progress update",for_me:"Private tracking must stay hidden",final_message_to_user:"Accepted final answer"};
     const message={id:"signal-message",role:"assistant",turnIndex:1,content:[{id:"signal-call",name,arguments:args}]};
     (window as any).signalTest={send,args,message,cursor:()=>({stream:"signals",seq})};
     send({type:"turn_start",step:1});

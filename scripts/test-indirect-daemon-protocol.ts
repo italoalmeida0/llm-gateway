@@ -10,10 +10,10 @@ async function run(label: string) {
   const work = join(dir, 'work'); mkdirSync(work);
   writeFileSync(join(work,'hello.txt'),'review fixture');
   const events:any[]=[]; const requests:any[]=[];
-  let socket:any; let scenario='text'; let toolIssued=false; let sleepCalls=0; let cancelBgId=''; let cancelBashed=false;
+  let socket:any; let scenario='text'; let toolIssued=false; let toolSeq=0; let sleepCalls=0; let cancelBgId=''; let cancelBashed=false;
   const sse=(name:string,input:unknown)=>{
     const items=[{type:'message_start',message:{id:'msg-review',model:'m',role:'assistant',usage:{input_tokens:10,output_tokens:0}}}];
-    if(name){items.push({type:'content_block_start',index:0,content_block:{type:'tool_use',id:'tool-review',name,input:{}}} as any);items.push({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify(input)}} as any);}
+    if(name){items.push({type:'content_block_start',index:0,content_block:{type:'tool_use',id:`tool-review-${++toolSeq}`,name,input:{}}} as any);items.push({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify(input)}} as any);}
     else{items.push({type:'content_block_start',index:0,content_block:{type:'text',text:''}} as any);items.push({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'review answer'}} as any);}
     items.push({type:'content_block_stop',index:0} as any,{type:'message_delta',delta:{stop_reason:name?'tool_use':'end_turn'},usage:{output_tokens:5}} as any,{type:'message_stop'} as any);
     return new Response(items.map(e=>`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),{headers:{'Content-Type':'text/event-stream'}});
@@ -26,9 +26,9 @@ async function run(label: string) {
         const body=await req.json();requests.push({scenario,body});
         if(scenario==='sleep') {
           sleepCalls++;
-          if(sleepCalls===1)return sse('sleep',{seconds:1,waitingFor:'bg_test',summary:'test wait'});
+          if(sleepCalls===1)return sse('bg_await',{max_wait_seconds:1,waiting_for:'bg_test',reason:'test wait'});
           if(sleepCalls===2)return new Response('temporary failure after sleep',{status:503});
-          return sse('mark_task_as_complete',{comprehensive_summary:'Recovered after sleep',summary:'Recovered after sleep'});
+          return sse('finish_entire_request',{final_message_to_user:`Recovered after sleep (#${sleepCalls})`});
         }
         if(scenario==='sleep_cancel'){
           // New sleep model: sleep only blocks on a RUNNING bg task. Detach
@@ -36,17 +36,17 @@ async function run(label: string) {
           // Explicit phase flag: the history contains bg_test (unknown-id
           // warning) from the earlier sleep scenario, so a regex would
           // match the wrong id and loop on immediate warnings.
-          if(!cancelBashed){cancelBashed=true;return sse('bash',{command:'sleep 300'});}
+          if(!cancelBashed){cancelBashed=true;return sse('bash',{command:'sleep_300'});}
           if(!cancelBgId){
             const hist=JSON.stringify(body?.messages||[]);
             const m=hist.match(/bg_[A-Za-z0-9]{8,}/);
-            if(m){cancelBgId=m[0];return sse('sleep',{seconds:360,waitingFor:cancelBgId,summary:'test wait'});}
+            if(m){cancelBgId=m[0];return sse('bg_await',{max_wait_seconds:360,waiting_for:cancelBgId,reason:'test wait'});}
             return sse('bash',{command:'sleep 30'});
           }
-          return sse('sleep',{seconds:360,waitingFor:cancelBgId,summary:'test wait'});
+          return sse('bg_await',{max_wait_seconds:360,waiting_for:cancelBgId,reason:'test wait'});
         }
         if((scenario==='approval'||scenario==='question')&&!toolIssued){toolIssued=true;return scenario==='approval'?sse('read',{path:join(work,'hello.txt')}):sse('question',{questions:[{header:'Choice',question:'Pick?',options:[{label:'One'}]}]});}
-        if(scenario==='approval'||scenario==='question')return sse('mark_task_as_complete',{comprehensive_summary:'Done',summary:'Done'});
+        if(scenario==='approval'||scenario==='question')return sse('finish_entire_request',{final_message_to_user:'Done'});
         return sse('',null);
       }
       return Response.json({success:true});

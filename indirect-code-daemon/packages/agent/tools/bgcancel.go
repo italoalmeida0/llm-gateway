@@ -57,10 +57,14 @@ func (t *BgCancelTool) Execute(ctx context.Context, raw json.RawMessage, _ func(
 	if strings.TrimSpace(a.JobID) == "" {
 		return core.ToolResult{}, fmt.Errorf("bg_cancel: job_id is required")
 	}
+	jobID := strings.TrimSpace(a.JobID)
+	if err := checkBgJobID("bg_cancel", jobID); err != nil {
+		return core.ToolResult{}, err
+	}
 	if t.Host == nil {
 		return core.ToolResult{}, fmt.Errorf("bg_cancel: host not configured")
 	}
-	out, err := t.Host.CancelBackgroundJob(t.SessionID, strings.TrimSpace(a.JobID))
+	out, err := t.Host.CancelBackgroundJob(t.SessionID, jobID)
 	if err != nil {
 		return core.ToolResult{}, err
 	}

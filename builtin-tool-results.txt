@@ -44,9 +44,9 @@ Onde os exemplos antigos abaixo viram atributos (mapeamento):
 - python "[exit N]  Took X" -> exit="N" duration="X" (corpo = stdout+stderr)
 - python "(no output)" -> info="no output"
 - bg_await "Waited X." / "Woken early…" / "[Note: …]" -> status= waited= info=
-- completion "Task marked as complete." -> info= (corpo vazio)
+- completion "Request finished; final_message_to_user is the only text the user reads." -> info= (corpo vazio)
 - fetch_url "fetched URL" + "…(truncated, N chars)" -> url= chars= truncated=
-- web_search "(cached)" / "N results for Q" / "(no results)" -> cached= query= total= info=
+- search_web "(cached)" / "N results for Q" / "(no results)" -> cached= query= total= info=
 - inspect "(N entries, capped at M)" -> total= truncated= info=
 - todo JSON continua no corpo (é dado), done/total/progress viram attrs.
 
@@ -180,7 +180,7 @@ ERRORS
 ================================================================================
 edit  (packages/agent/tools/edit.go)  [alias: "patch"]
 ================================================================================
-Args: {path (required), edits: [{oldText, newText}, ...] (required)}
+Args: {path (required), edits: [{old_text, new_text}, ...] (required)}
 Matching: exact first, then fuzzy (smart quotes/dashes/special spaces + trailing
 whitespace normalization, edit.go:252-325). All edits match the ORIGINAL file.
 
@@ -199,11 +199,11 @@ ERRORS
     Could not edit file: /x/y. binary file rejected.        edit.go:134
     Could not edit file: /x/y. file too large (>2MB).       edit.go:137
     Could not find the exact text in x. The old text must match exactly including all whitespace and newlines.            edit.go:329 (single edit)
-    Could not find edits[1] in x. The oldText must match exactly including all whitespace and newlines.                   edit.go:331 (multi edit)
+    Could not find edits[1] in x. The old_text must match exactly including all whitespace and newlines.                   edit.go:331 (multi edit)
     Found 3 occurrences of the text in x. The text must be unique. Please provide more context to make it unique.         edit.go:336
-    Found 3 occurrences of edits[1] in x. Each oldText must be unique. Please provide more context to make it unique.     edit.go:338
-    oldText must not be empty in x.                 edit.go:343
-    edits[1].oldText must not be empty in x.        edit.go:345
+    Found 3 occurrences of edits[1] in x. Each old_text must be unique. Please provide more context to make it unique.     edit.go:338
+    old_text must not be empty in x.                 edit.go:343
+    edits[1].old_text must not be empty in x.        edit.go:345
     No changes made to x. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.   edit.go:350
     No changes made to x. The replacements produced identical content.        edit.go:352
     edits[0] and edits[1] overlap in x. Merge them into one edit or target disjoint regions.   edit.go:426-428
@@ -275,7 +275,7 @@ TOOL ERRORS
 ================================================================================
 python  (packages/agent/tools/python.go) — only registered when Python 3 exists
 ================================================================================
-Args: {code | script (mutually exclusive), args, stdin, env, workdir}
+Args: {code | script (mutually exclusive), args, stdin, env, work_dir}
 
 SUCCESS (exit 0)
 ----------------
@@ -315,7 +315,7 @@ TOOL ERRORS
     python tool unavailable: no usable Python 3 interpreter on this host   python.go:133-135
     python: provide `code` or `script`              python.go:144
     python: `code` and `script` are mutually exclusive   python.go:147
-    python: invalid workdir: <err>                  python.go:155
+    python: invalid work_dir: <err>                  python.go:155
     python: invalid script path: <err>              python.go:176
     python: script must be a .py file               python.go:179
     python: script not found: scripts/x.py          python.go:182
@@ -327,7 +327,7 @@ TOOL ERRORS
 ================================================================================
 glob  (packages/agent/tools/glob.go)
 ================================================================================
-Args: {pattern (required), path, hidden, caseInsensitive, type ("f"|"d")}
+Args: {pattern (required), path, hidden, case_insensitive, type ("f"|"d")}
 Caps: 500 matches, depth 24. Honors .gitignore.
 
 SUCCESS
@@ -360,16 +360,16 @@ ERRORS
 ================================================================================
 search  (packages/agent/tools/search.go)
 ================================================================================
-Args: {pattern (required, RE2), path, include, exclude, maxResults (50/200),
-contextLines (0/20), caseSensitive, onlyMatching, count, filesOnly,
-respectGitignore (default true), maxFileBytes (default 1MB)}
-Default case-insensitive. Files >1MB (or maxFileBytes) are SKIPPED silently.
+Args: {pattern (required, RE2), path, include, exclude, max_results (50/200),
+context_lines (0/20), case_sensitive, only_matching, count, files_only,
+respect_gitignore (default true), max_file_bytes (default 1MB)}
+Default case-insensitive. Files >1MB (or max_file_bytes) are SKIPPED silently.
 
 SUCCESS (default mode)
 ----------------------
     3 matches (capped at 200 — narrow `path` or `include`)
     src/app.ts:12:5: export function boot() {
-      // context line (when contextLines > 0)
+      // context line (when context_lines > 0)
     src/app.ts:88:1: }
     (no matches)                                     search.go:327-341
     Format per match: <file>:<line>:<col>: <text>, context lines prefixed "  ".
@@ -381,7 +381,7 @@ SUCCESS (count mode)
     src/util.ts: 2 matches
     (capped at 200 — narrow `path` or `include`)      search.go:291-304
 
-SUCCESS (filesOnly mode)
+SUCCESS (files_only mode)
 ------------------------
     2 files
     src/app.ts
@@ -405,8 +405,8 @@ ERRORS
 ================================================================================
 inspect  (packages/agent/tools/inspect.go)
 ================================================================================
-Args: {path (default "."), depth (1, max 5), showHidden, gitStatus (default
-true), maxEntries (200, max 1000), include, exclude, caseInsensitive,
+Args: {path (default "."), depth (1, max 5), show_hidden, git_status (default
+true), max_entries (200, max 1000), include, exclude, case_insensitive,
 type ("f"|"d")}
 
 SUCCESS (directory tree)
@@ -421,7 +421,7 @@ SUCCESS (directory tree)
      files: "<indent><flag><name> (<size>, <N> lines, <mtime>)" inspect.go:254;
      line counts only for text files <256KB, inspect.go:250-253;
      git flags: "[M] ", "[A] ", "[D] ", "?? " or 4 spaces, inspect.go:296-301;
-     .git/node_modules/.hg/.svn always skipped, hidden skipped unless showHidden)
+     .git/node_modules/.hg/.svn always skipped, hidden skipped unless show_hidden)
 
 SUCCESS (single file)
 ---------------------
@@ -474,7 +474,7 @@ ERRORS
 ================================================================================
 fetch_url  (packages/agent/tools/fetchurl.go)
 ================================================================================
-Args: {url (required, http/https), maxChars (12000, max 50000), timeoutSec (20, max 60)}
+Args: {url (required, http/https), max_chars (12000, max 50000), timeout_sec (20, max 60)}
 Follows up to 5 redirects (re-guarded each hop). Body cap 5MB.
 
 SUCCESS (HTML article)
@@ -482,10 +482,10 @@ SUCCESS (HTML article)
     fetched https://example.com/post
     <extracted readable text>                         fetchurl.go:85
 
-SUCCESS (truncated at maxChars)
+SUCCESS (truncated at max_chars)
 -------------------------------
     fetched https://example.com/api
-    <maxChars of text>
+    <max_chars of text>
     …(truncated, 34211 chars total)                   fetchurl.go:81
 
 SUCCESS (plain text/JSON/code returned raw)
@@ -581,7 +581,7 @@ ERRORS
 ================================================================================
 bg_await  (packages/agent/tools/bgawait.go)
 ================================================================================
-Args: {seconds (1–3600), waitingFor (required bg_…), summary (required, ≤100 chars)}
+Args: {max_wait_seconds (1–3600), waiting_for (required bg_…), reason (required, ≤100 chars)}
 
 SUCCESS (full duration)
 -----------------------
@@ -611,15 +611,15 @@ CANCELLED (turn cancelled)
 ERRORS
 ------
     invalid args: <json err>                        bgawait.go:68
-    seconds must be between 1 and 3600              bgawait.go:71
-    waiting_for is required: pass the background task id (bg_…) this bg_await waits on   bgawait.go:75
+    max_wait_seconds must be between 1 and 3600     bgawait.go:71
+    waiting_for is required: pass the background task id (bg_…) this await waits on   bgawait.go:75
     reason is required: describe in ≤100 chars what you are waiting for   bgawait.go:79
 
 ================================================================================
 question  (packages/agent/tools/question.go)
 ================================================================================
 Args: {questions: [{header, question, options: [{label, description}],
-multiple, recommend, decideLater}]} (1–4 questions, ≤8 options each)
+multiple, recommend, decide_later}]} (1–4 questions, ≤8 options each)
 
 SUCCESS (the answers echo question order + option labels)
 ---------------------------------------------------------
@@ -660,12 +660,11 @@ ERRORS
 ================================================================================
 finish_entire_request  (packages/agent/tools/completion.go)
 ================================================================================
-Args: {notes (optional)}
+Args: {final_message_to_user (required)}
 
 SUCCESS
 -------
-    Task marked as complete.                        completion.go:30
-    Plan marked as ready to execute.                completion.go:53
+    Request finished; final_message_to_user is the only text the user reads.   completion.go:66
     (after these succeed the agent loop stops executing further tool calls,
      packages/core/agent.go:1074)
 
@@ -768,7 +767,7 @@ glob:
 search:
   match lines "file:line:col: text" .......... packages/agent/tools/search.go:334
   count mode header/rows ..................... search.go:291, 297
-  filesOnly mode ............................. search.go:311-316
+  files_only mode ............................ search.go:311-316
   "(no matches)" ............................. search.go:300, 316, 340
   "(capped at %d — narrow `path` or `include`)" search.go:303, 319, 330
   errors ..................................... search.go:80, 84, 121, 131, 135, 427
@@ -825,8 +824,7 @@ todo:
   errors ..................................... todo.go:35-57
 
 completion:
-  "Task marked as complete." ................. packages/agent/tools/completion.go:30
-  "Plan marked as ready to execute." ......... completion.go:53
+  "Request finished; final_message_to_user is ..."  packages/agent/tools/completion.go:66
 
 Background notices (turn wakeups):
   finished / finished with an error / orphaned cmd/daemon/bg_supervisor.go:551-556

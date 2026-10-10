@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -92,6 +93,32 @@ func findBgTask(rec *SessionRecord, jobID string) int {
 		}
 	}
 	return -1
+}
+
+// listBgTaskIDs renders this session's known background tasks for an
+// unknown-id error, so the model can recover with the right job_id
+// instead of inventing another one. Newest first, capped.
+func listBgTaskIDs(rec *SessionRecord) string {
+	if rec == nil || len(rec.BgTasks) == 0 {
+		return " This session has no background tasks — the job_id was invented; use the bg_… id from the detached command's placeholder."
+	}
+	const max = 8
+	var sb strings.Builder
+	sb.WriteString(" This session's background tasks:")
+	start := 0
+	if len(rec.BgTasks) > max {
+		start = len(rec.BgTasks) - max
+		sb.WriteString(fmt.Sprintf(" (last %d of %d)", max, len(rec.BgTasks)))
+	}
+	for _, t := range rec.BgTasks[start:] {
+		label := strings.TrimSpace(strings.SplitN(t.Label, "\n", 2)[0])
+		if len(label) > 60 {
+			label = label[:60] + "…"
+		}
+		fmt.Fprintf(&sb, "\n  %s [%s] %s", t.ID, t.Status, label)
+	}
+	sb.WriteString("\nPass one of these job_ids verbatim.")
+	return sb.String()
 }
 
 // upsertBgTask registers a task (or refreshes its label/status on replay).

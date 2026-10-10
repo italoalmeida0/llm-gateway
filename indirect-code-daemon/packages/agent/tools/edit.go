@@ -328,11 +328,255 @@ func countOccurrences(content, oldText string) int {
 	return strings.Count(fuzzyContent, fuzzyOldText)
 }
 
+// indentTolerantFind locates oldText in content when the only differences
+// are leading whitespace: every line of oldText must equal the
+// corresponding content line after stripping leading whitespace. The
+// match spans whole lines — from the first line's first non-space byte
+// back to its line start, through the last line's end. The last line's
+// trailing newline is included only when oldText itself ends with one,
+// so replacements keep the file's line structure 1:1. Substring matches
+// inside a line are handled by the exact/fuzzy stages; this stage only
+// fires for line-aligned blocks.
+func indentTolerantFind(content, oldText string) (index, length int, ok bool) {
+	oldLines := splitMatchLines(oldText)
+	if len(oldLines) == 0 {
+		return 0, 0, false
+	}
+	blankOnly := true
+	for _, l := range oldLines {
+		if strings.TrimSpace(l) != "" {
+			blankOnly = false
+			break
+		}
+	}
+	if blankOnly {
+		return 0, 0, false
+	}
+	wantTrailingNL := strings.HasSuffix(oldText, "\n")
+	contentLines := splitLinesWithEndings(content)
+	for i := 0; i+len(oldLines) <= len(contentLines); i++ {
+		match := true
+		for j := range oldLines {
+			fileLine := strings.TrimSuffix(contentLines[i+j], "\n")
+			if trimLeadingSpace(fileLine) != trimLeadingSpace(oldLines[j]) {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		start := 0
+		for k := 0; k < i; k++ {
+			start += len(contentLines[k])
+		}
+		end := start
+		for k := i; k < i+len(oldLines); k++ {
+			end += len(contentLines[k])
+		}
+		// Keep the last line's trailing newline in the span only when the
+		// old text ends with one (or the file line has none, e.g. EOF).
+		if end > start && content[end-1] == '\n' && !wantTrailingNL {
+			end--
+		}
+		return start, end - start, true
+	}
+	return 0, 0, false
+}
+
+// countIndentTolerantOccurrences counts non-overlapping line-aligned
+// matches of oldText modulo leading whitespace.
+func countIndentTolerantOccurrences(content, oldText string) int {
+	oldLines := splitMatchLines(oldText)
+	if len(oldLines) == 0 {
+		return 0
+	}
+	contentLines := splitLinesWithEndings(content)
+	count := 0
+	for i := 0; i+len(oldLines) <= len(contentLines); i++ {
+		match := true
+		for j := range oldLines {
+			fileLine := strings.TrimSuffix(contentLines[i+j], "\n")
+			if trimLeadingSpace(fileLine) != trimLeadingSpace(oldLines[j]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			count++
+			i += len(oldLines) - 1
+		}
+	}
+	return count
+}
+
+// splitMatchLines splits text into lines for indent-tolerant matching,
+// dropping the single empty element a trailing newline produces.
+func splitMatchLines(text string) []string {
+	lines := strings.Split(text, "\n")
+	if n := len(lines); n > 1 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	return lines
+}
+
+func trimLeadingSpace(s string) string {
+	return strings.TrimLeft(s, " \t")
+}
+
+// transferIndent re-indents newText to the matched file region: each new
+// line keeps its indentation relative to the corresponding old line,
+// shifted by the file-vs-old indentation difference, so an edit written
+// against re-indented text lands with the file's own indentation.
+func transferIndent(fileRegion, oldText, newText string) string {
+	oldLines := splitMatchLines(oldText)
+	fileLines := splitMatchLines(fileRegion)
+	trailingNL := strings.HasSuffix(newText, "\n")
+	newLines := splitMatchLines(newText)
+	if len(oldLines) == 0 || len(fileLines) == 0 {
+		return newText
+	}
+	for j, line := range newLines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		ref := j
+		if ref >= len(oldLines) {
+			ref = len(oldLines) - 1
+		}
+		if ref >= len(fileLines) {
+			ref = len(fileLines) - 1
+		}
+		ni, oi, fi := leadingSpace(line), leadingSpace(oldLines[ref]), leadingSpace(fileLines[ref])
+		newLines[j] = shiftLineIndent(ni, oi, fi) + line[len(ni):]
+	}
+	out := strings.Join(newLines, "\n")
+	if trailingNL {
+		out += "\n"
+	}
+	return out
+}
+
+// shiftLineIndent maps a new line's indent onto the file's indentation:
+// the indent beyond the old line's indent is kept after the file's indent;
+// a dedented new line drops the same number of indent characters from the
+// file's indent (clamped). Divergent indent styles fall back to the new
+// line's own indent.
+func shiftLineIndent(ni, oi, fi string) string {
+	switch {
+	case ni == oi:
+		return fi
+	case strings.HasPrefix(ni, oi): // deeper: keep the extra indent
+		return fi + ni[len(oi):]
+	case strings.HasPrefix(oi, ni): // shallower: drop the difference
+		drop := len(oi) - len(ni)
+		if drop >= len(fi) {
+			return ni
+		}
+		return fi[:len(fi)-drop]
+	default: // tabs vs spaces style mismatch: keep the new indent
+		return ni
+	}
+}
+
+func leadingSpace(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' && s[i] != '\t' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
 func getNotFoundError(path string, editIndex, totalEdits int) error {
 	if totalEdits == 1 {
 		return fmt.Errorf("Could not find the exact text in %s. The old text must match exactly including all whitespace and newlines.", path)
 	}
 	return fmt.Errorf("Could not find edits[%d] in %s. The old_text must match exactly including all whitespace and newlines.", editIndex, path)
+}
+
+// notFoundHint appends a nearest-match diagnosis to a not-found error:
+// it reports how many of the old_text's lines exist anywhere in the file
+// and quotes the closest region, so the model can see the file's real
+// bytes instead of guessing again.
+func notFoundHint(content, oldText string) string {
+	if strings.TrimSpace(oldText) == "" || content == "" {
+		return ""
+	}
+	lines := strings.Split(strings.Trim(normalizeToLF(oldText), "\n"), "\n")
+	var nonEmpty []string
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			nonEmpty = append(nonEmpty, l)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		return ""
+	}
+	present := 0
+	for _, l := range nonEmpty {
+		if strings.Contains(content, l) {
+			present++
+		}
+	}
+	hint := fmt.Sprintf(" Only %d of its %d lines exist in the file", present, len(nonEmpty))
+	if present == 0 {
+		hint = " None of its lines exist in the file"
+	}
+	if excerpt, line := closestLineExcerpt(content, nonEmpty); excerpt != "" {
+		hint += fmt.Sprintf("; the closest text is at line %d: %s", line, excerpt)
+	}
+	return hint + ". Re-read the file and copy the exact text from it."
+}
+
+// closestLineExcerpt returns the file line most similar to any old_text
+// line (longest common substring against the query), trimmed for display.
+func closestLineExcerpt(content string, queryLines []string) (string, int) {
+	fileLines := strings.Split(content, "\n")
+	bestScore, bestLine := 0, -1
+	for i, fl := range fileLines {
+		if len(strings.TrimSpace(fl)) < 3 {
+			continue
+		}
+		for _, ql := range queryLines {
+			s := lcsLength(fl, ql)
+			if s > bestScore {
+				bestScore, bestLine = s, i
+			}
+		}
+	}
+	if bestLine < 0 || bestScore < 3 {
+		return "", 0
+	}
+	excerpt := strings.TrimSpace(fileLines[bestLine])
+	if len(excerpt) > 80 {
+		excerpt = excerpt[:80] + "…"
+	}
+	return excerpt, bestLine + 1
+}
+
+// lcsLength returns the length of the longest common substring of a and
+// b (rolling DP; inputs are single lines so this stays cheap).
+func lcsLength(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	if len(ar) == 0 || len(br) == 0 {
+		return 0
+	}
+	prev := make([]int, len(br)+1)
+	best := 0
+	for i := 1; i <= len(ar); i++ {
+		cur := make([]int, len(br)+1)
+		for j := 1; j <= len(br); j++ {
+			if ar[i-1] == br[j-1] {
+				cur[j] = prev[j-1] + 1
+				if cur[j] > best {
+					best = cur[j]
+				}
+			}
+		}
+		prev = cur
+	}
+	return best
 }
 
 func getDuplicateError(path string, editIndex, totalEdits, occurrences int) error {
@@ -406,7 +650,23 @@ func applyEditsToNormalizedContent(normalizedContent string, edits []textEdit, p
 	for i, e := range normalizedEdits {
 		matchResult := fuzzyFindText(replacementBaseContent, e.OldText)
 		if !matchResult.found {
-			return "", "", getNotFoundError(path, i, len(normalizedEdits))
+			// Indentation-tolerant fallback: a line-aligned block that
+			// matches modulo leading whitespace is accepted and
+			// re-indented to the file's own whitespace.
+			if idx, ln, ok := indentTolerantFind(replacementBaseContent, e.OldText); ok {
+				if n := countIndentTolerantOccurrences(replacementBaseContent, e.OldText); n > 1 {
+					return "", "", getDuplicateError(path, i, len(normalizedEdits), n)
+				}
+				matchedEdits = append(matchedEdits, matchedEdit{
+					editIndex:  i,
+					matchIndex: idx,
+					matchLen:   ln,
+					newText:    transferIndent(replacementBaseContent[idx:idx+ln], e.OldText, e.NewText),
+				})
+				continue
+			}
+			hint := notFoundHint(replacementBaseContent, e.OldText)
+			return "", "", fmt.Errorf("%s%s", getNotFoundError(path, i, len(normalizedEdits)), hint)
 		}
 		occurrences := countOccurrences(replacementBaseContent, e.OldText)
 		if occurrences > 1 {

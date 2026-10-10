@@ -77,6 +77,7 @@ var v4ArgRenames = map[string]string{
 	"gitStatus":             "git_status",
 	"maxEntries":            "max_entries",
 	"workdir":               "work_dir",
+	"decideLater":           "decide_later",
 }
 
 // completionTools are the tool names whose legacy summary arguments collapse

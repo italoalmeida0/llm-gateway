@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
@@ -97,7 +98,95 @@ func (r Registry) Get(name string) (Tool, error) {
 		t, ok = r["edit"]
 	}
 	if !ok {
-		return nil, fmt.Errorf("unknown tool %q", name)
+		return nil, fmt.Errorf("unknown tool %q%s", name, r.suggest(name))
 	}
 	return t, nil
+}
+
+// suggest renders a recovery hint for an unknown tool name: the closest
+// registered name when one is clearly related, plus the full list so the
+// model can pick the right tool on the next call instead of guessing.
+func (r Registry) suggest(name string) string {
+	names := make([]string, 0, len(r))
+	for n := range r {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if best := closestName(name, names); best != "" {
+		return fmt.Sprintf(" — did you mean %q? Available tools: %s", best, strings.Join(names, ", "))
+	}
+	return ". Available tools: " + strings.Join(names, ", ")
+}
+
+// toolAliasHints maps tool names the model commonly reaches for that are not
+// registered (shell-style verbs, pre-rename vocabulary) to the registered tool
+// that serves the same job. Used only in the unknown-tool error hint.
+var toolAliasHints = map[string]string{
+	"grep":                          "search",
+	"find":                          "glob",
+	"cat":                           "read",
+	"ls":                            "inspect",
+	"sleep":                         "bg_await",
+	"web_search":                    "search_web",
+	"fetchurl":                      "fetch_url",
+	"mark_task_as_complete":         "finish_entire_request",
+	"mark_task_complete":            "finish_entire_request",
+	"mark_plan_as_ready_to_execute": "finish_entire_request",
+}
+
+// closestName returns the registered name closest to name: a known alias
+// first, then a small edit distance. "" when nothing is similar enough to be
+// a useful hint.
+func closestName(name string, names []string) string {
+	if alias, ok := toolAliasHints[name]; ok {
+		for _, n := range names {
+			if n == alias {
+				return alias
+			}
+		}
+	}
+	best, bestDist := "", 0
+	limit := 3
+	if len(name) <= 4 {
+		limit = 2
+	}
+	for _, n := range names {
+		d := editDistance(name, n)
+		if d <= limit && (best == "" || d < bestDist) {
+			best, bestDist = n, d
+		}
+	}
+	return best
+}
+
+// editDistance is the Levenshtein distance between a and b.
+func editDistance(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	prev := make([]int, len(br)+1)
+	cur := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		cur[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			cur[j] = min3(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(br)]
+}
+
+func min3(a, b, c int) int {
+	if b < a {
+		a = b
+	}
+	if c < a {
+		a = c
+	}
+	return a
 }

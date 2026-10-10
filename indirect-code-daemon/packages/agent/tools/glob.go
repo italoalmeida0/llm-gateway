@@ -42,7 +42,7 @@ const globSchema = `{"type":"object","properties":{"pattern":{"type":"string","d
 
 func (t *GlobTool) Name() string { return "glob" }
 func (t *GlobTool) Description() string {
-	return "Find files by NAME pattern (e.g. \"**/*.go\", \"*.json\", \"src/**/*.ts\"). Honors .gitignore rules. Params: `caseInsensitive` (find -iname), `type` (\"f\" files / \"d\" dirs, like find -type). For file CONTENT use search (glob finds names, search finds text) — then read or inspect the hits."
+	return "Find files by NAME pattern (e.g. \"**/*.go\", \"*.json\", \"src/**/*.ts\"). Honors .gitignore rules. Params: `case_insensitive` (find -iname), `type` (\"f\" files / \"d\" dirs, like find -type). For file CONTENT use search (glob finds names, search finds text) — then read or inspect the hits."
 }
 func (t *GlobTool) Schema() json.RawMessage { return json.RawMessage(globSchema) }
 

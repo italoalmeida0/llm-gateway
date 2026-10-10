@@ -4,7 +4,7 @@ import { Icon } from "../../components/icon";
 
 export interface PendingQuestion {
   id: string;
-  questions: {header:string; question:string; options:{label:string; description?:string}[]; multiple?:boolean; custom?:boolean; recommend?:string; decideLater?:boolean}[];
+  questions: {header:string; question:string; options:{label:string; description?:string}[]; multiple?:boolean; custom?:boolean; recommend?:string; decide_later?:boolean}[];
 }
 
 const DELEGATE_LABEL = "Decide later (do whatever you think is best)";
@@ -59,17 +59,17 @@ export function QuestionPanel(props: {
           <Show when={question().multiple}><p class="text-[11px] text-ink-500">Select all that apply.</p></Show>
           <For each={(() => {
             const opts = [...(question().options || [])];
-            const rec = (question() as any).recommend as string | undefined;
+            const rec = ((question() as any).recommend as string | undefined || "").trim().toLowerCase();
             if (rec && !question().multiple) {
-              const i = opts.findIndex((o) => o.label === rec);
+              const i = opts.findIndex((o) => o.label.trim().toLowerCase() === rec);
               if (i > 0) { const [r] = opts.splice(i, 1); opts.unshift(r); }
             }
             return opts;
           })()}>{(option) => <label class={`flex items-start gap-3 rounded-xl border px-3 py-2.5 cursor-pointer transition-colors ${draft().selected.includes(option.label) ? "border-ink-400 bg-elev" : "border-line hover:bg-elev/70"}`}>
             <input type={question().multiple ? "checkbox" : "radio"} name={`${props.request.id}-${step()}`} checked={draft().selected.includes(option.label)} onChange={(e) => choose(option.label, e.currentTarget.checked)} class="mt-0.5 accent-accent-500 shrink-0" />
-            <span class="min-w-0"><span class="block text-xs font-medium text-ink-200 break-words">{option.label}{(question() as any).recommend === option.label ? <span class="ml-1.5 rounded bg-accent-500/15 px-1.5 py-px text-[10px] font-medium text-accent-400">(Recommended)</span> : null}</span><Show when={option.description}><span class="block mt-1 text-xs text-ink-500 break-words">{option.description}</span></Show></span>
+            <span class="min-w-0"><span class="block text-xs font-medium text-ink-200 break-words">{option.label}{(question() as any).recommend && option.label.trim().toLowerCase() === ((question() as any).recommend as string).trim().toLowerCase() ? <span class="ml-1.5 rounded bg-accent-500/15 px-1.5 py-px text-[10px] font-medium text-accent-400">(Recommended)</span> : null}</span><Show when={option.description}><span class="block mt-1 text-xs text-ink-500 break-words">{option.description}</span></Show></span>
           </label>}</For>
-          <Show when={(question() as any).decideLater && !question().multiple}>
+          <Show when={(question() as any).decide_later && !question().multiple}>
             <button type="button" onClick={() => {
               if (props.submitting) return;
               if (step() < questions().length-1) { setDrafts(step(), {selected:[DELEGATE_LABEL], custom:false}); move(step()+1); }

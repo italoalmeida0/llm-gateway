@@ -4,11 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"llm-gateway/indirect-code-daemon/packages/core"
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
+
+// bgJobIDPattern matches the ids the daemon issues for detached
+// commands ("bg_" + lowercase hex). Anything else is a hallucinated or
+// copied-from-prose id and gets a self-explaining error up front.
+var bgJobIDPattern = regexp.MustCompile(`^bg_[0-9a-f]+$`)
+
+// checkBgJobID validates a bg job id and returns the model-facing error
+// for a malformed one.
+func checkBgJobID(tool, jobID string) error {
+	if bgJobIDPattern.MatchString(jobID) {
+		return nil
+	}
+	return fmt.Errorf("%s: %q is not a valid job_id — it must be the bg_… id from the detached command's placeholder (for example bg_1a2b3c4d5e6f7a8b). Never invent ids: call %s with the job_id reported when the command detached.", tool, jobID, tool)
+}
 
 // BgCheckArgs are the model-facing arguments of the bg_check tool.
 type BgCheckArgs struct {
@@ -69,15 +84,19 @@ func (t *BgCheckTool) Execute(ctx context.Context, raw json.RawMessage, _ func(s
 	if strings.TrimSpace(a.JobID) == "" {
 		return core.ToolResult{}, fmt.Errorf("bg_check: job_id is required")
 	}
+	jobID := strings.TrimSpace(a.JobID)
+	if err := checkBgJobID("bg_check", jobID); err != nil {
+		return core.ToolResult{}, err
+	}
 	if t.Host == nil {
 		return core.ToolResult{}, fmt.Errorf("bg_check: no background support")
 	}
-	res, err := t.Host.ReadBackgroundTask(t.SessionID, strings.TrimSpace(a.JobID), a.Offset, a.Limit)
+	res, err := t.Host.ReadBackgroundTask(t.SessionID, jobID, a.Offset, a.Limit)
 	if err != nil {
 		return core.ToolResult{}, err
 	}
 	if !res.Found {
-		return core.ToolResult{}, fmt.Errorf("bg_check: unknown background task %s", strings.TrimSpace(a.JobID))
+		return core.ToolResult{}, fmt.Errorf("bg_check: unknown background task %s", jobID)
 	}
 	var sb strings.Builder
 	var attrs []core.Attr

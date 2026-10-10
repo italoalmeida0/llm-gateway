@@ -29,11 +29,19 @@ import (
 //   - fractional values (2.5, "2.5") are rejected with a clear error;
 //   - null/absent fields keep their zero value (omitempty-safe);
 //   - unknown fields are ignored (same as json.Unmarshal).
+//
+// It also tolerates the mirror mistake for slices: some models emit a
+// single value where an array is expected ({"include": "*.ts"} instead of
+// {"include": ["*.ts"]}, or one edit object instead of an edits array), or
+// wrap the whole array in a JSON string. Fields the target struct declares
+// as slices are normalized: a lone value is wrapped into a one-element
+// array and a string holding a JSON array is parsed.
 func unmarshalArgs(raw json.RawMessage, target any) error {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return fmt.Errorf("empty args")
 	}
 	numericFields := numericFieldSet(target)
+	sliceFields := sliceFieldSet(target)
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
@@ -41,6 +49,7 @@ func unmarshalArgs(raw json.RawMessage, target any) error {
 		return err
 	}
 	normalizeNumbers(v, numericFields)
+	normalizeSlices(v, sliceFields)
 	fixed, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -143,6 +152,108 @@ func collectNumericFields(t reflect.Type, out map[string]bool) {
 			collectNumericFields(ft, out)
 		case reflect.Slice, reflect.Array:
 			collectNumericFields(ft.Elem(), out)
+		}
+	}
+}
+
+// normalizeSlices rewrites values for slice-typed fields into arrays:
+// a lone value (string or object) becomes a one-element array, and a
+// string that holds a JSON array ("[\"a\",\"b\"]") is parsed into that
+// array. Only keys the target struct declares as slices are touched, so
+// genuine string fields are never wrapped. Values that cannot possibly
+// decode (a non-JSON string for a struct-elem slice) are left alone so
+// the final unmarshal reports the type error.
+func normalizeSlices(v any, sliceFields map[string]bool) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, e := range t {
+			if sliceFields[k] {
+				switch n := e.(type) {
+				case string:
+					// "[...]" decodes as that array; "{...}" becomes a
+					// one-element array of that object; anything else
+					// ("*.ts") becomes a one-element array of the string.
+					var parsed any
+					if err := json.Unmarshal([]byte(n), &parsed); err == nil {
+						switch p := parsed.(type) {
+						case []any:
+							t[k] = p
+							normalizeNumbers(p, nil)
+							normalizeSlices(p, sliceFields)
+							continue
+						case map[string]any:
+							t[k] = []any{p}
+							normalizeSlices(p, sliceFields)
+							continue
+						}
+					}
+					t[k] = []any{n}
+				case map[string]any:
+					t[k] = []any{n}
+				case []any:
+					normalizeNumbers(n, nil)
+					normalizeSlices(n, sliceFields)
+				}
+				continue
+			}
+			switch n := e.(type) {
+			case map[string]any, []any:
+				normalizeSlices(n, sliceFields)
+			}
+		}
+	case []any:
+		for _, e := range t {
+			switch n := e.(type) {
+			case map[string]any, []any:
+				normalizeSlices(n, sliceFields)
+			}
+		}
+	}
+}
+
+// sliceFieldSet returns the JSON names of the target struct's slice
+// fields (any element type), so normalizeSlices knows which lone values
+// are safe to wrap into arrays. Nested structs are flattened by JSON
+// name, mirroring collectNumericFields.
+func sliceFieldSet(target any) map[string]bool {
+	out := map[string]bool{}
+	collectSliceFields(reflect.TypeOf(target), out)
+	return out
+}
+
+func collectSliceFields(t reflect.Type, out map[string]bool) {
+	if t == nil {
+		return
+	}
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" {
+			continue // unexported
+		}
+		tag := f.Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name == "" {
+			name = strings.ToLower(f.Name)
+		}
+		if name == "-" {
+			continue
+		}
+		ft := f.Type
+		for ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		switch ft.Kind() {
+		case reflect.Slice:
+			out[name] = true
+			collectSliceFields(ft.Elem(), out)
+		case reflect.Struct:
+			collectSliceFields(ft, out)
 		}
 	}
 }

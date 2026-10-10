@@ -1991,7 +1991,7 @@ func (a *sessionActor) onBgTaskRead(m bgTaskReadMsg) {
 	res := bgTaskReadResult{}
 	i := findBgTask(a.rec, m.JobID)
 	if i < 0 {
-		res.Error = "unknown background task " + m.JobID
+		res.Error = "unknown background task " + m.JobID + "." + listBgTaskIDs(a.rec)
 	} else {
 		t := &a.rec.BgTasks[i]
 		res.Found = true

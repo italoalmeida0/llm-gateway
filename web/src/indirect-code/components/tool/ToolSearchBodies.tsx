@@ -43,9 +43,9 @@ export function ToolSearchBodies(props: ToolPartProps) {
               <span class="text-ink-300">/{String(props.m.args().pattern || "")}/</span>
               <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">regex</span>
               {props.m.args().path && String(props.m.args().path) !== "." ? <span class="ml-1.5">in {String(props.m.args().path)}</span> : null}
-              {props.m.args().onlyMatching ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">only-matching</span> : null}
+              {props.m.args().only_matching ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">only-matching</span> : null}
               {props.m.args().count ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">count</span> : null}
-              {props.m.args().filesOnly ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">files-only</span> : null}
+              {props.m.args().files_only ? <span class="ml-1.5 rounded bg-ink-700/60 px-1 py-px text-[10px]">files-only</span> : null}
             </div>
             <CodeBlock embedded follow={() => props.m.open() && props.running} text={props.m.terminal().output || props.m.output() || props.m.prog() || ""} language={undefined} plain wrap={false} scrollKey={props.m.key()} />
           </Show>

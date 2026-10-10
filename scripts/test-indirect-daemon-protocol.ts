@@ -124,7 +124,7 @@ async function run(label: string) {
     scenario='sleep_cancel';
     const cancelFrom=events.length;
     send({type:'prompt',sessionId:sleepSID,text:'Sleep again',requestId:'cancel-send'});
-    // New sleep model: detach (10s) + sleep(waitingFor) start lands ~11s in.
+    // bg_await model: detach (10s) + bg_await(waiting_for) start lands ~11s in.
     // Two tool_execution_starts fire (bash, then the blocking sleep) —
     // cancelling on the first would kill the foreground bash pre-detach.
     assert(await wait(()=>events.slice(cancelFrom).filter(e=>e.type==='agent_event'&&e.event?.type==='tool_execution_start').length>=2,30000),'sleep did not start');

@@ -129,7 +129,7 @@ const units: any[] = [
     },
   },
   {
-    call: { toolId: "edit1", toolName: "edit", toolArgs: JSON.stringify({ path: "web/src/indirect-code/components/tool/ToolSearchBodies.tsx", oldText: "old", newText: "new" }) },
+    call: { toolId: "edit1", toolName: "edit", toolArgs: JSON.stringify({ path: "web/src/indirect-code/components/tool/ToolSearchBodies.tsx", old_text: "old", new_text: "new" }) },
     result: {
       toolResult: "118:            // TODO: structured view for the common case\n119:            <CodeBlock plain wrap={false} />",
       toolDetails: { env: { path: "web/src/indirect-code/components/tool/ToolSearchBodies.tsx" }, footer: facts("1 hunk applied") },
@@ -171,7 +171,7 @@ const units: any[] = [
     },
   },
   {
-    call: { toolId: "sleep1", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 42 }) },
+    call: { toolId: "await1", toolName: "bg_await", toolArgs: JSON.stringify({ max_wait_seconds: 42 }) },
     result: undefined,
   },
 ];

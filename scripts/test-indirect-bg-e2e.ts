@@ -210,7 +210,7 @@ function assertNoPageErrors(pageErrors: string[], consoleErrors: string[], where
   assert.deepEqual(fresh, [], `${where}: console errors: ${fresh.join(" | ")}`);
 }
 
-// A. finish flow: detach -> sleep(waitingFor+summary) -> bg_check read.
+// A. finish flow: detach -> bg_await(waiting_for+reason) -> bg_check read.
 // The tool row keeps the detach placeholder; the output lives in the
 // session BgTask (bg card + bg_check), with full runner logs retained on disk.
 async function scenarioFinish(ctx: any) {
@@ -220,7 +220,7 @@ async function scenarioFinish(ctx: any) {
   assert(sessionId, "create_session failed");
   ctx.ws.send(JSON.stringify({
     type: "prompt", hostId: ctx.hostId, sessionId, model: MODEL,
-    text: "Run `sleep 15 && echo done-gamma` with the bash tool. It will go to the background after 10s. Then use the sleep tool with waitingFor=<the bg task id> and a short summary to wait, then read the output with bg_check (job_id <id>), then reply exactly DONE-GAMMA plus the echo text.",
+    text: "Run `sleep 15 && echo done-gamma` with the bash tool. It will go to the background after 10s. Then use the bg_await tool with waiting_for=<the bg task id>, max_wait_seconds=60 and a short reason to wait, then read the output with bg_check (job_id <id>), then reply exactly DONE-GAMMA plus the echo text.",
   }));
   const t0 = Date.now();
   for (;;) {
@@ -277,7 +277,7 @@ async function scenarioCancel(ctx: any) {
   assert(sessionId, "create_session failed");
   ctx.ws.send(JSON.stringify({
     type: "prompt", hostId: ctx.hostId, sessionId, model: MODEL,
-    text: "Run `sleep 60 && echo done-never` with the bash tool. It will go to the background after 10s. Then use the sleep tool with waitingFor=<the bg task id> and a short summary to wait 90 seconds, then report what happened.",
+    text: "Run `sleep 60 && echo done-never` with the bash tool. It will go to the background after 10s. Then use the bg_await tool with waiting_for=<the bg task id>, max_wait_seconds=90 and a short reason to wait, then report what happened.",
   }));
   let jobId = "";
   {

@@ -109,10 +109,10 @@ export function ApprovalCard(props: ApprovalCardProps) {
                         {(e: any) => (
                           <>
                             <div class="px-2.5 py-1 bg-rose-500/10 text-rose-300 whitespace-pre-wrap break-all max-h-20 overflow-y-auto">
-                              {(String(e.oldText || "").split("\n").slice(0, 6).join("\n"))}
+                              {(String(e.old_text || "").split("\n").slice(0, 6).join("\n"))}
                             </div>
                             <div class="px-2.5 py-1 bg-emerald-500/10 text-emerald-300 whitespace-pre-wrap break-all max-h-20 overflow-y-auto">
-                              {(String(e.newText || "").split("\n").slice(0, 6).join("\n"))}
+                              {(String(e.new_text || "").split("\n").slice(0, 6).join("\n"))}
                             </div>
                           </>
                         )}

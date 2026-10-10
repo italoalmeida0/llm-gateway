@@ -38,7 +38,7 @@ type globArgs struct {
 	Type string `json:"type,omitempty"`
 }
 
-const globSchema = `{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match files against (e.g. \"**/*.go\", \"*.json\", \"src/**/*.ts\")"},"path":{"type":"string","description":"Directory to search within, relative to CWD (defaults to \".\")"},"hidden":{"type":"boolean","description":"Whether to include hidden files and directories (default false)"},"_caseInsensitive_":{"type":"boolean","description":"Match names case-insensitively (find -iname, default false)"},"type":{"type":"string","description":"Entry type filter: \"f\" files only, \"d\" directories only (find -type, default both)"}},"required":["pattern"]}`
+const globSchema = `{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match files against (e.g. \"**/*.go\", \"*.json\", \"src/**/*.ts\")"},"path":{"type":"string","description":"Directory to search within, relative to CWD (defaults to \".\")"},"hidden":{"type":"boolean","description":"Whether to include hidden files and directories (default false)"},"case_insensitive":{"type":"boolean","description":"Match names case-insensitively (find -iname, default false)"},"type":{"type":"string","description":"Entry type filter: \"f\" files only, \"d\" directories only (find -type, default both)"}},"required":["pattern"]}`
 
 func (t *GlobTool) Name() string { return "glob" }
 func (t *GlobTool) Description() string {

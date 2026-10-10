@@ -15,7 +15,7 @@ func TestUnmarshalArgsWholeFloats(t *testing.T) {
 		t.Fatalf("unmarshalArgs inspect: %v", err)
 	}
 	if ia.Depth != 2 || ia.MaxEntries != 200 {
-		t.Fatalf("got %+v, want depth=2 maxEntries=200", ia)
+		t.Fatalf("got %+v, want depth=2 max_entries=200", ia)
 	}
 
 	var ra struct {

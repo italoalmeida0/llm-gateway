@@ -39,7 +39,7 @@ export function ToolUnitHeader(props: ToolPartProps) {
         <span class="inline-flex items-center gap-2 min-w-0 flex-1" data-rc-tip={targetPath() ? absoluteRemotePath(targetPath(), props.ctx.activeSession()?.cwd || "", props.ctx.projects().find((p: { protected?: boolean }) => p.protected)?.path) : undefined}>
           <Show when={targetPath()}><FileIcon path={targetPath()} /></Show>
           <Show when={props.m.name() === "bash" || props.m.name() === "python"} fallback={
-            <span class="truncate text-ink-200 font-medium min-w-0">{props.m.name() === "sleep" ? props.m.sleepLabel() : props.m.sum().target}</span>
+            <span class="truncate text-ink-200 font-medium min-w-0">{props.m.name() === "bg_await" ? props.m.sleepLabel() : props.m.sum().target}</span>
           }>
             <span class="truncate text-ink-200 min-w-0 text-[12.5px]"><ShellCmd text={collapseCwd(props.m.bashHeaderCmd(), props.ctx.activeSession()?.cwd || "")} /></span>
           </Show>
@@ -62,7 +62,7 @@ export function ToolUnitHeader(props: ToolPartProps) {
         <span class="text-[11px] text-ink-600 shrink-0">{props.m.sum().stat}</span>
       </Show>
       <Show when={props.m.elapsed() && !props.m.isDetachedBg()}><span data-tool-duration class="text-[11px] text-ink-500 tabular-nums shrink-0">{props.m.elapsed()}</span></Show>
-      {/* Header-only rows (sleep) keep the clickable row but hide the
+      {/* Header-only rows (bg_await) keep the clickable row but hide the
           chevron: there is never a body to reveal. */}
       <Show when={props.m.expandable()}>
         <Iconify

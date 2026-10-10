@@ -46,7 +46,7 @@ func (t *FetchURLTool) Description() string {
 	return "Fetch a URL and extract readable text. Params: `url` (required, http/https only — private IPs and file:// blocked), `max_chars` (default 12000, max 50000), `timeout_sec` (default 20, max 60). HTML articles extract main content; plain text/code returned raw; PDFs/media refused. Follows up to 5 redirects."
 }
 
-const fetchURLSchema = `{"type":"object","required":["url"],"properties":{"url":{"type":"string","description":"URL to fetch (http/https only)."},"_maxChars_":{"type":"number","description":"Max extracted chars (default 12000, max 50000)."},"_timeoutSec_":{"type":"number","description":"Request timeout in seconds (default 20, max 60)."}}}`
+const fetchURLSchema = `{"type":"object","required":["url"],"properties":{"url":{"type":"string","description":"URL to fetch (http/https only)."},"max_chars":{"type":"number","description":"Max extracted chars (default 12000, max 50000)."},"timeout_sec":{"type":"number","description":"Request timeout in seconds (default 20, max 60)."}}}`
 
 func (t *FetchURLTool) Schema() json.RawMessage { return json.RawMessage(fetchURLSchema) }
 

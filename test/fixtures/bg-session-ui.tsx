@@ -66,8 +66,8 @@ function ToolRows() {
       <div data-testid="row-sleep">
         <ToolRow
           unit={{
-            call: { type: "tool_call", toolId: "c-sleep", toolName: "sleep", toolArgs: JSON.stringify({ seconds: 90, waitingFor: "bg_1", summary: "waiting for build" }) },
-            result: { type: "tool_result", toolId: "c-sleep", toolResult: "waiting for build\nSlept 1m30s." },
+            call: { type: "tool_call", toolId: "c-sleep", toolName: "bg_await", toolArgs: JSON.stringify({ max_wait_seconds: 90, waiting_for: "bg_1", reason: "waiting for build" }) },
+            result: { type: "tool_result", toolId: "c-sleep", toolResult: "waiting for build\nWaited 1m30s." },
           }}
         />
       </div>

@@ -16,7 +16,7 @@ func TestAssistantTextDiscardedBeforePersistenceAndNextRequest(t *testing.T) {
 		t.Run(completion, func(t *testing.T) {
 			const speech = "This speech must never enter the transcript."
 			const thinking = "Private reasoning survives."
-			args := json.RawMessage(`{"comprehensive_summary":"Visible final answer"}`)
+			args := json.RawMessage(`{"final_message_to_user":"Visible final answer"}`)
 			calls := 0
 			client := persistentClient{stream: func(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
 				calls++

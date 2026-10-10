@@ -7,11 +7,18 @@ export function ToolbarSend() {
   const s = useSession();
   const t = useTranscriptCtx();
   return (
-<>
-<div class="flex shrink-0 items-center">
-  <Show
-    when={t.sessionStatus() === "running"}
-    fallback={
+    <div class="flex shrink-0 items-center gap-1.5">
+      <Show when={t.sessionStatus() === "running"}>
+        <button
+          onClick={t.cancelCurrentTurn}
+          disabled={t.turnActivity()?.status === "cancelling"}
+          class="ui-button ui-button-danger ui-button-sm w-8 h-8 p-0 disabled:opacity-60"
+          data-rc-tip={t.turnActivity()?.status === "cancelling" ? "Stopping…" : "Stop"}
+          aria-label={t.turnActivity()?.status === "cancelling" ? "Stopping turn" : "Stop"}
+        >
+          <Iconify icon="lucide:square" size={13} />
+        </button>
+      </Show>
       <button
         onClick={c.sendPrompt}
         disabled={
@@ -26,19 +33,6 @@ export function ToolbarSend() {
       >
         <Iconify icon="lucide:arrow-right" size={14} />
       </button>
-    }
-  >
-    <button
-      onClick={t.cancelCurrentTurn}
-      disabled={t.turnActivity()?.status === "cancelling"}
-      class="ui-button ui-button-danger ui-button-sm w-8 h-8 p-0 disabled:opacity-60"
-      data-rc-tip={t.turnActivity()?.status === "cancelling" ? "Stopping…" : "Stop"}
-      aria-label={t.turnActivity()?.status === "cancelling" ? "Stopping turn" : "Stop"}
-    >
-      <Iconify icon="lucide:square" size={13} />
-    </button>
-  </Show>
-</div>
-</>
+    </div>
   );
 }

@@ -1523,6 +1523,33 @@ func (s *wsServer) onCheckWorkspace(requestID, sessionID, projectID string) {
 }
 
 func (s *wsServer) onGetTurnChanges(sessionID, requestID string) {
+	// Ask the actor first: it serves committed balloons PLUS the live
+	// preview of the running turn. A mid-turn refresh must not replace the
+	// floating live balloon with an empty committed list (the balloon
+	// vanished until the next tool event repainted it).
+	res := s.sessions.route(sessionID, true)
+	if res.Error == "" {
+		rr := make(chan any, 1)
+		select {
+		case res.Inbox <- Envelope{Payload: readReqMsg{What: "turnChanges", Reply: rr}}:
+			select {
+			case r := <-rr:
+				if rd, ok := r.(readResult); ok && rd.Error == "" {
+					if out, ok := rd.Payload.(map[string]any); ok {
+						msg := map[string]any{"type": "turn_changes", "hostId": s.host(), "sessionId": sessionID, "requestId": requestID}
+						for k, v := range out {
+							msg[k] = v
+						}
+						s.emit(msg)
+						return
+					}
+				}
+			case <-time.After(replyTimeout):
+			}
+		case <-time.After(replyTimeout):
+		}
+	}
+	// Fallback (passivated/busy): disk state, committed balloons only.
 	rec := s.readRecord(sessionID)
 	if rec == nil {
 		return

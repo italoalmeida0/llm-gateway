@@ -75,9 +75,9 @@ func PruneOldToolResults(msgs []provider.Message) []provider.Message {
 				if tb, ok := inner.(provider.TextBlock); ok {
 					if len(tb.Text) > ToolOutputMaxChars {
 						if isRecentTurn {
-							// In recent turn but over budget: truncate
+							// In recent turn but over budget: truncate (rune-safe)
 							prunedInner = append(prunedInner, provider.TextBlock{
-								Text:             tb.Text[:ToolOutputMaxChars] + "\n[truncated]",
+								Text:             truncateRunes(tb.Text, ToolOutputMaxChars) + "\n[truncated]",
 								ThoughtSignature: tb.ThoughtSignature,
 							})
 						} else {

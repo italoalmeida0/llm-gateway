@@ -15,10 +15,8 @@ const defaults: AgentSettings = {
   autoCompactPercent: 80,
   noAutoTitle: false,
   jailByDefault: false,
-  autoSwarmEnabled: false,
   insecureTls: false,
   httpProxy: "",
-  maxExecutionTimeSec: 600,
 };
 
 /** Settings edits are local drafts. Only the daemon mirror feeds the composer. */
@@ -75,10 +73,8 @@ export function createSettings(opts: {
           80,
         noAutoTitle: s.noAutoTitle ?? s.no_auto_title ?? false,
         jailByDefault: s.jailByDefault ?? s.jail_by_default ?? false,
-        autoSwarmEnabled: s.autoSwarmEnabled ?? s.auto_swarm_enabled ?? false,
         insecureTls: s.insecureTls ?? s.insecure ?? false,
         httpProxy: s.httpProxy ?? s.http_proxy ?? "",
-        maxExecutionTimeSec: 600,
       });
       setBaseRevision(doc?.revision);
     });
@@ -199,7 +195,6 @@ export function createSettings(opts: {
         auto_compact_threshold: s.autoCompactPercent,
         no_auto_title: s.noAutoTitle,
         jail_by_default: s.jailByDefault,
-        auto_swarm_enabled: s.autoSwarmEnabled,
         insecure: s.insecureTls,
         http_proxy: s.httpProxy,
       },

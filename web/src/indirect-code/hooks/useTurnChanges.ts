@@ -143,6 +143,17 @@ export function createTurnChanges(opts: {
       .map((b: any) => ({ ...b, live: false }));
     if (typeof msg?.live?.turnIndex === "number" && msg.live.files?.length > 0 &&
       !list.some((b) => b.turnIndex === msg.live.turnIndex)) list.push({ ...msg.live, live: true });
+    // A response WITHOUT a live half (older daemon, passivated session or
+    // disk fallback) must not replace the floating live balloon with an
+    // empty list — that made the balloon vanish on Refresh until the next
+    // tool event repainted it. Keep the current live row when the reply
+    // does not cover its turn.
+    const liveTurns = new Set(list.filter((b) => b.live).map((b) => b.turnIndex));
+    for (const b of untrack(() => state.balloons)) {
+      if (b.live && !liveTurns.has(b.turnIndex) && !list.some((x) => x.turnIndex === b.turnIndex)) {
+        list.push(b);
+      }
+    }
     // Apply once: clearing and re-adding live rows would remount their open diffs.
     setBalloons(list.sort((a, b) => a.turnIndex - b.turnIndex));
   }

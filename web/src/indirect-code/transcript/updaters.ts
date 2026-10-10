@@ -114,7 +114,9 @@ export function mergeUsage(
       inTok: src.input_tokens ?? src.inTok ?? prev[sessionId]?.inTok ?? 0,
       outTok: src.output_tokens ?? src.outTok ?? prev[sessionId]?.outTok ?? 0,
       cacheTok:
-        (src.cache_read_tokens ?? 0) + (src.cache_write_tokens ?? src.cache_creation_tokens ?? 0),
+        src.cache_read_tokens == null && src.cache_write_tokens == null && src.cache_creation_tokens == null
+          ? (prev[sessionId]?.cacheTok ?? 0)
+          : (src.cache_read_tokens ?? 0) + (src.cache_write_tokens ?? src.cache_creation_tokens ?? 0),
       reasoningTok: src.reasoning_tokens ?? prev[sessionId]?.reasoningTok ?? 0,
       costUsd: src.cost_usd ?? prev[sessionId]?.costUsd ?? 0,
       costInUsd: src.cost_input_usd ?? prev[sessionId]?.costInUsd ?? 0,
@@ -209,7 +211,9 @@ export function upsertToolCall(prev: ChatMessage[], callId: string, name: string
       blocks[bi] = { ...blocks[bi], toolName: name || blocks[bi].toolName, toolArgs: argsStr || blocks[bi].toolArgs };
       return [...prev.slice(0, i), { ...m, blocks }, ...prev.slice(i + 1)];
     }
-    break;
+    // Keep scanning: the call card may live in an EARLIER carrier (a
+    // steering/retry opened a new one). Stopping at the first assistant
+    // would duplicate the card.
   }
   const toolBlock: ContentBlock = {
     type: "tool_call",
@@ -269,8 +273,13 @@ export function appendToolResult(
 ): ChatMessage[] {
   if (messageId) return updateMessage(prev,messageId,m=>appendToolResult([m],callId,result,isError,startedAt,durationMs,details)[0]);
   const target = prev.findLastIndex(m => m.role === "assistant" && m.blocks.some(b => b.toolId === callId));
-  const index = target >= 0 ? target : prev.length - 1;
-  const carrier = prev[index];
+  // An orphan result (call cut by edit/regenerate, or a late event) must not
+  // pollute an unrelated completed bubble: only the ACTIVE streaming carrier
+  // may host it without a matching call card; otherwise open a dedicated one.
+  const last = prev[prev.length - 1];
+  const fallback = target < 0 && last?.role === "assistant" && last.streaming ? prev.length - 1 : -1;
+  const index = target >= 0 ? target : fallback;
+  const carrier = index >= 0 ? prev[index] : undefined;
   const detailed = result == null ? null : stripToolEnvelopeDetailed(result);
   const env = detailed && Object.keys(detailed.attrs).length ? { ...(details as any), env: detailed.attrs, footer: detailed.footer } : details;
   const resBlock: ContentBlock = {

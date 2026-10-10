@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"llm-gateway/indirect-code-daemon/packages/provider"
 )
@@ -231,11 +232,24 @@ func toolResultText(b provider.ToolResultBlock) string {
 	return sb.String()
 }
 
+// truncateRunes cuts s to at most max bytes without splitting a multibyte
+// rune (a byte cut injects invalid UTF-8 into prompts and persisted text).
+func truncateRunes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 func truncateForSummary(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "...[truncated]"
+	return truncateRunes(s, max) + "...[truncated]"
 }
 
 // SummarizationSystemPrompt configures the summarizer:

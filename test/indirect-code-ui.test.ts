@@ -600,7 +600,9 @@ describe("Indirect Code transcript updaters", () => {
   test("mergeUsage keeps previous buckets when the payload omits them", () => {
     const prev = { s: { inTok: 1, outTok: 2, cacheTok: 3, reasoningTok: 4, costUsd: 5 } };
     const next = mergeUsage(prev, "s", { output_tokens: 9 }, null);
-    expect(next.s).toEqual({ inTok: 1, outTok: 9, cacheTok: 0, reasoningTok: 4, costUsd: 5, costInUsd: 0, costCacheUsd: 0, costOutUsd: 0 });
+    // cacheTok is a kept bucket like inTok/reasoningTok/cost*: a payload with
+    // NO cache fields at all must not zero it (only explicit zeros do).
+    expect(next.s).toEqual({ inTok: 1, outTok: 9, cacheTok: 3, reasoningTok: 4, costUsd: 5, costInUsd: 0, costCacheUsd: 0, costOutUsd: 0 });
     const split = mergeUsage(prev, "s", { output_tokens: 9, cost_input_usd: 0.1, cost_cache_usd: 0.2, cost_output_usd: 0.3 }, null);
     expect(split.s).toMatchObject({ costInUsd: 0.1, costCacheUsd: 0.2, costOutUsd: 0.3 });
     expect(mergeUsage(prev, "", {}, null)).toBe(prev);
@@ -1032,6 +1034,25 @@ describe("balloon tail cuts", () => {
     expect(tc.balloons().map((b) => b.turnIndex)).toEqual([1, 3]);
     tc.dropAbove(0);
     expect(tc.balloons().map((b) => b.turnIndex)).toEqual([3]);
+  });
+
+  test("a refresh reply without a live half keeps the floating live balloon", async () => {
+    const { createTurnChanges } = await import("../web/src/indirect-code/hooks/useTurnChanges");
+    const tc = createTurnChanges({ send: () => {}, getSessionId: () => "s", toast: () => {} });
+    // Live balloon of the running turn (from turn_file_changes live=true).
+    tc.noteBalloon({ turnIndex: 5, files: [{ path: "a.ts" }] }, true);
+    expect(tc.balloons().map((b) => `${b.turnIndex}:${b.live}`)).toEqual(["5:true"]);
+    // Refresh reply: committed balloons only (empty mid-turn), no live half.
+    // The floating balloon must survive — it used to vanish here.
+    tc.noteTurnChanges({ requestId: "r1", balloons: [] });
+    expect(tc.balloons().map((b) => `${b.turnIndex}:${b.live}`)).toEqual(["5:true"]);
+    // A reply that DOES carry the live half replaces it.
+    tc.noteTurnChanges({ requestId: "r2", balloons: [], live: { turnIndex: 5, files: [{ path: "a.ts" }, { path: "b.ts" }] } });
+    expect(tc.balloons()).toHaveLength(1);
+    expect(tc.balloons()[0].files).toHaveLength(2);
+    // Committed balloons merge without touching the live row.
+    tc.noteTurnChanges({ requestId: "r3", balloons: [{ turnIndex: 4, files: [{ path: "old.ts" }] }], live: { turnIndex: 5, files: [{ path: "a.ts" }] } });
+    expect(tc.balloons().map((b) => b.turnIndex)).toEqual([4, 5]);
   });
 
   test("undoTurn prompts for confirmation before sending and honors cancellation", async () => {

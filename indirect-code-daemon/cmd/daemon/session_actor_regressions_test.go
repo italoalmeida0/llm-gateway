@@ -125,6 +125,9 @@ func TestForkResendFirstAndToolEndedBoundaryPreservesJail(t *testing.T) {
 	msgs := darMsgs(4)
 	msgs = append(msgs[:2], append([]provider.Message{{Role: provider.RoleTool, TurnIndex: 1}}, msgs[2:]...)...)
 	a, st := darActor(t, &SessionRecord{ID: "sess1", Messages: msgs, TurnSeq: 2, Jailed: true})
+	// The fork's actor answers the seeded start (route stub): the reply
+	// reports success only after the turn actually starts.
+	a.routeFn = answeringForkRoute()
 	for _, turn := range []int{1, 2} {
 		reply := make(chan any, 1)
 		a.onForkAndResend(forkAndResendMsg{TurnID: turn, Text: "forked", Reply: reply})

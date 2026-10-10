@@ -93,6 +93,11 @@ type sessionActor struct {
 	// pendingBalloon holds the finished file-changes balloon until the
 	// finalizer appends it with the true message count.
 	pendingBalloon *filetrack.TurnChanges
+	// liveIncoming is the worker's latest file-tracker snapshot (WAL
+	// walTypeIncoming). It rebuilds the LIVE file-changes balloon for
+	// get_turn_changes while the turn runs — without it a mid-turn refresh
+	// only sees committed balloons (empty) and the live balloon vanishes.
+	liveIncoming []filetrack.TrackedFile
 
 	// approvalWaiters correlates workerApprovalReqMsg ids to worker channels.
 	approvalWaiters map[string]chan approvalOutcome
@@ -574,16 +579,30 @@ func (a *sessionActor) onQueueOp(m queueOpMsg) {
 			m.Reply <- queueOpResult{Error: "queue_full"}
 			return
 		}
+		// Validate like the direct prompt path: a queued item must never
+		// carry attachment ids that do not belong to this conversation
+		// (they would silently vanish at promote time).
+		if err := validateAttachmentIDs(a.rec, m.AttachmentIDs); err != nil {
+			m.Reply <- queueOpResult{Error: err.Error()}
+			return
+		}
 		a.rec.Queue = append(a.rec.Queue, QueuedMessage{ID: randomID8(), Text: m.Text, AttachmentIDs: m.AttachmentIDs, Model: m.Model, YOLO: m.YOLO, CreatedAt: time.Now().UnixMilli()})
 	case "update":
 		found := false
 		for i, q := range a.rec.Queue {
 			if q.ID == m.ID {
-				if m.Text != "" {
-					a.rec.Queue[i].Text = m.Text
-				}
 				if m.AttachmentIDs != nil {
+					// Full-item update (the wire protocol always sends text +
+					// attachments together): an empty text CLEARS the item.
+					if err := validateAttachmentIDs(a.rec, m.AttachmentIDs); err != nil {
+						m.Reply <- queueOpResult{Error: err.Error()}
+						return
+					}
+					a.rec.Queue[i].Text = m.Text
 					a.rec.Queue[i].AttachmentIDs = m.AttachmentIDs
+				} else if m.Text != "" {
+					// Partial update: empty text means "no change".
+					a.rec.Queue[i].Text = m.Text
 				}
 				if m.Model != "" {
 					a.rec.Queue[i].Model = m.Model
@@ -817,6 +836,7 @@ func (a *sessionActor) finishTurn(ok bool) {
 		a.rec.FileBalloons = append(a.rec.FileBalloons, b)
 		a.pendingBalloon = nil
 	}
+	a.liveIncoming = nil // the live preview is superseded by the committed balloon
 	a.rec.Status = "idle"
 	a.rec.ApprovalDeadlineUnix = 0
 	a.finishOK = ok
@@ -1302,9 +1322,14 @@ func (a *sessionActor) applyForkAndResend(m forkAndResendMsg) {
 		replyForkResend(m.Reply, forkResendResult{Error: "Could not save the fork: " + err.Error()})
 		return
 	}
+	// Start the seeded turn in the FORK (its actor spawns on this message)
+	// BEFORE answering: the client must learn whether the turn actually
+	// started. The fork and its user row are already durable either way.
+	if err := a.startForkedSeeded(fr.NewID, newTurn, m.Model, m.YOLO, ids); err != nil {
+		replyForkResend(m.Reply, forkResendResult{NewID: fr.NewID, Error: "Fork created but the turn did not start: " + err.Error()})
+		return
+	}
 	replyForkResend(m.Reply, forkResendResult{NewID: fr.NewID})
-	// Start the seeded turn in the FORK (its actor spawns on this message).
-	a.startForkedSeeded(fr.NewID, newTurn, m.Model, m.YOLO, ids)
 }
 
 // seededUserMessage is the actor-side equivalent of PromptWithMeta's
@@ -1397,25 +1422,31 @@ func (a *sessionActor) copySelectedForkAttachments(rec *SessionRecord, ids []str
 }
 
 // startForkedSeeded routes a seededStartMsg to the fork's actor (spawned
-// transparently by the supervisor).
-func (a *sessionActor) startForkedSeeded(forkID string, turnSeq int, model string, yolo bool, attachIDs []string) {
+// transparently by the supervisor) and reports whether the turn actually
+// started. A failure here never loses the fork's durable user row, but the
+// caller must surface it instead of claiming success.
+func (a *sessionActor) startForkedSeeded(forkID string, turnSeq int, model string, yolo bool, attachIDs []string) error {
 	inbox, control, ok := a.sessionRoute(forkID)
 	_ = control
 	if !ok {
-		return
+		return fmt.Errorf("fork session is not routable")
 	}
 	reply := make(chan any, 1)
 	select {
 	case inbox <- Envelope{SessionID: forkID, Payload: seededStartMsg{TurnSeq: turnSeq, Model: model, YOLO: yolo, AttachmentIDs: attachIDs, Reply: reply}}:
 	case <-time.After(replyTimeout):
+		return fmt.Errorf("fork session busy")
 	}
 	select {
 	case r := <-reply:
 		if res, ok := r.(seededStartResult); ok && res.Error != "" {
 			trace("fork.seeded.start_failed", map[string]any{"sid": forkID, "error": res.Error})
+			return fmt.Errorf("%s", res.Error)
 		}
 	case <-time.After(replyTimeout):
+		return fmt.Errorf("fork session busy")
 	}
+	return nil
 }
 
 // onSeededStart starts a turn whose user row already exists (fork&resend
@@ -1661,6 +1692,21 @@ func (a *sessionActor) onRead(m readReqMsg) {
 		block.Attachments = append([]AttachmentRef(nil), a.rec.Attachments...)
 		block.Mode = a.rec.Options.Mode
 		m.Reply <- readResult{Payload: block}
+	case "turnChanges":
+		// Committed balloons + the LIVE preview of the running turn. The
+		// live half is what keeps a mid-turn refresh (get_turn_changes)
+		// from replacing the floating balloon with an empty list.
+		brainDir := a.store.brainDir(a.id)
+		out := map[string]any{
+			"balloons": fileBalloonPayloads(stripBrainBalloonFiles(a.rec.FileBalloons, brainDir)),
+		}
+		if a.state != stateIdle && a.state != statePersist && len(a.liveIncoming) > 0 {
+			files := filetrack.PreviewChanged(dropBrainTracked(append([]filetrack.TrackedFile(nil), a.liveIncoming...), brainDir), a.rec.CWD)
+			if len(files) > 0 {
+				out["live"] = map[string]any{"turnIndex": a.rec.TurnSeq, "files": files}
+			}
+		}
+		m.Reply <- readResult{Payload: out}
 	default:
 		m.Reply <- readResult{Error: "unknown read"}
 	}
@@ -1752,7 +1798,9 @@ func (a *sessionActor) onWALAppend(m walAppendMsg) {
 			a.rec.Context = ev.Context
 		}
 	case walTypeIncoming:
-		// tracker snapshot only; no record change.
+		// Tracker snapshot for the LIVE file-changes view: keep it so a
+		// mid-turn get_turn_changes can rebuild the live balloon.
+		a.liveIncoming = append([]filetrack.TrackedFile(nil), ev.Incoming...)
 	case walTypeQueue, walTypeTitle, walTypeModel, walTypeOptions, walTypeTurnState, walTypeMeta, walTypeAttach, walTypeBgTask, walTypeBgChunk, walTypeBgFinish:
 		a.applyControlWAL(ev)
 	}
@@ -1930,8 +1978,17 @@ func (a *sessionActor) onBgTaskRegister(m bgTaskRegisterMsg) {
 // and persistence is immediate too, while the runner/brain logs retain the
 // complete output for recovery and inspection.
 func (a *sessionActor) onBgTaskChunk(m bgTaskChunkMsg) {
-	if m.Text == "" || findBgTask(a.rec, m.JobID) < 0 {
+	if m.Text == "" {
 		return
+	}
+	if findBgTask(a.rec, m.JobID) < 0 {
+		// The record may have lost the task (meta rewrite, crash window):
+		// rebuild it from the runner's durable state before dropping the
+		// chunk — the chunk is the only live copy of this output.
+		if _, err := a.restoreRunnerTask(m.JobID); err != nil || findBgTask(a.rec, m.JobID) < 0 {
+			trace("bg.chunk.dropped", map[string]any{"sid": a.id, "job": m.JobID})
+			return
+		}
 	}
 	a.touch()
 	// Line math carries across chunk splits: a chunk continuing a partial
@@ -2082,16 +2139,19 @@ func (a *sessionActor) ackNotice(jobID string) {
 		return
 	}
 	select {
-	case a.bg.inbox <- Envelope{Payload: bgAckMsg{JobID: jobID}}:
+	case a.bg.inbox <- Envelope{Payload: bgAckMsg{JobID: jobID, SessionID: a.id}}:
 	default:
 	}
 }
 
 func noticePreview(text string) string {
-	if len(text) > 500 {
-		return text[:500] + "…"
+	// Truncate on a rune boundary: a byte cut can split a multibyte
+	// character and corrupt the preview.
+	runes := []rune(text)
+	if len(runes) <= 500 {
+		return text
 	}
-	return text
+	return string(runes[:500]) + "…"
 }
 
 // saveOrAppend persists a control event: WAL when running, direct save idle.

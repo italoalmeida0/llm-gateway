@@ -161,6 +161,9 @@ func (w *turnBridge) run() error {
 		w.modelInfo.Reasoning = true
 	}
 	w.client = provider.NewGatewayAnthropic(cfg.APIKey, apiBase, w.modelInfo)
+	// Honor the transport settings: TLS verification opt-out and explicit
+	// upstream proxy apply to the provider client only.
+	w.client = provider.WithHTTPClient(w.client, provider.NewHTTPClientWithProxy(cfg.Settings.Insecure, cfg.Settings.HTTPProxy))
 	w.modelToUse = w.modelInfo.ID
 
 	sb := tools.NewSandbox(w.sessionCWD)
@@ -414,6 +417,7 @@ func (w *turnBridge) beforeRequest(requestCtx context.Context) error {
 	}
 	apiBase := strings.TrimRight(w.cfg.GatewayURL, "/") + "/anthropic/v1"
 	w.client = provider.NewGatewayAnthropic(w.cfg.APIKey, apiBase, requestModel)
+	w.client = provider.WithHTTPClient(w.client, provider.NewHTTPClientWithProxy(w.cfg.Settings.Insecure, w.cfg.Settings.HTTPProxy))
 	w.modelToUse = w.modelInfo.ID
 	w.agent.Client, w.agent.Model, w.agent.Reasoning = w.client, w.modelToUse, rf.options.Effort
 	w.agent.MaxTokens = maxOutputTokens(w.modelInfo)

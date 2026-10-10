@@ -117,10 +117,8 @@ export interface AgentSettings {
   autoCompactPercent: number;
   noAutoTitle: boolean;
   jailByDefault: boolean;
-  autoSwarmEnabled: boolean;
   insecureTls: boolean;
   httpProxy: string;
-  maxExecutionTimeSec: number;
 }
 
 export interface SkillConfig {

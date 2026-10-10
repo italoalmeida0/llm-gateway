@@ -57,8 +57,11 @@ type questionResponseMsg struct {
 
 // bgAckMsg acknowledges that a background notice was folded into the
 // session transcript (V2-003) — the pending delivery may be retired.
+// SessionID names the acknowledging session so a stray ack can never retire
+// another session's notice.
 type bgAckMsg struct {
-	JobID string
+	JobID     string
+	SessionID string
 }
 
 // bgDropNoticesMsg terminates pending notice delivery for a deleted

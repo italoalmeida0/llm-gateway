@@ -52,3 +52,38 @@ func TestScopedInsecureClientReachesTLSServer(t *testing.T) {
 		t.Fatal("default client must still reject self-signed TLS")
 	}
 }
+
+func TestNewHTTPClientWithProxySetsProxy(t *testing.T) {
+	client := NewHTTPClientWithProxy(false, "http://proxy.example:8080")
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+	}
+	req, err := http.NewRequest("GET", "http://target.example/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := tr.Proxy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u == nil || u.Host != "proxy.example:8080" {
+		t.Fatalf("proxy not applied: %v", u)
+	}
+}
+
+func TestNewHTTPClientWithProxyMalformedFallsBack(t *testing.T) {
+	client := NewHTTPClientWithProxy(false, "://bad url")
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+	}
+	req, _ := http.NewRequest("GET", "http://target.example/", nil)
+	u, err := tr.Proxy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u != nil {
+		t.Fatalf("malformed proxy must fall back to default resolution, got %v", u)
+	}
+}

@@ -203,6 +203,9 @@ func TestForkAndResendVsPlainFork(t *testing.T) {
 		t.Fatalf("plain fork must include the boundary turn (4 rows), got %d", len(plain.Messages))
 	}
 	// fork_and_resend at turn 2: prefix ABOVE (turn 1 only) + new row.
+	// The fork's actor answers the seeded start (route stub): the reply
+	// reports success only after the turn actually starts.
+	a.routeFn = answeringForkRoute()
 	reply := make(chan any, 1)
 	a.onForkAndResend(forkAndResendMsg{TurnID: 2, Text: "FORK MSG", Reply: reply})
 	r := (<-reply).(forkResendResult)

@@ -200,8 +200,10 @@ func (p *projectsActor) onCreate(m projCreateMsg) {
 			}
 		}
 	}
-	if len(name) > 80 {
-		name = name[:80]
+	// Truncate on a rune boundary: a byte cut splits multibyte names
+	// (CJK/emoji) and persists a corrupted project name.
+	if runes := []rune(name); len(runes) > 80 {
+		name = string(runes[:80])
 	}
 	for _, pr := range p.list {
 		if filepath.Clean(resolvePath(pr.Path)) == cleanPath {

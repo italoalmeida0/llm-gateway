@@ -324,9 +324,12 @@ func (b *bgSupervisor) onFinish(jobID, status, result string, exitCodes ...int) 
 		if st, err := runner.ReadState(runner.StatePath(b.rootDir(), jobID)); err == nil && st.ExitCode != nil {
 			exitCode = *st.ExitCode
 		}
-		b.sessionInbox(j.SessionID, bgTaskRecoverMsg{JobID: j.ID})
+		b.sessionInboxDurable(j.SessionID,
+			bgTaskRecoverMsg{JobID: j.ID},
+			bgTaskFinishMsg{JobID: j.ID, Status: status, ExitCode: exitCode})
+	} else {
+		b.sessionInboxDurable(j.SessionID, bgTaskFinishMsg{JobID: j.ID, Status: status, ExitCode: exitCode})
 	}
-	b.sessionInbox(j.SessionID, bgTaskFinishMsg{JobID: j.ID, Status: status, ExitCode: exitCode})
 	// Adoption must retain the durable delivery choice, including cancellation.
 	if j.Runner && runner.ReadDisposition(b.rootDir(), j.ID) != runner.DispBackground {
 		j.closeDone()
@@ -388,7 +391,7 @@ func (b *bgSupervisor) onCancel(jobID, by string) bool {
 	// Mirror the terminal state into the session BgTask now (trim +
 	// persist): the runner's death rattle arrives later and loses to
 	// cancelled via the actor gate.
-	b.sessionInbox(j.SessionID, bgTaskFinishMsg{JobID: j.ID, Status: BgStatusCancelled, ExitCode: -1})
+	b.sessionInboxDurable(j.SessionID, bgTaskFinishMsg{JobID: j.ID, Status: BgStatusCancelled, ExitCode: -1})
 	if by == "user" {
 		b.deliver(j, false)
 	}
@@ -633,6 +636,21 @@ func (b *bgSupervisor) sessionInbox(sessionID string, payload any) {
 	}
 }
 
+// sessionInboxDurable delivers STATE messages (task finish / recovery) on a
+// tail goroutine with the same bounded retry as chunks, preserving their
+// order. Mailbox pressure must not lose a terminal transition: a dropped
+// finish leaves the task "running" forever. Never blocks the supervisor loop.
+func (b *bgSupervisor) sessionInboxDurable(sessionID string, payloads ...any) {
+	go func() {
+		for _, payload := range payloads {
+			if !b.sessionInboxReliable(sessionID, payload) {
+				trace("bg.state.lost", map[string]any{"sid": sessionID, "reason": "state delivery stalled"})
+				return
+			}
+		}
+	}()
+}
+
 func (b *bgSupervisor) tryNotice(n *pendingNotice) {
 	if b.session == nil {
 		return
@@ -657,8 +675,15 @@ func (b *bgSupervisor) flushNotices() {
 }
 
 // onAck retires a notice the session has folded into its transcript.
+// The ack names its session: a message for another session's job must never
+// retire this notice (and trigger cleanup of a live runner identity).
 func (b *bgSupervisor) onAck(m bgAckMsg) {
-	if _, ok := b.notices[m.JobID]; !ok {
+	n, ok := b.notices[m.JobID]
+	if !ok {
+		return
+	}
+	if m.SessionID != "" && m.SessionID != n.SessionID {
+		trace("bg.ack.mismatch", map[string]any{"job": m.JobID, "sid": m.SessionID, "owner": n.SessionID})
 		return
 	}
 	delete(b.notices, m.JobID)

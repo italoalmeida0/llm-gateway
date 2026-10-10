@@ -115,9 +115,17 @@ func TestQueueSendNowSteeringDuringTurn(t *testing.T) {
 	if len(steerMsg.Content) == 0 {
 		t.Fatal("empty content in steering message")
 	}
-	tb, ok := steerMsg.Content[0].(provider.TextBlock)
-	if !ok || tb.Text != "steering message" {
-		t.Fatalf("expected 'steering message', got %+v", steerMsg.Content[0])
+	// The date system-directive may precede the text (a queued turn
+	// promoted after a date roll announces the new date like any opening
+	// prompt): find the steering text among the blocks.
+	found := false
+	for _, c := range steerMsg.Content {
+		if blk, ok2 := c.(provider.TextBlock); ok2 && blk.Text == "steering message" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected 'steering message', got %+v", steerMsg.Content)
 	}
 	if steerMsg.Meta["steering"] != "true" {
 		t.Fatalf("expected steering=true meta, got %v", steerMsg.Meta)

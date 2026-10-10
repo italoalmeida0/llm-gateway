@@ -37,11 +37,21 @@ func queuePayload(queue []QueuedMessage) []any {
 }
 
 // buildQueuedUserMessage converts a queued message into a transcript user message
-// for live mid-turn steering (BeforeRequest).
+// for live mid-turn steering (BeforeRequest). It mirrors seededUserMessage's
+// directive handling: the date system-reminder is prepended when the date rolled
+// over since the last announcement (and LastDate/LastMode are advanced), so a
+// queued turn promoted after midnight announces the new date exactly like a
+// normal opening prompt.
 func (a *sessionActor) buildQueuedUserMessage(q QueuedMessage) provider.Message {
-	mode := normalizedOptions(a.rec.Options).Mode
-	fullText, images := buildTurnPrompt(a.rec.Attachments, q.Text, q.AttachmentIDs, mode)
+	options := normalizedOptions(a.rec.Options)
+	snap := workerSnapshot{options: options, lastDate: a.rec.LastDate, lastMode: a.rec.LastMode}
+	fullText, images := buildTurnPrompt(a.rec.Attachments, q.Text, q.AttachmentIDs, options.Mode)
+	sysBlock := buildTurnSystemDirectives(&snap, time.Now())
+	a.rec.LastDate, a.rec.LastMode = snap.lastDate, snap.lastMode
 	content := []provider.Content{}
+	if sysBlock != "" {
+		content = append(content, provider.TextBlock{Text: sysBlock})
+	}
 	if fullText != "" {
 		content = append(content, provider.TextBlock{Text: fullText})
 	}

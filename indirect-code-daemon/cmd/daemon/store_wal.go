@@ -577,8 +577,8 @@ func (s *diskStore) commitWAL(id string, rec *SessionRecord, wal *walWriter) err
 			break
 		}
 	}
-	if existingIdx >= 0 && len(lines[existingIdx].Messages) == len(turnMsgs) {
-		// Turn line present with matching message count (commit-window retry):
+	if existingIdx >= 0 && turnLineMatches(lines[existingIdx], turnMsgs) {
+		// Turn line present with matching content (commit-window retry):
 		// just rewrite meta.
 		if err := s.rewriteMetaOnly(id, recordMeta(rec)); err != nil {
 			// Fresh session with no lines yet (turn produced no messages):
@@ -655,6 +655,27 @@ func (s *diskStore) commitWAL(id string, rec *SessionRecord, wal *walWriter) err
 	return nil
 }
 
+// turnLineMatches reports whether the turn line already on disk holds
+// exactly the given messages (same count AND same serialized content).
+// Comparing content, not just the count, keeps the commit fast path from
+// skipping a rewrite when a re-run of the same turn number produced the
+// same number of messages with different content (regenerate/edit).
+func turnLineMatches(tl turnLine, msgs []provider.Message) bool {
+	if len(tl.Messages) != len(msgs) {
+		return false
+	}
+	for i, m := range msgs {
+		data, err := json.Marshal(m)
+		if err != nil {
+			return false
+		}
+		if !bytes.Equal(tl.Messages[i], data) {
+			return false
+		}
+	}
+	return true
+}
+
 // sliceTurnMessages extracts one turn's messages with splitRecord's
 // zero-index attachment rules: leading zeros attach to the first
 // non-zero turn at/after them; trailing zeros attach to the last turn.
@@ -699,6 +720,11 @@ func recordMeta(rec *SessionRecord) metaLine {
 		CreatedAt: rec.CreatedAt, UpdatedAt: rec.UpdatedAt,
 		Attachments: rec.Attachments, LastDate: rec.LastDate, LastMode: rec.LastMode,
 		Compaction: rec.Compaction, TurnSeq: rec.TurnSeq, Queue: rec.Queue, ApprovalDeadlineUnix: rec.ApprovalDeadlineUnix,
+		// BgTasks must survive EVERY meta rewrite (commitWAL, rewriteMetaOnly,
+		// persistEdited, truncateTail): a chunk is the only copy of that
+		// output, so dropping it here loses the log itself. Mirrors
+		// splitRecord's meta projection.
+		BgTasks: rec.BgTasks,
 	}
 }
 

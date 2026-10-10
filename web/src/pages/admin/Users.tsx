@@ -205,9 +205,9 @@ export default function AdminUsersPage() {
     if (!u) return null;
     return (
       <span class="text-ink-400 whitespace-nowrap">
-        <span title="password" class={u.hasPassword ? "" : "opacity-40"}>*</span>{" "}
-        <span title="2FA" class={u.totpEnabled ? "" : "opacity-40"}>2</span>{" "}
-        <span title="google" class={u.googleLinked ? "" : "opacity-40"}>G</span>
+        <span class={u.hasPassword ? "" : "opacity-40"}>*</span>{" "}
+        <span class={u.totpEnabled ? "" : "opacity-40"}>2</span>{" "}
+        <span class={u.googleLinked ? "" : "opacity-40"}>G</span>
       </span>
     );
   }

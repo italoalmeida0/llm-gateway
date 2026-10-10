@@ -452,7 +452,6 @@ export default function AdminModelsPage() {
         type="checkbox"
         checked={m.enabled}
         onChange={() => toggleEnabled(m)}
-        title={m.enabled ? "Disable model" : "Enable model"}
         class="w-4 h-4 rounded border-line bg-elev accent-brand-500 cursor-pointer"
       />
     );
@@ -508,7 +507,7 @@ export default function AdminModelsPage() {
       headerName: "Input / 1M",
       width: 125,
       cellRenderer: (p: { data?: ModelDto }) => (
-        <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
+        <code class="text-ink-400">
           {pricePerMillion(p.data?.pricingInput)}
         </code>
       ),
@@ -521,7 +520,7 @@ export default function AdminModelsPage() {
       headerName: "Cache read / 1M",
       width: 130,
       cellRenderer: (p: { data?: ModelDto }) => (
-        <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
+        <code class="text-ink-400">
           {pricePerMillion(p.data?.pricingInputCache)}
         </code>
       ),
@@ -534,7 +533,7 @@ export default function AdminModelsPage() {
       headerName: "Cache write / 1M",
       width: 135,
       cellRenderer: (p: { data?: ModelDto }) => (
-        <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
+        <code class="text-ink-400">
           {pricePerMillion(p.data?.pricingInputCacheWrite)}
         </code>
       ),
@@ -547,7 +546,7 @@ export default function AdminModelsPage() {
       headerName: "Output / 1M",
       width: 125,
       cellRenderer: (p: { data?: ModelDto }) => (
-        <code class="text-ink-400" title={p.data?.pricing ? JSON.stringify(p.data.pricing) : ""}>
+        <code class="text-ink-400">
           {pricePerMillion(p.data?.pricingOutput)}
         </code>
       ),
@@ -762,7 +761,6 @@ export default function AdminModelsPage() {
                       <div class="flex items-center gap-2 flex-1 sm:flex-none sm:w-[38%] min-w-0">
                         <span
                           data-handle
-                          title="Drag to reorder"
                           class="text-ink-500 hover:text-ink-200 transition-colors shrink-0 cursor-grab active:cursor-grabbing p-1"
                         >
                           <Icon name={Icons.grip} size={14} />
@@ -781,7 +779,6 @@ export default function AdminModelsPage() {
                         <div class="flex sm:hidden items-center gap-2 shrink-0 ml-auto pl-1">
                           <label
                             class="flex items-center gap-1 shrink-0 cursor-pointer text-xs text-ink-300"
-                            title="Enabled target"
                           >
                             <input
                               type="checkbox"
@@ -793,7 +790,6 @@ export default function AdminModelsPage() {
                           </label>
                           <button
                             type="button"
-                            title={fTargets().length <= 1 ? "At least one target required" : "Remove target"}
                             disabled={fTargets().length <= 1}
                             onClick={() => setFTargets((prev) => prev.filter((_, j) => j !== i()))}
                             class="p-1 rounded text-ink-400 hover:text-rose-400 disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer shrink-0"
@@ -822,7 +818,6 @@ export default function AdminModelsPage() {
                       <div class="hidden sm:flex items-center gap-2 shrink-0">
                         <label
                           class="flex items-center gap-1 shrink-0 cursor-pointer text-xs text-ink-300 px-1"
-                          title="Enabled target (disabled targets are skipped during failover)"
                         >
                           <input
                             type="checkbox"
@@ -834,7 +829,6 @@ export default function AdminModelsPage() {
                         </label>
                         <button
                           type="button"
-                          title={fTargets().length <= 1 ? "A model needs at least one routing target" : "Remove target"}
                           disabled={fTargets().length <= 1}
                           onClick={() => setFTargets((prev) => prev.filter((_, j) => j !== i()))}
                           class="p-1 rounded text-ink-400 hover:text-rose-400 disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer shrink-0"

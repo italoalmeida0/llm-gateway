@@ -390,7 +390,7 @@ export default function AdminProvidersPage() {
                 <Card interactive class="min-w-0 p-4 sm:p-5">
                   <div class="flex flex-wrap items-start justify-between gap-3">
                     <div class="flex items-start gap-2 min-w-0">
-                      <span data-handle title="Drag to reorder (fallback priority)" class="mt-0.5 text-ink-600 hover:text-ink-300 transition-colors">
+                      <span data-handle class="mt-0.5 text-ink-600 hover:text-ink-300 transition-colors">
                         <Icon name={Icons.grip} size={16} />
                       </span>
                       <div class="min-w-0">
@@ -460,7 +460,7 @@ export default function AdminProvidersPage() {
                           const st = () => keyStatus(k);
                           return (
                             <div data-id={k.id} class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl border border-line bg-elev/40 px-2 py-1.5">
-                              <span data-handle title="Drag to reorder" class="text-ink-600 hover:text-ink-300 transition-colors shrink-0">
+                              <span data-handle class="text-ink-600 hover:text-ink-300 transition-colors shrink-0">
                                 <Icon name={Icons.grip} size={14} />
                               </span>
                               <Badge tone={st().tone}>{st().label}</Badge>

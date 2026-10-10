@@ -959,7 +959,6 @@ export function FilterChip(props: {
             props.onRemove?.();
           }}
           class="hover:opacity-75 p-0.5 rounded transition-opacity"
-          title="Deselect"
         >
           <Icon name={Icons.x} size={11} />
         </span>

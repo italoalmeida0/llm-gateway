@@ -279,7 +279,6 @@ export function DailyChart(props: {
         <Show when={metric() === "tokens"}>
           <span
             class="text-[10px] text-ink-500"
-            title="Token bars are scaled per bucket (input ÷8, cache ÷75, output ×1) so disproportionate buckets stay comparable; tooltip values are exact."
           >
             Balanced scale
           </span>

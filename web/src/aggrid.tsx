@@ -236,15 +236,12 @@ export class DateTimeFloatingFilter {
       const el = document.createElement("input");
       el.type = "datetime-local";
       el.className = "llmgw-dt-input";
-      el.title = "";
       el.addEventListener("input", () => this.onChanged());
       this.eGui.appendChild(el);
       return el;
     };
     this.fromInput = input();
-    this.fromInput.title = "From";
     this.toInput = input();
-    this.toInput.title = "To";
   }
 
   private onChanged(): void {
@@ -519,7 +516,6 @@ export function UsageGrid(props: {
             {(totals) => (
               <div
                 class="flex items-center gap-2.5 whitespace-nowrap text-[11px] text-ink-400"
-                title="Totals for the current table filters"
               >
                 <span>In <strong class="font-semibold text-ink-200">{fmtNum(totals().in_tok)}</strong></span>
                 <span>Cache <strong class="font-semibold text-ink-200">{fmtNum(totals().cache_tok)}</strong></span>

@@ -109,7 +109,7 @@ export default function AdminAuditPage() {
       flex: 1,
       minWidth: 200,
       cellRenderer: (p: { value?: string }) => (
-        <span class="text-ink-500 truncate block" title={p.value ?? ""}>
+        <span class="text-ink-500 truncate block">
           {p.value ?? "—"}
         </span>
       ),

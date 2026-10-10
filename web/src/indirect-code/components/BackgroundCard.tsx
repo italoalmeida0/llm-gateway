@@ -87,7 +87,6 @@ export function BackgroundCard(props: { contextKey?: string }) {
               : "border-line/60 text-ink-500 hover:bg-elev hover:text-ink-200"}`}
             aria-pressed={showArchived()}
             aria-label={`Archived tasks (${archived().length})`}
-            title={showArchived() ? "Show running tasks" : "Show archived tasks"}
             onClick={toggleArchive}
             data-bg-archive-toggle
           >
@@ -108,7 +107,6 @@ export function BackgroundCard(props: { contextKey?: string }) {
                     class={`inline-flex shrink-0 ${taskState(job.status).color}`}
                     role="img"
                     aria-label={taskState(job.status).label}
-                    title={taskState(job.status).label}
                     data-bg-status={job.status}
                   >
                     <Iconify icon={taskState(job.status).icon} size={14} class={job.status === "running" ? "animate-spin" : ""} />
@@ -118,10 +116,10 @@ export function BackgroundCard(props: { contextKey?: string }) {
                     size={14}
                     class="shrink-0 text-ink-500"
                   />
-                  <span class="truncate text-ink-200 min-w-0 flex-1 text-[12.5px]" title={job.label || job.id}>
+                  <span class="truncate text-ink-200 min-w-0 flex-1 text-[12.5px]">
                     <ShellCmd text={shortLabel(job.label || job.id)} />
                   </span>
-                  <span class="text-[11px] text-ink-500 tabular-nums shrink-0" title={job.status === "running" ? "Elapsed time" : "Total duration"} data-bg-duration>
+                  <span class="text-[11px] text-ink-500 tabular-nums shrink-0" data-bg-duration>
                     {duration(job)}
                   </span>
                   <Show when={job.status === "running"}>
@@ -130,7 +128,6 @@ export function BackgroundCard(props: { contextKey?: string }) {
                       class="shrink-0 inline-flex items-center justify-center rounded p-1 text-ink-500 hover:text-ink-100 hover:bg-elev cursor-pointer"
                       onClick={() => bg.stop(job.id)}
                       aria-label="Stop task"
-                      title="Stop task"
                       data-bg-stop={job.id}
                     >
                       <Iconify icon="lucide:square" size={12} />
@@ -142,7 +139,6 @@ export function BackgroundCard(props: { contextKey?: string }) {
                     onClick={() => toggle(job.id)}
                     aria-expanded={isOpen(job.id)}
                     aria-label={isOpen(job.id) ? "Hide logs" : "Show logs"}
-                    title={isOpen(job.id) ? "Hide logs" : "Show logs"}
                   >
                     <Iconify icon="lucide:chevron-down" size={14} class={`transition-transform ${isOpen(job.id) ? "rotate-180" : ""}`} />
                   </button>

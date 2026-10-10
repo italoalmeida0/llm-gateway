@@ -12,9 +12,11 @@ import (
 )
 
 // bgJobIDPattern matches the ids the daemon issues for detached
-// commands ("bg_" + lowercase hex). Anything else is a hallucinated or
-// copied-from-prose id and gets a self-explaining error up front.
-var bgJobIDPattern = regexp.MustCompile(`^bg_[0-9a-f]+$`)
+// commands: runner jobs use "<scope16hex>_<call16hex>" (or the legacy
+// 64-hex halves), the no-supervisor stub uses "bg_<hex>". Anything else
+// is a hallucinated or copied-from-prose id and gets a self-explaining
+// error up front.
+var bgJobIDPattern = regexp.MustCompile(`^(?:[0-9a-f]{16,64}_[0-9a-f]{16,64}|bg_[0-9a-f]+)$`)
 
 // checkBgJobID validates a bg job id and returns the model-facing error
 // for a malformed one.
@@ -22,13 +24,13 @@ func checkBgJobID(tool, jobID string) error {
 	if bgJobIDPattern.MatchString(jobID) {
 		return nil
 	}
-	return fmt.Errorf("%s: %q is not a valid job_id — it must be the bg_… id from the detached command's placeholder (for example bg_1a2b3c4d5e6f7a8b). Never invent ids: call %s with the job_id reported when the command detached.", tool, jobID, tool)
+	return fmt.Errorf("%s: %q is not a valid job_id — pass the exact job_id from the detached command's placeholder (a hex id like \"1a2b3c4d5e6f7a8b_9f8e7d6c5b4a3210\"). Never invent ids: call %s with the job_id reported when the command detached.", tool, jobID, tool)
 }
 
 // BgCheckArgs are the model-facing arguments of the bg_check tool.
 type BgCheckArgs struct {
-	// JobID is the background task to read (bg_… from the detached
-	// command's placeholder). Required.
+	// JobID is the background task to read (the job_id from the
+	// detached command's placeholder). Required.
 	JobID string `json:"job_id"`
 	// Offset is the 1-indexed first line to read (over the task's total
 	// lines). <=0 (default) reads the tail: the last Limit lines.
@@ -73,7 +75,7 @@ func (*BgCheckTool) Description() string {
 	return fmt.Sprintf(`Read a background task's log (one of YOUR session's bg tasks that went to the background after %s). Works like read but for task output: paged by lines, tail by default. Pass the job_id from the detach placeholder; use offset/limit for large logs. The result shows lines From–To of Total plus whether the task is still running.`, humanDuration(AutoBackgroundAfter))
 }
 func (*BgCheckTool) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string","description":"Background task id (bg_…)."},"offset":{"type":"integer","description":"1-indexed first line to read (over total lines); <=0 reads the tail (default)"},"limit":{"type":"integer","description":"Maximum lines to return (default 50, max 500)"}},"required":["job_id"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string","description":"Background task id — the exact job_id from the detached command's placeholder."},"offset":{"type":"integer","description":"1-indexed first line to read (over total lines); <=0 reads the tail (default)"},"limit":{"type":"integer","description":"Maximum lines to return (default 50, max 500)"}},"required":["job_id"]}`)
 }
 
 func (t *BgCheckTool) Execute(ctx context.Context, raw json.RawMessage, _ func(string)) (core.ToolResult, error) {

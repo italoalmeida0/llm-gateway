@@ -11,7 +11,7 @@ import (
 
 // BgCancelArgs are the model-facing arguments of the bg_cancel tool.
 type BgCancelArgs struct {
-	// JobID is the background job to cancel (bg_… from the detached
+	// JobID is the background job to cancel (the job_id from the detached
 	// command's placeholder). Required.
 	JobID string `json:"job_id"`
 }
@@ -46,7 +46,7 @@ func (*BgCancelTool) Description() string {
 	return `Force-stop one of YOUR background tasks: a bash/python command that went to the background (it gave you its job_id when it detached). The process is killed and the job is marked cancelled; no completion notice is delivered — re-run the command differently instead of waiting. Already-finished jobs cannot be cancelled. Unknown or foreign ids are refused.`
 }
 func (*BgCancelTool) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string","description":"Background job id (bg_…)."}},"required":["job_id"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"job_id":{"type":"string","description":"Background job id — the exact job_id from the detached command's placeholder."}},"required":["job_id"]}`)
 }
 
 func (t *BgCancelTool) Execute(ctx context.Context, raw json.RawMessage, _ func(string)) (core.ToolResult, error) {

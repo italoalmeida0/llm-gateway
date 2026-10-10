@@ -26,16 +26,26 @@ type executionReceipt struct {
 	Result      json.RawMessage `json:"result,omitempty"`
 }
 
+// executionHash derives a compact identity token: 8 bytes of SHA-256,
+// 16 hex chars. Full 64-hex hashes made job ids unreadable in prompts and
+// logs; 64 bits is ample for per-session call identities (collision odds
+// ~2^-64 per call pair).
 func executionHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:8])
+}
+
+// validExecutionHex accepts current 16-hex and legacy 64-hex identity
+// halves so receipts written before the id shortening still resolve.
+func validExecutionHex(part string) bool {
+	return len(part) == 16 || len(part) == 64
 }
 
 // Scope and invocation are hashes, never untrusted path components. Receipts
 // stay outside the brain so ordinary log reads cannot modify execution claims.
 func executionReceiptPath(root, sid, id string) string {
 	parts := strings.Split(id, "_")
-	if !validSessionID(sid) || len(parts) != 2 || len(parts[0]) != 64 || len(parts[1]) != 64 {
+	if !validSessionID(sid) || len(parts) != 2 || !validExecutionHex(parts[0]) || !validExecutionHex(parts[1]) {
 		return ""
 	}
 	for _, part := range parts {

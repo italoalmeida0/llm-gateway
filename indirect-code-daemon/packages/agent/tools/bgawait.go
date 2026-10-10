@@ -15,7 +15,8 @@ type BgAwaitArgs struct {
 	// Seconds to wait (1–3600). The wait ends early — with a notice —
 	// when a background task finishes while sleeping.
 	MaxWaitSeconds float64 `json:"max_wait_seconds"`
-	// WaitingFor is the bg task id (bg_…) this sleep waits on. Required:
+	// WaitingFor is the bg task id (the job_id from the detached
+	// command's placeholder) this sleep waits on. Required:
 	// it pins the wait to a task that is still running, so a stale
 	// sleep (task already finished) returns immediately instead of
 	// dead-waiting or failing.
@@ -59,7 +60,7 @@ func (*BgAwaitTool) Description() string {
 }
 
 func (*BgAwaitTool) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"max_wait_seconds":{"type":"number","minimum":1,"maximum":3600,"description":"Upper bound of the wait in seconds (1–3600). Ends early when a background task finishes."},"waiting_for":{"type":"string","description":"Background task id (bg_…) this await waits on. Required."},"reason":{"type":"string","description":"What you are waiting for, max 100 chars (shown in the UI). Required.","maxLength":100}},"required":["max_wait_seconds","waiting_for","reason"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"max_wait_seconds":{"type":"number","minimum":1,"maximum":3600,"description":"Upper bound of the wait in seconds (1–3600). Ends early when a background task finishes."},"waiting_for":{"type":"string","description":"Background task id — the exact job_id from the detached command's placeholder. Required."},"reason":{"type":"string","description":"What you are waiting for, max 100 chars (shown in the UI). Required.","maxLength":100}},"required":["max_wait_seconds","waiting_for","reason"]}`)
 }
 
 func (t *BgAwaitTool) Execute(ctx context.Context, raw json.RawMessage, progress func(string)) (core.ToolResult, error) {
@@ -72,7 +73,7 @@ func (t *BgAwaitTool) Execute(ctx context.Context, raw json.RawMessage, progress
 	}
 	jobID := strings.TrimSpace(a.WaitingFor)
 	if jobID == "" {
-		return core.ToolResult{}, fmt.Errorf("waiting_for is required: pass the background task id (bg_…) this await waits on")
+		return core.ToolResult{}, fmt.Errorf("waiting_for is required: pass the background task id (the job_id from the detached command's placeholder) this await waits on")
 	}
 	reason := strings.TrimSpace(a.Reason)
 	if reason == "" {

@@ -100,7 +100,7 @@ func findBgTask(rec *SessionRecord, jobID string) int {
 // instead of inventing another one. Newest first, capped.
 func listBgTaskIDs(rec *SessionRecord) string {
 	if rec == nil || len(rec.BgTasks) == 0 {
-		return " This session has no background tasks — the job_id was invented; use the bg_… id from the detached command's placeholder."
+		return " This session has no background tasks — the job_id was invented; use the exact job_id from the detached command's placeholder."
 	}
 	const max = 8
 	var sb strings.Builder

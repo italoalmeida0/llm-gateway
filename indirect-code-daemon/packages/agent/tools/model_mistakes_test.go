@@ -140,15 +140,22 @@ func TestBgCheckRejectsHallucinatedJobID(t *testing.T) {
 	if err == nil {
 		t.Fatal("hallucinated job_id must fail")
 	}
-	if !strings.Contains(err.Error(), "not a valid job_id") || !strings.Contains(err.Error(), "bg_") {
-		t.Fatalf("error must explain the expected format: %v", err)
+	if !strings.Contains(err.Error(), "not a valid job_id") || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("error must explain where the id comes from: %v", err)
 	}
 	if host.called {
 		t.Fatal("host must not be queried with a malformed job_id")
 	}
-	// Real ids pass the format check.
-	if err := checkBgJobID("bg_check", "bg_1a2b3c4d5e6f7a8b"); err != nil {
-		t.Fatalf("valid id rejected: %v", err)
+	// Real id shapes pass the format check: current short halves, legacy
+	// 64-hex halves and the bg_ stub ids.
+	for _, id := range []string{
+		"1a2b3c4d5e6f7a8b_9f8e7d6c5b4a3210",
+		"3ae6e781d265ae75a3c73ab7e3ffccefc449d45f6520ad8e7617d85bd2c67385_178c116d59b6363fcb81180381955834535681302770085e4bb27e3cec01551b",
+		"bg_1a2b3c4d5e6f7a8b",
+	} {
+		if err := checkBgJobID("bg_check", id); err != nil {
+			t.Fatalf("valid id %q rejected: %v", id, err)
+		}
 	}
 }
 

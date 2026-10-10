@@ -32,6 +32,11 @@ export function displayToolArgs(raw?: string): Record<string, any> {
 export const SIGNAL_TOOL_NAMES = new Set(["todo", "finish_entire_request", "summary"]);
 export const COMPLETION_TOOL_NAMES = new Set(["finish_entire_request"]);
 
+/** Prefix of the daemon's summary-gate tool refusals (core.SummaryGateBlockPrefix).
+ * Kept in sync with indirect-code-daemon/packages/core/agent.go. */
+export const SUMMARY_GATE_BLOCK_PREFIX =
+  "Blocked: a progress summary is required first. Other tools are on hold until the progress summary is recorded.";
+
 /** Detects synthetic system prompt nudges. Transcript-real (sent to the provider)
  * but never shown as a user bubble in the chat UI. */
 export function isSyntheticNudge(text: string): boolean {
@@ -39,7 +44,8 @@ export function isSyntheticNudge(text: string): boolean {
   return (
     (trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>")) ||
     (trimmed.startsWith("<system_prompt>") && trimmed.endsWith("</system_prompt>")) ||
-    (trimmed.startsWith("<system-warn>") && trimmed.endsWith("</system-warn>"))
+    (trimmed.startsWith("<system-warn>") && trimmed.endsWith("</system-warn>")) ||
+    trimmed.startsWith(SUMMARY_GATE_BLOCK_PREFIX)
   );
 }
 

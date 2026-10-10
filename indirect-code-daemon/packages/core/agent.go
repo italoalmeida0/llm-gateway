@@ -27,10 +27,45 @@ const ContinueNudgeText = "<system-warn>Automated system notice (not from the us
 // names the tool the model can actually call.
 const completionNudgeTemplate = "<system-warn>Automated system notice (not from the user): Your conversational text was discarded; the user cannot read it and it is not saved in your context. If the ENTIRE request is finished (every requested change implemented and validated) or the user only asked a question, call %s with final_message_to_user — that parameter is the only text the user reads. Never call it after an intermediate step. If you need user input, call question. Otherwise, keep working silently through tools, using the summary tool for progress updates.</system-warn>"
 
+const DiscardedTextNudge = "<system-warn>Automated system notice (not from the user): You are sending too much conversational text alongside tool calls. That text is discarded; the user cannot read it and it is not saved in your context. Use reasoning for private thoughts, summary for progress updates, question for user input, and the current mode's completion tool with final_message_to_user for your final response. Continue silently through tools.</system-warn>"
+
+// SummaryWarnNudge is the progress notice of a turn. It grants exactly one
+// summary call: every mode with the summary tool starts the turn with the tool
+// unavailable, and each notice re-arms it for a single use.
+var SummaryWarnNudge = "<system-warn>Automated system notice (not from the user): Multiple tools have been executed without a progress update. Call the summary tool now with 'for_user' (100-500 chars user-facing update) and 'for_me' (your private tracking of next steps/verified items). Do not send conversational text messages.</system-warn>"
+
+// SummaryGateNudge is the second progress notice while the previous one was
+// never answered. It also puts every tool except summary on hold until the
+// summary call happens.
+var SummaryGateNudge = "<system-warn>Automated system notice (not from the user): Multiple progress updates are overdue: this is the SECOND notice of this turn and no summary was recorded after the first one. Until you call the summary tool, EVERY other tool is blocked and will fail. The summary tool is your only usable tool right now: reply with exactly ONE tool call, summary, with 'for_user' (100-500 chars user-facing update) and 'for_me' (your private tracking of next steps/verified items). Do not attempt another tool, do not send conversational text messages.</system-warn>"
+
+// Summary tool name and the text every gate refusal carries. The block prefix
+// is a stable contract: the frontend treats it as a synthetic system message
+// (never a user bubble), so it must stay in sync with
+// web/src/indirect-code/live.ts.
 const (
-	SummaryWarnNudge   = "<system-warn>Automated system notice (not from the user): Multiple tools have been executed without a progress update. Call the summary tool now with 'for_user' (100-500 chars user-facing update) and 'for_me' (your private tracking of next steps/verified items). Do not send conversational text messages.</system-warn>"
-	DiscardedTextNudge = "<system-warn>Automated system notice (not from the user): You are sending too much conversational text alongside tool calls. That text is discarded; the user cannot read it and it is not saved in your context. Use reasoning for private thoughts, summary for progress updates, question for user input, and the current mode's completion tool with final_message_to_user for your final response. Continue silently through tools.</system-warn>"
+	summaryToolName = "summary"
+
+	// SummaryGateBlockPrefix opens the tool error returned while the summary
+	// gate holds every other tool.
+	SummaryGateBlockPrefix = "Blocked: a progress summary is required first. Other tools are on hold until the progress summary is recorded."
+
+	// SummaryGateClosedText is the tool error returned when summary is called
+	// before a progress notice arms it, or after that single use is spent.
+	SummaryGateClosedText = "The summary tool cannot be used yet: it becomes available only when the runtime requests a progress update. Continue your work silently through tools and record the progress summary when the request arrives."
 )
+
+// summaryGate is the per-turn availability state of the summary tool. A notice
+// arms exactly one use (credit); a second notice while that credit is still
+// unspent escalates to hold, which blocks every tool except summary. A
+// successful summary returns the gate to its turn-start state.
+type summaryGate struct {
+	// credit is the single summary use the latest notice granted. The summary
+	// tool runs only while credit is set.
+	credit bool
+	// hold blocks every tool except summary.
+	hold bool
+}
 
 // CompletionNudgeText returns the discarded-text nudge naming toolName as the
 // turn-ending tool.
@@ -242,6 +277,12 @@ type Agent struct {
 
 	lastToolKey          string
 	consecutiveToolCount int
+
+	// summaryGate is the per-turn summary availability state. It is reset by
+	// every runLoop (so a resumed turn restarts clean) and owned by the same
+	// mutex as the transcript, because tool execution reads it from the tool
+	// goroutine.
+	summaryGate summaryGate
 }
 
 // NewAgent returns an Agent with sensible defaults.
@@ -532,6 +573,9 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 	lastSummaryAt := time.Now()
 	toolsSinceSummary := 0
 	discardedSinceNudge := 0
+	// Every turn restarts with the summary tool unavailable: a notice arms it
+	// for one use, a second unanswered notice blocks every other tool.
+	a.resetSummaryGate()
 	for step := 1; ; step++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -675,7 +719,7 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			for _, content := range toolMsg.Content {
 				if res, ok := content.(provider.ToolResultBlock); ok {
 					for _, c := range assistantMsg.Content {
-						if tc, ok := c.(provider.ToolCallBlock); ok && tc.ID == res.CallID && tc.Name == "summary" && !res.IsError {
+						if tc, ok := c.(provider.ToolCallBlock); ok && tc.ID == res.CallID && tc.Name == summaryToolName && !res.IsError {
 							hadSummary = true
 							break
 						}
@@ -688,15 +732,16 @@ func (a *Agent) runLoop(ctx context.Context, sink func(AgentEvent)) error {
 			if hadSummary {
 				toolsSinceSummary = 0
 				lastSummaryAt = time.Now()
+				a.clearSummaryGate()
 			}
 
 			a.mu.Lock()
-			_, hasSummaryTool := a.Tools["summary"]
+			_, hasSummaryTool := a.Tools[summaryToolName]
 			a.mu.Unlock()
 			if hasSummaryTool && ((time.Since(lastSummaryAt) >= 60*time.Second && toolsSinceSummary >= 15) || toolsSinceSummary >= 30) {
 				toolsSinceSummary = 0
 				lastSummaryAt = time.Now()
-				a.appendNudge(SummaryWarnNudge, sink)
+				a.appendNudge(a.grantSummaryUse(), sink)
 			}
 
 			continue
@@ -1148,7 +1193,110 @@ func (a *Agent) executeTools(ctx context.Context, msg provider.Message, sink fun
 	}, hadError
 }
 
+// resetSummaryGate restarts the turn's summary availability: the tool is
+// unavailable until a notice arms it again. runLoop calls this at entry, so a
+// resumed turn always restarts the state machine clean.
+func (a *Agent) resetSummaryGate() {
+	a.mu.Lock()
+	a.summaryGate = summaryGate{}
+	a.mu.Unlock()
+}
+
+// grantSummaryUse arms exactly one summary use and returns the notice to send.
+// The first unanswered notice grants the use; a further notice while that
+// credit is still unspent escalates to hold, where every tool except summary
+// is blocked until the summary lands.
+func (a *Agent) grantSummaryUse() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.summaryGate.credit {
+		a.summaryGate.hold = true
+		return SummaryGateNudge
+	}
+	a.summaryGate.credit = true
+	return SummaryWarnNudge
+}
+
+// takeSummaryCredit spends the single summary use the latest notice granted.
+// It reports whether the call may run; a failed call gives the credit back so
+// a validation error does not waste the notice.
+func (a *Agent) takeSummaryCredit() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.summaryGate.credit && !a.summaryGate.hold {
+		return false
+	}
+	a.summaryGate.credit = false
+	return true
+}
+
+// restoreSummaryCredit returns a spent use after a failed summary call.
+func (a *Agent) restoreSummaryCredit() {
+	a.mu.Lock()
+	a.summaryGate.credit = true
+	a.mu.Unlock()
+}
+
+// clearSummaryGate returns the gate to its turn-start state after a recorded
+// summary: summary is unavailable again and any hold is lifted.
+func (a *Agent) clearSummaryGate() {
+	a.mu.Lock()
+	a.summaryGate = summaryGate{}
+	a.mu.Unlock()
+}
+
+// summaryAllowed reports whether the summary tool may run right now: either
+// the latest notice granted its single use, or the hold is active and summary
+// is the only way out.
+func (a *Agent) summaryAllowed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.summaryGate.credit || a.summaryGate.hold
+}
+
+// summaryHoldActive reports whether the gate currently holds every tool
+// except summary itself.
+func (a *Agent) summaryHoldActive() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.summaryGate.hold
+}
+
+// hasSummaryTool reports whether the registry carries the summary tool. The
+// whole gate is a no-op without it (talk mode, stripped toolsets).
+func (a *Agent) hasSummaryTool() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.Tools[summaryToolName]
+	return ok
+}
+
 func (a *Agent) runOneTool(ctx context.Context, tc provider.ToolCallBlock, sink func(AgentEvent)) ToolResult {
+	summaryCall := tc.Name == summaryToolName
+
+	// Summary gate: the tool is unusable until a progress notice arms it, and
+	// after a second unanswered notice every other tool is on hold. Checked
+	// first so the model always sees the actionable message instead of a side
+	// effect, and so a refused call never feeds the loop detector. Without a
+	// summary tool in the registry the gate never engages.
+	if a.hasSummaryTool() {
+		if summaryCall {
+			if !a.summaryAllowed() {
+				return ToolResult{
+					Content: []provider.Content{provider.TextBlock{Text: SummaryGateClosedText}},
+					IsError: true,
+				}
+			}
+		} else if a.summaryHoldActive() {
+			return ToolResult{
+				Content: []provider.Content{provider.TextBlock{
+					Text: SummaryGateBlockPrefix + " Call the summary tool now (for_user, for_me); every other tool is blocked until the progress summary is recorded.",
+				}},
+				IsError: true,
+			}
+		}
+	}
+
 	callKey := tc.Name + ":" + string(tc.Arguments)
 	a.mu.Lock()
 	if a.lastToolKey == callKey {
@@ -1205,6 +1353,15 @@ func (a *Agent) runOneTool(ctx context.Context, tc provider.ToolCallBlock, sink 
 		args = json.RawMessage("{}")
 	}
 
+	// Spend the notice's single summary use only now: a call refused by the
+	// intercept hook never reaches the tool, so it must not consume it.
+	if summaryCall && !a.takeSummaryCredit() {
+		return ToolResult{
+			Content: []provider.Content{provider.TextBlock{Text: SummaryGateClosedText}},
+			IsError: true,
+		}
+	}
+
 	// Recover panics so a buggy tool does not crash the agent.
 	started := time.Now()
 	sink(EvToolExecutionStart{ID: tc.ID, StartedAt: started.UnixMilli(), Name: tc.Name, Args: args})
@@ -1239,6 +1396,17 @@ func (a *Agent) runOneTool(ctx context.Context, tc provider.ToolCallBlock, sink 
 	}()
 	res.StartedAt = started.UnixMilli()
 	res.DurationMs = time.Since(started).Milliseconds()
+	// A failed summary call (bad args, panic) must not waste the notice's
+	// single use: hand the credit back so the model can retry. A recorded
+	// summary lifts any hold right away, so later calls in the same batch
+	// run normally.
+	if summaryCall {
+		if res.IsError {
+			a.restoreSummaryCredit()
+		} else {
+			a.clearSummaryGate()
+		}
+	}
 	// Single choke point: every result body is pure tool content wrapped in
 	// the <tool_result> envelope (type=error only for tool misuse).
 	res.Content = WrapToolResultContent(res)
